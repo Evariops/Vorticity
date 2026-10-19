@@ -122,6 +122,69 @@ public sealed class VariantDirectoryTests
         Assert.True(VariantDirectory.MayMatch(Has("missing"), new Dictionary<string, VariantDirectory>()));
     }
 
+    /// <summary>
+    /// A hundred rows over four slices of 25: a key held by the first ten rows, one by the last ten, one
+    /// by every row. Each names the slices it lies in, the one held everywhere none, and a question asked
+    /// of one slice is refuted where its key is not.
+    /// </summary>
+    [Fact]
+    public void ADirectoryNamesTheSlicesEachPathLiesIn()
+    {
+        PathCensus census = new PathCensus();
+        for (int i = 0; i < 100; i++)
+        {
+            Variant row = Variant.Object([("all", Variant.From((long)i)), .. (i < 10 ? [("early", Variant.From(true))] : (i >= 90 ? new[] { ("late", Variant.From("x")) } : []))]);
+            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+        }
+
+        TimeSlice[] slices = [.. Enumerable.Range(0, 4).Select(s => new TimeSlice(s * 25_000L, (s + 1) * 25_000L, s * 25L, 25))];
+        VariantDirectory directory = VariantDirectory.From(census, null, slices);
+        Assert.Equal(4, directory.SliceCount);
+        Assert.Null(Entry(directory, ["all"], PathClass.Integer).Slices);
+        Assert.Equal([0b0001], Entry(directory, ["early"], PathClass.Boolean).Slices);
+        Assert.Equal([0b1000], Entry(directory, ["late"], PathClass.String).Slices);
+
+        Dictionary<string, VariantDirectory> directories = new() { ["Attributes"] = VariantDirectory.From(directory.ToBytes())! };
+        Assert.Equal(
+            [true, false, false, false],
+            Enumerable.Range(0, 4).Select(s => VariantDirectory.MayMatch(Has("early"), directories, s)));
+        Assert.Equal(
+            [false, false, false, true],
+            Enumerable.Range(0, 4).Select(s => VariantDirectory.MayMatch(Expr.Or(Has("late"), Has("missing")), directories, s)));
+        Assert.True(VariantDirectory.MayMatch(Has("early"), directories));
+        Assert.All(Enumerable.Range(0, 4), s => Assert.True(VariantDirectory.MayMatch(Expr.Not(Has("early")), directories, s)));
+    }
+
+    /// <summary>
+    /// Two thousand keys, each held by one row but a few held by many: over its budget the directory
+    /// leaves the rarest out, keeps those held most, and refutes nothing by a path's absence any more.
+    /// </summary>
+    [Fact]
+    public void ADirectoryOverItsBudgetLeavesTheRarestPathsOut()
+    {
+        PathCensus census = new PathCensus();
+        for (int i = 0; i < 2_000; i++)
+        {
+            Variant row = Variant.Object(($"user.{i}.score", Variant.From((long)i)), ("route", Variant.From("/a")));
+            census.Add(row.Metadata.Span, row.Value.Span);
+        }
+
+        VariantDirectory whole = VariantDirectory.From(census, null);
+        Dictionary<string, VariantDirectory> complete = new() { ["Attributes"] = whole };
+        Assert.False(VariantDirectory.MayMatch(Has("never"), complete));
+
+        int bytes = whole.ToBytes().Length;
+        VariantDirectory trimmed = whole.Within(bytes / 4);
+        Assert.True(trimmed.Partial);
+        Assert.InRange(trimmed.ToBytes().Length, 1, bytes / 4);
+        Assert.Equal(1, trimmed.Of(["route"]).Length);
+        Assert.InRange(trimmed.Entries.Count, 2, whole.Entries.Count - 1);
+        Dictionary<string, VariantDirectory> partial = new() { ["Attributes"] = VariantDirectory.From(trimmed.ToBytes())! };
+        Assert.True(VariantDirectory.MayMatch(Has("never"), partial));
+        Assert.False(VariantDirectory.MayMatch(Path(VariantRead.AsInt64, ComparisonOp.Equal, FilterLiteral.From(1L), "route"), partial));
+        Assert.Same(whole, whole.Within(bytes));
+    }
+
     /// <summary>Six rows: integers and a text at "status", routes, a flag, numbers and a NaN, a time, a nested key, a list, a null.</summary>
     private static VariantDirectory Directory()
     {

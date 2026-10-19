@@ -45,6 +45,9 @@ internal static class ShredWriteMicro
             }
 
             int field = file.DType.IndexOfField(nameof(ShredEvent.Attributes));
+
+            // A row's instant, a millisecond apart, as a job hands the census each row's.
+            long[][] instants = [.. batches.Select(batch => Enumerable.Range(0, batch.RowCount).Select(row => (batch.StartRow + row) * 1_000L).ToArray())];
             double census = double.MaxValue;
             double whole = double.MaxValue;
             double shredded = double.MaxValue;
@@ -58,10 +61,10 @@ internal static class ShredWriteMicro
                 // As a job counts: text bounds cut as a text column's zones cut theirs, and the path
                 // directory built beside the choice.
                 long begin = Stopwatch.GetTimestamp();
-                PathCensus counted = new PathCensus(VortexWriteOptions.Default.StringBoundBytes);
-                foreach (RecordBatch batch in batches)
+                PathCensus counted = new PathCensus(VortexWriteOptions.Default.StringBoundBytes, Vorticity.Dataset.TimeSlicer.DefaultTargetRows);
+                for (int b = 0; b < batches.Count; b++)
                 {
-                    counted.Add(batch, field);
+                    counted.Add(batches[b], field, instants[b]);
                 }
 
                 plan = ShreddingChoice.Choose(counted);

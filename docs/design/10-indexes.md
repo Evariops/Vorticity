@@ -246,16 +246,24 @@ text, a timestamp, an object, a list, a null, anything else), how many values, w
 typed column a shredded path keeps, the values of other classes beside it, or the residual), and their
 bounds. An integer or a timestamp keeps its least and greatest, a number its least and greatest and
 whether one was NaN, a boolean which of the two it saw, and a text its least and greatest cut to the
-bytes a text column's zones keep, the greatest one past its cut when a longer text shares it. The
-entry is on the variant column. Its one run holds one region, behind a version byte and the body's
-length, the body one zstd frame.
+bytes a text column's zones keep, the greatest one past its cut when a longer text shares it. Each path
+also names, a bit each, the time slices of the object it may hold a value in, from the spans of time
+its values lie in as the rows stream past in time order: two values closer than a slice is wide share
+a span, so a path keeps about a span per slice at most, and the bits are a superset of the slices
+that hold it. The entry is on the variant column. Its one run holds one region, behind a version byte
+and the body's length, the body one zstd frame.
+
+The directory fits the file's index budget. Over it, the paths of the residual held least are left
+out first, and the directory says it is partial, after which a path's absence proves nothing.
 
 A scan whose filter asks a path for a value reads the directories of the columns it names, one region
 each, before the Bloom filters. It refutes the file when a fenced predicate asks for a path the file
 never holds, for a class the path never holds there, or for values outside its bounds, under the
 filter's conjunctions and disjunctions. A presence asked absent, a conversion of any class, and a
 negation refute nothing. A refuted file reads no block (`ScanPlan.MayMatch` is false, and `Explain`
-names the step `path directory`). An append drops the entry, since it parses none of its rows.
+names the step `path directory`). Otherwise it asks the same of each slice, and kills the blocks that
+lie wholly inside the runs of slices refuted. An append drops the entry, since it parses none of its
+rows.
 
 ### 4.7 The file-level filter
 

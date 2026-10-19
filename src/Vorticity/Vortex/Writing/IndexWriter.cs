@@ -1539,13 +1539,13 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// Writes the path directory of the variant column <paramref name="field"/>, one region from the
-    /// sink's position, and adds the entry that names it: on the column, one run over every block of
-    /// the file's <paramref name="rows"/>.
+    /// sink's position, within the index budget of the file's <paramref name="dataBytes"/>, and adds the
+    /// entry that names it: on the column, one run over every block of the file's <paramref name="rows"/>.
     /// </summary>
     internal async ValueTask AddVariantDirectoryAsync(
-        ISegmentSink sink, int field, VariantDirectory directory, long rows, int blockRows, CancellationToken cancellationToken)
+        ISegmentSink sink, int field, VariantDirectory directory, long rows, int blockRows, long dataBytes, CancellationToken cancellationToken)
     {
-        byte[] bytes = directory.ToBytes();
+        byte[] bytes = directory.Within(Math.Max(dataBytes, BudgetFloor) * _budgetPerMille / 1000).ToBytes();
         IndexSegment region = IndexSegment.Of(sink.Position, bytes, 0);
         await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
         int length = Math.Max(blockRows, 1);

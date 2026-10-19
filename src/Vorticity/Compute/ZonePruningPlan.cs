@@ -93,24 +93,23 @@ internal static class ZonePruningPlan
 
         long blockRows = Scanning.SplitPlan.NaturalBatchRows(tree);
 
-        // The path directories first among the indexes: one small read refutes the whole file.
+        // The path directories first among the indexes: one small read refutes the whole file, or the
+        // slices that hold no path the filter asks for.
+        List<RowRange>? pathRanges = null;
+        int pathSegments = 0;
+        long pathBytes = 0;
         if (indexes && blockRows > 0 && VariantColumns(filter) is { } variants)
         {
-            (bool refuted, int read, long readBytes) = await RefutedByPathsAsync(file, filter, variants, cancellationToken).ConfigureAwait(false);
-            Scanning.ScanCounters.Note(metrics, read, readBytes);
+            (bool refuted, pathRanges, pathSegments, pathBytes) = await RefutedByPathsAsync(file, filter, variants, cancellationToken).ConfigureAwait(false);
+            Scanning.ScanCounters.Note(metrics, pathSegments, pathBytes);
             if (refuted)
             {
                 BlockMask none = new BlockMask(tree.Root.RowCount, blockRows);
                 int all = Counted(none, scope);
                 none.KillAll();
-                steps?.Add(new PruningStep("path directory", all, read, readBytes));
+                steps?.Add(new PruningStep("path directory", all, pathSegments, pathBytes));
                 Diagnostics.VortexEventSource.Pruned(none.BlockCount, none.BlockCount);
                 return new PruningPlan(none, zones);
-            }
-
-            if (read > 0)
-            {
-                steps?.Add(new PruningStep("path directory", 0, read, readBytes));
             }
         }
 
@@ -120,8 +119,13 @@ internal static class ZonePruningPlan
         Indexes.KeyIndexPruner? locating = indexes && blockRows > 0
             ? await Indexes.KeyIndexPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
             : null;
-        if (zones is null && blooms is null && locating is null)
+        if (zones is null && blooms is null && locating is null && pathRanges is null)
         {
+            if (pathSegments > 0)
+            {
+                steps?.Add(new PruningStep("path directory", 0, pathSegments, pathBytes));
+            }
+
             return default;
         }
 
@@ -135,6 +139,17 @@ internal static class ZonePruningPlan
             // credited only with what the earlier ones left it -- against the segments read for
             // it.
             steps?.Add(new PruningStep("zone map", before - Counted(live, scope), segments, bytes));
+        }
+
+        if (pathSegments > 0)
+        {
+            before = Counted(live, scope);
+            foreach (RowRange range in pathRanges ?? [])
+            {
+                KillWithin(live, range);
+            }
+
+            steps?.Add(new PruningStep("path directory", before - Counted(live, scope), pathSegments, pathBytes));
         }
 
         if (blooms is not null && !live.IsEmpty)
@@ -213,9 +228,10 @@ internal static class ZonePruningPlan
 
     /// <summary>
     /// Whether the path directories of <paramref name="columns"/> prove that no row of
-    /// <paramref name="file"/> matches <paramref name="filter"/>, and the segments and bytes read for them.
+    /// <paramref name="file"/> matches <paramref name="filter"/>; when they do not, the rows of the runs
+    /// of slices they prove hold none, or null; and the segments and bytes read for them.
     /// </summary>
-    private static async ValueTask<(bool Refuted, int Segments, long Bytes)> RefutedByPathsAsync(
+    private static async ValueTask<(bool Refuted, List<RowRange>? Ranges, int Segments, long Bytes)> RefutedByPathsAsync(
         VortexFile file, VortexExpr filter, List<string> columns, CancellationToken cancellationToken)
     {
         Dictionary<string, Indexes.VariantDirectory>? directories = null;
@@ -239,7 +255,68 @@ internal static class ZonePruningPlan
             }
         }
 
-        return (directories is not null && !Indexes.VariantDirectory.MayMatch(filter, directories), segments, bytes);
+        if (directories is null)
+        {
+            return (false, null, segments, bytes);
+        }
+
+        if (!Indexes.VariantDirectory.MayMatch(filter, directories))
+        {
+            return (true, null, segments, bytes);
+        }
+
+        // Slice by slice, when every directory names the file's slices.
+        int slices = -1;
+        foreach (Indexes.VariantDirectory directory in directories.Values)
+        {
+            slices = slices < 0 || slices == directory.SliceCount ? directory.SliceCount : 0;
+        }
+
+        if (slices <= 0 || await Indexes.SliceTable.ReadAsync(file, cancellationToken).ConfigureAwait(false) is not { } table
+            || table.Slices.Count != slices)
+        {
+            return (false, null, segments, bytes);
+        }
+
+        List<RowRange>? ranges = null;
+        long start = -1;
+        long end = -1;
+        for (int slice = 0; slice < slices; slice++)
+        {
+            Indexes.TimeSlice cut = table.Slices[slice];
+            if (Indexes.VariantDirectory.MayMatch(filter, directories, slice))
+            {
+                continue;
+            }
+
+            // Neighbouring slices refuted make one run, so that a block astride them dies too.
+            if (start >= 0 && end == cut.FirstRow)
+            {
+                end = cut.FirstRow + cut.Rows;
+                ranges![^1] = new RowRange(start, end);
+                continue;
+            }
+
+            (start, end) = (cut.FirstRow, cut.FirstRow + cut.Rows);
+            (ranges ??= []).Add(new RowRange(start, end));
+        }
+
+        return (false, ranges, segments, bytes);
+    }
+
+    /// <summary>Kills the blocks of <paramref name="live"/> that lie wholly inside <paramref name="rows"/>.</summary>
+    private static void KillWithin(BlockMask live, RowRange rows)
+    {
+        long blockRows = live.BlockRows;
+        for (long block = (rows.Start + blockRows - 1) / blockRows; block < live.BlockCount; block++)
+        {
+            if (Math.Min((block + 1) * blockRows, live.RowCount) > rows.End)
+            {
+                return;
+            }
+
+            live.Kill((int)block);
+        }
     }
 
     /// <summary>The live blocks of <paramref name="live"/>, among those of <paramref name="scope"/> when there is one.</summary>

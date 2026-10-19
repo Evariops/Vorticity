@@ -542,16 +542,17 @@ internal static class DatasetCompactor
                 {
                     if (!tallies.TryGetValue((level, period), out var tally))
                     {
-                        tally = (new SecondCounts(cut.Unit), [.. candidates.Select(static _ => new CardinalitySketch())], [.. variants.Select(_ => new PathCensus(textBound))]);
+                        tally = (new SecondCounts(cut.Unit), [.. candidates.Select(static _ => new CardinalitySketch())], [.. variants.Select(_ => new PathCensus(textBound, target))]);
                         tallies[(level, period)] = tally;
                     }
 
                     RecordBatch part = at == 0 && end == run.RowCount ? run : run.Window(at, end - at);
-                    tally.Seconds.Add(Instants(part, instant));
+                    ReadOnlySpan<long> instants = Instants(part, instant);
+                    tally.Seconds.Add(instants);
                     SynopsisOrder.Count(part, candidates, tally.Sketches);
                     for (int v = 0; v < variants.Length; v++)
                     {
-                        tally.Paths[v].Add(part, variants[v]);
+                        tally.Paths[v].Add(part, variants[v], instants);
                     }
 
                     at = end;
@@ -569,7 +570,8 @@ internal static class DatasetCompactor
             }
 
             // Each variant column shreds what its rows in the object pay for, in chunks of its own, and
-            // lists every path and class they hold, shredded or not.
+            // lists every path and class they hold, shredded or not, with the slices that hold it.
+            SliceTable table = new SliceTable(cut.Unit, TimeSlicer.Cut(seconds.Seconds, cut.Unit, target), SynopsisOrder.Choose(counted, seconds.Rows));
             ImmutableDictionary<string, VariantShredding> shredded = ImmutableDictionary<string, VariantShredding>.Empty;
             ImmutableDictionary<string, int> chunks = ImmutableDictionary<string, int>.Empty;
             ImmutableDictionary<string, VariantDirectory> directories = ImmutableDictionary<string, VariantDirectory>.Empty;
@@ -583,11 +585,11 @@ internal static class DatasetCompactor
                     chunks = chunks.SetItem(name, ShreddingChoice.ChunkTargetBytes(paths[v]));
                 }
 
-                directories = directories.SetItem(name, VariantDirectory.From(paths[v], chosen));
+                directories = directories.SetItem(name, VariantDirectory.From(paths[v], chosen, table.Slices));
             }
 
             plans[(level, period)] = new ObjectPlan(
-                new SliceTable(cut.Unit, TimeSlicer.Cut(seconds.Seconds, cut.Unit, target), SynopsisOrder.Choose(counted, seconds.Rows)),
+                table,
                 shredded,
                 chunks,
                 directories);

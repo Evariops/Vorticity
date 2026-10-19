@@ -2015,7 +2015,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                             $"The path directory of column {field} counts {paths.Rows} rows of a file of {_rowCount}: it counts each row once.");
                     }
 
-                    await closed.AddVariantDirectoryAsync(_sink, field, paths, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                    await closed.AddVariantDirectoryAsync(_sink, field, paths, _rowCount, _blockRows, dataEnd - interleaved, cancellationToken).ConfigureAwait(false);
                 }
             }
         }

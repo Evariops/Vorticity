@@ -43,8 +43,17 @@ internal enum PathPlace : byte
 /// <param name="NaNs">Whether a number was NaN, which no bound counts.</param>
 /// <param name="MinText">The least text cut to the bound, which no text is below; null without text bounds.</param>
 /// <param name="MaxText">A text no text is above; null when there is none, as when the greatest was cut and every byte left was the largest.</param>
+/// <param name="Slices">
+/// The slices of the object the path may hold a value in, a bit each, slice 0 the low bit of byte 0;
+/// null when it may hold one in every slice, or the object has none.
+/// </param>
 internal sealed record PathEntry(
-    string[] Path, PathClass Class, long Values, PathPlace Place, long Low, long High, bool NaNs, byte[]? MinText, byte[]? MaxText);
+    string[] Path, PathClass Class, long Values, PathPlace Place, long Low, long High, bool NaNs, byte[]? MinText, byte[]? MaxText,
+    byte[]? Slices = null)
+{
+    /// <summary>Whether the path may hold a value in slice <paramref name="slice"/>; any slice for -1.</summary>
+    internal bool In(int slice) => slice < 0 || Slices is null || (slice >> 3 < Slices.Length && (Slices[slice >> 3] & (1 << (slice & 7))) != 0);
+}
 
 /// <summary>
 /// The path directory of a variant column: for every path and class the object's rows hold, its
@@ -56,7 +65,10 @@ internal sealed record PathEntry(
 /// <remarks>
 /// It is counted from the rows a job of a dataset of periods parses anyway, in the first pass that
 /// cuts its slices, so an append, which parses nothing, writes none and drops the one it extends.
-/// Like every index it is a hint: a region that does not decode refutes nothing.
+/// Each path names the slices it may hold a value in, which a question on it prunes the others by.
+/// Under the index budget, the paths of the residual held least are left out first, and a directory
+/// that left one out refutes nothing by a path's absence. Like every index it is a hint: a region that
+/// does not decode refutes nothing.
 /// </remarks>
 internal sealed class VariantDirectory
 {
@@ -64,10 +76,12 @@ internal sealed class VariantDirectory
 
     private readonly Dictionary<string, PathEntry[]> _byPath;
 
-    internal VariantDirectory(long rows, IReadOnlyList<PathEntry> entries)
+    internal VariantDirectory(long rows, IReadOnlyList<PathEntry> entries, int sliceCount = 0, bool partial = false)
     {
         Rows = rows;
         Entries = entries;
+        SliceCount = sliceCount;
+        Partial = partial;
         Dictionary<string, List<PathEntry>> grouped = new Dictionary<string, List<PathEntry>>(StringComparer.Ordinal);
         foreach (PathEntry entry in entries)
         {
@@ -93,25 +107,34 @@ internal sealed class VariantDirectory
     /// <summary>Every path and class, parents before their keys.</summary>
     internal IReadOnlyList<PathEntry> Entries { get; }
 
+    /// <summary>The slices of the object the entries' bits count; 0 when they name none.</summary>
+    internal int SliceCount { get; }
+
+    /// <summary>Whether the budget left a path out, so that a path's absence proves nothing.</summary>
+    internal bool Partial { get; }
+
     /// <summary>The classes the path of <paramref name="keys"/> holds; empty when the object holds no value there.</summary>
     internal ReadOnlySpan<PathEntry> Of(IReadOnlyList<string> keys) =>
         _byPath.TryGetValue(Joined(keys), out PathEntry[]? entries) ? entries : [];
 
     /// <summary>
     /// The directory of what <paramref name="census"/> counted, its paths placed by
-    /// <paramref name="shredding"/>, the shredding the object's column was written with, or null.
+    /// <paramref name="shredding"/>, the shredding the object's column was written with, or null, and
+    /// each named the <paramref name="slices"/> of the object it may hold a value in when there are.
     /// </summary>
-    internal static VariantDirectory From(PathCensus census, VariantShredding? shredding)
+    internal static VariantDirectory From(PathCensus census, VariantShredding? shredding, IReadOnlyList<TimeSlice>? slices = null)
     {
         List<PathEntry> entries = [];
         List<string> path = [];
-        Walk(census.Root, shredding, path, entries);
-        return new VariantDirectory(census.Rows, entries);
+        Walk(census.Root, shredding, slices, path, entries);
+        return new VariantDirectory(census.Rows, entries, slices?.Count ?? 0);
     }
 
-    private static void Walk(PathCensus.PathCount count, VariantShredding? shredding, List<string> path, List<PathEntry> entries)
+    private static void Walk(
+        PathCensus.PathCount count, VariantShredding? shredding, IReadOnlyList<TimeSlice>? slices, List<string> path, List<PathEntry> entries)
     {
         string[] keys = [.. path];
+        byte[]? held = slices is { Count: > 0 } ? SlicesOf(count.Spans, slices) : null;
         for (PathClass @class = PathClass.Null; @class <= PathClass.Other; @class++)
         {
             long values = count.Read(@class);
@@ -121,7 +144,7 @@ internal sealed class VariantDirectory
             }
 
             (long low, long high, bool nans, byte[]? min, byte[]? max) = Bounds(count, @class);
-            entries.Add(new PathEntry(keys, @class, values, PlaceOf(shredding, @class), low, high, nans, min, max));
+            entries.Add(new PathEntry(keys, @class, values, PlaceOf(shredding, @class), low, high, nans, min, max, held));
         }
 
         // Keys in their ordinal order, so that the same rows give the same bytes.
@@ -133,8 +156,94 @@ internal sealed class VariantDirectory
                 ? inner.Keys[at].Field
                 : null;
             path.Add(name);
-            Walk(count.Keys[name], field, path, entries);
+            Walk(count.Keys[name], field, slices, path, entries);
             path.RemoveAt(path.Count - 1);
+        }
+    }
+
+    /// <summary>
+    /// A bit for each of <paramref name="slices"/> one of <paramref name="spans"/> reaches into; null when
+    /// every slice is reached, or the spans name no time and so may lie anywhere.
+    /// </summary>
+    private static byte[]? SlicesOf(ReadOnlySpan<long> spans, IReadOnlyList<TimeSlice> slices)
+    {
+        if (spans.IsEmpty)
+        {
+            return null;
+        }
+
+        byte[] bits = new byte[(slices.Count + 7) / 8];
+        int reached = 0;
+        int slice = 0;
+        for (int i = 0; i < spans.Length; i += 2)
+        {
+            // Spans and slices are both in time order: the first slice that ends past the span's start.
+            while (slice < slices.Count && slices[slice].End <= spans[i])
+            {
+                slice++;
+            }
+
+            for (int s = slice; s < slices.Count && slices[s].Start <= spans[i + 1]; s++)
+            {
+                if ((bits[s >> 3] & (1 << (s & 7))) == 0)
+                {
+                    bits[s >> 3] |= (byte)(1 << (s & 7));
+                    reached++;
+                }
+            }
+        }
+
+        return reached == slices.Count ? null : bits;
+    }
+
+    /// <summary>
+    /// This directory within <paramref name="maxBytes"/> bytes: the paths of the residual held least left
+    /// out first, and the directory then partial; itself when it fits, or holds no path of the residual.
+    /// </summary>
+    internal VariantDirectory Within(long maxBytes)
+    {
+        int bytes = ToBytes().Length;
+        if (bytes <= maxBytes)
+        {
+            return this;
+        }
+
+        List<PathEntry> residual = [];
+        foreach (PathEntry entry in Entries)
+        {
+            if (entry.Place == PathPlace.Residual && entry.Path.Length > 0)
+            {
+                residual.Add(entry);
+            }
+        }
+
+        if (residual.Count == 0)
+        {
+            return this;
+        }
+
+        // The entries kept in proportion to the bytes, then fewer until they fit.
+        residual.Sort(static (a, b) => b.Values.CompareTo(a.Values));
+        int kept = (int)(residual.Count * Math.Max(0, (double)maxBytes / bytes));
+        while (true)
+        {
+            HashSet<PathEntry> dropped = [.. residual.GetRange(kept, residual.Count - kept)];
+            List<PathEntry> left = [];
+            foreach (PathEntry entry in Entries)
+            {
+                if (!dropped.Contains(entry))
+                {
+                    left.Add(entry);
+                }
+            }
+
+            VariantDirectory trimmed = new VariantDirectory(Rows, left, SliceCount, partial: true);
+            if (kept == 0 || trimmed.ToBytes().Length <= maxBytes)
+            {
+                return trimmed;
+            }
+
+            kept /= 2;
         }
     }
 
@@ -212,31 +321,32 @@ internal sealed class VariantDirectory
     /// </summary>
     /// <param name="filter">The scan's predicate.</param>
     /// <param name="directories">The directory of each variant column, by its name; a column without one may match anything.</param>
-    internal static bool MayMatch(VortexExpr filter, IReadOnlyDictionary<string, VariantDirectory> directories) => filter switch
+    /// <param name="slice">The one slice of the object asked about, by the bits its paths carry; -1 for the whole object.</param>
+    internal static bool MayMatch(VortexExpr filter, IReadOnlyDictionary<string, VariantDirectory> directories, int slice = -1) => filter switch
     {
-        LogicalExpr { IsAnd: true } both => MayMatch(both.Left, directories) && MayMatch(both.Right, directories),
-        LogicalExpr either => MayMatch(either.Left, directories) || MayMatch(either.Right, directories),
-        VariantFilterExpr fence => MayMatchFenced(fence.Inner, directories),
+        LogicalExpr { IsAnd: true } both => MayMatch(both.Left, directories, slice) && MayMatch(both.Right, directories, slice),
+        LogicalExpr either => MayMatch(either.Left, directories, slice) || MayMatch(either.Right, directories, slice),
+        VariantFilterExpr fence => MayMatchFenced(fence.Inner, directories, slice),
         _ => true,
     };
 
-    private static bool MayMatchFenced(VortexExpr predicate, IReadOnlyDictionary<string, VariantDirectory> directories)
+    private static bool MayMatchFenced(VortexExpr predicate, IReadOnlyDictionary<string, VariantDirectory> directories, int slice)
     {
         switch (predicate)
         {
             case ComparisonExpr { Field: VariantFieldExpr path } comparison:
-                return EntriesOf(path, directories, out ReadOnlySpan<PathEntry> entries) is not { } absent
-                    || MayMatch(path.Read, entries, comparison.Op, comparison.Value, absent);
+                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> entries) is not { } absent
+                    || MayMatch(path.Read, entries, comparison.Op, comparison.Value, absent, slice);
             case InExpr { Field: VariantFieldExpr path } membership:
             {
-                if (EntriesOf(path, directories, out ReadOnlySpan<PathEntry> members) is not { } lacking)
+                if (EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> members) is not { } lacking)
                 {
                     return true;
                 }
 
                 foreach (FilterLiteral literal in membership.Literals)
                 {
-                    if (MayMatch(path.Read, members, ComparisonOp.Equal, literal, lacking))
+                    if (MayMatch(path.Read, members, ComparisonOp.Equal, literal, lacking, slice))
                     {
                         return true;
                     }
@@ -246,9 +356,11 @@ internal sealed class VariantDirectory
             }
 
             case NullCheckExpr { Field: VariantFieldExpr path, IsNull: false }:
-                return EntriesOf(path, directories, out ReadOnlySpan<PathEntry> held) is not { } none || (!none && Holds(path.Read, held));
+                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> held) is not { } none
+                    || (!none && Holds(path.Read, held, slice));
             case StringMatchExpr { Field: VariantFieldExpr path }:
-                return EntriesOf(path, directories, out ReadOnlySpan<PathEntry> texts) is not { } empty || (!empty && Holds(path.Read, texts));
+                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> texts) is not { } empty
+                    || (!empty && Holds(path.Read, texts, slice));
             default:
                 return true;
         }
@@ -256,10 +368,11 @@ internal sealed class VariantDirectory
 
     /// <summary>
     /// The entries of <paramref name="path"/>'s column and keys: null when no directory answers for it,
-    /// or the path takes an index; otherwise whether the object holds no value at the path at all.
+    /// the path takes an index, or the directory is partial and lacks it; otherwise whether the object,
+    /// or slice <paramref name="slice"/> of it, holds no value at the path at all.
     /// </summary>
     private static bool? EntriesOf(
-        VariantFieldExpr path, IReadOnlyDictionary<string, VariantDirectory> directories, out ReadOnlySpan<PathEntry> entries)
+        VariantFieldExpr path, IReadOnlyDictionary<string, VariantDirectory> directories, int slice, out ReadOnlySpan<PathEntry> entries)
     {
         entries = default;
         if (!directories.TryGetValue(path.Column.Path, out VariantDirectory? directory))
@@ -279,15 +392,28 @@ internal sealed class VariantDirectory
         }
 
         entries = directory.Of(keys);
-        return entries.IsEmpty;
+        if (entries.IsEmpty)
+        {
+            return directory.Partial ? null : true;
+        }
+
+        foreach (PathEntry entry in entries)
+        {
+            if (entry.In(slice))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>Whether the path holds a value <paramref name="read"/> takes: of its class, or any value for a conversion or a presence.</summary>
-    private static bool Holds(VariantRead read, ReadOnlySpan<PathEntry> entries) =>
-        ClassOf(read) is not { } @class || Find(entries, @class) is not null;
+    private static bool Holds(VariantRead read, ReadOnlySpan<PathEntry> entries, int slice) =>
+        ClassOf(read) is not { } @class || Find(entries, @class, slice) is not null;
 
     /// <summary>Whether a value at the path may compare to <paramref name="value"/> by <paramref name="op"/> when read by <paramref name="read"/>.</summary>
-    private static bool MayMatch(VariantRead read, ReadOnlySpan<PathEntry> entries, ComparisonOp op, FilterLiteral value, bool absent)
+    private static bool MayMatch(VariantRead read, ReadOnlySpan<PathEntry> entries, ComparisonOp op, FilterLiteral value, bool absent, int slice)
     {
         if (read == VariantRead.Has)
         {
@@ -307,7 +433,7 @@ internal sealed class VariantDirectory
             return true;
         }
 
-        return Find(entries, @class) is { } entry && Within(entry, op, value);
+        return Find(entries, @class, slice) is { } entry && Within(entry, op, value);
     }
 
     /// <summary>The class a read of one class takes, or null for a conversion or a presence.</summary>
@@ -321,11 +447,11 @@ internal sealed class VariantDirectory
         _ => null,
     };
 
-    private static PathEntry? Find(ReadOnlySpan<PathEntry> entries, PathClass @class)
+    private static PathEntry? Find(ReadOnlySpan<PathEntry> entries, PathClass @class, int slice)
     {
         foreach (PathEntry entry in entries)
         {
-            if (entry.Class == @class)
+            if (entry.Class == @class && entry.In(slice))
             {
                 return entry;
             }
@@ -430,6 +556,8 @@ internal sealed class VariantDirectory
         try
         {
             writer.WriteVarint((ulong)Rows);
+            writer.WriteVarint((ulong)SliceCount);
+            writer.WriteVarint(Partial ? 1UL : 0);
             writer.WriteVarint((ulong)Entries.Count);
             foreach (PathEntry entry in Entries)
             {
@@ -446,9 +574,11 @@ internal sealed class VariantDirectory
                 writer.WriteVarint((ulong)entry.Place);
                 writer.WriteVarint(Zigzag(entry.Low));
                 writer.WriteVarint(Zigzag(entry.High));
-                writer.WriteVarint((entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL));
+                writer.WriteVarint(
+                    (entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL) | (entry.Slices is null ? 0 : 8UL));
                 Text(ref writer, entry.MinText);
                 Text(ref writer, entry.MaxText);
+                Text(ref writer, entry.Slices);
             }
 
             return writer.WrittenSpan.ToArray();
@@ -516,6 +646,8 @@ internal sealed class VariantDirectory
         {
             ProtoReader reader = new ProtoReader(bytes);
             long rows = checked((long)reader.ReadVarint());
+            int slices = checked((int)reader.ReadVarint());
+            bool partial = reader.ReadVarint() != 0;
             ulong count = reader.ReadVarint();
             if (count > (ulong)bytes.Length)
             {
@@ -545,15 +677,16 @@ internal sealed class VariantDirectory
                 ulong flags = reader.ReadVarint();
                 byte[]? min = (flags & 2) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
                 byte[]? max = (flags & 4) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
-                if (@class > (ulong)PathClass.Other || place > (ulong)PathPlace.Value)
+                byte[]? held = (flags & 8) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
+                if (@class > (ulong)PathClass.Other || place > (ulong)PathPlace.Value || (held is not null && held.Length != (slices + 7) / 8))
                 {
                     return null;
                 }
 
-                entries[i] = new PathEntry(path, (PathClass)@class, values, (PathPlace)place, low, high, (flags & 1) != 0, min, max);
+                entries[i] = new PathEntry(path, (PathClass)@class, values, (PathPlace)place, low, high, (flags & 1) != 0, min, max, held);
             }
 
-            return reader.End ? new VariantDirectory(rows, entries) : null;
+            return reader.End ? new VariantDirectory(rows, entries, slices, partial) : null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)
         {

@@ -15,12 +15,25 @@ namespace Vorticity.Types.Variants;
 /// class a question reads them as (<see cref="PathClass"/>) and bounds them in each, what the path
 /// directory holds: text bounds cut to <paramref name="stringBoundBytes"/>, as a text column's zones
 /// cut theirs, none at 0.
+/// <para>
+/// Given each row's instant, rows in time order, each path also keeps the spans of time its values lie
+/// in, from which the directory says which slices of the object hold it. Two values of a path closer
+/// than a slice is wide, <paramref name="sliceTargetRows"/> rows at the rate counted so far, share a
+/// span, so a path keeps about a span per slice at most and the slices a span names are a superset of
+/// those that hold it.
+/// </para>
 /// </remarks>
-internal sealed class PathCensus(int stringBoundBytes = 0)
+internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows = 0)
 {
     private byte[] _metadata = [];
     private int _metadataLength = -1;
     private string?[] _names = [];
+
+    // The instant of the row being counted, long.MinValue without one; the first instant, and the gap
+    // under which two values of a path share a span.
+    private long _instant = long.MinValue;
+    private long _firstInstant = long.MinValue;
+    private long _gap;
 
     /// <summary>The bytes a text bound keeps; 0 for none.</summary>
     internal int StringBoundBytes { get; } = stringBoundBytes;
@@ -37,9 +50,12 @@ internal sealed class PathCensus(int stringBoundBytes = 0)
     /// <summary>Counts a null row.</summary>
     internal void AddNull() => Rows++;
 
-    /// <summary>Counts every row of the variant column <paramref name="field"/> of <paramref name="batch"/>'s root struct.</summary>
+    /// <summary>
+    /// Counts every row of the variant column <paramref name="field"/> of <paramref name="batch"/>'s root
+    /// struct, at <paramref name="instants"/>, one a row in time order, or at none.
+    /// </summary>
     /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
-    internal void Add(RecordBatch batch, int field)
+    internal void Add(RecordBatch batch, int field, ReadOnlySpan<long> instants = default)
     {
         Arrays.CanonicalArena arena = batch.Arena;
         int column = arena.GetNode(batch.RootIndex).GetFieldIndex(field);
@@ -48,6 +64,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0)
         int value = EncodedForms.Canonical(arena, variant.GetFieldIndex(1));
         Arrays.CanonicalNode metadataNode = arena.GetNode(metadata);
         Arrays.CanonicalNode valueNode = arena.GetNode(value);
+        bool timed = sliceTargetRows > 0 && instants.Length == batch.RowCount;
         for (int row = 0; row < batch.RowCount; row++)
         {
             if (!Arrays.ArenaWords.IsValid(arena, column, row))
@@ -58,14 +75,26 @@ internal sealed class PathCensus(int stringBoundBytes = 0)
 
             Add(
                 Compute.LiteralReader.ViewAt(metadataNode, row),
-                Arrays.ArenaWords.IsValid(arena, value, row) ? Compute.LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue);
+                Arrays.ArenaWords.IsValid(arena, value, row) ? Compute.LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue,
+                timed ? instants[row] : long.MinValue);
+        }
+
+        if (timed && instants.Length > 0)
+        {
+            // A slice is as wide as its target rows take at the rate counted so far.
+            _firstInstant = _firstInstant == long.MinValue ? instants[0] : _firstInstant;
+            _gap = (long)Math.Min((double)(instants[^1] - _firstInstant) / Math.Max(Rows, 1) * sliceTargetRows, long.MaxValue / 4);
         }
     }
 
-    /// <summary>Counts a row of <paramref name="value"/>, its keys named by <paramref name="metadata"/>.</summary>
+    /// <summary>
+    /// Counts a row of <paramref name="value"/>, its keys named by <paramref name="metadata"/>, at
+    /// <paramref name="instant"/>, after the rows counted before; long.MinValue for none.
+    /// </summary>
     /// <exception cref="VortexFormatException">The value or the metadata does not decode.</exception>
-    internal void Add(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value)
+    internal void Add(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, long instant = long.MinValue)
     {
+        _instant = instant;
         Rows++;
         ValueBytes += value.Length;
         if (metadata.Length != _metadataLength || !metadata.SequenceEqual(_metadata.AsSpan(0, _metadataLength)))
@@ -116,6 +145,10 @@ internal sealed class PathCensus(int stringBoundBytes = 0)
         private bool _false;
         private bool _true;
 
+        // The spans of time the values lie in, a first and a last instant each, the last span open.
+        private long[]? _spans;
+        private int _spanCount;
+
         // The text bounds, each cut to the census's bound, in buffers of that length; -1 before a text.
         private byte[]? _minText;
         private byte[]? _maxText;
@@ -150,6 +183,29 @@ internal sealed class PathCensus(int stringBoundBytes = 0)
         /// <summary>The values a question reads as <paramref name="class"/>.</summary>
         internal long Read(PathClass @class) => _read[(int)@class];
 
+        /// <summary>The spans of time the values lie in, a first and a last instant each, in time order; empty without instants.</summary>
+        internal ReadOnlySpan<long> Spans => _spans.AsSpan(0, 2 * _spanCount);
+
+        /// <summary>Notes a value at <paramref name="instant"/>, in the open span when it is within <paramref name="gap"/> of its end.</summary>
+        private void Occur(long instant, long gap)
+        {
+            int last = (2 * _spanCount) - 1;
+            if (_spanCount > 0 && instant - _spans![last] <= gap)
+            {
+                _spans[last] = Math.Max(_spans[last], instant);
+                return;
+            }
+
+            if (_spans is null || last + 2 >= _spans.Length)
+            {
+                Array.Resize(ref _spans, Math.Max(4, 2 * (_spans?.Length ?? 0)));
+            }
+
+            _spans[last + 1] = instant;
+            _spans[last + 2] = instant;
+            _spanCount++;
+        }
+
         /// <summary>The least and greatest integer; meaningless without one.</summary>
         internal (long Min, long Max) Integers => (_minInteger, _maxInteger);
 
@@ -177,6 +233,11 @@ internal sealed class PathCensus(int stringBoundBytes = 0)
         internal void Add(PathCensus census, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth)
         {
             Values++;
+            if (census._instant != long.MinValue)
+            {
+                Occur(census._instant, census._gap);
+            }
+
             switch (value[0] & 0x03)
             {
                 case ParquetVariant.BasicObject:

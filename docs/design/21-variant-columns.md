@@ -354,10 +354,17 @@ writes none. Its type is the class a question reads (`AsInt64` takes integers of
 are cut as a text column's zones cut theirs. A scan whose filter asks a path for a value reads the
 directory first and refutes the object, reading no block, when the path, its class or its bounds
 cannot match. Counting the bounds adds 41 ns a row of six to eight attributes to the count (223
-against 181, `--micro shredwrite`), 32 of them for the three texts. Two parts wait: the place in the
-synopsis, with the synopsis, and the postings of a residual path, since the rows a job counts are not
-yet in the order of the object it writes. Until the key table bounds it, the directory keeps every
-path: an object whose rows each hold one key of its own in a thousand carries 1 009 entries in 7 KB.
+against 181, `--micro shredwrite`), 32 of them for the three texts.
+
+The key table is, as built, the same directory. The rows a job counts are not yet in the order of
+the object it writes, so its postings name time slices, not blocks: each path keeps the spans of time
+its values lie in, and the directory names the slices those spans reach, which a question on the path
+prunes the others by, block by block (11 ns a row more to the count). The budget is the file's index
+budget: over it, the directory leaves out the residual's paths held least, and says it is partial, so
+that their absence refutes nothing. An object whose rows each hold one key of its own in a thousand
+carries 1 009 entries in 7 KB, well inside it. Discovery is the union of the objects' directories,
+an object without a whole one counted from its rows (`VariantDiscovery`, internal until the API that
+asks for it is decided). Two parts wait for the synopsis: the place in it, and counts per bucket.
 
 ### 5.5 Shapes
 
@@ -885,7 +892,7 @@ Every figure is an estimate.
 | the order pays for itself | the runs of every synopsis column under the measured order, against the order by numbers of distinct values, on real mixes of logs, and the cost of measuring it on a sample against the exact greedy order |
 | nulls cost what they hold | a path held by half of a chunk's rows costs no bit per row once its validity is encoded, on the write bench, and Rust reads it back in the cross-check (`ShreddedVariantWriteTests`: a validity of two runs written as runs; the slots of the null values remain, and the choice weighs them) |
 | a chunk shreds what it holds | the paths each chunk shreds, against the shapes it holds, on real mixes, and the bytes of the path map with a path's encoding fixed per object |
-| keys that are data are counted | at every version of the fuzzer, the key table's counts equal the rows that hold each key, and discovery lists every key of the window |
+| keys that are data are counted | at every version of the fuzzer, the key table's counts equal the rows that hold each key, and discovery lists every key of the window (`VariantDiscoveryTests`: four hundred user keys among others, at every append and compaction, appended and written objects alike) |
 | level 0 is parsed once per node | the parses of a level 0 object's path, counted on a query node under a load of questions: one per object, path and type class |
 | a path with dots stays one key | `http.route` and `http` holding `route` are two paths, in an index policy, the tool path and a plan |
 
