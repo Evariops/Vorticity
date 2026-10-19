@@ -3160,6 +3160,8 @@ Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(IObjectStore, D
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(IObjectStore, ulong, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, ulong, DatasetOptions = default, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<long> WarmAsync(VortexExpr, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<long> WarmAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(IAsyncEnumerable<RecordBatch>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(ObjectDraft, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, IReadOnlyDictionary<string, string> = default, CancellationToken = default)

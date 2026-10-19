@@ -251,6 +251,64 @@ public sealed partial class SynopsisAnswerTests
         Assert.Equal(requests[0], requests[1]);
     }
 
+    /// <summary>
+    /// A window warmed ahead reads its tables from the disk on its first question, with no request to the
+    /// store; warmed again, it reads nothing; and the cache's counters reach a listener of the library's meter.
+    /// </summary>
+    [Fact]
+    public async Task AWarmedWindowAsksTheStoreNothing()
+    {
+        string directory = CacheDirectory();
+        Dictionary<string, long> counted = new Dictionary<string, long>(StringComparer.Ordinal);
+        using System.Diagnostics.Metrics.MeterListener listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, listening) =>
+        {
+            if (instrument.Meter.Name == VortexDiagnostics.MeterName && instrument.Name.StartsWith("vortex.synopsis_cache.", StringComparison.Ordinal))
+            {
+                listening.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, _, _) =>
+        {
+            lock (counted)
+            {
+                counted[instrument.Name] = counted.GetValueOrDefault(instrument.Name) + value;
+            }
+        });
+        listener.Start();
+        try
+        {
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            await using VortexSession session = VortexSession.Create(options => options.SynopsisCache = new SynopsisCache(directory, 64 << 20));
+            await using VortexDataset dataset = await FilledAsync(store, session: session);
+            _ = await dataset.Scan<Request>().Where(r => r.At >= Noon).CountAsync(Ct);
+            DateTimeOffset hour = Noon.AddHours(1);
+            long warmed = await dataset.WarmAsync<Request>(r => r.At >= hour, Ct);
+            store.Reset();
+            (List<string> answer, ScanMetrics metrics) = await WindowAsync(dataset, hour, hour.AddHours(1));
+            Console.Out.Write($"WARMED: {warmed} bytes, then {store.Requests} requests for the hour.\n");
+            Assert.True(warmed > 0);
+            Assert.True(metrics.SynopsisRows > 0);
+            Assert.Equal(0, store.Requests);
+            Assert.Equal(0, await dataset.WarmAsync<Request>(r => r.At >= hour, Ct));
+            (List<string> rows, _) = await GroupsAsync(dataset.Scan<Request>().With(new ScanOptions { UseSynopses = false })
+                .Where(r => r.At >= hour && r.At < hour.AddHours(1)).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
+            Assert.Equal(rows, answer);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        lock (counted)
+        {
+            Assert.True(counted.GetValueOrDefault("vortex.synopsis_cache.bytes_from_store") > 0);
+            Assert.True(counted.GetValueOrDefault("vortex.synopsis_cache.hits") > 0);
+            Assert.True(counted.GetValueOrDefault("vortex.synopsis_cache.bytes_from_disk") > 0);
+        }
+    }
+
     /// <summary>A count and a sum of bytes by method over a window, and what reading it did.</summary>
     private static Task<(List<string> Groups, ScanMetrics Metrics)> WindowAsync(VortexDataset dataset, DateTimeOffset from, DateTimeOffset to) =>
         GroupsAsync(dataset.Scan<Request>().Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));

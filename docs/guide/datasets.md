@@ -162,6 +162,27 @@ Each part's answer is final for its range of time, so once a part arrives, the w
 to the window's end is answered. Counts and sums over the parts add up, and so do minimums and
 maximums. A mean over the whole window is the sum of the parts' sums over the sum of their counts.
 
+The tables a question reads can stay on the local disk, so that the next question over the same
+objects asks the store nothing for them. Give the session a `SynopsisCache`, a directory and the bytes
+it may hold:
+
+```csharp
+await using VortexSession session = VortexSession.Create(options =>
+    options.SynopsisCache = new SynopsisCache("/var/cache/vorticity", capacityBytes: 20L << 30));
+await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
+
+// Optional: read the last month's tables before the first question needs them.
+long warmed = await dataset.WarmAsync<Request>(r => r.At >= DateTimeOffset.UtcNow.AddDays(-30));
+```
+
+Only what an object's table of contents declares enters the cache: its synopsis tables and the
+directories that find its rows, never its data. An object never changes, so an entry never goes stale.
+Each region is checked against its checksum whenever it is read from the disk, and one that fails is
+read again from the store. One process owns a directory at a time, and the entries outlive it: the
+next session that opens the directory finds them. A dataset whose objects are encrypted is read from
+the store for now, since the cache would otherwise hold their plain bytes. The cache reports what it
+does on the library's meter, under `vortex.synopsis_cache.*`.
+
 ## Versions
 
 ```csharp

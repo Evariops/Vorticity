@@ -645,6 +645,99 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Reads into the session's <see cref="VortexSessionOptions.SynopsisCache"/>, before a question needs
+    /// them, the tables and directories of every object whose summaries say it may hold a row
+    /// <paramref name="filter"/> selects: <c>dataset.WarmAsync&lt;Request&gt;(r =&gt; r.At &gt;= DateTime.UtcNow.AddDays(-30))</c>.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
+    /// <param name="filter">A lambda over the record's columns.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The bytes read from the store into the cache; zero without a cache, or when it held them all.</returns>
+    /// <remarks>
+    /// Each object's regions are read in one request set, the objects side by side as many as the session
+    /// lets reads be in flight, and the regions the cache holds are not read again. A sealed object is not
+    /// cached, so it is not read either.
+    /// </remarks>
+    public ValueTask<long> WarmAsync<TRecord>(Func<Probe<TRecord>, Predicate> filter, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        Predicate predicate = filter(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
+        return predicate.IsNone ? ValueTask.FromResult(0L) : WarmCoreAsync(Checked(predicate.Node), cancellationToken);
+    }
+
+    /// <summary>
+    /// As <see cref="WarmAsync{TRecord}(Func{Probe{TRecord}, Predicate}, CancellationToken)"/>, for a caller
+    /// without a record type.
+    /// </summary>
+    /// <param name="filter">The filter, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The bytes read from the store into the cache.</returns>
+    /// <exception cref="VortexSchemaException">The filter names a column the dataset does not have, or compares one with a literal of a type it cannot compare to.</exception>
+    public ValueTask<long> WarmAsync(VortexExpr filter, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        return WarmCoreAsync(Checked(ToolPaths.Check(Schema, filter)), cancellationToken);
+    }
+
+    private async ValueTask<long> WarmCoreAsync(VortexExpr? filter, CancellationToken cancellationToken)
+    {
+        if (Session.Options.SynopsisCache is not { } cache)
+        {
+            return 0;
+        }
+
+        List<Task<long>> reads = [];
+        await foreach (PositionedObject held in Snapshot.WalkAsync(filter is null ? null : new SummaryPruner(filter), 0, long.MaxValue, null, cancellationToken)
+            .ConfigureAwait(false))
+        {
+            if (Indexes.SynopsisContents.From(held.Entry.Synopsis.Span) is { } contents)
+            {
+                reads.Add(WarmObjectAsync(cache, held.Entry, contents, cancellationToken));
+            }
+        }
+
+        long bytes = 0;
+        foreach (long read in await Task.WhenAll(reads).ConfigureAwait(false))
+        {
+            bytes += read;
+        }
+
+        return bytes;
+    }
+
+    /// <summary>Reads through the cache the regions of one object it does not hold yet: the bytes it read.</summary>
+    private async Task<long> WarmObjectAsync(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken)
+    {
+        List<Indexes.IndexSegment> missing = SynopsisCacheReader.Declared(contents);
+        missing.RemoveAll(region => cache.Holds(entry.Uid, region));
+        if (missing.Count == 0 || entry.Uid == UInt128.Zero)
+        {
+            return 0;
+        }
+
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            if (source is not ObjectStoreSource)
+            {
+                return 0;
+            }
+
+            using SegmentRequestSet requests = new SegmentRequestSet(missing.Count);
+            long bytes = 0;
+            foreach (Indexes.IndexSegment region in missing)
+            {
+                requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+                bytes += region.Length;
+            }
+
+            await Footerless(source, entry, contents).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            return bytes;
+        }
+    }
+
+    /// <summary>
     /// Whether the version this handle holds may hold a row <paramref name="filter"/> is true for,
     /// from the object and subtree summaries of the pages it holds without a request, those its
     /// header carries and those it kept from the versions before: false is a proof, true is not.

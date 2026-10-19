@@ -45,11 +45,26 @@ internal sealed class SynopsisCacheReader : ISegmentReader
         }
 
         Dictionary<(ulong, uint), IndexSegment> regions = [];
+        foreach (IndexSegment region in Declared(contents))
+        {
+            regions[(region.Offset, region.Length)] = region;
+        }
+
+        return regions.Count == 0 ? inner : new SynopsisCacheReader(inner, cache, uid, regions);
+    }
+
+    /// <summary>
+    /// The regions of an object the cache may keep: those its table of contents declares with a checksum, its
+    /// tables, its chunk directories, its path directories and its index directory.
+    /// </summary>
+    internal static List<IndexSegment> Declared(SynopsisContents contents)
+    {
+        List<IndexSegment> regions = [];
         void Declare(IndexSegment region)
         {
             if (region.Checksum is not null)
             {
-                regions[(region.Offset, region.Length)] = region;
+                regions.Add(region);
             }
         }
 
@@ -73,7 +88,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader
             Declare(directory);
         }
 
-        return regions.Count == 0 ? inner : new SynopsisCacheReader(inner, cache, uid, regions);
+        return regions;
     }
 
     public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => _inner.GetLengthAsync(cancellationToken);

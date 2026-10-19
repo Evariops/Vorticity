@@ -126,6 +126,7 @@ public sealed class SynopsisCache : IDisposable
             if (!_entries.TryGetValue(name, out entry))
             {
                 _misses++;
+                VortexTelemetry.SynopsisMiss();
                 return false;
             }
 
@@ -160,6 +161,7 @@ public sealed class SynopsisCache : IDisposable
                 _hits++;
             }
 
+            VortexTelemetry.SynopsisHit(length);
             return true;
         }
         finally
@@ -179,6 +181,7 @@ public sealed class SynopsisCache : IDisposable
             return;
         }
 
+        VortexTelemetry.SynopsisFetched(bytes.Length);
         if (bytes.Length > CapacityBytes)
         {
             lock (_gate)
@@ -186,6 +189,7 @@ public sealed class SynopsisCache : IDisposable
                 _refused++;
             }
 
+            VortexTelemetry.SynopsisRefusal();
             return;
         }
 
@@ -280,6 +284,7 @@ public sealed class SynopsisCache : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
             _lock.Dispose();
+            VortexTelemetry.SynopsisHolds(-HeldBytes);
         }
     }
 
@@ -362,6 +367,16 @@ public sealed class SynopsisCache : IDisposable
         _entries[entry.Name] = entry;
         entry.Node = _queue.AddFirst(entry);
         _held += entry.Bytes;
+        VortexTelemetry.SynopsisHolds(entry.Bytes);
+    }
+
+    /// <summary>Whether the cache holds the region of object <paramref name="uid"/>, without reading it.</summary>
+    internal bool Holds(UInt128 uid, IndexSegment region)
+    {
+        lock (_gate)
+        {
+            return _entries.ContainsKey(NameOf(uid, region));
+        }
     }
 
     /// <summary>
@@ -383,6 +398,7 @@ public sealed class SynopsisCache : IDisposable
             Remove(node.Value);
             evicted.Add(node.Value);
             _evictions++;
+            VortexTelemetry.SynopsisEvicted();
         }
     }
 
@@ -401,6 +417,7 @@ public sealed class SynopsisCache : IDisposable
         _queue.Remove(node);
         entry.Node = null;
         _held -= entry.Bytes;
+        VortexTelemetry.SynopsisHolds(-entry.Bytes);
     }
 
     private void Drop(Entry entry, bool corrupt)
@@ -411,6 +428,7 @@ public sealed class SynopsisCache : IDisposable
             if (corrupt)
             {
                 _corrupt++;
+                VortexTelemetry.SynopsisCorruption();
             }
         }
 

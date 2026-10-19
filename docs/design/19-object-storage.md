@@ -266,6 +266,14 @@ open of a dataset's object passes the length its entry records, which any store 
 the listing with heads removes vacuum's serial heads. On a dataset of a thousand commits on S3, at
 20 ms a head, that is twenty seconds of vacuum spent on heads, and none with the listing.
 
+A question a dataset answers from its synopses reads each object's tables with no open of it, in one
+request an object, and the objects side by side. With a `SynopsisCache` on the session, the second time
+reads them from the local disk and asks the store nothing, and a question whose window cuts slices asks
+it only for the chunks of those slices. `WarmAsync` reads a window's tables into the cache ahead of the
+first question. The requests a store refuses past its limits (thousands a second per prefix on S3, fewer
+on smaller services) are what this saves at a page's scale: a cold month is one request an object, a warm
+one none.
+
 ## 6. The HTTP layer
 
 ### 6.1 Why the platform's client
