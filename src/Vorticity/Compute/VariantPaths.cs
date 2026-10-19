@@ -136,14 +136,15 @@ internal sealed class VariantFieldExpr : FieldExpr
 
     /// <summary>
     /// The class a synopsis counts the values this path reads in, when it reads one top-level key of a top-level
-    /// column, strictly, at a class whose values are exactly those it reads; null otherwise. <c>AsDouble</c> has
-    /// none: it reads floats too, which the double class leaves out.
+    /// column, strictly; null otherwise. <c>AsDouble</c> reads floats too, which the double class leaves out, so a
+    /// path of doubles answers it only in an object that holds no float there (<c>SynopsisPath.Floats</c>).
     /// </summary>
     internal VariantClass? CountedClass =>
         Steps is [{ IsKey: true }] && Column.GetType() == typeof(FieldExpr) && !Column.Path.Contains('.', StringComparison.Ordinal)
             ? Read switch
             {
                 VariantRead.AsInt64 => VariantClass.Integer,
+                VariantRead.AsDouble => VariantClass.Double,
                 VariantRead.AsString => VariantClass.String,
                 VariantRead.AsBool => VariantClass.Boolean,
                 _ => null,

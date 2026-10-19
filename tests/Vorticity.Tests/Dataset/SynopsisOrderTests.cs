@@ -96,7 +96,11 @@ public sealed partial class SynopsisOrderTests
             TimeUnit.Microseconds,
             [new TimeSlice(0, 60, 0, 10), new TimeSlice(60, 120, 10, 5)],
             [3, -2, SynopsisPath.Entry(0), 1],
-            [new SynopsisPath(1, "http.route", Vorticity.Types.Variants.VariantClass.String)]);
+            [
+                new SynopsisPath(1, "http.route", Vorticity.Types.Variants.VariantClass.String),
+                new SynopsisPath(1, "duration", Vorticity.Types.Variants.VariantClass.Double, Floats: true),
+                new SynopsisPath(1, "retries", Vorticity.Types.Variants.VariantClass.Double, Residual: true, Floats: true),
+            ]);
         SliceTable read = SliceTable.FromBytes(table.ToBytes())!;
         Assert.Equal([3, -2, SynopsisPath.Entry(0), 1], read.Order);
         Assert.Equal(table.Slices, read.Slices);

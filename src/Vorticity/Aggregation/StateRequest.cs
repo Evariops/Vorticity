@@ -143,9 +143,11 @@ internal sealed class StateRequest
         _ => Column(field),
     };
 
-    /// <summary>A measure a batch of states carries: a top-level column, or a path of integers a synopsis sums.</summary>
+    /// <summary>A measure a batch of states carries: a top-level column, or a path of integers or doubles a synopsis sums.</summary>
     private static bool Measurable(FieldExpr field) =>
-        field is VariantFieldExpr path ? path.CountedClass == Types.Variants.VariantClass.Integer : Column(field);
+        field is VariantFieldExpr path
+            ? path.CountedClass is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double
+            : Column(field);
 
     /// <summary>A top-level column, read as it is.</summary>
     private static bool Column(FieldExpr field) =>

@@ -358,7 +358,9 @@ internal sealed record SynopsisAnswer(
         {
             if (paths[p].Field == field && paths[p].Class == @class && string.Equals(paths[p].Key, key, StringComparison.Ordinal))
             {
-                if (paths[p].Residual && !measure)
+                // A path left in the residual counts only the rows that hold it, so it answers as a measure
+                // alone; one of doubles leaves out the floats AsDouble reads, so it answers where it holds none.
+                if ((paths[p].Residual && !measure) || paths[p].Floats)
                 {
                     return null;
                 }

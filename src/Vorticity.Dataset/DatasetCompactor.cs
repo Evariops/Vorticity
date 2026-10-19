@@ -636,11 +636,13 @@ internal static class DatasetCompactor
         {
             if (shredded.TryGetValue(schema.GetFieldName(field), out VariantShredding? plan) && plan.Kind == VariantShreddingKind.Object)
             {
+                int counted = Array.IndexOf(variants, field);
                 foreach (ShreddedKey key in plan.Keys)
                 {
                     if (key.Field.Kind == VariantShreddingKind.Primitive)
                     {
-                        paths.Add(new SynopsisPath(field, key.Name, key.Field.Class));
+                        paths.Add(new SynopsisPath(
+                            field, key.Name, key.Field.Class, Floats: key.Field.Class == VariantClass.Double && HoldsFloats(counted < 0 ? null : censuses[counted], key.Name)));
                     }
                 }
             }
@@ -679,12 +681,20 @@ internal static class DatasetCompactor
             long room = census.Rows == 0 ? 0 : ((census.ValueBytes / census.Rows) + 32) / 16;
             foreach ((string key, VariantClass @class, long _) in residual.OrderByDescending(r => r.Held).ThenBy(r => r.Key, StringComparer.Ordinal).Take((int)Math.Min(room, int.MaxValue)))
             {
-                paths.Add(new SynopsisPath(variants[v], key, @class, Residual: true));
+                paths.Add(new SynopsisPath(variants[v], key, @class, Residual: true, Floats: @class == VariantClass.Double && HoldsFloats(census, key)));
             }
         }
 
         return paths;
     }
+
+    /// <summary>
+    /// Whether the object holds 32-bit floats at the top-level key <paramref name="key"/>: values <c>AsDouble</c>
+    /// reads that a path of doubles leaves out. Without a census, it may.
+    /// </summary>
+    private static bool HoldsFloats(PathCensus? census, string key) =>
+        census is null
+        || (census.Root.Keys.TryGetValue(key, out PathCensus.PathCount? count) && count.Read(PathClass.Double) > count.Of(VariantClass.Double));
 
     /// <summary>
     /// The bytes of the smallest synopsis table: one row, three measures, as the write bench measured it

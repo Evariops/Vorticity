@@ -858,9 +858,11 @@ their files still count the rows a deletion removed.
 A dataset of periods answers part of a pass with states instead
 ([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
 When every aggregate is a count of the rows, a sum, a minimum, a maximum or a mean of a number column
-or of a variant's integer path, none of them filtered, and every key is a column, a function of one or
-a variant's path read strictly, the pass asks its source for states. A path's states carry the
-path's text as their name. An object whose
+or of a variant's integer or double path, none of them filtered, and every key is a column, a function
+of one or a variant's path read strictly, the pass asks its source for states. A path's states carry
+the path's text as their name. A path read with `AsDouble()` reads floats too, which the double class
+of the tables leaves out, so an object that holds a float there, as its slice table says, answers with
+its rows. An object whose
 synopsis answers then comes as a batch of states: a row per bucket of a table and per value of its
 keys. The key columns carry the names and types the rows' have, the instant holds the bucket's start,
 and beside them are the rows the row stands for and each measure's states. A lane gives each row its

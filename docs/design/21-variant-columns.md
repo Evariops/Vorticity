@@ -200,8 +200,13 @@ rows. The others read their rows, each for a reason that holds at any scale:
 - `ServiceName` under a status code finds no table that holds both, at that scale's budget.
 - The flag of one source is a key left in the residual, whose tables count only the rows that hold
   it, so they cannot give the others' group.
-- `AsDouble()` reads floats too, which the double class the tables count leaves out.
 - `ToInt64()` reads every class.
+
+`AsDouble()` reads floats too, which the double class the tables count leaves out. Each object's slice
+table says, path by path, whether the object holds a float there, so a question that reads a double
+path so answers from the tables of every object that holds none and reads the rows of the others: a
+mean of durations over the test's two hours answers from 27 table rows and no row, and from 18 table
+rows and the 640 rows of one object when one of its rows holds a float.
 
 ## 5. The worst cases
 
@@ -288,7 +293,7 @@ rows. The others read their rows, each for a reason that holds at any scale:
 | numbered columns | a bounded number of columns | a column means another key in each object |
 | declared columns added by schema evolution | the fastest reads | a commit per key, a schema that only grows, and objects that answer for keys they never hold |
 | a layout of our own that makes each shredded path a column of the layout, with its zone map | the format's own pruning on paths, and a segment per path | a strict Rust reader fails to open a file whose layout it does not know, so every file with a variant would stop reading in Rust ([where an index lives](10-indexes.md#2-where-an-index-lives)). Proposing such a layout upstream is the way, and the index directory serves until an edition freezes one |
-| a double class that takes floats too | `AsDouble()` answered from the tables | the Parquet rules keep a float out of a double's typed column, so a double class that took them would no longer be the reference's shredding |
+| a double class that takes floats too | `AsDouble()` answered from the tables even in an object that holds a float | the Parquet rules keep a float out of a double's typed column, so a double class that took them would no longer be the reference's shredding. An object says instead whether it holds a float at each path, and only those that do read their rows |
 
 ## 9. Sources
 

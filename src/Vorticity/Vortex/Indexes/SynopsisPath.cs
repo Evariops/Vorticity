@@ -17,7 +17,11 @@ namespace Vorticity.Indexes;
 /// <param name="Key">The key, a top-level key of the column's objects.</param>
 /// <param name="Class">The class its values are read at.</param>
 /// <param name="Residual">Whether the object leaves the path in the residual rather than shred it.</param>
-internal sealed record SynopsisPath(int Field, string Key, VariantClass Class, bool Residual = false)
+/// <param name="Floats">
+/// Whether the object holds 32-bit floats at the path, which the double class leaves out and <c>AsDouble</c>
+/// reads: a path of doubles then answers no question that reads it so.
+/// </param>
+internal sealed record SynopsisPath(int Field, string Key, VariantClass Class, bool Residual = false, bool Floats = false)
 {
     /// <summary>The first entry that names a path rather than a field: the path at place <c>entry - Base</c>.</summary>
     internal const int Base = 1 << 24;

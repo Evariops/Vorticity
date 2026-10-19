@@ -155,8 +155,10 @@ var routes = dataset.Scan<LogRow>()
     .Select(g => (g.Key, g.Count()));
 ```
 
-`AsDouble()` reads floats as well as doubles, and `ToInt64()` converts every kind of value, so both read
-the rows, as a key an object leaves unshredded does, since its tables count only the rows that hold it.
+`AsDouble()` reads floats as well as doubles, which the tables keep apart: it answers from the tables
+of every object that holds no float at the path, and reads the rows of the others. `ToInt64()` converts
+every kind of value, so it reads the rows, as a key an object leaves unshredded does, since its tables
+count only the rows that hold it.
 
 The objects a synopsis answers are read newest first and many at once, as many as the session lets
 reads be in flight (`VortexSessionOptions.MaxConcurrentReads`), so a day of hourly objects costs the

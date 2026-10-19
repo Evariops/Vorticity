@@ -37,8 +37,10 @@ internal sealed class SliceTable
     private const byte Version = 4;
     private const byte ShapesVersion = 3;
 
-    // A path's class word: the class, and above the classes whether the path lies in the residual.
+    // A path's class word: the class, and above the classes whether the path lies in the residual and whether
+    // the object holds floats there.
     private const uint ResidualFlag = 0x100;
+    private const uint FloatsFlag = 0x200;
     private const byte OrderVersion = 2;
     private const byte FirstVersion = 1;
 
@@ -150,8 +152,9 @@ internal sealed class SliceTable
                 writer.WriteVarint((ulong)key.Length);
                 writer.WriteRawBytes(key);
 
-                // The class, and whether the path lies in the residual in the bit above the classes'.
-                writer.WriteVarint((byte)path.Class | (path.Residual ? ResidualFlag : 0u));
+                // The class, whether the path lies in the residual in the bit above the classes', and whether the
+                // object holds floats there in the next.
+                writer.WriteVarint((byte)path.Class | (path.Residual ? ResidualFlag : 0u) | (path.Floats ? FloatsFlag : 0u));
             }
 
             return writer.WrittenSpan.ToArray();
@@ -228,13 +231,14 @@ internal sealed class SliceTable
                     int field = checked((int)reader.ReadVarint());
                     string key = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
                     ulong word = reader.ReadVarint();
-                    ulong @class = word & ~(ulong)ResidualFlag;
+                    ulong @class = word & ~(ulong)(ResidualFlag | FloatsFlag);
                     if (@class > byte.MaxValue || !Enum.IsDefined((Types.Variants.VariantClass)(byte)@class))
                     {
                         return null;
                     }
 
-                    paths[i] = new SynopsisPath(field, key, (Types.Variants.VariantClass)(byte)@class, (word & ResidualFlag) != 0);
+                    paths[i] = new SynopsisPath(
+                        field, key, (Types.Variants.VariantClass)(byte)@class, (word & ResidualFlag) != 0, (word & FloatsFlag) != 0);
                 }
             }
 
