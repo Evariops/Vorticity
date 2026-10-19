@@ -38,7 +38,13 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
     /// <param name="instant">The dataset's instant, the first column of its clustering key.</param>
     /// <param name="request">What the aggregation asks.</param>
     /// <param name="filter">The scan's filter, null for every row.</param>
-    internal static SynopsisAnswer? Of(SynopsisContents contents, DType schema, string instant, StateRequest request, VortexExpr? filter)
+    /// <param name="held">
+    /// The least and the greatest instant the object's rows hold, from its summary, which lie outwards if
+    /// at all: a bucket spans no instant past them, however wide its slices' unit, so an hour's object cut
+    /// in slices of a day still holds one hour. Null when the summary does not say.
+    /// </param>
+    internal static SynopsisAnswer? Of(
+        SynopsisContents contents, DType schema, string instant, StateRequest request, VortexExpr? filter, (long Least, long Greatest)? held = null)
     {
         if (contents.Tables.Count == 0 || contents.Slices.Slices.Count == 0 || schema.IndexOfField(instant) < 0)
         {
@@ -146,9 +152,13 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
         SynopsisPart whole = new SynopsisPart(coarsest, []);
         SynopsisPart? runs = sliced is null || ReferenceEquals(sliced, coarsest) ? null : new SynopsisPart(sliced, []);
         List<TimeSlice> edges = [];
+        long least = held?.Least ?? long.MinValue;
+        long past = held is { Greatest: < long.MaxValue } bounds ? bounds.Greatest + 1 : long.MaxValue;
+        BucketFate FateOf(long start, long end) =>
+            Math.Max(start, least) >= Math.Min(end, past) ? BucketFate.Out : Fate(Math.Max(start, least), Math.Min(end, past), low, high, times);
         foreach ((long bucket, long start, long end, int first, int last) in Buckets(coarsest.Bucket, slices, contents.Slices.Unit))
         {
-            switch (Fate(start, end, low, high, times))
+            switch (FateOf(start, end))
             {
                 case BucketFate.Kept:
                     whole.Kept.Add(bucket);
@@ -156,7 +166,7 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
                 case BucketFate.Edge:
                     for (int s = first; s <= last; s++)
                     {
-                        BucketFate fate = coarsest.Bucket == SynopsisBucket.Slice ? BucketFate.Edge : Fate(slices[s].Start, slices[s].End, low, high, times);
+                        BucketFate fate = coarsest.Bucket == SynopsisBucket.Slice ? BucketFate.Edge : FateOf(slices[s].Start, slices[s].End);
                         if (fate == BucketFate.Kept && runs is not null)
                         {
                             runs.Kept.Add(slices[s].Start);

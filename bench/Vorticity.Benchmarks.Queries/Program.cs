@@ -125,6 +125,12 @@ if (Text(args, "--micro") == "sliceorder")
     return await SliceOrderMicro.Run(rounds, Option(args, "--slice-rows", 500_000));
 }
 
+// --micro synopsisanswer: an aggregation over a dataset of periods with its synopses and without (SynopsisAnswerMicro.cs).
+if (Text(args, "--micro") == "synopsisanswer")
+{
+    return await SynopsisAnswerMicro.Run(Option(args, "--rows", 2_000_000), rounds);
+}
+
 // --micro needles: what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs).
 if (Text(args, "--micro") == "needles")
 {

@@ -485,8 +485,13 @@ internal sealed class DatasetScanBuilder
             return default;
         }
 
+        // The instants the object's rows hold, which bound its buckets however wide its slices' unit.
+        (long, long)? instants = held.Entry.Summaries.TryGet(key.Paths[0], out ColumnSummary summary)
+            && summary is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
+            ? (summary.Min.SignedValue, summary.Max.SignedValue)
+            : null;
         return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
-            && SynopsisAnswer.Of(contents, schema, key.Paths[0], request, _filter) is { } answer
+            && SynopsisAnswer.Of(contents, schema, key.Paths[0], request, _filter, instants) is { } answer
             ? (answer, contents, key.Paths[0])
             : default;
     }
