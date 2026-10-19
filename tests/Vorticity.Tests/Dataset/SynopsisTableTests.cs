@@ -100,7 +100,7 @@ public sealed partial class SynopsisTableTests
     /// sealed periods, or fresh objects merged two by two; its index budget <paramref name="budgetPerMille"/>,
     /// the default when null.
     /// </summary>
-    private static async Task<VortexDataset> CallsAsync(MemoryObjectStore store, SliceWidth length, int? budgetPerMille)
+    private static async Task<VortexDataset> CallsAsync(MemoryObjectStore store, SliceWidth length, int? budgetPerMille, bool oneWrite = false)
     {
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
@@ -109,27 +109,83 @@ public sealed partial class SynopsisTableTests
             Write = budgetPerMille is { } perMille ? new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(perMille) } : VortexWriteOptions.Default,
         }, Ct);
         Random random = new Random(5);
+        List<Call[]> parts = [];
         for (int part = 0; part < 16; part++)
         {
-            Call[] rows = [.. Enumerable.Range(0, 400).Select(i => new Call(
+            parts.Add([.. Enumerable.Range(0, 400).Select(i => new Call(
                 Noon.AddSeconds((part * 400 + i) * 1.25),
                 random.Next(10) == 0 ? null : $"region-{random.Next(3)}",
                 200 + (random.Next(5) * 100),
                 random.NextInt64(-1_000, 1_000_000),
                 random.NextDouble() * 1e6,
                 random.Next(4) == 0 ? null : random.NextInt64(1L << 40),
-                $"host-{random.Next(100_000)}"))];
+                $"host-{random.Next(100_000)}"))]);
+        }
+
+        foreach (Call[] rows in oneWrite ? [[.. parts.SelectMany(p => p)]] : parts)
+        {
             await using ObjectDraft draft = dataset.StartObject();
             await draft.Writer.WriteAsync<Call>(rows, Ct);
             await dataset.AppendAsync(draft, Ct);
         }
 
-        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 2, Fanout = 2 };
+        // One write leaves level 0 at once, the parts two by two.
+        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = oneWrite ? 0 : 2, Fanout = 2 };
         while (await dataset.CompactAsync(compaction, Ct) is not null)
         {
         }
 
         return dataset;
+    }
+
+    /// <summary>
+    /// The same calls appended in sixteen parts, merged two by two through the fresh levels then sealed, and
+    /// appended in one write then sealed: each sealed hour holds the same slices, in the same order, and the
+    /// same synopsis tables, row for row.
+    /// </summary>
+    [Fact]
+    public async Task APeriodSealedThroughMergesHoldsTheTablesOfOneWrite()
+    {
+        await using MemoryObjectStore mergedStore = new MemoryObjectStore();
+        await using MemoryObjectStore directStore = new MemoryObjectStore();
+        await using VortexDataset merged = await CallsAsync(mergedStore, SliceWidth.Hour, 1_000);
+        await using VortexDataset direct = await CallsAsync(directStore, SliceWidth.Hour, 1_000, oneWrite: true);
+        List<ObjectEntry> mergedPeriods = await PeriodsAsync(merged);
+        List<ObjectEntry> directPeriods = await PeriodsAsync(direct);
+        Assert.Equal(2, mergedPeriods.Count);
+        Assert.Equal(mergedPeriods.Count, directPeriods.Count);
+        for (int i = 0; i < mergedPeriods.Count; i++)
+        {
+            await using ObjectLease left = await merged.RentAsync(mergedPeriods[i], Ct);
+            await using ObjectLease right = await direct.RentAsync(directPeriods[i], Ct);
+            SliceTable leftSlices = (await SliceTable.ReadAsync(left.File, Ct))!;
+            SliceTable rightSlices = (await SliceTable.ReadAsync(right.File, Ct))!;
+            Assert.Equal(leftSlices.Slices, rightSlices.Slices);
+            Assert.Equal(leftSlices.Order, rightSlices.Order);
+            List<(SynopsisTableInfo Info, List<TableRow> Rows)> leftTables = await TablesAsync(left.File);
+            List<(SynopsisTableInfo Info, List<TableRow> Rows)> rightTables = await TablesAsync(right.File);
+            Assert.NotEmpty(leftTables);
+            Assert.Equal(leftTables.Count, rightTables.Count);
+            Kind[] kinds = Kinds(left.File.DType, leftTables[0].Info.Measures);
+            for (int t = 0; t < leftTables.Count; t++)
+            {
+                Assert.Equal(
+                    (leftTables[t].Info.Kind, leftTables[t].Info.Bucket, string.Join(',', leftTables[t].Info.Keys)),
+                    (rightTables[t].Info.Kind, rightTables[t].Info.Bucket, string.Join(',', rightTables[t].Info.Keys)));
+                Assert.Equal(Show(leftTables[t].Rows, kinds), Show(rightTables[t].Rows, kinds));
+            }
+        }
+    }
+
+    private static async Task<List<ObjectEntry>> PeriodsAsync(VortexDataset dataset)
+    {
+        List<ObjectEntry> periods = [];
+        await foreach (TreeEntry entry in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        {
+            periods.Add(ObjectEntry.FromBytes(entry.Value.Span));
+        }
+
+        return periods;
     }
 
     /// <summary>The tables of <paramref name="file"/>, each row what the rows it covers give, and each coarse table the merge of the finer ones.</summary>

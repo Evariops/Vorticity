@@ -799,8 +799,10 @@ the object's end, the deepest run statistics of every slice are coded across the
 hour and keys with a counting sort per column, which gives every depth's coarse table per hour, each
 merged from the one below it. The value counts of each key after the first, the first's being the coarse
 table of depth 1, and the coarse tables per object, built only when the object spans more than an hour,
-merge the deepest table per hour. Run statistics merge into coarse tables before a seal or a fresh merge
-merges two objects' tables, which comes with the synopsis's merges.
+merge the deepest table per hour. A fresh merge and a seal sort their inputs' rows into new slices and
+count them afresh, so a period's tables are those one write of its rows gives, slice for slice and row
+for row (`SynopsisTableTests`). Merging the inputs' tables as sorted lists instead pays once a merge
+keeps their sorted slices without sorting them again, and comes with it.
 
 On a million rows in twenty slices, sorted by three synopsis columns of 5, 5 and 600 values, with three
 measures, a slice's sort takes 58 ns a row, counting it 38 ns, and building the object's ten tables
