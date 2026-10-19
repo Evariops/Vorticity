@@ -323,7 +323,8 @@ public sealed partial class VortexFileWriter
         /// <summary>The block bounds of column <paramref name="field"/>'s shredded keys in this chunk, given to the caller; null when it counted none.</summary>
         internal Indexes.ChunkBlockBounds? TakeBounds(int field)
         {
-            if (_bounds is null)
+            // The slots outlive their writer in the pool: only a writer that counts keys reads them.
+            if (_writer?._countedKeys is null || _bounds is null || field >= _bounds.Length)
             {
                 return null;
             }

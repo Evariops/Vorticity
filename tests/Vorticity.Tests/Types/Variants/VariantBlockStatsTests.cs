@@ -70,6 +70,52 @@ public sealed partial class VariantBlockStatsTests
         Assert.Equal(20, (await file.Scan<Doc>().Where(r => r.Attributes["duration"].AsInt64() > 500).ExplainAsync(Ct)).LiveBlocks);
     }
 
+    /// <summary>
+    /// The column sets a parallel write keeps in a pool outlive it: a write on four threads that counts
+    /// a variant's keys, then one of a wider schema that counts none, takes them back without reading
+    /// the first one's slots, and writes the bytes it writes on one thread.
+    /// </summary>
+    [Fact]
+    public async Task AWriteAfterOneThatCountedKeysTakesItsColumnsBackClean()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"vorticity-blockstats-pool-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            // Chunks of a block or so, so that both writes compress their whole chunks across threads.
+            VortexWriteOptions shredded = new VortexWriteOptions
+            {
+                BlockRows = 100,
+                ChunkTargetBytes = 1_024,
+                DegreeOfParallelism = 4,
+                ShreddedVariants = new Dictionary<string, VariantShredding> { [nameof(Doc.Attributes)] = Plan },
+            };
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Doc>(path, shredded))
+            {
+                await writer.WriteAsync<Doc>(Rows(), Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            Wide[] rows = [.. Enumerable.Range(0, 2_000).Select(i => new Wide(i, i * 2, i * 3, i * 4, i * 5, i * 6))];
+            byte[]? one = null;
+            foreach (int degree in new[] { 4, 1 })
+            {
+                await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Wide>(path, new VortexWriteOptions { BlockRows = 100, ChunkTargetBytes = 1_024, DegreeOfParallelism = degree }))
+                {
+                    await writer.WriteAsync<Wide>(rows, Ct);
+                    await writer.CompleteAsync(Ct);
+                }
+
+                byte[] bytes = await System.IO.File.ReadAllBytesAsync(path, Ct);
+                one ??= bytes;
+                Assert.Equal(one.Length, bytes.Length);
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     /// <summary>The rows: a status rising with them, a route of five hundred, a flag set every other block, a duration all over.</summary>
     private static Doc[] Rows()
     {
@@ -110,4 +156,7 @@ public sealed partial class VariantBlockStatsTests
 
     [VortexRecord]
     public partial record struct Doc(long Id, long Status, Variant Attributes);
+
+    [VortexRecord]
+    public partial record struct Wide(long A, long B, long C, long D, long E, long F);
 }
