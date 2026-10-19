@@ -103,6 +103,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader
             return await _inner.ReadAsync(spec, cancellationToken).ConfigureAwait(false);
         }
 
+        _cache.Asked?.Invoke(_uid, region);
         for (bool waited = false; ; waited = true)
         {
             if (_cache.TryRead(_uid, region, out SegmentOwner cached))
@@ -156,6 +157,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader
                     continue;
                 }
 
+                _cache.Asked?.Invoke(_uid, region);
                 if (_cache.TryRead(_uid, region, out SegmentOwner cached))
                 {
                     requests.SetResult(slot, cached);

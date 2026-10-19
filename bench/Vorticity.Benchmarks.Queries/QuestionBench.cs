@@ -26,7 +26,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// </remarks>
 internal static class QuestionBench
 {
-    private static readonly DateTimeOffset Start = new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero);
+    /// <summary>The instant the generated datasets start at.</summary>
+    internal static readonly DateTimeOffset Start = new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero);
 
     internal static async Task<int> Run(int hours, double rate, int latency, int rounds, int budget)
     {
@@ -92,7 +93,7 @@ internal static class QuestionBench
     /// The requests of <paramref name="hours"/> hours at <paramref name="rate"/> a second, appended a minute at a
     /// time and compacted until nothing is due; and the id of a request in the middle, a needle to leave out.
     /// </summary>
-    private static async Task<(long Rows, string Needle)> FillRequestsAsync(IObjectStore store, int hours, double rate, VortexWriteOptions write)
+    internal static async Task<(long Rows, string Needle)> FillRequestsAsync(IObjectStore store, int hours, double rate, VortexWriteOptions write)
     {
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedRequest.Schema, new DatasetOptions
         {

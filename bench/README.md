@@ -358,6 +358,37 @@ A red gate is not believed on the first run. The spread from run to run reaches 
 and a run can come out red with no byte changed. Replay it three times: two reds out of three is a
 regression, and anything else is noise.
 
+## Choosing the synopsis cache's eviction policy
+
+The synopsis cache keeps on the local disk the regions a question reads of a dataset's objects without
+their data. Which of them it drops past its capacity was chosen by replaying what questions ask of it:
+
+```
+DOTNET_TieredCompilation=0 dotnet run -c Release --project bench/Vorticity.Benchmarks.Queries -- \
+    --micro cachetrace [--hours 48] [--rate 20] [--questions 2000] [--seed 29]
+```
+
+It writes 48 hours of generated requests in periods of an hour, with their synopsis tables, then asks
+2 000 questions of six kinds, the first asked most, over windows that end at a "now" moving through the
+data: a quarter of an hour, an hour, six hours, a day, and one time in twenty everything up to now, a
+sweep. The cache records each region it is asked for, held or not, and the replay sends that trace
+through SIEVE, S3-FIFO and Window TinyLFU, each counting bytes, at capacities from a hundredth of what
+the distinct regions weigh to half of it. A run takes about 25 seconds.
+
+The share of the bytes asked that each served from what it held, averaged over seeds 29, 7 and 101:
+
+| capacity | SIEVE | S3-FIFO | Window TinyLFU |
+|---|---|---|---|
+| 5 % | 10.6 % | 14.5 % | 14.3 % |
+| 10 % | 19.4 % | 26.7 % | 24.0 % |
+| 20 % | 43.9 % | 48.9 % | 40.0 % |
+| 50 % | 82.5 % | 83.3 % | 76.1 % |
+
+S3-FIFO is ahead or level at every capacity, and varies least from seed to seed: at half the bytes,
+SIEVE ranged from 72 % to 89 %. The cache uses it since 2026-10-19. The trace is small, about 230
+distinct regions, since the bench's hours keep a dozen tables each; replay it on a larger dataset
+before reading a gap under two points as a difference.
+
 ## Where the figures live
 
 The figures are on [the benchmark page](../docs/guide/benchmarks.md), each section dated and signed

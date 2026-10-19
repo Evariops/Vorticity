@@ -228,8 +228,10 @@ directories that find its rows, never its data. An object never changes, so an e
 Each region is checked against its checksum whenever it is read from the disk, and one that fails is
 read again from the store. One process owns a directory at a time, and the entries outlive it: the
 next session that opens the directory finds them. A dataset whose objects are encrypted is read from
-the store for now, since the cache would otherwise hold their plain bytes. The cache reports what it
-does on the library's meter, under `vortex.synopsis_cache.*`.
+the store for now, since the cache would otherwise hold their plain bytes. Past its capacity, a region
+read only once leaves before one read again and again, so a question over thirteen months passes
+through without pushing out the tables of the last days. The cache reports what it does on the
+library's meter, under `vortex.synopsis_cache.*`.
 
 ## Versions
 

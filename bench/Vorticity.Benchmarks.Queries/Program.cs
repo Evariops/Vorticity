@@ -143,6 +143,12 @@ if (Text(args, "--micro") == "questions")
     return await QuestionBench.Run((int)Option(args, "--hours", 24), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100));
 }
 
+// --micro cachetrace: the regions a run of questions asks of the synopsis cache, replayed through three eviction policies (CacheTrace.cs).
+if (Text(args, "--micro") == "cachetrace")
+{
+    return await CacheTrace.Run((int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--questions", 2_000), (int)Option(args, "--seed", 29));
+}
+
 // --micro needles: what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs).
 if (Text(args, "--micro") == "needles")
 {

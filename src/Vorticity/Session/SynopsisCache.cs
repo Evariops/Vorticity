@@ -32,8 +32,12 @@ namespace Vorticity;
 /// </para>
 /// <para>
 /// A dataset whose objects are sealed reads them through the cache only once the cache can keep their
-/// sealed bytes: until then, it reads them from the store. Past its capacity, the cache drops the entries
-/// read least since they came in, by their bytes.
+/// sealed bytes: until then, it reads them from the store. Past its capacity, the cache drops entries as
+/// S3-FIFO does, by their bytes: a new entry waits in a small queue, a tenth of the capacity, and only one
+/// read again there moves on to the main queue, so a sweep of a long window passes through without pushing
+/// out what is read often. An entry dropped from the small queue and asked again soon goes straight to the
+/// main queue. A replay of question traces chose it over SIEVE and W-TinyLFU
+/// (<c>vortex-queries --micro cachetrace</c>).
 /// </para>
 /// </remarks>
 public sealed class SynopsisCache : IDisposable
@@ -41,13 +45,20 @@ public sealed class SynopsisCache : IDisposable
     private const string LockName = ".lock";
     private const string TemporaryExtension = ".tmp";
 
+    /// <summary>The reads an entry counts at most, which the main queue gives back one at a time.</summary>
+    private const int MaxHits = 3;
+
     private readonly FileStream _lock;
     private readonly object _gate = new object();
     private readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
-    private readonly LinkedList<Entry> _queue = new LinkedList<Entry>();
+    private readonly LinkedList<Entry> _small = new LinkedList<Entry>();
+    private readonly LinkedList<Entry> _main = new LinkedList<Entry>();
+    private readonly LinkedList<(string Name, long Bytes)> _ghost = new LinkedList<(string, long)>();
+    private readonly Dictionary<string, LinkedListNode<(string Name, long Bytes)>> _ghosts = new Dictionary<string, LinkedListNode<(string Name, long Bytes)>>(StringComparer.Ordinal);
     private readonly Dictionary<string, TaskCompletionSource> _reading = new Dictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
-    private LinkedListNode<Entry>? _hand;
     private long _held;
+    private long _smallHeld;
+    private long _ghostHeld;
     private long _hits;
     private long _misses;
     private long _corrupt;
@@ -113,6 +124,12 @@ public sealed class SynopsisCache : IDisposable
     internal long Refused => Count(ref _refused);
 
     /// <summary>
+    /// Told of each region a reader asks of the cache, held or not, once per ask, in the order asked: the trace a
+    /// replay of eviction policies reads (<c>vortex-queries --micro cachetrace</c>). Null, the default, tells nobody.
+    /// </summary>
+    internal Action<UInt128, IndexSegment>? Asked { get; set; }
+
+    /// <summary>
     /// The region of object <paramref name="uid"/> from the disk, checked against its checksum; false when the
     /// cache does not hold it, or held it torn, which it then drops.
     /// </summary>
@@ -130,7 +147,7 @@ public sealed class SynopsisCache : IDisposable
                 return false;
             }
 
-            entry.Visited = true;
+            entry.Hits = Math.Min(MaxHits, entry.Hits + 1);
         }
 
         int length = checked((int)region.Length);
@@ -234,7 +251,15 @@ public sealed class SynopsisCache : IDisposable
                 return;
             }
 
-            Add(entry);
+            // A region dropped not long ago and asked again goes to the main queue at once.
+            bool returning = _ghosts.Remove(name, out LinkedListNode<(string Name, long Bytes)>? ghost);
+            if (returning)
+            {
+                _ghost.Remove(ghost!);
+                _ghostHeld -= ghost!.Value.Bytes;
+            }
+
+            Add(entry, main: returning);
             Evict(evicted);
         }
 
@@ -347,9 +372,10 @@ public sealed class SynopsisCache : IDisposable
         List<Entry> evicted = [];
         lock (_gate)
         {
+            // What an earlier cache kept has outlived its small queue: the main queue takes it, oldest at the tail.
             foreach ((Entry entry, _) in found)
             {
-                Add(entry);
+                Add(entry, main: true);
             }
 
             Evict(evicted);
@@ -361,13 +387,33 @@ public sealed class SynopsisCache : IDisposable
         }
     }
 
-    /// <summary>Puts an entry at the head of the queue, the newest place.</summary>
-    private void Add(Entry entry)
+    /// <summary>Puts an entry at the head of the small queue, or of the main one, the newest place.</summary>
+    private void Add(Entry entry, bool main)
     {
         _entries[entry.Name] = entry;
-        entry.Node = _queue.AddFirst(entry);
+        Enqueue(entry, main);
         _held += entry.Bytes;
         VortexTelemetry.SynopsisHolds(entry.Bytes);
+    }
+
+    private void Enqueue(Entry entry, bool main)
+    {
+        entry.Main = main;
+        entry.Node = main ? _main.AddFirst(entry) : _small.AddFirst(entry);
+        if (!main)
+        {
+            _smallHeld += entry.Bytes;
+        }
+    }
+
+    private void Dequeue(Entry entry)
+    {
+        (entry.Main ? _main : _small).Remove(entry.Node!);
+        entry.Node = null;
+        if (!entry.Main)
+        {
+            _smallHeld -= entry.Bytes;
+        }
     }
 
     /// <summary>Whether the cache holds the region of object <paramref name="uid"/>, without reading it.</summary>
@@ -380,42 +426,72 @@ public sealed class SynopsisCache : IDisposable
     }
 
     /// <summary>
-    /// Drops entries past the capacity, a hand walking from the oldest towards the newest: an entry read since
-    /// the hand last passed is kept and loses its mark, the first one not read is dropped.
+    /// Drops entries past the capacity, S3-FIFO's way. While the small queue holds its tenth of the capacity or
+    /// more, its oldest entry leaves it: to the main queue if it was read since it came in, dropped otherwise, its
+    /// name kept among the ghosts. Then the main queue's oldest: back at its head with one read less while it has
+    /// reads, dropped otherwise.
     /// </summary>
     private void Evict(List<Entry> evicted)
     {
-        while (_held > CapacityBytes && _queue.Count > 0)
+        long smallCapacity = Math.Max(1, CapacityBytes / 10);
+        while (_held > CapacityBytes && (_small.Count > 0 || _main.Count > 0))
         {
-            LinkedListNode<Entry> node = _hand ?? _queue.Last!;
-            while (node.Value.Visited)
+            if (_small.Count > 0 && (_smallHeld >= smallCapacity || _main.Count == 0))
             {
-                node.Value.Visited = false;
-                node = node.Previous ?? _queue.Last!;
+                Entry oldest = _small.Last!.Value;
+                Dequeue(oldest);
+                if (oldest.Hits > 0)
+                {
+                    oldest.Hits = 0;
+                    Enqueue(oldest, main: true);
+                    continue;
+                }
+
+                Evicted(oldest, evicted);
+                _ghosts[oldest.Name] = _ghost.AddFirst((oldest.Name, oldest.Bytes));
+                _ghostHeld += oldest.Bytes;
+                while (_ghostHeld > CapacityBytes - smallCapacity && _ghost.Last is { } forgotten)
+                {
+                    _ghost.RemoveLast();
+                    _ghosts.Remove(forgotten.Value.Name);
+                    _ghostHeld -= forgotten.Value.Bytes;
+                }
+
+                continue;
             }
 
-            _hand = node.Previous;
-            Remove(node.Value);
-            evicted.Add(node.Value);
-            _evictions++;
-            VortexTelemetry.SynopsisEvicted();
+            Entry last = _main.Last!.Value;
+            Dequeue(last);
+            if (last.Hits > 0)
+            {
+                last.Hits--;
+                Enqueue(last, main: true);
+                continue;
+            }
+
+            Evicted(last, evicted);
         }
+    }
+
+    /// <summary>An entry dropped for the capacity, its file to delete once the gate is let go.</summary>
+    private void Evicted(Entry entry, List<Entry> evicted)
+    {
+        _entries.Remove(entry.Name);
+        _held -= entry.Bytes;
+        VortexTelemetry.SynopsisHolds(-entry.Bytes);
+        evicted.Add(entry);
+        _evictions++;
+        VortexTelemetry.SynopsisEvicted();
     }
 
     private void Remove(Entry entry)
     {
-        if (entry.Node is not { } node || !_entries.Remove(entry.Name))
+        if (entry.Node is null || !_entries.Remove(entry.Name))
         {
             return;
         }
 
-        if (ReferenceEquals(_hand, node))
-        {
-            _hand = node.Previous;
-        }
-
-        _queue.Remove(node);
-        entry.Node = null;
+        Dequeue(entry);
         _held -= entry.Bytes;
         VortexTelemetry.SynopsisHolds(-entry.Bytes);
     }
@@ -449,7 +525,10 @@ public sealed class SynopsisCache : IDisposable
         }
     }
 
-    /// <summary>An entry: its file's name and shard, its bytes, and whether it was read since the hand passed.</summary>
+    /// <summary>
+    /// An entry: its file's name and shard, its bytes, its reads since it came in or last passed the main queue's
+    /// tail, up to <see cref="MaxHits"/>, and its queue.
+    /// </summary>
     private sealed class Entry(string name, string shard, long bytes)
     {
         internal string Name { get; } = name;
@@ -458,7 +537,9 @@ public sealed class SynopsisCache : IDisposable
 
         internal long Bytes { get; } = bytes;
 
-        internal bool Visited { get; set; }
+        internal int Hits { get; set; }
+
+        internal bool Main { get; set; }
 
         internal LinkedListNode<Entry>? Node { get; set; }
     }

@@ -314,5 +314,62 @@ public sealed partial class SynopsisAnswerTests
         GroupsAsync(dataset.Scan<Request>().Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
 
     /// <summary>A fresh directory for a cache, which the test deletes.</summary>
+    /// <summary>
+    /// A sweep of a long window asks a hundred regions once each, through a cache that holds twenty: the four
+    /// regions read again and again before it are still there after it, and the sweep's own left but the newest.
+    /// </summary>
+    [Fact]
+    public void ASweepPassesThroughWithoutPushingOutWhatIsReadOften()
+    {
+        string directory = CacheDirectory();
+        try
+        {
+            byte[] bytes = new byte[1_000];
+            using SynopsisCache cache = new SynopsisCache(directory, 20 * bytes.Length);
+            IndexSegment RegionOf(int n)
+            {
+                bytes.AsSpan().Fill((byte)n);
+                BitConverter.TryWriteBytes(bytes, n);
+                return IndexSegment.Of(n * 4_096L, bytes, 0);
+            }
+
+            bool Read(UInt128 uid, int n)
+            {
+                IndexSegment region = RegionOf(n);
+                if (cache.TryRead(uid, region, out Vorticity.Buffers.SegmentOwner owner))
+                {
+                    owner.Dispose();
+                    return true;
+                }
+
+                cache.Admit(uid, region, bytes);
+                return false;
+            }
+
+            UInt128 hot = 1;
+            for (int round = 0; round < 3; round++)
+            {
+                for (int n = 0; n < 4; n++)
+                {
+                    Read(hot, n);
+                }
+            }
+
+            UInt128 swept = 2;
+            for (int n = 0; n < 100; n++)
+            {
+                Read(swept, n);
+            }
+
+            Assert.All(Enumerable.Range(0, 4), n => Assert.True(cache.Holds(hot, RegionOf(n)), $"hot region {n} pushed out"));
+            Assert.InRange(Enumerable.Range(0, 100).Count(n => cache.Holds(swept, RegionOf(n))), 1, 16);
+            Assert.InRange(cache.HeldBytes, 1, cache.CapacityBytes);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static string CacheDirectory() => Path.Combine(Path.GetTempPath(), "vorticity-synopsis-cache-" + Guid.NewGuid().ToString("N"));
 }
