@@ -113,6 +113,32 @@ internal sealed class ScanContexts : ISweptAfterCollections
         return context;
     }
 
+    /// <summary>
+    /// As <see cref="RentDetached(VortexReadOptions)"/>, over the encoding table <paramref name="encodings"/>, which
+    /// <paramref name="ids"/> name: a context that reads the regions of one file, then of another, without its open.
+    /// </summary>
+    internal ScanContext RentDetached(VortexReadOptions options, ReadOnlySpan<ArrayEncodingId> encodings, string[] ids)
+    {
+        ScanContext? context = null;
+        lock (_gate)
+        {
+            _taken = true;
+            if (_count > 0)
+            {
+                context = _contexts[--_count];
+                _contexts[_count] = null;
+            }
+        }
+
+        if (context is null)
+        {
+            return new ScanContext(ids, options);
+        }
+
+        context.RebindDetached(options, encodings, ids);
+        return context;
+    }
+
     /// <summary>Recycles <paramref name="context"/> and keeps it for a later scan, or disposes it past the bound.</summary>
     /// <param name="context">A context <see cref="Rent"/> gave, which nothing reads any more.</param>
     internal void Return(ScanContext context)

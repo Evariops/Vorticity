@@ -390,13 +390,21 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         }
 
         DTypeArena types = new DTypeArena();
-        string[] encodings = [.. contents.Encodings];
+        (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
+        ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
         SynopsisTableSet set = await DecodeAsync(
-            source, new ScanContext(encodings, options ?? VortexReadOptions.Default), found, (table, _) => table.RowType(schema, contents.Slices.Paths, types), cancellationToken)
+            source, context, found, (table, _) => table.RowType(schema, contents.Slices.Paths, types), cancellationToken, Contexts)
             .ConfigureAwait(false);
         set.Types = types;
         return set;
     }
+
+    /// <summary>
+    /// The contexts the tables of objects read without their open are decoded into, kept from one object to the next:
+    /// a context is a dozen arrays, which every object of a question built and dropped, half of what a warm question
+    /// over 48 objects allocated.
+    /// </summary>
+    private static ScanContexts Contexts { get; } = new ScanContexts(Math.Max(16, 3 * Environment.ProcessorCount)).Swept();
 
     /// <summary>
     /// Reads the regions of <paramref name="found"/> in one request set and decodes each into
@@ -405,7 +413,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// </summary>
     private static async ValueTask<SynopsisTableSet> DecodeAsync(
         IO.ISegmentReader source, ScanContext context, List<(SynopsisTableInfo Table, IndexSegment Region)> found,
-        Func<SynopsisTableInfo, int, DType> dtypeOf, CancellationToken cancellationToken)
+        Func<SynopsisTableInfo, int, DType> dtypeOf, CancellationToken cancellationToken, ScanContexts? pool = null)
     {
         try
         {
@@ -420,7 +428,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             List<(SynopsisTableInfo, int)> tables = [];
             if (found.Count == 0)
             {
-                return new SynopsisTableSet(context, tables);
+                return new SynopsisTableSet(context, tables, pool);
             }
 
             await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
@@ -446,7 +454,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 }
             }
 
-            return new SynopsisTableSet(context, tables);
+            return new SynopsisTableSet(context, tables, pool);
         }
         catch
         {
@@ -479,10 +487,16 @@ internal readonly record struct SynopsisPrices(double ByteSeconds, double RowSec
 internal sealed class SynopsisTableSet : IDisposable
 {
     private readonly ScanContext _context;
+    private readonly ScanContexts? _pool;
+    private int _disposed;
 
-    internal SynopsisTableSet(ScanContext context, IReadOnlyList<(SynopsisTableInfo Table, int Node)> tables)
+    /// <param name="context">The context the rows were decoded into.</param>
+    /// <param name="tables">Each table, and its rows.</param>
+    /// <param name="pool">The pool the context goes back to once the set is let go; null to dispose it.</param>
+    internal SynopsisTableSet(ScanContext context, IReadOnlyList<(SynopsisTableInfo Table, int Node)> tables, ScanContexts? pool = null)
     {
         _context = context;
+        _pool = pool;
         Tables = tables;
     }
 
@@ -495,5 +509,21 @@ internal sealed class SynopsisTableSet : IDisposable
     /// <summary>The arena of the rows' dtypes, where a struct over their columns is built; null when the reader does not say.</summary>
     internal DTypeArena? Types { get; set; }
 
-    public void Dispose() => _context.Dispose();
+    /// <summary>Lets the rows go, once: a context given back twice would be lent to two readers.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        if (_pool is { } pool)
+        {
+            pool.Return(_context);
+        }
+        else
+        {
+            _context.Dispose();
+        }
+    }
 }

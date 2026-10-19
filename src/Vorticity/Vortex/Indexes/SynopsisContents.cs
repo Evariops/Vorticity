@@ -72,6 +72,27 @@ internal sealed record SynopsisContents(
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
     internal DType SchemaIn(DTypeArena types) => DTypeFlatBuffers.Read(Schema, types);
 
+    /// <summary>
+    /// The file's encoding table, resolved the first time a read of its regions asks for it: the table a context
+    /// that decodes them is rebound to, and the ids its messages name.
+    /// </summary>
+    internal (Arrays.ArrayEncodingId[] Resolved, string[] Ids) EncodingTable
+    {
+        get
+        {
+            if (System.Threading.Volatile.Read(ref _encodingTableBox) is { } known)
+            {
+                return known.Value;
+            }
+
+            string[] ids = [.. Encodings];
+            System.Runtime.CompilerServices.StrongBox<(Arrays.ArrayEncodingId[], string[])> resolved = new((Arrays.ScanContext.Resolve(ids), ids));
+            return (System.Threading.Interlocked.CompareExchange(ref _encodingTableBox, resolved, null) ?? resolved).Value;
+        }
+    }
+
+    private System.Runtime.CompilerServices.StrongBox<(Arrays.ArrayEncodingId[], string[])>? _encodingTableBox;
+
     /// <summary>The schema <see cref="SchemaType"/> read, in an arena of its own that nothing adds to; null until then.</summary>
     private System.Runtime.CompilerServices.StrongBox<DType>? _schema;
 
