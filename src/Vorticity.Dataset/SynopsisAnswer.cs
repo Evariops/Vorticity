@@ -60,6 +60,13 @@ internal sealed record SynopsisAnswer(
     internal IReadOnlyList<(string Name, FilterLiteral Value)> Constants { get; init; } = [];
 
     /// <summary>
+    /// The paths of a variant the question reads, by the name their table gives them, <c>Attributes["route"]</c>, and
+    /// the name the question gives them, its text: the columns of their values and of their states are renamed so in
+    /// every batch, where the keys, the filter and the measures find them. Null when the question reads none.
+    /// </summary>
+    internal IReadOnlyDictionary<string, string>? Renames { get; init; }
+
+    /// <summary>
     /// The answer of the object of <paramref name="contents"/> to <paramref name="request"/> under
     /// <paramref name="filter"/>, or null when its rows are read whole: a part of the filter on the instant
     /// that is not a bound, or on a column no table keys, a key or a measure no table holds, or a window and
@@ -95,6 +102,7 @@ internal sealed record SynopsisAnswer(
         List<VortexExpr> onKeys = [];
         List<(VortexExpr, VortexExpr)> excluded = [];
         HashSet<int> keyed = [];
+        Dictionary<string, string>? renames = null;
         foreach (VortexExpr conjunct in Conjuncts(filter))
         {
             if (partition is not null && PartitionFilter.Decided(conjunct, partition) is { } holds)
@@ -125,15 +133,9 @@ internal sealed record SynopsisAnswer(
                 continue;
             }
 
-            foreach (string path in paths)
+            if (!KeyedBy(conjunct, contents, schema, keyed, ref renames))
             {
-                int field = schema.IndexOfField(path);
-                if (field < 0)
-                {
-                    return null;
-                }
-
-                keyed.Add(field);
+                return null;
             }
 
             onKeys.Add(conjunct);
@@ -148,6 +150,17 @@ internal sealed record SynopsisAnswer(
             if (key.GetType() == typeof(FieldExpr) && partition is not null && partition.TryGetValue(key.Path, out FilterLiteral constant))
             {
                 constants.Add((key.Path, constant));
+                continue;
+            }
+
+            if (key is VariantFieldExpr path)
+            {
+                if (Counted(contents, schema, path, ref renames) is not { } entry)
+                {
+                    return null;
+                }
+
+                keyed.Add(entry);
                 continue;
             }
 
@@ -178,9 +191,18 @@ internal sealed record SynopsisAnswer(
         }
 
         HashSet<int> measured = [];
-        foreach (string? input in request.Inputs)
+        for (int i = 0; i < request.Inputs.Count; i++)
         {
-            if (input is not null)
+            if (request.InputFields[i] is VariantFieldExpr path)
+            {
+                if (Counted(contents, schema, path, ref renames, measure: true) is not { } entry)
+                {
+                    return null;
+                }
+
+                measured.Add(entry);
+            }
+            else if (request.Inputs[i] is { } input)
             {
                 int field = schema.IndexOfField(input);
                 if (field < 0)
@@ -260,7 +282,117 @@ internal sealed record SynopsisAnswer(
 
         return parts.Count == 0 && edges.Count > 0
             ? null
-            : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys), request, excluded) { Constants = constants };
+            : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys), request, excluded) { Constants = constants, Renames = renames };
+    }
+
+    /// <summary>
+    /// Adds to <paramref name="keyed"/> what a predicate on keys reads, each a table's key: the columns, and the paths
+    /// of a variant a table counts, evaluated on the table's rows as columns are, through <c>and</c>, <c>or</c> and
+    /// <c>not</c>; false when it reads a column or a path no table could key.
+    /// </summary>
+    private static bool KeyedBy(VortexExpr predicate, SynopsisContents contents, DType schema, HashSet<int> keyed, ref Dictionary<string, string>? renames)
+    {
+        switch (predicate)
+        {
+            case LogicalExpr logical:
+                return KeyedBy(logical.Left, contents, schema, keyed, ref renames) && KeyedBy(logical.Right, contents, schema, keyed, ref renames);
+            case NotExpr not:
+                return KeyedBy(not.Operand, contents, schema, keyed, ref renames);
+            case VariantFilterExpr:
+                if (PathOf(predicate) is not { } path || Counted(contents, schema, path, ref renames) is not { } entry)
+                {
+                    return false;
+                }
+
+                keyed.Add(entry);
+                return true;
+            default:
+                HashSet<string> columns = new(StringComparer.Ordinal);
+                predicate.CollectFields(columns);
+                foreach (string column in columns)
+                {
+                    int field = schema.IndexOfField(column);
+                    if (field < 0)
+                    {
+                        return false;
+                    }
+
+                    keyed.Add(field);
+                }
+
+                return true;
+        }
+    }
+
+    /// <summary>The path of a variant a predicate behind a path's fence reads, alone; null for any other predicate.</summary>
+    private static VariantFieldExpr? PathOf(VortexExpr conjunct) => conjunct is VariantFilterExpr { Inner: { } inner }
+        ? inner switch
+        {
+            ComparisonExpr comparison => comparison.Field as VariantFieldExpr,
+            NullCheckExpr check => check.Field as VariantFieldExpr,
+            InExpr set => set.Field as VariantFieldExpr,
+            TypedInExpr set => set.Field as VariantFieldExpr,
+            StringMatchExpr match => match.Field as VariantFieldExpr,
+            _ => null,
+        }
+        : null;
+
+    /// <summary>
+    /// The entry of the object's synopsis path <paramref name="path"/> reads: its column, its key and the class of
+    /// what it reads, whose name in a table is renamed to the path's text in <paramref name="renames"/>; null when the
+    /// object counts no such path, or the path is not one a synopsis counts. A path the object leaves in the residual
+    /// is counted over the rows that hold it alone, so it answers as a measure, never as a key or in a filter
+    /// (<paramref name="measure"/>): its tables have no group for the rows without it.
+    /// </summary>
+    private static int? Counted(SynopsisContents contents, DType schema, VariantFieldExpr path, ref Dictionary<string, string>? renames, bool measure = false)
+    {
+        if (path.CountedClass is not { } @class)
+        {
+            return null;
+        }
+
+        int field = schema.IndexOfField(path.Column.Path);
+        string key = path.Steps[0].Key!;
+        IReadOnlyList<SynopsisPath> paths = contents.Slices.Paths;
+        for (int p = 0; p < paths.Count; p++)
+        {
+            if (paths[p].Field == field && paths[p].Class == @class && string.Equals(paths[p].Key, key, StringComparison.Ordinal))
+            {
+                if (paths[p].Residual && !measure)
+                {
+                    return null;
+                }
+
+                int entry = SynopsisPath.Entry(p);
+                renames ??= new Dictionary<string, string>(StringComparer.Ordinal);
+                renames[SynopsisTableInfo.NameOf(entry, schema, paths)] = path.Text;
+                return entry;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// A column of a table's rows by the name the question reads it by: a path's, or one of its states', renamed to
+    /// the path's text (<see cref="Renames"/>), any other as it is.
+    /// </summary>
+    private string Renamed(string name)
+    {
+        if (Renames is null)
+        {
+            return name;
+        }
+
+        foreach ((string table, string text) in Renames)
+        {
+            if (name.StartsWith(table, StringComparison.Ordinal) && (name.Length == table.Length || name[table.Length] == '.'))
+            {
+                return text + name[table.Length..];
+            }
+        }
+
+        return name;
     }
 
     /// <summary>
@@ -385,7 +517,7 @@ internal sealed record SynopsisAnswer(
             int[] fields = new int[names.Length];
             for (int f = 0; f < width; f++)
             {
-                names[f] = f == 0 ? instant : rowType.GetFieldName(f);
+                names[f] = f == 0 ? instant : Renamed(rowType.GetFieldName(f));
                 dtypes[f] = rowType.GetField(f);
                 fields[f] = stated[f];
             }

@@ -14,26 +14,37 @@ namespace Vorticity.Aggregating;
 /// </summary>
 /// <remarks>
 /// Asked only of a pass whose every aggregate a state answers whole: a count of rows, a sum, a least, a
-/// greatest or a mean of a number column, none filtered, nor a key's top, nor a chosen row's column, and
-/// whose every key is a column or a function of one, never a path of a variant.
+/// greatest or a mean of a number column or of a path of integers, none filtered, nor a key's top, nor a
+/// chosen row's column, and whose every key is a column, a function of one, or a path of a variant a synopsis
+/// counts (<see cref="VariantFieldExpr.CountedClass"/>). A path's states carry its text as their name.
 /// </remarks>
 internal sealed class StateRequest
 {
     /// <summary>The column of the rows of the data a row of states stands for.</summary>
     internal const string RowsColumn = "count";
 
-    private StateRequest(FieldExpr[] keys, string?[] inputs, AggregateKind[] kinds)
+    private StateRequest(FieldExpr[] keys, string?[] inputs, FieldExpr?[] inputFields, AggregateKind[] kinds)
     {
         Keys = keys;
         Inputs = inputs;
+        InputFields = inputFields;
         Kinds = kinds;
     }
 
     /// <summary>The fields the keys read, functions included, in the plan's order.</summary>
     internal IReadOnlyList<FieldExpr> Keys { get; }
 
-    /// <summary>Per aggregate of the plan, the column it folds; null for a count of rows, or for one the statistics settled.</summary>
+    /// <summary>
+    /// Per aggregate of the plan, the name of the column it folds (<see cref="NameOf"/>); null for a count of rows,
+    /// or for one the statistics settled.
+    /// </summary>
     internal IReadOnlyList<string?> Inputs { get; }
+
+    /// <summary>Per aggregate of the plan, the field it folds, a column or a path; null where <see cref="Inputs"/> is.</summary>
+    internal IReadOnlyList<FieldExpr?> InputFields { get; }
+
+    /// <summary>The name a key or a measure's states carry in a batch of states: a column's own, or a path's text.</summary>
+    internal static string NameOf(FieldExpr field) => field is VariantFieldExpr path ? path.Text : field.Path;
 
     /// <summary>Per aggregate of the plan, what it is: which of a column's states it reads, its sum or one of its extremes.</summary>
     internal IReadOnlyList<AggregateKind> Kinds { get; }
@@ -90,6 +101,7 @@ internal sealed class StateRequest
         }
 
         string?[] inputs = new string?[plan.Aggregates.Length];
+        FieldExpr?[] fields = new FieldExpr?[plan.Aggregates.Length];
         AggregateKind[] kinds = new AggregateKind[plan.Aggregates.Length];
         for (int i = 0; i < inputs.Length; i++)
         {
@@ -110,8 +122,9 @@ internal sealed class StateRequest
                 case AggregateKind.Count when aggregate.Input is null:
                     break;
                 case AggregateKind.Sum or AggregateKind.Min or AggregateKind.Max or AggregateKind.Average
-                    when aggregate.Input is { Kind: StorageKind.Primitive } input && Column(input.Field) && Numeric(input.PType):
-                    inputs[i] = input.Path;
+                    when aggregate.Input is { Kind: StorageKind.Primitive } input && Measurable(input.Field) && Numeric(input.PType):
+                    inputs[i] = NameOf(input.Field);
+                    fields[i] = input.Field;
                     kinds[i] = aggregate.Kind;
                     break;
                 default:
@@ -119,16 +132,20 @@ internal sealed class StateRequest
             }
         }
 
-        return new StateRequest(keys, inputs, kinds);
+        return new StateRequest(keys, inputs, fields, kinds);
     }
 
-    /// <summary>A key a batch of states carries: a top-level column, or functions of one.</summary>
+    /// <summary>A key a batch of states carries: a top-level column, functions of one, or a path a synopsis counts.</summary>
     private static bool Keyable(FieldExpr field) => field switch
     {
-        VariantFieldExpr => false,
-        FunctionFieldExpr function => Keyable(function.Column),
+        VariantFieldExpr path => path.CountedClass is not null,
+        FunctionFieldExpr function => function.Column is not VariantFieldExpr && Keyable(function.Column),
         _ => Column(field),
     };
+
+    /// <summary>A measure a batch of states carries: a top-level column, or a path of integers a synopsis sums.</summary>
+    private static bool Measurable(FieldExpr field) =>
+        field is VariantFieldExpr path ? path.CountedClass == Types.Variants.VariantClass.Integer : Column(field);
 
     /// <summary>A top-level column, read as it is.</summary>
     private static bool Column(FieldExpr field) =>

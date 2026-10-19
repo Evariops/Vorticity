@@ -138,6 +138,19 @@ edges (`EdgeRows`), and the question's `ExplainAsync()` lists in `States` what e
 table and the buckets it folds, the slices read at the edges, or its rows and why. Such a group by
 delivers its groups once the pass has run, rather than streaming.
 
+A key of a variant column counts as a column too, when it is read strictly as an integer, a text or a
+boolean, and the objects shred it:
+
+```csharp
+var routes = dataset.Scan<LogRow>()
+    .Where(r => r.Attributes["http.response.status_code"].AsInt64() >= 500)
+    .GroupBy(r => r.Attributes["http.route"].AsString())
+    .Select(g => (g.Key, g.Count()));
+```
+
+`AsDouble()` reads floats as well as doubles, and `ToInt64()` converts every kind of value, so both read
+the rows, as a key an object leaves unshredded does, since its tables count only the rows that hold it.
+
 The objects a synopsis answers are read newest first and many at once, as many as the session lets
 reads be in flight (`VortexSessionOptions.MaxConcurrentReads`), so a day of hourly objects costs the
 round trip of one hour. A filter that leaves out one value of a declared identifier,

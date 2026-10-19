@@ -739,6 +739,20 @@ internal sealed class FilterEvaluator
         int current = rootIndex;
         byte[][] segments = field.SegmentsUtf8;
 
+        // A batch of states carries a path's values as a column of their own, under the path's text: read as
+        // they are, with nothing left to extract.
+        if (field is VariantFieldExpr carried && arena.GetNode(rootIndex) is { Kind: CanonicalKind.Struct } states
+            && states.DType.IndexOfField(carried.TextUtf8) is >= 0 and int place)
+        {
+            int values = MaskedBy(arena, states.GetFieldIndex(place), states.Validity);
+            if (arena.GetNode(values).Length != rows)
+            {
+                throw new ArgumentException($"'{carried.Text}' has {arena.GetNode(values).Length} rows in a batch of {rows}.", nameof(field));
+            }
+
+            return values;
+        }
+
         for (int i = 0; i < segments.Length; i++)
         {
             // An extension can wrap a struct; unwrapping before descending is what lets a path

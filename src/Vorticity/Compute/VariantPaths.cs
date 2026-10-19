@@ -111,6 +111,8 @@ internal sealed class VariantFieldExpr : FieldExpr
         Column = column;
         Steps = steps;
         Read = read;
+        Text = $"{column.Path}{string.Concat(steps)}.{read}()";
+        TextUtf8 = Encoding.UTF8.GetBytes(Text);
     }
 
     /// <summary>The type a timestamp read is, a nullable instant in UTC microseconds.</summary>
@@ -123,8 +125,30 @@ internal sealed class VariantFieldExpr : FieldExpr
 
     internal VariantRead Read { get; }
 
-    /// <summary>The path as a plan writes it: its column, its keys quoted whole, and what it is read as.</summary>
-    internal string Text => $"{Column.Path}{string.Concat(Steps)}.{Read}()";
+    /// <summary>
+    /// The path as a plan writes it: its column, its keys quoted whole, and what it is read as. A batch of states
+    /// carries the path's values under this name (see <see cref="FilterEvaluator"/>).
+    /// </summary>
+    internal string Text { get; }
+
+    /// <summary>The UTF-8 bytes of <see cref="Text"/>, encoded once.</summary>
+    internal byte[] TextUtf8 { get; }
+
+    /// <summary>
+    /// The class a synopsis counts the values this path reads in, when it reads one top-level key of a top-level
+    /// column, strictly, at a class whose values are exactly those it reads; null otherwise. <c>AsDouble</c> has
+    /// none: it reads floats too, which the double class leaves out.
+    /// </summary>
+    internal VariantClass? CountedClass =>
+        Steps is [{ IsKey: true }] && Column.GetType() == typeof(FieldExpr) && !Column.Path.Contains('.', StringComparison.Ordinal)
+            ? Read switch
+            {
+                VariantRead.AsInt64 => VariantClass.Integer,
+                VariantRead.AsString => VariantClass.String,
+                VariantRead.AsBool => VariantClass.Boolean,
+                _ => null,
+            }
+            : null;
 
     internal override string Key => $"{Column.Key}{string.Concat(Steps)}.{Read}()";
 

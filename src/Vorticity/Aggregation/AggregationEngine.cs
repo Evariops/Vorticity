@@ -2607,7 +2607,7 @@ internal sealed class AggregationPartition
                 continue;
             }
 
-            StateInput input = StatesOf(arena, root, _plan.Aggregates[i].Input?.Path, stood);
+            StateInput input = StatesOf(arena, root, _plan.Aggregates[i].Input is { } measured ? StateRequest.NameOf(measured.Field) : null, stood);
             if (!Slots[i].StepStates(in input, selection, groups))
             {
                 throw new InvalidOperationException($"A batch of states reached the aggregate {_plan.Aggregates[i].Kind}, which folds none.");

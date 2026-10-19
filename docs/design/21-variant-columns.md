@@ -860,6 +860,17 @@ A grouping by a shredded path groups its dictionary codes or its runs. Across ob
 value, whatever column held them. What the synopsis adds, for shredded paths and for the others, is in
 [the synopsis on variant columns](#6-the-synopsis-on-variant-columns).
 
+As built, an aggregation answers from the tables a question on one top-level key of a variant column,
+read as `AsInt64()`, `AsString()` or `AsBool()`, as it answers one on a declared column: the path as a
+key, in a filter on the keys, through `and`, `or` and `not`, and an integer path as a measure. The
+object's synopsis path of the same column, key and class stands for it, and its states carry the
+path's text as their name, which the keys, the filter and the measures read. Four questions read the
+rows instead. `AsDouble()` reads floats too, which the double class the tables count leaves out. A
+conversion, `ToInt64()`, reads values of every class. A path the object leaves in the residual is
+counted over the rows that hold it alone, so its tables have no group for the others, and it answers
+as a measure only. A sum of a path whose values repeat finds no table, since the tables key such a
+path rather than sum it. Every answer gives the bits of its rows (`SynopsisAnswerTests`).
+
 ### 7.3 Presence and discovery
 
 `Has(path)` on a shredded path is a set of shapes, so a count of rows holding it, per slice, is a sum
