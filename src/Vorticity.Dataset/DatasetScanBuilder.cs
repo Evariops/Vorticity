@@ -494,7 +494,7 @@ internal sealed class DatasetScanBuilder
             ? (summary.Min.SignedValue, summary.Max.SignedValue)
             : null;
         return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
-            && SynopsisAnswer.Of(contents, schema, key.Paths[0], request, _filter, instants) is { } answer
+            && SynopsisAnswer.Of(contents, schema, key.Paths[0], request, _filter, instants, _version.Header.Identifiers) is { } answer
             ? (answer, contents, key.Paths[0])
             : default;
     }
@@ -523,9 +523,10 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>
     /// An object answered by its synopsis, with no open of it: the batches of states of its tables' kept
-    /// buckets, the rows its deletion marked taken out of them, then the rows of the slices at the window's
-    /// edges, through its chunk directories, the marked ones left out. When a marked row cannot come out of
-    /// a table exactly, the object's rows instead.
+    /// buckets, the rows its deletion marked and the rows the filter leaves out by an identifier taken out
+    /// of them, then the rows of the slices at the window's edges, through its chunk directories, the marked
+    /// ones left out. When a row cannot come out of a table exactly, or an identifier's index cannot find
+    /// the rows left out, the object's rows instead.
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> AnsweredAsync(
         PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, int open,
@@ -546,6 +547,9 @@ internal sealed class DatasetScanBuilder
         Task<List<RecordBatch>>? marked = held.Entry.HasDeletions && answer.Parts.Count > 0
             ? ReadSpansAsync(held, contents, MarkedSpans(held.Entry.Deletions), MeasuredColumns(answer), select: false, cancellationToken)
             : null;
+        Task<List<RecordBatch>>? excluded = answer.Excluded.Count > 0 && answer.Parts.Count > 0
+            ? ExcludedAsync(held, answer.Excluded, cancellationToken)
+            : null;
         List<RecordBatch> states = [];
         SynopsisTableSet? tables = null;
         bool exact = true;
@@ -555,9 +559,16 @@ internal sealed class DatasetScanBuilder
             {
                 tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer.Reads, cancellationToken).ConfigureAwait(false);
                 List<RecordBatch>? removed = marked is null ? null : await marked.ConfigureAwait(false);
+                if (excluded is not null)
+                {
+                    List<RecordBatch> left = await excluded.ConfigureAwait(false);
+                    exact = !ReferenceEquals(left, Unfound);
+                    removed = removed is null ? left : [.. removed, .. left];
+                }
+
                 foreach (SynopsisPart part in answer.Parts)
                 {
-                    if (answer.Batch(tables, part, instant, held.FirstRow, removed, schema, contents.Slices) is not { } batch)
+                    if (!exact || answer.Batch(tables, part, instant, held.FirstRow, removed, schema, contents.Slices) is not { } batch)
                     {
                         exact = false;
                         break;
@@ -569,13 +580,13 @@ internal sealed class DatasetScanBuilder
         }
         catch
         {
-            await LetGoAsync(states, tables, marked, edges).ConfigureAwait(false);
+            await LetGoAsync(states, tables, marked, edges, excluded).ConfigureAwait(false);
             throw;
         }
 
         if (!exact)
         {
-            await LetGoAsync(states, tables, marked, edges).ConfigureAwait(false);
+            await LetGoAsync(states, tables, marked, edges, excluded).ConfigureAwait(false);
             await foreach (RecordBatch batch in RowsAsync(held, open, cancellationToken).ConfigureAwait(false))
             {
                 yield return batch;
@@ -608,8 +619,81 @@ internal sealed class DatasetScanBuilder
         finally
         {
             // Every batch given back, delivered or not: a consumer that stopped, or a failure, leaves them.
-            await LetGoAsync(states, tables, marked, edges).ConfigureAwait(false);
+            await LetGoAsync(states, tables, marked, edges, excluded).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>What <see cref="ExcludedAsync"/> answers when an identifier's index cannot find the rows left out.</summary>
+    private static readonly List<RecordBatch> Unfound = [];
+
+    /// <summary>
+    /// The rows the filter leaves out by an identifier's value, found by the identifier's index with no open
+    /// of the object, three round trips cold, beside the tables: each part's rows, those an earlier part
+    /// already left out and those a deletion marked left out too, since a row comes out of a table once.
+    /// Batches counted from the object's first physical row, which the caller disposes; <see cref="Unfound"/>
+    /// when an index cannot say.
+    /// </summary>
+    private async Task<List<RecordBatch>> ExcludedAsync(
+        PositionedObject held, IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> excluded, CancellationToken cancellationToken)
+    {
+        Task<List<RecordBatch>?>[] lookups = new Task<List<RecordBatch>?>[excluded.Count];
+        for (int i = 0; i < lookups.Length; i++)
+        {
+            lookups[i] = _dataset.LookupAsync(held.Entry, excluded[i].Part, cancellationToken).AsTask();
+        }
+
+        try
+        {
+            await Task.WhenAll(lookups).ConfigureAwait(false);
+        }
+        catch
+        {
+            foreach (Task<List<RecordBatch>?> lookup in lookups)
+            {
+                if (lookup.IsCompletedSuccessfully)
+                {
+                    foreach (RecordBatch batch in await lookup.ConfigureAwait(false) ?? [])
+                    {
+                        batch.Dispose();
+                    }
+                }
+            }
+
+            throw;
+        }
+
+        List<RecordBatch> rows = [];
+        bool found = true;
+        VortexExpr? earlier = null;
+        for (int i = 0; i < lookups.Length; i++)
+        {
+            List<RecordBatch>? batches = await lookups[i].ConfigureAwait(false);
+            found &= batches is not null;
+            VortexExpr part = earlier is null ? excluded[i].Part : Expr.And(excluded[i].Part, earlier);
+            foreach (RecordBatch batch in batches ?? [])
+            {
+                rows.Add(batch);
+                SelectBy(batch, part);
+                if (held.Entry.HasDeletions)
+                {
+                    LeaveOutMarked(batch, held.Entry.Deletions);
+                }
+            }
+
+            earlier = earlier is null ? excluded[i].Kept : Expr.And(earlier, excluded[i].Kept);
+        }
+
+        if (found)
+        {
+            return rows;
+        }
+
+        foreach (RecordBatch batch in rows)
+        {
+            batch.Dispose();
+        }
+
+        return Unfound;
     }
 
     /// <summary>The batches and tables of an answer given back, those read beside it once their reads end.</summary>
@@ -1116,6 +1200,12 @@ internal sealed class DatasetScanBuilder
         if (held.Entry.HasDeletions && answer.Parts.Count > 0)
         {
             into.Add(new StatesStep(key, "marked", "rows a delete marked, taken out of the tables, or the object's rows if one cannot be", held.Entry.DeletedRows));
+        }
+
+        if (answer.Excluded.Count > 0 && answer.Parts.Count > 0)
+        {
+            into.Add(new StatesStep(
+                key, "excluded", "rows the filter leaves out by an identifier, found by its index and taken out of the tables", answer.Excluded.Count));
         }
 
         DType schema = contents.SchemaIn(new DTypeArena());

@@ -26,7 +26,14 @@ internal sealed record SynopsisPart(SynopsisTableInfo Table, HashSet<long> Kept)
 /// <param name="Edges">The slices whose rows are read, the window or a key of time cutting through them.</param>
 /// <param name="KeyFilter">The part of the filter on the tables' keys, evaluated on their rows; null for none.</param>
 /// <param name="Request">What the aggregation asks: the states a row taken out must be taken out of.</param>
-internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOnlyList<TimeSlice> Edges, VortexExpr? KeyFilter, StateRequest Request)
+/// <param name="Excluded">
+/// The values of identifiers the filter leaves out, <c>id != v || id == null</c>: the whole minus the part, the
+/// part (<c>id = v</c>) the rows the identifier's index finds, taken out of the tables as a delete's are, and
+/// what the filter keeps (the conjunct itself).
+/// </param>
+internal sealed record SynopsisAnswer(
+    IReadOnlyList<SynopsisPart> Parts, IReadOnlyList<TimeSlice> Edges, VortexExpr? KeyFilter, StateRequest Request,
+    IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> Excluded)
 {
     /// <summary>
     /// The answer of the object of <paramref name="contents"/> to <paramref name="request"/> under
@@ -44,8 +51,10 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
     /// at all: a bucket spans no instant past them, however wide its slices' unit, so an hour's object cut
     /// in slices of a day still holds one hour. Null when the summary does not say.
     /// </param>
+    /// <param name="identifiers">The dataset's identifiers, whose values a filter may leave out (<see cref="Excluded"/>).</param>
     internal static SynopsisAnswer? Of(
-        SynopsisContents contents, DType schema, string instant, StateRequest request, VortexExpr? filter, (long Least, long Greatest)? held = null)
+        SynopsisContents contents, DType schema, string instant, StateRequest request, VortexExpr? filter, (long Least, long Greatest)? held = null,
+        IReadOnlyList<string>? identifiers = null)
     {
         if (contents.Tables.Count == 0 || contents.Slices.Slices.Count == 0 || schema.IndexOfField(instant) < 0)
         {
@@ -56,9 +65,16 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
         long low = long.MinValue;
         long high = long.MaxValue;
         List<VortexExpr> onKeys = [];
+        List<(VortexExpr, VortexExpr)> excluded = [];
         HashSet<int> keyed = [];
         foreach (VortexExpr conjunct in Conjuncts(filter))
         {
+            if (Exclusion(conjunct, identifiers) is { } part)
+            {
+                excluded.Add((part, conjunct));
+                continue;
+            }
+
             HashSet<string> paths = new(StringComparer.Ordinal);
             conjunct.CollectFields(paths);
             if (paths.Contains(instant))
@@ -196,7 +212,42 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
             parts.Add(runs);
         }
 
-        return parts.Count == 0 && edges.Count > 0 ? null : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys), request);
+        return parts.Count == 0 && edges.Count > 0 ? null : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys), request, excluded);
+    }
+
+    /// <summary>
+    /// The part a conjunct leaves out when it is the complement of one value of an identifier under
+    /// three-valued logic, <c>id != v || id == null</c> in either order: the equality <c>id = v</c>, whose rows
+    /// the identifier's index finds; null for any other conjunct.
+    /// </summary>
+    private static VortexExpr? Exclusion(VortexExpr conjunct, IReadOnlyList<string>? identifiers)
+    {
+        if (identifiers is not { Count: > 0 } || conjunct is not LogicalExpr { IsAnd: false } or)
+        {
+            return null;
+        }
+
+        (VortexExpr a, VortexExpr b) = (or.Left, or.Right);
+        if (a is NullCheckExpr)
+        {
+            (a, b) = (b, a);
+        }
+
+        if (a is ComparisonExpr { Op: ComparisonOp.NotEqual } other && other.Value.Kind != FilterLiteralKind.Null
+            && b is NullCheckExpr { IsNull: true } missing
+            && other.Field.GetType() == typeof(FieldExpr) && missing.Field.GetType() == typeof(FieldExpr)
+            && string.Equals(other.Field.Path, missing.Field.Path, StringComparison.Ordinal))
+        {
+            foreach (string identifier in identifiers)
+            {
+                if (string.Equals(identifier, other.Field.Path, StringComparison.Ordinal))
+                {
+                    return Expr.Eq(other.Field, Expr.Literal(other.Value));
+                }
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Whether <paramref name="table"/> is one of the answer's, which the read of the synopsis fetches.</summary>

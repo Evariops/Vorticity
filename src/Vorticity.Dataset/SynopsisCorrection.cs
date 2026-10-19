@@ -32,7 +32,7 @@ internal static class SynopsisCorrection
     /// <param name="schema">The object's schema, which names the keys and measures.</param>
     /// <param name="removed">
     /// The rows taken out, each batch counted from the object's first physical row by its start row and
-    /// holding the table's keys and measures by their names.
+    /// holding the table's keys and measures by their names: its selected rows, every row without one.
     /// </param>
     /// <param name="slices">The object's slices, which place a row in its bucket.</param>
     /// <param name="unit">Their unit.</param>
@@ -131,8 +131,14 @@ internal static class SynopsisCorrection
                 measureNodes[m] = struct_.GetFieldIndex(field);
             }
 
+            ReadOnlySpan<ulong> selected = batch.SelectionWords;
             for (int r = 0; r < batch.RowCount; r++)
             {
+                if (!selected.IsEmpty && ((selected[r >> 6] >> (r & 63)) & 1) == 0)
+                {
+                    continue;
+                }
+
                 if (SliceOf(slices, batch.StartRow + r) is not { } slice)
                 {
                     return false;

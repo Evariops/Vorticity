@@ -1057,6 +1057,16 @@ without reading the row, since a position names its slice and, through the run e
 combination. An extreme stands unless an excluded row holds it, which a comparison tells. A distinct
 count has no subtraction, and is read as rows.
 
+As built, the planner recognises the second form on a column the dataset declares as an identifier,
+with the same column on both sides of the `||`. The identifier's index finds the rows of `id` with no
+open of the object, in three round trips read beside the tables. Those rows are then taken out of the
+tables' states as the rows a delete marked are: each is charged to the table row of its bucket and its
+keys, and its count and its exact sums come off. A row a delete also marked comes off once. When a
+removed row holds an extreme the question reads, or sets the top bin of a float sum, or when the index
+cannot find the rows, the object is read as rows. The slices a window cuts are read as rows under the
+whole filter, so they need no subtraction. A question's plan lists the step as `excluded`. An
+identifier written as a path of a variant column is not recognised yet.
+
 ### 9.5 Needles
 
 A needle is a question about one rare value: every row of one `RequestId` over 30 days. `RequestId`

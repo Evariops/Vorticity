@@ -162,11 +162,6 @@ public sealed partial class SynopsisAnswerTests
         (List<string> on, ScanMetrics metrics) = await AskAsync(dataset, question, synopses: true);
         (List<string> off, ScanMetrics without) = await AskAsync(dataset, question, synopses: false);
         Console.Out.Write($"DELETED {question}: {deleted.Rows} rows marked, {metrics.SynopsisRows} table rows and {metrics.Rows} rows, against {without.Rows} rows.\n");
-        ScanPlan plan = await dataset.Scan<Request>().GroupBy(r => r.Service).Select(g => (g.Key, g.Count())).ExplainAsync(Ct);
-        foreach (StatesStep step in plan.States)
-        {
-            Console.Out.Write($"DELETED STEP {step.Object}: {step.Read} {step.Detail} x{step.Count}\n");
-        }
         Assert.Equal(off, on);
 
         // A question that reads an extreme may meet a marked row holding it in every object, which then reads
@@ -211,6 +206,56 @@ public sealed partial class SynopsisAnswerTests
         }
 
         Assert.True(folded > 0, "no table answered under the marks");
+    }
+
+    /// <summary>
+    /// A question that leaves one request out, <c>RequestId != v || RequestId == null</c>, on an identifier
+    /// mostly null: the whole from the tables, minus the rows of <c>v</c> its index finds, read and taken out
+    /// as a delete's are, the rows a delete marked among them taken out once; the slices a window cuts read
+    /// as rows under the whole filter. Every answer gives the bits of its rows.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ARequestLeftOutComesOutOfTheStates(bool marked)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await TracedAsync(store, marked);
+        if (marked)
+        {
+            Assert.True((await dataset.DeleteAsync(VortexExpr.Parse("Service = 'cart' and Status = 404"), Ct)).ObjectsMarked > 0);
+        }
+
+        // A window across hours, by method: its whole hour from the coarse table, the slices of the hours it cuts
+        // from their runs, and the slices it cuts as rows.
+        DateTimeOffset from = Noon.AddMinutes(37.5);
+        DateTimeOffset to = Noon.AddMinutes(125.5);
+        foreach (string question in new[] { "one", "two", "a window" })
+        {
+            List<string>[] answers = new List<string>[2];
+            ScanMetrics[] metrics = new ScanMetrics[2];
+            foreach (bool synopses in new[] { true, false })
+            {
+                Scan<Traced> scan = dataset.Scan<Traced>().With(new ScanOptions { UseSynopses = synopses })
+                    .Where(r => r.RequestId != "hot" || r.RequestId == null);
+                (answers[synopses ? 0 : 1], metrics[synopses ? 0 : 1]) = await GroupsAsync(question switch
+                {
+                    "one" => scan.GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
+                    "two" => scan.Where(r => r.RequestId != "r3-22" || r.RequestId == null).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
+                    _ => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
+                });
+            }
+
+            Console.Out.Write($"LEFT OUT {(marked ? "marked" : "clean")} {question}: {metrics[0].SynopsisRows} table rows and {metrics[0].Rows} rows ({metrics[0].EdgeRows} at edges), against {metrics[1].Rows} rows.\n");
+            Assert.Equal(answers[1], answers[0]);
+            Assert.True(metrics[0].SynopsisRows > 0, "no state folded");
+            Assert.Equal(question == "a window", metrics[0].EdgeRows > 0);
+        }
+
+        ScanPlan plan = await dataset.Scan<Traced>().Where(r => r.RequestId != "hot" || r.RequestId == null)
+            .GroupBy(r => r.Service).Select(g => (g.Key, g.Count())).ExplainAsync(Ct);
+        Assert.Contains(plan.States, step => step is { Read: "excluded", Count: 1 });
+        Assert.Contains(plan.States, step => step.Read == "table");
     }
 
     private List<Totals> RowTotals { get; } = [];
@@ -297,8 +342,49 @@ public sealed partial class SynopsisAnswerTests
         return dataset;
     }
 
+    /// <summary>
+    /// The requests of <see cref="FilledAsync"/> with an identifier, mostly null: one row in eleven names a
+    /// request of its own, one in thirty-seven the request "hot", which every hour holds.
+    /// </summary>
+    private static async Task<VortexDataset> TracedAsync(Vorticity.IO.IObjectStore store, bool marking)
+    {
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Traced.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Traced.At)],
+            Identifiers = [nameof(Traced.RequestId)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 100 },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000) },
+            MarkedObjectBytes = marking ? 0 : 1L << 20,
+            MarkedShare = marking ? 1 : 8,
+        }, Ct);
+        Random random = new Random(43);
+        for (int part = 0; part < 16; part++)
+        {
+            Traced[] rows = [.. Enumerable.Range(0, 400).Select(i => new Traced(
+                Noon.AddSeconds((part * 400 + i) * 1.25),
+                Services[random.Next(Services.Length)],
+                Methods[random.Next(Methods.Length)],
+                random.Next(4) switch { 0 => 200L, 1 => 201L, 2 => 404L, _ => 500L },
+                random.NextDouble() * 1_000,
+                random.NextInt64(1, 1L << 40),
+                i % 37 == 0 ? "hot" : i % 11 == 0 ? $"r{part}-{i}" : null))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Traced>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        return dataset;
+    }
+
     [VortexRecord]
     public partial record struct Request(DateTimeOffset At, string Service, string Method, long Status, double Duration, long Bytes);
+
+    [VortexRecord]
+    public partial record struct Traced(DateTimeOffset At, string Service, string Method, long Status, double Duration, long Bytes, string? RequestId);
 
     [VortexRecord]
     public partial record struct Totals(long Bytes, double Duration, double? Mean, long? Largest);
