@@ -78,6 +78,21 @@ internal static class SliceBytesMicro
 
                 Console.WriteLine($"  {"file",-20} {(double)timeColumns[^1] / rows,10:F3} {(double)slicedColumns[^1] / rows,10:F3}");
                 Console.WriteLine($"  {"file, run on the key",-20} {(double)keyed[^1] / rows,10:F3}");
+
+                // The same sorted slices with their synopsis: the synopsis columns in the part, the tables
+                // the choice keeps under the default budget, every verdict.
+                (long synopsisFile, WriteReport report) = await WriteWithSynopsisAsync(
+                    scratch, file.DType, batches, new SliceTable(TimeUnit.Microseconds, slices, order), instant, options);
+                long tableBytes = 0;
+                foreach (IndexWriteReport table in report.Indexes.Where(r => r.Kind == IndexKinds.SynopsisTable))
+                {
+                    tableBytes += table.Bytes;
+                    Console.WriteLine($"  {table.Column,-40} {table.Reason}");
+                }
+
+                Console.WriteLine(
+                    $"  {"file with synopsis",-20} {(double)synopsisFile / rows,10:F3} bytes a row: the tables {tableBytes} bytes, {(double)tableBytes / rows:F3} a row, " +
+                    $"{100.0 * tableBytes / report.Bytes.Data:F2} % of the data's {report.Bytes.Data}");
             }
 
             foreach (RecordBatch batch in batches)
@@ -130,6 +145,39 @@ internal static class SliceBytesMicro
 
         columns[^1] = bytes.Length;
         return columns;
+    }
+
+    /// <summary>
+    /// The rows written in sorted slices with their synopsis, as a dataset's job writes them: the synopsis
+    /// columns in the part, the tables counted from each slice as it is sorted, then chosen. The file's
+    /// bytes, and the report that holds each table's verdict.
+    /// </summary>
+    private static async Task<(long Bytes, WriteReport Report)> WriteWithSynopsisAsync(
+        string scratch, DType schema, List<RecordBatch> batches, SliceTable table, int instant, VortexWriteOptions options)
+    {
+        string path = Path.Combine(scratch, $"{Guid.NewGuid():N}.vortex");
+        WriteReport report;
+        VortexWriteOptions synopsis = options with { SynopsisColumns = [.. table.Order.Where(e => e >= 0).Select(schema.GetFieldName)] };
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<SliceRequest>(path, synopsis))
+        {
+            using SortedSlices slices = new SortedSlices(table, instant, schema);
+            using SynopsisTables tables = new SynopsisTables(schema, table.Unit, SynopsisTables.Measures(schema, instant, table.Order));
+            int next = 0;
+            foreach (RecordBatch batch in batches)
+            {
+                await slices.AppendAsync(batch, (rows, token) =>
+                {
+                    tables.AddSlice(rows, table.Slices[next++].Start, slices.Order, slices.SortedCodes);
+                    return writer.WriteBatchAsync(rows, token);
+                }, default);
+            }
+
+            writer.DeclareSlices(nameof(SliceRequest.At), slices.Table);
+            writer.DeclareSynopsisTables(tables.Arena, tables.Build());
+            report = await writer.CompleteAsync();
+        }
+
+        return (new FileInfo(path).Length, report);
     }
 
     /// <summary>
