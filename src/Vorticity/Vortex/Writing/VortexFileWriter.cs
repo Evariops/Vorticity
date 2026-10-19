@@ -166,11 +166,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     internal byte[]? SynopsisContents { get; private set; }
 
+    // The table of contents of a sliced file, built once its regions are written, before the directory's.
+    private SynopsisContents? _contents;
+
     /// <summary>
     /// The table of contents of a sliced file: its slices' table and chunk directories, its synopsis part's
     /// tables and columns, its variant columns' path directories.
     /// </summary>
-    private byte[] Contents(SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories)
+    private SynopsisContents Contents(SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories)
     {
         List<(SynopsisTableInfo, IndexSegment)> tables = [];
         List<(int, ChunkSpan[])> columns = [];
@@ -192,7 +195,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         return new SynopsisContents(
             Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories,
-            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, columns, pathDirectories).ToBytes();
+            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, columns, pathDirectories);
     }
 
     /// <summary>
@@ -2340,7 +2343,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // A sliced file's table of contents, now that every region it names is written.
             if (_slices is { } sliced)
             {
-                SynopsisContents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories);
+                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.
@@ -2382,6 +2385,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (directory is not null)
         {
             await _sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
+        }
+
+        // A sliced file's table of contents names the directory too, now that it is written.
+        if (_contents is { } contents)
+        {
+            SynopsisContents = (directory is null ? contents : contents with { DirectoryRegion = IndexSegment.Of(directoryOffset, directory, 0) }).ToBytes();
         }
 
         long dtypeOffset = _sink.Position;

@@ -652,6 +652,15 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             write = write.WithIndexes(write.WritePolicy.With(schema.IndexPolicy)) with { BudgetSpares = schema.IndexedColumns };
         }
+
+        // Each declared identifier's sorted run, required and spared by the budget as the clustering key's
+        // is: a lookup of one value reads the objects that hold it and no other, and a Bloom filter, which
+        // a tree of them loses past what one filter holds, is never tried on it.
+        foreach (string identifier in Snapshot.Header.Identifiers)
+        {
+            write = write.WithIndexes(write.WritePolicy.For(identifier, Indexes.IndexSpec.SortedRuns.AsRequired())) with { BudgetSparesRequired = true };
+        }
+
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
 
         // An object in sorted slices on a key of its instant alone is walked through its slice table,
@@ -1831,6 +1840,100 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             return await Indexes.SynopsisTableInfo.ReadAsync(
                 SessionReader.Wrap(source, Session), contents, wanted, null, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The rows of the object <paramref name="entry"/> names that its locating indexes, its identifiers'
+    /// runs among them, leave for <paramref name="filter"/>, read with no open of the object: its index
+    /// directory beside every column's chunk directory, then the runs' segments that may hold the values,
+    /// then the chunks of the blocks left, three round trips cold. The rows of a block a run could not rule
+    /// out are all returned: the caller keeps those the filter holds for. Null when the entry carries no
+    /// table of contents this library reads, or the object no locating index the filter asks.
+    /// </summary>
+    internal async ValueTask<List<RecordBatch>?> LookupAsync(ObjectEntry entry, VortexExpr filter, CancellationToken cancellationToken)
+    {
+        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { DirectoryRegion: { } region } contents)
+        {
+            return null;
+        }
+
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            ISegmentReader reader = SessionReader.Wrap(source, Session);
+            if (Indexes.SliceReader.Open(reader, null, contents) is not { } slices)
+            {
+                return null;
+            }
+
+            // The first round trip: the index directory, beside every column's chunk directory.
+            DType schema = contents.SchemaIn(new DTypeArena());
+            ValueTask<Buffers.SegmentOwner> read = reader.ReadAsync(
+                new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken);
+            Task<long>[] chunks = new Task<long>[schema.FieldCount];
+            for (int field = 0; field < chunks.Length; field++)
+            {
+                chunks[field] = slices.ColumnBytesAsync(field, cancellationToken).AsTask();
+            }
+
+            Indexes.IndexDirectory? directory;
+            using (Buffers.SegmentOwner bytes = await read.ConfigureAwait(false))
+            {
+                await Task.WhenAll(chunks).ConfigureAwait(false);
+                if (!region.Holds(bytes.Buffer.Span)
+                    || !Indexes.IndexDirectory.TryParse(bytes.Buffer.Span, Indexes.IndexDirectory.UnknownRows, region.Offset, out directory, out _))
+                {
+                    return null;
+                }
+            }
+
+            // The second: the runs' segments that may hold a value the filter asks.
+            Indexes.IndexEntry? located = null;
+            foreach (Indexes.IndexEntry index in directory!.Entries)
+            {
+                if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks)
+                {
+                    located = index;
+                    break;
+                }
+            }
+
+            Indexes.FooterlessIndexes host = new Indexes.FooterlessIndexes(reader, schema, directory, [.. contents.Encodings]);
+            long blockRows = (long)(located?.BlockLength ?? 0);
+            if (blockRows <= 0
+                || await Indexes.KeyIndexPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false) is not { } pruner)
+            {
+                return null;
+            }
+
+            Compute.BlockMask live = new Compute.BlockMask(host.RowCount, blockRows);
+            await pruner.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
+
+            // The third: every run of blocks left, their chunks together.
+            List<Task<RecordBatch>> ranges = [];
+            ReadOnlySpan<ulong> words = live.Words;
+            int block = 0;
+            while (block < live.BlockCount)
+            {
+                if (((words[block >> 6] >> (block & 63)) & 1) == 0)
+                {
+                    block++;
+                    continue;
+                }
+
+                int first = block;
+                while (block < live.BlockCount && ((words[block >> 6] >> (block & 63)) & 1) != 0)
+                {
+                    block++;
+                }
+
+                long start = first * blockRows;
+                long end = Math.Min(block * blockRows, host.RowCount);
+                ranges.Add(slices.ReadRowsAsync(start, end - start, null, cancellationToken).AsTask());
+            }
+
+            return [.. await Task.WhenAll(ranges).ConfigureAwait(false)];
         }
     }
 

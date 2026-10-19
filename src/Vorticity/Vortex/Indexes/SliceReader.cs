@@ -143,9 +143,19 @@ internal sealed class SliceReader
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>A batch the caller disposes.</returns>
     /// <exception cref="VortexFormatException">A column's chunk directory or a chunk does not decode.</exception>
-    internal async ValueTask<RecordBatch> ReadSliceAsync(int slice, int[]? columns, CancellationToken cancellationToken)
+    internal ValueTask<RecordBatch> ReadSliceAsync(int slice, int[]? columns, CancellationToken cancellationToken) =>
+        ReadSpanAsync(Slices.Slices[slice], columns, cancellationToken);
+
+    /// <summary>
+    /// The rows <paramref name="first"/> to <paramref name="first"/> + <paramref name="rows"/> of the file, as
+    /// one batch, read as a slice's are: the blocks a lookup found, say. The chunks that hold them are read in
+    /// one request set, after the chunk directories of the columns not read before.
+    /// </summary>
+    internal ValueTask<RecordBatch> ReadRowsAsync(long first, long rows, int[]? columns, CancellationToken cancellationToken) =>
+        ReadSpanAsync(new TimeSlice(0, 1, first, rows), columns, cancellationToken);
+
+    private async ValueTask<RecordBatch> ReadSpanAsync(TimeSlice span, int[]? columns, CancellationToken cancellationToken)
     {
-        TimeSlice span = Slices.Slices[slice];
         int length = checked((int)span.Rows);
         int[] fields = columns ?? AllColumns();
         await LoadChunksAsync(fields, cancellationToken).ConfigureAwait(false);

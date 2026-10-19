@@ -457,7 +457,10 @@ dataset's clustering key is such an index (see [what a compaction
 does](13-dataset.md#53-what-a-compaction-does)), and the dataset writes it exempt from the budget: it
 is kept even when it alone is over the budget, and reported with what it cost, since a run on a
 narrow table is as large as the column it orders and no object is big enough to bring it under a
-share of the data.
+share of the data. A dataset's declared identifiers (`DatasetOptions.Identifiers`) get the same: a
+required sorted run on each, in every object it writes, appends and jobs alike, exempt from the budget.
+A Bloom filter is never tried on one, since a tree of filters loses its upper nodes past what one filter
+holds, which the values of an identifier always pass.
 
 The `WriteReport` names every index built, with its bytes, and every index abandoned, with its
 reason.

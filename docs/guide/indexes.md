@@ -218,6 +218,24 @@ written before takes a fragment that holds it. [dataset-maintenance.md](dataset-
 what it costs and what it buys, and the design is in
 [13-dataset.md](../design/13-dataset.md#64-fragments-in-commit-objects-transient).
 
+## Identifiers of a dataset
+
+A column whose values a question looks up one at a time, a request's id or a trace's, is declared when
+the dataset is created:
+
+```csharp
+DatasetOptions options = new DatasetOptions
+{
+    ClusteringKey = ["At"],
+    Identifiers = ["RequestId"],
+};
+```
+
+Every object the dataset writes then carries a sorted run on the column, appends and compactions alike,
+exempt from the index budget as the clustering key's run is. A lookup of one id reads only the blocks of
+the objects that hold it. No Bloom filter is tried on an identifier: its values are as many as its rows,
+and a tree of filters loses its upper nodes past what one filter holds.
+
 ## Watch out
 
 * `AppendIndexesAsync` rewrites the tail even when every index is abandoned, and the file takes a new

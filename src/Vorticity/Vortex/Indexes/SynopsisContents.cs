@@ -42,6 +42,13 @@ internal sealed record SynopsisContents(
     IReadOnlyList<(int Field, ChunkSpan[] Chunks)> Columns,
     IReadOnlyList<(int Field, IndexSegment Region)>? PathDirectories = null)
 {
+    /// <summary>
+    /// The region of the file's index directory: what a lookup of one value reads first, the runs of the
+    /// file's identifiers and every other index in it, with no open of the file. Null when unknown.
+    /// </summary>
+    internal IndexSegment? DirectoryRegion { get; init; }
+
+    private const int TagIndexDirectory = 11;
     private const int TagPathDirectory = 10;
     private const int TagDirectoryField = 1;
     private const int TagDirectoryRegion = 2;
@@ -107,6 +114,11 @@ internal sealed record SynopsisContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
+            if (DirectoryRegion is { } directoryRegion)
+            {
+                IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
+            }
+
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -130,6 +142,7 @@ internal sealed record SynopsisContents(
             List<(SynopsisTableInfo, IndexSegment)> tables = [];
             List<(int, ChunkSpan[])> columns = [];
             List<(int, IndexSegment)> pathDirectories = [];
+            IndexSegment? indexDirectory = null;
             byte[]? schema = null;
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
             {
@@ -172,6 +185,9 @@ internal sealed record SynopsisContents(
                     case (TagSchema, ProtoWireType.LengthDelimited):
                         schema = reader.ReadLengthDelimited().ToArray();
                         break;
+                    case (TagIndexDirectory, ProtoWireType.LengthDelimited):
+                        indexDirectory = IndexDirectory.ReadSegment(reader.ReadMessage());
+                        break;
                     case (TagPathDirectory, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } directory)
                         {
@@ -187,7 +203,7 @@ internal sealed record SynopsisContents(
             }
 
             return version == Version && slices is not null && schema is not null && end >= start
-                ? new SynopsisContents(schema, encodings, slices, directories, start, end, tables, columns, pathDirectories)
+                ? new SynopsisContents(schema, encodings, slices, directories, start, end, tables, columns, pathDirectories) { DirectoryRegion = indexDirectory }
                 : null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)

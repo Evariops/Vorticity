@@ -55,8 +55,18 @@ public sealed record VortexIndexVerification(long Held, IReadOnlyList<string> To
     public bool Holds => Torn.Count == 0 && FileHashHolds != false;
 }
 
-public sealed partial class VortexFile
+public sealed partial class VortexFile : IIndexHost
 {
+    bool IIndexHost.HasIndexDirectory => HasIndexDirectory;
+
+    DType IIndexHost.DType => DType;
+
+    ValueTask<IndexDirectory?> IIndexHost.ReadIndexDirectoryAsync(CancellationToken cancellationToken) => ReadIndexDirectoryAsync(cancellationToken);
+
+    ISegmentReader IIndexHost.IndexSourceOf(int origin) => IndexSourceOf(origin);
+
+    ScanContext IIndexHost.CreateIndexContext(int origin) => CreateIndexContext(origin);
+
     // Benign race, as for the layout tree: two first readers may both parse, and the results are
     // equal. The state is published as one object so a reader never sees a directory from one parse
     // and a refusal from another.

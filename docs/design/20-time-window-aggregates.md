@@ -1066,6 +1066,18 @@ an object, a physical choice like the clustering key, and not an aggregate tied 
    ([newest first](#96-newest-first)), and the application stops once it holds what it looks for. A
    trace lives in a few seconds, which Vorticity cannot assume of a needle in general.
 
+As built, every object a dataset writes, appends and jobs alike, carries a required sorted run on each
+identifier, spared by the budget, and Auto tries no Bloom filter on it. A random identifier of 32
+hexadecimal digits takes 19.3 bytes a row in its run, about 43 % of an hour of such rows, since the
+rows here are little else (`IdentifierRunTests`). Positions already take 64 bits past 2³² rows. The
+table of contents names the object's index directory, and a lookup reads, with no open of the
+object, that directory beside every column's chunk directory, then the run's segments that may hold
+the value, then the chunks of the blocks the run leaves: three dependent round trips cold for the
+object that holds the value, two for one whose run rules it out, and none warm once the session's
+cache holds them. The rows of a block are all returned, and the caller keeps those the filter holds
+for. The planner does not route needles to this read yet, and the fence pages are not kept apart
+from the session's cache.
+
 Over 1.24 × 10⁶ objects of 4 MiB, a needle costs 1.24 × 10⁶ probes. Over periods of a day it costs
 30. A needle in a path of a variant column, a user's identifier among the attributes, takes the same
 road through the indexes of that path and its type class, which Vorticity keeps since the format gives

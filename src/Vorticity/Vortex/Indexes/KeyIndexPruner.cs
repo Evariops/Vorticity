@@ -84,12 +84,12 @@ internal sealed class KeyIndexPruner
     /// The pruner for <paramref name="filter"/>, or <see langword="null"/> when no column it tests
     /// for equality carries a usable locating entry.
     /// </summary>
-    /// <param name="file">The open file.</param>
+    /// <param name="file">The file's indexes: the open file, or what a read with no open has of it.</param>
     /// <param name="filter">The scan's predicate.</param>
     /// <param name="blockRows">The scan's block length; an entry at another length is ignored.</param>
     /// <param name="cancellationToken">Cancels the directory read.</param>
     internal static async ValueTask<KeyIndexPruner?> BuildAsync(
-        VortexFile file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
+        IIndexHost file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
     {
         // A file without a directory pays nothing, not even the collectors.
         if (!file.HasIndexDirectory)
@@ -214,10 +214,10 @@ internal sealed class KeyIndexPruner
     }
 
     /// <summary>Refines <paramref name="live"/>, reading the segments that can hold the filter's keys.</summary>
-    /// <param name="file">The open file.</param>
+    /// <param name="file">The file's indexes: the open file, or what a read with no open has of it.</param>
     /// <param name="live">The mask, which only loses blocks.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
-    internal async ValueTask RefineAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
+    internal async ValueTask RefineAsync(IIndexHost file, BlockMask live, CancellationToken cancellationToken)
     {
         foreach (Column column in _columns.Values)
         {
@@ -239,14 +239,19 @@ internal sealed class KeyIndexPruner
     }
 
     /// <summary>Reads the runs and the dictionaries, and records what they claim.</summary>
-    private async ValueTask ClaimAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
+    private async ValueTask ClaimAsync(IIndexHost file, BlockMask live, CancellationToken cancellationToken)
     {
         using IndexBatches<(Column Column, Run Run, Fence Fence, int Low, int High, int[] Slots)> batches = new();
         foreach (Column column in _columns.Values)
         {
+            // A dictionary is read from the chunks of an open file: a read with no open claims nothing by it.
             if (column.DictionaryPath is { } dictionary)
             {
-                await ProbeAsync(file, column, dictionary, live, cancellationToken).ConfigureAwait(false);
+                if (file is VortexFile open)
+                {
+                    await ProbeAsync(open, column, dictionary, live, cancellationToken).ConfigureAwait(false);
+                }
+
                 continue;
             }
 
@@ -263,7 +268,7 @@ internal sealed class KeyIndexPruner
                 int pagesBefore = run.Table.PagesRead;
                 try
                 {
-                    fences = await column.CandidatesAsync(file.IndexSourceOf(run.Meta), run.Table, cancellationToken).ConfigureAwait(false);
+                    fences = await column.CandidatesAsync(file.IndexSourceOf(run.Meta.Origin), run.Table, cancellationToken).ConfigureAwait(false);
                 }
                 catch (VortexFormatException)
                 {
