@@ -1088,7 +1088,11 @@ Over 1.24 × 10⁶ objects of 4 MiB, a needle costs 1.24 × 10⁶ probes. Over p
 30. A needle in a path of a variant column, a user's identifier among the attributes, takes the same
 road through the indexes of that path and its type class, which Vorticity keeps since the format gives
 a path none ([what the format gives a
-path](21-variant-columns.md#510-what-the-format-gives-a-path-and-what-vorticity-adds)).
+path](21-variant-columns.md#510-what-the-format-gives-a-path-and-what-vorticity-adds)). As built, the
+application declares such an identifier as the filter writes it, `Attributes['user'].AsString()`, and a
+job shreds that key wherever a row holds a string there, whatever its bytes say, and gives it hashed
+postings. A lookup of one user takes three dependent round trips cold in the object that holds it and
+two in one that does not, as a declared column does (`IdentifierPostingsTests`).
 
 ### 9.6 Newest first
 

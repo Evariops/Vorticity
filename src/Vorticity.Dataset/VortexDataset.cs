@@ -394,22 +394,62 @@ public sealed class VortexDataset : IAsyncDisposable
         _ => 1.0 / 86_400,
     };
 
-    /// <summary>Refuses identifiers that name no top-level column of <paramref name="schema"/>, or one twice.</summary>
-    private static void RequireIdentifiers(IReadOnlyList<string> identifiers, DType schema)
+    /// <summary>
+    /// The identifiers as a commit keeps them: a top-level column of <paramref name="schema"/>, or a key
+    /// of one of its variant columns read as a string or an integer, <c>Attributes['user'].AsString()</c>,
+    /// written as a plan writes it. Refuses any other, and one named twice.
+    /// </summary>
+    private static string[] RequireIdentifiers(IReadOnlyList<string> identifiers, DType schema)
     {
         HashSet<string> seen = new(StringComparer.Ordinal);
-        foreach (string column in identifiers)
+        string[] kept = new string[identifiers.Count];
+        for (int i = 0; i < identifiers.Count; i++)
         {
-            if (column is null || schema.Kind != DTypeKind.Struct || schema.IndexOfField(column) < 0)
+            string identifier = identifiers[i];
+            string? name = identifier is null || schema.Kind != DTypeKind.Struct
+                ? null
+                : schema.IndexOfField(identifier) >= 0 ? identifier : IdentifierPath(identifier, schema)?.Text;
+            if (name is null)
             {
-                throw new ArgumentException($"The identifier '{column}' names no column of the dataset's schema.", nameof(DatasetOptions.Identifiers));
+                throw new ArgumentException(
+                    $"The identifier '{identifier}' names no column of the dataset's schema, nor a key of a variant column read as a string or an integer, such as Attributes['user'].AsString().",
+                    nameof(DatasetOptions.Identifiers));
             }
 
-            if (!seen.Add(column))
+            if (!seen.Add(name))
             {
-                throw new ArgumentException($"The identifier '{column}' is named twice.", nameof(DatasetOptions.Identifiers));
+                throw new ArgumentException($"The identifier '{identifier}' is named twice.", nameof(DatasetOptions.Identifiers));
             }
+
+            kept[i] = name;
         }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// The key of a variant column an identifier names, and the class its values are read in, for an
+    /// identifier written <c>Attributes['user'].AsString()</c> or <c>.AsInt64()</c>; null for any other,
+    /// a column's name among them. <c>Text</c> is the path as a plan writes it, the name a write
+    /// policy gives the key's index.
+    /// </summary>
+    internal static (int Field, string Key, Types.Variants.VariantClass Class, string Text)? IdentifierPath(string identifier, DType schema)
+    {
+        if (Expressions.ExprText.LastPath(identifier) is not ([string column], [{ Key: { } key }], { } read)
+            || read is not (Compute.VariantRead.AsString or Compute.VariantRead.AsInt64))
+        {
+            return null;
+        }
+
+        int field = schema.IndexOfField(column);
+        if (field < 0 || schema.GetField(field).Kind != DTypeKind.Variant)
+        {
+            return null;
+        }
+
+        string text = new Compute.VariantFieldExpr(new Expressions.FieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
+        Types.Variants.VariantClass @class = read == Compute.VariantRead.AsString ? Types.Variants.VariantClass.String : Types.Variants.VariantClass.Integer;
+        return (field, key, @class, text);
     }
 
     /// <summary>
@@ -1598,9 +1638,10 @@ public sealed class VortexDataset : IAsyncDisposable
             features |= DatasetFeatures.Periods;
         }
 
+        string[] declared = [];
         if (options.Identifiers is { Count: > 0 } identifiers)
         {
-            RequireIdentifiers(identifiers, schema);
+            declared = RequireIdentifiers(identifiers, schema);
             features |= DatasetFeatures.Identifiers;
         }
 
@@ -1618,7 +1659,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ErasureDelay = options.ErasureDelay,
             Lateness = options.Periods?.Lateness,
             PeriodLength = options.Periods?.Length,
-            Identifiers = [.. options.Identifiers ?? []],
+            Identifiers = declared,
             Features = features,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,

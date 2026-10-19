@@ -114,6 +114,7 @@ internal sealed class KeyIndexPruner
 
         int blocks = checked((int)((file.RowCount + blockRows - 1) / blockRows));
         Dictionary<string, Column> columns = new Dictionary<string, Column>(StringComparer.Ordinal);
+        DTypeArena? classTypes = null;
         foreach (IndexEntry entry in directory.Entries)
         {
             int stride = KeyRunOptions.StrideOf(entry.Kind);
@@ -124,6 +125,19 @@ internal sealed class KeyIndexPruner
                 || !KeyRunOptions.TryParseEntry(entry.Options, out _, out bool fold))
             {
                 continue;
+            }
+
+            // A path's entry holds the values of one class: it answers the read of that class alone,
+            // under that read's name, never the variant column's.
+            if (entry.VariantPath is not null)
+            {
+                if (trigrams || entry.VariantPath is not [string variantKey] || entry.VariantClass is not { } @class)
+                {
+                    continue;
+                }
+
+                path = new Compute.VariantFieldExpr(new FieldExpr(path), [Compute.VariantStep.Of(variantKey)], Writing.IndexWriter.ReadOf(@class)).Key;
+                dtype = Writing.IndexWriter.ClassType(classTypes ??= new DTypeArena(), @class);
             }
 
             string key = trigrams ? TrigramKey(path) : path;
@@ -478,6 +492,18 @@ internal sealed class KeyIndexPruner
 
                 list.Add(match);
                 break;
+
+            // A path's equality is asked of the entry of its read's class, by the read's name.
+            case Compute.VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.Equal, Field: Compute.VariantFieldExpr path } equal }:
+                Add(into, seen, path.Key, equal.Value);
+                break;
+            case Compute.VariantFilterExpr { Inner: InExpr { Field: Compute.VariantFieldExpr path } members }:
+                foreach (FilterLiteral value in members.Values)
+                {
+                    Add(into, seen, path.Key, value);
+                }
+
+                break;
             default:
                 break;
         }
@@ -760,6 +786,15 @@ internal sealed class KeyIndexPruner
 
                 case InExpr { Field: not Compute.FunctionFieldExpr } @in when @in.Field.Path == key:
                     Questions[expr] = (Ask(@in.Values), 1);
+                    break;
+
+                // The fence is the question: the walk over the filter stops at it as at a leaf.
+                case Compute.VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.Equal, Field: Compute.VariantFieldExpr path } equal } when path.Key == key:
+                    Questions[expr] = (Ask(equal.Value), 1);
+                    break;
+
+                case Compute.VariantFilterExpr { Inner: InExpr { Field: Compute.VariantFieldExpr path } members } when path.Key == key:
+                    Questions[expr] = (Ask(members.Values), 1);
                     break;
 
                 case StringMatchExpr match when TrigramKey(match.Field.Path) == key:

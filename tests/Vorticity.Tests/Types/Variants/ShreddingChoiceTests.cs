@@ -77,6 +77,39 @@ public sealed partial class ShreddingChoiceTests
         Assert.Null(ShreddingChoice.Choose(rare));
     }
 
+    /// <summary>
+    /// A key a dataset declares an identifier is shredded in its class wherever a row holds one, though
+    /// too rare to pay, and kept first when the budget cuts; a key of another class, or a nested one of
+    /// the same name, is not forced.
+    /// </summary>
+    [Fact]
+    public void AnIdentifierKeyIsShreddedThoughItDoesNotPay()
+    {
+        PathCensus census = new PathCensus();
+        for (int i = 0; i < 1_000; i++)
+        {
+            Variant row = i % 100 == 0
+                ? Variant.Object(("status", Variant.From(200L)), ("user", Variant.From($"u{i}")), ("deep", Variant.Object(("user", Variant.From(1L)))))
+                : Variant.Object(("status", Variant.From(200L)), ("deep", Variant.Object(("user", Variant.From(1L)))));
+            census.Add(row.Metadata.Span, row.Value.Span);
+        }
+
+        // Ten rows in a thousand: the residual keeps the user, alone.
+        Assert.DoesNotContain("user", ShreddingChoice.Choose(census)!.Keys.Select(key => key.Name));
+
+        Dictionary<string, VariantClass> required = new() { ["user"] = VariantClass.String };
+        VariantShredding forced = ShreddingChoice.Choose(census, required: required)!;
+        VariantShredding user = forced.Keys.Single(k => k.Name == "user").Field;
+        Assert.Equal((VariantShreddingKind.Primitive, VariantClass.String), (user.Kind, user.Class));
+
+        // First to keep when the tree has room for one path only.
+        VariantShredding cut = ShreddingChoice.Choose(census, tableBudget: ShreddingChoice.PathTables, required: required)!;
+        Assert.Equal(["user"], cut.Keys.Select(key => key.Name));
+
+        // An integer identifier forces nothing on a key that holds text.
+        Assert.DoesNotContain("user", ShreddingChoice.Choose(census, required: new Dictionary<string, VariantClass> { ["user"] = VariantClass.Integer })!.Keys.Select(key => key.Name));
+    }
+
     /// <summary>When more paths pay than the tree may hold, the ones that save the most, the densest here, are kept.</summary>
     [Fact]
     public void TheBudgetKeepsThePathsThatSaveTheMost()

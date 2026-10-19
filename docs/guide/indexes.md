@@ -176,8 +176,9 @@ The report and `file.GetIndexesAsync()` name each such index as the question tha
 filter, and skip the blocks it rules out. `Attributes["status"].AsString() == "502"` never asks it,
 since the text `"502"` is another value than the integer, written apart, so neither question ever
 finds the other's rows. `IndexPolicy.Auto` tries the same filter on every such key, judged against the
-bytes the key's own values take. Only a Bloom filter indexes a key for now. Objects written by
-appends shred nothing, and carry no index on their keys.
+bytes the key's own values take. A Bloom filter indexes a key, and so do hashed postings for a
+dataset's identifier among the attributes (see [identifiers of a dataset](#identifiers-of-a-dataset)).
+Objects written by appends shred nothing, and carry no index on their keys.
 
 ## Required
 
@@ -238,6 +239,19 @@ of about 44 KiB per object, then only the blocks that hold it, and about one pro
 block that does not. On ids of 32 hexadecimal digits the postings take under 3 bytes a row, where a
 sorted run took 19.5. No Bloom filter is tried on an identifier: its values are as many as its rows,
 and a tree of filters loses its upper nodes past what one filter holds.
+
+An identifier may also be a key of a variant column, read as a string or an integer, written as a filter
+writes it:
+
+```csharp
+Identifiers = ["Attributes['user'].AsString()"],
+```
+
+A compaction then shreds the key wherever a row holds a string there, and indexes it the same way, so
+`r.Attributes["user"].AsString() == id` finds its rows as `r.RequestId == id` does. Objects written by
+appends shred nothing and carry no index on the key, until a compaction rewrites them. A name that is
+neither a column nor such a key, or a key read in another class, is refused when the dataset is
+created.
 
 ## Watch out
 

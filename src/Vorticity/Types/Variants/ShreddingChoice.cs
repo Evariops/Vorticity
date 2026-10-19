@@ -81,12 +81,17 @@ internal static class ShreddingChoice
     /// </summary>
     /// <param name="census">The rows' paths, counted.</param>
     /// <param name="tableBudget">The tables a chunk's tree may give its paths.</param>
-    internal static VariantShredding? Choose(PathCensus census, int tableBudget = TableBudget)
+    /// <param name="required">
+    /// First-level keys shredded in their class wherever a row holds one of that class, whatever they
+    /// save, and first to keep: a dataset's identifiers among the attributes, whose index a key in the
+    /// residual could not have.
+    /// </param>
+    internal static VariantShredding? Choose(PathCensus census, int tableBudget = TableBudget, IReadOnlyDictionary<string, VariantClass>? required = null)
     {
         ArgumentNullException.ThrowIfNull(census);
         long chunks = ChunksOf(census.Rows);
         List<Candidate> candidates = [];
-        Collect(census.Root, [], census.Rows, chunks, candidates);
+        Collect(census.Root, [], census.Rows, chunks, candidates, required);
         if (candidates.Count == 0)
         {
             return null;
@@ -106,15 +111,24 @@ internal static class ShreddingChoice
     }
 
     /// <summary>The paths under <paramref name="node"/> that pay for themselves over the <paramref name="rows"/> rows of <paramref name="chunks"/> chunks.</summary>
-    private static void Collect(PathCensus.PathCount node, string[] path, long rows, long chunks, List<Candidate> into)
+    private static void Collect(
+        PathCensus.PathCount node, string[] path, long rows, long chunks, List<Candidate> into, IReadOnlyDictionary<string, VariantClass>? required)
     {
+        // An identifier's key is shredded in its class wherever a row holds one; a key that holds none of
+        // that class is judged as any other.
+        if (path.Length == 1 && required is not null && required.TryGetValue(path[0], out VariantClass wanted) && node.Of(wanted) > 0)
+        {
+            into.Add(new Candidate(path, VariantShredding.Primitive(wanted), double.PositiveInfinity));
+            return;
+        }
+
         long objects = node.Objects;
         (VariantShredding Shredding, long Count) best = Best(node);
         if (node.Keys.Count > 0 && objects >= best.Count)
         {
             foreach ((string name, PathCensus.PathCount key) in node.Keys.OrderBy(static key => key.Key, StringComparer.Ordinal))
             {
-                Collect(key, [.. path, name], rows, chunks, into);
+                Collect(key, [.. path, name], rows, chunks, into, path.Length == 0 ? required : null);
             }
 
             return;

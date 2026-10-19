@@ -134,8 +134,9 @@ internal sealed class IndexWriter : IDisposable
                 : Explicit(column, leaf, _builders[slot]);
         }
 
-        // Each shredded key in its class is a column of its own, under its variant column's policy:
-        // Auto's Bloom filter, or an explicit one. The locating kinds read no path yet.
+        // Each shredded key in its class is a column of its own, under the policy that names it, as
+        // Attributes['user'].AsString(), or else its variant column's: Auto's Bloom filter, an explicit
+        // one, or hashed postings for an identifier. The other locating kinds read no path yet.
         DTypeArena? classTypes = null;
         for (int p = 0; p < paths; p++)
         {
@@ -143,7 +144,7 @@ internal sealed class IndexWriter : IDisposable
             (int field, string key, Types.Variants.PathClass @class) = variantKeys![p];
             string name = schema.GetFieldName(field);
             Compute.VariantFieldExpr path = new Compute.VariantFieldExpr(new FieldExpr(name), [Compute.VariantStep.Of(key)], ReadOf(@class));
-            IndexSpec column = policy.Of(name);
+            IndexSpec column = policy.Columns.TryGetValue(path.Text, out IndexSpec own) ? own : policy.Of(name);
             DType dtype = ClassType(classTypes ??= new DTypeArena(), @class);
             _paths[slot] = path.Text;
             _columns[slot] = column;
@@ -154,8 +155,8 @@ internal sealed class IndexWriter : IDisposable
                 IndexPolicyKind.None => null,
                 IndexPolicyKind.Auto when BloomBuilder.Supports(dtype, out _) => AutoBloom(_builders[slot], blockRows),
                 IndexPolicyKind.Auto => null,
-                IndexPolicyKind.Bloom => Explicit(column, dtype, _builders[slot]),
-                _ => $"a path takes a Bloom filter, and {column.Kind} reads no path yet",
+                IndexPolicyKind.Bloom or IndexPolicyKind.HashedPostings => Explicit(column, dtype, _builders[slot]),
+                _ => $"a path takes a Bloom filter or hashed postings, and {column.Kind} reads no path yet",
             };
         }
 
@@ -296,6 +297,13 @@ internal sealed class IndexWriter : IDisposable
         return reason;
     }
 
+    /// <summary>Whether <paramref name="path"/> names a first-level key of a variant column of <paramref name="schema"/>, read in one class.</summary>
+    private static bool IsVariantKey(DType schema, string path) =>
+        path.Contains('[', StringComparison.Ordinal)
+        && Expressions.ExprText.LastPath(path) is ([string column], [{ Key: not null }], not null)
+        && schema.IndexOfField(column) is int field and >= 0
+        && schema.GetField(field).Kind == DTypeKind.Variant;
+
     /// <summary>
     /// The override paths that are not a top-level column, in ordinal order so that one policy
     /// always lays its slots out the same way; null when there is none.
@@ -305,7 +313,9 @@ internal sealed class IndexWriter : IDisposable
         List<string>? unmatched = null;
         foreach (string path in policy.Columns.Keys)
         {
-            bool column = isTabular ? schema.IndexOfField(path) >= 0 : path.Length == 0;
+            // A key of a variant column read in one class, Attributes['user'].AsString(), is the slot
+            // of that key when the file shreds it, and no slot of its own when it does not.
+            bool column = isTabular ? schema.IndexOfField(path) >= 0 || IsVariantKey(schema, path) : path.Length == 0;
             if (!column)
             {
                 (unmatched ??= []).Add(path);
@@ -714,7 +724,7 @@ internal sealed class IndexWriter : IDisposable
     private List<int>? _priorAbsorbed;
 
     private static bool Same(IndexEntry a, IndexEntry b) =>
-        a.Kind == b.Kind && SamePath(a.ColumnPath, b.ColumnPath) && a.Options.AsSpan().SequenceEqual(b.Options);
+        a.Kind == b.Kind && SamePath(a.ColumnPath, b.ColumnPath) && SameKey(a, b) && a.Options.AsSpan().SequenceEqual(b.Options);
 
     /// <summary>The locating builder whose entry would continue <paramref name="old"/>, or null.</summary>
     private KeyIndexBuilder? Continuing(IndexEntry old)
@@ -799,7 +809,7 @@ internal sealed class IndexWriter : IDisposable
             List<IndexEntry> all = [.. _entries];
             foreach (IndexEntry old in preserved)
             {
-                if (!_entries.Exists(e => e.Kind == old.Kind && SamePath(e.ColumnPath, old.ColumnPath)))
+                if (!_entries.Exists(e => e.Kind == old.Kind && SamePath(e.ColumnPath, old.ColumnPath) && SameKey(e, old)))
                 {
                     all.Add(old);
                 }
@@ -866,8 +876,28 @@ internal sealed class IndexWriter : IDisposable
     private static bool Continues(IndexEntry old, IndexEntry current) =>
         old.Kind == current.Kind
         && SamePath(old.ColumnPath, current.ColumnPath)
+        && SameKey(old, current)
         && old.BlockLength == current.BlockLength
         && old.Options.AsSpan().SequenceEqual(current.Options);
+
+    /// <summary>Whether two entries index the same key of a variant column in the same class, or both a whole column.</summary>
+    private static bool SameKey(IndexEntry a, IndexEntry b)
+    {
+        if (a.VariantClass != b.VariantClass || (a.VariantPath?.Count ?? 0) != (b.VariantPath?.Count ?? 0))
+        {
+            return false;
+        }
+
+        for (int i = 0; i < (a.VariantPath?.Count ?? 0); i++)
+        {
+            if (!string.Equals(a.VariantPath![i], b.VariantPath![i], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>Whether any column asked for anything: a file with no request carries no directory.</summary>
     internal bool Enabled
@@ -1433,8 +1463,8 @@ internal sealed class IndexWriter : IDisposable
             return;
         }
 
-        _entries.Add(new IndexEntry(
-            kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), ExpectedOptions(field, keys), runs));
+        _entries.Add(EntryOf(new IndexEntry(
+            kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), ExpectedOptions(field, keys), runs), field));
         Report(field, kind, IndexOutcome.Built, null, bytes, 0, runs.Count);
         foreach (PagedRun pages in paged ?? [])
         {

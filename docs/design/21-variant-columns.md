@@ -670,7 +670,12 @@ the path in its class at ingest, as a question does, to feed the builder. A Bloo
 kind on a path for now, from `Auto` or an explicit Bloom policy on the variant column, for each
 top-level key the object shreds in the class its typed column holds; `Auto`'s share is judged against
 the bytes of the key's ranges the path map measures. Equalities and memberships of that class probe it
-(`VariantPathIndexTests`). The locating kinds, and a key's other classes, wait for a need.
+(`VariantPathIndexTests`). Hashed postings are the one locating kind a path takes, for a dataset's
+identifier among the attributes, named `Attributes['user'].AsString()` or `.AsInt64()`: a job shreds
+that key in that class wherever a row holds one, even where its bytes would not pay, and the policy
+naming the path builds its entry. A lookup finds the key's value in as many round trips as a declared
+column's (`IdentifierPostingsTests`). The other locating kinds, and a key's other classes, wait for a
+need.
 
 The path map counts, per chunk, the values of the path that its field's `value` holds, per type class.
 There are none in most chunks, since the writer puts the path's dominant class in the typed column, so

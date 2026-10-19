@@ -578,7 +578,7 @@ internal static class DatasetCompactor
             for (int v = 0; v < variants.Length; v++)
             {
                 string name = schema.DType.GetFieldName(variants[v]);
-                VariantShredding? chosen = ShreddingChoice.Choose(paths[v]);
+                VariantShredding? chosen = ShreddingChoice.Choose(paths[v], required: IdentifierKeys(dataset, schema.DType, variants[v]));
                 if (chosen is not null)
                 {
                     shredded = shredded.SetItem(name, chosen);
@@ -670,6 +670,24 @@ internal static class DatasetCompactor
     /// costs less than reading them gains nothing from one.
     /// </summary>
     private const long SmallestTableBytes = 1_452;
+
+    /// <summary>
+    /// The keys of the variant column <paramref name="field"/> the dataset declares as identifiers, each
+    /// with the class it is read in, which every object shreds wherever a row holds one; null for none.
+    /// </summary>
+    private static Dictionary<string, VariantClass>? IdentifierKeys(VortexDataset dataset, Vorticity.Types.DType schema, int field)
+    {
+        Dictionary<string, VariantClass>? keys = null;
+        foreach (string identifier in dataset.Options.Identifiers ?? [])
+        {
+            if (VortexDataset.IdentifierPath(identifier, schema) is { } path && path.Field == field)
+            {
+                (keys ??= new Dictionary<string, VariantClass>(StringComparer.Ordinal))[path.Key] = path.Class;
+            }
+        }
+
+        return keys;
+    }
 
     /// <summary>The top-level variant columns of <paramref name="schema"/>.</summary>
     private static int[] VariantColumns(Vorticity.Types.DType schema)

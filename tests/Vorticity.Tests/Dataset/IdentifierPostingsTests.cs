@@ -156,6 +156,98 @@ public sealed partial class IdentifierPostingsTests
         Assert.Single(cold, batches => batches!.Count > 0);
     }
 
+    /// <summary>
+    /// A user's id among the attributes, declared as <c>Attributes['user'].AsString()</c>, unique to its
+    /// row: every sealed hour shreds the key and carries hashed postings on it in its class; a lookup of
+    /// one user, with no open, takes three dependent round trips cold in the hour that holds it and two in
+    /// the other, as a declared column does; and a scan finds its row.
+    /// </summary>
+    [Fact]
+    public async Task AnIdentifierAmongTheAttributesIsFoundAsAColumnIs()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexSession session = VortexSession.Create(static options => options.SegmentCache = new SegmentCache(64 << 20));
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
+        {
+            Session = session,
+            ClusteringKey = [nameof(Visit.At)],
+            Identifiers = ["Attributes['user'].AsString()"],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+        }, Ct);
+        Random random = new Random(31);
+        List<string> users = [];
+        for (int part = 0; part < 16; part++)
+        {
+            Visit[] rows = [.. Enumerable.Range(0, 400).Select(i =>
+            {
+                string user = $"{random.NextInt64():x16}{random.NextInt64():x16}";
+                users.Add(user);
+                return new Visit(
+                    Noon.AddSeconds((part * 400 + i) * 1.25),
+                    Variant.Object(("route", Variant.From($"/r/{i % 7}")), ("status", Variant.From(200 + random.Next(4))), ("user", Variant.From(user))));
+            })];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Visit>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        List<ObjectEntry> hours = [];
+        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        {
+            ObjectEntry hour = ObjectEntry.FromBytes(leaf.Value.Span);
+            hours.Add(hour);
+            await using ObjectLease lease = await dataset.RentAsync(hour, Ct);
+            IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
+            Assert.Contains(directory.Entries, e => e.Kind == IndexKinds.PostingsHashed && e.VariantPath is ["user"] && e.VariantClass == Vorticity.Types.Variants.PathClass.String);
+        }
+
+        Assert.Equal(2, hours.Count);
+        string needle = users[1_234];
+        VortexExpr filter = VortexExpr.Parse($"Attributes['user'].AsString() = '{needle}'");
+        inner.Latency = TimeSpan.FromMilliseconds(20);
+        int holding = 0;
+        foreach (ObjectEntry hour in hours)
+        {
+            store.Reset();
+            List<RecordBatch> cold = (await dataset.LookupAsync(hour, filter, Ct))!;
+            long coldSteps = store.DependentSteps;
+            Console.Out.Write(FormattableString.Invariant($"PATH IDENTIFIER LOOKUP: {coldSteps} dependent steps and {store.Requests} requests cold, {cold.Count} batches.\n"));
+            bool holds = cold.Count > 0;
+            holding += holds ? 1 : 0;
+            Assert.Equal(holds ? 3 : 2, coldSteps);
+            foreach (RecordBatch batch in cold)
+            {
+                batch.Dispose();
+            }
+        }
+
+        Assert.Equal(1, holding);
+        inner.Latency = TimeSpan.Zero;
+        Assert.Equal(1, await dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == needle).CountAsync(Ct));
+    }
+
+    [Theory]
+    [InlineData("Status")]
+    [InlineData("Attributes['user']")]
+    [InlineData("Attributes['user']['id'].AsString()")]
+    [InlineData("Attributes['user'].AsDouble()")]
+    [InlineData("Nope['user'].AsString()")]
+    public async Task AnIdentifierNamesAColumnOrAKeyReadAsAStringOrAnInteger(string identifier)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Visit.At)],
+            Identifiers = [identifier],
+        }, Ct));
+        Assert.Contains("Attributes['user'].AsString()", refused.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>The rows of <paramref name="lookups"/> whose id is <paramref name="id"/>, the batches let go.</summary>
     private static int Holding(List<RecordBatch>?[] lookups, string id)
     {
@@ -196,4 +288,7 @@ public sealed partial class IdentifierPostingsTests
 
     [VortexRecord]
     public partial record struct Request(DateTimeOffset At, string RequestId, long Status);
+
+    [VortexRecord]
+    public partial record struct Visit(DateTimeOffset At, Variant Attributes);
 }

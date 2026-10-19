@@ -218,7 +218,10 @@ public sealed record DatasetOptions
     /// <summary>
     /// The columns whose values questions look up one at a time, such as a request's id: those an
     /// object indexes by value so that a lookup reads the objects that hold the value and no other.
-    /// Null, the default, names none. Fixed when the dataset is created and carried by every commit.
+    /// An identifier may also be a key of a variant column read as a string or an integer, written as a
+    /// filter writes it, <c>Attributes['user'].AsString()</c>: a job then shreds that key wherever a
+    /// row holds it in that class, and indexes it. Null, the default, names none. Fixed when the
+    /// dataset is created and carried by every commit.
     /// </summary>
     public IReadOnlyList<string>? Identifiers { get; init; }
 

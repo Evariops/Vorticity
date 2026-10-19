@@ -297,7 +297,11 @@ The writer reads the path in its class at ingest, as a question reads it, and ha
 the entry's builder as a column of that class's dtype: `IndexPolicy.Auto` or an explicit Bloom policy
 on the variant column gives each top-level key it shreds, in the class its typed column holds, a Bloom
 filter judged against the bytes of that key's ranges. A filter's question of the same class probes it,
-and a question of another class never does. The locating kinds read no path yet.
+and a question of another class never does. A policy may also name one key in one class as a column
+of its own, `Attributes['user'].AsString()`, which a dataset does for an identifier among the
+attributes: that key's entry is then built under that policy, a Bloom filter or [hashed
+postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash), the only locating kind a
+path takes for now. An object that does not shred the key has no slot for it, and no entry.
 
 ### 4.8 `vorticity.synopsis.columns.v1`: the synopsis part
 
@@ -501,7 +505,10 @@ share of the data. A dataset's declared identifiers (`DatasetOptions.Identifiers
 required [hashed postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash) on each, in
 every object it writes, appends and jobs alike, exempt from the budget. A Bloom filter is never tried
 on one, since a tree of filters loses its upper nodes past what one filter holds, which the values of
-an identifier always pass.
+an identifier always pass. An identifier may be a key of a variant column read as a string or an
+integer, `Attributes['user'].AsString()`: a job then shreds that key wherever a row holds one of that
+class, whatever its bytes say, and indexes it as a column. An append shreds nothing, so its objects
+carry no index on such a key.
 
 The `WriteReport` names every index built, with its bytes, and every index abandoned, with its
 reason.
