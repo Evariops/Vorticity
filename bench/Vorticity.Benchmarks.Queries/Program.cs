@@ -155,7 +155,8 @@ if (Text(args, "--micro") == "lifecycle")
     return await LifecycleBench.Run(
         (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
         Text(args, "--style") == "leveled", (int)Option(args, "--period-hours", 1), Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
-        Text(args, "--late") != "off");
+        Text(args, "--late") != "off", Text(args, "--neighbours") != "off", (long)Option(args, "--max-object-mib", 0) << 20,
+        Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0));
 }
 
 // --micro cachetrace: the regions a run of questions asks of the synopsis cache, replayed through three eviction policies (CacheTrace.cs).

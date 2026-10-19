@@ -42,7 +42,7 @@ public sealed class DatasetPlanTests
             Random random = new Random(seed);
             await using MemoryObjectStore store = new MemoryObjectStore();
             IBoundaryRule rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024);
-            List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> shape = Shape(random);
+            List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> shape = Shape(random, banded: seed % 4 == 3);
             bool erasure = seed % 5 == 4;
             shape = erasure ? Aged(shape, seed) : shape;
             await using VortexDataset dataset = await PointAsync(store, rule, await CreateAsync(store, rule, shape, ct, erasure: erasure), shape, random, clustered: true, ct);
@@ -99,7 +99,8 @@ public sealed class DatasetPlanTests
             }
         }
 
-        Met(met, ranks);
+        // A tiered level's concatenations grow its objects, and neighbours merge under the leveled style alone.
+        Met(met, ranks, CompactionTrigger.Neighbours);
         Assert.True(longest >= 4, $"no run was longer than {longest} objects, so a run's end is untested");
     }
 
@@ -489,12 +490,18 @@ public sealed class DatasetPlanTests
     }
 
     /// <summary>Fails unless every trigger was met and some shape ranked three jobs.</summary>
-    private static void Met(Dictionary<CompactionTrigger, int> met, int ranks)
+    private static void Met(Dictionary<CompactionTrigger, int> met, int ranks, CompactionTrigger? never = null)
     {
         // A dataset of periods plans by reading every leaf, so its own triggers have no descent to hold
         // to the full read (DatasetPeriodsCompactionTests meets them).
         foreach (CompactionTrigger trigger in Enum.GetValues<CompactionTrigger>())
         {
+            if (trigger == never)
+            {
+                Assert.Equal(0, met.GetValueOrDefault(trigger));
+                continue;
+            }
+
             Assert.True(
                 trigger is CompactionTrigger.LateCeiling or CompactionTrigger.FreshMerge or CompactionTrigger.Seal
                     || met.GetValueOrDefault(trigger) > 0,
@@ -563,17 +570,21 @@ public sealed class DatasetPlanTests
     /// ties, fragments up to six, and some objects with rows marked: a few, or runs enough that the
     /// vector alone makes them due.
     /// </summary>
-    private static List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Shape(Random random)
+    private static List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Shape(Random random, bool banded = false)
     {
         List<(int, ReadOnlyMemory<byte>, ObjectEntry)> objects = [];
         int levels = random.Next(1, 6);
         for (int level = 0; level < levels; level++)
         {
+            // Banded, as keys in order leave the levels: each level a band of keys of its own, level 0
+            // the newest and the deepest the oldest, so that neighbours at a level's end have nothing of
+            // another level between them.
+            long band = banded ? (level == 0 ? levels : levels - level) * 1_000_000L : 0;
             int count = level == 0 ? random.Next(0, 14) : random.Next(0, 90);
-            long at = random.Next(0, 50);
+            long at = band + random.Next(0, 50);
             for (int i = 0; i < count; i++)
             {
-                long low = level == 0 ? random.Next(0, 5_000) : at + random.Next(0, 3) * 17;
+                long low = level == 0 ? band + random.Next(0, 5_000) : at + random.Next(0, 3) * 17;
                 long high = low + random.Next(0, 60);
                 at = high + 1 + random.Next(0, 40);
                 objects.Add(Entry(
@@ -583,7 +594,7 @@ public sealed class DatasetPlanTests
                     1_000L * random.Next(1, 5),
                     random.Next(10) == 0 ? random.Next(1, 7) : 0,
                     random.Next(8) == 0 ? random.Next(1, 20) : random.Next(30) == 0 ? random.Next(150, 400) : 0,
-                    keyed: random.Next(25) != 0));
+                    keyed: random.Next(25) != 0 || banded));
             }
         }
 

@@ -274,6 +274,27 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
+    public async Task KeysThatArriveInOrderLeaveEachLevelABandThatNoMergeOfNeighboursSpans()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // A level that gives up its first object when that one moves up whole keeps the band of keys in
+        // order: every job out of a level above 0 is a move, and the stream checks each one before it
+        // runs. The largest object scatters the bands, since objects of one size class differ by a few
+        // bytes; a merge of the neighbours at a level's end then stops where an object of another level
+        // sits between them, which the stream checks of every merge, rather than write one that every
+        // later move into its range rewrites (5.9 rewrites a row instead of 2.2 on the lifecycle bench).
+        Decoders.EnsureRegistered();
+        (long appended, _, long rows, _, _, _, long objects) = await InOrderStreamAsync(trivialMoves: true, ct, neighbours: true, varied: true);
+        (_, _, long rowsLargest, _, _, _, long objectsLargest) = await InOrderStreamAsync(
+            trivialMoves: true, ct, neighbours: true, CompactionPick.Largest, varied: true);
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET BANDS, keys in order: {appended} rows appended; a level's first object moved, {objects} objects above level 0 and {rows} rows rewritten; the largest, {objectsLargest} objects and {rowsLargest} rows.\n"));
+        Assert.True(objects < objectsLargest, $"{objects} objects above level 0 in bands, {objectsLargest} scattered");
+    }
+
+    [Fact]
     public async Task KeysThatArriveAtRandomRewriteNoMoreWithTheMoves()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -320,26 +341,35 @@ public sealed class DatasetCompactionTests
     /// <summary>
     /// Appends of consecutive keys, each past every key before it, with compaction drained after each:
     /// the rows appended, those left in level 0, the rows and bytes compaction rewrote, the objects it
-    /// moved, and the levels the dataset reached.
+    /// moved, and the levels the dataset reached. Appends of 100 rows, or of 50 to 149 when
+    /// <paramref name="varied"/>, so that objects of one size class differ in size as real ones do.
     /// </summary>
     private static async Task<(long Appended, long Left, long Rows, long Bytes, long Moved, int Levels, long ObjectsAbove)> InOrderStreamAsync(
-        bool trivialMoves, CancellationToken ct, bool neighbours)
+        bool trivialMoves, CancellationToken ct, bool neighbours, CompactionPick pick = CompactionPick.Auto, bool varied = false)
     {
+        Random random = new Random(0x0BA4D);
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
-        CompactionOptions options = Options(target: 2 << 10) with { Fanout = 3, TrivialMoves = trivialMoves, MergeNeighbours = neighbours };
+        CompactionOptions options = Options(target: 2 << 10) with { Fanout = 3, TrivialMoves = trivialMoves, MergeNeighbours = neighbours, Pick = pick };
         long appended = 0;
         long rows = 0;
         long bytes = 0;
         long moved = 0;
         for (int round = 0; round < 96; round++)
         {
-            await dataset.AppendAsync(Ordered(types, schema, appended, 100), ct);
-            appended += 100;
-            while (await dataset.CompactAsync(options, ct) is { } step)
+            int count = varied ? 50 + random.Next(100) : 100;
+            await dataset.AppendAsync(Ordered(types, schema, appended, count), ct);
+            appended += count;
+            while (true)
             {
+                await HoldsItsBandsAsync(dataset, options, ct);
+                if (await dataset.CompactAsync(options, ct) is not { } step)
+                {
+                    break;
+                }
+
                 Assert.Equal(OperationOutcome.Applied, step.Outcome);
                 rows += step.Rows;
                 bytes += step.BytesOut;
@@ -356,6 +386,39 @@ public sealed class DatasetCompactionTests
         }
 
         return (appended, dataset.Levels[0].Rows, rows, bytes, moved, dataset.Levels.Count, above);
+    }
+
+    /// <summary>
+    /// Holds the job due on keys in order to what keeps a level's band: a merge of neighbours spans no
+    /// object of another level, and under the default pick, with the moves on, a job out of a level above
+    /// 0 moves its object.
+    /// </summary>
+    private static async Task HoldsItsBandsAsync(VortexDataset dataset, CompactionOptions options, CancellationToken ct)
+    {
+        CompactionPlan plan = await dataset.PlanCompactionAsync(options, ct);
+        if (plan.Job is { Trigger: CompactionTrigger.LevelSize } grown && options is { Pick: CompactionPick.Auto, TrivialMoves: true })
+        {
+            Assert.True(grown.Moves, $"a job out of level {grown.FromLevel} reads {grown.Inputs.Count} objects instead of moving one");
+        }
+
+        if (plan.Job is not { Trigger: CompactionTrigger.Neighbours } merge)
+        {
+            return;
+        }
+
+        LevelRange range = LevelRange.Of(merge.ToLevel, merge.Inputs, dataset.Snapshot.Schema.Key!);
+        for (int level = 0; level < dataset.Levels.Count; level++)
+        {
+            if (level == merge.ToLevel)
+            {
+                continue;
+            }
+
+            await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Snapshot.Pages, ct))
+            {
+                Assert.False(range.Overlaps(entry.Value), $"a merge of {merge.Inputs.Count} neighbours in level {merge.ToLevel} spans an object of level {level}");
+            }
+        }
     }
 
     [Fact]

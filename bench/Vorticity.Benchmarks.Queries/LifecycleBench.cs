@@ -21,14 +21,19 @@ namespace Vorticity.Benchmarks.Queries;
 /// <remarks>
 /// <c>--style periods</c> compacts by periods of an hour (<c>--period-hours 24</c> for a day), the default;
 /// <c>--style leveled</c> compacts by levels, as a dataset without periods does. Data time runs as fast as the
-/// machine writes, so the bench says what the policy writes, not whether a machine keeps up.
+/// machine writes, so the bench says what the policy writes, not whether a machine keeps up. <c>--neighbours
+/// off</c> turns off the merges of small neighbours at a level's end, <c>--max-object-mib</c> sets the cap on an
+/// object, and <c>--trace-overlaps N</c> prints the first N jobs that rewrite rather than move, with what the
+/// other levels hold inside their range.
 /// </remarks>
 internal static class LifecycleBench
 {
     private static readonly (string Name, TimeSpan Width)[] Windows =
         [("15 min", TimeSpan.FromMinutes(15)), ("1 h", TimeSpan.FromHours(1)), ("1 day", TimeSpan.FromDays(1)), ("30 days", TimeSpan.FromDays(30))];
 
-    internal static async Task<int> Run(int hours, double rate, int writers, int batchSeconds, bool leveled, int periodHours, int deletesPerHour, int fanout, bool late)
+    internal static async Task<int> Run(
+        int hours, double rate, int writers, int batchSeconds, bool leveled, int periodHours, int deletesPerHour, int fanout, bool late,
+        bool neighbours, long maxObjectBytes, string? pick, int traceOverlaps)
     {
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(memory);
@@ -47,10 +52,16 @@ internal static class LifecycleBench
 
         await using VortexDataset compactor = await VortexDataset.OpenAsync(store);
         await using VortexDataset deleter = await VortexDataset.OpenAsync(store);
-        CompactionOptions compaction = fanout > 0 ? new CompactionOptions { Fanout = fanout } : new CompactionOptions();
+        CompactionOptions compaction = new CompactionOptions
+        {
+            Fanout = fanout > 0 ? fanout : CompactionOptions.DefaultFanout,
+            MaxObjectBytes = maxObjectBytes > 0 ? maxObjectBytes : CompactionOptions.DefaultMaxObjectBytes,
+            MergeNeighbours = neighbours,
+            Pick = pick switch { "largest" => CompactionPick.Largest, "roundrobin" => CompactionPick.RoundRobin, _ => CompactionPick.Auto },
+        };
         TimeUnit unit = PeriodOptions.InstantOf(compactor.Key);
 
-        Ledger ledger = new Ledger();
+        Ledger ledger = new Ledger { TraceLeft = traceOverlaps, Tracing = traceOverlaps > 0 };
         RequestGenerator generator = new RequestGenerator(41);
         Random random = new Random(43);
         Queue<string> recent = new Queue<string>();
@@ -104,6 +115,10 @@ internal static class LifecycleBench
 
             await DrainAsync(compactor, compaction, ledger);
             await SampleAsync(compactor, unit, newest, ledger);
+            for (int level = 0; level < compactor.Levels.Count; level++)
+            {
+                ledger.Levels.Add((compactor.Levels[level].Entries, compactor.Levels[level].Rows));
+            }
         }
         finally
         {
@@ -113,7 +128,7 @@ internal static class LifecycleBench
             }
         }
 
-        Print(hours, rate, writers, batchSeconds, leveled, periodHours, late, appended, store, ledger, Stopwatch.GetElapsedTime(begin));
+        Print(hours, rate, writers, batchSeconds, leveled, periodHours, late, compaction, appended, store, ledger, Stopwatch.GetElapsedTime(begin));
         return 0;
     }
 
@@ -142,6 +157,11 @@ internal static class LifecycleBench
         await dataset.RefreshAsync();
         while (true)
         {
+            if (ledger.Tracing)
+            {
+                await TraceAsync(dataset, options, ledger);
+            }
+
             long begin = Stopwatch.GetTimestamp();
             CompactionResult? result = await dataset.CompactAsync(options);
             if (result is null)
@@ -170,6 +190,93 @@ internal static class LifecycleBench
             }
         }
     }
+
+    /// <summary>
+    /// Counts the next job when it rewrites rather than moves: a leveled job that reads an object of its
+    /// destination, or a merge of neighbours whose range holds an object of another level; and prints the first
+    /// ones with every object of every level inside their range, in minutes of data.
+    /// </summary>
+    private static async Task TraceAsync(VortexDataset dataset, CompactionOptions options, Ledger ledger)
+    {
+        CompactionPlan plan = await CompactionPolicy.PlanAsync(dataset, options);
+        if (plan.Job is not { Trigger: CompactionTrigger.LevelSize or CompactionTrigger.Neighbours } job || job.Moves)
+        {
+            return;
+        }
+
+        DatasetSnapshot snapshot = dataset.Snapshot;
+        string instant = dataset.Key!.InstantPath;
+        long from = long.MaxValue;
+        long to = long.MinValue;
+        foreach (CompactionInput input in job.Inputs)
+        {
+            (long min, long max) = Bounds(input.Entry, instant);
+            from = Math.Min(from, min);
+            to = Math.Max(to, max);
+        }
+
+        // What the other levels hold inside the job's range: a merge that spans one leaves an object a later
+        // move of it overlaps.
+        List<(int Level, ObjectEntry Entry)> inside = [];
+        for (int level = 0; level < snapshot.Levels.Count; level++)
+        {
+            await foreach (TreeEntry entry in snapshot.Levels[level].EnumerateAsync(snapshot.Pages, default))
+            {
+                ObjectEntry held = ObjectEntry.FromBytes(entry.Value);
+                (long min, long max) = Bounds(held, instant);
+                bool read = job.Inputs.Any(input => input.Entry.Key == held.Key);
+                if (!read && max >= from && min <= to)
+                {
+                    inside.Add((level, held));
+                }
+            }
+        }
+
+        bool overlaps = job.Trigger == CompactionTrigger.LevelSize ? job.Inputs.Count > 1 : inside.Count > 0;
+        lock (ledger)
+        {
+            if (job.Trigger == CompactionTrigger.LevelSize)
+            {
+                ledger.Rewriting++;
+                ledger.Overlapping += overlaps ? 1 : 0;
+            }
+            else
+            {
+                ledger.Merges++;
+                ledger.Spanning += overlaps ? 1 : 0;
+            }
+
+            if (!overlaps || ledger.TraceLeft <= 0)
+            {
+                return;
+            }
+
+            ledger.TraceLeft--;
+        }
+
+        TimeUnit unit = PeriodOptions.InstantOf(dataset.Key);
+        long origin = TimeSlicer.InstantOf(QuestionBench.Start, unit);
+        double perMinute = TimeSlicer.InstantOf(QuestionBench.Start.AddMinutes(1), unit) - origin;
+        string Range(ObjectEntry entry)
+        {
+            (long min, long max) = Bounds(entry, instant);
+            return $"[{(min - origin) / perMinute:F1}, {(max - origin) / perMinute:F1}] {entry.Bytes / 1e6:F2} MB";
+        }
+
+        Console.WriteLine(
+            $"{job.Trigger} L{job.FromLevel}->L{job.ToLevel}: " +
+            string.Join("; ", job.Inputs.Select(input => $"L{input.Level} {Range(input.Entry)}")));
+        foreach ((int level, ObjectEntry entry) in inside)
+        {
+            Console.WriteLine($"    inside, L{level} {Range(entry)}");
+        }
+    }
+
+    /// <summary>The smallest and largest instants an object holds, from its summary.</summary>
+    private static (long Min, long Max) Bounds(ObjectEntry entry, string instant) =>
+        entry.Summaries.TryGet(instant, out ColumnSummary summary) && summary is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed }
+            ? (summary.Min.SignedValue, summary.Max.SignedValue)
+            : (long.MinValue, long.MaxValue);
 
     /// <summary>The objects each window ending at <paramref name="newest"/> covers: those whose instants reach into it.</summary>
     private static async Task SampleAsync(VortexDataset dataset, TimeUnit unit, DateTimeOffset newest, Ledger ledger)
@@ -200,11 +307,19 @@ internal static class LifecycleBench
     }
 
     private static void Print(
-        int hours, double rate, int writers, int batchSeconds, bool leveled, int periodHours, bool late, long appended, CountingObjectStore store, Ledger ledger, TimeSpan elapsed)
+        int hours, double rate, int writers, int batchSeconds, bool leveled, int periodHours, bool late, CompactionOptions compaction, long appended,
+        CountingObjectStore store, Ledger ledger, TimeSpan elapsed)
     {
         Console.WriteLine(
             $"{appended} rows over {hours} hours at {rate}/s{(late ? string.Empty : ", none late")}, {writers} writers appending {batchSeconds} s each, " +
-            $"{(leveled ? "leveled" : $"periods of {(periodHours >= 24 ? "a day" : "an hour")}")}; {elapsed.TotalSeconds:F1} s");
+            $"{(leveled ? "leveled" : $"periods of {(periodHours >= 24 ? "a day" : "an hour")}")}, fan-out {compaction.Fanout}, objects up to " +
+            $"{compaction.MaxObjectBytes >> 20} MiB, neighbours {(compaction.MergeNeighbours ? "merged" : "left")}, pick {compaction.Pick}; {elapsed.TotalSeconds:F1} s");
+        if (ledger.Tracing)
+        {
+            Console.WriteLine(
+                $"traced: {ledger.Overlapping} of {ledger.Rewriting} level-size jobs that rewrite read an object of their destination; " +
+                $"{ledger.Spanning} of {ledger.Merges} merges of neighbours span an object of another level");
+        }
         Console.WriteLine($"{"jobs by trigger",-18} {"jobs",6} {"objects in",11} {"moved",6} {"rows/row",9} {"MB out",9} {"ms mean",8} {"ms max",8} {"abandoned",10} {"MB lost",8}");
         long rewritten = 0;
         foreach ((CompactionTrigger trigger, Jobs jobs) in ledger.ByTrigger.OrderBy(pair => pair.Key))
@@ -218,6 +333,9 @@ internal static class LifecycleBench
         Console.WriteLine(
             $"rows rewritten per row appended {(double)rewritten / appended:F2}; store: {store.Requests} requests, " +
             $"{(double)store.BytesWritten / appended:F0} bytes written per row; {ledger.Deletes} deletes of {ledger.Deleted} rows");
+        Console.WriteLine(
+            "levels at the end, objects and rows an object: " +
+            string.Join(", ", ledger.Levels.Select((held, level) => $"L{level} {held.Objects} x {(held.Objects == 0 ? 0 : held.Rows / held.Objects)}")));
         if (ledger.Samples.Count > 0)
         {
             Console.WriteLine($"objects over a window ending at the newest row, {ledger.Samples.Count} samples, mean and max:");
@@ -236,9 +354,23 @@ internal static class LifecycleBench
 
         internal List<(long Objects, long[] Counts)> Samples { get; } = [];
 
+        internal List<(long Objects, long Rows)> Levels { get; } = [];
+
         internal long Deletes { get; set; }
 
         internal long Deleted { get; set; }
+
+        internal bool Tracing { get; init; }
+
+        internal int TraceLeft { get; set; }
+
+        internal long Rewriting { get; set; }
+
+        internal long Overlapping { get; set; }
+
+        internal long Merges { get; set; }
+
+        internal long Spanning { get; set; }
     }
 
     private sealed class Jobs

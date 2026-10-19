@@ -38,9 +38,11 @@ public enum CompactionStyle
 public enum CompactionPick
 {
     /// <summary>
-    /// <see cref="Largest"/> for a leveled dataset, which writes fewer bytes that way, and
-    /// <see cref="RoundRobin"/> for a tiered one, whose plan then descends the trees: a dataset
-    /// ordered by arrival keeps each level's objects together, and the two take the same runs.
+    /// For a leveled dataset, a level's first object when it moves up whole, as it does when keys
+    /// arrive in order, so that each level keeps one band of the key space, and otherwise
+    /// <see cref="Largest"/>, which writes fewer bytes that way. <see cref="RoundRobin"/> for a tiered
+    /// one, whose plan then descends the trees: a dataset ordered by arrival keeps each level's
+    /// objects together, and the two take the same runs.
     /// </summary>
     Auto = 0,
 
@@ -338,6 +340,12 @@ public sealed record CompactionOptions
         CompactionPick.RoundRobin => CompactionPick.RoundRobin,
         _ => style == CompactionStyle.Tiered ? CompactionPick.RoundRobin : CompactionPick.Largest,
     };
+
+    /// <summary>
+    /// Whether a leveled level gives up its first object when that one moves up whole, before the pick
+    /// chooses: under <see cref="CompactionPick.Auto"/>, which keeps the bands keys in order leave.
+    /// </summary>
+    internal bool MovesFirst(CompactionStyle style) => Pick == CompactionPick.Auto && style == CompactionStyle.Leveled;
 
     /// <summary>
     /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: by periods for a

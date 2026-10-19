@@ -65,6 +65,24 @@ entries of each level for it, a page or two down the tree's right edge, and rank
 of marks. On the 96 appends above, at `F = 3`, it halved the objects above level 0, from 32 to 16,
 level 4's growing from 6 KB to 23 KB, for 9 600 more rows rewritten.
 
+Such a merge takes only neighbours that nothing of another level sits between. Its output covers the
+holes between its inputs, and an object of another level in one of them would overlap it: that
+object's later move into this level, or this one's move into the object's level, would read and
+rewrite it, and every move after that again. The plan cuts the run at the newest such object and merges
+what is left past it when that still makes `F`. Merges of neighbours belong to the leveled style alone:
+a tiered level grows its objects by concatenating them already, and a merge across another level's
+object would change the order a dataset without a clustering key answers in.
+
+Keys in order keep the merges' runs whole as long as each level holds one band of the key space, the
+oldest at the bottom, which the pick of the object a full level gives up decides
+([the pointer](#the-pointer-and-the-tiered-plan)). On the lifecycle bench, 48 hours of requests in
+order (`vortex-queries --micro lifecycle --style leveled --late off --writers 1 --deletes off`), merges
+across other levels' objects rewrote a row 5.9 times, every move into their range reading them again.
+With the bands kept and the merges held to them, a row is rewritten 2.2 times, once out of level 0 and
+1.2 times as its objects grow, every job out of a level above 0 is a move, the dataset holds 108
+objects instead of 139, and its store took 195 bytes a row instead of 332. Without the merges a row is
+written once, and the dataset holds 330 objects.
+
 Three costs remain, and this document is about them:
 
 1. Who pays, and when. On demand, whoever calls `CompactAsync` pays, when they call it. Until then a
@@ -194,6 +212,17 @@ same jobs either way for roughly its first 15 000 commits. With two seeds out of
 robin then writes 6 % more in compaction (2 149 and 2 146 MiB against 2 032 and 2 019), and 16 % more
 in the objects the updates and deletes write themselves. The third seed takes the same jobs
 throughout. So a leveled dataset keeps the largest-first pick by default (`CompactionPick.Auto`).
+
+The default asks one thing first: whether the level's first object moves up whole, overlapping nothing
+in the level above. Keys in order make every object do so, and any pick then moves rather than merges,
+but the largest scatters the level's band, since objects of one size class differ by a few kilobytes,
+where the first keeps the band whole for the merges of neighbours at the level's end. Keys at random
+make the first object overlap the level above as much as any, and the largest goes, as before: the churn
+bench at random keys takes the same jobs and writes the same bytes either way. The question costs a
+walk of the level above that skips what lies outside the first object's range. Under late rows and
+four writers, where levels interleave anyway, the lifecycle bench rewrites a row 10.2 times under the
+default and 9.8 times under the largest alone, a cost such a dataset avoids with periods
+([a dataset of periods](#a-dataset-of-periods)).
 
 A tiered job concatenates a run of one level's objects with nothing else between them, and where the
 runs are depends on every level's order. The longest run can only be found by reading every leaf. The
