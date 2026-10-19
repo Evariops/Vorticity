@@ -527,6 +527,7 @@ internal static class DatasetCompactor
         long target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
         int[] candidates = SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers);
         int[] variants = VariantColumns(schema.DType);
+        int textBound = dataset.Options.Write.StringBoundBytes;
         Dictionary<(int, long), (SecondCounts Seconds, CardinalitySketch[] Sketches, PathCensus[] Paths)> tallies = [];
         List<Cut> cuts = [];
         KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
@@ -541,7 +542,7 @@ internal static class DatasetCompactor
                 {
                     if (!tallies.TryGetValue((level, period), out var tally))
                     {
-                        tally = (new SecondCounts(cut.Unit), [.. candidates.Select(static _ => new CardinalitySketch())], [.. variants.Select(static _ => new PathCensus())]);
+                        tally = (new SecondCounts(cut.Unit), [.. candidates.Select(static _ => new CardinalitySketch())], [.. variants.Select(_ => new PathCensus(textBound))]);
                         tallies[(level, period)] = tally;
                     }
 
@@ -567,23 +568,29 @@ internal static class DatasetCompactor
                 counted[i] = (candidates[i], sketches[i].Estimate());
             }
 
-            // Each variant column shreds what its rows in the object pay for, in chunks of its own.
+            // Each variant column shreds what its rows in the object pay for, in chunks of its own, and
+            // lists every path and class they hold, shredded or not.
             ImmutableDictionary<string, VariantShredding> shredded = ImmutableDictionary<string, VariantShredding>.Empty;
             ImmutableDictionary<string, int> chunks = ImmutableDictionary<string, int>.Empty;
+            ImmutableDictionary<string, VariantDirectory> directories = ImmutableDictionary<string, VariantDirectory>.Empty;
             for (int v = 0; v < variants.Length; v++)
             {
-                if (ShreddingChoice.Choose(paths[v]) is { } chosen)
+                string name = schema.DType.GetFieldName(variants[v]);
+                VariantShredding? chosen = ShreddingChoice.Choose(paths[v]);
+                if (chosen is not null)
                 {
-                    string name = schema.DType.GetFieldName(variants[v]);
                     shredded = shredded.SetItem(name, chosen);
                     chunks = chunks.SetItem(name, ShreddingChoice.ChunkTargetBytes(paths[v]));
                 }
+
+                directories = directories.SetItem(name, VariantDirectory.From(paths[v], chosen));
             }
 
             plans[(level, period)] = new ObjectPlan(
                 new SliceTable(cut.Unit, TimeSlicer.Cut(seconds.Seconds, cut.Unit, target), SynopsisOrder.Choose(counted, seconds.Rows)),
                 shredded,
-                chunks);
+                chunks,
+                directories);
         }
 
         return plans;
@@ -606,10 +613,13 @@ internal static class DatasetCompactor
 
     /// <summary>
     /// What a job writes an object of a level and period with: its slices and the order inside them,
-    /// and what each variant column shreds, with its chunk target.
+    /// what each variant column shreds, with its chunk target, and each variant column's path directory.
     /// </summary>
     internal sealed record ObjectPlan(
-        SliceTable Slices, ImmutableDictionary<string, VariantShredding> Shredded, ImmutableDictionary<string, int> VariantChunks);
+        SliceTable Slices,
+        ImmutableDictionary<string, VariantShredding> Shredded,
+        ImmutableDictionary<string, int> VariantChunks,
+        ImmutableDictionary<string, VariantDirectory> Directories);
 
     /// <summary>
     /// The change of period length the load of the period a seal wrote calls for, or null: its bytes
@@ -830,7 +840,8 @@ internal static class DatasetCompactor
                 // variant columns shred.
                 ObjectPlan? plan = Plans?[(_level, _period)];
                 _draft = _dataset.StartObjectUnder(
-                    _schema, _inKeyOrder, _rowBound, sliced: plan is not null, shredded: plan?.Shredded, variantChunks: plan?.VariantChunks);
+                    _schema, _inKeyOrder, _rowBound, sliced: plan is not null, shredded: plan?.Shredded, variantChunks: plan?.VariantChunks,
+                    directories: plan?.Directories);
                 if (plan is not null)
                 {
                     _table = plan.Slices;

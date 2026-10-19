@@ -11,8 +11,9 @@ namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// What shredding costs a job in time (<c>--micro shredwrite</c>): an object of attributes, its rows
-/// decoded as a job reads them, counted path by path and the shredding chosen, then written whole and
-/// written shredded. What a job pays for shredding is the count and the difference of the two writes.
+/// decoded as a job reads them, counted path by path, the shredding chosen and the path directory
+/// built, then written whole and written shredded. What a job pays for shredding is the count and the
+/// difference of the two writes.
 /// </summary>
 /// <remarks>Run it with <c>DOTNET_TieredCompilation=0</c>.</remarks>
 internal static class ShredWriteMicro
@@ -48,13 +49,16 @@ internal static class ShredWriteMicro
             double whole = double.MaxValue;
             double shredded = double.MaxValue;
             VariantShredding? plan = null;
+            Vorticity.Indexes.VariantDirectory? directory = null;
             int chunk = 0;
             long wholeBytes = 0;
             long shreddedBytes = 0;
             for (int round = 0; round < rounds; round++)
             {
+                // As a job counts: text bounds cut as a text column's zones cut theirs, and the path
+                // directory built beside the choice.
                 long begin = Stopwatch.GetTimestamp();
-                PathCensus counted = new PathCensus();
+                PathCensus counted = new PathCensus(VortexWriteOptions.Default.StringBoundBytes);
                 foreach (RecordBatch batch in batches)
                 {
                     counted.Add(batch, field);
@@ -62,6 +66,7 @@ internal static class ShredWriteMicro
 
                 plan = ShreddingChoice.Choose(counted);
                 chunk = ShreddingChoice.ChunkTargetBytes(counted);
+                directory = Vorticity.Indexes.VariantDirectory.From(counted, plan);
                 census = Math.Min(census, Stopwatch.GetElapsedTime(begin).TotalMilliseconds);
 
                 (double time, long bytes) = await WriteAsync(batches, target, null, 0);
@@ -72,7 +77,9 @@ internal static class ShredWriteMicro
                 shreddedBytes = bytes;
             }
 
-            Console.WriteLine($"{rows} rows, {plan?.Keys.Count ?? 0} keys shredded, chunks of {chunk} bytes; best of {rounds}:");
+            Console.WriteLine(
+                $"{rows} rows, {plan?.Keys.Count ?? 0} keys shredded, chunks of {chunk} bytes, a path directory of "
+                + $"{directory?.Entries.Count ?? 0} entries in {directory?.ToBytes().Length ?? 0} bytes; best of {rounds}:");
             Console.WriteLine($"  count and choose  {census,8:F1} ms  {census * 1e6 / rows,6:F1} ns/row");
             Console.WriteLine($"  write whole       {whole,8:F1} ms  {whole * 1e6 / rows,6:F1} ns/row  {wholeBytes,11} B");
             Console.WriteLine($"  write shredded    {shredded,8:F1} ms  {shredded * 1e6 / rows,6:F1} ns/row  {shreddedBytes,11} B");

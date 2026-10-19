@@ -263,6 +263,12 @@ public sealed record VortexWriteOptions
     /// </summary>
     internal IReadOnlyDictionary<string, Types.Variants.VariantShredding>? ShreddedVariants { get; init; }
 
+    /// <summary>
+    /// The path directory of each top-level variant column, by its name, counted from the rows the file
+    /// will hold: each rides in the index directory, whatever the policy builds.
+    /// </summary>
+    internal IReadOnlyDictionary<string, Indexes.VariantDirectory>? VariantDirectories { get; init; }
+
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
 

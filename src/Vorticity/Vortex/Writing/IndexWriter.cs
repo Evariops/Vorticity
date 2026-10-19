@@ -625,8 +625,9 @@ internal sealed class IndexWriter : IDisposable
         foreach (IndexEntry entry in entries)
         {
             // The slice kinds and the variant paths describe the file as its writer cut it, which an
-            // append changes.
+            // append changes, and the path directory counts rows the append does not parse.
             if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.VariantPaths
+                    or IndexKinds.VariantDirectory
                 || Kept(entry, boundary) is not { } kept)
             {
                 continue;
@@ -1536,6 +1537,23 @@ internal sealed class IndexWriter : IDisposable
             [new IndexRun(0, Blocks(rows, length), regions, [])]));
     }
 
+    /// <summary>
+    /// Writes the path directory of the variant column <paramref name="field"/>, one region from the
+    /// sink's position, and adds the entry that names it: on the column, one run over every block of
+    /// the file's <paramref name="rows"/>.
+    /// </summary>
+    internal async ValueTask AddVariantDirectoryAsync(
+        ISegmentSink sink, int field, VariantDirectory directory, long rows, int blockRows, CancellationToken cancellationToken)
+    {
+        byte[] bytes = directory.ToBytes();
+        IndexSegment region = IndexSegment.Of(sink.Position, bytes, 0);
+        await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            IndexKinds.VariantDirectory, [checked((uint)field)], (ulong)length, [],
+            [new IndexRun(0, Blocks(rows, length), [region], [])]));
+    }
+
     private static uint Blocks(long rows, int length) => checked((uint)((rows + length - 1) / length));
 
     /// <summary>
@@ -1613,7 +1631,8 @@ internal sealed class IndexWriter : IDisposable
     internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null)
     {
         // A file's time slices and its variant paths ride in the directory whatever the policy asks.
-        if (!Enabled && _preserved is not { Count: > 0 } && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths))
+        if (!Enabled && _preserved is not { Count: > 0 }
+            && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory))
         {
             return null;
         }

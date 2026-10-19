@@ -53,6 +53,13 @@ internal static class IndexKinds
     public const string VariantPaths = "vorticity.variant.paths.v1";
 
     /// <summary>
+    /// Every path and class a variant column's rows hold in the file, on that column: each its count,
+    /// its bounds and where it lies, in one payload region, so that a question on a path the file
+    /// lacks, or outside its bounds, refutes the file (<see cref="VariantDirectory"/>).
+    /// </summary>
+    public const string VariantDirectory = "vorticity.variant.directory.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -62,7 +69,7 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or Slices or SliceChunks or VariantPaths => true,
+                or PostingsNgram3 or Slices or SliceChunks or VariantPaths or VariantDirectory => true,
             _ => false,
         };
 

@@ -92,6 +92,28 @@ internal static class ZonePruningPlan
         Scanning.ScanCounters.Note(metrics, segments, bytes);
 
         long blockRows = Scanning.SplitPlan.NaturalBatchRows(tree);
+
+        // The path directories first among the indexes: one small read refutes the whole file.
+        if (indexes && blockRows > 0 && VariantColumns(filter) is { } variants)
+        {
+            (bool refuted, int read, long readBytes) = await RefutedByPathsAsync(file, filter, variants, cancellationToken).ConfigureAwait(false);
+            Scanning.ScanCounters.Note(metrics, read, readBytes);
+            if (refuted)
+            {
+                BlockMask none = new BlockMask(tree.Root.RowCount, blockRows);
+                int all = Counted(none, scope);
+                none.KillAll();
+                steps?.Add(new PruningStep("path directory", all, read, readBytes));
+                Diagnostics.VortexEventSource.Pruned(none.BlockCount, none.BlockCount);
+                return new PruningPlan(none, zones);
+            }
+
+            if (read > 0)
+            {
+                steps?.Add(new PruningStep("path directory", 0, read, readBytes));
+            }
+        }
+
         Indexes.BloomPruner? blooms = indexes && blockRows > 0
             ? await Indexes.BloomPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
             : null;
@@ -138,6 +160,86 @@ internal static class ZonePruningPlan
 
         Diagnostics.VortexEventSource.Pruned(live.BlockCount - live.LiveCount, live.BlockCount);
         return new PruningPlan(live, zones, located);
+    }
+
+    /// <summary>
+    /// Whether the path directories of <paramref name="file"/> leave a row that may match
+    /// <paramref name="filter"/>: true unless the filter's fenced predicates on paths ask what no
+    /// directory holds. A file without directories, or a filter on no path, may match.
+    /// </summary>
+    internal static async ValueTask<bool> PathsMayMatchAsync(VortexFile file, VortexExpr filter, CancellationToken cancellationToken) =>
+        VariantColumns(filter) is not { } columns
+        || !(await RefutedByPathsAsync(file, filter, columns, cancellationToken).ConfigureAwait(false)).Refuted;
+
+    /// <summary>The variant columns the fenced predicates of <paramref name="filter"/> read paths of, by name; null for none.</summary>
+    private static List<string>? VariantColumns(VortexExpr filter)
+    {
+        List<string>? columns = null;
+        Collect(filter, ref columns);
+        return columns;
+
+        static void Collect(VortexExpr expr, ref List<string>? columns)
+        {
+            switch (expr)
+            {
+                case LogicalExpr logical:
+                    Collect(logical.Left, ref columns);
+                    Collect(logical.Right, ref columns);
+                    return;
+                case VariantFilterExpr { Inner: ComparisonExpr { Field: VariantFieldExpr path } }:
+                    Add(path, ref columns);
+                    return;
+                case VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } }:
+                    Add(path, ref columns);
+                    return;
+                case VariantFilterExpr { Inner: NullCheckExpr { Field: VariantFieldExpr path } }:
+                    Add(path, ref columns);
+                    return;
+                case VariantFilterExpr { Inner: StringMatchExpr { Field: VariantFieldExpr path } }:
+                    Add(path, ref columns);
+                    return;
+            }
+        }
+
+        static void Add(VariantFieldExpr path, ref List<string>? columns)
+        {
+            columns ??= [];
+            if (!columns.Contains(path.Column.Path))
+            {
+                columns.Add(path.Column.Path);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the path directories of <paramref name="columns"/> prove that no row of
+    /// <paramref name="file"/> matches <paramref name="filter"/>, and the segments and bytes read for them.
+    /// </summary>
+    private static async ValueTask<(bool Refuted, int Segments, long Bytes)> RefutedByPathsAsync(
+        VortexFile file, VortexExpr filter, List<string> columns, CancellationToken cancellationToken)
+    {
+        Dictionary<string, Indexes.VariantDirectory>? directories = null;
+        int segments = 0;
+        long bytes = 0;
+        foreach (string column in columns)
+        {
+            int field = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(column) : -1;
+            if (field < 0)
+            {
+                continue;
+            }
+
+            (Indexes.VariantDirectory? directory, int read, long readBytes) =
+                await Indexes.VariantDirectory.ReadAsync(file, field, cancellationToken).ConfigureAwait(false);
+            segments += read;
+            bytes += readBytes;
+            if (directory is not null)
+            {
+                (directories ??= new Dictionary<string, Indexes.VariantDirectory>(StringComparer.Ordinal))[column] = directory;
+            }
+        }
+
+        return (directories is not null && !Indexes.VariantDirectory.MayMatch(filter, directories), segments, bytes);
     }
 
     /// <summary>The live blocks of <paramref name="live"/>, among those of <paramref name="scope"/> when there is one.</summary>

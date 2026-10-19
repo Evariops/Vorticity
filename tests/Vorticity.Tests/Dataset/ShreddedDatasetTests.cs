@@ -83,6 +83,59 @@ public sealed partial class ShreddedDatasetTests
     }
 
     /// <summary>
+    /// Each object a job writes carries the path directory of its attributes, and a question on a key an
+    /// object lacks, on a class its key never holds, or outside its bounds, refutes it before its data:
+    /// the key "deploy" is held by a hundred rows of the second hour alone. The answers are the
+    /// dataset of levels' own, whose objects carry no directory.
+    /// </summary>
+    [Fact]
+    public async Task AQuestionOnAKeyAnObjectLacksRefutesItBeforeItsData()
+    {
+        await using MemoryObjectStore periodsStore = new MemoryObjectStore();
+        await using MemoryObjectStore levelsStore = new MemoryObjectStore();
+        await using VortexDataset periods = await VortexDataset.CreateAsync(periodsStore, Event.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Event.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+        }, Ct);
+        await using VortexDataset levels = await VortexDataset.CreateAsync(levelsStore, Event.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Event.At)],
+        }, Ct);
+        await AppendAsync(periods, levels);
+        foreach (VortexDataset dataset in new[] { periods, levels })
+        {
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+            {
+            }
+        }
+
+        Assert.Equal(await levels.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct), await periods.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
+        Assert.Equal(100, await periods.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
+        Assert.Equal(0, await periods.Scan<Event>().Where(r => r.Attributes["status"].AsInt64() > 10_000).CountAsync(Ct));
+        Assert.Equal(
+            await levels.Scan<Event>().Where(r => r.Attributes["status"].AsString() == "502").CountAsync(Ct),
+            await periods.Scan<Event>().Where(r => r.Attributes["status"].AsString() == "502").CountAsync(Ct));
+        Assert.Equal(
+            await levels.Scan<Event>().Where(r => r.Attributes["deploy"].AsString() == "v1").CountAsync(Ct),
+            await periods.Scan<Event>().Where(r => r.Attributes["deploy"].AsString() == "v1").CountAsync(Ct));
+
+        // Two of the three objects lack the key: each read its directory, one region, and none of its blocks.
+        ScanPlan plan = await periods.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(Ct);
+        PruningStep step = Assert.Single(plan.Pruning, s => s.Structure == "path directory");
+        Assert.Equal(3, step.SegmentsRead);
+        Assert.InRange(step.BlocksPruned, 1, plan.Blocks - 1);
+        Assert.Equal(plan.Blocks - step.BlocksPruned, plan.LiveBlocks);
+
+        // A bound no object reaches refutes them all: what is read is their directories alone.
+        ScanPlan none = await periods.Scan<Event>().Where(r => r.Attributes["status"].AsInt64() > 10_000).ExplainAsync(Ct);
+        PruningStep refuted = Assert.Single(none.Pruning, s => s.Structure == "path directory");
+        Assert.Equal(none.Blocks, refuted.BlocksPruned);
+        Assert.Equal((refuted.SegmentsRead, refuted.BytesRead), (none.Segments, none.BytesToRead));
+        Assert.False(none.MayMatch);
+    }
+
+    /// <summary>
     /// The .NET half of Rust reading the objects a job shreds: each object above level 0 of a dataset of
     /// periods written out as it is stored, beside its rows in the same order written whole, for
     /// `cargo run --example verify_shredded` to compare (`bench/crosscheck.sh`). It skips rather than
@@ -165,6 +218,7 @@ public sealed partial class ShreddedDatasetTests
             ("score", Variant.From(random.NextDouble())),
             ("status", i % 97 == 0 ? Variant.From("502") : Variant.From(200 + random.Next(4))),
             .. (IEnumerable<(string, Variant)>)(i % 500 == 0 ? [("rare", Variant.From(i))] : []),
+            .. (IEnumerable<(string, Variant)>)(i is >= 3_000 and < 3_100 ? [("deploy", Variant.From($"v{i % 3}"))] : []),
         ]));
 
     /// <summary>Each object's level, and the keys of its attributes' path map, null for none.</summary>

@@ -242,6 +242,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>By column, where a shredded object's keys lie as its chunks are written; null when none shreds an object.</summary>
     private VariantPathMap.Builder?[]? _pathMaps;
 
+    /// <summary>By column, the path directory of a variant column; null when none has one.</summary>
+    private VariantDirectory?[]? _directories;
+
     /// <summary>The rows past which the batches waiting go through the writer, as one.</summary>
     private const int StagedRows = 256;
 
@@ -635,7 +638,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
-            options.SealScratch, options.CarriesSlices || options.ShreddedVariants is { Count: > 0 })
+            options.SealScratch, options.CarriesSlices || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 })
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _zstdLevel = options.ZstdLevel,
@@ -653,6 +656,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         foreach (KeyValuePair<string, int> target in options.ColumnChunkTargetBytes)
         {
             (writer._gathering ??= new Gathering?[writer._fieldCount])[schema.IndexOfField(target.Key)] = new Gathering(target.Value);
+        }
+
+        foreach (KeyValuePair<string, VariantDirectory> column in options.VariantDirectories ?? ImmutableDictionary<string, VariantDirectory>.Empty)
+        {
+            int field = writer._isTabular ? schema.IndexOfField(column.Key) : -1;
+            if (field < 0 || schema.GetField(field).Kind != DTypeKind.Variant)
+            {
+                throw new ArgumentException($"'{column.Key}' is no top-level variant column of the file, and only those have a path directory.", nameof(options));
+            }
+
+            (writer._directories ??= new VariantDirectory?[writer._fieldCount])[field] = column.Value;
         }
 
         foreach (KeyValuePair<string, VariantShredding> column in options.ShreddedVariants ?? ImmutableDictionary<string, VariantShredding>.Empty)
@@ -1987,6 +2001,21 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     VariantPathMap built = map.Build(_gathering?[field]?.ChunkRows ?? _chunkRows, [.. _arrayEncodings.Ids]);
                     await closed.AddVariantPathsAsync(_sink, field, built, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            // Every path and class of a variant column, for a question that refutes the file by them.
+            for (int field = 0; field < (_directories?.Length ?? 0); field++)
+            {
+                if (_directories![field] is { } paths)
+                {
+                    if (paths.Rows != _rowCount)
+                    {
+                        throw new InvalidOperationException(
+                            $"The path directory of column {field} counts {paths.Rows} rows of a file of {_rowCount}: it counts each row once.");
+                    }
+
+                    await closed.AddVariantDirectoryAsync(_sink, field, paths, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
                 }
             }
         }

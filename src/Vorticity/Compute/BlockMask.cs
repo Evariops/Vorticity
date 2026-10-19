@@ -125,6 +125,9 @@ internal sealed class BlockMask
         }
     }
 
+    /// <summary>Marks every block as proven to hold no matching row: what a structure that refutes the whole file says.</summary>
+    internal void KillAll() => _bits.AsSpan().Clear();
+
     /// <summary>
     /// Leaves live exactly the blocks <paramref name="rows"/> overlaps, whatever was live before.
     /// </summary>

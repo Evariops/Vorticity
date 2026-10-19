@@ -347,6 +347,18 @@ nor count it. The directory and the key table are part of the object's synopsis 
 [synopsis cache](20-time-window-aggregates.md#11-the-synopsis-cache) keeps them. Below the object, a path is pruned by its block statistics and found by its indexes ([what
 the format gives a path, and what Vorticity adds](#510-what-the-format-gives-a-path-and-what-vorticity-adds)).
 
+As built ([the path directory](10-indexes.md#46-vorticityvariantdirectoryv1-every-path-a-variant-holds)),
+the directory comes from the count a job already makes to cut the object's slices, so an append
+writes none. Its type is the class a question reads (`AsInt64` takes integers of every width,
+`AsDouble` floats and doubles), the null count is the count of the null class, and a text's bounds
+are cut as a text column's zones cut theirs. A scan whose filter asks a path for a value reads the
+directory first and refutes the object, reading no block, when the path, its class or its bounds
+cannot match. Counting the bounds adds 41 ns a row of six to eight attributes to the count (223
+against 181, `--micro shredwrite`), 32 of them for the three texts. Two parts wait: the place in the
+synopsis, with the synopsis, and the postings of a residual path, since the rows a job counts are not
+yet in the order of the object it writes. Until the key table bounds it, the directory keeps every
+path: an object whose rows each hold one key of its own in a thousand carries 1 009 entries in 7 KB.
+
 ### 5.5 Shapes
 
 A row's shape is the set of paths the object shreds that the row holds, with their types, and one bit

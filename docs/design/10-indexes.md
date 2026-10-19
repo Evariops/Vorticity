@@ -132,7 +132,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#46-the-file-level-filter)).
+file-level filter](#47-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -237,10 +237,30 @@ a flat layout decodes a segment whose tree is inlined, never fetching another ke
 buffers do not lie together in a chunk is left out of that chunk, which is then read whole. An append
 drops the entry.
 
-### 4.6 The file-level filter
+### 4.6 `vorticity.variant.directory.v1`: every path a variant holds
+
+A job of a dataset of periods counts the paths of each variant column as it cuts the object's slices
+([21-variant-columns.md](21-variant-columns.md#54-the-path-directory)), and the object carries what it
+counted: for every path and class of value the rows hold there (a boolean, an integer, a number, a
+text, a timestamp, an object, a list, a null, anything else), how many values, where they lie (the
+typed column a shredded path keeps, the values of other classes beside it, or the residual), and their
+bounds. An integer or a timestamp keeps its least and greatest, a number its least and greatest and
+whether one was NaN, a boolean which of the two it saw, and a text its least and greatest cut to the
+bytes a text column's zones keep, the greatest one past its cut when a longer text shares it. The
+entry is on the variant column. Its one run holds one region, behind a version byte and the body's
+length, the body one zstd frame.
+
+A scan whose filter asks a path for a value reads the directories of the columns it names, one region
+each, before the Bloom filters. It refutes the file when a fenced predicate asks for a path the file
+never holds, for a class the path never holds there, or for values outside its bounds, under the
+filter's conjunctions and disjunctions. A presence asked absent, a conversion of any class, and a
+negation refute nothing. A refuted file reads no block (`ScanPlan.MayMatch` is false, and `Explain`
+names the step `path directory`). An append drops the entry, since it parses none of its rows.
+
+### 4.7 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
-statistics, and `ScanPlan.MayMatch` is false when either proves the scan empty. `VortexFile.MayMatch`
+statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`
 answers from the statistics alone, without a read, for an engine that prunes many files before
 opening any. An append does not extend a tree, since filters of different sizes do not merge.
 Instead it adds a tree for its own blocks.

@@ -607,7 +607,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal ObjectDraft StartObjectUnder(
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool sliced = false,
-        IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null)
+        IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
@@ -624,6 +625,13 @@ public sealed class VortexDataset : IAsyncDisposable
                 ColumnChunkTargetBytes = write.ColumnChunkTargetBytes.SetItems(variantChunks ?? ImmutableDictionary<string, int>.Empty),
             };
         }
+
+        // Every path and class of the variant columns, which a job counted from the object's rows.
+        if (directories is { Count: > 0 })
+        {
+            write = write with { VariantDirectories = directories };
+        }
+
         if (_store is SealedObjectStore { Seals: true })
         {
             // The runs an index of the object moves to disk hold its values: sealed as the object is.
