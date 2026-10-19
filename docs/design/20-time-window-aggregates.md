@@ -1209,6 +1209,19 @@ The fuzzer that drives deletes, updates and compactions checks, at every version
 walked through runs equals the count of the live rows, and that every coarse table it uses, corrected
 by the marked rows, equals the merge of its slices' live runs.
 
+As built, the marked rows of an object a question answers from its tables are read by their places,
+through the chunk directories of the columns its tables key and measure, beside the tables. Each row
+is charged to its table's row by its slice's bucket and the values of its keys. Its count comes off,
+and so do the states the question reads: a count of values, an exact sum. An extreme the question
+reads stands unless the marked row holds it. A float sum stands while its top bin does, which holds
+when the row is neither the least nor the greatest of its group and no earlier marked row was. A
+table row whose every row is marked leaves no group. When a row cannot come out exactly, the object
+is read as rows. Under five rounds of random deletes, every question of `SynopsisAnswerTests` gives
+the bits of the rows left, with the synopses on and off. A count per service reads 15 corrected table
+rows instead of 6 400 rows. The correction is computed at each question and not kept yet. A delete
+that rewrites an object rather than marking its rows leaves it without a synopsis, so its rows are
+read until a compaction writes it again.
+
 ## 11. The synopsis cache
 
 ### What it keeps
