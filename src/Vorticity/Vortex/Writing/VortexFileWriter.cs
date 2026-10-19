@@ -239,6 +239,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>By column, what a variant column shreds, null for a column written whole; null when none shreds.</summary>
     private VariantShredding?[]? _shredding;
 
+    /// <summary>By column, where a shredded object's keys lie as its chunks are written; null when none shreds an object.</summary>
+    private VariantPathMap.Builder?[]? _pathMaps;
+
     /// <summary>The rows past which the batches waiting go through the writer, as one.</summary>
     private const int StagedRows = 256;
 
@@ -632,7 +635,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
-            options.SealScratch, options.CarriesSlices)
+            options.SealScratch, options.CarriesSlices || options.ShreddedVariants is { Count: > 0 })
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _zstdLevel = options.ZstdLevel,
@@ -661,6 +664,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             (writer._shredding ??= new VariantShredding?[writer._fieldCount])[field] = column.Value;
+            if (column.Value.Kind == VariantShreddingKind.Object)
+            {
+                string[] keys = new string[column.Value.Keys.Count];
+                for (int key = 0; key < keys.Length; key++)
+                {
+                    keys[key] = column.Value.Keys[key].Name;
+                }
+
+                (writer._pathMaps ??= new VariantPathMap.Builder?[writer._fieldCount])[field] = new VariantPathMap.Builder(keys);
+            }
         }
 
         return writer;
@@ -1764,6 +1777,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+            _pathMaps?[field]?.Add(blob.Memory.Span, _segments[segment].Offset, _columnSegments[field].Count);
             _columnSegments[field].Add(segment);
             _indexes?.AddColumnBytes(field, _segments[segment].Length);
         }
@@ -1964,6 +1978,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_slices is not null)
             {
                 await closed.AddSliceChunksAsync(_sink, ChunkDirectory(), _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+            }
+
+            // Where each shredded key of a variant column lies, for a reader of one key.
+            for (int field = 0; field < (_pathMaps?.Length ?? 0); field++)
+            {
+                if (_pathMaps![field] is { } map)
+                {
+                    VariantPathMap built = map.Build(_gathering?[field]?.ChunkRows ?? _chunkRows, [.. _arrayEncodings.Ids]);
+                    await closed.AddVariantPathsAsync(_sink, field, built, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
 

@@ -624,8 +624,9 @@ internal sealed class IndexWriter : IDisposable
 
         foreach (IndexEntry entry in entries)
         {
-            // The slice kinds describe the file as its writer cut it, which an append changes.
-            if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks
+            // The slice kinds and the variant paths describe the file as its writer cut it, which an
+            // append changes.
+            if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.VariantPaths
                 || Kept(entry, boundary) is not { } kept)
             {
                 continue;
@@ -1513,6 +1514,28 @@ internal sealed class IndexWriter : IDisposable
             [new IndexRun(0, Blocks(rows, length), regions, [])]));
     }
 
+    /// <summary>
+    /// Writes where each shredded key of the variant column <paramref name="field"/> lies, a region per
+    /// key from the sink's position, and adds the entry that names them: on the column, the encodings
+    /// and the keys in its options, one run over every block of the file's <paramref name="rows"/>.
+    /// </summary>
+    internal async ValueTask AddVariantPathsAsync(
+        ISegmentSink sink, int field, VariantPathMap map, long rows, int blockRows, CancellationToken cancellationToken)
+    {
+        IndexSegment[] regions = new IndexSegment[map.Keys.Count];
+        for (int key = 0; key < regions.Length; key++)
+        {
+            byte[] bytes = map.KeyBytes(key);
+            regions[key] = IndexSegment.Of(sink.Position, bytes, 0);
+            await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        }
+
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            IndexKinds.VariantPaths, [checked((uint)field)], (ulong)length, map.OptionBytes(),
+            [new IndexRun(0, Blocks(rows, length), regions, [])]));
+    }
+
     private static uint Blocks(long rows, int length) => checked((uint)((rows + length - 1) / length));
 
     /// <summary>
@@ -1589,8 +1612,8 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null)
     {
-        // A file's time slices ride in the directory whatever the policy asks.
-        if (!Enabled && _preserved is not { Count: > 0 } && !_entries.Exists(static entry => entry.Kind == IndexKinds.Slices))
+        // A file's time slices and its variant paths ride in the directory whatever the policy asks.
+        if (!Enabled && _preserved is not { Count: > 0 } && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths))
         {
             return null;
         }

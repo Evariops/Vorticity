@@ -132,7 +132,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#45-the-file-level-filter)).
+file-level filter](#46-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -222,7 +222,22 @@ segment ends with its encoding tree, and never reads the footer ([the rows of a 
 slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer)). An append drops both slice
 kinds, since they describe the file as its writer cut it.
 
-### 4.5 The file-level filter
+### 4.5 `vorticity.variant.paths.v1`: where each shredded key of a variant lies
+
+A writer that shreds a variant column ([21-variant-columns.md](21-variant-columns.md#52-how-a-variant-is-stored))
+notes, for each key of the column's tree and in each chunk, the range of the key's buffers in the
+chunk's segment, the dtype the key wears there (its typed column's, or a variant's where the key kept
+values of other classes) and the key's encoding tree over those buffers alone. The writer lays a key's
+buffers out together, in its tree's depth-first order, so the range is one read. The entry is on the
+variant column. Its options hold the file's table of array encodings and the keys, and its one run has a
+payload region per key, behind a version byte and the body's length, the body one zstd frame: the
+trees of one key differ little from chunk to chunk, so a key costs 32 to 82 bytes a chunk where its
+trees take 219 to 929. A reader of one key reads its region, then each chunk's range, and decodes it as
+a flat layout decodes a segment whose tree is inlined, never fetching another key's bytes. A key whose
+buffers do not lie together in a chunk is left out of that chunk, which is then read whole. An append
+drops the entry.
+
+### 4.6 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics, and `ScanPlan.MayMatch` is false when either proves the scan empty. `VortexFile.MayMatch`

@@ -492,10 +492,13 @@ The path map stores a path's part of the tree once while its chunks encode it al
 what differs (where the buffers lie, their lengths, a dictionary's size), which is what keeps its
 entries to a few dozen bytes. Chunks encode a path alike only if the writer makes them: each column
 chooses its encoding once per chunk ([blocks-and-chunks.md](../guide/blocks-and-chunks.md)), so
-dictionaries, run ends, frames of reference and widths differ, and an entry may grow to a few hundred
-bytes, back to the order of the inlined trees set aside above. The writer therefore fixes a path's
-encoding once per object, at a cost in compression the write bench measures, unless the path map,
-measured on real mixes first, stays small without it (hypothesis).
+dictionaries, run ends, frames of reference and widths differ, and an entry grows to a few hundred
+bytes: 219 to 929 bytes a chunk, measured on four keys. The trees of one key still differ little from
+chunk to chunk, so the map keeps each tree whole and compresses each key's region as one zstd frame,
+which brings an entry to 32 to 82 bytes a chunk, a few dozen as with an encoding fixed per object,
+without its cost in compression ([the path map](10-indexes.md#45-vorticityvariantpathsv1-where-each-shredded-key-of-a-variant-lies)).
+A key read through it fetches the key's range in each chunk and nothing else of the chunk
+(`VariantPathMapTests`).
 
 Reading a path then goes as follows:
 
@@ -839,7 +842,7 @@ Every figure is an estimate.
 | a range on a path skips what it skips on a declared column | the blocks and bytes a range question reads over a shredded path that is no synopsis column, against the same question over a declared column holding the same values in the same order: the same blocks, on a counting store |
 | an index on a path never matches across classes | a path holding 502 as an integer in some chunks and `"502"` as text in others, probed by `AsInt64() == 502` and by `AsString() == "502"`: each finds its own rows and no other |
 | the integers of a path share one column | a path written as `int8`, `int16`, `int32` and `int64` across its rows reads back from one typed column, each value equal to the one written under the format's equivalence classes, in Vorticity and in Rust |
-| the path map and the trees stay within the column budget | their bytes, and the nodes of every tree, as ratchets on a bench of 10⁴ paths over a day of chunks |
+| the path map and the trees stay within the column budget | their bytes, and the nodes of every tree, as ratchets on a bench of 10⁴ paths over a day of chunks (`VariantPathMapTests`: at most 90 bytes a key and a chunk) |
 | the synopsis counts a path exactly, shredded or not | at every version of the fuzzer, every value count, coarse table and run of a path equals the count of the parsed live rows that hold it |
 | the order pays for itself | the runs of every synopsis column under the measured order, against the order by numbers of distinct values, on real mixes of logs, and the cost of measuring it on a sample against the exact greedy order |
 | nulls cost what they hold | a path held by half of a chunk's rows costs no bit per row once its validity is encoded, on the write bench, and Rust reads it back in the cross-check (`ShreddedVariantWriteTests`: a validity of two runs written as runs; the slots of the null values remain, and the choice weighs them) |
@@ -886,7 +889,7 @@ To clean up: the refusal of shredded variants, its messages and its tests, once 
 | 18 | the integers of one path | one typed column for every width, rebuilt at the widest, equal in value under the format's classes | a column per width, which splits a path between its typed column and its field's `value` |
 | 19 | the validity of a shredded field | runs or sparse, chosen by their cost, once Rust reads it there | a plain bitmap, a bit per row and per field |
 | 20 | the shapes a variant chunk holds | measured first: the shape first in the order, chunks cut where the shape changes, or a budget that counts a chunk's shapes | chunks of 10⁶ rows whatever their shapes |
-| 21 | a path's encoding across chunks | fixed per object, so the path map stays small | chosen per chunk, which the path map pays for |
+| 21 | a path's encoding across chunks | chosen per chunk, each key's region of the path map one zstd frame: measured at 32 to 82 bytes a chunk, so fixing the encoding per object is not needed (decided 2026-10-19) | fixed per object, at a cost in compression |
 | 22 | the variants of level 0 | parsed once per query node and object, kept in memory until it leaves level 0 | shredded in the append, from the previous object's choice of paths |
 
 ## 14. Alternatives weighed

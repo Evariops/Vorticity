@@ -45,6 +45,14 @@ internal static class IndexKinds
     public const string SliceChunks = "vorticity.slices.chunks.v1";
 
     /// <summary>
+    /// Where each shredded key of a variant column lies, chunk by chunk, on that column: the
+    /// encodings and the keys in its options, and a payload region per key holding the range of its
+    /// buffers and its tree in each chunk, so a read of one key fetches its bytes alone
+    /// (<see cref="VariantPathMap"/>).
+    /// </summary>
+    public const string VariantPaths = "vorticity.variant.paths.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -54,7 +62,7 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or Slices or SliceChunks => true,
+                or PostingsNgram3 or Slices or SliceChunks or VariantPaths => true,
             _ => false,
         };
 
