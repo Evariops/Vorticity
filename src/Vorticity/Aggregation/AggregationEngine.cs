@@ -4598,6 +4598,9 @@ internal static class AggregationEngine
             OrderPath = null,
             Descending = false,
             Options = spec.Options with { Compact = false },
+
+            // The window a dataset grows for the question, the same whether its states or its rows answer.
+            Aligning = spec.Options.AlignWindow ? StateRequest.Of(plan, new AggregateSlot?[plan.Aggregates.Length], top: null) : null,
         };
     }
 

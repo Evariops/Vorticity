@@ -160,6 +160,26 @@ of every object that holds no float at the path, and reads the rows of the other
 every kind of value, so it reads the rows, as a key an object leaves unshredded does, since its tables
 count only the rows that hold it.
 
+A window whose ends fall inside an hour reads the rows its tables cannot answer there: the slices it
+cuts when a table of slices holds the question's keys, the whole hour when only the hour's table does.
+A dashboard over the last N minutes has an end inside an hour every time. `ScanOptions.AlignWindow`
+lets each end move out to the nearest bound the tables answer at, the slice's, the hour's or the
+object's, and no further than the rows held, so the question reads no row. It then answers that
+window exactly, which the metrics give back: divide a count by the window applied, not the one asked.
+
+```csharp
+var question = dataset.Scan<Request>().With(new ScanOptions { AlignWindow = true })
+    .Where(r => r.At >= now.AddMinutes(-15) && r.At < now)
+    .GroupBy(r => r.Service).Select(g => (g.Key, g.Count()));
+var counts = await question.As<ServiceCount>().ToRecordsAsync().ToListAsync();
+var applied = (question.Metrics.WindowFrom, question.Metrics.WindowTo);
+```
+
+On a day of requests behind a store 30 ms away, a count per service over a window that cuts its first
+and last hours took 8 requests in 6 round trips warm, 194 ms, and aligned it took none, 4 ms
+(`vortex-queries --micro questions --only window`). The rows give the same answer under the option, so
+`UseSynopses = false` still checks it.
+
 The objects a synopsis answers are read newest first and many at once, as many as the session lets
 reads be in flight (`VortexSessionOptions.MaxConcurrentReads`), so a day of hourly objects costs the
 round trip of one hour. A filter that leaves out one value of a declared identifier,

@@ -253,6 +253,57 @@ public sealed partial class SynopsisAnswerTests
         Assert.Equal(sealedHour ? 2 : 0, store.DependentSteps);
     }
 
+    /// <summary>
+    /// A window that cuts both sealed hours, aligned: each end moves out to the nearest bound the hour's tables answer
+    /// the question at, its minute's when a table of slices holds the question's keys, as the methods' does, its
+    /// hour's otherwise, as for the services, and no further than the rows the hour holds. No row is read, and the
+    /// answer is the exact one of the window applied, which the metrics give, also when the rows answer it. The same
+    /// window not aligned reads the rows the tables cannot answer, and says no window.
+    /// </summary>
+    [Theory]
+    [InlineData("count by method", 1)]
+    [InlineData("count", 60)]
+    [InlineData("count and bytes", 60)]
+    public async Task AnAlignedWindowReadsNoRowAndAnswersTheWindowItApplied(string question, int growthMinutes)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store);
+        DateTimeOffset from = Noon.AddMinutes(37.5);
+        DateTimeOffset to = Noon.AddMinutes(101.5);
+        Vorticity.Aggregation aligned = Asked(dataset.Scan<Request>().With(new ScanOptions { AlignWindow = true }), question, from, to);
+        (List<string> answer, ScanMetrics metrics) = await GroupsAsync(aligned);
+        DateTimeOffset appliedFrom = Assert.NotNull(metrics.WindowFrom);
+        DateTimeOffset appliedTo = Assert.NotNull(metrics.WindowTo);
+        Console.Out.Write($"ALIGNED WINDOW, {question}: [{appliedFrom:HH:mm:ss}, {appliedTo:HH:mm:ss}) for [{from:HH:mm:ss}, {to:HH:mm:ss}), {metrics.SynopsisRows} table rows, {metrics.Rows} rows.\n");
+        Assert.Equal(0, metrics.Rows);
+        Assert.True(metrics.SynopsisRows > 0);
+        Assert.InRange(from - appliedFrom, TimeSpan.FromTicks(1), TimeSpan.FromMinutes(growthMinutes));
+        Assert.InRange(appliedTo - to, TimeSpan.FromTicks(1), TimeSpan.FromMinutes(growthMinutes));
+
+        (List<string> exact, _) = await GroupsAsync(Asked(dataset.Scan<Request>().With(new ScanOptions { UseSynopses = false }), question, appliedFrom, appliedTo));
+        Assert.Equal(exact, answer);
+
+        // Read from the rows, the question applies the same window: turning the synopses off changes no answer.
+        (List<string> rows, ScanMetrics read) = await GroupsAsync(
+            Asked(dataset.Scan<Request>().With(new ScanOptions { UseSynopses = false, AlignWindow = true }), question, from, to));
+        Assert.Equal((appliedFrom, appliedTo), (read.WindowFrom, read.WindowTo));
+        Assert.Equal(answer, rows);
+
+        (_, ScanMetrics asked) = await GroupsAsync(Asked(dataset.Scan<Request>(), question, from, to));
+        Console.Out.Write($"ASKED WINDOW, {question}: {asked.SynopsisRows} table rows, {asked.Rows} rows, {asked.EdgeRows} edge rows.\n");
+        Assert.True(asked.Rows + asked.EdgeRows > 0);
+        Assert.Null(asked.WindowFrom);
+        Assert.Null(asked.WindowTo);
+    }
+
+    /// <summary>A count by method, or by service with the sum of its bytes for the last question, over a window.</summary>
+    private static Vorticity.Aggregation Asked(Scan<Request> scan, string question, DateTimeOffset from, DateTimeOffset to) => question switch
+    {
+        "count by method" => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.Count())),
+        "count" => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => r.Service).Select(g => (g.Key, g.Count())),
+        _ => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
+    };
+
     /// <summary>A count and a sum of bytes by service over a window.</summary>
     private static async ValueTask<List<ServiceTotals>> TotalsAsync(VortexDataset dataset, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken) =>
         await dataset.Scan<Request>().Where(r => r.At >= from && r.At < to).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)))

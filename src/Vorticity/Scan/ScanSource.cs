@@ -83,6 +83,13 @@ internal sealed record ScanSpec
     /// states.
     /// </summary>
     internal Aggregating.StateRequest? States { get; init; }
+
+    /// <summary>
+    /// The keys and measures of the aggregation a window is grown for under <see cref="ScanOptions.AlignWindow"/>,
+    /// set whether the pass takes states or reads rows, so that both answer the same window; null when the scan
+    /// is no such aggregation, or aligns nothing.
+    /// </summary>
+    internal Aggregating.StateRequest? Aligning { get; init; }
 }
 
 /// <summary>

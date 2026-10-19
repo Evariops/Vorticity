@@ -22,14 +22,15 @@ namespace Vorticity.Benchmarks.Queries;
 /// (<c>--rate</c>) and half as many log records, 30 ms a round trip (<c>--latency</c>). At that scale an hour's
 /// tables weigh far more against its rows than a day's do at the design's rate, so the default budget of the
 /// tables (<c>--budget</c>, in thousandths of the data, 100) keeps the shallow ones only. The counts are the
-/// figures to hold; the times only say where the time goes.
+/// figures to hold; the times only say where the time goes. <c>--only</c> asks only the questions whose name holds
+/// its text.
 /// </remarks>
 internal static class QuestionBench
 {
     /// <summary>The instant the generated datasets start at.</summary>
     internal static readonly DateTimeOffset Start = new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero);
 
-    internal static async Task<int> Run(int hours, double rate, int latency, int rounds, int budget)
+    internal static async Task<int> Run(int hours, double rate, int latency, int rounds, int budget, string? only = null)
     {
         await using MemoryObjectStore requestBytes = new MemoryObjectStore();
         await using CountingObjectStore requests = new CountingObjectStore(requestBytes);
@@ -65,10 +66,14 @@ internal static class QuestionBench
             ("one host per minute", scan => scan.Where(r => r.Host == "host-000-00").GroupBy(r => r.At.Truncate(CalendarUnit.Minute)).Select(g => (g.Key, g.Count()))),
             ("every row but one request's, per service and per 12 hours", scan => scan.Where(r => r.RequestId != needle).GroupBy(r => (r.Service, r.At.Bucket(half))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()))),
             ("a count per service and per 12 hours, the window unaligned", scan => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => (r.Service, r.At.Bucket(half))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()))),
+            ("the same, the window aligned (ScanOptions.AlignWindow)", scan => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => (r.Service, r.At.Bucket(half))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()))),
         ];
         foreach ((string name, Func<Scan<GeneratedRequest>, Aggregation> ask) in requestQuestions)
         {
-            await AskAsync(requestBytes, requests, name, ask, rounds);
+            if (only is null || name.Contains(only, StringComparison.Ordinal))
+            {
+                await AskAsync(requestBytes, requests, name, ask, rounds, align: name.Contains("AlignWindow", StringComparison.Ordinal));
+            }
         }
 
         (string Name, Func<Scan<LogRow>, Aggregation> Ask)[] logQuestions =
@@ -83,7 +88,10 @@ internal static class QuestionBench
         ];
         foreach ((string name, Func<Scan<LogRow>, Aggregation> ask) in logQuestions)
         {
-            await AskAsync(logBytes, logs, name, ask, rounds);
+            if (only is null || name.Contains(only, StringComparison.Ordinal))
+            {
+                await AskAsync(logBytes, logs, name, ask, rounds);
+            }
         }
 
         return 0;
@@ -184,7 +192,8 @@ internal static class QuestionBench
     /// <paramref name="rounds"/>. <paramref name="bytes"/> is the store under the count, whose wait is lifted for a
     /// first ask.
     /// </summary>
-    internal static async Task AskAsync<TRecord>(MemoryObjectStore bytes, CountingObjectStore store, string name, Func<Scan<TRecord>, Aggregation> ask, int rounds)
+    internal static async Task AskAsync<TRecord>(
+        MemoryObjectStore bytes, CountingObjectStore store, string name, Func<Scan<TRecord>, Aggregation> ask, int rounds, bool align = false)
         where TRecord : IVortexRecord<TRecord>
     {
         // Asked once each way first, with no wait and nothing kept, so that neither cold ask pays the question's
@@ -195,7 +204,7 @@ internal static class QuestionBench
         {
             await using VortexSession session = VortexSession.Create(static _ => { });
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
-            await MeasureAsync(store, dataset, ask, synopses);
+            await MeasureAsync(store, dataset, ask, synopses, align);
         }
 
         bytes.Latency = latency;
@@ -206,11 +215,11 @@ internal static class QuestionBench
             {
                 await using VortexSession session = VortexSession.Create(options => options.SynopsisCache = new SynopsisCache(directory, 256L << 20));
                 await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
-                Measured cold = await MeasureAsync(store, dataset, ask, synopses);
-                Measured warm = await MeasureAsync(store, dataset, ask, synopses);
+                Measured cold = await MeasureAsync(store, dataset, ask, synopses, align);
+                Measured warm = await MeasureAsync(store, dataset, ask, synopses, align);
                 for (int round = 1; round < rounds; round++)
                 {
-                    Measured again = await MeasureAsync(store, dataset, ask, synopses);
+                    Measured again = await MeasureAsync(store, dataset, ask, synopses, align);
                     warm = again.Milliseconds < warm.Milliseconds ? again : warm;
                 }
 
@@ -219,7 +228,12 @@ internal static class QuestionBench
                 Console.WriteLine(Line(string.Empty, path, "warm", warm));
                 if (synopses)
                 {
-                    Console.WriteLine($"    plan: {await PlanAsync(dataset, ask)}");
+                    Console.WriteLine($"    plan: {await PlanAsync(dataset, ask, align)}");
+                }
+
+                if (cold.Window is { } window)
+                {
+                    Console.WriteLine($"    window applied: [{window.From:MM-dd HH:mm:ss}, {window.To:MM-dd HH:mm:ss})");
                 }
             }
             finally
@@ -229,11 +243,12 @@ internal static class QuestionBench
         }
     }
 
-    private static async Task<Measured> MeasureAsync<TRecord>(CountingObjectStore store, VortexDataset dataset, Func<Scan<TRecord>, Aggregation> ask, bool synopses)
+    private static async Task<Measured> MeasureAsync<TRecord>(
+        CountingObjectStore store, VortexDataset dataset, Func<Scan<TRecord>, Aggregation> ask, bool synopses, bool align)
         where TRecord : IVortexRecord<TRecord>
     {
         store.Reset();
-        Aggregation aggregation = ask(dataset.Scan<TRecord>().With(new ScanOptions { UseSynopses = synopses }));
+        Aggregation aggregation = ask(dataset.Scan<TRecord>().With(new ScanOptions { UseSynopses = synopses, AlignWindow = align }));
         TimeSpan cpu = Environment.CpuUsage.TotalTime;
         long begin = Stopwatch.GetTimestamp();
         long groups = 0;
@@ -249,14 +264,17 @@ internal static class QuestionBench
         double milliseconds = Stopwatch.GetElapsedTime(begin).TotalMilliseconds;
         double cpuMilliseconds = (Environment.CpuUsage.TotalTime - cpu).TotalMilliseconds;
         ScanMetrics metrics = aggregation.Metrics;
-        return new Measured(store.Requests, store.DependentSteps, store.BytesRead, metrics.SynopsisRows, metrics.Rows, milliseconds, cpuMilliseconds, groups);
+        return new Measured(store.Requests, store.DependentSteps, store.BytesRead, metrics.SynopsisRows, metrics.Rows, milliseconds, cpuMilliseconds, groups)
+        {
+            Window = metrics.WindowFrom is { } from && metrics.WindowTo is { } to ? (from, to) : null,
+        };
     }
 
     /// <summary>What the plan says each object reads, counted by kind, and why the first object read as rows is.</summary>
-    private static async Task<string> PlanAsync<TRecord>(VortexDataset dataset, Func<Scan<TRecord>, Aggregation> ask)
+    private static async Task<string> PlanAsync<TRecord>(VortexDataset dataset, Func<Scan<TRecord>, Aggregation> ask, bool align)
         where TRecord : IVortexRecord<TRecord>
     {
-        ScanPlan plan = await ask(dataset.Scan<TRecord>()).ExplainAsync();
+        ScanPlan plan = await ask(dataset.Scan<TRecord>().With(new ScanOptions { AlignWindow = align })).ExplainAsync();
         SortedDictionary<string, int> kinds = new SortedDictionary<string, int>(StringComparer.Ordinal);
         string? why = null;
         foreach (StatesStep step in plan.States)
@@ -274,5 +292,9 @@ internal static class QuestionBench
         $"{name,-58} {path,-8} {temperature,-4} {measured.Requests,8} {measured.Steps,6} {measured.Bytes / 1e6,8:F2} {measured.States,9} {measured.Rows,9} {measured.Milliseconds,9:F1} {measured.CpuMilliseconds,8:F1}";
 
     /// <summary>What one asking cost: the store's requests, dependent round trips and bytes, the states and rows the answer read, its time.</summary>
-    private readonly record struct Measured(long Requests, long Steps, long Bytes, long States, long Rows, double Milliseconds, double CpuMilliseconds, long Groups);
+    private readonly record struct Measured(long Requests, long Steps, long Bytes, long States, long Rows, double Milliseconds, double CpuMilliseconds, long Groups)
+    {
+        /// <summary>The window an aligned question applied, null for one asked as it is.</summary>
+        internal (DateTimeOffset From, DateTimeOffset To)? Window { get; init; }
+    }
 }

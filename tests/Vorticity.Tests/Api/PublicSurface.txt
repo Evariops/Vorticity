@@ -1901,6 +1901,8 @@ Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
 Vorticity:     method void Deconstruct(out long, out long, out long, out long, out long, out long, out long)
 Vorticity:     property GroupMetrics Grouping { get; init; }
+Vorticity:     property Nullable<DateTimeOffset> WindowFrom { get; init; }
+Vorticity:     property Nullable<DateTimeOffset> WindowTo { get; init; }
 Vorticity:     property long Batches { get; init; }
 Vorticity:     property long BlocksDecoded { get; init; }
 Vorticity:     property long BlocksPruned { get; init; }
@@ -1919,6 +1921,7 @@ Vorticity:     method bool op_Equality(ScanOptions, ScanOptions)
 Vorticity:     method bool op_Inequality(ScanOptions, ScanOptions)
 Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
+Vorticity:     property bool AlignWindow { get; init; }
 Vorticity:     property bool Compact { get; init; }
 Vorticity:     property bool UseIndexes { get; init; }
 Vorticity:     property bool UseStatistics { get; init; }

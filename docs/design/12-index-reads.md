@@ -238,9 +238,12 @@ are read as rows, through the chunk directories, without the footer
 ([the rows of a time slice](#51-the-rows-of-a-time-slice-without-the-footer)). An object that no table
 answers, or whose every row lies at an edge, is read as rows. The predicates on keys run once per table
 row. A key may be a column, a function of the instant, a partition column, whose one value the object
-holds, or a key of a variant column read strictly as an integer, a text or a boolean, which the
-object's synopsis path of the same class stands for. A key the object leaves in its residual is counted
-over the rows that hold it alone, so it answers as a measure only.
+holds, or a key of a variant column read strictly as an integer, a double, a text or a boolean, which
+the object's synopsis path of the same class stands for, a double only where the object holds no float
+there. A key the object leaves in its residual is counted over the rows that hold it alone, so it
+answers as a measure only. Under `ScanOptions.AlignWindow` the window grows first, each end to the
+nearest bound at which the object it cuts answers with no row, and no further than that object's rows
+([the window aligned](16-queries.md#93-statistics-and-zone-maps)).
 
 Two kinds of rows come out of a table's states rather than make the object read its rows. The rows a
 delete marked are found by their positions, charged to the table row of their bucket and keys, and

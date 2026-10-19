@@ -872,6 +872,16 @@ states makes the pass block rather than stream when one of its objects would ans
 with their objects, not in key order. `ScanOptions.UseSynopses` turns this off, and the metrics count
 the table rows folded (`SynopsisRows`) and the rows read at the edges (`EdgeRows`).
 
+`ScanOptions.AlignWindow` grows the window on the instant to what the tables answer whole. The pass
+carries the question's keys and measures beside its states (`ScanSpec.Aligning`), set from the plan
+whether the states or the rows answer, so the source grows the same window either way: each end that
+cuts an object moves, in the object of most rows it cuts, to the nearest bound at which that object
+answers its side of the window with no row, its slice's, its hour's or its own, and no further than
+the instants it holds. The source rewrites the filter's bounds on the instant once per scan, from the
+entries alone, and the metrics give the window applied (`WindowFrom`, `WindowTo`). Another object the
+moved end cuts, a late or fresh one whose slices fall elsewhere, reads its rows there, so the answer
+is the exact one of that window.
+
 ### 9.4 Parallelism and the merge
 
 At a degree above one the rows are cut into ranges that end where a chunk does, so no chunk is read

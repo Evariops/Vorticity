@@ -36,38 +36,95 @@ internal sealed class DatasetScanSource : ScanSource
     internal override bool KeepsStates => _dataset.Options.Periods is not null;
 
     /// <summary>Whether the synopsis of an object the scan covers answers: its entry's table of contents says, with no read of the object.</summary>
-    internal override ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
+    internal override async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
         KeepsStates && spec.Options.UseSynopses && !spec.MatchesNothing
-            ? Builder(spec with { States = states }, null).AnswersAnyAsync(cancellationToken)
-            : ValueTask.FromResult(false);
+        && await Builder(await AlignedAsync(spec with { States = states }, null, cancellationToken).ConfigureAwait(false), null)
+            .AnswersAnyAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>The version every sink of the scan reads.</summary>
     internal ulong Version => _version.Version;
 
     internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
-        spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>() : Builder(spec, metrics).ExecuteAsync();
+        spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>()
+        : spec.Options.AlignWindow ? AlignedBatchesAsync(spec, metrics)
+        : Builder(spec, metrics).ExecuteAsync();
 
-    internal override ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
-        spec.MatchesNothing ? ValueTask.FromResult(0L) : Builder(spec, metrics).CountAsync(cancellationToken);
+    /// <summary>The batches of the scan whose window is aligned to its slices first.</summary>
+    private async IAsyncEnumerable<RecordBatch> AlignedBatchesAsync(
+        ScanSpec spec, ScanCounters metrics, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ScanSpec aligned = await AlignedAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
+        await foreach (RecordBatch batch in Builder(aligned, metrics).ExecuteAsync(cancellationToken).ConfigureAwait(false))
+        {
+            yield return batch;
+        }
+    }
 
-    internal override ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
-        spec.MatchesNothing ? ValueTask.FromResult(false) : Builder(spec, metrics).AnyAsync(cancellationToken);
+    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+        spec.MatchesNothing
+            ? 0L
+            : await Builder(await AlignedAsync(spec, metrics, cancellationToken).ConfigureAwait(false), metrics).CountAsync(cancellationToken).ConfigureAwait(false);
 
-    internal override ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
+    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+        !spec.MatchesNothing
+        && await Builder(await AlignedAsync(spec, metrics, cancellationToken).ConfigureAwait(false), metrics).AnyAsync(cancellationToken).ConfigureAwait(false);
+
+    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing)
         {
-            return ValueTask.FromResult(FilterLiteral.Null);
+            return FilterLiteral.Null;
         }
 
-        DatasetScanBuilder builder = Builder(spec, metrics);
-        return min ? builder.MinAsync(column.Path, cancellationToken) : builder.MaxAsync(column.Path, cancellationToken);
+        DatasetScanBuilder builder = Builder(await AlignedAsync(spec, metrics, cancellationToken).ConfigureAwait(false), metrics);
+        return min
+            ? await builder.MinAsync(column.Path, cancellationToken).ConfigureAwait(false)
+            : await builder.MaxAsync(column.Path, cancellationToken).ConfigureAwait(false);
     }
 
     internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
-        ScanPlan plan = await Builder(spec, null).PlanAsync(cancellationToken).ConfigureAwait(false);
+        ScanPlan plan = await Builder(await AlignedAsync(spec, null, cancellationToken).ConfigureAwait(false), null).PlanAsync(cancellationToken).ConfigureAwait(false);
         return spec.MatchesNothing ? plan with { MayMatch = false } : plan;
+    }
+
+    /// <summary>The filter and the states <see cref="_aligned"/> was worked out for, and the spec's filter it gave; null before.</summary>
+    private (VortexExpr Asked, Aggregating.StateRequest States, (VortexExpr Filter, long Low, long High)? Aligned)? _aligned;
+
+    /// <summary>
+    /// The spec of an aggregation with its window grown to the bounds its objects' tables answer at, when its
+    /// options ask and its filter bounds the instant (<see cref="WindowAlignment"/>), the window applied recorded
+    /// in <paramref name="counters"/>; the spec as it is otherwise. Every operation of the scan applies the same
+    /// window, worked out once, whether the objects answer with states or with rows.
+    /// </summary>
+    private async ValueTask<ScanSpec> AlignedAsync(ScanSpec spec, ScanCounters? counters, CancellationToken cancellationToken)
+    {
+        if (!spec.Options.AlignWindow || !KeepsStates || spec.Filter is not { } filter || spec.Aligning is not { } states
+            || _version.Schema.Key is not { } key)
+        {
+            return spec;
+        }
+
+        if (_aligned is not { } known || !ReferenceEquals(known.Asked, filter) || !ReferenceEquals(known.States, states))
+        {
+            known = (filter, states, await WindowAlignment.OfAsync(_version, key.InstantPath, filter, states, _version.Header.Identifiers, cancellationToken)
+                .ConfigureAwait(false));
+            _aligned = known;
+        }
+
+        if (known.Aligned is not { } aligned)
+        {
+            return spec;
+        }
+
+        if (counters is not null)
+        {
+            TimeUnit unit = PeriodOptions.InstantOf(key);
+            counters.WindowFrom = aligned.Low == long.MinValue ? null : TimeSlicer.TimeOf(aligned.Low, unit);
+            counters.WindowTo = aligned.High == long.MaxValue ? null : TimeSlicer.TimeOf(aligned.High + 1, unit);
+        }
+
+        return spec with { Filter = aligned.Filter };
     }
 
     internal override bool MayMatch(VortexExpr filter) => _version.MayMatch(filter);
@@ -114,6 +171,8 @@ internal sealed class DatasetScanSource : ScanSource
         {
             return null;
         }
+
+        spec = await AlignedAsync(spec, null, cancellationToken).ConfigureAwait(false);
 
         SummaryPruner? pruner = spec.Options.UseStatistics && spec.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
         long from = spec.Rows?.Start ?? 0;

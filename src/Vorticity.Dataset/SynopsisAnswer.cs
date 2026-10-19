@@ -721,7 +721,7 @@ internal sealed record SynopsisAnswer(
     /// Narrows the window by a comparison of the instant itself with an integer, in its units; false for
     /// any other predicate on it.
     /// </summary>
-    private static bool Bound(VortexExpr conjunct, string instant, ref long low, ref long high)
+    internal static bool Bound(VortexExpr conjunct, string instant, ref long low, ref long high)
     {
         if (conjunct is not ComparisonExpr { Value.Kind: FilterLiteralKind.Signed } comparison
             || comparison.Field.GetType() != typeof(FieldExpr) || !string.Equals(comparison.Field.Path, instant, StringComparison.Ordinal))
@@ -756,7 +756,7 @@ internal sealed record SynopsisAnswer(
     }
 
     /// <summary>The conjuncts of <paramref name="filter"/>: its operands under its conjunctions, none for no filter.</summary>
-    private static IEnumerable<VortexExpr> Conjuncts(VortexExpr? filter)
+    internal static IEnumerable<VortexExpr> Conjuncts(VortexExpr? filter)
     {
         if (filter is null)
         {

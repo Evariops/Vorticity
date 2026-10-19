@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using Vorticity.Scanning;
@@ -116,11 +117,25 @@ public readonly record struct ScanMetrics(
     /// <summary>Rows of the slices at a window's edges, read beside their objects' states: part of <see cref="Rows"/>.</summary>
     public long EdgeRows { get; init; }
 
+    /// <summary>
+    /// The first instant of the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>,
+    /// at or before the one asked; null for a scan that aligned no window, or one with no lower bound.
+    /// </summary>
+    public DateTimeOffset? WindowFrom { get; init; }
+
+    /// <summary>
+    /// The instant past the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>, at
+    /// or after the one asked; null for a scan that aligned no window, or one with no upper bound.
+    /// </summary>
+    public DateTimeOffset? WindowTo { get; init; }
+
     internal static ScanMetrics From(ScanCounters counters) => new ScanMetrics(
         counters.Rows, counters.Batches, counters.SegmentRequests, counters.BytesRequested, counters.BlocksDecoded, counters.BlocksPruned, counters.CacheHits)
     {
         SynopsisRows = counters.SynopsisRows,
         EdgeRows = counters.EdgeRows,
+        WindowFrom = counters.WindowFrom,
+        WindowTo = counters.WindowTo,
     };
 }
 

@@ -79,6 +79,12 @@ internal sealed class ScanCounters
 
     internal void AddEdgeRows(long rows) => Interlocked.Add(ref _edgeRows, rows);
 
+    /// <summary>The first instant of the window a scan aligned to its slices answered; null when it aligned none.</summary>
+    public System.DateTimeOffset? WindowFrom { get; internal set; }
+
+    /// <summary>The instant past that window; null when it aligned none, or has no upper bound.</summary>
+    public System.DateTimeOffset? WindowTo { get; internal set; }
+
     internal void AddSplitProven() => Interlocked.Increment(ref _splitsProven);
 
     internal void AddWindow(int splits)
