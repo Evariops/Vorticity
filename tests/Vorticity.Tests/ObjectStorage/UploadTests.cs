@@ -156,6 +156,108 @@ public sealed class UploadTests : IDisposable
         Assert.Equal(16 << 20, r2.PartSizeFor(-1, 5_000));
     }
 
+    [Theory]
+    [InlineData(S3Profile.Amazon)]
+    [InlineData(S3Profile.R2)]
+    [InlineData(S3Profile.Ovhcloud)]
+    [InlineData(S3Profile.Scaleway)]
+    public async Task EachServiceTakesEveryPutAsTheStoreSendsIt(S3Profile profile)
+    {
+        // Under the service's own rules, with a round trip to it: whole, in parts from memory, from a stream of
+        // unknown length, from a bounded one, and with a condition, which R2 takes on a whole put only.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = S3Emulator.For(profile);
+        emulator.Latency = TimeSpan.FromMilliseconds(1);
+        await using S3ObjectStore store = Store(emulator, profile);
+        byte[] content = Bytes(600_000, 10);
+
+        Assert.Equal(PutOutcome.Created, await store.PutAsync("commit/1", new ReadOnlySequence<byte>(content.AsMemory(0, 1_000)), PutCondition.IfAbsent, ct));
+        Assert.Equal(PutOutcome.Created, await store.PutAsync("data/1", Segmented(content, 100_000), PutCondition.None, ct));
+        Assert.Equal(PutOutcome.Created, await store.PutAsync("data/2", PipeReader.Create(Segmented(content, 7_000)), -1, PutCondition.None, ct));
+        Assert.Equal(PutOutcome.Created, await store.PutAsync("data/3", PipeReader.Create(Segmented(content, 7_000)), -1, 700_000, PutCondition.None, ct));
+        Assert.Equal(PutOutcome.Created, await store.PutAsync("data/4", new ReadOnlySequence<byte>(content), PutCondition.IfAbsent, ct));
+
+        Assert.Equal(content.AsSpan(0, 1_000).ToArray(), emulator.BytesOf(Bucket, "commit/1"));
+        foreach (string key in new[] { "data/1", "data/2", "data/3", "data/4" })
+        {
+            Assert.Equal(content, emulator.BytesOf(Bucket, key));
+        }
+
+        Assert.Equal(profile == S3Profile.R2 ? 3 : 4, emulator.Log.Count(line => line.EndsWith("?uploads", StringComparison.Ordinal)));
+        Assert.Equal(0, emulator.OpenUploads);
+        Assert.Equal(0, emulator.SlowedDown);
+    }
+
+    [Theory]
+    [InlineData(S3Profile.Amazon, true)]
+    [InlineData(S3Profile.R2, false)]
+    [InlineData(S3Profile.Ovhcloud, true)]
+    [InlineData(S3Profile.Scaleway, false)]
+    public async Task APutOf200GBIsPlannedWithinEachServicesRules(S3Profile profile, bool unknownLengthFits)
+    {
+        // The parts the store would send for 200 GB, at its default sizes, judged by the service's rules without a
+        // byte: a known length, or a bound, always fits. An unknown length fits where parts grow and are many, about
+        // 1 TB on S3, and not on R2, whose parts keep one size, 168 GB, nor on Scaleway, whose thousand parts reach
+        // 106 GB: such a put needs its bound, or a spool to learn its length.
+        const long Length = 200_000_000_000;
+        using S3Emulator emulator = S3Emulator.For(profile);
+        emulator.MinimumPartSize = 5 << 20;
+        await using S3ObjectStore store = new S3ObjectStore(new S3StoreOptions
+        {
+            Bucket = Bucket,
+            Region = profile == S3Profile.R2 ? null : "eu-west-3",
+            Profile = profile,
+            Endpoint = new Uri("https://s3.storage.example.com"),
+            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
+            Handler = emulator,
+        });
+
+        Assert.Null(emulator.Refusal(PlanOf(store, Length, Length)));
+        (string Code, string Message)? unknown = emulator.Refusal(PlanOf(store, Length, -1));
+        Assert.Equal(unknownLengthFits, unknown is null);
+        Assert.Empty(emulator.Log);
+    }
+
+    [Fact]
+    public async Task AServiceThatSlowsDownIsWaitedFor()
+    {
+        // Past the writes a second the service serves, it answers 503 SlowDown: the store halves the requests it
+        // sends at once and waits between attempts, and every put lands: twice the puts the second serves, sent eight
+        // at a time, each a round trip of 5 ms, so they meet the limit however slow the machine. Ten attempts rather
+        // than five keep the luck of a full jitter out of the test.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = S3Emulator.For(S3Profile.Ovhcloud);
+        emulator.WritesPerSecond = 100;
+        emulator.Latency = TimeSpan.FromMilliseconds(5);
+        await using S3ObjectStore store = Store(emulator, S3Profile.Ovhcloud, new StoreTransportOptions { MaxAttempts = 10 });
+        byte[] content = Bytes(100, 11);
+
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, 200),
+            new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+            async (i, token) => Assert.Equal(PutOutcome.Created, await store.PutAsync($"commit/{i}", new ReadOnlySequence<byte>(content), PutCondition.None, token)));
+
+        Assert.True(emulator.SlowedDown > 0);
+        Assert.All(Enumerable.Range(0, 200), i =>Assert.Equal(content, emulator.BytesOf(Bucket, $"commit/{i}")));
+    }
+
+    /// <summary>
+    /// The sizes of the parts the store sends for <paramref name="length"/> bytes, sized by <paramref name="sizedBy"/>,
+    /// the length or a bound, or -1 when it knows neither: its plan, walked without a byte.
+    /// </summary>
+    private static long[] PlanOf(S3ObjectStore store, long length, long sizedBy)
+    {
+        System.Collections.Generic.List<long> sizes = [];
+        for (long left = length; left > 0;)
+        {
+            long size = Math.Min(left, store.PartSizeFor(sizedBy, sizes.Count + 1));
+            sizes.Add(size);
+            left -= size;
+        }
+
+        return [.. sizes];
+    }
+
     [Fact]
     public async Task APutBoundedInLengthStreamsWhereAnUnknownOneIsSpooled()
     {
@@ -233,7 +335,7 @@ public sealed class UploadTests : IDisposable
             Bucket = Bucket,
             Region = profile == S3Profile.R2 ? null : "eu-west-3",
             Profile = profile,
-            Endpoint = profile is null ? null : new Uri("https://storage.example.com"),
+            Endpoint = profile is null ? null : new Uri("https://s3.storage.example.com"),
             Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = emulator,
             PartThreshold = 256 << 10,
