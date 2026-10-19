@@ -63,7 +63,7 @@ make `Row` a lie.
 
 Time slices serve the objects a dataset of periods writes, whose rows are sorted inside each slice by
 other columns first, then by their instant ([sorted time
-slices](20-time-window-aggregates.md#6-sorted-time-slices)). The slices follow each other in time,
+slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)). The slices follow each other in time,
 so the slice table finds the one slice that may hold a key, and the rank of a key at or below a
 slice's start is the rows of the slices before it, without a read. Inside the slice, the instants are
 read, decoded and sorted by a radix over their distance from the slice's start, which keeps the rows

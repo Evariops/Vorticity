@@ -240,7 +240,7 @@ Every such object is written in sorted slices. A job merges its inputs twice. Th
 for each object it will write, its rows per second and the distinct values of the columns that may be
 synopsis columns, from which it cuts the object's slices and picks the order inside them: the
 columns whose values repeat twice on average, fewest values first
-([20-time-window-aggregates.md](20-time-window-aggregates.md#62-the-order-inside-a-slice)). The second
+([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)). The second
 pass gathers each slice as its rows come, in time order, codes each synopsis column's values in the
 order of the values, and sorts the slice by one stable counting sort per column, from the last to the
 first, so that rows of equal values keep their time order without a pass on the instant. The rows are
@@ -255,7 +255,7 @@ it sorts: a slice past the query memory's grant, sorted in runs and merged, is n
 
 The first pass also counts the paths of each variant column, value by value, and the object shreds
 those its own rows pay for, each column in long chunks of its own, with a path map that lets a
-question read one key alone ([what an object shreds](21-variant-columns.md#53-what-an-object-shreds)).
+question read one key alone ([shredded variants](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)).
 Counting and choosing take 181 ns a row of six to eight attributes, and the shredded write 310 ns a
 row more than the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing.
 

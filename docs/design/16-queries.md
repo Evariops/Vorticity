@@ -337,11 +337,18 @@ an element of a projection.
 A batch extracts each path once, from the rows' bytes: the path's keys are looked up in the row's
 dictionary once per run of rows of the same metadata, an object's field is found by halves when the
 dictionary is sorted, a string is a view of the variant's own bytes, and the batch allocates its
-output and nothing else. Nothing prunes on a path yet. The variant column's statistics describe the
-column, not a path in it: its null count says nothing of whether a path is absent. So a filter over
-a path is fenced from every pruner and answered row by row, and a key over one takes no bound and no
-sort from the column's statistics. The time-window design's synopsis and the per-path statistics are
-what make a path prune ([21-variant-columns.md](21-variant-columns.md)).
+output and nothing else. The variant column's statistics describe the column, not a path in it: its
+null count says nothing of whether a path is absent. So a filter over a path is fenced from the
+pruners that read a column's own statistics, and a key over one takes no bound and no sort from them.
+The path's own structures prune it instead. An object's path directory refutes the object, and its
+slices, for a path it never holds, a class it never holds there, or values outside its bounds. A
+shredded key's block statistics kill the blocks they refute, and a Bloom filter or hashed postings on
+a key in its class probe it ([10-indexes.md, the variant's kinds](10-indexes.md#45-vorticityvariantpathsv1-where-each-shredded-key-of-a-variant-lies)).
+A key an object shreds is read from its typed column through the chunk's path map, without the bytes
+of the other keys, and a key left in the residual is parsed from the rows of the shapes that hold it.
+A dataset's synopsis counts a shredded path as a column, so a question that groups or filters by it
+answers from the tables ([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
+The keys a window holds, with their counts, are the union of its objects' path directories.
 
 ## 4. Keys
 

@@ -431,7 +431,11 @@ synopsis columns, which it encodes as runs, and the job counts the synopsis tabl
 while the slice is still in memory. An object written so is 4 % smaller than the same rows in time
 order, and 10 % smaller than a leveled object with its sorted run.
 
-A variant column is written whole by an append, and shredded by the job that rewrites it. The job's
+A variant column is written whole by an append, and shredded by the job that rewrites it, so that
+ingestion pays nothing for shredding. Until that job runs, a query node that reads the variants of an
+object of level 0 shreds a copy of them in memory, once per object and under the session's budget,
+and keeps it until the object leaves level 0, so every question after the first reads typed columns
+there too. The job's
 first pass counts each top-level key, its class and its bytes (`PathCensus`). From those counts a cost
 model chooses the keys the object shreds: a key earns a typed column when what its occurrences cost in
 the residual, at the measured price of each class, outweighs the column's overhead of about 200 bytes a
@@ -442,6 +446,17 @@ as any column does, as runs where it has few of them, as a bitmap otherwise. A p
 metadata (`vorticity.variant.paths.v1`) says which keys it holds and where. Counting and writing cost
 about 80 ns an attribute: 181 ns a row to count, and 310 ns a row more to write six to eight
 attributes shredded.
+
+Once an object has chosen its keys, each row has a shape: per key it shreds, two bits that say whether
+the row holds it, in the class its typed column holds or in another, and one bit for anything left in
+the residual, so that a source that puts identifiers in its keys touches only that bit. The shape is
+one more synopsis column. The object's first slice places it in the order, before the first column
+whose values in that slice outnumber its shapes, and nowhere when its shapes are more than half its
+rows. Every path's rows then lie together inside each run of the columns before it, so a question on
+a path reads only the ranges of the shapes that hold it, and `Has` on a shredded key is a set of
+shapes. Coding the shapes costs about 100 ns a row of six to eight attributes. A body is a variant too:
+a line of text keeps its text, which the trigram indexes search, and an object is shredded as
+attributes are, and shown again from its columns and residual, keys in order.
 
 ## 10. Deliberately not done
 

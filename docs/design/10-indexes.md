@@ -210,7 +210,7 @@ paths, a key a variant column shreds whose values repeat (version 4; version 3 h
 2 names columns alone, version 1 none, its rows in time order). A synopsis table's keys and measures
 name paths the same way. A table that does not decode, or whose rows are not the file's, is not read.
 The writer that sorts the rows declares the slices before it completes the file, which checks that
-they cover its rows ([20-time-window-aggregates.md](20-time-window-aggregates.md#61-what-a-slice-is)),
+they cover its rows ([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)),
 and writes an index directory for them even when its policy asks for no index. The table is also the
 instant's key source, so an object of a dataset of periods carries no sorted run on a key of its
 instant alone ([sources of order](12-index-reads.md#2-sources-of-order)).
@@ -228,7 +228,7 @@ kinds, since they describe the file as its writer cut it.
 
 ### 4.5 `vorticity.variant.paths.v1`: where each shredded key of a variant lies
 
-A writer that shreds a variant column ([21-variant-columns.md](21-variant-columns.md#52-how-a-variant-is-stored))
+A writer that shreds a variant column ([90-registry.md](90-registry.md#1-array-encodings))
 notes, for each key of the column's tree and in each chunk, the range of the key's buffers in the
 chunk's segment, the dtype the key wears there (its typed column's, or a variant's where the key kept
 values of other classes) and the key's encoding tree over those buffers alone. The writer lays a key's
@@ -244,7 +244,7 @@ drops the entry.
 ### 4.6 `vorticity.variant.directory.v1`: every path a variant holds
 
 A job of a dataset of periods counts the paths of each variant column as it cuts the object's slices
-([21-variant-columns.md](21-variant-columns.md#54-the-path-directory)), and the object carries what it
+([shredded variants](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)), and the object carries what it
 counted: for every path and class of value the rows hold there (a boolean, an integer, a number, a
 text, a timestamp, an object, a list, a null, anything else), how many values, where they lie (the
 typed column a shredded path keeps, the values of other classes beside it, or the residual), and their
@@ -305,7 +305,7 @@ path takes for now. An object that does not shred the key has no slot for it, an
 
 ### 4.8 `vorticity.synopsis.columns.v1`: the synopsis part
 
-A writer told an object's synopsis columns ([20-time-window-aggregates.md](20-time-window-aggregates.md#72-the-synopsis-part))
+A writer told an object's synopsis columns ([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants))
 holds their chunks in a scratch store, under its memory budget and in its sealed file past it, and
 writes them together once the rest of the data is out, before the index regions: one contiguous range
 of the file, the synopsis part. A data segment is still a data segment, which the layout references
@@ -316,7 +316,7 @@ An append drops the entries, since its chunks go after the part.
 
 ### 4.9 `vorticity.synopsis.table.v1`: the synopsis tables
 
-The tables of an object's synopsis ([20-time-window-aggregates.md](20-time-window-aggregates.md#73-what-the-synopsis-keeps))
+The tables of an object's synopsis ([what reads them](12-index-reads.md#45-aggregations-from-a-datasets-synopsis))
 follow the synopsis columns in the synopsis part, one array payload each, in the file's encodings and
 checksummed with XXH3-64. A table's rows are a struct: the start of its bucket, the values of its keys,
 a count of rows, then for each measure column the count of its values, its exact sum in the words

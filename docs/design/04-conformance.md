@@ -56,7 +56,7 @@ patching bytes, in `forged/`: the legacy `vortex.stats` layout, and the unknown 
 Shredded variants have files of their own, in `tests/Vorticity.Tests/Data/shredded-variants`, written
 by `examples/gen_shredded_variants.rs`. The sidecar would record a variant as the reference reads it,
 and the reference reads a shredded key a row lacks as a key holding null, which the format leaves out
-([21-variant-columns.md](21-variant-columns.md#52-how-a-variant-is-stored)). So each case is written
+([90-registry.md](90-registry.md#1-array-encodings)). So each case is written
 three times instead: unshredded, shredded by the reference's own shredder and pipeline, which store the
 reference's tree, and shredded but written verbatim, which keeps the Parquet layout the reference reads
 and never stores on its own. The test reads all three and requires the same values. The cases cover

@@ -174,7 +174,7 @@ A leaf entry describes one data object:
 - for an object of sorted slices, the table of contents of its synopsis: the object's schema, the
   encodings its blobs name, its slice table and the region of each column's chunk directory, the
   extent of its synopsis part, and the region of each synopsis table and each synopsis column's
-  chunks ([reading the synopsis part](20-time-window-aggregates.md#8-reading-the-synopsis-part-without-the-data)).
+  chunks ([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
   A reader of its tables then reads them in one round trip, and a reader of a slice in two, with no
   open of the object. It is a tagged field like the footer's length, about a kilobyte for a period
   of an hour, most of it the slice table
@@ -241,7 +241,7 @@ library never stalls a writer.
 - Without a clustering key, levels are size tiers. A lookup touches every object the summaries do not
   refute, which is output-sensitive rather than bounded, and the plan says so.
 - A dataset that declares periods lays its levels out for them ([compaction by
-  periods](20-time-window-aggregates.md#51-a-compaction-style-by-periods)). Level 0 is the same.
+  periods](15-compaction.md#a-dataset-of-periods)). Level 0 is the same.
   Level 1 is the late level, which holds the rows that were older than the newest fresh instant when
   they left level 0, in sorted objects that overlap, one per period once merged. Level 2 holds the
   object of each sealed period, and the fresh levels, from 3 up, hold the rows past every fresh
