@@ -319,7 +319,7 @@ public sealed partial class SynopsisAnswerTests
                 _ => $"Duration < {random.Next(5, 50)}",
             };
             RowChangeResult deleted = await dataset.DeleteAsync(VortexExpr.Parse(delete), Ct);
-            foreach (string question in Questions().Select(row => row.Data))
+            foreach (string question in MatrixQuestions())
             {
                 (List<string> on, ScanMetrics metrics) = await AskAsync(dataset, question, synopses: true);
                 (List<string> off, _) = await AskAsync(dataset, question, synopses: false);
@@ -386,9 +386,9 @@ public sealed partial class SynopsisAnswerTests
     private List<Totals> WindowTotals { get; } = [];
 
     /// <summary>The question's groups, each a line of its key and results, and what reading them did.</summary>
-    private static async Task<(List<string> Groups, ScanMetrics Metrics)> AskAsync(VortexDataset dataset, string question, bool synopses)
+    private static async Task<(List<string> Groups, ScanMetrics Metrics)> AskAsync(VortexDataset dataset, string question, bool synopses, int degree = 0)
     {
-        Scan<Request> scan = dataset.Scan<Request>().With(new ScanOptions { UseSynopses = synopses });
+        Scan<Request> scan = dataset.Scan<Request>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = degree });
         DateTimeOffset from = Noon.AddHours(1);
         DateTimeOffset to = Noon.AddHours(2);
         DateTimeOffset cutFrom = Noon.AddMinutes(37.5);
@@ -404,6 +404,11 @@ public sealed partial class SynopsisAnswerTests
             "an unaligned window" => scan.Where(r => r.At >= cutFrom && r.At < cutTo).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Max(r => r.Bytes))),
             "a window across hours" => scan.Where(r => r.At >= cutFrom && r.At < Noon.AddMinutes(125.5)).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Duration))),
             "a cut hour without runs" => scan.Where(r => r.At >= cutFrom && r.At < Noon.AddMinutes(125.5)).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Duration))),
+            "a set of services" => scan.Where(r => r.Service == "api" || r.Service == "cart" || r.Service == "search").GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
+            "a range of statuses" => scan.Where(r => r.Status >= 400).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Min(r => r.Bytes), g.Max(r => r.Duration))),
+            "a negation" => scan.Where(r => !(r.Method == "GET")).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Average(r => r.Duration))),
+            "either of two keys" => scan.Where(r => r.Service == "api" || r.Method == "PUT").GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
+            "a measure's bound" => scan.Where(r => r.Bytes > 1L << 39).GroupBy(r => r.Service).Select(g => (g.Key, g.Count())),
             _ => scan.GroupBy(r => (r.At.Truncate(CalendarUnit.Hour), r.Service)).Select(g => (g.Key.Item1, g.Key.Service, g.Count(), g.Sum(r => r.Bytes))),
         };
 

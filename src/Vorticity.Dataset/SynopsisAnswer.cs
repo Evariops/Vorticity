@@ -13,7 +13,25 @@ namespace Vorticity.Dataset;
 /// <summary>One table of an answer, and the buckets of it whose rows are folded as states: each inside the window, with one value of every key of time over it.</summary>
 /// <param name="Table">The table read.</param>
 /// <param name="Kept">Its buckets folded.</param>
-internal sealed record SynopsisPart(SynopsisTableInfo Table, HashSet<long> Kept);
+internal sealed record SynopsisPart(SynopsisTableInfo Table, HashSet<long> Kept)
+{
+    /// <summary>
+    /// The instant a folded bucket's states carry where it is not the bucket's own value: the first the
+    /// object holds in it. A bucket is named by its start, which a slice wider than the object's rows puts
+    /// before them, and an object's bucket by zero, while a key of time is one value over the instants held.
+    /// </summary>
+    internal Dictionary<long, long> Instants { get; } = [];
+
+    /// <summary>Folds <paramref name="bucket"/>, its states carrying <paramref name="first"/>, the first instant the object holds in it.</summary>
+    internal void Fold(long bucket, long first)
+    {
+        Kept.Add(bucket);
+        if (first != bucket)
+        {
+            Instants[bucket] = first;
+        }
+    }
+}
 
 /// <summary>
 /// What one object's synopsis answers of an aggregation that asked for states (<see cref="StateRequest"/>):
@@ -178,7 +196,7 @@ internal sealed record SynopsisAnswer(
             switch (FateOf(start, end))
             {
                 case BucketFate.Kept:
-                    whole.Kept.Add(bucket);
+                    whole.Fold(bucket, Math.Max(start, least));
                     break;
                 case BucketFate.Edge:
                     for (int s = first; s <= last; s++)
@@ -186,7 +204,7 @@ internal sealed record SynopsisAnswer(
                         BucketFate fate = coarsest.Bucket == SynopsisBucket.Slice ? BucketFate.Edge : FateOf(slices[s].Start, slices[s].End);
                         if (fate == BucketFate.Kept && runs is not null)
                         {
-                            runs.Kept.Add(slices[s].Start);
+                            runs.Fold(slices[s].Start, Math.Max(slices[s].Start, least));
                         }
                         else if (fate != BucketFate.Out)
                         {
@@ -316,11 +334,17 @@ internal sealed record SynopsisAnswer(
                 return null;
             }
 
+            int bucketed = fields[0];
+            if (part.Instants.Count > 0)
+            {
+                fields[0] = InstantsOf(arena, bucketed, dtypes[0], count, part.Instants);
+            }
+
             int root = arena.AddStruct(types.Struct(names, dtypes, Nullability.NonNullable), count, Validity.NonNullable, fields);
 
             // The rows of the buckets kept, then those the filter on the keys holds for, but a row whose
             // every row was taken out, whose group the rows would not make.
-            ReadOnlySpan<long> buckets = arena.GetNode(fields[0]).Values.Cast<long>();
+            ReadOnlySpan<long> buckets = arena.GetNode(bucketed).Values.Cast<long>();
             ReadOnlySpan<long> stood = arena.GetNode(fields[table.Keys.Length + 1]).Values.Cast<long>();
             int words = Math.Max((count + 63) >> 6, 1);
             VortexBuffer selection = arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bits);
@@ -348,6 +372,20 @@ internal sealed record SynopsisAnswer(
         }
 
         return null;
+    }
+
+    /// <summary>The instants a table's rows carry as states, by row: each bucket's own value, or the first instant the object holds in it.</summary>
+    private static int InstantsOf(CanonicalArena arena, int buckets, DType type, int count, Dictionary<long, long> instants)
+    {
+        VortexBuffer buffer = arena.AllocateUninitialized(count * sizeof(long), sizeof(long), out Span<byte> bytes);
+        Span<long> carried = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes);
+        ReadOnlySpan<long> values = arena.GetNode(buckets).Values.Cast<long>();
+        for (int r = 0; r < count; r++)
+        {
+            carried[r] = instants.TryGetValue(values[r], out long first) ? first : values[r];
+        }
+
+        return arena.AddPrimitive(type, count, Validity.NonNullable, PType.I64, buffer);
     }
 
     private enum BucketFate

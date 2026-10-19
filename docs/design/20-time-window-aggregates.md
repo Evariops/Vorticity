@@ -1198,6 +1198,16 @@ runs and 1.4 to 3.2 GB, since a run-end array is located through its ends (estim
 - One value over a long window reads its range of value counts, not its column's runs (a ratchet on
   bytes).
 
+As built, the switch is `ScanOptions.UseSynopses`, beside `UseIndexes` and `UseStatistics`, on by
+default. The matrix asks fourteen questions over three shapes of objects (one slice an object, slices
+of a hundred rows, periods of a minute) at three stages (appended, after one step of compaction,
+compacted), at a degree of one, of three and of the machine, with the synopses on and off. Every answer
+gives the bits of the rows read at a degree of one. The questions cover counts, exact integer and float
+sums, extremes and means, keys of time, windows aligned and cut, and filters that are sets, ranges,
+negations, disjunctions across keys and bounds on a measure. Questions drawn at random, with filters of
+up to three levels, give the same bits, and so do the questions under deletes drawn at random. A
+minute's rows weigh less than any table over them, so those objects keep none and read their rows.
+
 ### 9.10 A page's questions together
 
 A page sends 8 to 15 questions over one window, which walk the same runs and tables. An API that takes
