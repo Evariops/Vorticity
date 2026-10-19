@@ -107,6 +107,9 @@ internal readonly struct VarianceOp<TValue, TSum> : IValueOp<TValue, VarianceSta
         into.Squares.Merge(in other.Squares);
     }
 
+    /// <summary>No synopsis keeps the squares a variance sums.</summary>
+    public bool FoldState(ref VarianceState<TSum> state, in StateInput input, int row) => false;
+
     /// <remarks>The rows left out are left out, not read as zero: a zero moved by the center is a value.</remarks>
     [SkipLocalsInit]
     public void AddWords(ref VarianceState<TSum> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)

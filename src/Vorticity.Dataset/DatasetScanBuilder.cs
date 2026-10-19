@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
@@ -242,6 +244,18 @@ internal sealed class DatasetScanBuilder
     private IReadOnlyDictionary<string, string[]>? _variantKeys;
 
     /// <summary>
+    /// The states an aggregation would take in place of rows (<see cref="StateRequest"/>): an object its
+    /// synopsis answers is read as a batch of states, and the slices at the window's edges as rows.
+    /// </summary>
+    internal DatasetScanBuilder WithStates(StateRequest? states)
+    {
+        _states = states;
+        return this;
+    }
+
+    private StateRequest? _states;
+
+    /// <summary>
     /// A lease of <paramref name="held"/>: for a scan that reads keys of variant columns, an object of level 0
     /// through the node's memo of it shredded in memory, which parses its keys once; the object itself otherwise.
     /// </summary>
@@ -402,10 +416,23 @@ internal sealed class DatasetScanBuilder
         return null;
     }
 
-    /// <summary>One object's batches as the dataset's rows, its lease held until the last is read.</summary>
+    /// <summary>
+    /// One object's batches as the dataset's rows, its lease held until the last is read; for an aggregation
+    /// that takes states, the batch of states its synopsis answers with, then the rows of its edge slices.
+    /// </summary>
     private async IAsyncEnumerable<RecordBatch> ObjectAsync(
         PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        if (_states is { } request && Answer(held, request) is ({ } answer, { } contents, string instant))
+        {
+            await foreach (RecordBatch batch in AnsweredAsync(held, answer, contents, instant, open, cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
         ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
@@ -430,6 +457,100 @@ internal sealed class DatasetScanBuilder
                 await foreach (RecordBatch batch in batches.ConfigureAwait(false))
                 {
                     yield return batch;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// What the synopsis of an object the scan covers whole, with no row marked and of the version's
+    /// schema, answers of <paramref name="request"/>: the answer, the object's table of contents, and the
+    /// dataset's instant; nothing when its rows are read.
+    /// </summary>
+    private (SynopsisAnswer? Answer, SynopsisContents? Contents, string? Instant) Answer(in PositionedObject held, StateRequest request)
+    {
+        if (held.Entry.HasDeletions || Covered(held) != held.Entry.Rows || _dataset.Key is not { } key
+            || SynopsisContents.From(held.Entry.Synopsis.Span) is not { } contents)
+        {
+            return default;
+        }
+
+        DType schema;
+        try
+        {
+            schema = contents.SchemaIn(new DTypeArena());
+        }
+        catch (VortexFormatException)
+        {
+            return default;
+        }
+
+        return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
+            && SynopsisAnswer.Of(contents, schema, key.Paths[0], request, _filter) is { } answer
+            ? (answer, contents, key.Paths[0])
+            : default;
+    }
+
+    /// <summary>
+    /// Whether the synopsis of an object the scan covers answers the states it asks: what the version's
+    /// entries hold, with no read of an object.
+    /// </summary>
+    internal async ValueTask<bool> AnswersAnyAsync(CancellationToken cancellationToken)
+    {
+        if (_states is not { } request || _orderPaths is not null || _take is not null)
+        {
+            return false;
+        }
+
+        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (Answer(held, request).Answer is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// An object answered by its synopsis: the batch of states of its table's kept buckets, read with no
+    /// open of the object, then the rows of the slices at the window's edges, read through the object.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> AnsweredAsync(
+        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, int open,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        SynopsisTableSet tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, table => ReferenceEquals(table, answer.Table), cancellationToken).ConfigureAwait(false);
+        using (tables)
+        {
+            RecordBatch states = answer.Batch(tables, instant, held.FirstRow)
+                ?? throw new VortexFormatException($"The synopsis table of object {held.Entry.Key} did not read.");
+            using (states)
+            {
+                _counters?.AddSynopsisRows(states.SelectedRows);
+                yield return states;
+            }
+        }
+
+        if (answer.Edges.Count == 0)
+        {
+            yield break;
+        }
+
+        ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
+        await using (lease.ConfigureAwait(false))
+        {
+            RecordOpen(lease, open);
+            RecordBatch? view = null;
+            foreach (TimeSlice slice in answer.Edges)
+            {
+                ScanBuilder scan = Configure(lease.File.ScanBuilder(), _filter, _mask, canonical: false)
+                    .Rows(new RowRange(slice.FirstRow, slice.FirstRow + slice.Rows));
+                await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    _counters?.AddEdgeRows(batch.SelectedRows);
+                    yield return InDataset(batch, held.FirstRow, ref view);
                 }
             }
         }

@@ -94,8 +94,18 @@ public readonly record struct ScanMetrics(
     /// <summary>What a group by did with the rows; null without a group by, or before it ran.</summary>
     public GroupMetrics? Grouping { get; init; }
 
+    /// <summary>Rows of a dataset's synopsis tables an aggregation folded as states, in place of the rows they stand for.</summary>
+    public long SynopsisRows { get; init; }
+
+    /// <summary>Rows of the slices at a window's edges, read beside their objects' states: part of <see cref="Rows"/>.</summary>
+    public long EdgeRows { get; init; }
+
     internal static ScanMetrics From(ScanCounters counters) => new ScanMetrics(
-        counters.Rows, counters.Batches, counters.SegmentRequests, counters.BytesRequested, counters.BlocksDecoded, counters.BlocksPruned, counters.CacheHits);
+        counters.Rows, counters.Batches, counters.SegmentRequests, counters.BytesRequested, counters.BlocksDecoded, counters.BlocksPruned, counters.CacheHits)
+    {
+        SynopsisRows = counters.SynopsisRows,
+        EdgeRows = counters.EdgeRows,
+    };
 }
 
 /// <summary>

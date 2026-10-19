@@ -479,6 +479,36 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
         }
     }
 
+    /// <summary>Each row of states through the op, which merges it as its values would have folded.</summary>
+    internal override bool StepStates(in StateInput input, ReadOnlySpan<ulong> selection, ReadOnlySpan<int> groups)
+    {
+        TOp op = _op;
+        StateView<TState> states = States;
+        if (selection.IsEmpty)
+        {
+            for (int row = 0; row < groups.Length; row++)
+            {
+                if (!op.FoldState(ref states[groups[row]], in input, row))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        RowCursor cursor = new RowCursor(selection, 0, groups.Length);
+        while (cursor.Next(out int row))
+        {
+            if (!op.FoldState(ref states[groups[row]], in input, row))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     internal override TResult Result(int group) => _finish(State(group));
 
     /// <summary>The answers of <paramref name="groups"/> under one view of the records: a group at a time, each made its view, cost the reader a third of building a million of them.</summary>

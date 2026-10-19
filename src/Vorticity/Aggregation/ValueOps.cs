@@ -48,6 +48,12 @@ internal interface IValueOp<TValue, TState>
     /// <summary>The mean a sum's state holds, its total over its count, for a mean that shares the sum's slot; null with no value.</summary>
     /// <exception cref="NotSupportedException">The state is not a sum's.</exception>
     double? Mean(in TState state) => throw new NotSupportedException($"{typeof(TState).Name} holds no mean.");
+
+    /// <summary>
+    /// Folds row <paramref name="row"/> of a batch of states, as its values would have folded one at a
+    /// time, to the same bits; false for an op no persisted state feeds, which no batch of states asks.
+    /// </summary>
+    bool FoldState(ref TState state, in StateInput input, int row);
 }
 
 /// <summary>A running sum at the widened type, and how many values it holds.</summary>
@@ -112,6 +118,13 @@ internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
         state.Sum += SumKernels.Signed(selected);
         state.Count += WordFold.Count(words);
     }
+
+    public bool FoldState(ref SumState<Int128> state, in StateInput input, int row)
+    {
+        state.Sum += input.IntegerSum(row);
+        state.Count += input.Values[row];
+        return true;
+    }
 }
 
 /// <summary>
@@ -164,6 +177,14 @@ internal readonly struct NarrowSignedSum<TValue> : IValueOp<TValue, SumState<lon
         state.Sum += (long)SumKernels.Signed(selected);
         state.Count += WordFold.Count(words);
     }
+
+    /// <remarks>A part of a total the statistics prove within 64 bits is within them too.</remarks>
+    public bool FoldState(ref SumState<long> state, in StateInput input, int row)
+    {
+        state.Sum += long.CreateChecked(input.IntegerSum(row));
+        state.Count += input.Values[row];
+        return true;
+    }
 }
 
 /// <summary>A sum of unsigned integers in 64 bits, for a column whose statistics prove its rows times its largest value stay below 2^64.</summary>
@@ -209,6 +230,13 @@ internal readonly struct NarrowUnsignedSum<TValue> : IValueOp<TValue, SumState<u
         WordFold.Select(block, words, TValue.Zero, selected);
         state.Sum += (ulong)SumKernels.Unsigned(selected);
         state.Count += WordFold.Count(words);
+    }
+
+    public bool FoldState(ref SumState<ulong> state, in StateInput input, int row)
+    {
+        state.Sum += ulong.CreateChecked(input.UnsignedSum(row));
+        state.Count += input.Values[row];
+        return true;
     }
 }
 
@@ -256,6 +284,13 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
         state.Sum += SumKernels.Unsigned(selected);
         state.Count += WordFold.Count(words);
     }
+
+    public bool FoldState(ref SumState<UInt128> state, in StateInput input, int row)
+    {
+        state.Sum += input.UnsignedSum(row);
+        state.Count += input.Values[row];
+        return true;
+    }
 }
 
 /// <summary>
@@ -286,6 +321,12 @@ internal readonly struct NarrowSignedTotal<TValue> : IValueOp<TValue, long>
         WordFold.Select(block, words, TValue.Zero, selected);
         state += (long)SumKernels.Signed(selected);
     }
+
+    public bool FoldState(ref long state, in StateInput input, int row)
+    {
+        state += long.CreateChecked(input.IntegerSum(row));
+        return true;
+    }
 }
 
 /// <summary>A sum of signed integers in 128 bits that no mean reads: the total alone, as <see cref="SignedSum{TValue}"/> without its count.</summary>
@@ -311,6 +352,12 @@ internal readonly struct SignedTotal<TValue> : IValueOp<TValue, Int128>
         selected = selected[..block.Length];
         WordFold.Select(block, words, TValue.Zero, selected);
         state += SumKernels.Signed(selected);
+    }
+
+    public bool FoldState(ref Int128 state, in StateInput input, int row)
+    {
+        state += input.IntegerSum(row);
+        return true;
     }
 }
 
@@ -338,6 +385,12 @@ internal readonly struct NarrowUnsignedTotal<TValue> : IValueOp<TValue, ulong>
         WordFold.Select(block, words, TValue.Zero, selected);
         state += (ulong)SumKernels.Unsigned(selected);
     }
+
+    public bool FoldState(ref ulong state, in StateInput input, int row)
+    {
+        state += ulong.CreateChecked(input.UnsignedSum(row));
+        return true;
+    }
 }
 
 /// <summary>A sum of unsigned integers in 128 bits that no mean reads, as <see cref="UnsignedSum{TValue}"/> without its count.</summary>
@@ -363,6 +416,12 @@ internal readonly struct UnsignedTotal<TValue> : IValueOp<TValue, UInt128>
         selected = selected[..block.Length];
         WordFold.Select(block, words, TValue.Zero, selected);
         state += SumKernels.Unsigned(selected);
+    }
+
+    public bool FoldState(ref UInt128 state, in StateInput input, int row)
+    {
+        state += input.UnsignedSum(row);
+        return true;
     }
 }
 
@@ -405,6 +464,9 @@ internal readonly struct DecimalSum : IValueOp<Int128, SumState<Int128>>
 
     public void AddWords(ref SumState<Int128> state, ReadOnlySpan<Int128> block, ReadOnlySpan<ulong> words) =>
         WordFold.Each<Int128, SumState<Int128>, DecimalSum>(in this, ref state, block, words);
+
+    /// <summary>No synopsis keeps a decimal's sum.</summary>
+    public bool FoldState(ref SumState<Int128> state, in StateInput input, int row) => false;
 }
 
 /// <summary>
@@ -444,6 +506,9 @@ internal readonly struct WideDecimalSum : IValueOp<Int128, SumState<WideSum>>
 
     public void AddWords(ref SumState<WideSum> state, ReadOnlySpan<Int128> block, ReadOnlySpan<ulong> words) =>
         WordFold.Each<Int128, SumState<WideSum>, WideDecimalSum>(in this, ref state, block, words);
+
+    /// <summary>No synopsis keeps a decimal's sum.</summary>
+    public bool FoldState(ref SumState<WideSum> state, in StateInput input, int row) => false;
 }
 
 /// <summary>A sum of unscaled decimals of more than 38 digits, exact whatever their count, through an <see cref="Int256"/> total spilled into 320 bits.</summary>
@@ -479,6 +544,9 @@ internal readonly struct Decimal256Sum : IValueOp<Int256, SumState<WideSum>>
 
     public void AddWords(ref SumState<WideSum> state, ReadOnlySpan<Int256> block, ReadOnlySpan<ulong> words) =>
         WordFold.Each<Int256, SumState<WideSum>, Decimal256Sum>(in this, ref state, block, words);
+
+    /// <summary>No synopsis keeps a decimal's sum.</summary>
+    public bool FoldState(ref SumState<WideSum> state, in StateInput input, int row) => false;
 }
 
 /// <summary>The smallest or the largest value of a type with an order and no NaN: a decimal of 256 bits, which no vector kernel folds.</summary>
@@ -523,6 +591,9 @@ internal readonly struct OrderedExtremeOp<TValue, TMax> : IValueOp<TValue, Extre
 
     public void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words) =>
         WordFold.Each<TValue, ExtremeState<TValue>, OrderedExtremeOp<TValue, TMax>>(in this, ref state, block, words);
+
+    /// <summary>No synopsis keeps the extremes of a decimal of 256 bits.</summary>
+    public bool FoldState(ref ExtremeState<TValue> state, in StateInput input, int row) => false;
 }
 
 /// <summary>A compile-time boolean, so that a generic op's branch on it is specialised away.</summary>
@@ -613,6 +684,16 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         WordFold.Select(block, words, block[BitOperations.TrailingZeroCount(words[0])], selected);
         AddSpan(ref state, selected);
     }
+
+    public bool FoldState(ref ExtremeState<TValue> state, in StateInput input, int row)
+    {
+        if (input.TryExtreme(row, greatest: false, out TValue least))
+        {
+            Add(ref state, least);
+        }
+
+        return true;
+    }
 }
 
 /// <summary>The largest value, NaN skipped.</summary>
@@ -676,6 +757,16 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         WordFold.Select(block, words, block[BitOperations.TrailingZeroCount(words[0])], selected);
         AddSpan(ref state, selected);
     }
+
+    public bool FoldState(ref ExtremeState<TValue> state, in StateInput input, int row)
+    {
+        if (input.TryExtreme(row, greatest: true, out TValue greatest))
+        {
+            Add(ref state, greatest);
+        }
+
+        return true;
+    }
 }
 
 /// <summary>
@@ -722,6 +813,16 @@ internal readonly struct SeededMinOp<TValue> : IValueOp<TValue, TValue>
         {
             Add(ref state, min);
         }
+    }
+
+    public bool FoldState(ref TValue state, in StateInput input, int row)
+    {
+        if (input.TryExtreme(row, greatest: false, out TValue least))
+        {
+            Add(ref state, least);
+        }
+
+        return true;
     }
 
     /// <remarks>A state that saw nothing holds the seed, which moves no other.</remarks>
@@ -774,6 +875,16 @@ internal readonly struct SeededMaxOp<TValue> : IValueOp<TValue, TValue>
         {
             Add(ref state, max);
         }
+    }
+
+    public bool FoldState(ref TValue state, in StateInput input, int row)
+    {
+        if (input.TryExtreme(row, greatest: true, out TValue greatest))
+        {
+            Add(ref state, greatest);
+        }
+
+        return true;
     }
 
     /// <remarks>A state that saw nothing holds the seed, which moves no other.</remarks>

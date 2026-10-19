@@ -36,6 +36,12 @@ public sealed record ScanOptions
     public bool UseIndexes { get; init; } = true;
 
     /// <summary>
+    /// Whether an aggregation over a dataset may answer from the states its objects' synopses keep, in
+    /// place of their rows; off only to check a synopsis, never to change a result.
+    /// </summary>
+    public bool UseSynopses { get; init; } = true;
+
+    /// <summary>
     /// Whether a filtered batch is compacted to the rows that passed; false delivers whole blocks
     /// with their <c>Selection</c>, which copies nothing.
     /// </summary>

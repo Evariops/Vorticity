@@ -76,6 +76,13 @@ internal sealed record ScanSpec
 
     /// <summary>The mask of live blocks when <see cref="Pruned"/>, or null when no structure prunes anything.</summary>
     internal BlockMask? Live { get; init; }
+
+    /// <summary>
+    /// What an aggregation would take as states in place of rows, or null for rows alone: a source that
+    /// keeps states of some rows (<see cref="ScanSource.KeepsStates"/>) may answer those with batches of
+    /// states.
+    /// </summary>
+    internal Aggregating.StateRequest? States { get; init; }
 }
 
 /// <summary>
@@ -124,6 +131,21 @@ internal abstract class ScanSource
 
     /// <summary>The rows of the whole source, whatever a scan keeps of them; -1 when they are not known before it is read.</summary>
     internal virtual long RowBound => -1;
+
+    /// <summary>
+    /// Whether the source may answer some of its rows as states (<see cref="ScanSpec.States"/>): a
+    /// dataset whose objects carry synopses. An aggregation then groups apart from any order the rows
+    /// stream in, the states coming with their objects.
+    /// </summary>
+    internal virtual bool KeepsStates => false;
+
+    /// <summary>
+    /// Whether a pass of <paramref name="spec"/> asking <paramref name="states"/> would take states in place
+    /// of some of its rows: a dataset one of whose objects the scan covers has a synopsis that answers. Read
+    /// from what the version's entries hold, before any data.
+    /// </summary>
+    internal virtual ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(false);
 
     /// <summary>
     /// The most bytes one split of <paramref name="spec"/> read ahead holds (<see cref="ScanSpec.ReadAhead"/>),

@@ -218,6 +218,13 @@ internal readonly struct WideIndexedFloatSum<TValue> : IValueOp<TValue, WideInde
 
     public double? Mean(in WideIndexedSum state) => state.Count == 0 ? null : state.Value / state.Count;
 
+    public bool FoldState(ref WideIndexedSum state, in StateInput input, int row)
+    {
+        WideIndexedSum persisted = input.FloatSum(row);
+        state.Merge(in persisted);
+        return true;
+    }
+
     /// <remarks>
     /// The rows left out are left out, not counted and taken back as the narrow sum does: a settling
     /// between the two would take back values of an epoch already settled.

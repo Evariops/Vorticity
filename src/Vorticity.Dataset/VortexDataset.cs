@@ -1877,6 +1877,16 @@ public sealed class VortexDataset : IAsyncDisposable
             return null;
         }
 
+        return await ReadSynopsisAsync(entry, contents, wanted, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// As <see cref="ReadSynopsisAsync(ObjectEntry, Func{Indexes.SynopsisTableInfo, bool}?, CancellationToken)"/>,
+    /// with the entry's table of contents already read: <paramref name="wanted"/> is asked of its tables.
+    /// </summary>
+    internal async ValueTask<Indexes.SynopsisTableSet> ReadSynopsisAsync(
+        ObjectEntry entry, Indexes.SynopsisContents contents, Func<Indexes.SynopsisTableInfo, bool>? wanted, CancellationToken cancellationToken)
+    {
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {

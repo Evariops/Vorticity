@@ -729,6 +729,23 @@ internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
 
     public double? Mean(in IndexedSum state) => state.Count == 0 ? null : state.Value / state.Count;
 
+    /// <remarks>
+    /// A persisted sum is a <see cref="WideIndexedSum"/>, which settles nothing below an epoch of values:
+    /// its sum inside is then the whole of it, and merges as the narrow sum's would. One past an epoch is
+    /// past what a source of the narrow sum's rows holds.
+    /// </remarks>
+    public bool FoldState(ref IndexedSum state, in StateInput input, int row)
+    {
+        WideIndexedSum persisted = input.FloatSum(row);
+        if (persisted.High != 0)
+        {
+            throw new OverflowException("A persisted float sum past an epoch of values folds into a wide sum only.");
+        }
+
+        state.Merge(in persisted.Sum);
+        return true;
+    }
+
     /// <remarks>The rows left out read as zero, which no bin takes anything of, and come off the count.</remarks>
     [SkipLocalsInit]
     public void AddWords(ref IndexedSum state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)

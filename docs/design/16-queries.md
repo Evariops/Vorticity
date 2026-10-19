@@ -835,6 +835,19 @@ of as many rows holding each column's minimum and, on its last row, its maximum,
 streams and the groups come in the order they would have. A dataset's objects do not settle, because
 their files still count the rows a deletion removed.
 
+A dataset of periods answers part of a pass with states instead
+([answering a question](20-time-window-aggregates.md#9-answering-a-question)). When every aggregate is
+a count of the rows, a sum, a minimum, a maximum or a mean of a number column, none of them filtered,
+and every key is a column or a function of one, the pass asks its source for states. An object whose
+synopsis answers then comes as a batch of states: a row per bucket of a table and per value of its
+keys. The key columns carry the names and types the rows' have, the instant holds the bucket's start,
+and beside them are the rows the row stands for and each measure's states. A lane gives each row its
+group through the same keys and functions as rows, and each aggregate folds the row's state into it,
+an exact sum merged and an extreme compared, to the bits the rows would give. A source that keeps
+states makes the pass block rather than stream when one of its objects would answer: states come
+with their objects, not in key order. `ScanOptions.UseSynopses` turns this off, and the metrics count
+the table rows folded (`SynopsisRows`) and the rows read at the edges (`EdgeRows`).
+
 ### 9.4 Parallelism and the merge
 
 At a degree above one the rows are cut into ranges that end where a chunk does, so no chunk is read

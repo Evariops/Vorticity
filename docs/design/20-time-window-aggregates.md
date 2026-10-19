@@ -1015,6 +1015,24 @@ than the footer: about 13.5 MB at 36 bits a row in nanoseconds, in one round tri
 since the cache keeps no data (estimate). The plan states the rows its edges will read, and the
 default is one of the [decisions to take](#18-decisions-to-take).
 
+As built, a pass asks for states when every aggregate is a count of the rows, a sum, a least, a
+greatest or a mean of a number column, unfiltered, and every key is a column or a function of one
+([16-queries.md, statistics and zone maps](16-queries.md#93-statistics-and-zone-maps)). For each object
+that the scan covers whole, with no row marked and of the version's schema, the planner reads only
+its entry's table of contents. It splits the filter into bounds on the instant, which make the window,
+and predicates on other columns, which must read keys only. It then tries the tables that hold the
+keys and the measures, fewest rows first. A table answers when each of its buckets lies inside the
+window with one value of every key of time over it, or outside. A bucket is a slice, an hour holding
+the slices that start in it, or the whole object. A table of slices answers anyway, and the slices it
+cuts are its edges, read as rows through their row range: exact edges are the only kind built so far.
+The chosen table is read in one request, its buckets' start named as the instant, and the rows of
+the kept buckets that pass the key predicates go to the lanes as a batch of states. Any other object
+is read as rows. On two hours and a quarter of requests, every question of `SynopsisAnswerTests`
+gives the bits of its rows. A count per service reads 15 table rows instead of 6 400 rows, and a
+window that cuts two slices reads 189 run rows and 24 edge rows instead of 3 048 rows. An object with
+marked rows is read as rows until [deletes](#10-deletes) correct its states. The plan does not yet
+say per object what it reads, and a question's needles are not yet routed to their postings.
+
 ### 9.4 Excluding a rare value
 
 Under three-valued logic, `r.RequestId != id` is unknown where `RequestId` is null, so it drops every

@@ -166,9 +166,24 @@ internal sealed class AggregationQuery : ResultQuery
     /// </summary>
     internal IAsyncEnumerator<RecordBatch> Groups(CancellationToken cancellationToken) =>
         Plan.Blocking ? new GroupBatches(this, cancellationToken)
-        : StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken)
+        : States is { } states ? new StatesOrStreams(this, states, cancellationToken)
+        : Streamed(cancellationToken);
+
+    /// <summary>The groups of a pass that takes no states: as they close on a key that streams, once the pass has run otherwise.</summary>
+    internal IAsyncEnumerator<RecordBatch> Streamed(CancellationToken cancellationToken) =>
+        StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken)
         : ZoneFinality.Candidate(this) ? new ZoneDecidedGroups(this, cancellationToken)
         : new GroupBatches(this, cancellationToken);
+
+    /// <summary>
+    /// What the pass would take as states in place of rows (<see cref="StateRequest"/>), when its source
+    /// keeps states of some of its rows; null otherwise. States come with their objects rather than in the
+    /// order a key streams in, so a pass that takes them delivers its groups once it has run.
+    /// </summary>
+    private StateRequest? States =>
+        Host.Source.KeepsStates && Host.Spec().Options.UseSynopses
+            ? StateRequest.Of(Plan, new AggregateSlot?[Plan.Aggregates.Length], top: null)
+            : null;
 
     internal override GroupMetrics? Grouping => Plan.Grouped ? Plan.Metrics() : null;
 

@@ -126,6 +126,16 @@ queue, with large objects cut between their chunks. On the first column of the c
 function of it, a group by streams, because the dataset delivers its rows in key order. See
 [aggregates.md](aggregates.md).
 
+A dataset compacted by periods answers many aggregations from its objects' synopses instead of their
+rows. Each sealed object keeps tables of counts, exact sums and extremes per value of its
+low-cardinality columns, per slice of time and per hour. A count, a sum, a minimum, a maximum or a
+mean, grouped by such columns or by a function of the instant, under a filter on them and a window of
+time, reads a few table rows per object, and then only the rows of the slices the window cuts. The
+answer is the same bits as from the rows. On two hours and a quarter of requests, a count per service
+read 15 table rows instead of 6 400 rows. `ScanOptions.UseSynopses = false` reads the rows, to check a
+synopsis. The scan's metrics count the table rows (`SynopsisRows`) and the rows read at the window's
+edges (`EdgeRows`). Such a group by delivers its groups once the pass has run, rather than streaming.
+
 ## Versions
 
 ```csharp

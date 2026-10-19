@@ -188,6 +188,7 @@ public sealed class RecordBatch : IDisposable
         _arena = arena;
         _context = context;
         _root = rootCanonicalIndex;
+        CarriesStates = false;
 
         // GetNode bounds-checks and throws VortexFormatException for an index outside the arena.
         CanonicalNode root = arena.GetNode(rootCanonicalIndex);
@@ -245,6 +246,13 @@ public sealed class RecordBatch : IDisposable
 
     /// <summary>The session whose pool the batch's buffers come from.</summary>
     internal VortexSession? Session { get; private init; }
+
+    /// <summary>
+    /// Whether the batch holds states of rows rather than rows, as a dataset's synopsis keeps them: its
+    /// key columns by their names, then per row the rows it stands for and each aggregate's states
+    /// (<see cref="Aggregating.StateInput"/>). Only an aggregation that asked for states is sent one.
+    /// </summary>
+    internal bool CarriesStates { get; set; }
 
     private Buffers.VortexBuffer _selection;
     private int _selected;

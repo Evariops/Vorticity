@@ -375,7 +375,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// the file's schema, which the contents hold.
     /// </summary>
     /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
-    internal static ValueTask<SynopsisTableSet> ReadAsync(
+    internal static async ValueTask<SynopsisTableSet> ReadAsync(
         IO.ISegmentReader source, SynopsisContents contents, Func<SynopsisTableInfo, bool>? wanted, VortexReadOptions? options,
         CancellationToken cancellationToken)
     {
@@ -391,8 +391,11 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
 
         DTypeArena types = new DTypeArena();
         string[] encodings = [.. contents.Encodings];
-        return DecodeAsync(
-            source, new ScanContext(encodings, options ?? VortexReadOptions.Default), found, (table, _) => table.RowType(schema, contents.Slices.Paths, types), cancellationToken);
+        SynopsisTableSet set = await DecodeAsync(
+            source, new ScanContext(encodings, options ?? VortexReadOptions.Default), found, (table, _) => table.RowType(schema, contents.Slices.Paths, types), cancellationToken)
+            .ConfigureAwait(false);
+        set.Types = types;
+        return set;
     }
 
     /// <summary>
@@ -488,6 +491,9 @@ internal sealed class SynopsisTableSet : IDisposable
 
     /// <summary>The arena the rows lie in.</summary>
     internal CanonicalArena Arena => _context.Canonical;
+
+    /// <summary>The arena of the rows' dtypes, where a struct over their columns is built; null when the reader does not say.</summary>
+    internal DTypeArena? Types { get; set; }
 
     public void Dispose() => _context.Dispose();
 }

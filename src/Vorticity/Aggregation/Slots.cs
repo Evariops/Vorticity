@@ -114,6 +114,14 @@ internal abstract class AggregateSlot
         }
     }
 
+    /// <summary>
+    /// Folds a batch of states (<see cref="StateInput"/>): each row <paramref name="selection"/> keeps,
+    /// every row when it is empty, into the group <paramref name="groups"/> gives it, as the rows the
+    /// states hold would have folded, to the same bits. False for a slot no persisted state feeds, which
+    /// a source asked for states never sends them to.
+    /// </summary>
+    internal virtual bool StepStates(in StateInput input, ReadOnlySpan<ulong> selection, ReadOnlySpan<int> groups) => false;
+
     /// <summary>Merges the same aggregate of another partition, whose group <c>g</c> is this one's <c>map[g]</c>.</summary>
     internal void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map) => MergeFrom(other, Numbers.Upto(map.Length), map);
 
@@ -763,6 +771,30 @@ internal sealed class CountSlot<TCount> : RecordSlot<TCount, long>
         {
             counts[into[i]] += others[from[i]];
         }
+    }
+
+    /// <summary>A row of states counts the rows it stands for.</summary>
+    internal override bool StepStates(in StateInput input, ReadOnlySpan<ulong> selection, ReadOnlySpan<int> groups)
+    {
+        StateView<TCount> counts = States;
+        ReadOnlySpan<long> rows = input.Rows;
+        if (selection.IsEmpty)
+        {
+            for (int row = 0; row < groups.Length; row++)
+            {
+                counts[groups[row]] += TCount.CreateChecked(rows[row]);
+            }
+
+            return true;
+        }
+
+        RowCursor cursor = new RowCursor(selection, 0, groups.Length);
+        while (cursor.Next(out int row))
+        {
+            counts[groups[row]] += TCount.CreateChecked(rows[row]);
+        }
+
+        return true;
     }
 
     internal override long Result(int group) => long.CreateTruncating(State(group));

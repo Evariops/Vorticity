@@ -32,6 +32,15 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>The rows of every object of the version, deleted ones counted, as its levels hold them: what bounds a table of a key's groups by value.</summary>
     internal override long RowBound => _version.RowCount;
 
+    /// <summary>A dataset compacted by periods: its sealed objects carry synopses.</summary>
+    internal override bool KeepsStates => _dataset.Options.Periods is not null;
+
+    /// <summary>Whether the synopsis of an object the scan covers answers: its entry's table of contents says, with no read of the object.</summary>
+    internal override ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
+        KeepsStates && spec.Options.UseSynopses && !spec.MatchesNothing
+            ? Builder(spec with { States = states }, null).AnswersAnyAsync(cancellationToken)
+            : ValueTask.FromResult(false);
+
     /// <summary>The version every sink of the scan reads.</summary>
     internal ulong Version => _version.Version;
 
@@ -123,13 +132,14 @@ internal sealed class DatasetScanSource : ScanSource
         }
 
         // The objects to cut are opened side by side to read where their chunks end; the scan finds
-        // them open after. Each cut gives its object back, whatever another one's open did.
+        // them open after. Each cut gives its object back, whatever another one's open did. An object a
+        // synopsis may answer stays whole, since states answer an object, not a part of it.
         long share = System.Math.Max(PieceRows, total / (degree * 4L));
         Task<RowRange[]>?[] cuts = new Task<RowRange[]>?[objects.Count];
         List<Task> cutting = [];
         for (int o = 0; o < objects.Count; o++)
         {
-            if (objects[o].Rows.Length >= 2 * share)
+            if (objects[o].Rows.Length >= 2 * share && (spec.States is null || objects[o].Held.Entry.Synopsis.IsEmpty))
             {
                 cuts[o] = CutAsync(objects[o].Held, objects[o].Rows, share, spec.Projection, cancellationToken);
                 cutting.Add(cuts[o]!);
@@ -193,7 +203,7 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>The engine's scan for <paramref name="spec"/>, adding what the objects' scans count to <paramref name="counters"/>.</summary>
     internal DatasetScanBuilder Builder(ScanSpec spec, ScanCounters? counters)
     {
-        DatasetScanBuilder builder = new DatasetScanBuilder(_dataset, _version).WithVariantKeys(spec.VariantKeys);
+        DatasetScanBuilder builder = new DatasetScanBuilder(_dataset, _version).WithVariantKeys(spec.VariantKeys).WithStates(spec.States);
         if (spec.Projection is { } mask)
         {
             builder.Project(in mask);

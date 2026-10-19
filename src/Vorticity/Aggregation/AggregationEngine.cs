@@ -2501,6 +2501,12 @@ internal sealed class AggregationPartition
 
     internal void Process(RecordBatch batch)
     {
+        if (batch.CarriesStates)
+        {
+            ProcessStates(batch);
+            return;
+        }
+
         if (_settling is not null)
         {
             FoldSettled(batch.StartRow);
@@ -2526,6 +2532,137 @@ internal sealed class AggregationPartition
         {
             Account(memory);
         }
+    }
+
+    /// <summary>
+    /// Folds a batch of states (<see cref="RecordBatch.CarriesStates"/>), which only a pass that asked
+    /// for them (<see cref="StateRequest"/>) is sent: its key columns, read by the names and through the
+    /// functions the rows' are, give each row its group, and each slot folds its aggregate's states, a row
+    /// standing for the rows of the data it counts, to the bits those rows would have given.
+    /// </summary>
+    private void ProcessStates(RecordBatch batch)
+    {
+        int rows = batch.RowCount;
+        if (rows == 0 || batch.SelectedRows == 0)
+        {
+            return;
+        }
+
+        if (_componentKeys is not null || _settling is not null || Top is not null || _masks is not null)
+        {
+            throw new InvalidOperationException("A batch of states reached a pass that streams, settles, takes a top or filters an aggregate, which asks for none.");
+        }
+
+        // The key table numbers its groups as they come: numbering them by value is judged on a first
+        // batch of rows, which this pass may never see first.
+        _wholeJudged = true;
+        CanonicalArena arena = batch.Arena;
+        int root = batch.RootIndex;
+        ReadOnlySpan<ulong> selection = batch.SelectionWords;
+        int before = Keys?.Count ?? 0;
+        if (_rowGroups.Length < rows)
+        {
+            RentRowGroups(rows);
+        }
+
+        Span<int> groups = _rowGroups.AsSpan(0, rows);
+        if (Keys is null)
+        {
+            groups.Clear();
+        }
+        else
+        {
+            for (int c = 0; c < _keyCount; c++)
+            {
+                int node = FilterEvaluator.Resolve(arena, root, _columns[c].Field, rows);
+                while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+                {
+                    node = arena.GetNode(node).StorageIndex;
+                }
+
+                _nodes[c] = node;
+            }
+
+            _ranges.Clear();
+            if (Keys.Assign(arena, _nodes.AsSpan(0, _keyCount), rows, selection, _rowGroups, _ranges))
+            {
+                for (int r = 0; r < _ranges.Count; r++)
+                {
+                    groups[_ranges.StartAt(r).._ranges.EndAt(r)].Fill(_ranges.GroupAt(r));
+                }
+            }
+        }
+
+        int count = Keys?.Count ?? 1;
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            Slots[i].EnsureGroups(count);
+        }
+
+        ReadOnlySpan<long> stood = StateColumn(arena, root, StateRequest.RowsColumn);
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            if (_inputs[i] == Settled)
+            {
+                continue;
+            }
+
+            StateInput input = StatesOf(arena, root, _plan.Aggregates[i].Input?.Path, stood);
+            if (!Slots[i].StepStates(in input, selection, groups))
+            {
+                throw new InvalidOperationException($"A batch of states reached the aggregate {_plan.Aggregates[i].Kind}, which folds none.");
+            }
+        }
+
+        _rowsFolded += rows;
+        Core?.Fold(this, batch.SelectedRows, before);
+        if (Memory is { } memory)
+        {
+            Account(memory);
+        }
+    }
+
+    /// <summary>The states of <paramref name="column"/>'s aggregate in a batch of states; the rows alone for a count of rows.</summary>
+    private static StateInput StatesOf(CanonicalArena arena, int root, string? column, ReadOnlySpan<long> rows)
+    {
+        if (column is null)
+        {
+            return new StateInput { Rows = rows };
+        }
+
+        bool floats = arena.GetNode(root).DType.IndexOfField(StateRequest.SumWord(column, "m0")) >= 0;
+        return new StateInput
+        {
+            Rows = rows,
+            Values = StateColumn(arena, root, StateRequest.ValuesOf(column)),
+            Sum0 = StateColumn(arena, root, StateRequest.SumWord(column, floats ? "m0" : "low")),
+            Sum1 = StateColumn(arena, root, StateRequest.SumWord(column, floats ? "m1" : "high")),
+            Sum2 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, "m2")) : default,
+            Sum3 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, "meta")) : default,
+            Sum4 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, "high")) : default,
+            Least = StateColumn(arena, root, StateRequest.LeastOf(column)),
+            Greatest = StateColumn(arena, root, StateRequest.GreatestOf(column)),
+            Floats = floats,
+        };
+    }
+
+    /// <summary>The 64-bit integers of the field <paramref name="name"/> of a batch of states.</summary>
+    private static ReadOnlySpan<long> StateColumn(CanonicalArena arena, int root, string name)
+    {
+        CanonicalNode batch = arena.GetNode(root);
+        int field = batch.DType.IndexOfField(name);
+        if (field < 0)
+        {
+            throw new InvalidOperationException($"A batch of states holds no column '{name}'.");
+        }
+
+        CanonicalNode column = arena.GetNode(batch.GetFieldIndex(field));
+        if (column.Kind != CanonicalKind.Primitive || column.PType != PType.I64)
+        {
+            throw new InvalidOperationException($"The column '{name}' of a batch of states is not 64-bit integers.");
+        }
+
+        return column.Values.Cast<long>();
     }
 
     /// <summary>Reserves what the partition's groups grew to through a merge into it.</summary>
@@ -3360,6 +3497,14 @@ internal static class AggregationEngine
         if (settling is not null)
         {
             pass = settling.Pass(pass);
+        }
+
+        // A source that keeps states of some of its rows, a dataset's synopses, answers those as states,
+        // for a pass whose every aggregate and key a state answers whole: asked before the rows are cut, so
+        // that the cut leaves whole what states answer.
+        else if (pass.Options.UseSynopses && source.KeepsStates && StateRequest.Of(plan, settled, top) is { } states)
+        {
+            pass = pass with { States = states };
         }
 
         // On several lanes the structures are read once, before the rows are cut, so that the cut
