@@ -92,6 +92,9 @@ internal static class VariantShredder
         /// <summary>Whether each row holds the node: the key is in its object.</summary>
         protected Bits Held { get; } = new Bits();
 
+        /// <summary>Whether some row holds the node.</summary>
+        internal bool HeldAny => Held.SetCount > 0;
+
         internal static Group For(VariantShredding plan) => plan.Kind switch
         {
             VariantShreddingKind.Object => new ObjectGroup(plan),
@@ -258,15 +261,34 @@ internal static class VariantShredder
             }
         }
 
+        /// <remarks>
+        /// The chunk shreds only the keys its rows hold: a key no row holds would cost its nodes and a
+        /// typed column of nulls for nothing, and a chunk's tree is its own, which every reader takes.
+        /// When no row holds any, every key is kept, so that the tree is never empty.
+        /// </remarks>
         internal override int Typed(CanonicalArena arena, DTypeArena types, int rows, int metadata, out DType dtype)
         {
-            int[] nodes = new int[_fields.Length];
-            DType[] fields = new DType[_fields.Length];
-            string[] names = new string[_fields.Length];
+            int held = 0;
+            foreach (Group field in _fields)
+            {
+                held += field.HeldAny ? 1 : 0;
+            }
+
+            int count = held == 0 ? _fields.Length : held;
+            int[] nodes = new int[count];
+            DType[] fields = new DType[count];
+            string[] names = new string[count];
+            int at = 0;
             for (int k = 0; k < _fields.Length; k++)
             {
-                nodes[k] = _fields[k].Field(arena, types, rows, metadata, out fields[k]);
-                names[k] = _plan.Keys[k].Name;
+                if (held > 0 && !_fields[k].HeldAny)
+                {
+                    continue;
+                }
+
+                nodes[at] = _fields[k].Field(arena, types, rows, metadata, out fields[at]);
+                names[at] = _plan.Keys[k].Name;
+                at++;
             }
 
             dtype = types.Struct(names, fields, Nullability.Nullable);
@@ -505,6 +527,9 @@ internal static class VariantShredder
     {
         private ulong[] _words = new ulong[1];
         private int _set;
+
+        /// <summary>The bits set.</summary>
+        internal int SetCount => _set;
 
         internal int Count { get; private set; }
 

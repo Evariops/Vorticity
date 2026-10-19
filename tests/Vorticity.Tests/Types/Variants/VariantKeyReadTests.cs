@@ -95,6 +95,44 @@ public sealed partial class VariantKeyReadTests
         }
     }
 
+    /// <summary>
+    /// A route in the first half of the rows, a status in the second: each chunk shreds only the keys its
+    /// rows hold, so the path map lists each key in half the chunks, and a question on both keys still reads
+    /// them by key, a key a chunk lacks reading null there, and answers as over the rows written whole.
+    /// </summary>
+    [Fact]
+    public async Task AChunkShredsOnlyTheKeysItsRowsHold()
+    {
+        Doc[] rows = [.. Enumerable.Range(0, 6_000).Select(i => new Doc(i, i < 3_000
+            ? Variant.Object(("route", Variant.From($"/r/{i % 12}")), ("other", Variant.From(i)))
+            : Variant.Object(("status", Variant.From(200L + (i % 4))), ("other", Variant.From(i)))))];
+        byte[] bytes = await WriteAsync(rows, Plan);
+        await using VortexFile shredded = await OpenAsync(bytes, out TestSegmentSource source);
+        await using VortexFile whole = await OpenAsync(await WriteAsync(rows, null), out _);
+
+        int field = shredded.DType.IndexOfField(nameof(Doc.Attributes));
+        VariantPathMap map = (await VariantPathMap.ReadAsync(shredded, field, Plan.Keys.Select(k => k.Name).ToArray(), Ct))!;
+        PathChunk[] routes = map.Chunks[map.Keys.ToList().IndexOf("route")];
+        PathChunk[] statuses = map.Chunks[map.Keys.ToList().IndexOf("status")];
+        Assert.NotEmpty(routes);
+        Assert.NotEmpty(statuses);
+        Assert.All(routes, chunk => Assert.True(chunk.FirstRow < 3_000));
+        Assert.All(statuses, chunk => Assert.True(chunk.EndRow > 3_000));
+        Assert.Empty(map.Chunks[map.Keys.ToList().IndexOf("ok")]);
+
+        foreach (VortexFile file in new[] { shredded, whole })
+        {
+            Assert.Equal(rows.Select(r => r.Attributes["route"]?.AsString()), await file.Scan<Doc>().Select(r => r.Attributes["route"].AsString()).ToListAsync(Ct));
+            Assert.Equal(rows.Select(r => r.Attributes["status"]?.AsInt64()), await file.Scan<Doc>().Select(r => r.Attributes["status"].AsInt64()).ToListAsync(Ct));
+        }
+
+        // The question reads each key's ranges, never a chunk's segment whole.
+        int before = source.Ranges!.Count;
+        Assert.Equal(1_500, await shredded.Scan<Doc>().Where(r => r.Attributes["status"].AsInt64() >= 202).CountAsync(Ct));
+        long read = source.Ranges.Skip(before).Sum(range => range.Length);
+        Assert.True(read < bytes.Length / 2, $"{read} bytes read of a file of {bytes.Length}");
+    }
+
     private static Doc[] Rows()
     {
         Random random = new Random(8);

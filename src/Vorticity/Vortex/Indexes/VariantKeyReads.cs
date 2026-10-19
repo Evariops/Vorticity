@@ -148,7 +148,11 @@ internal sealed class VariantKeyReads
         return low < _chunks.Length && _chunks[low].Start < offset + length ? _chunks[low] : null;
     }
 
-    /// <summary>The column's chunks, each holding every key wanted, its typed column of one dtype across them; null when one does not.</summary>
+    /// <summary>
+    /// The column's chunks that shred a key wanted, each key's typed column of one dtype across them; null
+    /// when the keys' chunks disagree. A chunk shreds only the keys its rows hold, so a key it lacks reads
+    /// as null in it, and a chunk that holds none of the keys is not listed, and reads whole.
+    /// </summary>
     private static List<Chunk>? Column(VariantPathMap map, string[] wanted, DTypeArena types)
     {
         int[] keys = new int[wanted.Length];
@@ -169,64 +173,75 @@ internal sealed class VariantKeyReads
             }
         }
 
-        int count = map.Chunks[keys[0]].Length;
-        DType binary = types.Binary(Nullability.Nullable);
-        Key[][] perChunk = new Key[count][];
-        for (int c = 0; c < count; c++)
+        // The chunks by their first row, each its rows, from whichever key it shreds.
+        SortedDictionary<long, long> rowsOf = [];
+        foreach (int key in keys)
         {
-            perChunk[c] = new Key[wanted.Length];
+            foreach (PathChunk part in map.Chunks[key])
+            {
+                if (rowsOf.TryGetValue(part.FirstRow, out long rows) && rows != part.Rows)
+                {
+                    return null;
+                }
+
+                rowsOf[part.FirstRow] = part.Rows;
+            }
+        }
+
+        long[] firsts = [.. rowsOf.Keys];
+        DType binary = types.Binary(Nullability.Nullable);
+        Key?[][] perChunk = new Key?[firsts.Length][];
+        for (int c = 0; c < firsts.Length; c++)
+        {
+            perChunk[c] = new Key?[wanted.Length];
         }
 
         DType[] groups = new DType[wanted.Length];
         for (int k = 0; k < wanted.Length; k++)
         {
-            PathChunk[] parts = map.Chunks[keys[k]];
-            if (parts.Length != count)
-            {
-                return null;
-            }
-
             DType? typed = null;
-            for (int c = 0; c < count; c++)
+            foreach (PathChunk part in map.Chunks[keys[k]])
             {
-                DType shape = DTypeProtobuf.Read(parts[c].DType, types);
-                DType own = shape.Kind == DTypeKind.Variant ? NestedTyped(parts[c], types) ?? default : shape;
+                DType shape = DTypeProtobuf.Read(part.DType, types);
+                DType own = shape.Kind == DTypeKind.Variant ? NestedTyped(part, types) ?? default : shape;
                 if (own.IsDefault || (typed is { } known && !SameShape(known, own)))
                 {
                     return null;
                 }
 
                 typed ??= own;
-                perChunk[c][k] = new Key(wanted[k], parts[c], shape, own);
+                perChunk[Array.BinarySearch(firsts, part.FirstRow)][k] = new Key(wanted[k], part, shape, own);
             }
 
-            groups[k] = types.Struct(["metadata", "value", "typed_value"], [binary, binary, typed!.Value], Nullability.NonNullable);
-        }
-
-        DType tree = types.Struct(wanted, groups, Nullability.NonNullable);
-        List<Chunk> chunks = new List<Chunk>(count);
-        for (int c = 0; c < count; c++)
-        {
-            ulong start = ulong.MaxValue;
-            foreach (Key key in perChunk[c])
-            {
-                if (key.Part.Length > 0)
-                {
-                    start = Math.Min(start, key.Part.Offset);
-                }
-
-                if (key.Part.Rows != perChunk[c][0].Part.Rows)
-                {
-                    return null;
-                }
-            }
-
-            if (start == ulong.MaxValue)
+            if (typed is null)
             {
                 return null;
             }
 
-            chunks.Add(new Chunk(start, checked((int)perChunk[c][0].Part.Rows), perChunk[c], groups, tree, binary));
+            groups[k] = types.Struct(["metadata", "value", "typed_value"], [binary, binary, typed.Value], Nullability.NonNullable);
+            for (int c = 0; c < firsts.Length; c++)
+            {
+                perChunk[c][k] ??= new Key(wanted[k], null, typed.Value, typed.Value);
+            }
+        }
+
+        DType tree = types.Struct(wanted, groups, Nullability.NonNullable);
+        List<Chunk> chunks = new List<Chunk>(firsts.Length);
+        for (int c = 0; c < firsts.Length; c++)
+        {
+            ulong start = ulong.MaxValue;
+            foreach (Key? key in perChunk[c])
+            {
+                if (key!.Part is { Length: > 0 } part)
+                {
+                    start = Math.Min(start, part.Offset);
+                }
+            }
+
+            if (start != ulong.MaxValue)
+            {
+                chunks.Add(new Chunk(start, checked((int)rowsOf[firsts[c]]), [.. perChunk[c]!], groups, tree, binary));
+            }
         }
 
         return chunks;
@@ -246,8 +261,11 @@ internal sealed class VariantKeyReads
     private static bool SameShape(DType left, DType right) =>
         string.Equals(DTypeFormatter.Format(left), DTypeFormatter.Format(right), StringComparison.Ordinal);
 
-    /// <summary>One key of a chunk: its name, its range and tree, the dtype the chunk shredded it as, and its typed column's.</summary>
-    internal sealed record Key(string Name, PathChunk Part, DType Shape, DType Typed);
+    /// <summary>
+    /// One key of a chunk: its name, its range and tree, the dtype the chunk shredded it as, and its typed
+    /// column's; no range for a key the chunk does not shred, since none of its rows holds it.
+    /// </summary>
+    internal sealed record Key(string Name, PathChunk? Part, DType Shape, DType Typed);
 
     /// <summary>
     /// One chunk read by keys: where its first key's range starts, its rows, its keys, each key's
@@ -260,9 +278,9 @@ internal sealed class VariantKeyReads
         {
             foreach (Key key in Keys)
             {
-                if (key.Part.Length > 0)
+                if (key.Part is { Length: > 0 } part)
                 {
-                    segments.Add(Spec(key.Part));
+                    segments.Add(Spec(part));
                 }
             }
         }
@@ -280,11 +298,19 @@ internal sealed class VariantKeyReads
             for (int k = 0; k < Keys.Length; k++)
             {
                 Key key = Keys[k];
+                if (key.Part is not { } part)
+                {
+                    // No row of the chunk holds the key: every row reads null there, and nothing is read.
+                    int absent = Nulls(arena, Binary, Rows);
+                    groups.Span[k] = arena.AddStruct(Groups[k], Rows, Validity.NonNullable, [absent, absent, arena.AddNull(key.Typed, Rows)]);
+                    continue;
+                }
+
                 Buffers.VortexBuffer segment = default;
-                if (key.Part.Length > 0)
+                if (part.Length > 0)
                 {
                     SegmentRequestSet segments = context.Segments;
-                    int slot = segments.Add(Spec(key.Part));
+                    int slot = segments.Add(Spec(part));
                     segment = segments.GetBuffer(slot);
                     if (context.IsRetaining)
                     {
@@ -292,7 +318,7 @@ internal sealed class VariantKeyReads
                     }
                 }
 
-                context.Decode.LoadBlob(key.Part.Tree, segment);
+                context.Decode.LoadBlob(part.Tree, segment);
                 ArrayNode root = context.Nodes.Root;
                 int metadata;
                 int values;

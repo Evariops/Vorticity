@@ -89,6 +89,12 @@ if (Text(args, "--micro") == "shredcost")
     return await ShredCostMicro.Run();
 }
 
+// --micro chunkshapes: the keys the chunks of a slice shred, three ways (ChunkShapesMicro.cs).
+if (Text(args, "--micro") == "chunkshapes")
+{
+    return ChunkShapesMicro.Run((int)Option(args, "--rows", 3_000_000), (int)Option(args, "--chunk-rows", 1_000_000));
+}
+
 // --micro runsorder: the order inside a slice by distinct values or by runs added (RunsOrderMicro.cs).
 if (Text(args, "--micro") == "runsorder")
 {

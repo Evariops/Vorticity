@@ -321,7 +321,14 @@ from the counts of every path and type its rows hold.
    with them (estimate). Three ways keep a chunk's paths few, each to measure: the shape first in the
    order, at the cost of runs in the shallow columns, chunks of the variant cut where the shape
    changes, or a column budget that counts the shapes a chunk really holds. Past the budget, the paths
-   that pay the least stay in the residual.
+   that pay the least stay in the residual. As built, a chunk shreds only the keys its rows hold, the
+   others left out of its tree, and a question on a key it lacks reads nulls there without a byte.
+   Measured on fifty sources of eight keys each, among 150, a chunk of 10⁶ rows of a slice of
+   3 × 10⁶ holds 140 keys in the order by runs, 80 with the shape first, for 14 % more runs, and 8 when
+   chunks are cut at each shape, for a hundred times the chunks (`vortex-queries --micro chunkshapes`).
+   No way keeps a chunk's keys few for free: the order stays the one by runs, and putting the shape
+   first where a key's chunk costs more than the runs it adds waits for the price of a run, which the
+   synopsis gives.
 4. A path holding several type classes shreds the class most of its rows hold, every width of it in
    one typed column wide enough for all: a path whose sources send 502 as an `int16` and 70 000 as an
    `int32` is one integer column, not a column and a residual. The format's equivalence classes allow
@@ -849,7 +856,7 @@ Every figure is an estimate.
 | a path left in the residual, asked jointly with other columns per minute | the residual of its shapes in every slice of the window, since it has no runs | shredding it, where the column budget allows | rows |
 | shapes almost as many as rows among the shredded paths, so the shape is left out of the order | the residual of every row the object holds, for a path left there | keys left in the residual stay out of the shape, and the cost model shreds more where shapes scatter | every row's residual, in that object |
 | a path held by 10 to 90 % of a chunk's rows | a bit per row of validity for its typed column and for its field's `value`, 12 to 25 bytes a row over a hundred such paths (estimate) | validity encoded as runs or sparse, once Rust reads it there | a bit per row until then |
-| a chunk that crosses most shapes of its slice | the paths of every shape in its tree and its path map | the shape first, chunks cut where the shape changes, or a column budget that counts a chunk's shapes, as measured | the paths past the budget stay in the residual |
+| a chunk that crosses most shapes of its slice | the paths of every shape in its tree and its path map | each chunk shreds only the keys its rows hold, within the object's column budget; measured on fifty sources of eight keys among 150, a chunk of 10⁶ rows of a 3 × 10⁶-row slice holds 140 of them in the order by runs, 80 with the shape first (14 % more runs), 8 with chunks cut at each shape (a hundred times the chunks) (`--micro chunkshapes`) | most of the object's keys in each chunk, at a few hundred bytes and six tables each; the shape first pays where a key's chunk costs more than the runs it adds, which waits for the price of a run |
 | a path whose chunks encode it differently | path map entries of a few hundred bytes | a path's encoding fixed per object | some compression, which the write bench measures |
 | sparse paths placed early in the order | more runs for every column after them | the order by the runs each column adds | the overhead the bench measures |
 | a path the table of contents does not name | a round trip more per object, cold | the paths the rows hold most are named | one round trip, cold only |
@@ -925,7 +932,7 @@ Every figure is an estimate.
 | the synopsis counts a path exactly, shredded or not | at every version of the fuzzer, every value count, coarse table and run of a path equals the count of the parsed live rows that hold it |
 | the order pays for itself | the runs of every synopsis column under the measured order, against the order by numbers of distinct values, on real mixes of logs, and the cost of measuring it on a sample against the exact greedy order |
 | nulls cost what they hold | a path held by half of a chunk's rows costs no bit per row once its validity is encoded, on the write bench, and Rust reads it back in the cross-check (`ShreddedVariantWriteTests`: a validity of two runs written as runs; the slots of the null values remain, and the choice weighs them) |
-| a chunk shreds what it holds | the paths each chunk shreds, against the shapes it holds, on real mixes, and the bytes of the path map with a path's encoding fixed per object |
+| a chunk shreds what it holds | the paths each chunk shreds, against the shapes it holds, on real mixes, and the bytes of the path map with a path's encoding fixed per object (`VariantKeyReadTests.AChunkShredsOnlyTheKeysItsRowsHold`: each chunk's tree holds its rows' keys alone, and keyed reads serve the chunks that lack one) |
 | keys that are data are counted | at every version of the fuzzer, the key table's counts equal the rows that hold each key, and discovery lists every key of the window (`VariantDiscoveryTests`: four hundred user keys among others, at every append and compaction, appended and written objects alike) |
 | level 0 is parsed once per node | the parses of a level 0 object's path, counted on a query node under a load of questions: one per object, path and type class |
 | a path with dots stays one key | `http.route` and `http` holding `route` are two paths, in an index policy, the tool path and a plan |
