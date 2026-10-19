@@ -596,13 +596,21 @@ All figures in this table are estimates. Five things follow.
    which a binary search in the deletion vector finds ([deletes](#10-deletes)).
 4. The instant ascends inside each run of the last synopsis column, so rows in time order are a merge
    of a slice's runs.
-5. The data shrinks. On the example, the seven synopsis columns cost about 0.2 runs a row, under a byte
-   a row in all, where stored once per row they take five to eight bytes a row (estimate). That is 17
-   to 30 GB less per day of rows, before whatever the other columns gain from neighbouring rows that
-   look alike, which a bench measures. The instant gives some of it back under the size-first profile:
-   in time order it takes pco's delta, which sorted slices lose, about 2 to 3 bytes a row (estimate).
-   Under the default profile, a frame of reference over a few seconds or over a minute differs by two
-   or three bits. The write bench measures both profiles.
+5. The data shrinks, less than first estimated. On a million requests of the example's table, drawn
+   column by column independently and sorted in one slice (`vortex-queries --micro slicebytes`), the
+   three shallowest columns fall from about 0.39 bytes a row each to 0.01, `Service` from 1.35 to 0.69
+   (0.46 under the size-first profile) and `Version` from 1.62 to 1.29 (0.81). `Host` and `Endpoint`,
+   deep in the order, keep runs of a row or two, and about their weight, 2 to 3 bytes a row each. In
+   all the seven synopsis columns go from 10.1 bytes a row to 7.7 under the default profile, and from
+   9.6 to 5.9 under the size-first one, not under a byte as estimated: the estimate assumed runs that
+   columns drawn independently do not make, and real columns, which follow each other (an endpoint
+   belongs to one service), make more of them. The instant gives some of it back: 0.75 bytes a row
+   more under the default profile, whose frame of reference spans the slice rather than a few
+   seconds, and 2.3 more under the size-first one, which loses pco's delta. The file weighs 40.35
+   bytes a row against 42.03 in time order, 4 % less, and 36.94 against 38.36 under the size-first
+   profile, 3.7 % less. An object of a dataset of levels also carries a run on its key, and against it
+   the sorted object is 10 % and 5.5 % lighter, about 18 GB less a day of rows on the example. A
+   ratchet holds these bytes (`SortedSliceBytesTests`).
 
 ### 6.4 How a writer sorts a slice
 

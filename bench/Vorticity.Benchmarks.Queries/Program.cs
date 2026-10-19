@@ -83,6 +83,12 @@ if (Text(args, "--micro") == "slicesort")
     return await SliceSortMicro.Run(rounds);
 }
 
+// --micro slicebytes: what sorted slices weigh against the same rows in time order (SliceBytesMicro.cs).
+if (Text(args, "--micro") == "slicebytes")
+{
+    return await SliceBytesMicro.Run(Option(args, "--rows", 1_000_000));
+}
+
 // --micro sliceorder: the time order of an object sorted slice by slice (SliceOrderMicro.cs).
 if (Text(args, "--micro") == "sliceorder")
 {

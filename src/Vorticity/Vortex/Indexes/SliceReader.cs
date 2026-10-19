@@ -177,6 +177,22 @@ internal sealed class SliceReader
         }
     }
 
+    /// <summary>
+    /// What column <paramref name="field"/> weighs in the file: the bytes of its chunks, as its chunk
+    /// directory lists them, read the first time it is asked for.
+    /// </summary>
+    internal async ValueTask<long> ColumnBytesAsync(int field, CancellationToken cancellationToken)
+    {
+        await LoadChunksAsync([field], cancellationToken).ConfigureAwait(false);
+        long bytes = 0;
+        foreach (ChunkSpan chunk in _columns[field]!)
+        {
+            bytes += chunk.Length;
+        }
+
+        return bytes;
+    }
+
     private int[] AllColumns()
     {
         int[] all = new int[_regions.Count];

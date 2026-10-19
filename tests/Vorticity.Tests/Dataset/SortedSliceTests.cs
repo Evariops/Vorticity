@@ -171,6 +171,74 @@ public sealed partial class SortedSliceTests
         await SameAsync(periods, levels);
     }
 
+    /// <summary>
+    /// The .NET half of Rust reading the objects a dataset of periods sorts: under each profile, every
+    /// object above level 0 written out as it is stored, beside its rows in time order written plainly,
+    /// for `cargo run --example verify_sliced` to compare (`bench/crosscheck.sh`). It skips rather than
+    /// passes without its directory, so a run that forgets it does not look like a green cross-check.
+    /// </summary>
+    [Fact]
+    public async Task WritesSortedSlicesOutForTheRustCrossCheck()
+    {
+        string? root = Environment.GetEnvironmentVariable("VORTICITY_WRITE_SLICES");
+        Assert.SkipWhen(string.IsNullOrEmpty(root), "Set VORTICITY_WRITE_SLICES to a directory to produce objects for the Rust cross-check.");
+        System.IO.Directory.CreateDirectory(root!);
+        int written = 0;
+        foreach (CompressionProfile profile in new[] { CompressionProfile.Auto, CompressionProfile.Smallest })
+        {
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Span.Schema, new DatasetOptions
+            {
+                ClusteringKey = [nameof(Span.At)],
+                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+                Write = new VortexWriteOptions { Compression = profile },
+            }, Ct);
+            Random random = new Random(5);
+            for (int part = 0; part < 16; part++)
+            {
+                Span[] rows = [.. Enumerable.Range(0, 400).Select(i => new Span(
+                    Noon.AddSeconds((part * 400 + i) * 1.25),
+                    200 + (random.Next(5) * 100),
+                    $"region-{random.Next(3)}",
+                    $"host-{random.Next(100_000)}"))];
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Span>(rows, Ct);
+                await dataset.AppendAsync(draft, Ct);
+                while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+                {
+                }
+            }
+
+            for (int level = 1; level < dataset.Levels.Count; level++)
+            {
+                await foreach (TreeEntry leaf in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
+                {
+                    ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
+                    string name = System.IO.Path.Combine(root!, $"{profile}-{written++}");
+                    byte[] bytes = new byte[entry.Bytes];
+                    await store.ReadAsync(entry.Key, 0, bytes, null, Ct);
+                    await System.IO.File.WriteAllBytesAsync(name + ".sorted.vortex", bytes, Ct);
+
+                    List<Span> stored = [];
+                    await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
+                    {
+                        Assert.NotNull(await SliceTable.ReadAsync(lease.File, Ct));
+                        await foreach (Span row in lease.File.Scan<Span>().ToRecordsAsync(Ct))
+                        {
+                            stored.Add(row);
+                        }
+                    }
+
+                    await using VortexFileWriter twin = VortexSession.Default.CreateWriter<Span>(name + ".time.vortex");
+                    await twin.WriteAsync<Span>([.. stored.OrderBy(r => r.At).ThenBy(r => r.Host, StringComparer.Ordinal)], Ct);
+                    await twin.CompleteAsync(Ct);
+                }
+            }
+        }
+
+        Assert.True(written >= 4, $"{written} objects in sorted slices");
+    }
+
     /// <summary>What every read in the key's order gives, alike on both datasets.</summary>
     private static async Task SameAsync(VortexDataset periods, VortexDataset levels)
     {

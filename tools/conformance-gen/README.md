@@ -51,6 +51,11 @@ VORTICITY_WRITE_CORPUS=/tmp/vxwritten dotnet test ../../Vorticity.slnx -c Releas
 VORTEX_EXPERIMENTAL_PATCHED_ARRAY=1 VORTEX_EXPERIMENTAL_LIST_LAYOUT=1 \
     cargo run --release -j 6 --example verify_written -- \
     ../../tests/Vorticity.Conformance/corpus /tmp/vxwritten
+# Does it read the objects a dataset of periods sorts slice by slice? Each is compared, as a multiset
+# of rows, with its twin written in time order.
+VORTICITY_WRITE_SLICES=/tmp/vxslices dotnet test ../../Vorticity.slnx -c Release \
+    --filter-method '*WritesSortedSlicesOutForTheRustCrossCheck*'
+cargo run --release -j 6 --example verify_sliced -- /tmp/vxslices
 ```
 
 Output goes to `tests/Vorticity.Conformance/corpus` by default, and `--out <dir>` redirects it.
@@ -400,5 +405,6 @@ over-reports as described above.
 | `src/forged.rs` | the forged-fixture set: byte patches no writer can produce, with their provenance |
 | `examples/verify_corpus.rs` | independent derivation of the coverage, sharing no code with `emit` |
 | `examples/verify_forged.rs` | asserts the forged manifest's expectations against the Rust reader |
+| `examples/verify_sliced.rs` | reads the objects a dataset of periods sorts slice by slice, each against its twin in time order |
 | `API-NOTES.md` | the 0.86.1 API, as this generator uses it |
 | `examples/api_experiments.rs` | the runnable proof behind `API-NOTES.md` |
