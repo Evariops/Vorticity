@@ -2818,6 +2818,7 @@ Vorticity.Dataset:     property ImmutableArray<long> BytesByLevel { get; init; }
 Vorticity.Dataset:     property ImmutableArray<long> ObjectsByLevel { get; init; }
 Vorticity.Dataset:     property bool HasWork { get; }
 Vorticity.Dataset:     property bool IsClustered { get; init; }
+Vorticity.Dataset:     property int Partitions { get; init; }
 Vorticity.Dataset:     property long FragmentedObjects { get; init; }
 Vorticity.Dataset:     property long Lag { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }

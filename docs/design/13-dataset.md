@@ -797,6 +797,11 @@ expired apart. An append splits its rows by their values, so every
 object holds one value of each partition column, which its entry records as exact summaries even for
 a text column, which file statistics would not bound. Compaction plans each partition's periods apart,
 so no job mixes two, and an append that would hold more values than `MaxPartitionValues` is refused.
+That bound holds per append, which catches a column of identifiers declared a partition at its first
+append and keeps no state. The values a dataset gathers over its life are not bounded: the plan of a
+compaction counts those its objects hold, from the summaries it reads anyway
+(`CompactionPlan.Partitions`), and the meter records the count (`vortex.dataset.partitions`), so that a
+partition column whose values only grow shows before its periods pile up.
 `ExpireAsync(partition, before)` then removes one partition's periods from what the leaves say, and a
 question's conjunct on a partition column is decided object by object, true or false for all its rows,
 without a read. The header carries the columns, in commit format 4.

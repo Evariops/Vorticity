@@ -105,6 +105,24 @@ internal static partial class CompactionPolicy
         return [.. partitions.Values];
     }
 
+    /// <summary>The values of the partition columns the objects hold rows of, from the objects whose summaries say one each.</summary>
+    private static int PartitionsOf(List<List<CompactionInput>> levels, ClusteringKey key)
+    {
+        HashSet<string> partitions = new HashSet<string>(StringComparer.Ordinal);
+        foreach (List<CompactionInput> level in levels)
+        {
+            foreach (CompactionInput input in level)
+            {
+                if (key.PartitionOf(input.Entry.Summaries) is { } values)
+                {
+                    partitions.Add(Convert.ToHexString(key.Encode(values)));
+                }
+            }
+        }
+
+        return partitions.Count;
+    }
+
     /// <summary>Byte strings in ordinal order: the order of encoded keys.</summary>
     private sealed class ByteOrder : IComparer<byte[]>
     {

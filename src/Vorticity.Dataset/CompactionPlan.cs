@@ -504,6 +504,17 @@ public sealed record CompactionPlan
     /// </summary>
     public long FragmentedObjects { get; init; }
 
+    /// <summary>
+    /// How many values of its partition columns the dataset holds rows of, counted from the objects' summaries
+    /// the plan reads; 0 for a dataset without partition columns (<see cref="DatasetOptions.PartitionColumns"/>).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="DatasetOptions.MaxPartitionValues"/> bounds the values one append holds, which catches a column
+    /// of identifiers declared as a partition. Nothing bounds the values a dataset gathers over its life: each one
+    /// grows periods of its own, and this count, which the meter records too, is what shows them pile up.
+    /// </remarks>
+    public int Partitions { get; init; }
+
     /// <summary>Whether a compaction is due.</summary>
     public bool HasWork => Job is not null;
 }

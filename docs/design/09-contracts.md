@@ -133,6 +133,7 @@ so a listener that enables one only pays for that one:
 | `vortex.dataset.compaction.bytes_read`, `vortex.dataset.compaction.bytes_written`, by `vortex.trigger` | what compaction reads and rewrites, abandoned jobs included, which is the write amplification of the datasets |
 | `vortex.dataset.vacuum.objects_deleted` | what vacuums deleted, a dry run's nothing |
 | `vortex.dataset.rows_past_horizon` | rows a dataset by periods took later than its lateness horizon, kept in the late level beside their period: a horizon too short shows here |
+| `vortex.dataset.partitions` | the values of its partition columns a dataset holds rows of, at each plan of its compaction: what one append's bound does not see pile up over a dataset's life |
 
 A scan is one activity, `vortex.scan.typed` or `vortex.scan.tool`, tagged when it ends with its rows,
 batches, requests, bytes requested, and blocks decoded and pruned. A write is one activity,

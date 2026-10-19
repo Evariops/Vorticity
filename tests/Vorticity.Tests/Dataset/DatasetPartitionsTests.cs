@@ -170,6 +170,57 @@ public sealed partial class DatasetPartitionsTests
     }
 
     /// <summary>
+    /// One append's values are bounded, a dataset's over its life are not: a plan counts those the dataset holds from
+    /// the summaries it reads anyway, the meter records them, and a partition expired whole leaves the count. A
+    /// dataset without partition columns holds none.
+    /// </summary>
+    [Fact]
+    public async Task APlanCountsThePartitionsTheDatasetHolds()
+    {
+        long recorded = 0;
+        using System.Diagnostics.Metrics.MeterListener listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, meter) =>
+        {
+            if (instrument.Meter.Name == VortexDiagnostics.MeterName && instrument.Name == "vortex.dataset.partitions")
+            {
+                meter.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Exchange(ref recorded, Math.Max(Interlocked.Read(ref recorded), value)));
+        listener.Start();
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        (VortexDataset dataset, _) = await FilledAsync(store, partitions: true);
+        await using (dataset)
+        {
+            Assert.Equal(Retentions.Length, (await dataset.PlanCompactionAsync(null, Ct)).Partitions);
+            Assert.True(Interlocked.Read(ref recorded) >= Retentions.Length, $"the meter recorded {recorded} partitions");
+
+            // The periods a cutoff past every row expires are the sealed ones: the debug rows left past them keep their
+            // partition, and once they are gone too the partition is.
+            await dataset.ExpireAsync<Logged>(r => r.Retention == "debug", Noon.AddHours(3), Ct);
+            long left = await dataset.Scan<Logged>().Where(r => r.Retention == "debug").CountAsync(Ct);
+            Assert.Equal(Retentions.Length - (left == 0 ? 1 : 0), (await dataset.PlanCompactionAsync(null, Ct)).Partitions);
+            if (left > 0)
+            {
+                await dataset.DeleteAsync<Logged>(r => r.Retention == "debug", Ct);
+                while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, Ct) is not null)
+                {
+                }
+
+                Assert.Equal(Retentions.Length - 1, (await dataset.PlanCompactionAsync(null, Ct)).Partitions);
+            }
+        }
+
+        await using MemoryObjectStore plainStore = new MemoryObjectStore();
+        (VortexDataset plain, _) = await FilledAsync(plainStore, partitions: false);
+        await using (plain)
+        {
+            Assert.Equal(0, (await plain.PlanCompactionAsync(null, Ct)).Partitions);
+        }
+    }
+
+    /// <summary>
     /// Rows an hour late, past a horizon of five minutes, land in the late level beside their sealed period, which no
     /// job rewrites, and every question reads them with it; expiring their partition takes them with their period, and
     /// the other partitions keep theirs. The dataset counts them on its meter, and a handle that refuses such rows

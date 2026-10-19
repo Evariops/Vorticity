@@ -200,8 +200,11 @@ DatasetOptions options = new DatasetOptions
 Every object then holds one retention value. An append is split into an object per value, and each
 value grows its own periods, so a period never mixes rows that expire at different times. Partition
 columns should have a few values: an append that holds more than `MaxPartitionValues` of them, 64 by
-default, is refused. A question filtered or grouped on the partition column is still answered from the
-synopses, since each object holds a single value of it.
+default, is refused. That bound is per append, and nothing bounds the values a dataset gathers over
+time, each of which grows periods of its own: `PlanCompactionAsync` says how many the dataset holds
+(`CompactionPlan.Partitions`), and so does the `vortex.dataset.partitions` metric. A question filtered or
+grouped on the partition column is still answered from the synopses, since each object holds a single
+value of it.
 
 Each partition then expires on its own schedule, reading no data:
 
