@@ -120,6 +120,58 @@ public sealed partial class SynopsisAnswerTests
         }
     }
 
+    /// <summary>
+    /// A day of sealed hours, an object each, on a store that answers in 20 ms: a count by service reads the
+    /// answers of every hour at once, newest first, so the day costs the round trips of an hour and the open
+    /// of the fresh rows beside them, not a round trip an hour.
+    /// </summary>
+    [Fact]
+    public async Task ADayOfHoursCostsTheRoundTripsOfAnHour()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexSession session = VortexSession.Create(static options => options.MaxConcurrentReads = 32);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
+        {
+            Session = session,
+            ClusteringKey = [nameof(Request.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 100 },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000) },
+        }, Ct);
+        Random random = new Random(47);
+        DateTimeOffset midnight = new DateTimeOffset(2026, 10, 19, 0, 0, 0, TimeSpan.Zero);
+        for (int part = 0; part < 49; part++)
+        {
+            Request[] rows = [.. Enumerable.Range(0, 180).Select(i => new Request(
+                midnight.AddSeconds((part * 180 + i) * 10),
+                Services[random.Next(Services.Length)],
+                Methods[random.Next(Methods.Length)],
+                random.Next(4) switch { 0 => 200L, 1 => 201L, 2 => 404L, _ => 500L },
+                random.NextDouble() * 1_000,
+                random.NextInt64(1, 1L << 40)))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Request>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        _ = await dataset.Scan<Request>().Where(r => r.At >= midnight).CountAsync(Ct);
+        inner.Latency = TimeSpan.FromMilliseconds(20);
+        store.Reset();
+        (List<string> on, ScanMetrics metrics) = await GroupsAsync(dataset.Scan<Request>().GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
+        Console.Out.Write($"A DAY: {store.DependentSteps} dependent steps, {store.Requests} requests, {metrics.SynopsisRows} table rows, {metrics.Rows} rows.\n");
+        Assert.InRange(store.DependentSteps, 1, 2);
+        Assert.True(store.Requests >= 24, $"{store.Requests} requests for 24 hours");
+        Assert.Equal(0, metrics.Rows);
+
+        (List<string> off, _) = await GroupsAsync(dataset.Scan<Request>().With(new ScanOptions { UseSynopses = false })
+            .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
+        Assert.Equal(off, on);
+    }
+
     /// <summary>A whole scan's sums, extremes and means, over every row and over a window that cuts slices, are the bits of its rows.</summary>
     [Fact]
     public async Task AWholeScanGivesTheBitsOfItsRowsFromTheSynopses()

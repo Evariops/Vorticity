@@ -312,6 +312,16 @@ internal sealed class DatasetScanBuilder
             yield break;
         }
 
+        if (_states is { } request)
+        {
+            await foreach (RecordBatch batch in StatesAsync(request, cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
         IAsyncEnumerator<PositionedObject> walk = WalkAsync(cancellationToken).GetAsyncEnumerator(cancellationToken);
         await using (walk.ConfigureAwait(false))
         {
@@ -532,6 +542,196 @@ internal sealed class DatasetScanBuilder
         PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, int open,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        if (await AnswerObjectAsync(held, answer, contents, instant, cancellationToken).ConfigureAwait(false) is { } answered)
+        {
+            foreach (RecordBatch batch in Delivered(held, answered))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
+        await foreach (RecordBatch batch in RowsAsync(held, open, cancellationToken).ConfigureAwait(false))
+        {
+            yield return batch;
+        }
+    }
+
+    /// <summary>
+    /// The objects of an aggregation that takes states, newest first: the answers of those their synopses
+    /// answer read ahead of the consumer, as many at once as the session lets reads be in flight, so that a
+    /// question over a month of objects costs the round trips of one object, not one per object; an object
+    /// read as rows is read in its turn, alone ahead of none.
+    /// </summary>
+    /// <remarks>
+    /// An answer read ahead holds its tables' states and its edges' rows until its turn: a few tables' rows
+    /// and a few slices an object, against the rows a scan of the object would hold.
+    /// </remarks>
+    private async IAsyncEnumerable<RecordBatch> StatesAsync(StateRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        List<PositionedObject> objects = [];
+        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (Covered(held) > 0)
+            {
+                objects.Add(held);
+            }
+        }
+
+        NewestFirst(objects);
+        using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        int width = _dataset.Session.Options.MaxConcurrentReads;
+        Queue<(PositionedObject Held, Task<AnsweredObject?>? Answer)> ahead = new Queue<(PositionedObject, Task<AnsweredObject?>?)>(Math.Min(width, objects.Count));
+        int next = 0;
+        try
+        {
+            while (true)
+            {
+                while (ahead.Count < width && next < objects.Count)
+                {
+                    PositionedObject held = objects[next++];
+                    ahead.Enqueue((held, Answer(held, request) is ({ } answer, { } contents, string instant)
+                        ? AnswerObjectAsync(held, answer, contents, instant, stopped.Token)
+                        : null));
+                }
+
+                if (!ahead.TryDequeue(out (PositionedObject Held, Task<AnsweredObject?>? Answer) turn))
+                {
+                    break;
+                }
+
+                // The answer was started by this walk, a few turns before.
+#pragma warning disable VSTHRD003
+                if (turn.Answer is not null && await turn.Answer.ConfigureAwait(false) is { } answered)
+#pragma warning restore VSTHRD003
+                {
+                    foreach (RecordBatch batch in Delivered(turn.Held, answered))
+                    {
+                        yield return batch;
+                    }
+
+                    continue;
+                }
+
+                await foreach (RecordBatch batch in RowsAsync(turn.Held, 1, stopped.Token).ConfigureAwait(false))
+                {
+                    yield return batch;
+                }
+            }
+        }
+        finally
+        {
+            // The answers read ahead of a consumer that stopped, or of a failure, are nobody's.
+            await stopped.CancelAsync().ConfigureAwait(false);
+            foreach ((_, Task<AnsweredObject?>? answer) in ahead)
+            {
+                if (answer is null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    (await answer.ConfigureAwait(false))?.Dispose();
+                }
+                catch (Exception) when (answer.IsFaulted || answer.IsCanceled)
+                {
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Orders <paramref name="objects"/> by the newest instant each holds, newest first, those whose
+    /// summary does not say last, each kind in the walk's order.
+    /// </summary>
+    private void NewestFirst(List<PositionedObject> objects)
+    {
+        if (_dataset.Key is not { } key)
+        {
+            return;
+        }
+
+        (long Newest, int At)[] order = new (long, int)[objects.Count];
+        for (int i = 0; i < order.Length; i++)
+        {
+            long newest = objects[i].Entry.Summaries.TryGet(key.Paths[0], out ColumnSummary summary)
+                && summary is { HasMax: true, Max.Kind: FilterLiteralKind.Signed }
+                ? summary.Max.SignedValue
+                : long.MinValue;
+            order[i] = (newest, i);
+        }
+
+        Array.Sort(order, static (a, b) => a.Newest != b.Newest ? b.Newest.CompareTo(a.Newest) : a.At.CompareTo(b.At));
+        PositionedObject[] walked = [.. objects];
+        for (int i = 0; i < order.Length; i++)
+        {
+            objects[i] = walked[order[i].At];
+        }
+    }
+
+    /// <summary>What an object's synopsis answered: its batches of states, the tables they lie in, and the rows of its edge slices.</summary>
+    private sealed class AnsweredObject(List<RecordBatch> states, SynopsisTableSet? tables, List<RecordBatch> edges) : IDisposable
+    {
+        internal List<RecordBatch> States { get; } = states;
+
+        internal List<RecordBatch> Edges { get; } = edges;
+
+        public void Dispose()
+        {
+            foreach (RecordBatch batch in States)
+            {
+                batch.Dispose();
+            }
+
+            foreach (RecordBatch batch in Edges)
+            {
+                batch.Dispose();
+            }
+
+            tables?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The batches of an object's answer as the dataset's: its states, then the rows its edges keep, each
+    /// counted; the answer given back once the last is read, or the consumer stops.
+    /// </summary>
+    private IEnumerable<RecordBatch> Delivered(PositionedObject held, AnsweredObject answered)
+    {
+        try
+        {
+            foreach (RecordBatch batch in answered.States)
+            {
+                _counters?.AddSynopsisRows(batch.SelectedRows);
+                yield return batch;
+            }
+
+            foreach (RecordBatch slice in answered.Edges)
+            {
+                using RecordBatch rows = slice.Rebased(held.FirstRow + slice.StartRow);
+                _counters?.AddEdgeRows(rows.SelectedRows);
+                if (rows.SelectedRows > 0)
+                {
+                    yield return rows;
+                }
+            }
+        }
+        finally
+        {
+            answered.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Reads what an object's synopsis answers, with no open of it, as <see cref="AnsweredAsync"/> delivers it;
+    /// null, with nothing held, when a row cannot come out of a table exactly or an identifier's index cannot
+    /// find the rows left out.
+    /// </summary>
+    private async Task<AnsweredObject?> AnswerObjectAsync(
+        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, CancellationToken cancellationToken)
+    {
         // A deletion vector kept out of line is read before the rows it marks are.
         if (held.Entry.HasDeletions && !held.Entry.IsResolved)
         {
@@ -584,42 +784,22 @@ internal sealed class DatasetScanBuilder
             throw;
         }
 
+        // The rows taken out are spent once the states are corrected.
+        await LetGoAsync([], null, marked, excluded).ConfigureAwait(false);
         if (!exact)
         {
-            await LetGoAsync(states, tables, marked, edges, excluded).ConfigureAwait(false);
-            await foreach (RecordBatch batch in RowsAsync(held, open, cancellationToken).ConfigureAwait(false))
-            {
-                yield return batch;
-            }
-
-            yield break;
+            await LetGoAsync(states, tables, edges).ConfigureAwait(false);
+            return null;
         }
 
         try
         {
-            foreach (RecordBatch batch in states)
-            {
-                _counters?.AddSynopsisRows(batch.SelectedRows);
-                yield return batch;
-            }
-
-            if (edges is not null)
-            {
-                foreach (RecordBatch slice in await edges.ConfigureAwait(false))
-                {
-                    using RecordBatch rows = slice.Rebased(held.FirstRow + slice.StartRow);
-                    _counters?.AddEdgeRows(rows.SelectedRows);
-                    if (rows.SelectedRows > 0)
-                    {
-                        yield return rows;
-                    }
-                }
-            }
+            return new AnsweredObject(states, tables, edges is null ? [] : await edges.ConfigureAwait(false));
         }
-        finally
+        catch
         {
-            // Every batch given back, delivered or not: a consumer that stopped, or a failure, leaves them.
-            await LetGoAsync(states, tables, marked, edges, excluded).ConfigureAwait(false);
+            await LetGoAsync(states, tables).ConfigureAwait(false);
+            throw;
         }
     }
 
