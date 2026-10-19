@@ -131,6 +131,12 @@ if (Text(args, "--micro") == "synopsisanswer")
     return await SynopsisAnswerMicro.Run(Option(args, "--rows", 2_000_000), rounds);
 }
 
+// --micro slicecost: the price of a row at a window's edge and of a row of a table of slices, the two a slice's target trades (SliceCostMicro.cs).
+if (Text(args, "--micro") == "slicecost")
+{
+    return await SliceCostMicro.Run(Option(args, "--rows", 2_000_000), rounds);
+}
+
 // --micro generator: a minute of the time-window design's requests, and the runs of each synopsis column against its figures (RequestGenerator.cs).
 if (Text(args, "--micro") == "generator")
 {

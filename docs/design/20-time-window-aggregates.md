@@ -193,7 +193,8 @@ Eight rules carry the design.
    and serve any predicate and any grouping over the columns they hold.
 5. No size or threshold is guessed. Periods, tables and the cache's policy come from cost models whose
    constants a bench measures, and from a byte budget the user sets. The slice's target is the one
-   exception still waiting for its measure ([decision 3](#7-decisions)).
+   exception: a model of its edges against its tables was measured and lost to a fixed minute of the
+   example, since a slice is also the rows the job sorts together ([decision 3](#7-decisions)).
 6. A question reads synopses first and rows last, and its answer is the same bits whichever it reads.
 7. The local disk keeps synopsis parts, never the rest of an object.
 8. Rows reach their period through a life the dataset bounds: fresh objects that merge as they age, a
@@ -376,7 +377,7 @@ of a day under late rows and four writers, 2.7 times when rows come in order (me
 |---|---|---|---|
 | 1 | where the counts of combinations live | in the rows' own order, sorted inside each slice. An object is 4 % smaller than its rows in time order, 10 % smaller than a leveled object with its sorted run (measured) | in a synopsis table beside rows kept in time order ([alternatives](#8-alternatives-weighed)) |
 | 2 | the order of the synopsis columns | one per object, measured on its rows by the runs each adds, and recorded in its slice table ([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)) | measured per slice, which breaks the sorted merges of coarse tables, or per dataset |
-| 3 | the slice's target | for now a minute of the example's rate, 3 × 10⁶ rows. The model of an edge's rows against the slice tables of the hours a window cuts puts the optimum at the square root of the hour's rows times the depth's combinations times the price of a table row over the price of an edge row, between 3.6 × 10⁵ and 2 × 10⁶ rows on the example by depth (estimate); a target per object from that model is to come | a fixed number of rows |
+| 3 | the slice's target | a minute of the example's rate, 3 × 10⁶ rows, cut at the coarsest calendar unit that holds no more. A slice is also the rows the job sorts together, so a narrower one breaks the runs of the synopsis columns | a target per object from the rows a cut hour's edge reads against the table rows it folds, a table row worth 2.3 edge rows (measured, 39.4 bytes against 16.5): on six hours of the questions bench it cut hours into minutes, whose sorted columns took 16 % more bytes, and questions read from rows took up to three times the requests and 3.8 times the bytes (measured) |
 | 4 | the depth of the synopsis part | every synopsis column. A reader takes the regions it needs, not the whole part | where the budget stops |
 | 5 | tables over subsets of columns | none beyond the prefixes of the order and each column's value counts | admitted by their benefit per byte, as every other table |
 | 6 | edges | exact by default, their rows stated by the plan. `ScanOptions.AlignWindow` moves each end to the nearest bound the tables answer at, a slice's, an hour's or the object's, no further than its rows, and the metrics return the window applied, the same whether states or rows answer: a window that cuts its first and last hours, 8 requests in 6 round trips warm, aligned none (measured) | moved to slice boundaries by default, which changes what a question means without its asking |
@@ -390,7 +391,7 @@ of a day under late rows and four writers, 2.7 times when rows come in order (me
 | 14 | format | commit format 4 for the style, partition columns, the table of contents and the footer's length, refused by older libraries | fields older libraries skip |
 | 15 | the life of a row | a compaction style by periods: 4.7 rewrites per row on periods of a day with fan-out 30, 20 objects for the last hour (measured) | concatenations of time-adjacent objects, or the leveled style, which rewrites a row 2.2 times with keys in order but 10.2 times under late rows and four writers, and keeps no slices to answer from (measured) |
 | 16 | writing large objects | a bound on a put's length and the spool, the store choosing by its profile and the object's size. Every rewrite announces what it reads times 1.03 (measured at worst 1.024), and starts again under twice the bound when its content runs past it | the spool alone, or the bound alone |
-| 17 | the size of a chunk in a period | from the footer's cap. Chunks do not end at slices | 16 MB of the widest column |
+| 17 | the size of a chunk in a period | from the footer's cap. Chunks do not end at slices | 16 MB of the widest column, or chunks ended around each slice, which took five times the requests of a whole read and 2.4 times the bytes of a cut hour's rows (measured) |
 | 18 | reading part of a flat segment | no, while chunks stay at a megabyte of values: what it saves of one segment, at most 10 ms, never pays the round trip it adds, 30 to 50 ms | now, for every column |
 | 19 | needles | identifiers declared by the application, with hashed postings from value to block outside the index budget (0.14 to 0.40 times the bytes of a sorted run, a probe reading 44 KB instead of up to 1.2 MB) | Bloom filter trees, a sorted run inside or outside the budget |
 | 20 | physical erasure | a delay the application declares, one purge per object and delay | a purge triggered by the vector's bytes |

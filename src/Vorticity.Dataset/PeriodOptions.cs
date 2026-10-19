@@ -42,9 +42,8 @@ public sealed record PeriodOptions
     public bool RefuseLateRows { get; init; }
 
     /// <summary>
-    /// The rows a time slice aims at: <see cref="TimeSlicer.DefaultTargetRows"/>, until the cost of a
-    /// window's edges against the runs a finer slice adds is measured. Set by tests to cut slices of a
-    /// few rows; each writer's own, since an object's slices are its own.
+    /// The rows a time slice aims at: <see cref="TimeSlicer.DefaultTargetRows"/>. Set by tests and the
+    /// benches to cut slices of a few rows; each writer's own, since an object's slices are its own.
     /// </summary>
     internal long SliceTargetRows { get; init; } = TimeSlicer.DefaultTargetRows;
 

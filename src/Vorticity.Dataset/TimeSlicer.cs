@@ -21,14 +21,16 @@ internal enum SliceWidth : byte
 /// target.
 /// </summary>
 /// <remarks>
-/// A slice is the finest grain of time a question reads without reading rows, and the most rows an
-/// edge of a window reads, so its target weighs the edges' cost against the runs a smaller slice adds.
-/// That constant is measured once the runs exist; until then <see cref="DefaultTargetRows"/> is the
-/// one the design's example gives, a minute of 5 × 10⁴ rows a second.
+/// A slice is the finest grain of time a question reads without reading rows, the most rows an edge
+/// of a window reads, and the rows the job sorts together. A smaller slice makes edges cheaper, but
+/// it adds rows to the tables of slices and breaks the runs of the synopsis columns that a wider
+/// slice sorts whole. A target per object from the edges and the tables alone was measured and
+/// dropped: it cut the bench's hours into minutes, whose sorted columns took 16 % more bytes.
+/// <see cref="DefaultTargetRows"/> stays a minute of the design's example, 5 × 10⁴ rows a second.
 /// </remarks>
 internal static class TimeSlicer
 {
-    /// <summary>The rows a slice aims at until the cost of edges against runs is measured: a minute of the design's example.</summary>
+    /// <summary>The rows a slice aims at: a minute of the design's example.</summary>
     internal const long DefaultTargetRows = 3_000_000;
 
     /// <summary>A unit past which a burst is cut again: twice the target.</summary>

@@ -416,12 +416,39 @@ its determinism, so it is not done.
 ## 9. Sorted time slices, and shredded variants
 
 A dataset compacted by periods hands the writer rows it has already sorted. Its jobs cut each object
-into time slices, ranges of instants of a few thousand rows to a few hundred thousand, and sort the
+into time slices, ranges of instants of up to a few million rows, and sort the
 rows of a slice by the object's synopsis columns, the columns whose values repeat, then by the
 instant ([13-dataset.md](13-dataset.md#5-levels-and-compaction)).
 The order is one per object: its columns are those whose values repeat twice on average, and the
 object's first slice settles their order greedily, by the runs each adds over a sample of 16 384 of its
 rows. The slice table records it, beside each slice's instants.
+
+A slice aims at 3 × 10⁶ rows, a minute of the design's example. The slicer takes the coarsest calendar
+unit, a second, a minute, an hour, a day or a month, whose units hold no more than that at the median,
+and cuts a burst finer.
+
+A target of each object's own, from what a window that cuts one of its hours costs, was built and
+measured, then dropped. The cut hour reads at its edge every row of the slice the edge falls in, and
+folds, for the slices it keeps, the rows of a table of slices. A wider slice reads more rows there and
+folds fewer table rows. At each depth of the order, a cut hour of `H` rows and `D` combinations costs
+`N` rows read at the edge and `(H / N) × min(N, D)` table rows. A table row is worth 2.3 rows read at an
+edge: it weighs 39.4 bytes compressed against 16.5, at 10 ns a byte and 12 ns a row grouped
+(`vortex-queries --micro slicecost`). That model, never under a chunk's rows since an edge reads its
+chunks whole, asks for slices of about 9 × 10⁴ rows on an hour of 1.8 × 10⁸ rows and twenty services,
+and of a chunk, about 24 000 rows, on the questions bench, whose hours hold 72 000 rows. Two costs it
+leaves out decided against it:
+
+- The slicer cuts at calendar units, so a target between a minute and an hour gives minutes. The
+  bench's hours went from one slice to sixty slices of 1 200 rows.
+- A slice is also the rows the job sorts together. Sixty minutes sorted one by one hold up to sixty
+  times the runs of an hour sorted whole: the bench's objects took 16 % more bytes of data, 7.3 times
+  more for the service column. The questions read from rows took up to three times the requests and
+  3.8 times the bytes.
+
+Chunks do not end at slices. Ending them around each slice's first row, at the start and the end of
+its block, was tried and measured: on six hours of requests at twenty a second, a read of whole objects
+took five times the requests, a request a chunk, and the rows a cut hour reads took 2.4 times the
+bytes, each small chunk carrying its own dictionaries and encodings.
 
 A slice is sorted in memory before the writer sees it. Each synopsis column becomes codes, the ranks
 of the slice's distinct values, and stable counting sorts over the codes, the last column first, give
