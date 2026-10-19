@@ -253,7 +253,14 @@ period, so its plan reads every leaf. Its jobs come in this order:
   rows stream past, so that a day costs 1.4 MB of counts rather than its instants. From then on, level
   0's exit sends that period's rows to the late level, since they lie before the newest fresh instant,
   so a late row never abandons a seal. Late rows of a sealed period wait in the late level, and when
-  the late level is past its ceiling a second seal folds them into the period's object.
+  the late level is past its ceiling a second seal folds them into the period's object. Time here is
+  the data's, partition by partition, never a clock's, so a seal is the same whoever plans it and
+  whenever. A partition that receives nothing more keeps its last period in its fresh objects, which
+  answer exactly at a few requests more. A clock would seal a partition behind the others too early,
+  its rows then late, and a seal a caller asks for is the way left should one need it. Rows later than
+  the horizon cost seals: periods of an hour under a tail of rows an hour late seal each hour three
+  times, a row rewritten 5.1 times against 2.7 in order (`vortex-queries --micro lifecycle`), so the
+  horizon is to cover the tail, or the period to outlast it.
 - The late level past level 0's ceiling merges the objects of each period it holds several of into
   one, in place. When it holds more open periods than its ceiling, only their seals lower it.
 - `F` adjacent objects of one open period in a fresh level merge into one object of the next fresh

@@ -145,8 +145,8 @@ two days by service, synopses on: api 6944, auth 7000, billing 6867, cart 6870, 
 two days by service, synopses off: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 0 table rows, 34560 rows read
 ```
 
-A key of a variant column counts as a column too, when it is read strictly as an integer, a text or a
-boolean, and the objects shred it:
+A key of a variant column counts as a column too, when it is read strictly as an integer, a double, a
+text or a boolean, and the objects shred it:
 
 ```csharp
 var routes = dataset.Scan<LogRow>()
@@ -221,6 +221,19 @@ period in a small object of its own, and every question reads it with the period
 rewritten for it, and it expires with its partition. The dataset counts such rows on its meter, as
 `vortex.dataset.rows_past_horizon`. A handle created with `PeriodOptions.RefuseLateRows = true`
 refuses an append that holds one instead.
+
+A period closes on the data's own time, never the clock's: once the dataset holds a row past the
+period's end and the lateness horizon, partition by partition. A partition that stops receiving rows
+keeps its last period open, in the small objects its last appends left. Questions over it are just as
+exact and cost a few more requests than over a sealed period, and it expires with its partition all
+the same.
+
+Declare a horizon that covers how late your rows come, or periods longer than that. Rows that keep
+coming later than the horizon fill the small objects beside their period, and the period is sealed
+again with them: on periods of an hour, under a few rows up to an hour late among four writers, a row
+is rewritten about five times instead of under three, each hour sealed three times over
+(`vortex-queries --micro lifecycle`). The `vortex.dataset.lateness` histogram records how late the
+oldest row of each append came, to set the horizon against.
 
 The tables a question reads can stay on the local disk, so that the next question over the same
 objects asks the store nothing for them. Give the session a `SynopsisCache`, a directory and the bytes

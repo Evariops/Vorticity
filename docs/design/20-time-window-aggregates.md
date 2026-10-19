@@ -382,7 +382,7 @@ of a day under late rows and four writers, 2.7 times when rows come in order (me
 | 6 | edges | exact, their rows stated by the plan | moved to slice boundaries by default, the window applied returned with the answer, not built |
 | 7 | the synopsis part's table of contents | in the object's leaf entry, about 1.1 KB for an hour, so one round trip per object for whole periods and two for a shorter window | read from the object's index directory, one round trip more |
 | 8 | deletes | tables corrected by the marked rows' contributions, computed at read | deltas written beside the vector, or the runs of every marked bucket |
-| 9 | the lateness horizon | declared by the application, checked by the dataset's counters | chosen by the dataset from the lateness it measures |
+| 9 | the lateness horizon | declared by the application, checked by the dataset's counters, on the data's time partition by partition: a partition that receives nothing more keeps its last period unsealed, exact at a few requests more | chosen by the dataset from the lateness it measures, or a clock, which would seal a lagging partition too early |
 | 10 | rows later than the horizon | the late level beside their sealed period, sealed again when the late level is crowded, counted, or refused on request. On periods of an hour with a tail an hour late, every period is sealed about three times (measured) | a partition of their own, which loses their retention, or a rewrite of their period at once |
 | 11 | retention per row | partition columns in one dataset | one dataset per retention, and a scan over several datasets |
 | 12 | the budget | the indexes' share of the data's bytes, 10 % by default, with no floor | a number of bytes per object |
