@@ -161,6 +161,23 @@ An abandoned index leaves no bytes behind. The file was 90 bytes larger than one
 policy, which is the index directory. The budget only drops an index that has not written anything
 yet, so an index whose filters are already in the file is kept even past the budget.
 
+## Keys of a variant column
+
+A variant column holds a document per row, and its keys are not columns, so a policy that names the
+column indexes the keys a shredded object keeps in typed columns, each in the class of its values:
+
+```csharp
+Indexes = IndexPolicy.None.Bloom("Attributes"),
+```
+
+The report and `file.GetIndexesAsync()` name each such index as the question that probes it, here
+`Attributes['status'].AsInt64()`. `Attributes["status"].AsInt64() == 502` and its `IN` lists ask that
+filter, and skip the blocks it rules out. `Attributes["status"].AsString() == "502"` never asks it,
+since the text `"502"` is another value than the integer, written apart, so neither question ever
+finds the other's rows. `IndexPolicy.Auto` tries the same filter on every such key, judged against the
+bytes the key's own values take. Only a Bloom filter indexes a key for now. Objects written by
+appends shred nothing, and carry no index on their keys.
+
 ## Required
 
 ```

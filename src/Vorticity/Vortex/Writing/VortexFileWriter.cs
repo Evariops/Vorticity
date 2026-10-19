@@ -379,7 +379,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
         FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired,
-        bool sealScratch = false, bool carriesSlices = false)
+        bool sealScratch = false, bool carriesSlices = false,
+        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null)
     {
         VortexRuntimeChecks.Require();
         _sink = sink;
@@ -426,7 +427,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _indexes = IndexWriter.Asks(indexes) || carriesSlices
             ? new IndexWriter(
                 indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
-                scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch)
+                scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch, variantKeys)
             {
                 Fences = fences,
                 BudgetSparesRequired = budgetSparesRequired,
@@ -647,7 +648,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
-            options.SealScratch, options.CarriesSlices || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 })
+            options.SealScratch, options.CarriesSlices || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 },
+            IndexWriter.Asks(indexes) ? IndexedKeys(schema, options.ShreddedVariants) : null)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _zstdLevel = options.ZstdLevel,
@@ -1473,6 +1475,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         indexes.AccumulateKeys(arena, _fieldNodes, start, count);
         indexes.AccumulateNested(arena, _fieldNodes, start, count);
+        indexes.AccumulateVariants(arena, _fieldNodes, start, count);
     }
 
     /// <summary>Seals the open block of every column.</summary>
@@ -1752,6 +1755,40 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken, bounds).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The shredded keys an index policy may index, each in the class its typed column holds: the
+    /// top-level primitive keys of each variant column <paramref name="shredding"/> names; null for none.
+    /// </summary>
+    private static List<(int Field, string Key, Types.Variants.PathClass Class)>? IndexedKeys(
+        DType schema, IReadOnlyDictionary<string, VariantShredding>? shredding)
+    {
+        List<(int, string, Types.Variants.PathClass)>? keys = null;
+        foreach (KeyValuePair<string, VariantShredding> column in shredding ?? ImmutableDictionary<string, VariantShredding>.Empty)
+        {
+            int field = schema.Kind == DTypeKind.Struct ? schema.IndexOfField(column.Key) : -1;
+            if (field < 0 || column.Value.Kind != VariantShreddingKind.Object)
+            {
+                continue;
+            }
+
+            foreach (ShreddedKey key in column.Value.Keys)
+            {
+                if (key.Field.Kind == VariantShreddingKind.Primitive)
+                {
+                    (keys ??= []).Add((field, key.Name, key.Field.Class switch
+                    {
+                        VariantClass.Integer => Types.Variants.PathClass.Integer,
+                        VariantClass.Double => Types.Variants.PathClass.Double,
+                        VariantClass.Boolean => Types.Variants.PathClass.Boolean,
+                        _ => Types.Variants.PathClass.String,
+                    }));
+                }
+            }
+        }
+
+        return keys;
+    }
+
     /// <summary>Where a chunk of column <paramref name="field"/> counts its shredded keys block by block; null when it counts none.</summary>
     private ChunkBlockBounds? BoundsFor(int field) =>
         _countedKeys?[field] is { } keys ? new ChunkBlockBounds(keys, _blockRows, _variantTextBound) : null;
@@ -1819,7 +1856,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
-            _pathMaps?[field]?.Add(blob.Memory.Span, _segments[segment].Offset, _columnSegments[field].Count);
+            if (_pathMaps?[field] is { } map)
+            {
+                // Each key's range is its bytes, toward the share Auto gives the indexes of the paths.
+                map.Add(blob.Memory.Span, _segments[segment].Offset, _columnSegments[field].Count);
+                for (int key = 0; key < map.Keys.Count; key++)
+                {
+                    _indexes?.AddVariantKeyBytes(field, map.Keys[key], map.LastBytes[key]);
+                }
+            }
+
             _columnSegments[field].Add(segment);
             _indexes?.AddColumnBytes(field, _segments[segment].Length);
         }

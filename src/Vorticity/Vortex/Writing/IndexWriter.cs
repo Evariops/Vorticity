@@ -6,7 +6,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Expressions;
 using Vorticity.Indexes;
+using Vorticity.Layouts;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
 
@@ -47,6 +49,15 @@ internal sealed class IndexWriter : IDisposable
     /// the policy names no nested column, which is every default write.
     /// </summary>
     private readonly int[]?[]? _nested;
+
+    /// <summary>
+    /// For a path's slot, the variant column it reads and the path read in one class; null when no
+    /// variant column shreds a key, which is every write but a job's.
+    /// </summary>
+    private readonly (int Field, Compute.VariantFieldExpr Path)?[]? _variants;
+
+    // Where a path's values are read into before its builders take them, emptied after each batch.
+    private CanonicalArena? _variantRows;
     private CanonicalArena? _keySlices;
     private DTypeArena? _maskTypes;
     private bool _firstBlockClosed;
@@ -79,7 +90,8 @@ internal sealed class IndexWriter : IDisposable
     internal IndexWriter(
         WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0,
         IKeyEncoder? keyEncoder = null, string? scratchDirectory = null, long scratchMemoryBytes = DefaultScratchMemoryBytes,
-        long wideRowsAbove = uint.MaxValue, bool sealScratch = false)
+        long wideRowsAbove = uint.MaxValue, bool sealScratch = false,
+        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null)
     {
         _policy = policy;
         _isTabular = isTabular;
@@ -87,12 +99,14 @@ internal sealed class IndexWriter : IDisposable
         _fieldCount = fieldCount;
         _keyEncoder = keyEncoder;
 
-        // A composite key is one more column after the real ones, and a nested column one more after
-        // the keys, so every loop over the builders serves them with no second path; only the feed
-        // differs. An override naming nothing in the schema takes a slot too, so the report says so.
+        // A composite key is one more column after the real ones, a nested column one more after the
+        // keys, and a shredded key read in one class one more after those, so every loop over the
+        // builders serves them with no second path; only the feed differs. An override naming nothing
+        // in the schema takes a slot too, so the report says so.
         List<string>? nested = Unmatched(policy, schema, isTabular);
         int keys = policy.Keys.Count;
-        int total = fieldCount + keys + (nested?.Count ?? 0);
+        int paths = isTabular ? variantKeys?.Count ?? 0 : 0;
+        int total = fieldCount + keys + (nested?.Count ?? 0) + paths;
         _paths = new string[total];
         _columns = new IndexSpec[total];
         _builders = new List<IndexBuilder>[total];
@@ -118,6 +132,31 @@ internal sealed class IndexWriter : IDisposable
             _refusals[slot] = column.Kind == IndexPolicyKind.Auto
                 ? "Auto chooses among the top-level columns; a nested column is indexed when its override names a kind"
                 : Explicit(column, leaf, _builders[slot]);
+        }
+
+        // Each shredded key in its class is a column of its own, under its variant column's policy:
+        // Auto's Bloom filter, or an explicit one. The locating kinds read no path yet.
+        DTypeArena? classTypes = null;
+        for (int p = 0; p < paths; p++)
+        {
+            int slot = fieldCount + keys + (nested?.Count ?? 0) + p;
+            (int field, string key, Types.Variants.PathClass @class) = variantKeys![p];
+            string name = schema.GetFieldName(field);
+            Compute.VariantFieldExpr path = new Compute.VariantFieldExpr(new FieldExpr(name), [Compute.VariantStep.Of(key)], ReadOf(@class));
+            IndexSpec column = policy.Of(name);
+            DType dtype = ClassType(classTypes ??= new DTypeArena(), @class);
+            _paths[slot] = path.Text;
+            _columns[slot] = column;
+            _builders[slot] = [];
+            (_variants ??= new (int, Compute.VariantFieldExpr)?[total])[slot] = (field, path);
+            _refusals[slot] = column.Kind switch
+            {
+                IndexPolicyKind.None => null,
+                IndexPolicyKind.Auto when BloomBuilder.Supports(dtype, out _) => AutoBloom(_builders[slot], blockRows),
+                IndexPolicyKind.Auto => null,
+                IndexPolicyKind.Bloom => Explicit(column, dtype, _builders[slot]),
+                _ => $"a path takes a Bloom filter, and {column.Kind} reads no path yet",
+            };
         }
 
         for (int k = 0; k < keys; k++)
@@ -152,11 +191,7 @@ internal sealed class IndexWriter : IDisposable
                     // per chunk and postings an intern per row, so neither is ever Auto's.
                     if (BloomBuilder.Supports(dtype, out _))
                     {
-                        builders.Add(new BloomBuilder(IndexSpec.Bloom())
-                        {
-                            AutoShare = AutoBloomShare,
-                            BlockRows = blockRows,
-                        });
+                        AutoBloom(builders, blockRows);
                     }
 
                     break;
@@ -1300,7 +1335,7 @@ internal sealed class IndexWriter : IDisposable
             policy.Resolutions >= 3 ? BloomBuilder.FileMaxBlocks : BloomBuilder.MaxBlocksOf(policy));
         IndexRun run = new IndexRun(
             (ulong)tree.FirstBlock, checked((uint)tree.Leaves), [root], [dtype], 0, BloomTreeRun.Options(tree.RootWords));
-        _entries.Add(new IndexEntry(kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), options.ToBytes(), [run]));
+        _entries.Add(EntryOf(new IndexEntry(kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), options.ToBytes(), [run]), field));
 
         string? fileNote = policy.Resolutions >= 3 ? bloom.FileAbandoned : null;
         Report(
@@ -1643,13 +1678,116 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// A column's path: its field for a top-level column, its fields for a nested one; empty for the
-    /// root and for a composite key, whose columns are in its options.
+    /// A column's path: its field for a top-level column, its fields for a nested one, its variant
+    /// column's field for a path; empty for the root and for a composite key, whose columns are in its
+    /// options.
     /// </summary>
     private uint[] ColumnPath(int field) =>
         _nested?[field] is { } chain ? Unsigned(chain)
+        : _variants?[field] is { } path ? [checked((uint)path.Field)]
         : _isTabular && field < _fieldCount ? [checked((uint)field)]
         : [];
+
+    /// <summary>An entry on slot <paramref name="field"/>, which names its path and class when the slot is a path's.</summary>
+    private IndexEntry EntryOf(IndexEntry entry, int field) =>
+        _variants?[field] is { } path
+            ? entry with { VariantPath = [path.Path.Steps[0].Key!], VariantClass = ClassOf(path.Path.Read) }
+            : entry;
+
+    /// <summary>Auto's Bloom filter, which gives itself up past its share of the column's bytes; no refusal.</summary>
+    private static string? AutoBloom(List<IndexBuilder> builders, int blockRows)
+    {
+        builders.Add(new BloomBuilder(IndexSpec.Bloom())
+        {
+            AutoShare = AutoBloomShare,
+            BlockRows = blockRows,
+        });
+        return null;
+    }
+
+    /// <summary>The read of one class that takes the values of <paramref name="class"/>.</summary>
+    internal static Compute.VariantRead ReadOf(Types.Variants.PathClass @class) => @class switch
+    {
+        Types.Variants.PathClass.Integer => Compute.VariantRead.AsInt64,
+        Types.Variants.PathClass.Double => Compute.VariantRead.AsDouble,
+        Types.Variants.PathClass.Boolean => Compute.VariantRead.AsBool,
+        Types.Variants.PathClass.Timestamp => Compute.VariantRead.AsTimestamp,
+        _ => Compute.VariantRead.AsString,
+    };
+
+    /// <summary>The class a read of one class takes.</summary>
+    private static Types.Variants.PathClass ClassOf(Compute.VariantRead read) => read switch
+    {
+        Compute.VariantRead.AsInt64 => Types.Variants.PathClass.Integer,
+        Compute.VariantRead.AsDouble => Types.Variants.PathClass.Double,
+        Compute.VariantRead.AsBool => Types.Variants.PathClass.Boolean,
+        Compute.VariantRead.AsTimestamp => Types.Variants.PathClass.Timestamp,
+        _ => Types.Variants.PathClass.String,
+    };
+
+    /// <summary>The dtype a read of <paramref name="class"/> gives, nullable, as a path's builders see it.</summary>
+    internal static DType ClassType(DTypeArena types, Types.Variants.PathClass @class) => @class switch
+    {
+        Types.Variants.PathClass.Integer or Types.Variants.PathClass.Timestamp => types.Primitive(PType.I64, Nullability.Nullable),
+        Types.Variants.PathClass.Double => types.Primitive(PType.F64, Nullability.Nullable),
+        Types.Variants.PathClass.Boolean => types.Bool(Nullability.Nullable),
+        _ => types.Utf8(Nullability.Nullable),
+    };
+
+    /// <summary>
+    /// Credits key <paramref name="key"/> of the variant column <paramref name="field"/> with the bytes of
+    /// a chunk's range of its buffers, toward `Auto`'s share for the slots that read it.
+    /// </summary>
+    internal void AddVariantKeyBytes(int field, string key, long bytes)
+    {
+        if (_variants is not { } variants)
+        {
+            return;
+        }
+
+        for (int slot = 0; slot < variants.Length; slot++)
+        {
+            if (variants[slot] is { } path && path.Field == field && string.Equals(path.Path.Steps[0].Key, key, StringComparison.Ordinal))
+            {
+                _columnBytes[slot] += bytes;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Hands the rows <paramref name="start"/> to <paramref name="start"/> + <paramref name="count"/> of
+    /// each shredded key, read in its slot's class, to that slot's builders.
+    /// </summary>
+    internal void AccumulateVariants(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int start, int count)
+    {
+        if (_variants is not { } variants || count <= 0)
+        {
+            return;
+        }
+
+        for (int slot = 0; slot < variants.Length; slot++)
+        {
+            if (variants[slot] is not { } path || _builders[slot].Count == 0)
+            {
+                continue;
+            }
+
+            CanonicalArena rows = _variantRows ??= new CanonicalArena();
+            try
+            {
+                int variant = CanonicalSlice.SliceAcross(arena, rows, fieldNodes[path.Field], start, count);
+                int read = path.Path.Apply(rows, variant);
+                foreach (IndexBuilder builder in _builders[slot])
+                {
+                    builder.Accumulate(rows, read, 0, count);
+                }
+            }
+            finally
+            {
+                rows.Reset();
+            }
+        }
+    }
 
     /// <summary>A composite key's columns, as the entry options carry them; null for a real column.</summary>
     private List<uint[]>? KeyColumns(int field) =>
@@ -1710,6 +1848,8 @@ internal sealed class IndexWriter : IDisposable
         _payloads = null;
         _keySlices?.Reset();
         _keySlices = null;
+        _variantRows?.Reset();
+        _variantRows = null;
         _scratch?.Dispose();
         _adopted?.Dispose();
         _adopted = null;

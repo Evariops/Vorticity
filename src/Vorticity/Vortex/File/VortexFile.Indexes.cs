@@ -213,6 +213,13 @@ public sealed partial class VortexFile
     /// <summary>An entry's column as a caller names it: a dotted path, or a composite key's columns.</summary>
     private string ColumnOf(IndexEntry entry)
     {
+        // A path's entry is named as the read of its class that probes it.
+        if (entry is { VariantPath: { } keys, VariantClass: { } @class } && entry.ColumnPath.Count > 0)
+        {
+            return new Compute.VariantFieldExpr(
+                new Expressions.FieldExpr(PathOf(entry.ColumnPath)), [.. keys.Select(Compute.VariantStep.Of)], Writing.IndexWriter.ReadOf(@class)).Text;
+        }
+
         if (entry.ColumnPath.Count > 0)
         {
             return PathOf(entry.ColumnPath);

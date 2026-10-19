@@ -346,6 +346,9 @@ internal sealed class VariantPathMap
         /// <summary>The keys, in their order in the column's tree.</summary>
         internal IReadOnlyList<string> Keys => keys;
 
+        /// <summary>Per key, the bytes of its range in the chunk added last; 0 for a key the chunk left out.</summary>
+        internal long[] LastBytes { get; } = new long[keys.Count];
+
         /// <summary>
         /// Notes chunk <paramref name="chunk"/> of the column, whose blob is <paramref name="blob"/>,
         /// written at <paramref name="offset"/>: for each key of its tree, the range of its buffers,
@@ -354,6 +357,7 @@ internal sealed class VariantPathMap
         /// </summary>
         internal void Add(ReadOnlySpan<byte> blob, ulong offset, int chunk)
         {
+            Array.Clear(LastBytes);
             int length = (int)BinaryPrimitives.ReadUInt32LittleEndian(blob[^4..]);
             ReadOnlySpan<byte> flat = blob[(blob.Length - 4 - length)..^4];
             int budget = VortexLimits.MaxFlatBufferTables;
@@ -420,6 +424,7 @@ internal sealed class VariantPathMap
 
                 byte[] bytes = builder.Finish(ArrayWriter.Write(builder, root, own)).ToArray();
                 long end = count == 0 ? 0 : starts[high] + specs[high].Length;
+                LastBytes[key] = end - first;
                 _chunks[key].Add((chunk, new PathChunk(
                     offset + (ulong)first, checked((uint)(end - first)), alignment, 0, 0,
                     Types.Serialization.DTypeProtobuf.Serialize(treeDType.GetField(field)), bytes)));

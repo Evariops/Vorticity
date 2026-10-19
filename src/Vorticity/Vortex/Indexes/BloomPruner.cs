@@ -113,13 +113,30 @@ internal sealed class BloomPruner
         DType schema = file.DType;
         ulong blocks = (ulong)((file.RowCount + blockRows - 1) / blockRows);
         Dictionary<string, Column> columns = new Dictionary<string, Column>(StringComparer.Ordinal);
+        DTypeArena? classTypes = null;
         foreach (IndexEntry entry in directory.Entries)
         {
             bool trigrams = entry.Kind == IndexKinds.BloomNgram3;
             if ((!trigrams && entry.Kind != IndexKinds.BloomSbbf) || entry.BlockLength != (ulong)blockRows
-                || !KeyIndexPruner.TryResolve(schema, entry.ColumnPath, out string path, out DType dtype)
-                || !(trigrams ? matches : equalities).Contains(path)
-                || !BloomIndexOptions.TryParse(entry.Options, out BloomIndexOptions? options))
+                || !KeyIndexPruner.TryResolve(schema, entry.ColumnPath, out string path, out DType dtype))
+            {
+                continue;
+            }
+
+            // A path's entry holds the values of one class: it answers the read of that class alone,
+            // under that read's name, never the variant column's.
+            if (entry.VariantPath is not null)
+            {
+                if (trigrams || entry.VariantPath is not [string variantKey] || entry.VariantClass is not { } @class)
+                {
+                    continue;
+                }
+
+                path = new Compute.VariantFieldExpr(new FieldExpr(path), [Compute.VariantStep.Of(variantKey)], Writing.IndexWriter.ReadOf(@class)).Key;
+                dtype = Writing.IndexWriter.ClassType(classTypes ??= new DTypeArena(), @class);
+            }
+
+            if (!(trigrams ? matches : equalities).Contains(path) || !BloomIndexOptions.TryParse(entry.Options, out BloomIndexOptions? options))
             {
                 continue;
             }
@@ -462,6 +479,17 @@ internal sealed class BloomPruner
                 Ask(expr, new Question(text, Trigrams.Required(match, text.Fold)));
                 break;
 
+            // The fence is the question: the walk over the filter stops at it as at a leaf.
+            case Compute.VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.Equal, Field: Compute.VariantFieldExpr path } equal }
+                when _columns.TryGetValue(path.Key, out Column? read):
+                Ask(expr, new Question(read, [equal.Value]));
+                break;
+
+            case Compute.VariantFilterExpr { Inner: InExpr { Field: Compute.VariantFieldExpr path } members }
+                when _columns.TryGetValue(path.Key, out Column? read):
+                Ask(expr, new Question(read, members.Values));
+                break;
+
             default:
                 break;
         }
@@ -530,6 +558,14 @@ internal sealed class BloomPruner
                 break;
             case StringMatchExpr match:
                 matches.Add(match.Field.Path);
+                break;
+
+            // A path's equality is asked of the entry of its read's class, by the read's name.
+            case Compute.VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.Equal, Field: Compute.VariantFieldExpr path } }:
+                equalities.Add(path.Key);
+                break;
+            case Compute.VariantFilterExpr { Inner: InExpr { Field: Compute.VariantFieldExpr path } }:
+                equalities.Add(path.Key);
                 break;
             default:
                 break;

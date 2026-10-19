@@ -90,7 +90,19 @@ internal sealed record IndexEntry(
     IReadOnlyList<uint> ColumnPath,
     ulong BlockLength,
     byte[] Options,
-    IReadOnlyList<IndexRun> Runs);
+    IReadOnlyList<IndexRun> Runs)
+{
+    /// <summary>
+    /// The keys of the path into the variant column <see cref="ColumnPath"/> names that the entry
+    /// indexes, its values read as <see cref="VariantClass"/>; null for an entry on a column. A reader
+    /// older than paths skips both fields, and sees an entry on a variant column, which no kind
+    /// supports, so it uses none.
+    /// </summary>
+    internal IReadOnlyList<string>? VariantPath { get; init; }
+
+    /// <summary>The class the path's values are read as, one entry per class; null for an entry on a column.</summary>
+    internal Types.Variants.PathClass? VariantClass { get; init; }
+}
 
 /// <summary>
 /// The index directory of one file: a single postscript metadata entry whose segment is this
@@ -185,6 +197,8 @@ internal sealed record IndexDirectory(
     private const int EntryBlockLen = 3;
     private const int EntryOptions = 4;
     private const int EntryRuns = 5;
+    private const int EntryVariantPath = 6;
+    private const int EntryVariantClass = 7;
     private const int RunFirstBlock = 1;
     private const int RunBlockCount = 2;
     private const int RunPayload = 3;
@@ -398,6 +412,16 @@ internal sealed record IndexDirectory(
 
         writer.WriteUInt64Always(EntryBlockLen, entry.BlockLength);
         writer.WriteBytes(EntryOptions, entry.Options);
+        foreach (string key in entry.VariantPath ?? [])
+        {
+            writer.WriteBytesAlways(EntryVariantPath, Encoding.UTF8.GetBytes(key));
+        }
+
+        if (entry.VariantClass is { } @class)
+        {
+            writer.WriteUInt32Always(EntryVariantClass, (uint)@class);
+        }
+
         foreach (IndexRun run in entry.Runs)
         {
             using ProtoWriter.MessageScope scope = writer.BeginMessage(EntryRuns);
@@ -624,12 +648,20 @@ internal sealed record IndexDirectory(
         ulong blockLength = 0;
         byte[] options = [];
         List<IndexRun> runs = [];
+        List<string>? variantPath = null;
+        uint? variantClass = null;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field)
             {
                 case EntryKind when wire == ProtoWireType.LengthDelimited:
                     kind = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case EntryVariantPath when wire == ProtoWireType.LengthDelimited:
+                    (variantPath ??= []).Add(Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
+                    break;
+                case EntryVariantClass when wire == ProtoWireType.Varint:
+                    variantClass = reader.ReadVarint32();
                     break;
                 case EntryColumnPath when wire == ProtoWireType.Varint:
                     path.Add(reader.ReadVarint32());
@@ -665,7 +697,17 @@ internal sealed record IndexDirectory(
             return false;
         }
 
-        entry = new IndexEntry(kind, path, blockLength, options, runs);
+        // A path names its class, and a class its path: one without the other is no entry this library wrote.
+        if ((variantPath is null) != (variantClass is null) || variantClass > (uint)Types.Variants.PathClass.Other)
+        {
+            return false;
+        }
+
+        entry = new IndexEntry(kind, path, blockLength, options, runs)
+        {
+            VariantPath = variantPath,
+            VariantClass = (Types.Variants.PathClass?)variantClass,
+        };
         return true;
     }
 

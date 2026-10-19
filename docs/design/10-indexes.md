@@ -286,6 +286,15 @@ the class, a membership) reads its region after the zone maps and kills each liv
 statistics refute, under the filter's conjunctions and disjunctions, as a zone map kills a declared
 column's (`Explain` names the step `path statistics`). An append drops the entry.
 
+An index of the policy may also name a path. An entry then carries, beside the variant column's field,
+the keys of the path and the class of its values (two fields of the entry's message that an older
+reader skips, which then sees an entry on a variant column, a dtype no kind supports, and uses none).
+The writer reads the path in its class at ingest, as a question reads it, and hands those values to
+the entry's builder as a column of that class's dtype: `IndexPolicy.Auto` or an explicit Bloom policy
+on the variant column gives each top-level key it shreds, in the class its typed column holds, a Bloom
+filter judged against the bytes of that key's ranges. A filter's question of the same class probes it,
+and a question of another class never does. The locating kinds read no path yet.
+
 ### 4.8 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file

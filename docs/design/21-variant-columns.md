@@ -638,6 +638,13 @@ supports, and ignores that entry alone. `IndexPolicy.Auto` treats every path an 
 of its type classes, as a top-level column of its own, with the same verdicts and under the same
 budget.
 
+As built, an entry carries the path's keys and class in two fields of its own, and the writer reads
+the path in its class at ingest, as a question does, to feed the builder. A Bloom filter is the one
+kind on a path for now, from `Auto` or an explicit Bloom policy on the variant column, for each
+top-level key the object shreds in the class its typed column holds; `Auto`'s share is judged against
+the bytes of the key's ranges the path map measures. Equalities and memberships of that class probe it
+(`VariantPathIndexTests`). The locating kinds, and a key's other classes, wait for a need.
+
 The path map counts, per chunk, the values of the path that its field's `value` holds, per type class.
 There are none in most chunks, since the writer puts the path's dominant class in the typed column, so
 `AsInt64()` reads a field's `value` only in a chunk that shredded the path as text and holds a few
@@ -893,7 +900,7 @@ Every figure is an estimate.
 | a path read rebuilds no variant | an allocation ratchet on a question over one shredded path, which equals the same question over a declared column |
 | `As…` converts nothing and reads one class | on a path holding integers and text in the same chunks, the bytes `AsInt64()` reads: the typed column and none of the field's `value`, on a counting store |
 | a range on a path skips what it skips on a declared column | the blocks and bytes a range question reads over a shredded path that is no synopsis column, against the same question over a declared column holding the same values in the same order: the same blocks, on a counting store (`VariantBlockStatsTests`: five ranges keep the same live blocks on the key and on the column) |
-| an index on a path never matches across classes | a path holding 502 as an integer in some chunks and `"502"` as text in others, probed by `AsInt64() == 502` and by `AsString() == "502"`: each finds its own rows and no other |
+| an index on a path never matches across classes | a path holding 502 as an integer in some chunks and `"502"` as text in others, probed by `AsInt64() == 502` and by `AsString() == "502"`: each finds its own rows and no other (`VariantPathIndexTests`: the integer's filter prunes for the integer, the text's question never asks it) |
 | the integers of a path share one column | a path written as `int8`, `int16`, `int32` and `int64` across its rows reads back from one typed column, each value equal to the one written under the format's equivalence classes, in Vorticity and in Rust |
 | the path map and the trees stay within the column budget | their bytes, and the nodes of every tree, as ratchets on a bench of 10⁴ paths over a day of chunks (`VariantPathMapTests`: at most 90 bytes a key and a chunk) |
 | the synopsis counts a path exactly, shredded or not | at every version of the fuzzer, every value count, coarse table and run of a path equals the count of the parsed live rows that hold it |
