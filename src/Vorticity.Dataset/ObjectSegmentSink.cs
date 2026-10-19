@@ -58,6 +58,9 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     private readonly string _key;
     private readonly long _maxBytes;
     private readonly long _streamedFrom;
+
+    /// <summary>The most bytes a streamed object takes, which the store sizes its parts from; -1 when unknown.</summary>
+    private readonly long _bound;
     private readonly MemoryPool<byte> _pool;
     private readonly List<IMemoryOwner<byte>> _chunks = [];
 
@@ -84,17 +87,22 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// Opens a sink that will create <paramref name="key"/>; <paramref name="maxBytes"/> of 0 means
     /// <see cref="DefaultMaxBytes"/>, <paramref name="streamedFrom"/> of 0
     /// <see cref="DefaultStreamedFromBytes"/>, and a null <paramref name="pool"/> the shared aligned one.
+    /// A <paramref name="bound"/> is the most bytes the object takes if it streams, which the store sizes
+    /// its parts from (<see cref="ObjectBound"/>); -1 for none, the length then unknown to the store
+    /// until the end.
     /// </summary>
-    public ObjectSegmentSink(IObjectStore store, string key, long maxBytes = 0, MemoryPool<byte>? pool = null, long streamedFrom = 0)
+    public ObjectSegmentSink(IObjectStore store, string key, long maxBytes = 0, MemoryPool<byte>? pool = null, long streamedFrom = 0, long bound = -1)
     {
         ArgumentNullException.ThrowIfNull(store);
         ObjectKey.Check(key);
         ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(streamedFrom);
+        ArgumentOutOfRangeException.ThrowIfLessThan(bound, -1);
         _store = store;
         _key = key;
         _maxBytes = maxBytes == 0 ? DefaultMaxBytes : maxBytes;
         _streamedFrom = streamedFrom == 0 ? DefaultStreamedFromBytes : streamedFrom;
+        _bound = bound < 0 ? -1 : Math.Max(bound, _streamedFrom);
         _pool = pool ?? AlignedMemoryPool.Shared;
     }
 
@@ -150,6 +158,14 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
             throw new ObjectStoreException(
                 $"'{_key}' would take {wanted} bytes, over the {_maxBytes} an object may take " +
                 "(DatasetOptions.MaxObjectBytes).");
+        }
+
+        // An object held whole goes with its length; one streamed was announced to the store as at most its
+        // bound, which the store refuses content past, so the rewrite hears of it here, at the write.
+        if (_bound >= 0 && wanted > _bound)
+        {
+            throw new ObjectPastBoundException(
+                $"'{_key}' would take {wanted} bytes, past the {_bound} its rewrite announced to the store.");
         }
 
         if (_pipe is not null || wanted > _streamedFrom)
@@ -226,17 +242,21 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         }
     }
 
-    /// <summary>The store's put of the streamed object, run beside the writer: its outcome and the bytes the store holds, -1 when they are those written.</summary>
+    /// <summary>
+    /// The store's put of the streamed object, run beside the writer: its outcome and the bytes the store
+    /// holds, -1 when they are those written. Its length is unknown, and its bound, when the sink has one,
+    /// is what the store sizes its parts from.
+    /// </summary>
     private async Task<(PutOutcome Outcome, long StoredLength)> PutStreamedAsync(PipeReader content)
     {
         await Task.Yield();
         PutCondition condition = SealedObjectStore.TryUid(_key, out _) ? PutCondition.None : PutCondition.IfAbsent;
         if (_store is SealedObjectStore sealedStore)
         {
-            return await sealedStore.PutSealedAsync(_key, content, -1, condition, CancellationToken.None).ConfigureAwait(false);
+            return await sealedStore.PutSealedAsync(_key, content, -1, condition, CancellationToken.None, _bound).ConfigureAwait(false);
         }
 
-        return (await _store.PutAsync(_key, content, -1, condition, CancellationToken.None).ConfigureAwait(false), -1);
+        return (await _store.PutAsync(_key, content, -1, _bound, condition, CancellationToken.None).ConfigureAwait(false), -1);
     }
 
     /// <summary>The bytes chunk <paramref name="chunk"/> takes of what is written: twice the one before, up to <see cref="ChunkBytes"/>.</summary>

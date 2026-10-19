@@ -185,6 +185,11 @@ internal static class LifecycleBench
                 jobs.Moved += result.ObjectsMoved;
                 jobs.Rows += result.Rows;
                 jobs.BytesOut += result.BytesOut;
+                if (result.Rows > 0 && result.BytesIn > 0)
+                {
+                    jobs.MostOutPerIn = Math.Max(jobs.MostOutPerIn, (double)result.BytesOut / result.BytesIn);
+                    jobs.LargestIn = Math.Max(jobs.LargestIn, result.BytesIn);
+                }
                 jobs.Milliseconds += milliseconds;
                 jobs.Longest = Math.Max(jobs.Longest, milliseconds);
             }
@@ -320,14 +325,17 @@ internal static class LifecycleBench
                 $"traced: {ledger.Overlapping} of {ledger.Rewriting} level-size jobs that rewrite read an object of their destination; " +
                 $"{ledger.Spanning} of {ledger.Merges} merges of neighbours span an object of another level");
         }
-        Console.WriteLine($"{"jobs by trigger",-18} {"jobs",6} {"objects in",11} {"moved",6} {"rows/row",9} {"MB out",9} {"ms mean",8} {"ms max",8} {"abandoned",10} {"MB lost",8}");
+        Console.WriteLine(
+            $"{"jobs by trigger",-18} {"jobs",6} {"objects in",11} {"moved",6} {"rows/row",9} {"MB out",9} {"ms mean",8} {"ms max",8} {"abandoned",10} {"MB lost",8} " +
+            $"{"out/in max",10} {"MB in max",9}");
         long rewritten = 0;
         foreach ((CompactionTrigger trigger, Jobs jobs) in ledger.ByTrigger.OrderBy(pair => pair.Key))
         {
             rewritten += jobs.Rows;
             Console.WriteLine(
                 $"{trigger,-18} {jobs.Count,6} {jobs.ObjectsIn,11} {jobs.Moved,6} {(double)jobs.Rows / appended,9:F2} {jobs.BytesOut / 1e6,9:F1} " +
-                $"{(jobs.Count == 0 ? 0 : jobs.Milliseconds / jobs.Count),8:F1} {jobs.Longest,8:F1} {jobs.Abandoned,10} {jobs.AbandonedBytes / 1e6,8:F1}");
+                $"{(jobs.Count == 0 ? 0 : jobs.Milliseconds / jobs.Count),8:F1} {jobs.Longest,8:F1} {jobs.Abandoned,10} {jobs.AbandonedBytes / 1e6,8:F1} " +
+                $"{jobs.MostOutPerIn,10:F3} {jobs.LargestIn / 1e6,9:F2}");
         }
 
         Console.WriteLine(
@@ -392,5 +400,11 @@ internal static class LifecycleBench
         internal long Abandoned { get; set; }
 
         internal long AbandonedBytes { get; set; }
+
+        /// <summary>The most bytes a job wrote for each byte it read, moves aside.</summary>
+        internal double MostOutPerIn { get; set; }
+
+        /// <summary>The most bytes a job read.</summary>
+        internal long LargestIn { get; set; }
     }
 }

@@ -112,6 +112,7 @@ internal static class DatasetRowChanges
     {
         CommitKind kind = start is null ? CommitKind.Delete : CommitKind.Update;
         int attempts = Math.Max(dataset.Options.MaxAttempts, 1);
+        int doublings = 0;
         for (int attempt = 1; attempt <= attempts; attempt++)
         {
             DatasetSnapshot version = dataset.Snapshot;
@@ -133,7 +134,7 @@ internal static class DatasetRowChanges
                     // sink wants its rows: bounds only loosen under marks, so its live rows are selected too.
                     Change change = changed is null && pruner is not null && pruner.MustMatch(held.Entry.Summaries.Columns, held.Entry.PhysicalRows)
                         ? new Change(held.Entry.Rows, null, null)
-                        : await RewriteAsync(dataset, version, held, filter, changed, cancellationToken).ConfigureAwait(false);
+                        : await RewriteAsync(dataset, version, held, filter, changed, doublings, cancellationToken).ConfigureAwait(false);
                     if (change.Taken == 0)
                     {
                         continue;
@@ -167,6 +168,19 @@ internal static class DatasetRowChanges
                         bytesOut += written.Entry.Bytes;
                     }
                 }
+            }
+            catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
+            {
+                // An object kept ran past the bound its put announced: the change starts again under one twice
+                // as large, which no other writer caused, so it takes no attempt. What it wrote is left for vacuum.
+                if (changed is not null)
+                {
+                    await changed.AbandonAsync().ConfigureAwait(false);
+                }
+
+                doublings++;
+                attempt--;
+                continue;
             }
             catch
             {
@@ -249,6 +263,7 @@ internal static class DatasetRowChanges
         PositionedObject held,
         VortexExpr? filter,
         ChangedRows? changed,
+        int doublings,
         CancellationToken cancellationToken)
     {
         ObjectLease lease = await version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
@@ -296,7 +311,11 @@ internal static class DatasetRowChanges
             // Written in the version's schema, which an object of an earlier one is read as. The rows
             // kept are the object's own in its own order, and an object above level 0 is a
             // compaction's, whose rows come in key order, or in sorted slices for a dataset of periods.
-            ObjectDraft? draft = matched < held.Entry.Rows ? dataset.StartObjectUnder(version.Schema, inKeyOrder: version.Levels.RowsInKeyOrder(held.Level)) : null;
+            // They are some of its rows, which bound what the store sizes the parts of the object from.
+            ObjectDraft? draft = matched < held.Entry.Rows
+                ? dataset.StartObjectUnder(
+                    version.Schema, inKeyOrder: version.Levels.RowsInKeyOrder(held.Level), byteBound: ObjectBound.Of(held.Entry.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                : null;
             if (draft is not null && version.Schema.Key is { } rewritten)
             {
                 // The rows kept are the object's own: its one partition value, if it has one.

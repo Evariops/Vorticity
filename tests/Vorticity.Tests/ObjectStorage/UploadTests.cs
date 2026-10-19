@@ -196,9 +196,10 @@ public sealed class UploadTests : IDisposable
     public async Task APutOf200GBIsPlannedWithinEachServicesRules(S3Profile profile, bool unknownLengthFits)
     {
         // The parts the store would send for 200 GB, at its default sizes, judged by the service's rules without a
-        // byte: a known length, or a bound, always fits. An unknown length fits where parts grow and are many, about
-        // 1 TB on S3, and not on R2, whose parts keep one size, 168 GB, nor on Scaleway, whose thousand parts reach
-        // 106 GB: such a put needs its bound, or a spool to learn its length.
+        // byte: a known length, or a bound, always fits, as the bound a dataset's rewrite announces does, a little past
+        // what it writes. An unknown length fits where parts grow and are many, about 1 TB on S3, and not on R2, whose
+        // parts keep one size, 168 GB, nor on Scaleway, whose thousand parts reach 106 GB: such a put needs its bound,
+        // or a spool to learn its length.
         const long Length = 200_000_000_000;
         using S3Emulator emulator = S3Emulator.For(profile);
         emulator.MinimumPartSize = 5 << 20;
@@ -213,6 +214,7 @@ public sealed class UploadTests : IDisposable
         });
 
         Assert.Null(emulator.Refusal(PlanOf(store, Length, Length)));
+        Assert.Null(emulator.Refusal(PlanOf(store, Length, Vorticity.Dataset.ObjectBound.Of(Length, 0))));
         (string Code, string Message)? unknown = emulator.Refusal(PlanOf(store, Length, -1));
         Assert.Equal(unknownLengthFits, unknown is null);
         Assert.Empty(emulator.Log);

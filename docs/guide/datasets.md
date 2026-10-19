@@ -422,6 +422,13 @@ never lend its values to an unrelated column.
   [dataset-maintenance.md](dataset-maintenance.md).
 * An object is created before the commit that names it, so a crash between the two leaves an object
   no version references. Vacuum collects it once it is older than the window.
+* An object past 32 MiB goes to the store as it is written. A compaction tells the store how large it
+  can grow, so the parts fit every service, but an append cannot, and an append past what a service
+  reaches without that fails at its end: 168 GB on Cloudflare R2 and 106 GB on Scaleway (about a
+  terabyte on Amazon S3). Append in smaller pieces, or give the store a spool directory
+  (`StoreTransportOptions.SpoolDirectory`) there. The parts of a large object are in flight four at a
+  time: a period of a day at a few thousand rows a second sends parts of about 180 MB on Scaleway,
+  where periods of an hour keep the default parts of 16 MiB.
 * `DatasetOptions.Session` is the session whose pool, cache and parallelism the dataset's scans use,
   and `DatasetOptions.TimeProvider` is the clock a commit reads its creation time from.
 

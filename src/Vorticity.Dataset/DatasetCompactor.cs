@@ -134,24 +134,37 @@ internal static class DatasetCompactor
         IReadOnlyDictionary<(int Level, long Period), ObjectPlan>? plans = merge && job.Cut is not null && !key!.InstantPath.Contains('.')
             ? await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false)
             : null;
-        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null, rowBound: job.Rows, job.ToLevel)
-        {
-            Plans = plans,
-            InstantPath = plans is null ? null : key!.InstantPath,
-            Partition = key?.SharedPartition(job.Inputs.Select(static input => input.Entry.Summaries)),
-        };
+        // Each object it streams is announced to the store as at most what the job reads, times what a job
+        // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
+        ObjectStream outputs;
         long rows;
-        try
+        for (int doublings = 0; ; doublings++)
         {
-            rows = merge
-                ? await MergeAsync(dataset, schema, job, key!, outputs, cancellationToken).ConfigureAwait(false)
-                : await ConcatenateAsync(dataset, schema, job, outputs, cancellationToken).ConfigureAwait(false);
-            await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            await outputs.AbandonAsync().ConfigureAwait(false);
-            throw;
+            outputs = new ObjectStream(
+                dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null, rowBound: job.Rows, job.ToLevel,
+                ObjectBound.Of(job.Bytes, doublings, dataset.Options.BoundOutPerIn))
+            {
+                Plans = plans,
+                InstantPath = plans is null ? null : key!.InstantPath,
+                Partition = key?.SharedPartition(job.Inputs.Select(static input => input.Entry.Summaries)),
+            };
+            try
+            {
+                rows = merge
+                    ? await MergeAsync(dataset, schema, job, key!, outputs, cancellationToken).ConfigureAwait(false)
+                    : await ConcatenateAsync(dataset, schema, job, outputs, cancellationToken).ConfigureAwait(false);
+                await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+                break;
+            }
+            catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
+            {
+                await outputs.AbandonAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                await outputs.AbandonAsync().ConfigureAwait(false);
+                throw;
+            }
         }
 
         if (rows != job.Rows)
@@ -847,6 +860,7 @@ internal static class DatasetCompactor
         private readonly bool _inKeyOrder;
         private readonly long _target;
         private readonly long _rowBound;
+        private readonly long _byteBound;
         private readonly List<WrittenObject> _written = [];
         private readonly List<int> _levels = [];
         private byte[] _lastKey = [];
@@ -857,8 +871,9 @@ internal static class DatasetCompactor
         private int _level;
         private long _period;
 
-        // The rows the job reads, `rowBound`, bound every object it writes, and so the length of their chunks.
-        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder, long rowBound, int level)
+        // The rows the job reads, `rowBound`, bound every object it writes, and so the length of their chunks;
+        // its bytes, `byteBound`, bound what the store sizes the parts of one it streams from.
+        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder, long rowBound, int level, long byteBound)
         {
             _dataset = dataset;
             _schema = schema;
@@ -867,6 +882,7 @@ internal static class DatasetCompactor
             _firstRow = firstRow;
             _rowBound = rowBound;
             _level = level;
+            _byteBound = byteBound;
         }
 
         /// <summary>The objects it has sealed.</summary>
@@ -949,7 +965,7 @@ internal static class DatasetCompactor
                 ObjectPlan? plan = Plans?[(_level, _period)];
                 _draft = _dataset.StartObjectUnder(
                     _schema, _inKeyOrder, _rowBound, sliced: plan is not null, shredded: plan?.Shredded, variantChunks: plan?.VariantChunks,
-                    directories: plan?.Directories, synopsis: plan is null ? null : SynopsisColumns(plan.Slices));
+                    directories: plan?.Directories, synopsis: plan is null ? null : SynopsisColumns(plan.Slices), byteBound: _byteBound);
                 _draft.Partition = Partition;
                 if (plan is not null)
                 {

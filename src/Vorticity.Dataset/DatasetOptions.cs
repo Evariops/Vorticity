@@ -57,6 +57,12 @@ public sealed record DatasetOptions
     /// </summary>
     internal long StreamedObjectBytes { get; init; } = ObjectSegmentSink.DefaultStreamedFromBytes;
 
+    /// <summary>
+    /// The bytes a rewrite announces to the store for each byte it reads, as the bound of an object it
+    /// streams: <see cref="ObjectBound.OutPerIn"/>, unless a test asks for less to run past it.
+    /// </summary>
+    internal double BoundOutPerIn { get; init; } = ObjectBound.OutPerIn;
+
     /// <summary>The columns an object's entry summarises, or null for the first <see cref="SummaryColumnLimit"/>.</summary>
     /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the clustering key's columns are always among them.</remarks>
     public IReadOnlyList<string>? SummaryColumns { get; init; }
