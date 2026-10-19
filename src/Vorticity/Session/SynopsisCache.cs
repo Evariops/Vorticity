@@ -55,11 +55,15 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>The reads an entry counts at most, which the main queue gives back one at a time.</summary>
     private const int MaxHits = 3;
 
+    /// <summary>The files the cache keeps open at most, the least recently opened closed first.</summary>
+    private const int MaxOpenHandles = 4096;
+
     private readonly FileStream _lock;
     private readonly object _gate = new object();
     private readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
     private readonly LinkedList<Entry> _small = new LinkedList<Entry>();
     private readonly LinkedList<Entry> _main = new LinkedList<Entry>();
+    private readonly LinkedList<Entry> _open = new LinkedList<Entry>();
     private readonly LinkedList<(string Name, long Bytes)> _ghost = new LinkedList<(string, long)>();
     private readonly Dictionary<string, LinkedListNode<(string Name, long Bytes)>> _ghosts = new Dictionary<string, LinkedListNode<(string Name, long Bytes)>>(StringComparer.Ordinal);
     private readonly Dictionary<string, TaskCompletionSource> _reading = new Dictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
@@ -204,16 +208,7 @@ public sealed class SynopsisCache : IDisposable
             return false;
         }
 
-        long length;
-        try
-        {
-            length = new FileInfo(PathOf(entry)).Length;
-        }
-        catch (IOException)
-        {
-            length = -1;
-        }
-
+        long length = entry.Bytes;
         NativeSegmentOwner? block = length is > 0 && length <= maxLength ? AlignedBufferPool.Shared.Rent((int)length, VortexLimits.MaxAlignment) : null;
         if (block is null || !ReadWhole(entry, block.WritableSpan[..(int)length]))
         {
@@ -290,17 +285,110 @@ public sealed class SynopsisCache : IDisposable
     }
 
     /// <summary>Whether the file of <paramref name="entry"/> holds exactly as many bytes as <paramref name="bytes"/>, read into it.</summary>
+    /// <remarks>
+    /// Through the entry's handle, opened at its first read and kept while it is held: an open and a close cost
+    /// about 85 µs on Windows, where a read of a region the system caches costs a few, and they took half of a
+    /// warm question's time. Its length is the one the cache learned when it kept the file or found it.
+    /// </remarks>
     private bool ReadWhole(Entry entry, Span<byte> bytes)
     {
+        if (entry.Bytes != bytes.Length)
+        {
+            return false;
+        }
+
         try
         {
-            using SafeFileHandle file = System.IO.File.OpenHandle(PathOf(entry), FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            return RandomAccess.GetLength(file) == bytes.Length && ReadAll(file, bytes);
+            (SafeFileHandle file, bool kept) = Lease(entry);
+            try
+            {
+                return ReadAll(file, bytes);
+            }
+            finally
+            {
+                if (kept)
+                {
+                    file.DangerousRelease();
+                }
+                else
+                {
+                    file.Dispose();
+                }
+            }
         }
         catch (IOException)
         {
             return false;
         }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The handle of <paramref name="entry"/>'s file, a reference to it taken, and whether the entry keeps it; one opened
+    /// for the read alone when the entry left the cache meanwhile, which the caller disposes.
+    /// </summary>
+    private (SafeFileHandle File, bool Kept) Lease(Entry entry)
+    {
+        bool added = false;
+        lock (_gate)
+        {
+            if (entry.Handle is { } held)
+            {
+                held.DangerousAddRef(ref added);
+                return (held, true);
+            }
+        }
+
+        SafeFileHandle opened = System.IO.File.OpenHandle(PathOf(entry), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        SafeFileHandle? closed = null;
+        try
+        {
+            lock (_gate)
+            {
+                if (entry.Handle is { } raced)
+                {
+                    closed = opened;
+                    raced.DangerousAddRef(ref added);
+                    return (raced, true);
+                }
+
+                if (entry.Node is null || Volatile.Read(ref _disposed) != 0)
+                {
+                    return (opened, false);
+                }
+
+                entry.Handle = opened;
+                entry.OpenNode = _open.AddFirst(entry);
+                if (_open.Count > MaxOpenHandles)
+                {
+                    closed = Close(_open.Last!.Value);
+                }
+
+                opened.DangerousAddRef(ref added);
+                return (opened, true);
+            }
+        }
+        finally
+        {
+            closed?.Dispose();
+        }
+    }
+
+    /// <summary>Takes the handle an entry keeps out of it, for the caller to dispose; null when it keeps none. Under the gate.</summary>
+    private SafeFileHandle? Close(Entry entry)
+    {
+        if (entry.Handle is not { } handle)
+        {
+            return null;
+        }
+
+        _open.Remove(entry.OpenNode!);
+        entry.OpenNode = null;
+        entry.Handle = null;
+        return handle;
     }
 
     /// <summary>Counts <paramref name="length"/> bytes served from the disk.</summary>
@@ -431,6 +519,14 @@ public sealed class SynopsisCache : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            lock (_gate)
+            {
+                while (_open.First is { } open)
+                {
+                    Close(open.Value)?.Dispose();
+                }
+            }
+
             _lock.Dispose();
             VortexTelemetry.SynopsisHolds(-HeldBytes);
         }
@@ -606,6 +702,7 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>An entry dropped for the capacity, its file to delete once the gate is let go.</summary>
     private void Evicted(Entry entry, List<Entry> evicted)
     {
+        Close(entry)?.Dispose();
         _entries.Remove(entry.Name);
         _held -= entry.Bytes;
         VortexTelemetry.SynopsisHolds(-entry.Bytes);
@@ -621,6 +718,7 @@ public sealed class SynopsisCache : IDisposable
             return;
         }
 
+        Close(entry)?.Dispose();
         Dequeue(entry);
         _held -= entry.Bytes;
         VortexTelemetry.SynopsisHolds(-entry.Bytes);
@@ -672,5 +770,11 @@ public sealed class SynopsisCache : IDisposable
         internal bool Main { get; set; }
 
         internal LinkedListNode<Entry>? Node { get; set; }
+
+        /// <summary>The handle of its file, kept open from its first read while the cache holds it; null before.</summary>
+        internal SafeFileHandle? Handle { get; set; }
+
+        /// <summary>Its place among the entries whose handle is open, the most recently opened first.</summary>
+        internal LinkedListNode<Entry>? OpenNode { get; set; }
     }
 }
