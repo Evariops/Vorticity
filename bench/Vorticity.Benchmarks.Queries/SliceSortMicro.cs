@@ -63,7 +63,25 @@ internal static class SliceSortMicro
                 best = Math.Min(best, Stopwatch.GetElapsedTime(begin).TotalMilliseconds);
             }
 
-            Console.WriteLine($"slice of {Rows} rows, 3 synopsis columns: best {best:F1} ms, {best * 1e6 / Rows:F1} ns/row");
+            // One pass more, untimed, folds the sorted rows into a checksum: two builds that sort alike print the same.
+            long checksum = 0;
+            using (SortedSlices sorter = new SortedSlices(table, file.DType.IndexOfField(nameof(SliceSpan.At)), file.DType))
+            {
+                int[] fields = [file.DType.IndexOfField(nameof(SliceSpan.Region)), file.DType.IndexOfField(nameof(SliceSpan.Status)), file.DType.IndexOfField(nameof(SliceSpan.Service))];
+                foreach (RecordBatch batch in batches)
+                {
+                    await sorter.AppendAsync(
+                        batch,
+                        (sorted, _) =>
+                        {
+                            checksum = Fold(checksum, sorted, fields);
+                            return ValueTask.CompletedTask;
+                        },
+                        default);
+                }
+            }
+
+            Console.WriteLine($"slice of {Rows} rows, 3 synopsis columns: best {best:F1} ms, {best * 1e6 / Rows:F1} ns/row, checksum {checksum:x16}");
             foreach (RecordBatch batch in batches)
             {
                 batch.Dispose();
@@ -75,6 +93,23 @@ internal static class SliceSortMicro
         }
 
         return 0;
+    }
+
+    /// <summary>The rows of a sorted slice folded in order, their region, status and service, into <paramref name="checksum"/>.</summary>
+    private static long Fold(long checksum, RecordBatch sorted, int[] fields)
+    {
+        Columns<SliceSpan> columns = sorted.As<SliceSpan>();
+        Column<string> regions = columns.Column<string>(fields[0]);
+        ReadOnlySpan<int> statuses = columns.Column<int>(fields[1]).Values;
+        Column<string> services = columns.Column<string>(fields[2]);
+        for (int row = 0; row < sorted.RowCount; row++)
+        {
+            ReadOnlySpan<byte> region = regions[row];
+            ReadOnlySpan<byte> service = services[row];
+            checksum = (checksum * 1_000_003) ^ (statuses[row] + (region[^1] * 1_009L) + (service.Length * 65_537L) + (service[^1] * 257L));
+        }
+
+        return checksum;
     }
 }
 
