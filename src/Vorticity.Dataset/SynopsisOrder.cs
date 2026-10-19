@@ -10,9 +10,10 @@ using Vorticity.Types;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// The order rows take inside each slice of an object: its synopsis columns, the columns whose values
-/// repeat, by their number of distinct values over the object's rows, fewest first, then the instant.
-/// One order serves every slice of an object, and the slice table records it.
+/// The synopsis columns of an object, the columns whose values repeat, chosen from their numbers of
+/// distinct values over the object's rows, fewest first, then the instant. The object's first slice then
+/// settles their order by the runs each adds (<see cref="SortedSlices"/>), which keeps this one for
+/// independent columns. One order serves every slice of an object, and the slice table records it.
 /// </summary>
 /// <remarks>
 /// <para>

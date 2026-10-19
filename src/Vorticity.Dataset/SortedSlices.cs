@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -28,12 +29,13 @@ namespace Vorticity.Dataset;
 /// A slice is held whole while it sorts, at most twice the slice target's rows, which a burst bounds.
 /// </para>
 /// <para>
-/// A variant column the object shreds adds its rows' shape (<see cref="Types.Variants.VariantShapes"/>) to
-/// the order, which can only be known once the object has chosen its paths, after the table was made.
-/// The first slice places it: among the table's columns, before the first whose values in that slice are
-/// more than its shapes, and left out when its shapes are more than half its rows, as a column whose
-/// values do not repeat is. The order is then the object's for every slice, and <see cref="Table"/>
-/// records it.
+/// The table's columns are the object's synopsis columns, which repeat over its rows; their order is the
+/// first slice's to settle. It orders them greedily by the runs each adds after those before it, measured
+/// on a sample of the slice, which comes back to the order of their numbers of distinct values when they
+/// are independent and puts a column nested in another right after it. A variant column the object
+/// shreds adds its rows' shape (<see cref="Types.Variants.VariantShapes"/>), known only once the object has
+/// chosen its paths, after the table was made, when its shapes repeat twice on average in the slice. The
+/// order is then the object's for every slice, and <see cref="Table"/> records it.
 /// </para>
 /// </remarks>
 internal sealed class SortedSlices : IDisposable
@@ -62,7 +64,7 @@ internal sealed class SortedSlices : IDisposable
     }
 
     /// <summary>The slices, sorted in the order the first slice settled: the table's, the shapes placed in it.</summary>
-    internal SliceTable Table => _order is { } order && order.Count != _table.Order.Count ? new SliceTable(_table.Unit, _table.Slices, order) : _table;
+    internal SliceTable Table => _order is { } order && !order.SequenceEqual(_table.Order) ? new SliceTable(_table.Unit, _table.Slices, order) : _table;
 
     /// <summary>Takes the next rows in time order, writing each slice they complete through <paramref name="write"/>.</summary>
     internal async ValueTask AppendAsync(RecordBatch rows, Func<RecordBatch, CancellationToken, ValueTask> write, CancellationToken cancellationToken)
@@ -118,9 +120,9 @@ internal sealed class SortedSlices : IDisposable
     private int Sort(CanonicalArena arena, int node, int rows)
     {
         int[] permutation;
-        if (_order is null && _shapes is not null)
+        if (_order is null && (_shapes is not null || _table.Order.Count > 1))
         {
-            // The first slice settles where the shapes go, and sorts by the codes it measured them with.
+            // The first slice settles the object's order, and sorts by the codes it measured it with.
             (List<int> order, List<(int[] Codes, int Distinct)> columns) = Place(arena, node, rows);
             _order = order;
             permutation = SliceSort.Permutation(columns, rows);
@@ -140,36 +142,46 @@ internal sealed class SortedSlices : IDisposable
     }
 
     /// <summary>
-    /// The object's order, the table's columns and the shapes placed among them by their counts in this
-    /// slice, and each entry's codes over the slice.
+    /// The rows of a slice the order is measured on, at most: on mixes of columns independent, correlated,
+    /// nested and shaped, a sample of one row in 64 of a million gives the order every row gives, in 3 to
+    /// 7 ms where every row takes 160 to 430 (`vortex-queries --micro runsorder`). Provisional until real
+    /// mixes of logs confirm it.
+    /// </summary>
+    private const int OrderSampleRows = 16_384;
+
+    /// <summary>
+    /// The object's order and each entry's codes over this slice: the table's columns and the shapes that
+    /// repeat, ordered greedily by the runs each adds (<see cref="SliceSort.Greedy"/>), measured on a sample.
     /// </summary>
     private (List<int> Order, List<(int[] Codes, int Distinct)> Columns) Place(CanonicalArena arena, int node, int rows)
     {
-        List<int> order = [.. _table.Order];
-        List<(int[] Codes, int Distinct)> columns = [];
-        foreach (int entry in order)
+        List<int> entries = [.. _table.Order];
+        List<(int[] Codes, int Distinct)> candidates = [];
+        foreach (int entry in entries)
         {
-            columns.Add(SliceSort.CodesOf(arena, node, entry, rows, _shapes));
+            candidates.Add(SliceSort.CodesOf(arena, node, entry, rows, _shapes));
         }
 
-        List<int> fields = [.. _shapes!.Keys];
+        List<int> fields = [.. _shapes?.Keys ?? []];
         fields.Sort();
         foreach (int field in fields)
         {
+            // Shapes that do not repeat twice on average are no synopsis column, as a column's values.
             (int[] Codes, int Distinct) shapes = SliceSort.CodesOf(arena, node, -field - 1, rows, _shapes);
-            if (shapes.Distinct * 2L > rows)
+            if (shapes.Distinct * 2L <= rows)
             {
-                continue;
+                entries.Add(-field - 1);
+                candidates.Add(shapes);
             }
+        }
 
-            int at = 0;
-            while (at < columns.Count && columns[at].Distinct <= shapes.Distinct)
-            {
-                at++;
-            }
-
-            order.Insert(at, -field - 1);
-            columns.Insert(at, shapes);
+        int[] greedy = SliceSort.Greedy(candidates, rows, Math.Max(1, rows / OrderSampleRows));
+        List<int> order = [];
+        List<(int[] Codes, int Distinct)> columns = [];
+        foreach (int k in greedy)
+        {
+            order.Add(entries[k]);
+            columns.Add(candidates[k]);
         }
 
         return (order, columns);

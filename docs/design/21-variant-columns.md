@@ -713,6 +713,15 @@ object to share their order, and shapes drift from slice to slice more than decl
 order is therefore fixed per object, for every dataset, as the time-window design decided ([decisions
 to take](20-time-window-aggregates.md#18-decisions-to-take)).
 
+As built, the object's first slice measures the greedy order on the synopsis columns the first pass
+chose and the shapes that repeat, on a sample of 16 384 of its rows (`SliceSort.Greedy`). On four
+synthetic mixes of a million rows (independent, correlated, nested, shaped), the greedy order stores
+as few runs as the order by distinct values or fewer, 21 per cent fewer on the nested mix, and a
+sample of one row in 64 gives the order every row gives, in 3 to 7 ms where every row takes 160 to
+430 (`vortex-queries --micro runsorder`). Real mixes of logs are still to confirm both. The shredded
+paths whose values repeat are not candidates yet: the slice table would need an entry naming a path
+and its class, and the sort its values read per row.
+
 ### 6.3 Typed questions
 
 A question asks a path for one type: `AsInt64()`, `AsString()`. Under strict types, a row whose value

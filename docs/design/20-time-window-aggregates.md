@@ -565,6 +565,14 @@ null outside the shapes that hold them, so the order is measured by the runs eac
 for dense columns comes back to the ascending number of distinct values ([the order with variant
 columns](21-variant-columns.md#62-the-order-inside-a-slice)).
 
+As built, the first pass's counts choose the synopsis columns, those that repeat, and the object's
+first slice orders them: greedily, each place to the column that adds the fewest runs after those
+before it, on a sample of the slice. Independent columns keep the order of their numbers of distinct
+values; a column nested in another comes right after it, as a route after its service, which on a
+mix of a service of ten, its three routes each and a method of twenty stores 640 runs where the
+order by distinct values stores 810 (`vortex-queries --micro runsorder`). The order is then the
+object's for every slice, and the slice table records it.
+
 ### 6.3 What the order gives
 
 The `k`-th synopsis column of a slice is a sequence of runs, one per distinct combination of the first

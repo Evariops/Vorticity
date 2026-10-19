@@ -89,6 +89,12 @@ if (Text(args, "--micro") == "shredcost")
     return await ShredCostMicro.Run();
 }
 
+// --micro runsorder: the order inside a slice by distinct values or by runs added (RunsOrderMicro.cs).
+if (Text(args, "--micro") == "runsorder")
+{
+    return RunsOrderMicro.Run((int)Option(args, "--rows", 1_000_000), rounds);
+}
+
 // --micro shredwrite: what shredding costs a job in time, counted, chosen and written (ShredWriteMicro.cs).
 if (Text(args, "--micro") == "shredwrite")
 {

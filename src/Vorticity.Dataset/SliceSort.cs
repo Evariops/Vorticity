@@ -67,6 +67,93 @@ internal static class SliceSort
     }
 
     /// <summary>
+    /// The order of <paramref name="columns"/> that adds the fewest runs at each place, greedily: first the
+    /// column whose rows split into the fewest runs, then the one that splits the runs so far into the
+    /// fewest, and so on, ties in the columns' given order. Measured over every <paramref name="stride"/>-th
+    /// row of the <paramref name="rows"/>, 1 for all of them.
+    /// </summary>
+    /// <remarks>
+    /// Sorted by a prefix of columns, the rows of each combination of their values lie in one run, so the
+    /// runs a column adds at its place are the combinations it makes with the columns before it, which the
+    /// order by numbers of distinct values counts only when the columns are independent. A sparse column,
+    /// such as a shredded path null outside the shapes that hold it, splits only the runs of those shapes.
+    /// </remarks>
+    internal static int[] Greedy(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows, int stride = 1)
+    {
+        int sampled = (rows + stride - 1) / stride;
+        int[] groups = new int[sampled];
+        List<int> left = [];
+        for (int k = 0; k < columns.Count; k++)
+        {
+            left.Add(k);
+        }
+
+        int[] order = new int[columns.Count];
+        Dictionary<long, int> pairs = [];
+        for (int place = 0; place < order.Length; place++)
+        {
+            int best = -1;
+            int bestRuns = int.MaxValue;
+            foreach (int k in left)
+            {
+                int runs = Combinations(groups, columns[k].Codes, stride, pairs, assign: null);
+                if (runs < bestRuns)
+                {
+                    (best, bestRuns) = (k, runs);
+                }
+            }
+
+            order[place] = best;
+            left.Remove(best);
+            Combinations(groups, columns[best].Codes, stride, pairs, assign: groups);
+        }
+
+        return order;
+    }
+
+    /// <summary>
+    /// The runs every column adds over <paramref name="rows"/> rows sorted by <paramref name="columns"/> in
+    /// their order, summed: the combinations of each prefix's values.
+    /// </summary>
+    internal static long Runs(IReadOnlyList<int[]> columns, int rows)
+    {
+        int[] groups = new int[rows];
+        Dictionary<long, int> pairs = [];
+        long runs = 0;
+        foreach (int[] codes in columns)
+        {
+            runs += Combinations(groups, codes, 1, pairs, assign: groups);
+        }
+
+        return runs;
+    }
+
+    /// <summary>
+    /// How many distinct pairs of a row's group in <paramref name="groups"/> and its code in
+    /// <paramref name="codes"/> there are, over every <paramref name="stride"/>-th row; each sampled row's
+    /// pair numbered into <paramref name="assign"/> when it is given.
+    /// </summary>
+    private static int Combinations(int[] groups, int[] codes, int stride, Dictionary<long, int> pairs, int[]? assign)
+    {
+        pairs.Clear();
+        for (int i = 0; i < groups.Length; i++)
+        {
+            long pair = ((long)groups[i] << 32) | (uint)codes[i * stride];
+            if (!pairs.TryGetValue(pair, out int number))
+            {
+                pairs[pair] = number = pairs.Count;
+            }
+
+            if (assign is not null)
+            {
+                assign[i] = number;
+            }
+        }
+
+        return pairs.Count;
+    }
+
+    /// <summary>
     /// Each row's code for order entry <paramref name="entry"/> of the struct node <paramref name="root"/>, nulls
     /// last, and how many distinct values there are: a field's values, or a variant field's shapes.
     /// </summary>

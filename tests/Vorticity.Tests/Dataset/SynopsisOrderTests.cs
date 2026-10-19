@@ -27,6 +27,31 @@ public sealed partial class SynopsisOrderTests
         Assert.Equal([2, 4, 5, 1], order);
     }
 
+    /// <summary>
+    /// A route of three a service, nested in its service of ten, beside a method of twenty: the order by
+    /// distinct values puts the method second, the order by runs added the route, which adds 30 runs where
+    /// the method adds 200, and so 640 runs in all against 810. Independent columns keep the order of their
+    /// distinct values, and a sample of the rows gives the order every row gives.
+    /// </summary>
+    [Fact]
+    public void TheOrderByRunsAddedPutsANestedColumnAfterItsParent()
+    {
+        const int rows = 60_000;
+        Random random = new Random(3);
+        int[] service = [.. Enumerable.Range(0, rows).Select(_ => random.Next(10))];
+        int[] method = [.. Enumerable.Range(0, rows).Select(_ => random.Next(20))];
+        int[] route = [.. service.Select(s => (s * 3) + random.Next(3))];
+        (int[] Codes, int Distinct)[] columns = [(service, 10), (method, 20), (route, 30)];
+
+        Assert.Equal([0, 2, 1], SliceSort.Greedy(columns, rows));
+        Assert.Equal([0, 2, 1], SliceSort.Greedy(columns, rows, stride: 16));
+        Assert.Equal(640, SliceSort.Runs([service, route, method], rows));
+        Assert.Equal(810, SliceSort.Runs([service, method, route], rows));
+
+        int[] region = [.. Enumerable.Range(0, rows).Select(_ => random.Next(5))];
+        Assert.Equal([1, 0, 2], SliceSort.Greedy([(method, 20), (region, 5), (route, 30)], rows));
+    }
+
     /// <summary>The same rows counted twice give the same order: status, region, host, never the id nor the instant.</summary>
     [Fact]
     public async Task TheSameRowsGiveTheSameOrder()
