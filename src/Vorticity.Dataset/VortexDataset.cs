@@ -1962,8 +1962,8 @@ public sealed class VortexDataset : IAsyncDisposable
             Compute.BlockMask live = new Compute.BlockMask(host.RowCount, blockRows);
             await pruner.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
 
-            // The third: every run of blocks left, their chunks together.
-            List<Task<RecordBatch>> ranges = [];
+            // The third: every run of blocks left, their chunks together, a chunk two runs share read once.
+            List<Indexes.TimeSlice> ranges = [];
             ReadOnlySpan<ulong> words = live.Words;
             int block = 0;
             while (block < live.BlockCount)
@@ -1982,10 +1982,10 @@ public sealed class VortexDataset : IAsyncDisposable
 
                 long start = first * blockRows;
                 long end = Math.Min(block * blockRows, host.RowCount);
-                ranges.Add(slices.ReadRowsAsync(start, end - start, null, cancellationToken).AsTask());
+                ranges.Add(new Indexes.TimeSlice(0, 1, start, end - start));
             }
 
-            return [.. await Task.WhenAll(ranges).ConfigureAwait(false)];
+            return [.. await slices.ReadSpansAsync(ranges, null, cancellationToken).ConfigureAwait(false)];
         }
     }
 
@@ -2071,13 +2071,13 @@ public sealed class VortexDataset : IAsyncDisposable
                 }
             }
 
-            Task<RecordBatch>[] reads = new Task<RecordBatch>[wanted.Count];
-            for (int i = 0; i < reads.Length; i++)
+            Indexes.TimeSlice[] spans = new Indexes.TimeSlice[wanted.Count];
+            for (int i = 0; i < spans.Length; i++)
             {
-                reads[i] = slices.ReadSliceAsync(wanted[i], [field], cancellationToken).AsTask();
+                spans[i] = slices.Slices.Slices[wanted[i]];
             }
 
-            return [.. await Task.WhenAll(reads).ConfigureAwait(false)];
+            return [.. await slices.ReadSpansAsync(spans, [field], cancellationToken).ConfigureAwait(false)];
         }
     }
 
@@ -2085,21 +2085,19 @@ public sealed class VortexDataset : IAsyncDisposable
     /// The rows of <paramref name="slices"/> of the object <paramref name="entry"/> names, read with no open of
     /// the object through its table of contents <paramref name="contents"/>: per slice, in order, a batch of
     /// <paramref name="columns"/>, every column when null, counted from the object's first row, which the
-    /// caller disposes. The columns' chunk directories are read once, with the first slice's.
+    /// caller disposes. The columns' chunk directories, then every slice's chunks together, a chunk two
+    /// slices share read once: two round trips cold, however many slices.
     /// </summary>
-    internal async IAsyncEnumerable<RecordBatch> ReadSlicesAsync(
+    internal async ValueTask<RecordBatch[]> ReadSlicesAsync(
         ObjectEntry entry, Indexes.SynopsisContents contents, IReadOnlyList<Indexes.TimeSlice> slices, int[]? columns,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        CancellationToken cancellationToken)
     {
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
             Indexes.SliceReader reader = Indexes.SliceReader.Open(SessionReader.Wrap(source, Session), null, contents)
                 ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
-            foreach (Indexes.TimeSlice slice in slices)
-            {
-                yield return await reader.ReadRowsAsync(slice.FirstRow, slice.Rows, columns, cancellationToken).ConfigureAwait(false);
-            }
+            return await reader.ReadSpansAsync(slices, columns, cancellationToken).ConfigureAwait(false);
         }
     }
 

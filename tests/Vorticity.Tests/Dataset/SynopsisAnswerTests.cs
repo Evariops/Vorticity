@@ -88,7 +88,8 @@ public sealed partial class SynopsisAnswerTests
     /// <summary>
     /// A window inside one sealed hour, cutting it, on a store that answers in 20 ms, the tree's pages in hand:
     /// the hour's tables and its edge slices are read beside each other, with no open of the object, two
-    /// dependent round trips, the chunk directories before the chunks; a window on the hour's bounds, one.
+    /// dependent round trips, the chunk directories before the chunks of every edge together, a chunk two
+    /// edges share read once; a window on the hour's bounds, one.
     /// </summary>
     [Fact]
     public async Task AnUnalignedWindowCostsTwoRoundTripsAnAlignedOneOne()
@@ -100,10 +101,10 @@ public sealed partial class SynopsisAnswerTests
         // The version's pages read once, by a count the summaries answer.
         _ = await dataset.Scan<Request>().Where(r => r.At >= Noon).CountAsync(Ct);
         inner.Latency = TimeSpan.FromMilliseconds(20);
-        foreach ((string name, DateTimeOffset from, DateTimeOffset to, long steps) in new[]
+        foreach ((string name, DateTimeOffset from, DateTimeOffset to, long steps, long requests) in new[]
         {
-            ("unaligned", Noon.AddMinutes(37.5), Noon.AddMinutes(52.25), 2L),
-            ("aligned", Noon.AddHours(1), Noon.AddHours(2), 1L),
+            ("unaligned", Noon.AddMinutes(37.5), Noon.AddMinutes(52.25), 2L, 3L),
+            ("aligned", Noon.AddHours(1), Noon.AddHours(2), 1L, 1L),
         })
         {
             store.Reset();
@@ -111,7 +112,11 @@ public sealed partial class SynopsisAnswerTests
                 dataset.Scan<Request>().Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
             Console.Out.Write($"ROUND TRIPS {name}: {store.DependentSteps} dependent steps, {store.Requests} requests, {metrics.SynopsisRows} table rows, {metrics.EdgeRows} edge rows.\n");
             Assert.True(metrics.SynopsisRows > 0);
-            Assert.Equal(steps, store.DependentSteps);
+            Assert.Equal(requests, store.Requests);
+
+            // The store counts a step when a read starts with none in flight: the chunks, started the instant
+            // their directory arrives, may count with the tables read beside it if those arrive a tick later.
+            Assert.InRange(store.DependentSteps, 1, steps);
         }
     }
 

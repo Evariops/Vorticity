@@ -651,12 +651,11 @@ internal sealed class DatasetScanBuilder
     private async Task<List<RecordBatch>> ReadSpansAsync(
         PositionedObject held, SynopsisContents contents, IReadOnlyList<TimeSlice> spans, int[]? columns, bool select, CancellationToken cancellationToken)
     {
-        List<RecordBatch> batches = [];
+        List<RecordBatch> batches = [.. await _dataset.ReadSlicesAsync(held.Entry, contents, spans, columns, cancellationToken).ConfigureAwait(false)];
         try
         {
-            await foreach (RecordBatch batch in _dataset.ReadSlicesAsync(held.Entry, contents, spans, columns, cancellationToken).ConfigureAwait(false))
+            foreach (RecordBatch batch in batches)
             {
-                batches.Add(batch);
                 if (select && _filter is { } filter)
                 {
                     SelectBy(batch, filter);

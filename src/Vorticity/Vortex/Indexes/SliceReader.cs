@@ -154,52 +154,131 @@ internal sealed class SliceReader
     internal ValueTask<RecordBatch> ReadRowsAsync(long first, long rows, int[]? columns, CancellationToken cancellationToken) =>
         ReadSpanAsync(new TimeSlice(0, 1, first, rows), columns, cancellationToken);
 
+    /// <summary>
+    /// The rows of each of <paramref name="spans"/>, a batch per span in order, as <see cref="ReadRowsAsync"/>
+    /// reads one: the chunks of them all read in one request set, a chunk two spans share read once, after
+    /// the chunk directories of the columns not read before. Two round trips cold, one once the directories
+    /// are in hand, however many spans. The caller disposes the batches.
+    /// </summary>
+    /// <param name="spans">The spans, by their first row in the file and their rows.</param>
+    /// <param name="columns">The columns to read, in the order the batches hold them; every column when null.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <exception cref="VortexFormatException">A column's chunk directory or a chunk does not decode.</exception>
+    internal async ValueTask<RecordBatch[]> ReadSpansAsync(IReadOnlyList<TimeSlice> spans, int[]? columns, CancellationToken cancellationToken)
+    {
+        int[] fields = columns ?? AllColumns();
+        await LoadChunksAsync(fields, cancellationToken).ConfigureAwait(false);
+        using SegmentRequestSet shared = new SegmentRequestSet();
+        int[][] slots = new int[spans.Count][];
+        for (int s = 0; s < slots.Length; s++)
+        {
+            slots[s] = ChunksOf(shared, spans[s], fields);
+        }
+
+        await _source.ReadManyAsync(shared, cancellationToken).ConfigureAwait(false);
+
+        // Each batch owns a context of its own, its chunks views of the shared reads it retains.
+        RecordBatch[] batches = new RecordBatch[spans.Count];
+        int made = 0;
+        try
+        {
+            for (; made < batches.Length; made++)
+            {
+                ScanContext context = new ScanContext(_encodings, _options);
+                try
+                {
+                    int[] own = ChunksOf(context.Segments, spans[made], fields);
+                    for (int i = 0; i < own.Length; i++)
+                    {
+                        if (!context.Segments.IsFilled(own[i]))
+                        {
+                            int read = slots[made][i];
+                            context.Segments.SetSharedResult(own[i], shared.GetOwner(read), shared.GetBuffer(read));
+                        }
+                    }
+
+                    context.Segments.Complete();
+                    batches[made] = Batch(context, spans[made], fields, columns, own);
+                }
+                catch
+                {
+                    context.Dispose();
+                    throw;
+                }
+            }
+
+            return batches;
+        }
+        catch
+        {
+            for (int i = 0; i < made; i++)
+            {
+                batches[i].Dispose();
+            }
+
+            throw;
+        }
+    }
+
     private async ValueTask<RecordBatch> ReadSpanAsync(TimeSlice span, int[]? columns, CancellationToken cancellationToken)
     {
-        int length = checked((int)span.Rows);
         int[] fields = columns ?? AllColumns();
         await LoadChunksAsync(fields, cancellationToken).ConfigureAwait(false);
 
         ScanContext context = new ScanContext(_encodings, _options);
         try
         {
-            int chunkCount = 0;
-            foreach (int field in fields)
-            {
-                chunkCount += SliceChunks.Overlapping(_columns[field]!, span.FirstRow, span.Rows).Length;
-            }
-
-            int[] slots = new int[chunkCount];
-            int next = 0;
-            foreach (int field in fields)
-            {
-                foreach (ChunkSpan chunk in SliceChunks.Overlapping(_columns[field]!, span.FirstRow, span.Rows))
-                {
-                    slots[next++] = context.Segments.Add(new SegmentSpec(chunk.Offset, chunk.Length, chunk.AlignmentExponent, 0, 0));
-                }
-            }
-
+            int[] slots = ChunksOf(context.Segments, span, fields);
             await _source.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
-
-            // A projection's struct is built in the context's own arena, and its fields decode at the
-            // types it holds, so the batch's columns and its schema are the same nodes.
-            DType schema = columns is null ? _schema : Projected(context.Types, fields);
-            int[] decoded = new int[fields.Length];
-            next = 0;
-            for (int i = 0; i < fields.Length; i++)
-            {
-                decoded[i] = Column(context, schema.GetField(i), _columns[fields[i]]!, span, length, slots, ref next);
-            }
-
-            int root = context.Canonical.AddStruct(
-                schema, length, schema.IsNullable ? Validity.AllValid : Validity.NonNullable, decoded);
-            return RecordBatch.Adopt(context, root, span.FirstRow, null, null);
+            return Batch(context, span, fields, columns, slots);
         }
         catch
         {
             context.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Registers in <paramref name="requests"/> the chunks of <paramref name="fields"/> that hold the span's rows: their slots, field by field.</summary>
+    private int[] ChunksOf(SegmentRequestSet requests, TimeSlice span, int[] fields)
+    {
+        int chunkCount = 0;
+        foreach (int field in fields)
+        {
+            chunkCount += SliceChunks.Overlapping(_columns[field]!, span.FirstRow, span.Rows).Length;
+        }
+
+        int[] slots = new int[chunkCount];
+        int next = 0;
+        foreach (int field in fields)
+        {
+            foreach (ChunkSpan chunk in SliceChunks.Overlapping(_columns[field]!, span.FirstRow, span.Rows))
+            {
+                slots[next++] = requests.Add(new SegmentSpec(chunk.Offset, chunk.Length, chunk.AlignmentExponent, 0, 0));
+            }
+        }
+
+        return slots;
+    }
+
+    /// <summary>The span's rows decoded from the chunks <paramref name="context"/> holds, as a batch that adopts it.</summary>
+    private RecordBatch Batch(ScanContext context, TimeSlice span, int[] fields, int[]? columns, int[] slots)
+    {
+        int length = checked((int)span.Rows);
+
+        // A projection's struct is built in the context's own arena, and its fields decode at the
+        // types it holds, so the batch's columns and its schema are the same nodes.
+        DType schema = columns is null ? _schema : Projected(context.Types, fields);
+        int[] decoded = new int[fields.Length];
+        int next = 0;
+        for (int i = 0; i < fields.Length; i++)
+        {
+            decoded[i] = Column(context, schema.GetField(i), _columns[fields[i]]!, span, length, slots, ref next);
+        }
+
+        int root = context.Canonical.AddStruct(
+            schema, length, schema.IsNullable ? Validity.AllValid : Validity.NonNullable, decoded);
+        return RecordBatch.Adopt(context, root, span.FirstRow, null, null);
     }
 
     /// <summary>
