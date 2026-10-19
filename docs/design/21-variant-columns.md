@@ -461,8 +461,12 @@ other way, which costs the append ([decisions to take](#13-decisions-to-take)).
 - A dataset with a variant column targets the edition `core2026.08.3` or later, and a variant column
   below it fails the write, as it does today.
 - Rust 0.85.0 and later reads every object, shredded variants included, and the cross-check proves it
-  value for value, under the one difference in how Rust reads a shredded key a row lacks ([how a
-  variant is stored](#52-how-a-variant-is-stored)).
+  value for value (`verify_shredded`, run by `bench/crosscheck.sh`): each file we write with shredded
+  variants, fuzzed documents under random shreddings and the objects a job shreds by its cost model,
+  reads in Rust row by row as its twin written whole does. Two differences are Rust's own, in how it
+  reads any shredded value: a shredded key a row lacks reads as a null field ([how a variant is
+  stored](#52-how-a-variant-is-stored)), and an integer reads at the width of its typed column, which
+  is 64 bits. The check renders both sides with integers at 64 bits and null fields left out.
 - Everything Vorticity adds (the path directory, the path map, the shapes) lies in the index
   directory, which Rust never reads.
 - An encoding tree inlined in a flat layout is read by every reader since 0.84, and Rust 0.85.0, the
@@ -470,8 +474,9 @@ other way, which costs the append ([decisions to take](#13-decisions-to-take)).
   segment whole and gets the same values.
 - A dataset whose objects shred differently is legal for the format, and the dataset's schema says only
   `Variant`.
-- A shredded field's validity is written as runs or sparse only once the cross-check shows that Rust
-  reads an encoded validity in that place. Until then the writer keeps it plain, at a bit per row.
+- A shredded field's validity goes through the compressor, as runs where its rows come in runs, and
+  the cross-check reads such a file in Rust value for value (`runs`, a key held by the first half of
+  the rows). A validity anywhere else stays plain, at a bit per row.
 - A Rust reader reads every path, and none of what makes a path fast in Vorticity. It reads each
   chunk's segment whole and prunes nothing on a path, since the format gives a path no zone map. If an
   edition freezes a layout for paths, the block statistics move there, as the indexes are to move to
@@ -851,7 +856,7 @@ Every figure is an estimate.
 |---|---|
 | a variant reads back as it was written, whatever the shredding | a fuzzer of documents of every shape (nesting, lists, mixed types, keys that are data, keys with dots), written under random choices and read back equal, value for value, integers equal under their class (`ShreddedVariantWriteTests`) |
 | the format's rules | tests of a missing key, a type mismatch, a residual disjoint from the shredded keys, and a key present in both, which is refused (`ShreddedVariantWriteTests`, and the two conflict cases of the Parquet suite) |
-| Rust reads what we write, and we read what Rust writes | shredded variants in the cross-check, both ways |
+| Rust reads what we write, and we read what Rust writes | shredded variants in the cross-check, both ways (`verify_shredded`: our files against their twins written whole, value for value; `gen_shredded_variants`: the reference's shredder's files, read here) |
 | the same answers shredded or not | every question of a matrix over paths, on the same rows written shredded and unshredded |
 | a shredded path is as fast as a declared column | a ratchet on the same question over a path and over a declared column holding the same values |
 | the column budget | footer bytes and layout nodes as ratchets, on a bench of 10⁴ paths (`ShreddingChoiceTests`: the bytes of the file and the tables of its largest tree) |

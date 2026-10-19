@@ -41,17 +41,7 @@ public sealed partial class ShreddedDatasetTests
             ClusteringKey = [nameof(Event.At)],
         }, Ct);
 
-        Random random = new Random(19);
-        for (int part = 0; part < 16; part++)
-        {
-            Event[] rows = [.. Enumerable.Range(0, 400).Select(i => Row(random, part * 400 + i))];
-            foreach (VortexDataset dataset in new[] { periods, levels })
-            {
-                await using ObjectDraft draft = dataset.StartObject();
-                await draft.Writer.WriteAsync<Event>(rows, Ct);
-                await dataset.AppendAsync(draft, Ct);
-            }
-        }
+        await AppendAsync(periods, levels);
 
         // An append writes the rows as they come: no path map.
         Assert.All(await MapsAsync(periods), map => Assert.Equal((0, false), (map.Level, map.Keys is not null)));
@@ -90,6 +80,80 @@ public sealed partial class ShreddedDatasetTests
         Assert.Equal(
             await RoutesAsync(levels),
             await RoutesAsync(periods));
+    }
+
+    /// <summary>
+    /// The .NET half of Rust reading the objects a job shreds: each object above level 0 of a dataset of
+    /// periods written out as it is stored, beside its rows in the same order written whole, for
+    /// `cargo run --example verify_shredded` to compare (`bench/crosscheck.sh`). It skips rather than
+    /// passes without its directory.
+    /// </summary>
+    [Fact]
+    public async Task WritesJobObjectsOutForTheRustCrossCheck()
+    {
+        string? root = Environment.GetEnvironmentVariable("VORTICITY_WRITE_SHREDDED");
+        Assert.SkipWhen(string.IsNullOrEmpty(root), "Set VORTICITY_WRITE_SHREDDED to a directory to produce shredded objects for the Rust cross-check.");
+        System.IO.Directory.CreateDirectory(root!);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Event.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+        }, Ct);
+        await AppendAsync(dataset);
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        int written = 0;
+        foreach ((int level, DatasetTree tree) in dataset.Levels.Occupied())
+        {
+            if (level == 0)
+            {
+                continue;
+            }
+
+            await foreach (TreeEntry leaf in tree.EnumerateAsync(dataset.Pages, Ct))
+            {
+                ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
+                string name = System.IO.Path.Combine(root!, $"job-{written++}");
+                byte[] bytes = new byte[entry.Bytes];
+                await store.ReadAsync(entry.Key, 0, bytes, null, Ct);
+                await System.IO.File.WriteAllBytesAsync(name + ".shredded.vortex", bytes, Ct);
+
+                List<Event> stored = [];
+                await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
+                {
+                    Assert.NotNull(await VariantPathMap.ReadAsync(lease.File, lease.File.DType.IndexOfField(nameof(Event.Attributes)), Dense, Ct));
+                    await foreach (Event row in lease.File.Scan<Event>().ToRecordsAsync(Ct))
+                    {
+                        stored.Add(row);
+                    }
+                }
+
+                await using VortexFileWriter twin = VortexSession.Default.CreateWriter<Event>(name + ".whole.vortex");
+                await twin.WriteAsync<Event>([.. stored], Ct);
+                await twin.CompleteAsync(Ct);
+            }
+        }
+
+        Assert.True(written >= 3, $"{written} shredded objects");
+    }
+
+    /// <summary>Sixteen appends of 400 events, 1.25 seconds apart from noon, the same into each dataset.</summary>
+    private static async Task AppendAsync(params VortexDataset[] datasets)
+    {
+        Random random = new Random(19);
+        for (int part = 0; part < 16; part++)
+        {
+            Event[] rows = [.. Enumerable.Range(0, 400).Select(i => Row(random, part * 400 + i))];
+            foreach (VortexDataset dataset in datasets)
+            {
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Event>(rows, Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+        }
     }
 
     private static Event Row(Random random, int i) => new Event(
