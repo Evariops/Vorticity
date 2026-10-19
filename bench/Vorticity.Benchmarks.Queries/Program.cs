@@ -77,6 +77,12 @@ if (Text(args, "--micro") == "sketches")
     return SketchMicro.Run(rounds);
 }
 
+// --micro slicesort: one time slice sorted as a dataset of periods writes it (SliceSortMicro.cs).
+if (Text(args, "--micro") == "slicesort")
+{
+    return await SliceSortMicro.Run(rounds);
+}
+
 // Each file is written the first time a query asks for it, and kept.
 Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Func<ValueTask<string>>>(StringComparer.Ordinal)
 {

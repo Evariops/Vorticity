@@ -263,9 +263,15 @@ public sealed record DatasetOptions
     internal bool AcceptsNullableKey { get; init; }
 
     /// <summary>The periods a header records, or null for a dataset compacted by levels.</summary>
-    private static PeriodOptions? PeriodsOf(CommitHeader header) =>
+    /// <remarks>The slice target is the handle's own, from <paramref name="asked"/>, as no header records it.</remarks>
+    private static PeriodOptions? PeriodsOf(CommitHeader header, PeriodOptions? asked) =>
         header.Lateness is { } lateness
-            ? new PeriodOptions { Lateness = lateness, Length = header.PeriodLength ?? SliceWidth.Day }
+            ? new PeriodOptions
+            {
+                Lateness = lateness,
+                Length = header.PeriodLength ?? SliceWidth.Day,
+                SliceTargetRows = asked?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows,
+            }
             : null;
 
     /// <summary>What vacuum keeps, as a header records it.</summary>
@@ -285,7 +291,7 @@ public sealed record DatasetOptions
             Seed = header.Seed,
             LockedStore = false,
             ErasureDelay = header.ErasureDelay,
-            Periods = PeriodsOf(header),
+            Periods = PeriodsOf(header, Periods),
             Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
         }
         : this with
@@ -293,7 +299,7 @@ public sealed record DatasetOptions
             Seed = header.Seed,
             LockedStore = true,
             ErasureDelay = null,
-            Periods = PeriodsOf(header),
+            Periods = PeriodsOf(header, Periods),
             Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
             MarkedObjectBytes = 0,
             MarkedShare = 1,

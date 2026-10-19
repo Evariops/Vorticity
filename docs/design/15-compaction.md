@@ -234,7 +234,23 @@ period, so its plan reads every leaf. Its jobs come in this order:
 - Purges and fragments, as for any dataset.
 
 Every job writes an object per period, so that no object spans two, and level 0's exit an object per
-level as well. A period is a day at creation, and each seal weighs the load of the period it wrote and
+level as well.
+
+Every such object is written in sorted slices. A job merges its inputs twice. The first pass counts,
+for each object it will write, its rows per second and the distinct values of the columns that may be
+synopsis columns, from which it cuts the object's slices and picks the order inside them: the
+columns whose values repeat twice on average, fewest values first
+([20-time-window-aggregates.md](20-time-window-aggregates.md#62-the-order-inside-a-slice)). The second
+pass gathers each slice as its rows come, in time order, codes each synopsis column's values in the
+order of the values, and sorts the slice by one stable counting sort per column, from the last to the
+first, so that rows of equal values keep their time order without a pass on the instant. The rows are
+gathered once through the permutation and written, and the slice table records the order. A slice of
+a million rows over three synopsis columns sorts in 43 ns a row (`vortex-queries --micro slicesort`),
+its rows copied, coded, sorted and gathered. The object then holds its rows in the key's order slice by
+slice only, so it carries the sorted run on the key, through which the key cursor and every read in
+key order find its rows, and a dataset of periods takes no row's rank for its row above level 0. A
+slice is held whole while it sorts: a slice past the query memory's grant, sorted in runs and merged,
+is not done yet. A period is a day at creation, and each seal weighs the load of the period it wrote and
 records the length that load calls for, from past the newest instant ([the length of a
 period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so that every writer cuts
 the same. `DatasetPeriodsCompactionTests` runs 300 rounds of

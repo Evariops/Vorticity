@@ -34,6 +34,13 @@ public sealed record PeriodOptions
         }
     }
 
+    /// <summary>
+    /// The rows a time slice aims at: <see cref="TimeSlicer.DefaultTargetRows"/>, until the cost of a
+    /// window's edges against the runs a finer slice adds is measured. Set by tests to cut slices of a
+    /// few rows; each writer's own, since an object's slices are its own.
+    /// </summary>
+    internal long SliceTargetRows { get; init; } = TimeSlicer.DefaultTargetRows;
+
     private readonly SliceWidth _length = SliceWidth.Day;
 
     /// <summary>

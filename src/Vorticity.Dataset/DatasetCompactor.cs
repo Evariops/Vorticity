@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
@@ -123,10 +124,17 @@ internal static class DatasetCompactor
         // Every input is read as this schema and every output written in it: a compaction is also
         // how objects of an earlier schema come to hold the current one.
         DatasetSchema schema = dataset.Snapshot.Schema;
-        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge, rowBound: job.Rows, job.ToLevel)
+
+        // A job of a dataset of periods writes its objects in sorted slices: a first pass over its rows
+        // cuts each object's slices and picks the order inside them, the second sorts and writes them.
+        // The instant must be a top-level column, which slices are declared on.
+        IReadOnlyDictionary<(int Level, long Period), SliceTable>? plans = merge && job.Cut is not null && !key!.Paths[0].Contains('.')
+            ? await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false)
+            : null;
+        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null, rowBound: job.Rows, job.ToLevel)
         {
-            // A seal's object declares its time slices, on the instant, a top-level column.
-            Slicing = job.Cut is { Slices: true } cut && !key!.Paths[0].Contains('.') ? (key.Paths[0], cut.Unit) : null,
+            Plans = plans,
+            InstantPath = plans is null ? null : key!.Paths[0],
         };
         long rows;
         try
@@ -426,27 +434,8 @@ internal static class DatasetCompactor
         ObjectStream outputs,
         CancellationToken cancellationToken)
     {
-        // Offered by leaf key, an exact lower bound, so an input opens only once it could hold the
-        // next row; the job's own order breaks ties among inputs holding the same key.
-        List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
-        for (int i = 0; i < job.Inputs.Count; i++)
-        {
-            CompactionInput input = job.Inputs[i];
-            inputs.Add((input.Key, new MergeObject(input.Entry, VortexDataset.OrderOf(input.Key), i)));
-        }
-
-        inputs.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
-
         IReadOnlyList<string> paths = key.Paths;
-        KeyOrderedMerge merge = new KeyOrderedMerge(
-            dataset.Snapshot,
-            inputs.Select(static held => held.Object).ToAsyncEnumerable(),
-            key.Paths,
-            descending: false,
-            rankedTies: false,
-            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken),
-            opened: null,
-            cancellationToken);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
         long rows = 0;
         List<Cut> cuts = [];
         await using (merge.ConfigureAwait(false))
@@ -487,6 +476,92 @@ internal static class DatasetCompactor
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The k-way merge of a job's inputs on the clustering key. Offered by leaf key, an exact lower bound,
+    /// so an input opens only once it could hold the next row; the job's own order breaks ties among
+    /// inputs holding the same key.
+    /// </summary>
+    private static KeyOrderedMerge InputsMerged(VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
+    {
+        List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
+        for (int i = 0; i < job.Inputs.Count; i++)
+        {
+            CompactionInput input = job.Inputs[i];
+            inputs.Add((input.Key, new MergeObject(input.Entry, VortexDataset.OrderOf(input.Key), i)));
+        }
+
+        inputs.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
+        IReadOnlyList<string> paths = key.Paths;
+        return new KeyOrderedMerge(
+            dataset.Snapshot,
+            inputs.Select(static held => held.Object).ToAsyncEnumerable(),
+            key.Paths,
+            descending: false,
+            rankedTies: false,
+            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken),
+            opened: null,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// The first pass of a job of a dataset of periods: its rows merged once, each object it writes,
+    /// by level and period, counting its rows per second and the distinct values of the columns that may
+    /// be synopsis columns. Each object's slices are then cut from its seconds and its order picked from
+    /// its counts, before a row is written.
+    /// </summary>
+    /// <remarks>
+    /// The pass reads the inputs whole a second time: the instant and the candidate columns alone would
+    /// do, read through a projection, which a later change takes.
+    /// </remarks>
+    private static async ValueTask<IReadOnlyDictionary<(int Level, long Period), SliceTable>> PlanSlicesAsync(
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
+    {
+        PeriodCut cut = job.Cut!;
+        string instant = key.Paths[0];
+        long target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
+        int[] candidates = SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers);
+        Dictionary<(int, long), (SecondCounts Seconds, CardinalitySketch[] Sketches)> tallies = [];
+        List<Cut> cuts = [];
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
+        await using (merge.ConfigureAwait(false))
+        {
+            while (await merge.MoveNextAsync().ConfigureAwait(false))
+            {
+                RecordBatch run = merge.Current;
+                CutRun(run, instant, cut, job.ToLevel, cuts);
+                int at = 0;
+                foreach ((int end, int level, long period) in cuts)
+                {
+                    if (!tallies.TryGetValue((level, period), out var tally))
+                    {
+                        tally = (new SecondCounts(cut.Unit), [.. candidates.Select(static _ => new CardinalitySketch())]);
+                        tallies[(level, period)] = tally;
+                    }
+
+                    RecordBatch part = at == 0 && end == run.RowCount ? run : run.Window(at, end - at);
+                    tally.Seconds.Add(Instants(part, instant));
+                    SynopsisOrder.Count(part, candidates, tally.Sketches);
+                    at = end;
+                }
+            }
+        }
+
+        Dictionary<(int Level, long Period), SliceTable> plans = [];
+        foreach (((int level, long period), (SecondCounts seconds, CardinalitySketch[] sketches)) in tallies)
+        {
+            (int, long)[] counted = new (int, long)[candidates.Length];
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                counted[i] = (candidates[i], sketches[i].Estimate());
+            }
+
+            plans[(level, period)] = new SliceTable(
+                cut.Unit, TimeSlicer.Cut(seconds.Seconds, cut.Unit, target), SynopsisOrder.Choose(counted, seconds.Rows));
+        }
+
+        return plans;
     }
 
     /// <summary>
@@ -639,12 +714,17 @@ internal static class DatasetCompactor
         internal IReadOnlyList<int> Levels => _levels;
 
         /// <summary>
-        /// The instant column and its unit when each object declares its time slices, cut from its rows
-        /// counted per second as they are written; null for none.
+        /// Each object's slice table, by level and period, when the objects are written in sorted slices;
+        /// null for rows written as they come.
         /// </summary>
-        internal (string Path, TimeUnit Unit)? Slicing { get; init; }
+        internal IReadOnlyDictionary<(int Level, long Period), SliceTable>? Plans { get; init; }
 
-        private SecondCounts? _seconds;
+        /// <summary>The instant column, top-level, the slices are declared on; null without plans.</summary>
+        internal string? InstantPath { get; init; }
+
+        // The slices of the object being written, sorted as they fill; null without plans.
+        private SortedSlices? _sorter;
+        private SliceTable? _table;
 
         /// <summary>
         /// Sends what is written next to <paramref name="level"/> and <paramref name="period"/>, sealing
@@ -697,15 +777,26 @@ internal static class DatasetCompactor
 
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
         {
-            _draft ??= _dataset.StartObjectUnder(_schema, _inKeyOrder, _rowBound, sliced: Slicing is not null);
-            if (Slicing is { } slicing)
+            _draft ??= _dataset.StartObjectUnder(_schema, _inKeyOrder, _rowBound, sliced: Plans is not null);
+            _rows += batch.RowCount;
+            if (Plans is { } plans)
             {
-                (_seconds ??= new SecondCounts(slicing.Unit)).Add(Instants(batch, slicing.Path));
+                // Rows come in time order; each slice they complete is sorted and written whole.
+                if (_sorter is null)
+                {
+                    _table = plans[(_level, _period)];
+                    _sorter = new SortedSlices(_table, _schema.DType.IndexOfField(InstantPath!), _schema.DType);
+                }
+
+                await _sorter.AppendAsync(batch, WriteSortedAsync, cancellationToken).ConfigureAwait(false);
+                return;
             }
 
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-            _rows += batch.RowCount;
         }
+
+        private ValueTask WriteSortedAsync(RecordBatch sorted, CancellationToken cancellationToken) =>
+            _draft!.Writer.WriteBatchAsync(sorted, cancellationToken);
 
         internal ValueTask RollIfFullAsync(CancellationToken cancellationToken) =>
             WantsRoll ? RollAsync(cancellationToken) : ValueTask.CompletedTask;
@@ -722,12 +813,21 @@ internal static class DatasetCompactor
             _lastKeyLength = -1;
             await using (draft.Writer.ConfigureAwait(false))
             {
-                if (Slicing is { } slicing && _seconds is { Rows: > 0 } seconds)
+                if (_sorter is { } sorter)
                 {
-                    draft.Writer.DeclareSlices(slicing.Path, new SliceTable(slicing.Unit, TimeSlicer.Cut(seconds.Seconds, slicing.Unit)));
+                    // The first pass counted these rows: every slice is written, or the passes disagree.
+                    _sorter = null;
+                    bool complete = sorter.Complete;
+                    sorter.Dispose();
+                    if (!complete)
+                    {
+                        throw new DatasetIntegrityException(
+                            $"The object of level {_level} wrote {_rows} rows where its slices hold {_table!.Rows}: the two passes of the job read different rows.");
+                    }
+
+                    draft.Writer.DeclareSlices(InstantPath!, _table!);
                 }
 
-                _seconds = null;
                 await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
             }
 
@@ -755,6 +855,8 @@ internal static class DatasetCompactor
             }
 
             _draft = null;
+            _sorter?.Dispose();
+            _sorter = null;
             await draft.Writer.DisposeAsync().ConfigureAwait(false);
             draft.Sink.Discard();
         }
