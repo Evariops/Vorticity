@@ -401,6 +401,10 @@ never lend its values to an unrelated column.
 
 * The dataset format is experimental and specific to this project. Pin the package version, and do
   not expect another Vortex implementation to read the commit tree.
+* A dataset written in commit format 4 is refused by earlier releases, which would otherwise misread
+  it. A dataset takes format 4 once it declares periods, partition columns, identifiers or an erasure
+  delay, or once one of its objects has a footer past the first 64 KiB an open reads. Upgrade every
+  process that writes or reads such a dataset before any of them uses one of those.
 * Marked rows keep their bytes until compaction. A delete that marks rows frees no space, since the
   object holds them (up to an eighth of its rows) until compaction rewrites it or a later delete
   passes that share. An object under a mebibyte is rewritten by every delete that touches it, so
