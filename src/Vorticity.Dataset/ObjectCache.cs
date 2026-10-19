@@ -356,15 +356,30 @@ internal sealed class ObjectCache : IAsyncDisposable
 }
 
 /// <summary>One borrowing of an open data object.</summary>
-internal sealed class ObjectLease(ObjectCache cache, string key, VortexFile file, bool cached) : IAsyncDisposable
+internal sealed class ObjectLease : IAsyncDisposable
 {
+    private readonly Func<ValueTask> _giveBack;
     private bool _returned;
 
+    /// <summary>A lease of the object <paramref name="key"/> names, open as <paramref name="file"/>, which disposing gives back to <paramref name="cache"/>.</summary>
+    internal ObjectLease(ObjectCache cache, string key, VortexFile file, bool cached)
+        : this(file, cached, () => cache.ReturnAsync(key))
+    {
+    }
+
+    /// <summary>A lease of <paramref name="file"/>, which disposing gives back through <paramref name="giveBack"/>.</summary>
+    internal ObjectLease(VortexFile file, bool cached, Func<ValueTask> giveBack)
+    {
+        File = file;
+        WasCached = cached;
+        _giveBack = giveBack;
+    }
+
     /// <summary>The open file. Valid until this lease is disposed.</summary>
-    internal VortexFile File => file;
+    internal VortexFile File { get; }
 
     /// <summary>Whether the object was already open, so the lease cost no request.</summary>
-    internal bool WasCached => cached;
+    internal bool WasCached { get; }
 
     /// <summary>
     /// The fragments left out because their bytes are not what their references say; the file's own
@@ -380,6 +395,6 @@ internal sealed class ObjectLease(ObjectCache cache, string key, VortexFile file
         }
 
         _returned = true;
-        return cache.ReturnAsync(key);
+        return _giveBack();
     }
 }

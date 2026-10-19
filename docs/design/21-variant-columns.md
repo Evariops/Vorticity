@@ -492,6 +492,16 @@ immutable objects. A query node therefore keeps in memory the decoded column of 
 not once per question. Shredding in the append, from the previous object's choice of paths, is the
 other way, which costs the append ([decisions to take](#13-decisions-to-take)).
 
+As built, the memo keeps a copy of the object rather than columns. The first question that reads keys
+of a level-0 object's variant column reads the object whole and writes it again in memory, the keys
+asked shredded at the class most of their values hold, with their path maps, the rows in their order so
+that the entry's deletion vector applies. Every later question on those keys reads the copy through
+them alone, as it reads an object a job shredded, and a question on another key shreds the object
+again with the keys of both. A copy is reserved from the session's query memory budget, and one the
+budget refuses serves its question and is let go. The first read on the node after the object has left
+level 0 lets its copy go. Five questions on a key of three objects shred each once and serve the four
+others from the copies (`LevelZeroMemoTests`).
+
 ### 5.8 Compatibility
 
 - A dataset with a variant column targets the edition `core2026.08.3` or later, and a variant column

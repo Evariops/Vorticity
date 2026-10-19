@@ -242,6 +242,26 @@ internal sealed class DatasetScanBuilder
     private IReadOnlyDictionary<string, string[]>? _variantKeys;
 
     /// <summary>
+    /// A lease of <paramref name="held"/>: for a scan that reads keys of variant columns, an object of level 0
+    /// through the node's memo of it shredded in memory, which parses its keys once; the object itself otherwise.
+    /// </summary>
+    private async ValueTask<ObjectLease> RentAsync(PositionedObject held, CancellationToken cancellationToken)
+    {
+        // Once a scan, the memo lets go of the objects that have left level 0 since it last looked.
+        if (!_memoChecked)
+        {
+            _memoChecked = true;
+            await _dataset.LevelZero.ForgetMovedAsync(_version, cancellationToken).ConfigureAwait(false);
+        }
+
+        return held.Level == 0 && _variantKeys is { Count: > 0 } keys
+            ? await _dataset.LevelZero.RentAsync(_dataset, _version, held.Entry, keys, cancellationToken).ConfigureAwait(false)
+            : await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool _memoChecked;
+
+    /// <summary>
     /// Runs every object's scan under <paramref name="options"/>: the batch cap, zone-map pruning,
     /// the degree of parallelism, the prefetch and compaction; <paramref name="keepEncodings"/> lets
     /// the decoders deliver dictionary and run-end columns encoded, <paramref name="sinkDecodes"/>
@@ -386,7 +406,7 @@ internal sealed class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> ObjectAsync(
         PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+        ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
             RecordOpen(lease, open);
@@ -441,7 +461,7 @@ internal sealed class DatasetScanBuilder
                 continue;
             }
 
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -473,7 +493,7 @@ internal sealed class DatasetScanBuilder
                 return true;
             }
 
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -590,7 +610,7 @@ internal sealed class DatasetScanBuilder
 
             ScanExplanation plan;
             bool evaluated = false;
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -742,7 +762,7 @@ internal sealed class DatasetScanBuilder
                 continue;
             }
 
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);

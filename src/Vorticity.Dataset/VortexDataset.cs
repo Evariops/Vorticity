@@ -1472,6 +1472,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>A task that completes when every object is closed.</returns>
     public async ValueTask DisposeAsync()
     {
+        await LevelZero.DisposeAsync().ConfigureAwait(false);
         await _objects.DisposeAsync().ConfigureAwait(false);
         if (_store is SealedObjectStore sealedStore)
         {
@@ -1808,6 +1809,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </exception>
     internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
         Snapshot.RentAsync(entry, cancellationToken);
+
+    /// <summary>The objects of level 0 this node read through keys of their variant columns, shredded in memory once.</summary>
+    internal LevelZeroMemo LevelZero { get; } = new LevelZeroMemo();
 
     /// <summary>
     /// The synopsis tables of the object <paramref name="entry"/> names that <paramref name="wanted"/> keeps,
