@@ -15,6 +15,16 @@ namespace Vorticity;
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
 
 /// <summary>
+/// What an aggregation reads of one object of a dataset: a table of its synopsis, whose states stand for
+/// the rows of the buckets it folds; the rows of the slices a window cuts; or its rows whole, and why.
+/// </summary>
+/// <param name="Object">The object, by its key in the dataset.</param>
+/// <param name="Read"><c>table</c>, <c>edges</c> or <c>rows</c>.</param>
+/// <param name="Detail">The table's kind, its bucket and the columns that key it; or why the rows are read.</param>
+/// <param name="Count">The buckets the table folds, the slices read at the edges, or the object's rows.</param>
+public sealed record StatesStep(string Object, string Read, string Detail, long Count);
+
+/// <summary>
 /// What a scan will do, worked out from statistics, zone maps and indexes before a data segment is
 /// read: its blocks, the segments and bytes the live ones need, what each structure pruned.
 /// </summary>
@@ -39,6 +49,12 @@ public sealed record ScanPlan(
 {
     /// <summary>What a group by will do with the rows; null without a group by.</summary>
     public GroupPlan? Grouping { get; init; }
+
+    /// <summary>
+    /// For an aggregation over a dataset whose objects keep synopses, what each object reads: its tables'
+    /// states, the rows at a window's edges, or its rows and why; empty otherwise.
+    /// </summary>
+    public ImmutableArray<StatesStep> States { get; init; } = [];
 
     /// <summary>The engine's own explanation, with its splits, for the tests that hold the plan to the execution.</summary>
     internal ScanExplanation? Detail { get; init; }

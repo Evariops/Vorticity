@@ -3422,8 +3422,17 @@ internal abstract class AggregationHost
     /// <summary>The plan of the pass the aggregation would run, before the statistics settle any of it.</summary>
     internal ValueTask<ScanPlan> ExplainAsync(AggregationPlan plan, CancellationToken cancellationToken, VortexExpr? rows = null)
     {
-        (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
-        return Source.ExplainAsync(AggregationEngine.PassSpec(Spec(rows), columns, plan, Source.Schema), cancellationToken);
+        AggregateSlot?[] settled = new AggregateSlot?[plan.Aggregates.Length];
+        (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, settled);
+        ScanSpec pass = AggregationEngine.PassSpec(Spec(rows), columns, plan, Source.Schema);
+
+        // The states the pass would ask for, so that a source that keeps them says per object what it reads.
+        if (pass.Options.UseSynopses && Source.KeepsStates && StateRequest.Of(plan, settled, top: null) is { } states)
+        {
+            pass = pass with { States = states };
+        }
+
+        return Source.ExplainAsync(pass, cancellationToken);
     }
 
     /// <summary>The scan's spec, its filter joined with <paramref name="rows"/>: the conjuncts on a group's key, which filter rows.</summary>

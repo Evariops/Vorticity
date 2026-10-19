@@ -521,15 +521,21 @@ internal sealed class DatasetScanBuilder
         PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, int open,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        SynopsisTableSet tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, table => ReferenceEquals(table, answer.Table), cancellationToken).ConfigureAwait(false);
-        using (tables)
+        if (answer.Parts.Count > 0)
         {
-            RecordBatch states = answer.Batch(tables, instant, held.FirstRow)
-                ?? throw new VortexFormatException($"The synopsis table of object {held.Entry.Key} did not read.");
-            using (states)
+            SynopsisTableSet tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer.Reads, cancellationToken).ConfigureAwait(false);
+            using (tables)
             {
-                _counters?.AddSynopsisRows(states.SelectedRows);
-                yield return states;
+                foreach (SynopsisPart part in answer.Parts)
+                {
+                    RecordBatch states = answer.Batch(tables, part, instant, held.FirstRow)
+                        ?? throw new VortexFormatException($"A synopsis table of object {held.Entry.Key} did not read.");
+                    using (states)
+                    {
+                        _counters?.AddSynopsisRows(states.SelectedRows);
+                        yield return states;
+                    }
+                }
             }
         }
 
@@ -720,6 +726,7 @@ internal sealed class DatasetScanBuilder
         List<string> sources = [];
         long runs = 0;
         long entries = 0;
+        List<StatesStep> states = [];
         KeyRange? range = CountRange();
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -727,6 +734,18 @@ internal sealed class DatasetScanBuilder
             if (covered == 0)
             {
                 continue;
+            }
+
+            // What an aggregation that takes states reads of the object: its tables, then its edges' rows,
+            // or its rows and why. An object whose tables answer it whole is not opened.
+            if (_states is { } request)
+            {
+                if (StatesOf(held, request, states) is { Edges.Count: 0 })
+                {
+                    keptRows += covered;
+                    mayMatch = true;
+                    continue;
+                }
             }
 
             ScanExplanation plan;
@@ -833,7 +852,44 @@ internal sealed class DatasetScanBuilder
             new CountPlan(exact, exactRows, Narrow(pruned), Narrow(proven), Narrow(decoded)),
             _orderPaths is null
                 ? null
-                : new OrderPlan(sources.Count == 0 ? nameof(KeySourceKind.None) : string.Join('+', sources), Narrow(runs), entries, _descending));
+                : new OrderPlan(sources.Count == 0 ? nameof(KeySourceKind.None) : string.Join('+', sources), Narrow(runs), entries, _descending))
+        {
+            States = [.. states],
+        };
+    }
+
+    /// <summary>
+    /// Adds to <paramref name="into"/> what the object reads for an aggregation that takes states: each
+    /// table of its answer with the buckets it folds and the slices read at its edges; or its rows, and
+    /// why. The answer, or null when the rows are read whole.
+    /// </summary>
+    private SynopsisAnswer? StatesOf(in PositionedObject held, StateRequest request, List<StatesStep> into)
+    {
+        string key = held.Entry.Key.ToString();
+        (SynopsisAnswer? answer, SynopsisContents? contents, _) = Answer(held, request);
+        if (answer is null || contents is null)
+        {
+            string why = held.Entry.HasDeletions ? "rows marked deleted"
+                : Covered(held) != held.Entry.Rows ? "a part of its rows asked"
+                : held.Entry.Synopsis.IsEmpty ? "no synopsis"
+                : "no table holds the keys, the measures and the window";
+            into.Add(new StatesStep(key, "rows", why, held.Entry.Rows));
+            return null;
+        }
+
+        DType schema = contents.SchemaIn(new DTypeArena());
+        foreach (SynopsisPart part in answer.Parts)
+        {
+            string[] keys = Array.ConvertAll(part.Table.Keys, field => SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths));
+            into.Add(new StatesStep(key, "table", $"{part.Table.Kind} by {part.Table.Bucket} on ({string.Join(", ", keys)})", part.Kept.Count));
+        }
+
+        if (answer.Edges.Count > 0)
+        {
+            into.Add(new StatesStep(key, "edges", "the slices the window or a key of time cuts", answer.Edges.Count));
+        }
+
+        return answer;
     }
 
     /// <summary>

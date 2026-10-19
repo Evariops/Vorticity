@@ -1020,18 +1020,22 @@ greatest or a mean of a number column, unfiltered, and every key is a column or 
 ([16-queries.md, statistics and zone maps](16-queries.md#93-statistics-and-zone-maps)). For each object
 that the scan covers whole, with no row marked and of the version's schema, the planner reads only
 its entry's table of contents. It splits the filter into bounds on the instant, which make the window,
-and predicates on other columns, which must read keys only. It then tries the tables that hold the
-keys and the measures, fewest rows first. A table answers when each of its buckets lies inside the
-window with one value of every key of time over it, or outside. A bucket is a slice, an hour holding
-the slices that start in it, or the whole object. A table of slices answers anyway, and the slices it
-cuts are its edges, read as rows through their row range: exact edges are the only kind built so far.
-The chosen table is read in one request, its buckets' start named as the instant, and the rows of
-the kept buckets that pass the key predicates go to the lanes as a batch of states. Any other object
-is read as rows. On two hours and a quarter of requests, every question of `SynopsisAnswerTests`
-gives the bits of its rows. A count per service reads 15 table rows instead of 6 400 rows, and a
-window that cuts two slices reads 189 run rows and 24 edge rows instead of 3 048 rows. An object with
-marked rows is read as rows until [deletes](#10-deletes) correct its states. The plan does not yet
-say per object what it reads, and a question's needles are not yet routed to their postings.
+and predicates on other columns, which must read keys only. Of the tables that hold the keys and the
+measures, the one of fewest rows answers each of its buckets that lies inside the window with one
+value of every key of time over it. A bucket is a slice, an hour holding the slices that start in it,
+or the whole object. Inside a bucket the window or a key of time cuts, the runs of the slices of fewest
+rows answer the slices left whole, and the slices cut are its edges, read as rows through their row
+range: exact edges are the only kind built so far. Without a table of slices, a bucket cut is read as
+rows, and an object whose answer would be rows alone is read as rows. The tables are read in one
+request, their buckets' start named as the instant, and the rows of the kept buckets that pass the
+key predicates go to the lanes as batches of states. On two hours and a quarter of requests, every
+question of `SynopsisAnswerTests` gives the bits of its rows. A count per service reads 15 table
+rows instead of 6 400 rows. A window that cuts two slices reads 189 run rows and 24 edge rows instead
+of 3 048 rows. A window across hours reads 84 table rows and 48 edge rows instead of 4 224 rows. An
+object with marked rows is read as rows until [deletes](#10-deletes) correct its states. A
+question's plan lists per object each table it reads with the buckets it folds, the slices read at
+its edges, or its rows and why (`ScanPlan.States`). An object whose tables answer it whole is not
+opened, by the plan as by the pass. A question's needles are not yet routed to their postings.
 
 ### 9.4 Excluding a rare value
 

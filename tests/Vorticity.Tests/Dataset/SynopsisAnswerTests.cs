@@ -33,6 +33,8 @@ public sealed partial class SynopsisAnswerTests
         "count by service under a status",
         "an aligned window",
         "an unaligned window",
+        "a window across hours",
+        "a cut hour without runs",
         "by the hour",
     ];
 
@@ -50,7 +52,37 @@ public sealed partial class SynopsisAnswerTests
         Assert.Equal(0, without.SynopsisRows);
         Assert.True(metrics.SynopsisRows > 0, "no state folded");
         Assert.True(metrics.Rows < without.Rows, $"{metrics.Rows} rows read, as many as without");
-        Assert.Equal(question == "an unaligned window", metrics.EdgeRows > 0);
+        // A window across hours reads its whole hours from their coarse tables, the slices of the hours it
+        // cuts from their runs and the slices it cuts as rows; where no table of slices keys the service, the
+        // hour it cuts is read as rows, its object's every row.
+        Assert.Equal(question is "an unaligned window" or "a window across hours", metrics.EdgeRows > 0);
+    }
+
+    /// <summary>
+    /// The plan of a question over a window across hours says, per object, what it reads: the coarse table of
+    /// the whole hour, the runs and the edges of the hour cut, and the rows of an object of level 0 or of
+    /// the window's last hour, cut where no table of slices keys the service.
+    /// </summary>
+    [Fact]
+    public async Task ThePlanSaysWhatEachObjectReads()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store);
+        DateTimeOffset from = Noon.AddMinutes(37.5);
+        DateTimeOffset to = Noon.AddMinutes(125.5);
+        ScanPlan plan = await dataset.Scan<Request>().Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method)
+            .Select(g => (g.Key, g.Count())).ExplainAsync(Ct);
+        foreach (StatesStep step in plan.States)
+        {
+            Console.Out.Write($"STEP {step.Object}: {step.Read} {step.Detail} x{step.Count}\n");
+        }
+
+        Assert.Contains(plan.States, step => step is { Read: "table", Detail: "Coarse by Hour on (Method)" });
+        Assert.Contains(plan.States, step => step is { Read: "table", Detail: "Runs by Slice on (Method)" });
+        Assert.Contains(plan.States, step => step is { Read: "edges", Count: > 0 });
+
+        ScanPlan rows = await dataset.Scan<Request>().With(new ScanOptions { UseSynopses = false }).GroupBy(r => r.Method).Select(g => (g.Key, g.Count())).ExplainAsync(Ct);
+        Assert.Empty(rows.States);
     }
 
     /// <summary>A whole scan's sums, extremes and means, over every row and over a window that cuts slices, are the bits of its rows.</summary>
@@ -118,6 +150,8 @@ public sealed partial class SynopsisAnswerTests
             "count by service under a status" => scan.Where(r => r.Status == 200).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
             "an aligned window" => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Duration))),
             "an unaligned window" => scan.Where(r => r.At >= cutFrom && r.At < cutTo).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Max(r => r.Bytes))),
+            "a window across hours" => scan.Where(r => r.At >= cutFrom && r.At < Noon.AddMinutes(125.5)).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Duration))),
+            "a cut hour without runs" => scan.Where(r => r.At >= cutFrom && r.At < Noon.AddMinutes(125.5)).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Duration))),
             _ => scan.GroupBy(r => (r.At.Truncate(CalendarUnit.Hour), r.Service)).Select(g => (g.Key.Item1, g.Key.Service, g.Count(), g.Sum(r => r.Bytes))),
         };
 

@@ -10,17 +10,22 @@ using Vorticity.Types;
 
 namespace Vorticity.Dataset;
 
+/// <summary>One table of an answer, and the buckets of it whose rows are folded as states: each inside the window, with one value of every key of time over it.</summary>
+/// <param name="Table">The table read.</param>
+/// <param name="Kept">Its buckets folded.</param>
+internal sealed record SynopsisPart(SynopsisTableInfo Table, HashSet<long> Kept);
+
 /// <summary>
 /// What one object's synopsis answers of an aggregation that asked for states (<see cref="StateRequest"/>):
-/// the table whose rows stand for the object's rows, the buckets of it the window keeps whole, and the
-/// slices at the window's edges, whose rows are read. Chosen from the table of contents the object's
-/// entry carries, with no read: the tables, their keys, measures and rows, and the slice table.
+/// the coarsest table that holds the question's keys and measures for the buckets the window keeps whole,
+/// the runs of the slices for the slices inside the buckets the window or a key of time cuts, and the rows
+/// of the slices they cut themselves. Chosen from the table of contents the object's entry carries, with no
+/// read: the tables, their keys, measures and rows, and the slice table.
 /// </summary>
-/// <param name="Table">The table read.</param>
-/// <param name="Kept">The buckets of the table whose rows are folded as states: each inside the window, and one key of time over it.</param>
+/// <param name="Parts">The tables read, each with the buckets it folds.</param>
 /// <param name="Edges">The slices whose rows are read, the window or a key of time cutting through them.</param>
-/// <param name="KeyFilter">The part of the filter on the table's keys, evaluated on its rows; null for none.</param>
-internal sealed record SynopsisAnswer(SynopsisTableInfo Table, HashSet<long> Kept, IReadOnlyList<TimeSlice> Edges, VortexExpr? KeyFilter)
+/// <param name="KeyFilter">The part of the filter on the tables' keys, evaluated on their rows; null for none.</param>
+internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOnlyList<TimeSlice> Edges, VortexExpr? KeyFilter)
 {
     /// <summary>
     /// The answer of the object of <paramref name="contents"/> to <paramref name="request"/> under
@@ -118,66 +123,95 @@ internal sealed record SynopsisAnswer(SynopsisTableInfo Table, HashSet<long> Kep
             }
         }
 
-        // The tables that hold the keys and the measures, fewest rows first: the first whose every bucket
-        // is whole or out of the window answers; past them, the runs of the slices, the edges read as rows.
-        List<SynopsisTableInfo> candidates = [];
+        // The tables that hold the keys and the measures: the one of fewest rows answers the buckets the
+        // window keeps whole, the runs of the slices of fewest rows the slices inside the buckets it cuts,
+        // and the slices cut are read as rows. Without a table of slices, a bucket cut is read as rows.
+        SynopsisTableInfo? coarsest = null;
+        SynopsisTableInfo? sliced = null;
         foreach ((SynopsisTableInfo table, IndexSegment _) in contents.Tables)
         {
             if (Holds(table.Keys, keyed) && Holds(table.Measures, measured))
             {
-                candidates.Add(table);
+                coarsest = coarsest is null || table.Rows < coarsest.Rows ? table : coarsest;
+                sliced = table.Bucket == SynopsisBucket.Slice && (sliced is null || table.Rows < sliced.Rows) ? table : sliced;
             }
         }
 
-        candidates.Sort(static (a, b) => a.Rows.CompareTo(b.Rows));
-        VortexExpr? keyFilter = onKeys.Count == 0 ? null : And(onKeys);
-        IReadOnlyList<TimeSlice> slices = contents.Slices.Slices;
-        foreach (SynopsisTableInfo table in candidates)
+        if (coarsest is null)
         {
-            HashSet<long> kept = [];
-            List<TimeSlice> edges = [];
-            bool whole = true;
-            foreach ((long bucket, long start, long end, int first) in Buckets(table.Bucket, slices, contents.Slices.Unit))
-            {
-                switch (Fate(start, end, low, high, times))
-                {
-                    case BucketFate.Kept:
-                        kept.Add(bucket);
-                        break;
-                    case BucketFate.Edge when table.Bucket == SynopsisBucket.Slice:
-                        edges.Add(slices[first]);
-                        break;
-                    case BucketFate.Edge:
-                        whole = false;
-                        break;
-                    default:
-                        break;
-                }
+            return null;
+        }
 
-                if (!whole)
-                {
+        IReadOnlyList<TimeSlice> slices = contents.Slices.Slices;
+        SynopsisPart whole = new SynopsisPart(coarsest, []);
+        SynopsisPart? runs = sliced is null || ReferenceEquals(sliced, coarsest) ? null : new SynopsisPart(sliced, []);
+        List<TimeSlice> edges = [];
+        foreach ((long bucket, long start, long end, int first, int last) in Buckets(coarsest.Bucket, slices, contents.Slices.Unit))
+        {
+            switch (Fate(start, end, low, high, times))
+            {
+                case BucketFate.Kept:
+                    whole.Kept.Add(bucket);
                     break;
-                }
-            }
+                case BucketFate.Edge:
+                    for (int s = first; s <= last; s++)
+                    {
+                        BucketFate fate = coarsest.Bucket == SynopsisBucket.Slice ? BucketFate.Edge : Fate(slices[s].Start, slices[s].End, low, high, times);
+                        if (fate == BucketFate.Kept && runs is not null)
+                        {
+                            runs.Kept.Add(slices[s].Start);
+                        }
+                        else if (fate != BucketFate.Out)
+                        {
+                            edges.Add(slices[s]);
+                        }
+                    }
 
-            if (whole)
-            {
-                return new SynopsisAnswer(table, kept, edges, keyFilter);
+                    break;
+                default:
+                    break;
             }
         }
 
-        return null;
+        // An object whose every row the edges hold is read as rows, with no table.
+        List<SynopsisPart> parts = [];
+        if (whole.Kept.Count > 0)
+        {
+            parts.Add(whole);
+        }
+
+        if (runs is { Kept.Count: > 0 })
+        {
+            parts.Add(runs);
+        }
+
+        return parts.Count == 0 && edges.Count > 0 ? null : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys));
+    }
+
+    /// <summary>Whether <paramref name="table"/> is one of the answer's, which the read of the synopsis fetches.</summary>
+    internal bool Reads(SynopsisTableInfo table)
+    {
+        foreach (SynopsisPart part in Parts)
+        {
+            if (ReferenceEquals(part.Table, table))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
-    /// The batch of states of the table's rows read into <paramref name="tables"/>: its bucket named as the
-    /// instant, its keys and states as they lie, and selected the rows of the kept buckets the key filter
-    /// holds for; null when the table is not among those read.
+    /// The batch of states of <paramref name="part"/>'s table, read into <paramref name="tables"/>: its bucket
+    /// named as the instant, its keys and states as they lie, and selected the rows of the part's buckets
+    /// the key filter holds for; null when the table is not among those read.
     /// </summary>
-    /// <param name="tables">The table, read.</param>
+    /// <param name="tables">The tables, read.</param>
+    /// <param name="part">The table and its buckets.</param>
     /// <param name="instant">The dataset's instant, whose name the buckets take.</param>
     /// <param name="startRow">The object's first row in the dataset.</param>
-    internal RecordBatch? Batch(SynopsisTableSet tables, string instant, long startRow)
+    internal RecordBatch? Batch(SynopsisTableSet tables, SynopsisPart part, string instant, long startRow)
     {
         if (tables.Types is not { } types)
         {
@@ -186,7 +220,7 @@ internal sealed record SynopsisAnswer(SynopsisTableInfo Table, HashSet<long> Kep
 
         foreach ((SynopsisTableInfo table, int node) in tables.Tables)
         {
-            if (!ReferenceEquals(table, Table) && table != Table)
+            if (!ReferenceEquals(table, part.Table))
             {
                 continue;
             }
@@ -222,7 +256,7 @@ internal sealed record SynopsisAnswer(SynopsisTableInfo Table, HashSet<long> Kep
             int selected = 0;
             for (int r = 0; r < count; r++)
             {
-                if (Kept.Contains(buckets[r]) && (states.IsEmpty || states[r] == Trilean.True))
+                if (part.Kept.Contains(buckets[r]) && (states.IsEmpty || states[r] == Trilean.True))
                 {
                     kept[r >> 6] |= 1UL << (r & 63);
                     selected++;
@@ -287,17 +321,17 @@ internal sealed record SynopsisAnswer(SynopsisTableInfo Table, HashSet<long> Kep
 
     /// <summary>
     /// Each bucket of a table over <paramref name="slices"/>: its value in the table's rows, the instants
-    /// its slices span, and the first of them. A slice is its own bucket; an hour holds the slices that
-    /// start in it, which a slice wider than an hour carries past it; the object holds every slice.
+    /// its slices span, and the first and last of them. A slice is its own bucket; an hour holds the slices
+    /// that start in it, which a slice wider than an hour carries past it; the object holds every slice.
     /// </summary>
-    private static IEnumerable<(long Bucket, long Start, long End, int First)> Buckets(SynopsisBucket kind, IReadOnlyList<TimeSlice> slices, TimeUnit unit)
+    private static IEnumerable<(long Bucket, long Start, long End, int First, int Last)> Buckets(SynopsisBucket kind, IReadOnlyList<TimeSlice> slices, TimeUnit unit)
     {
         switch (kind)
         {
             case SynopsisBucket.Slice:
                 for (int s = 0; s < slices.Count; s++)
                 {
-                    yield return (slices[s].Start, slices[s].Start, slices[s].End, s);
+                    yield return (slices[s].Start, slices[s].Start, slices[s].End, s, s);
                 }
 
                 break;
@@ -313,13 +347,13 @@ internal sealed record SynopsisAnswer(SynopsisTableInfo Table, HashSet<long> Kep
                         end = Math.Max(end, slices[last].End);
                     }
 
-                    yield return (hour, slices[s].Start, end, s);
+                    yield return (hour, slices[s].Start, end, s, last);
                     s = last + 1;
                 }
 
                 break;
             default:
-                yield return (0, slices[0].Start, slices[^1].End, 0);
+                yield return (0, slices[0].Start, slices[^1].End, 0, slices.Count - 1);
                 break;
         }
     }

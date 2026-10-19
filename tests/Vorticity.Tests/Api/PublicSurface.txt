@@ -1935,6 +1935,7 @@ Vorticity:     method void Deconstruct(out long, out int, out int, out int, out 
 Vorticity:     property CountPlan Count { get; init; }
 Vorticity:     property GroupPlan Grouping { get; init; }
 Vorticity:     property ImmutableArray<PruningStep> Pruning { get; init; }
+Vorticity:     property ImmutableArray<StatesStep> States { get; init; }
 Vorticity:     property OrderPlan Order { get; init; }
 Vorticity:     property bool MayMatch { get; init; }
 Vorticity:     property int Blocks { get; init; }
@@ -1969,6 +1970,20 @@ Vorticity:     property int Count { get; }
 Vorticity: ref struct Vorticity.Selection.Enumerator
 Vorticity:     method bool MoveNext()
 Vorticity:     property int Current { get; }
+Vorticity: sealed class Vorticity.StatesStep : IEquatable<StatesStep>
+Vorticity:     ctor StatesStep(string, string, string, long)
+Vorticity:     method StatesStep <Clone>$()
+Vorticity:     method bool Equals(StatesStep)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(StatesStep, StatesStep)
+Vorticity:     method bool op_Inequality(StatesStep, StatesStep)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out string, out string, out string, out long)
+Vorticity:     property long Count { get; init; }
+Vorticity:     property string Detail { get; init; }
+Vorticity:     property string Object { get; init; }
+Vorticity:     property string Read { get; init; }
 Vorticity: struct Vorticity.Sym<T>
 Vorticity:     method Predicate Between(T, T)
 Vorticity:     method Predicate In(ReadOnlySpan<T>)

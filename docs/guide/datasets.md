@@ -134,7 +134,9 @@ time, reads a few table rows per object, and then only the rows of the slices th
 answer is the same bits as from the rows. On two hours and a quarter of requests, a count per service
 read 15 table rows instead of 6 400 rows. `ScanOptions.UseSynopses = false` reads the rows, to check a
 synopsis. The scan's metrics count the table rows (`SynopsisRows`) and the rows read at the window's
-edges (`EdgeRows`). Such a group by delivers its groups once the pass has run, rather than streaming.
+edges (`EdgeRows`), and the question's `ExplainAsync()` lists in `States` what each object reads: a
+table and the buckets it folds, the slices read at the edges, or its rows and why. Such a group by
+delivers its groups once the pass has run, rather than streaming.
 
 ## Versions
 
