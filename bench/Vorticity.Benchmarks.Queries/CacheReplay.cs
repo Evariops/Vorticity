@@ -107,9 +107,9 @@ internal static class CacheReplay
     /// again, and a ghost queue of the keys the small one dropped, which go straight to the main one when asked
     /// again. Each entry counts its hits up to three; the main queue gives one back each time it passes an entry.
     /// </summary>
-    internal sealed class S3Fifo(long capacity) : ICachePolicy
+    internal sealed class S3Fifo(long capacity, double smallShare = 0.1) : ICachePolicy
     {
-        private readonly long _smallCapacity = Math.Max(1, capacity / 10);
+        private readonly long _smallCapacity = Math.Max(1, (long)(capacity * smallShare));
         private readonly LinkedList<Entry> _small = new LinkedList<Entry>();
         private readonly LinkedList<Entry> _main = new LinkedList<Entry>();
         private readonly LinkedList<(long Key, long Bytes)> _ghost = new LinkedList<(long, long)>();
@@ -119,7 +119,7 @@ internal static class CacheReplay
         private long _mainHeld;
         private long _ghostHeld;
 
-        public string Name => "S3-FIFO";
+        public string Name => smallShare == 0.1 ? "S3-FIFO" : $"S3-FIFO {smallShare:P0}";
 
         public bool Access(long key, long bytes)
         {

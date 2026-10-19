@@ -73,6 +73,20 @@ internal static class CacheTrace
             Console.WriteLine($"{share,9:P0} {capacity / 1e6,8:F2}  " + string.Join("  ", cells));
         }
 
+        // S3-FIFO's one constant, the small queue's share of the capacity, swept.
+        Console.WriteLine();
+        Console.WriteLine($"{"capacity",9}  " + string.Join("  ", new[] { 0.05, 0.1, 0.2 }.Select(small => $"{"small " + small.ToString("P0", System.Globalization.CultureInfo.InvariantCulture),-20}")));
+        foreach (double share in new[] { 0.05, 0.1, 0.2, 0.5 })
+        {
+            long capacity = Math.Max(1, (long)(distinct * share));
+            IEnumerable<string> cells = new[] { 0.05, 0.1, 0.2 }.Select(small =>
+            {
+                (double bytes, double asks) = CacheReplay.Replay(trace, new CacheReplay.S3Fifo(capacity, small));
+                return $"{bytes,8:P1} {asks,10:P1}";
+            });
+            Console.WriteLine($"{share,9:P0}  " + string.Join("  ", cells));
+        }
+
         await LoadAsync(store, hours, questions, seed, distinct);
         return 0;
     }

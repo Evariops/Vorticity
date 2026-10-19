@@ -385,7 +385,9 @@ The share of the bytes asked that each served from what it held, averaged over s
 | 50 % | 82.5 % | 83.3 % | 76.1 % |
 
 S3-FIFO is ahead or level at every capacity, and varies least from seed to seed: at half the bytes,
-SIEVE ranged from 72 % to 89 %. The cache uses it since 2026-10-19. The trace is small, about 230
+SIEVE ranged from 72 % to 89 %. The cache uses it since 2026-10-19. Its one constant, the small
+queue's share of the capacity, is swept too: a twentieth serves 0.1 to 1.4 points more than a tenth,
+a fifth up to 2 points less, so the cache keeps the tenth S3-FIFO's authors chose. The trace is small, about 230
 distinct regions, since the bench's hours keep a dozen tables each; replay it on a larger dataset
 before reading a gap under two points as a difference.
 
