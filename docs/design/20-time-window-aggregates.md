@@ -1304,6 +1304,27 @@ await requests.WarmAsync(r => r.At >= DateTime.UtcNow.AddDays(-30));
    deployment stays under them. S3 partitions a prefix under sustained load, which the fresh uid that
    names every data object allows ([13-dataset.md, Objects and keys](13-dataset.md#3-objects-and-keys)).
 
+### As built
+
+`SynopsisCache(directory, capacityBytes)` is set on `VortexSessionOptions.SynopsisCache`, and the session
+releases its directory when it is disposed. A dataset reads an object with no open of it through a reader
+that serves from the disk only the regions the object's table of contents declares with a checksum: its
+tables, its chunk directories, its index directory and its path directories. Every other read, the data
+and the footer, goes to the store. An entry's file is named by the object's uid, the region's offset and
+length, and its checksum, under a directory sharded by the uid. A region read from the disk that fails its
+checksum is deleted, counted, and read again from the store. A reader that misses a region another reader
+is fetching waits for that read, and reads the rest of its request set beside it. The cache drops entries
+past its capacity with a hand that spares those read since it last passed, a placeholder until the trace
+replay chooses the policy.
+
+On the test dataset, over a store that answers in 20 ms, a window aligned on an hour makes one request cold
+and none warm, also after a restart, and a window that cuts slices makes three cold and one warm, its
+edges' chunks. Eight questions asked at once on a cold cache make the requests of one.
+
+A dataset whose objects are sealed is not cached yet. Its reader decrypts below the cache's place, so the
+cache would hold the plain bytes. Keeping the sealed frames instead needs the frames that cover a region and
+their own check, which is left for later.
+
 ### Done when
 
 - Warm, the aligned examples make no request to the store (a ratchet).

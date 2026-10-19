@@ -20,7 +20,7 @@ public sealed partial class SynopsisContentsTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>
-    /// Two sealed hours of calls on a store that answers in 20 ms: every object's synopsis tables, read at
+    /// Two sealed hours of calls on a store that answers in 100 ms: every object's synopsis tables, read at
     /// once through the tables of contents their entries carry, take one dependent round trip and a request
     /// an object, read none of the bytes past their synopsis parts, and are the tables the directory names.
     /// A slice of one takes two round trips, its chunk directory then its chunks, and holds the rows a whole
@@ -68,8 +68,9 @@ public sealed partial class SynopsisContentsTests
         long partBytes = contents.Sum(c => c.PartEnd - c.PartStart);
 
         // Cold, every object at once: one round trip, a request an object, nothing past the parts. A latency
-        // longer than what readying a read takes, which the tests running beside this one stretch.
-        inner.Latency = TimeSpan.FromMilliseconds(20);
+        // longer than what readying a read takes, which the tests running beside this one stretch: at 20 ms,
+        // a thread held that long between the two objects' reads under a loaded full suite counted two steps.
+        inner.Latency = TimeSpan.FromMilliseconds(100);
         store.Reset();
         SynopsisTableSet?[] sets = await Task.WhenAll(periods.Select(p => dataset.ReadSynopsisAsync(p, null, Ct).AsTask()));
         Assert.Equal(1, store.DependentSteps);

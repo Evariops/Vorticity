@@ -1926,6 +1926,16 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The reader of an object read with no open of it, from the store's reader <paramref name="source"/>: the
+    /// session's, through the session's synopsis cache for the regions the object's table of contents declares
+    /// when the object is plain. A sealed object's reader decrypts, and the cache keeps no plaintext.
+    /// </summary>
+    private ISegmentReader Footerless(ISegmentReader source, ObjectEntry entry, Indexes.SynopsisContents contents) =>
+        SessionReader.Wrap(
+            source is ObjectStoreSource ? SynopsisCacheReader.Over(source, Session.Options.SynopsisCache, entry.Uid, contents) : source,
+            Session);
+
+    /// <summary>
     /// As <see cref="ReadSynopsisAsync(ObjectEntry, Func{Indexes.SynopsisTableInfo, bool}?, CancellationToken)"/>,
     /// with the entry's table of contents already read: <paramref name="wanted"/> is asked of its tables.
     /// </summary>
@@ -1936,7 +1946,7 @@ public sealed class VortexDataset : IAsyncDisposable
         await using (source.ConfigureAwait(false))
         {
             return await Indexes.SynopsisTableInfo.ReadAsync(
-                SessionReader.Wrap(source, Session), contents, wanted, null, cancellationToken).ConfigureAwait(false);
+                Footerless(source, entry, contents), contents, wanted, null, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -1958,7 +1968,7 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            ISegmentReader reader = SessionReader.Wrap(source, Session);
+            ISegmentReader reader = Footerless(source, entry, contents);
             if (Indexes.SliceReader.Open(reader, null, contents) is not { } slices)
             {
                 return null;
@@ -2057,7 +2067,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
             await using (source.ConfigureAwait(false))
             {
-                using Buffers.SegmentOwner bytes = await SessionReader.Wrap(source, Session)
+                using Buffers.SegmentOwner bytes = await Footerless(source, entry, contents)
                     .ReadAsync(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken)
                     .ConfigureAwait(false);
                 return region.Holds(bytes.Buffer.Span) ? Indexes.VariantDirectory.From(bytes.Buffer.Span) : null;
@@ -2085,7 +2095,7 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            ISegmentReader reader = SessionReader.Wrap(source, Session);
+            ISegmentReader reader = Footerless(source, entry, contents);
             if (Indexes.SliceReader.Open(reader, null, contents) is not { } slices)
             {
                 return null;
@@ -2140,7 +2150,7 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            Indexes.SliceReader reader = Indexes.SliceReader.Open(SessionReader.Wrap(source, Session), null, contents)
+            Indexes.SliceReader reader = Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents)
                 ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
             return await reader.ReadSpansAsync(slices, columns, cancellationToken).ConfigureAwait(false);
         }
@@ -2162,7 +2172,7 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            return Indexes.SliceReader.Open(SessionReader.Wrap(source, Session), null, contents) is { } reader
+            return Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents) is { } reader
                 ? await reader.ReadSliceAsync(slice, columns, cancellationToken).ConfigureAwait(false)
                 : null;
         }

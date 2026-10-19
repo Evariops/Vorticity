@@ -2119,6 +2119,12 @@ Vorticity: sealed class Vorticity.SymExtensions.<G>$EAA1A4811C4615E6168DDA7467CF
 Vorticity:     method Sym<Nullable<Int128>> AsInt128()
 Vorticity: static class Vorticity.SymExtensions.<G>$EAA1A4811C4615E6168DDA7467CFD457.<M>$9CE249A2642403A1F116F7D653B92A9E
 Vorticity:     method void <Extension>$(Sym<Nullable<long>>)
+Vorticity: sealed class Vorticity.SynopsisCache : IDisposable
+Vorticity:     ctor SynopsisCache(string, long)
+Vorticity:     method void Dispose()
+Vorticity:     property long CapacityBytes { get; }
+Vorticity:     property long HeldBytes { get; }
+Vorticity:     property string Directory { get; }
 Vorticity: static class Vorticity.TextColumnBuilderExtensions
 Vorticity:     method Span<byte> GetSpan<TText>(ColumnBuilder<TText>, int = default)
 Vorticity:     method void Append<TText, TValue>(ColumnBuilder<TText>, TValue)
@@ -2604,6 +2610,7 @@ Vorticity:     property ObjectStoreRegistry ObjectStores { get; }
 Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }
 Vorticity:     property ScratchBudget ScratchBudget { get; set; }
 Vorticity:     property SegmentCache SegmentCache { get; set; }
+Vorticity:     property SynopsisCache SynopsisCache { get; set; }
 Vorticity:     property VortexExtensionRegistry Extensions { get; }
 Vorticity:     property VortexKeyring Keyring { get; set; }
 Vorticity:     property bool EncryptFiles { get; set; }

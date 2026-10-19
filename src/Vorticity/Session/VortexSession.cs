@@ -18,6 +18,7 @@ public sealed class VortexSessionOptions
 {
     private MemoryPool<byte> _memoryPool = AlignedMemoryPool.Shared;
     private SegmentCache? _segmentCache;
+    private SynopsisCache? _synopsisCache;
     private int _maxConcurrentReads = 16;
     private int _maxDegreeOfParallelism = 1;
     private long _indexCacheBytes = 64L * 1024 * 1024;
@@ -65,6 +66,21 @@ public sealed class VortexSessionOptions
     {
         get => _segmentCache;
         set => _segmentCache = Set(value);
+    }
+
+    /// <summary>
+    /// The local disk's copy of what questions read of a dataset's objects without the rest of their data,
+    /// their synopses' tables and directories, across the processes that open it in turn; null keeps none.
+    /// The session owns it, and releases its directory when it is disposed.
+    /// </summary>
+    /// <remarks>
+    /// Only the regions an object's table of contents declares with a checksum enter it, checked on every
+    /// read from the disk. A dataset whose objects are sealed reads them from the store.
+    /// </remarks>
+    public SynopsisCache? SynopsisCache
+    {
+        get => _synopsisCache;
+        set => _synopsisCache = Set(value);
     }
 
     /// <summary>The most reads in flight across every scan of every file of the session whose reads do I/O.</summary>
@@ -723,6 +739,7 @@ public sealed class VortexSession : IAsyncDisposable
         }
 
         Options.SegmentCache?.Clear();
+        Options.SynopsisCache?.Dispose();
         Mappings?.Clear();
         Keys?.Dispose();
         if (Options.MemoryPool is AlignedMemoryPool aligned && !ReferenceEquals(aligned, AlignedMemoryPool.Shared))

@@ -1,0 +1,259 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Vorticity.Buffers;
+using Vorticity.Indexes;
+using Vorticity.IO;
+using Vorticity.Serialization.Schemas;
+
+namespace Vorticity;
+
+/// <summary>
+/// An object's reader through a <see cref="SynopsisCache"/>: a region its table of contents declares, with a
+/// checksum, comes from the disk when the cache holds it, and goes into the cache when the store sends it;
+/// every other read, its data and its footer, goes to the store untouched.
+/// </summary>
+/// <remarks>
+/// Readers that miss the same region at once wait for one read of it. A request set whose regions another
+/// reader is fetching reads the rest beside that read, so the wait costs no round trip of its own.
+/// </remarks>
+internal sealed class SynopsisCacheReader : ISegmentReader
+{
+    private readonly ISegmentReader _inner;
+    private readonly SynopsisCache _cache;
+    private readonly UInt128 _uid;
+    private readonly Dictionary<(ulong Offset, uint Length), IndexSegment> _regions;
+
+    private SynopsisCacheReader(ISegmentReader inner, SynopsisCache cache, UInt128 uid, Dictionary<(ulong, uint), IndexSegment> regions)
+    {
+        _inner = inner;
+        _cache = cache;
+        _uid = uid;
+        _regions = regions;
+    }
+
+    /// <summary>
+    /// <paramref name="inner"/> through <paramref name="cache"/> for the regions <paramref name="contents"/>
+    /// declares; <paramref name="inner"/> itself without a cache, an object's uid, or a region with a checksum.
+    /// </summary>
+    internal static ISegmentReader Over(ISegmentReader inner, SynopsisCache? cache, UInt128 uid, SynopsisContents contents)
+    {
+        if (cache is null || uid == UInt128.Zero)
+        {
+            return inner;
+        }
+
+        Dictionary<(ulong, uint), IndexSegment> regions = [];
+        void Declare(IndexSegment region)
+        {
+            if (region.Checksum is not null)
+            {
+                regions[(region.Offset, region.Length)] = region;
+            }
+        }
+
+        foreach ((SynopsisTableInfo _, IndexSegment region) in contents.Tables)
+        {
+            Declare(region);
+        }
+
+        foreach (IndexSegment region in contents.ChunkDirectories)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, IndexSegment region) in contents.PathDirectories ?? [])
+        {
+            Declare(region);
+        }
+
+        if (contents.DirectoryRegion is { } directory)
+        {
+            Declare(directory);
+        }
+
+        return regions.Count == 0 ? inner : new SynopsisCacheReader(inner, cache, uid, regions);
+    }
+
+    public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => _inner.GetLengthAsync(cancellationToken);
+
+    public ValueTask<SegmentOwner> ReadRangeAsync(long offset, int length, int alignment, CancellationToken cancellationToken) =>
+        _inner.ReadRangeAsync(offset, length, alignment, cancellationToken);
+
+    public async ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
+    {
+        if (!_regions.TryGetValue((spec.Offset, spec.Length), out IndexSegment region))
+        {
+            return await _inner.ReadAsync(spec, cancellationToken).ConfigureAwait(false);
+        }
+
+        for (bool waited = false; ; waited = true)
+        {
+            if (_cache.TryRead(_uid, region, out SegmentOwner cached))
+            {
+                return cached;
+            }
+
+            if (!_cache.TryBeginRead(_uid, region, out TaskCompletionSource? mine, out Task? theirs) && !waited)
+            {
+#pragma warning disable VSTHRD003
+                await theirs!.WaitAsync(cancellationToken).ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+                continue;
+            }
+
+            try
+            {
+                SegmentOwner owner = await _inner.ReadAsync(spec, cancellationToken).ConfigureAwait(false);
+                _cache.Admit(_uid, region, owner.Buffer.Span);
+                return owner;
+            }
+            finally
+            {
+                if (mine is not null)
+                {
+                    _cache.EndRead(_uid, region, mine);
+                }
+            }
+        }
+    }
+
+    public async ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(requests);
+        if (requests.IsPopulated)
+        {
+            return;
+        }
+
+        // The regions declared: those the disk holds fill their slots, those another reader is fetching are
+        // waited for, and this reader fetches the rest.
+        List<(int Slot, IndexSegment Region, TaskCompletionSource Mine)> mine = [];
+        List<(int Slot, IndexSegment Region, Task Theirs)>? waited = null;
+        try
+        {
+            for (int slot = 0; slot < requests.Count; slot++)
+            {
+                SegmentSpec spec = requests.GetSpec(slot);
+                if (requests.IsFilled(slot) || !_regions.TryGetValue((spec.Offset, spec.Length), out IndexSegment region))
+                {
+                    continue;
+                }
+
+                if (_cache.TryRead(_uid, region, out SegmentOwner cached))
+                {
+                    requests.SetResult(slot, cached);
+                    requests.NoteCacheHit();
+                }
+                else if (_cache.TryBeginRead(_uid, region, out TaskCompletionSource? reading, out Task? theirs))
+                {
+                    mine.Add((slot, region, reading!));
+                }
+                else
+                {
+                    (waited ??= []).Add((slot, region, theirs!));
+                }
+            }
+
+            if (waited is null)
+            {
+                await _inner.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await ReadBesideAsync(requests, waited, cancellationToken).ConfigureAwait(false);
+            }
+
+            foreach ((int slot, IndexSegment region, _) in mine)
+            {
+                _cache.Admit(_uid, region, requests.GetBuffer(slot).Span);
+            }
+        }
+        catch
+        {
+            requests.AbandonPending();
+            throw;
+        }
+        finally
+        {
+            foreach ((_, IndexSegment region, TaskCompletionSource reading) in mine)
+            {
+                _cache.EndRead(_uid, region, reading);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads the slots of <paramref name="requests"/> no other reader is fetching in a set of their own, beside
+    /// the reads <paramref name="waited"/> waits for; then those slots from the disk, or from the store when
+    /// the other read did not leave them there.
+    /// </summary>
+    private async ValueTask ReadBesideAsync(
+        SegmentRequestSet requests, List<(int Slot, IndexSegment Region, Task Theirs)> waited, CancellationToken cancellationToken)
+    {
+        HashSet<int> theirs = [];
+        Task[] others = new Task[waited.Count];
+        for (int i = 0; i < waited.Count; i++)
+        {
+            theirs.Add(waited[i].Slot);
+            others[i] = waited[i].Theirs;
+        }
+
+        using SegmentRequestSet own = new SegmentRequestSet();
+        List<(int Slot, int Own)> placed = [];
+        for (int slot = 0; slot < requests.Count; slot++)
+        {
+            if (!requests.IsFilled(slot) && !theirs.Contains(slot))
+            {
+                placed.Add((slot, own.Add(requests.GetSpec(slot))));
+            }
+        }
+
+        Task reading = placed.Count > 0 ? _inner.ReadManyAsync(own, cancellationToken).AsTask() : Task.CompletedTask;
+        try
+        {
+            await Task.WhenAll(others).WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // This read's own segments are taken, or given back, whatever the wait did.
+#pragma warning disable VSTHRD003
+            await reading.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+        }
+
+        foreach ((int slot, int at) in placed)
+        {
+            requests.SetSharedResult(slot, own.GetOwner(at), own.GetBuffer(at));
+        }
+
+        using SegmentRequestSet late = new SegmentRequestSet();
+        List<(int Slot, int Late)> missed = [];
+        foreach ((int slot, IndexSegment region, _) in waited)
+        {
+            if (_cache.TryRead(_uid, region, out SegmentOwner cached))
+            {
+                requests.SetResult(slot, cached);
+                requests.NoteCacheHit();
+            }
+            else
+            {
+                missed.Add((slot, late.Add(requests.GetSpec(slot))));
+            }
+        }
+
+        if (missed.Count > 0)
+        {
+            await _inner.ReadManyAsync(late, cancellationToken).ConfigureAwait(false);
+            foreach ((int slot, int at) in missed)
+            {
+                requests.SetSharedResult(slot, late.GetOwner(at), late.GetBuffer(at));
+            }
+        }
+
+        requests.Complete();
+    }
+
+    public ValueTask DisposeAsync() => _inner.DisposeAsync();
+}
