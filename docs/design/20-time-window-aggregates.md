@@ -1058,7 +1058,8 @@ combination. An extreme stands unless an excluded row holds it, which a comparis
 count has no subtraction, and is read as rows.
 
 As built, the planner recognises the second form on a column the dataset declares as an identifier,
-with the same column on both sides of the `||`. The identifier's index finds the rows of `id` with no
+with the same column on both sides of the `||`. On an identifier the schema holds no null in, the two
+forms are one, and `r.RequestId != id` alone is recognised too. The identifier's index finds the rows of `id` with no
 open of the object, in three round trips read beside the tables. Those rows are then taken out of the
 tables' states as the rows a delete marked are: each is charged to the table row of its bucket and its
 keys, and its count and its exact sums come off. A row a delete also marked comes off once. When a

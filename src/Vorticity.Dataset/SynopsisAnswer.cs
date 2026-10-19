@@ -107,7 +107,7 @@ internal sealed record SynopsisAnswer(
                 continue;
             }
 
-            if (Exclusion(conjunct, identifiers) is { } part)
+            if (Exclusion(conjunct, identifiers, schema) is { } part)
             {
                 excluded.Add((part, conjunct));
                 continue;
@@ -265,26 +265,45 @@ internal sealed record SynopsisAnswer(
 
     /// <summary>
     /// The part a conjunct leaves out when it is the complement of one value of an identifier under
-    /// three-valued logic, <c>id != v || id == null</c> in either order: the equality <c>id = v</c>, whose rows
-    /// the identifier's index finds; null for any other conjunct.
+    /// three-valued logic, <c>id != v || id == null</c> in either order, or <c>id != v</c> alone on an identifier
+    /// the schema holds no null in: the equality <c>id = v</c>, whose rows the identifier's index finds; null for
+    /// any other conjunct.
     /// </summary>
-    private static VortexExpr? Exclusion(VortexExpr conjunct, IReadOnlyList<string>? identifiers)
+    private static VortexExpr? Exclusion(VortexExpr conjunct, IReadOnlyList<string>? identifiers, DType schema)
     {
-        if (identifiers is not { Count: > 0 } || conjunct is not LogicalExpr { IsAnd: false } or)
+        if (identifiers is not { Count: > 0 })
         {
             return null;
         }
 
-        (VortexExpr a, VortexExpr b) = (or.Left, or.Right);
-        if (a is NullCheckExpr)
+        ComparisonExpr? other;
+        if (conjunct is LogicalExpr { IsAnd: false } or)
         {
-            (a, b) = (b, a);
+            (VortexExpr a, VortexExpr b) = (or.Left, or.Right);
+            if (a is NullCheckExpr)
+            {
+                (a, b) = (b, a);
+            }
+
+            other = a as ComparisonExpr;
+            if (b is not NullCheckExpr { IsNull: true } missing || other is null
+                || missing.Field.GetType() != typeof(FieldExpr) || !string.Equals(other.Field.Path, missing.Field.Path, StringComparison.Ordinal))
+            {
+                return null;
+            }
+        }
+        else
+        {
+            // Alone, the comparison drops the nulls too: the complement only where there are none.
+            other = conjunct as ComparisonExpr;
+            int field = other is null ? -1 : schema.IndexOfField(other.Field.Path);
+            if (field < 0 || schema.GetField(field).IsNullable)
+            {
+                return null;
+            }
         }
 
-        if (a is ComparisonExpr { Op: ComparisonOp.NotEqual } other && other.Value.Kind != FilterLiteralKind.Null
-            && b is NullCheckExpr { IsNull: true } missing
-            && other.Field.GetType() == typeof(FieldExpr) && missing.Field.GetType() == typeof(FieldExpr)
-            && string.Equals(other.Field.Path, missing.Field.Path, StringComparison.Ordinal))
+        if (other is { Op: ComparisonOp.NotEqual } && other.Value.Kind != FilterLiteralKind.Null && other.Field.GetType() == typeof(FieldExpr))
         {
             foreach (string identifier in identifiers)
             {

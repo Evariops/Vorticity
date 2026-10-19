@@ -142,7 +142,8 @@ The objects a synopsis answers are read newest first and many at once, as many a
 reads be in flight (`VortexSessionOptions.MaxConcurrentReads`), so a day of hourly objects costs the
 round trip of one hour. A filter that leaves out one value of a declared identifier,
 `r.RequestId != id || r.RequestId == null`, is answered from the tables too: the identifier's index
-finds that value's few rows, and they are taken out of the tables' counts and sums.
+finds that value's few rows, and they are taken out of the tables' counts and sums. When the
+identifier's column cannot be null, `r.RequestId != id` alone says the same and is answered alike.
 
 A page that shows a long window can show its newest part first. `AskNewestFirstAsync` cuts the window
 at the starts of the periods it crosses, asks your question over each part, several parts at once,

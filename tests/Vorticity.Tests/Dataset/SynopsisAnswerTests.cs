@@ -381,6 +381,46 @@ public sealed partial class SynopsisAnswerTests
         Assert.Contains(plan.States, step => step.Read == "table");
     }
 
+    /// <summary>
+    /// On an identifier that holds no null, <c>RequestId != v</c> alone is the complement of <c>v</c>, as a typed
+    /// question writes it: the whole from the tables, minus the rows of <c>v</c>. On one that holds nulls, the
+    /// comparison drops them too, so the rows answer. Every answer gives the bits of its rows.
+    /// </summary>
+    [Fact]
+    public async Task ARequestLeftOutOfAColumnWithoutNullsComesOutOfTheStates()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await StampedAsync(store);
+        foreach (string left in new[] { "hot", "r3-22", "nowhere" })
+        {
+            List<string>[] answers = new List<string>[2];
+            ScanMetrics[] metrics = new ScanMetrics[2];
+            foreach (bool synopses in new[] { true, false })
+            {
+                (answers[synopses ? 0 : 1], metrics[synopses ? 0 : 1]) = await GroupsAsync(dataset.Scan<Stamped>().With(new ScanOptions { UseSynopses = synopses })
+                    .Where(r => r.RequestId != left).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
+            }
+
+            Assert.Equal(answers[1], answers[0]);
+            Assert.True(metrics[0].SynopsisRows > 0, "no state folded");
+        }
+
+        ScanPlan plan = await dataset.Scan<Stamped>().Where(r => r.RequestId != "hot").GroupBy(r => r.Service).Select(g => (g.Key, g.Count())).ExplainAsync(Ct);
+        Assert.Contains(plan.States, step => step is { Read: "excluded", Count: 1 });
+
+        await using MemoryObjectStore nullable = new MemoryObjectStore();
+        await using VortexDataset traced = await TracedAsync(nullable, marking: false);
+        List<string>[] bare = new List<string>[2];
+        foreach (bool synopses in new[] { true, false })
+        {
+            (bare[synopses ? 0 : 1], ScanMetrics metrics) = await GroupsAsync(traced.Scan<Traced>().With(new ScanOptions { UseSynopses = synopses })
+                .Where(r => r.RequestId != "hot").GroupBy(r => r.Service).Select(g => (g.Key, g.Count())));
+            Assert.Equal(0, metrics.SynopsisRows);
+        }
+
+        Assert.Equal(bare[1], bare[0]);
+    }
+
     private List<Totals> RowTotals { get; } = [];
 
     private List<Totals> WindowTotals { get; } = [];
@@ -509,8 +549,44 @@ public sealed partial class SynopsisAnswerTests
         return dataset;
     }
 
+    /// <summary>The requests of <see cref="TracedAsync"/>, each with an id: its own, or one in thirty-seven "hot".</summary>
+    private static async Task<VortexDataset> StampedAsync(Vorticity.IO.IObjectStore store)
+    {
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Stamped.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Stamped.At)],
+            Identifiers = [nameof(Stamped.RequestId)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 100 },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000) },
+        }, Ct);
+        Random random = new Random(47);
+        for (int part = 0; part < 16; part++)
+        {
+            Stamped[] rows = [.. Enumerable.Range(0, 400).Select(i => new Stamped(
+                Noon.AddSeconds((part * 400 + i) * 1.25),
+                Services[random.Next(Services.Length)],
+                Methods[random.Next(Methods.Length)],
+                random.Next(4) switch { 0 => 200L, 1 => 201L, 2 => 404L, _ => 500L },
+                random.NextDouble() * 1_000,
+                random.NextInt64(1, 1L << 40),
+                i % 37 == 0 ? "hot" : $"r{part}-{i}"))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Stamped>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        return dataset;
+    }
+
     [VortexRecord]
     public partial record struct Request(DateTimeOffset At, string Service, string Method, long Status, double Duration, long Bytes);
+
+    [VortexRecord]
+    public partial record struct Stamped(DateTimeOffset At, string Service, string Method, long Status, double Duration, long Bytes, string RequestId);
 
     [VortexRecord]
     public partial record struct Traced(DateTimeOffset At, string Service, string Method, long Status, double Duration, long Bytes, string? RequestId);
