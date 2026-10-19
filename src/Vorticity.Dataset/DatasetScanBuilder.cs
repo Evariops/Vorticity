@@ -1857,11 +1857,15 @@ internal sealed class DatasetScanBuilder
         return RowEncoder.EncodeKey([bound], [dtype], [field]);
     }
 
-    /// <summary>Whether a column's summary bounds are bounds in the key order (see <see cref="SummaryBound"/>).</summary>
+    /// <summary>
+    /// Whether a column's summary bounds are bounds in the key order (see <see cref="SummaryBound"/>). An
+    /// extension's, a timestamp's say, are its storage's, which the key order encodes it as.
+    /// </summary>
     private static bool HasKeyOrderBounds(DType dtype) => dtype.Kind switch
     {
         DTypeKind.Primitive => !dtype.PType.IsFloat(),
         DTypeKind.Bool or DTypeKind.Utf8 or DTypeKind.Binary => true,
+        DTypeKind.Extension => HasKeyOrderBounds(dtype.StorageType),
         _ => false,
     };
 

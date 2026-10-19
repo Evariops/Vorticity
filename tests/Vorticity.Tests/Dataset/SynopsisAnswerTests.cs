@@ -227,7 +227,10 @@ public sealed partial class SynopsisAnswerTests
     /// <summary>
     /// A page of the 200 newest rows under a broad filter, three rows in four, on a store that answers in
     /// 20 ms, from the fresh tail and from inside a sealed hour: the rows the rows' own sort gives, and what
-    /// reading them costs.
+    /// reading them costs. The objects open as the merge reaches their newest instant, so the fresh tail,
+    /// held whole since its open, answers with no request, and the older hours are never read; inside the
+    /// sealed hour, the segment of instants its slices lie in is read once for all of them, then the rows,
+    /// two round trips.
     /// </summary>
     [Theory]
     [InlineData(false)]
@@ -246,6 +249,8 @@ public sealed partial class SynopsisAnswerTests
         List<Request> newest = await page.ToRecordsAsync(Ct).Take(200).ToListAsync(Ct);
         Console.Out.Write($"NEWEST PAGE {(sealedHour ? "sealed" : "fresh")}: {store.DependentSteps} dependent steps, {store.Requests} requests, {store.BytesRead} bytes, {page.Metrics.Rows} rows of {all.Count}.\n");
         Assert.Equal(all.Where(r => r.Status != 500 && r.At < before).OrderByDescending(r => r.At).Take(200), newest);
+        Assert.Equal(sealedHour ? 2 : 0, store.Requests);
+        Assert.Equal(sealedHour ? 2 : 0, store.DependentSteps);
     }
 
     /// <summary>A count and a sum of bytes by service over a window.</summary>

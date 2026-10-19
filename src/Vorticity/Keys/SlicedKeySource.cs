@@ -10,6 +10,7 @@ using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Indexes;
+using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
 
@@ -47,6 +48,18 @@ internal sealed class SlicedKeySource : KeySource
     private Held _here = new Held();
     private Held _spare = new Held();
     private int _at = -1;
+
+    /// <summary>
+    /// The instants of the rows of the segments the last read covered, from <see cref="_segmentStart"/>: a slice
+    /// of a few hundred rows lies in a segment of thousands, which a scan fetches whole whatever rows it asks
+    /// for, so the slices beside it are ranked from these rather than read again, a round trip each.
+    /// </summary>
+    private long[] _segment = [];
+    private long _segmentStart = -1;
+    private int _segmentRows;
+
+    /// <summary>The bounds of the instant column's segments, from the first read on; null before.</summary>
+    private SplitPlan? _segments;
 
     private SlicedKeySource(VortexFile file, string path, SliceTable table)
     {
@@ -513,35 +526,32 @@ internal sealed class SlicedKeySource : KeySource
         return _spare;
     }
 
-    /// <summary>Reads the instants of <paramref name="slice"/> into <paramref name="held"/>, and ranks them.</summary>
+    /// <summary>
+    /// Ranks the instants of <paramref name="slice"/> into <paramref name="held"/>: from the segments the last
+    /// read covered when they hold the slice's rows, and otherwise from a read of the segments that do.
+    /// </summary>
     private async ValueTask LoadAsync(Held held, int slice, CancellationToken cancellationToken)
     {
         TimeSlice span = _table.Slices[slice];
         int count = checked((int)span.Rows);
         held.Slice = -1;
         held.Reserve(count);
-        FieldExpr column = Expr.Field(_path);
-        int filled = 0;
-        await foreach (RecordBatch batch in _file.ScanBuilder()
-            .Project(_path)
-            .Rows(new RowRange(span.FirstRow, span.FirstRow + span.Rows))
-            .WithPruning(false)
-            .WithIndexes(false)
-            .ExecuteAsync()
-            .WithCancellation(cancellationToken)
-            .ConfigureAwait(false))
+        if (_segmentStart < 0 || span.FirstRow < _segmentStart || span.FirstRow + count > _segmentStart + _segmentRows)
         {
-            filled += Copy(batch, column, held, (int)(batch.StartRow - span.FirstRow), span);
+            await ReadSegmentsAsync(span, cancellationToken).ConfigureAwait(false);
         }
 
-        if (filled != count)
-        {
-            throw new VortexFormatException(
-                $"The slice table of '{_path}' gives slice {slice} {count} rows, and the file {filled}.");
-        }
-
+        ReadOnlySpan<long> keys = _segment.AsSpan(checked((int)(span.FirstRow - _segmentStart)), count);
         for (int i = 0; i < count; i++)
         {
+            long key = keys[i];
+            if (key < span.Start || key >= span.End)
+            {
+                throw new VortexFormatException(
+                    $"Row {span.FirstRow + i} of '{_path}' lies outside its slice [{span.Start}, {span.End}).");
+            }
+
+            held.Keys[i] = key;
             held.Rows[i] = i;
         }
 
@@ -550,32 +560,99 @@ internal sealed class SlicedKeySource : KeySource
         held.Slice = slice;
     }
 
-    /// <summary>A batch's instants copied to their place in the slice; refused when one is null or outside the slice's bounds.</summary>
-    private int Copy(RecordBatch batch, FieldExpr column, Held held, int offset, TimeSlice span)
+    /// <summary>
+    /// Reads the instants of the rows of the segments <paramref name="span"/> lies in: those a read of the
+    /// slice's rows alone would fetch anyway, from the bound at or before its first row to the one at or after
+    /// its last, in one scan, so in one round trip when they are several.
+    /// </summary>
+    private async ValueTask ReadSegmentsAsync(TimeSlice span, CancellationToken cancellationToken)
+    {
+        (long from, long to) = SegmentsOf(span.FirstRow, span.FirstRow + span.Rows);
+        int rows = checked((int)(to - from));
+        if (_segment.Length < rows)
+        {
+            _segment = new long[rows];
+        }
+
+        _segmentStart = -1;
+        FieldExpr column = Expr.Field(_path);
+        long filled = 0;
+        await foreach (RecordBatch batch in _file.ScanBuilder()
+            .Project(_path)
+            .Rows(new RowRange(from, to))
+            .WithPruning(false)
+            .WithIndexes(false)
+            .ExecuteAsync()
+            .WithCancellation(cancellationToken)
+            .ConfigureAwait(false))
+        {
+            filled += Copy(batch, column, checked((int)(batch.StartRow - from)));
+        }
+
+        if (filled != rows)
+        {
+            throw new VortexFormatException($"The file gives rows [{from}, {to}) of '{_path}' {filled} instants.");
+        }
+
+        _segmentStart = from;
+        _segmentRows = rows;
+    }
+
+    /// <summary>
+    /// The rows of the instant column's segments that rows [<paramref name="start"/>, <paramref name="end"/>)
+    /// lie in, from the file's layout; those rows alone for an instant below the top level.
+    /// </summary>
+    private (long From, long To) SegmentsOf(long start, long end)
+    {
+        int field = _file.DType.Kind == DTypeKind.Struct ? _file.DType.IndexOfField(_path) : -1;
+        if (field < 0)
+        {
+            return (start, end);
+        }
+
+        LayoutTree tree = _file.LayoutTree;
+        _segments ??= SplitPlan.Compute(tree, new RowRange(0, _before[^1]), FieldMask.Single(field), SplitPlan.NaturalBatchRows(tree));
+        long from = 0;
+        long to = _before[^1];
+        for (int b = 0; b < _segments.BoundaryCount; b++)
+        {
+            long at = _segments.BoundaryAt(b);
+            if (at <= start)
+            {
+                from = at;
+            }
+
+            if (at >= end)
+            {
+                to = at;
+                break;
+            }
+        }
+
+        return (from, to);
+    }
+
+    /// <summary>A batch's instants copied to their place among the segments' rows; refused when one is null.</summary>
+    private int Copy(RecordBatch batch, FieldExpr column, int offset)
     {
         CanonicalArena arena = batch.Arena;
         int rows = batch.RowCount;
         CanonicalNode values = arena.GetNode(ComparisonKernels.Unwrap(arena, FilterEvaluator.Resolve(arena, batch.RootIndex, column, rows)));
-        if (values.Kind != CanonicalKind.Primitive || values.PType != PType.I64 || offset < 0 || offset + rows > held.Keys.Length)
+        if (values.Kind != CanonicalKind.Primitive || values.PType != PType.I64 || offset < 0 || offset + rows > _segment.Length)
         {
             throw new VortexFormatException($"The rows of a slice of '{_path}' do not read as the slice table says.");
         }
 
         ValidityMask valid = ValidityMask.From(arena, values.Validity);
-        ReadOnlySpan<long> keys = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(values.Values.Span)[..rows];
-        Span<long> into = held.Keys.AsSpan(offset, rows);
         for (int i = 0; i < rows; i++)
         {
-            long key = keys[i];
-            if (!valid.IsValid(i) || key < span.Start || key >= span.End)
+            if (!valid.IsValid(i))
             {
-                throw new VortexFormatException(
-                    $"Row {batch.StartRow + i} of '{_path}' lies outside its slice [{span.Start}, {span.End}), or holds no instant.");
+                throw new VortexFormatException($"Row {batch.StartRow + i} of '{_path}' holds no instant.");
             }
-
-            into[i] = key;
         }
 
+        System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(values.Values.Span)[..rows].CopyTo(_segment.AsSpan(offset, rows));
         return rows;
     }
 

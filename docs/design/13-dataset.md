@@ -456,8 +456,11 @@ So a consumer that stops after `k` rows opens no object whose minimum lies past 
 level 0 objects, and one over the key-disjoint level a compaction made of them. A float has no such
 bound, since a zone's minimum and maximum exclude NaN while the key order places NaNs at the ends, so
 float objects open before the first row, and an object whose first row lies below the bound it was
-ordered by raises `VortexFormatException` rather than deliver a wrong order. Ties between objects
-follow the dataset's order, so a descending read is the exact reverse of an ascending one.
+ordered by raises `VortexFormatException` rather than deliver a wrong order. An extension's bounds are
+its storage's, which the key order encodes it as, so the objects of a timestamp open as a read reaches
+them too: the 200 newest rows of a dataset of periods read the fresh tail and never open the sealed
+hours behind it. Ties between objects follow the dataset's order, so a descending read is the exact
+reverse of an ascending one.
 
 A key cursor walks both ways. Walking down is the same merge with a max-heap. The objects of a level
 above 0 are key-disjoint, so the minimum of the next object in the level is a strict upper bound on an

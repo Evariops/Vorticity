@@ -50,7 +50,7 @@ locate a key in `O(log n)`. The cheapest source the file offers is used, and the
 |---|---|---|---|
 | sorted column | the file statistics say the column ascends, and it has a zone map | `(value, row)` per non-null row, in row order, which is key order | the zone bounds in memory, then one zone decoded and bisected |
 | sorted runs | the column carries `vorticity.sorted.runs.v1` | `(key, row)` per non-null row, per run | the runs' bounds exclude runs, then a binary search in each survivor, through its fences |
-| time slices | the column, of 64-bit instants, carries `vorticity.slices.v1`, its rows sorted slice by slice | `(key, row)` per row, one slice's instants read and sorted when a position first needs them | the table's bounds name the slice, then a binary search in its sorted instants |
+| time slices | the column, of 64-bit instants, carries `vorticity.slices.v1`, its rows sorted slice by slice | `(key, row)` per row, one slice's instants sorted when a position first needs them, from the instants of the segments it lies in, read once for every slice they hold | the table's bounds name the slice, then a binary search in its sorted instants |
 | postings | `vorticity.postings.blocks.v1` | the distinct keys of each run, without rows | the same, on keys only |
 | dictionary | `vorticity.dict.probe.v1` | the values of each dictionary chunk, sorted at open, without rows | in memory |
 | none | an unsorted, unindexed column | none | refused with a `VortexUnsupportedException` naming `IndexPolicy.SortedRuns` |
