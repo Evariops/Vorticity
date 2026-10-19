@@ -35,6 +35,13 @@ public sealed record PeriodOptions
     }
 
     /// <summary>
+    /// Refuses an append that holds a row later than the lateness horizon, a row of a period already closed, rather
+    /// than keep it in the late level beside its period: false by default. Each handle's own, not recorded by the
+    /// dataset. The dataset counts such rows either way, on its meter.
+    /// </summary>
+    public bool RefuseLateRows { get; init; }
+
+    /// <summary>
     /// The rows a time slice aims at: <see cref="TimeSlicer.DefaultTargetRows"/>, until the cost of a
     /// window's edges against the runs a finer slice adds is measured. Set by tests to cut slices of a
     /// few rows; each writer's own, since an object's slices are its own.

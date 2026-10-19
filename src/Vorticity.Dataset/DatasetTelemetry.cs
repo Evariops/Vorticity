@@ -98,6 +98,12 @@ internal static class DatasetTelemetry
         "vortex.dataset.lateness", "s", "How far behind the newest instant a handle appended the oldest row of each append to a dataset of periods came.");
 
     /// <summary>Records how late an append's oldest row came: what tells a lateness horizon too short.</summary>
+    private static readonly Counter<long> RowsPastHorizon = VortexTelemetry.Meter.CreateCounter<long>(
+        "vortex.dataset.rows_past_horizon", "{row}", "Rows a dataset by periods took later than its lateness horizon, kept in the late level beside their period.");
+
+    /// <summary>Rows level 0's exit sent to the late level for a period already closed.</summary>
+    internal static void PastHorizon(long rows) => RowsPastHorizon.Add(rows);
+
     internal static void Late(double seconds)
     {
         if (Lateness.Enabled)

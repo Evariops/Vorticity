@@ -895,19 +895,75 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
-        return Observed(written is { } produced ? await PartitionedAsync(produced, cancellationToken).ConfigureAwait(false) : []);
+        return await ObservedAsync(written is { } produced ? await PartitionedAsync(produced, cancellationToken).ConfigureAwait(false) : [], cancellationToken)
+            .ConfigureAwait(false);
     }
 
-    /// <summary>Notes how late the rows of an append's objects came, and hands the objects on.</summary>
-    private List<WrittenObject> Observed(List<WrittenObject> written)
+    /// <summary>
+    /// Notes how late the rows of an append's objects came, refuses them when they come later than the horizon and the
+    /// handle says so, and hands them on.
+    /// </summary>
+    private async ValueTask<List<WrittenObject>> ObservedAsync(List<WrittenObject> written, CancellationToken cancellationToken)
     {
         foreach (WrittenObject produced in written)
         {
             ObserveLateness(produced);
         }
 
+        await RefuseLateAsync(written, cancellationToken).ConfigureAwait(false);
         return written;
     }
+
+    /// <summary>
+    /// Refuses an append whose objects hold a row later than the lateness horizon, when the handle says so
+    /// (<see cref="PeriodOptions.RefuseLateRows"/>): a row of a period the newest instant its partition holds past
+    /// level 0 and the late level has closed. Nothing is committed, and the objects are left for vacuum.
+    /// </summary>
+    /// <exception cref="ArgumentException">An object holds such a row.</exception>
+    private async ValueTask RefuseLateAsync(List<WrittenObject> written, CancellationToken cancellationToken)
+    {
+        if (_options.Periods is not { RefuseLateRows: true } || Key is not { } key || written.Count == 0)
+        {
+            return;
+        }
+
+        DatasetSnapshot version = Snapshot;
+        TimeUnit unit = PeriodOptions.InstantOf(key);
+        PeriodCalendar calendar = PeriodCalendar.Of(version.Header, unit);
+        long horizon = TimeSlicer.Units(version.Header.Lateness ?? TimeSpan.Zero, unit);
+        Dictionary<string, long> newest = new Dictionary<string, long>(StringComparer.Ordinal);
+        await foreach (PositionedObject held in version.WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        {
+            if (held.Level is not (0 or PeriodLevels.Late) && Instants(held.Entry.Summaries, key) is { } instants)
+            {
+                string partition = PartitionName(held.Entry.Summaries, key);
+                newest[partition] = Math.Max(newest.GetValueOrDefault(partition, long.MinValue), instants.Greatest);
+            }
+        }
+
+        foreach (WrittenObject produced in written)
+        {
+            if (Instants(produced.Entry.Summaries, key) is { } instants
+                && newest.TryGetValue(PartitionName(produced.Entry.Summaries, key), out long held)
+                && calendar.Next(calendar.Floor(instants.Least)) <= held - horizon)
+            {
+                throw new ArgumentException(
+                    $"The append holds rows from {TimeSlicer.TimeOf(instants.Least, unit):O}, of a period the dataset has closed: " +
+                    $"they come later than its lateness horizon of {version.Header.Lateness}, and this handle refuses such rows (PeriodOptions.RefuseLateRows).");
+            }
+        }
+    }
+
+    /// <summary>The least and the greatest instant an object's summaries state, or null.</summary>
+    private static (long Least, long Greatest)? Instants(ObjectSummaries summaries, ClusteringKey key) =>
+        summaries.TryGet(key.InstantPath, out ColumnSummary instant)
+            && instant is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
+            ? (instant.Min.SignedValue, instant.Max.SignedValue)
+            : null;
+
+    /// <summary>A name of the partition an object holds, empty without partition columns or when its summaries do not say it.</summary>
+    private static string PartitionName(ObjectSummaries summaries, ClusteringKey key) =>
+        key.PartitionOf(summaries) is { } values ? Convert.ToHexString(key.Encode(values)) : string.Empty;
 
     /// <summary>
     /// An object a writer of this dataset put, as the objects it stands for: itself, unless the dataset has partition
@@ -966,7 +1022,7 @@ public sealed class VortexDataset : IAsyncDisposable
                     await split.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
                 }
 
-                return Observed(await WrittenAsync(split, cancellationToken).ConfigureAwait(false));
+                return await ObservedAsync(await WrittenAsync(split, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
             }
         }
 

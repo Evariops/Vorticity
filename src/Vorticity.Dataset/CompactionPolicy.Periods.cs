@@ -143,7 +143,7 @@ internal static partial class CompactionPolicy
                 Range = after is { } newest
                     ? LevelRange.Above(PeriodLevels.FirstFresh, FilterLiteral.From(newest), sources, key)
                     : LevelRange.Of(PeriodLevels.FirstFresh, sources, key),
-                Cut = new PeriodCut(calendar, after, Exit: true),
+                Cut = new PeriodCut(calendar, after, Exit: true) { Horizon = horizon },
             };
         }
 

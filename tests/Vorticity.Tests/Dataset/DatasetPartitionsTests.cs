@@ -169,6 +169,89 @@ public sealed partial class DatasetPartitionsTests
         }
     }
 
+    /// <summary>
+    /// Rows an hour late, past a horizon of five minutes, land in the late level beside their sealed period, which no
+    /// job rewrites, and every question reads them with it; expiring their partition takes them with their period, and
+    /// the other partitions keep theirs. The dataset counts them on its meter, and a handle that refuses such rows
+    /// commits nothing.
+    /// </summary>
+    [Fact]
+    public async Task RowsLaterThanTheHorizonRewriteNoPeriodAndKeepTheirRetention()
+    {
+        long counted = 0;
+        using System.Diagnostics.Metrics.MeterListener listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, listening) =>
+        {
+            if (instrument.Meter.Name == VortexDiagnostics.MeterName && instrument.Name == "vortex.dataset.rows_past_horizon")
+            {
+                listening.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Add(ref counted, value));
+        listener.Start();
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DateTimeOffset hour = Noon.AddHours(1);
+        Logged[] late = [.. Enumerable.Range(0, 30).Select(i => new Logged("debug", Noon.AddMinutes(30).AddSeconds(i), Services[i % 5], 1_000 + i))];
+        (VortexDataset dataset, _) = await FilledAsync(store, partitions: true);
+        await using (dataset)
+        {
+            HashSet<string> sealedBefore = await PeriodObjectsAsync(dataset);
+            long debugBefore = await dataset.Scan<Logged>().Where(r => r.Retention == "debug" && r.At < hour).CountAsync(Ct);
+            long othersBefore = await dataset.Scan<Logged>().Where(r => r.Retention != "debug" && r.At < hour).CountAsync(Ct);
+            await dataset.AppendAsync(Batches(late), Ct);
+
+            // Level 0's exit sends them to the late level; under its ceiling, which level 0's sets, no seal takes them
+            // again, and their period stays as it was sealed.
+            CompactionResult exit = (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, Ct))!;
+            Assert.Equal(CompactionTrigger.LevelZeroCeiling, exit.Trigger);
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+            {
+            }
+
+            Assert.Equal(sealedBefore, await PeriodObjectsAsync(dataset));
+            int lateObjects = 0;
+            await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, Ct))
+            {
+                lateObjects += held.Level == PeriodLevels.Late ? 1 : 0;
+            }
+
+            Assert.Equal(1, lateObjects);
+            Assert.Equal(debugBefore + late.Length, await dataset.Scan<Logged>().Where(r => r.Retention == "debug" && r.At < hour).CountAsync(Ct));
+            (List<string> answer, _) = await AskAsync(dataset, "debug by service", synopses: true);
+            (List<string> rows, _) = await AskAsync(dataset, "debug by service", synopses: false);
+            Assert.Equal(rows, answer);
+
+            await dataset.ExpireAsync<Logged>(r => r.Retention == "debug", hour, Ct);
+            Assert.Equal(0, await dataset.Scan<Logged>().Where(r => r.Retention == "debug" && r.At < hour).CountAsync(Ct));
+            Assert.Equal(othersBefore, await dataset.Scan<Logged>().Where(r => r.Retention != "debug" && r.At < hour).CountAsync(Ct));
+        }
+
+        Assert.True(Interlocked.Read(ref counted) >= late.Length, $"{counted} rows counted past the horizon");
+
+        await using VortexDataset refusing = await VortexDataset.OpenAsync(store, new DatasetOptions { Periods = new PeriodOptions { RefuseLateRows = true } }, Ct);
+        ulong version = refusing.Version;
+        await Assert.ThrowsAsync<ArgumentException>(async () => await refusing.AppendAsync(Batches(late), Ct));
+        Assert.Equal(version, refusing.Version);
+        await refusing.AppendAsync(Batches([new Logged("debug", Noon.AddHours(3), "api", 1)]), Ct);
+        Assert.True(refusing.Version > version);
+    }
+
+    /// <summary>The keys of the objects of the periods level.</summary>
+    private static async Task<HashSet<string>> PeriodObjectsAsync(VortexDataset dataset)
+    {
+        HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, Ct))
+        {
+            if (held.Level == PeriodLevels.Periods)
+            {
+                keys.Add(held.Entry.Key.ToString());
+            }
+        }
+
+        return keys;
+    }
+
     private const int Rows = 16 * 400;
 
     /// <summary>

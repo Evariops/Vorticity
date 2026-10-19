@@ -313,6 +313,7 @@ public sealed record DatasetOptions
                 Lateness = lateness,
                 Length = header.PeriodLength ?? SliceWidth.Day,
                 SliceTargetRows = asked?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows,
+                RefuseLateRows = asked?.RefuseLateRows ?? false,
             }
             : null;
 

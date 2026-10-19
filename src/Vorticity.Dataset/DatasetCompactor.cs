@@ -441,6 +441,7 @@ internal static class DatasetCompactor
         IReadOnlyList<string> paths = key.Paths;
         KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
         long rows = 0;
+        long pastHorizon = 0;
         List<Cut> cuts = [];
         await using (merge.ConfigureAwait(false))
         {
@@ -456,6 +457,8 @@ internal static class DatasetCompactor
                     int at = 0;
                     foreach ((int end, int level, long period) in cuts)
                     {
+                        // A row of a period already closed, later than the horizon: kept beside its period, and counted.
+                        pastHorizon += level == PeriodLevels.Late && cut.PastHorizon(period) ? end - at : 0;
                         await outputs.RouteAsync(level, period, cancellationToken).ConfigureAwait(false);
                         await outputs.WriteAsync(at == 0 && end == run.RowCount ? run : run.Window(at, end - at), cancellationToken)
                             .ConfigureAwait(false);
@@ -477,6 +480,11 @@ internal static class DatasetCompactor
                 rows += run.RowCount;
                 await outputs.WriteAsync(run, cancellationToken).ConfigureAwait(false);
             }
+        }
+
+        if (pastHorizon > 0)
+        {
+            DatasetTelemetry.PastHorizon(pastHorizon);
         }
 
         return rows;

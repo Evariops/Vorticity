@@ -190,6 +190,12 @@ await dataset.ExpireAsync<Logged>(r => r.Retention == "info", DateTimeOffset.Utc
 The filter compares partition columns with values, nothing else: a filter on any other column is a
 delete, and `DeleteAsync` is the call for it.
 
+A row that arrives after its period has closed, later than the lateness horizon, is kept beside its
+period in a small object of its own, and every question reads it with the period. Its period is not
+rewritten for it, and it expires with its partition. The dataset counts such rows on its meter, as
+`vortex.dataset.rows_past_horizon`. A handle created with `PeriodOptions.RefuseLateRows = true`
+refuses an append that holds one instead.
+
 The tables a question reads can stay on the local disk, so that the next question over the same
 objects asks the store nothing for them. Give the session a `SynopsisCache`, a directory and the bytes
 it may hold:

@@ -138,6 +138,13 @@ internal sealed record PeriodCut(PeriodCalendar Calendar, long? FreshAfter, bool
     /// </summary>
     internal long? Newest { get; init; }
 
+    /// <summary>The lateness horizon, in the instant's unit: in level 0's exit, a row of a period it has closed comes later than it.</summary>
+    internal long Horizon { get; init; }
+
+    /// <summary>Whether level 0's exit takes a row of <paramref name="period"/> later than the horizon: its period closed by the newest instant held.</summary>
+    internal bool PastHorizon(long period) =>
+        Exit && FreshAfter is { } newest && newest != long.MaxValue && Calendar.Next(period) <= newest - Horizon;
+
     /// <summary>The level a row of <paramref name="instant"/> goes to in a job whose destination is <paramref name="to"/>.</summary>
     internal int LevelOf(long instant, int to) =>
         !Exit ? to : FreshAfter is { } after && instant <= after ? PeriodLevels.Late : PeriodLevels.FirstFresh;

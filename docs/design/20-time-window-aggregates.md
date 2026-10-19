@@ -1417,6 +1417,14 @@ A row later than the horizon belongs to a sealed period. It stays in the late le
 partition and so under its own retention, and questions read it beside its period until a seal again
 pays for itself. The application may also refuse such rows. The dataset counts them either way.
 
+As built, level 0's exit sends a row of a closed period to the late level and counts it on the
+meter (`vortex.dataset.rows_past_horizon`). A seal takes the period again only once the late level
+holds more objects than level 0's ceiling, so thirty rows an hour late leave every sealed period as it
+was. An expiry of their partition removes them with their period, and the other partitions keep
+theirs. `PeriodOptions.RefuseLateRows`, each handle's own, refuses an append whose rows reach into a
+period the newest instant of their partition, past level 0 and the late level, has closed, and
+nothing is committed.
+
 ### 12.4 Done when
 
 - Interleaved appends over three partition values rewrite each row as often as appends in order do.

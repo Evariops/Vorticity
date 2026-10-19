@@ -3038,6 +3038,7 @@ Vorticity.Dataset:     method bool op_Inequality(PeriodOptions, PeriodOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property TimeSpan Lateness { get; init; }
+Vorticity.Dataset:     property bool RefuseLateRows { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.ReplaceResult : IEquatable<ReplaceResult>
 Vorticity.Dataset:     ctor ReplaceResult()
 Vorticity.Dataset:     method ReplaceResult <Clone>$()
