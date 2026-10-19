@@ -259,6 +259,13 @@ question read one key alone ([what an object shreds](21-variant-columns.md#53-wh
 Counting and choosing take 181 ns a row of six to eight attributes, and the shredded write 310 ns a
 row more than the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing.
 
+Once an object has chosen what a variant column shreds, the shape of each row, which shredded keys it
+holds and in which class, and whether anything is left to the residual, joins the order: the first
+slice places it before the first column whose values there are more than its shapes, and leaves it
+out when its shapes are more than half the slice's rows. The rows of each shape then lie together
+inside each run of the columns before it. Coding the shapes takes about 100 ns a row of six to eight
+attributes, on top of the slice's sort.
+
 A period is a day at creation, and each seal weighs the load of the period it wrote and
 records the length that load calls for, from past the newest instant ([the length of a
 period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so that every writer cuts

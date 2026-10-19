@@ -399,6 +399,16 @@ threshold.
 The shape is derived from the rows and stored nowhere in them. Its dictionary and its runs lie in the
 synopsis part, in the index directory, so a Rust reader sees only the data.
 
+As built, a key's part of the shape is two bits, absent, in the class its typed column holds, or in
+another, and the residual one more, so a source that puts identifiers in its keys touches only that
+bit (`VariantShapesTests`). The shapes are known only once the object has chosen its paths, after its
+order was cut from the first pass's counts, so the object's first slice places them: before the first
+column whose values in that slice outnumber its shapes, and nowhere when its shapes are more than half
+its rows. The slice table records the place, an entry below zero, and every slice of the object
+follows it (`ShreddedDatasetTests.AnObjectOrdersItsSlicesByShape`). Coding them costs about 100 ns a
+row of six to eight attributes (`--micro shredwrite`), most of it reading each row's keys once more.
+The dictionary and the runs wait for the synopsis part.
+
 ### 5.6 Bodies
 
 A body is a variant: a line of text is a string, and an object is shredded like attributes. A body

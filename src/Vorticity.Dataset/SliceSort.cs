@@ -31,8 +31,25 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal static class SliceSort
 {
-    /// <summary>The permutation of <paramref name="rows"/> rows, in time order, sorted by the columns <paramref name="order"/> of the struct node <paramref name="root"/>.</summary>
-    internal static int[] Permutation(CanonicalArena arena, int root, IReadOnlyList<int> order, int rows)
+    /// <summary>
+    /// The permutation of <paramref name="rows"/> rows, in time order, sorted by the entries <paramref name="order"/>
+    /// of the struct node <paramref name="root"/>: a field, or, below zero, the shape of variant field
+    /// <c>-entry - 1</c> against what <paramref name="shapes"/> holds for it.
+    /// </summary>
+    internal static int[] Permutation(
+        CanonicalArena arena, int root, IReadOnlyList<int> order, int rows, IReadOnlyDictionary<int, Types.Variants.VariantShapes>? shapes = null)
+    {
+        (int[] Codes, int Distinct)[] columns = new (int[], int)[order.Count];
+        for (int k = 0; k < order.Count; k++)
+        {
+            columns[k] = CodesOf(arena, root, order[k], rows, shapes);
+        }
+
+        return Permutation(columns, rows);
+    }
+
+    /// <summary>The permutation of <paramref name="rows"/> rows sorted by <paramref name="columns"/>' codes, the first the most significant, ties in time order.</summary>
+    internal static int[] Permutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows)
     {
         int[] permutation = new int[rows];
         for (int i = 0; i < rows; i++)
@@ -41,20 +58,40 @@ internal static class SliceSort
         }
 
         int[] scratch = new int[rows];
-        CanonicalNode node = arena.GetNode(root);
-        for (int k = order.Count - 1; k >= 0; k--)
+        for (int k = columns.Count - 1; k >= 0; k--)
         {
-            int column = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, node.GetFieldIndex(order[k])));
-            (int[] codes, int distinct) = Codes(arena, column, rows);
-            CountingSort(permutation, scratch, codes, distinct + 1);
+            CountingSort(permutation, scratch, columns[k].Codes, columns[k].Distinct + 1);
         }
 
         return permutation;
     }
 
     /// <summary>
+    /// Each row's code for order entry <paramref name="entry"/> of the struct node <paramref name="root"/>, nulls
+    /// last, and how many distinct values there are: a field's values, or a variant field's shapes.
+    /// </summary>
+    internal static (int[] Codes, int Distinct) CodesOf(
+        CanonicalArena arena, int root, int entry, int rows, IReadOnlyDictionary<int, Types.Variants.VariantShapes>? shapes)
+    {
+        CanonicalNode node = arena.GetNode(root);
+        if (entry < 0)
+        {
+            int field = -entry - 1;
+            if (shapes is null || !shapes.TryGetValue(field, out Types.Variants.VariantShapes? coder))
+            {
+                throw new InvalidOperationException($"The order names the shapes of field {field}, which nothing shreds.");
+            }
+
+            return coder.Codes(arena, node.GetFieldIndex(field), rows);
+        }
+
+        int column = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, node.GetFieldIndex(entry)));
+        return Codes(arena, column, rows);
+    }
+
+    /// <summary>
     /// How two rows of a column compare in a slice's order: by value, nulls last. The order
-    /// <see cref="Permutation"/> sorts by.
+    /// <see cref="CodesOf"/> codes a column in.
     /// </summary>
     internal static int Compare(CanonicalArena arena, int column, int left, int right)
     {

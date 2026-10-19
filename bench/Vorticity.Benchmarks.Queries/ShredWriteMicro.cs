@@ -52,6 +52,8 @@ internal static class ShredWriteMicro
             double whole = double.MaxValue;
             double shredded = double.MaxValue;
             VariantShredding? plan = null;
+            double coding = double.MaxValue;
+            int shapes = 0;
             Vorticity.Indexes.VariantDirectory? directory = null;
             int chunk = 0;
             long wholeBytes = 0;
@@ -72,6 +74,21 @@ internal static class ShredWriteMicro
                 directory = Vorticity.Indexes.VariantDirectory.From(counted, plan);
                 census = Math.Min(census, Stopwatch.GetElapsedTime(begin).TotalMilliseconds);
 
+                // The rows' shapes against the keys chosen, as the sort of a slice codes them.
+                if (plan is { Kind: VariantShreddingKind.Object })
+                {
+                    VariantShapes coder = new VariantShapes(plan);
+                    long shaped = Stopwatch.GetTimestamp();
+                    shapes = 0;
+                    foreach (RecordBatch batch in batches)
+                    {
+                        int node = batch.Arena.GetNode(batch.RootIndex).GetFieldIndex(field);
+                        shapes = Math.Max(shapes, coder.Codes(batch.Arena, node, batch.RowCount).Distinct);
+                    }
+
+                    coding = Math.Min(coding, Stopwatch.GetElapsedTime(shaped).TotalMilliseconds);
+                }
+
                 (double time, long bytes) = await WriteAsync(batches, target, null, 0);
                 whole = Math.Min(whole, time);
                 wholeBytes = bytes;
@@ -87,6 +104,7 @@ internal static class ShredWriteMicro
             Console.WriteLine($"  write whole       {whole,8:F1} ms  {whole * 1e6 / rows,6:F1} ns/row  {wholeBytes,11} B");
             Console.WriteLine($"  write shredded    {shredded,8:F1} ms  {shredded * 1e6 / rows,6:F1} ns/row  {shreddedBytes,11} B");
             Console.WriteLine($"  shredding's cost  {census + shredded - whole,8:F1} ms  {(census + shredded - whole) * 1e6 / rows,6:F1} ns/row");
+            Console.WriteLine($"  shapes coded      {coding,8:F1} ms  {coding * 1e6 / rows,6:F1} ns/row  {shapes} shapes in a batch at most");
             foreach (RecordBatch batch in batches)
             {
                 batch.Dispose();

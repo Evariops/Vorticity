@@ -31,8 +31,10 @@ internal readonly record struct TimeSlice(long Start, long End, long FirstRow, l
 /// </remarks>
 internal sealed class SliceTable
 {
-    // Version 1 holds the slices alone, and version 2 the order inside them after them.
-    private const byte Version = 2;
+    // Version 1 holds the slices alone, version 2 the order inside them after them, its fields as they
+    // are, and version 3 the order's entries zigzagged, a variant field's shapes below zero.
+    private const byte Version = 3;
+    private const byte OrderVersion = 2;
     private const byte FirstVersion = 1;
 
     /// <summary>
@@ -59,7 +61,8 @@ internal sealed class SliceTable
 
     /// <summary>
     /// The top-level columns the rows of each slice are sorted by, in that order, the instant after them:
-    /// the object's synopsis columns. Empty for rows in time order.
+    /// the object's synopsis columns, an entry below zero the shapes of variant field <c>-entry - 1</c>.
+    /// Empty for rows in time order.
     /// </summary>
     internal IReadOnlyList<int> Order { get; }
 
@@ -121,9 +124,9 @@ internal sealed class SliceTable
             }
 
             writer.WriteVarint((ulong)Order.Count);
-            foreach (int field in Order)
+            foreach (int entry in Order)
             {
-                writer.WriteVarint((ulong)field);
+                writer.WriteVarint(ZigZag(entry));
             }
 
             return writer.WrittenSpan.ToArray();
@@ -141,7 +144,7 @@ internal sealed class SliceTable
         {
             ProtoReader reader = new ProtoReader(bytes);
             ulong version = reader.ReadVarint();
-            if (version is not (Version or FirstVersion))
+            if (version is not (Version or OrderVersion or FirstVersion))
             {
                 return null;
             }
@@ -169,7 +172,7 @@ internal sealed class SliceTable
             }
 
             int[] order = [];
-            if (version == Version)
+            if (version != FirstVersion)
             {
                 ulong fields = reader.ReadVarint();
                 if (fields > (ulong)bytes.Length)
@@ -180,7 +183,8 @@ internal sealed class SliceTable
                 order = new int[(int)fields];
                 for (int i = 0; i < order.Length; i++)
                 {
-                    order[i] = checked((int)reader.ReadVarint());
+                    ulong entry = reader.ReadVarint();
+                    order[i] = version == Version ? checked((int)UnZigZag(entry)) : checked((int)entry);
                 }
             }
 

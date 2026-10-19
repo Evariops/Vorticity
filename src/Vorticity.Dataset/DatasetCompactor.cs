@@ -847,7 +847,7 @@ internal static class DatasetCompactor
                 if (plan is not null)
                 {
                     _table = plan.Slices;
-                    _sorter = new SortedSlices(_table, _schema.DType.IndexOfField(InstantPath!), _schema.DType);
+                    _sorter = new SortedSlices(_table, _schema.DType.IndexOfField(InstantPath!), _schema.DType, Shapes(plan.Shredded));
                 }
             }
 
@@ -860,6 +860,22 @@ internal static class DatasetCompactor
             }
 
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>A shape coder for each variant column the object shreds as an object, by its field; null for none.</summary>
+        private Dictionary<int, VariantShapes>? Shapes(ImmutableDictionary<string, VariantShredding> shredded)
+        {
+            Dictionary<int, VariantShapes>? shapes = null;
+            foreach (KeyValuePair<string, VariantShredding> column in shredded)
+            {
+                int field = _schema.DType.IndexOfField(column.Key);
+                if (field >= 0 && column.Value.Kind == VariantShreddingKind.Object)
+                {
+                    (shapes ??= [])[field] = new VariantShapes(column.Value);
+                }
+            }
+
+            return shapes;
         }
 
         private ValueTask WriteSortedAsync(RecordBatch sorted, CancellationToken cancellationToken) =>
@@ -885,6 +901,7 @@ internal static class DatasetCompactor
                     // The first pass counted these rows: every slice is written, or the passes disagree.
                     _sorter = null;
                     bool complete = sorter.Complete;
+                    _table = sorter.Table;
                     sorter.Dispose();
                     if (!complete)
                     {

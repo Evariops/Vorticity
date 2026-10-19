@@ -203,7 +203,8 @@ its bounds on the instant, its first row and its row count, in time order, cover
 Like the dictionary probe it has no payload. The entry is on the instant column, one run over every
 block, and its options hold the table behind a version byte: the instant's unit, then per slice the
 gap from the previous slice's end, its width and its rows, each a varint, a few bytes a slice, then the
-columns each slice's rows are sorted by before the instant (version 2; a table of version 1 names none,
+columns each slice's rows are sorted by before the instant, each zigzagged, an entry below zero standing
+for the shapes of a shredded variant column (version 3; version 2 names columns alone, version 1 none,
 its rows in time order). A table that does not decode, or whose rows are not the file's, is not read.
 The writer that sorts the rows declares the slices before it completes the file, which checks that
 they cover its rows ([20-time-window-aggregates.md](20-time-window-aggregates.md#61-what-a-slice-is)),
