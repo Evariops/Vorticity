@@ -242,7 +242,7 @@ internal sealed class IndexWriter : IDisposable
         {
             IndexPolicyKind.Bloom => BloomBuilder.Supports(dtype, out reason),
             IndexPolicyKind.NgramBloom or IndexPolicyKind.NgramPostings => BloomBuilder.Supports(dtype, trigrams: true, out reason),
-            IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns => KeyIndexBuilder.Supports(dtype, out _, out _, out reason),
+            IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns or IndexPolicyKind.HashedPostings => KeyIndexBuilder.Supports(dtype, out _, out _, out reason),
             _ => true,
         };
         return supported ? null : reason;
@@ -279,6 +279,13 @@ internal sealed class IndexWriter : IDisposable
                 {
                     builders.Add(new KeyIndexBuilder(
                         column.Kind == IndexPolicyKind.SortedRuns, layout, utf8, column.SegmentEntries));
+                }
+
+                break;
+            case IndexPolicyKind.HashedPostings:
+                if (KeyIndexBuilder.Supports(dtype, out KeyLayout values, out _, out reason))
+                {
+                    builders.Add(KeyIndexBuilder.ForHashes(values, column.SegmentEntries));
                 }
 
                 break;
@@ -1292,6 +1299,9 @@ internal sealed class IndexWriter : IDisposable
                     break;
                 case IndexPolicyKind.NgramPostings:
                     Locating(field, IndexKinds.PostingsNgram3, only as KeyIndexBuilder, blockRows);
+                    break;
+                case IndexPolicyKind.HashedPostings:
+                    Locating(field, IndexKinds.PostingsHashed, only as KeyIndexBuilder, blockRows);
                     break;
                 default:
                     throw new InvalidOperationException($"Unhandled index policy {policy.Kind}.");

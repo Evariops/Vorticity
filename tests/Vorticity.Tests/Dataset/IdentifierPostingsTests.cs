@@ -1,6 +1,6 @@
-// Declared identifiers: every object of a dataset, appended or written by a job, carries a sorted run on
-// each identifier, required and outside the index budget, so that a lookup of one value reads the objects
-// that hold it and no other.
+// Declared identifiers: every object of a dataset, appended or written by a job, carries hashed postings
+// on each identifier, required and outside the index budget, so that a lookup of one value reads the
+// objects that hold it and almost no other.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -12,7 +12,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Dataset;
 
-public sealed partial class IdentifierRunTests
+public sealed partial class IdentifierPostingsTests
 {
     private static readonly DateTimeOffset Noon = new(2026, 10, 18, 12, 0, 0, TimeSpan.Zero);
 
@@ -20,12 +20,12 @@ public sealed partial class IdentifierRunTests
 
     /// <summary>
     /// Two hours and a quarter of requests, each with an id of its own, the dataset declaring the id an
-    /// identifier: every object at every level, those of level 0 and the sealed hours alike, carries a
-    /// sorted run on the id, under no index policy at all; a lookup of one id finds its row; and the run of
-    /// a sealed hour weighs what the ratchet holds.
+    /// identifier: every object at every level, those of level 0 and the sealed hours alike, carries
+    /// hashed postings on the id, under no index policy at all; a lookup of one id finds its row; and the
+    /// postings of a sealed hour weigh what the ratchet holds.
     /// </summary>
     [Fact]
-    public async Task EveryObjectCarriesARunOnEachIdentifier()
+    public async Task EveryObjectCarriesHashedPostingsOnEachIdentifier()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
@@ -46,7 +46,7 @@ public sealed partial class IdentifierRunTests
             appended.AddRange(rows);
             if (part == 0)
             {
-                Assert.Equal(1, await WithRunsAsync(dataset, 0));
+                Assert.Equal(1, await WithPostingsAsync(dataset, 0));
             }
         }
 
@@ -57,7 +57,7 @@ public sealed partial class IdentifierRunTests
         int objects = 0;
         for (int level = 0; level < dataset.Levels.Count; level++)
         {
-            objects += await WithRunsAsync(dataset, level);
+            objects += await WithPostingsAsync(dataset, level);
         }
 
         Assert.True(objects >= 3, $"only {objects} objects");
@@ -66,7 +66,8 @@ public sealed partial class IdentifierRunTests
         Request needle = appended[4_321];
         Assert.Equal([needle], await dataset.Scan<Request>().Where(r => r.RequestId == needle.RequestId).ToRecordsAsync(Ct).ToListAsync(Ct));
 
-        // What the run of a sealed hour weighs a row: 32 hexadecimal digits an id.
+        // What the postings of a sealed hour weigh a row, the id 32 hexadecimal digits: a gap of about 12
+        // bits and a block number, here always the hour's one block. A sorted run took 19.3 bytes.
         await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
         {
             ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
@@ -74,19 +75,19 @@ public sealed partial class IdentifierRunTests
             IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
             int field = lease.File.DType.IndexOfField(nameof(Request.RequestId));
             long bytes = directory.Entries
-                .Where(e => e.Kind == IndexKinds.SortedRuns && e.ColumnPath.SequenceEqual([(uint)field]))
+                .Where(e => e.Kind == IndexKinds.PostingsHashed && e.ColumnPath.SequenceEqual([(uint)field]))
                 .Sum(e => e.Runs.Sum(r => r.Payload.Sum(p => (long)p.Length)));
             double perRow = (double)bytes / entry.Rows;
-            Console.Out.Write(FormattableString.Invariant($"IDENTIFIER RUN: {entry.Rows} rows, {bytes} bytes, {perRow:F2} a row, the object {entry.Bytes} bytes.\n"));
-            Assert.InRange(perRow, 1, 40);
+            Console.Out.Write(FormattableString.Invariant($"IDENTIFIER POSTINGS: {entry.Rows} rows, {bytes} bytes, {perRow:F2} a row, the object {entry.Bytes} bytes.\n"));
+            Assert.InRange(perRow, 1, 4);
         }
     }
 
     /// <summary>
     /// A lookup of one id in two sealed hours at once, on a store that answers in 20 ms, with no open of
     /// either: cold, three dependent round trips, the index directories beside the chunk directories, the
-    /// runs' segments that may hold the id, then the chunks of the blocks left; warm, the directories kept
-    /// by the session's cache, two. The id's row is among those read, and no other object's block.
+    /// postings' segments that may hold the id, then the chunks of the blocks left; warm, none, the
+    /// session's cache holding them all. The id's row is among those read, and no other object's block.
     /// </summary>
     [Fact]
     public async Task ALookupReadsInThreeRoundTripsColdAndTwoWarm()
@@ -143,8 +144,8 @@ public sealed partial class IdentifierRunTests
             Console.Out.Write(FormattableString.Invariant(
                 $"IDENTIFIER LOOKUP: {coldSteps} dependent steps and {coldRequests} requests cold, {store.DependentSteps} steps and {store.Requests} requests warm.\n"));
 
-            // The hour that holds the id reads its block; the other's run rules every block out, and it
-            // reads no chunk at all.
+            // The hour that holds the id reads its block; the other's postings rule every block out, and
+            // it reads no chunk at all.
             bool holds = cold[h]!.Count > 0;
             Assert.Equal(holds ? 3 : 2, coldSteps);
             Assert.InRange(store.DependentSteps, 0, 2);
@@ -177,8 +178,8 @@ public sealed partial class IdentifierRunTests
         return found;
     }
 
-    /// <summary>The objects of <paramref name="level"/>, each checked to carry a sorted run on the request id; how many.</summary>
-    private static async Task<int> WithRunsAsync(VortexDataset dataset, int level)
+    /// <summary>The objects of <paramref name="level"/>, each checked to carry hashed postings on the request id; how many.</summary>
+    private static async Task<int> WithPostingsAsync(VortexDataset dataset, int level)
     {
         int objects = 0;
         await foreach (TreeEntry leaf in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
@@ -186,7 +187,7 @@ public sealed partial class IdentifierRunTests
             await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(leaf.Value.Span), Ct);
             IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
             int field = lease.File.DType.IndexOfField(nameof(Request.RequestId));
-            Assert.Contains(directory.Entries, e => e.Kind == IndexKinds.SortedRuns && e.ColumnPath.SequenceEqual([(uint)field]));
+            Assert.Contains(directory.Entries, e => e.Kind == IndexKinds.PostingsHashed && e.ColumnPath.SequenceEqual([(uint)field]));
             objects++;
         }
 

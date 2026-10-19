@@ -32,6 +32,13 @@ internal static class IndexKinds
     public const string PostingsNgram3 = "vorticity.postings.ngram3.v1";
 
     /// <summary>
+    /// Value to blocks through the value's hash, a superset at block granularity: each run holds its
+    /// (hash, block) pairs sorted by hash, the hashes cut to as many bits as its pairs need plus ten,
+    /// per segment as gaps beside the blocks (<see cref="KeyRunOptions.HashShift"/>).
+    /// </summary>
+    public const string PostingsHashed = "vorticity.postings.hashed.v1";
+
+    /// <summary>
     /// The time slices of a file, on its instant column: per slice its bounds, its first row and its
     /// row count, held in the entry's options with no payload (<see cref="SliceTable"/>).
     /// </summary>
@@ -89,7 +96,7 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks or SynopsisColumns
+                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks or SynopsisColumns
                 or SynopsisTable => true,
             _ => false,
         };
@@ -119,6 +126,7 @@ internal static class IndexKinds
             IndexPolicyKind.Postings => PostingsBlocks,
             IndexPolicyKind.SortedRuns => SortedRuns,
             IndexPolicyKind.NgramPostings => PostingsNgram3,
+            IndexPolicyKind.HashedPostings => PostingsHashed,
             _ => null,
         };
 }

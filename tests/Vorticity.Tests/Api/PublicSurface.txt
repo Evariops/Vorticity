@@ -1250,6 +1250,7 @@ Vorticity:     property IReadOnlyList<IndexWriteReport> Reports { get; init; }
 Vorticity:     property ReadOnlyMemory<byte> Bytes { get; init; }
 Vorticity: enum Vorticity.IndexKind
 Vorticity:     const IndexKind Bloom = 0
+Vorticity:     const IndexKind HashedPostings = 5
 Vorticity:     const IndexKind NgramBloom = 1
 Vorticity:     const IndexKind NgramPostings = 3
 Vorticity:     const IndexKind Postings = 2
@@ -1263,6 +1264,7 @@ Vorticity: sealed class Vorticity.IndexPolicy
 Vorticity:     method IndexPolicy Bloom(string, double = default, bool = default)
 Vorticity:     method IndexPolicy ForKey(ReadOnlySpan<string>, IndexKind, IKeyEncoder, bool = default)
 Vorticity:     method IndexPolicy ForKey(ReadOnlySpan<string>, IndexKind, bool = default)
+Vorticity:     method IndexPolicy HashedPostings(string, bool = default)
 Vorticity:     method IndexPolicy NgramBloom(string, int = default, bool = default)
 Vorticity:     method IndexPolicy Postings(string, bool = default)
 Vorticity:     method IndexPolicy SortedRuns(string, bool = default)

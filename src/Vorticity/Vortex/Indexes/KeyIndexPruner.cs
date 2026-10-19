@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -117,6 +118,7 @@ internal sealed class KeyIndexPruner
         {
             int stride = KeyRunOptions.StrideOf(entry.Kind);
             bool trigrams = entry.Kind == IndexKinds.PostingsNgram3;
+            bool hashed = entry.Kind == IndexKinds.PostingsHashed;
             if (stride == 0 || entry.BlockLength != (ulong)blockRows
                 || !TryResolve(file.DType, entry.ColumnPath, out string path, out DType dtype)
                 || !KeyRunOptions.TryParseEntry(entry.Options, out _, out bool fold))
@@ -153,7 +155,7 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
-            Asked asked = prepared.For(key, layout, fold, predicates);
+            Asked asked = prepared.For(key, layout, fold, predicates, hashed);
             if (asked.Literals == 0)
             {
                 continue;
@@ -162,7 +164,7 @@ internal sealed class KeyIndexPruner
             List<Run> runs = [];
             foreach (IndexRun run in entry.Runs)
             {
-                if (FenceTable.TryOpen(run, stride, layout, out FenceTable? table, out _)
+                if (FenceTable.TryOpen(run, stride, asked.Layout, out FenceTable? table, out _)
                     && run.EndBlock <= (ulong)blocks)
                 {
                     runs.Add(new Run(run, table!));
@@ -171,7 +173,9 @@ internal sealed class KeyIndexPruner
 
             if (runs.Count > 0)
             {
-                columns[key] = new Column(entry.Kind == IndexKinds.SortedRuns, asked, storage, runs, blocks);
+                columns[key] = new Column(
+                    hashed ? Placing.Hashes : entry.Kind == IndexKinds.SortedRuns ? Placing.Rows : Placing.Blocks,
+                    asked, storage, runs, blocks);
             }
         }
 
@@ -190,10 +194,10 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
-            Asked asked = prepared.For(path, layout, fold: false, predicates: null);
+            Asked asked = prepared.For(path, layout, fold: false, predicates: null, hashed: false);
             if (asked.Literals > 0)
             {
-                columns[path] = new Column(rows: false, asked, Storage(dtype), [], blocks)
+                columns[path] = new Column(Placing.Blocks, asked, Storage(dtype), [], blocks)
                 {
                     DictionaryPath = path,
                 };
@@ -537,6 +541,19 @@ internal sealed class KeyIndexPruner
 
     private sealed record Run(IndexRun Meta, FenceTable Table);
 
+    /// <summary>Where a column's runs place a key.</summary>
+    private enum Placing
+    {
+        /// <summary>At the blocks it occurs in, as postings do.</summary>
+        Blocks,
+
+        /// <summary>At its rows, as sorted runs do.</summary>
+        Rows,
+
+        /// <summary>At the blocks its hash occurs in, as hashed postings do: a superset, a false block now and then.</summary>
+        Hashes,
+    }
+
     /// <summary>A question of the filter a column answers: its presence sets, <paramref name="Sets"/> from <paramref name="First"/>.</summary>
     private readonly record struct Leaf(Column Column, int First, int Sets);
 
@@ -553,7 +570,7 @@ internal sealed class KeyIndexPruner
     private sealed class Prepared
     {
         private readonly VortexExpr _filter;
-        private readonly Dictionary<(string Key, KeyLayout Layout, bool Fold), Asked> _asked = [];
+        private readonly Dictionary<(string Key, KeyLayout Layout, bool Fold, bool Hashed), Asked> _asked = [];
 
         internal Prepared(VortexExpr filter)
         {
@@ -575,9 +592,10 @@ internal sealed class KeyIndexPruner
         /// <param name="layout">How the column's index orders its keys.</param>
         /// <param name="fold">For a text index, whether its trigrams were folded.</param>
         /// <param name="predicates">For a text index, the matches whose trigrams it is asked for; null for values.</param>
-        internal Asked For(string key, KeyLayout layout, bool fold, List<StringMatchExpr>? predicates)
+        /// <param name="hashed">Whether the index holds the keys' hashes rather than the keys.</param>
+        internal Asked For(string key, KeyLayout layout, bool fold, List<StringMatchExpr>? predicates, bool hashed)
         {
-            (string, KeyLayout, bool) id = (key, layout, fold);
+            (string, KeyLayout, bool, bool) id = (key, layout, fold, hashed);
             lock (_asked)
             {
                 if (_asked.TryGetValue(id, out Asked? known))
@@ -586,7 +604,7 @@ internal sealed class KeyIndexPruner
                 }
             }
 
-            Asked built = new Asked(_filter, key, layout, fold, predicates is null ? Equalities[key] : TrigramsOf(predicates, fold));
+            Asked built = new Asked(_filter, key, layout, fold, predicates is null ? Equalities[key] : TrigramsOf(predicates, fold), hashed);
             lock (_asked)
             {
                 return _asked.TryAdd(id, built) ? built : _asked[id];
@@ -641,9 +659,13 @@ internal sealed class KeyIndexPruner
         /// <summary>Per presence set, whether it can prove absence: its question names keys, and every one encodes.</summary>
         private readonly List<bool> _keyed = [];
 
-        internal Asked(VortexExpr filter, string key, KeyLayout layout, bool fold, List<FilterLiteral> literals)
+        /// <remarks>
+        /// For hashed postings each key is the XXH3-64 of the literal's bytes in the column's layout,
+        /// the bytes the writer hashed, as eight bytes in the order of the runs' keys.
+        /// </remarks>
+        internal Asked(VortexExpr filter, string key, KeyLayout layout, bool fold, List<FilterLiteral> literals, bool hashed)
         {
-            Layout = layout;
+            Layout = hashed ? KeyRunOptions.HashedLayout : layout;
             Fold = fold;
             _slots = new Dictionary<FilterLiteral, int>(literals.Count);
             Keys = new byte[]?[literals.Count];
@@ -657,8 +679,8 @@ internal sealed class KeyIndexPruner
                 _slots.TryAdd(literals[i], i);
                 if (layout.TryEncode(literals[i], scratch, out ReadOnlySpan<byte> encoded, zero, out bool hasOtherZero))
                 {
-                    Keys[i] = encoded.ToArray();
-                    OtherZeros[i] = hasOtherZero ? zero[..layout.Width].ToArray() : null;
+                    Keys[i] = hashed ? Hashed(encoded) : encoded.ToArray();
+                    OtherZeros[i] = !hasOtherZero ? null : hashed ? Hashed(zero[..layout.Width]) : zero[..layout.Width].ToArray();
                 }
             }
 
@@ -667,6 +689,14 @@ internal sealed class KeyIndexPruner
             FeedSet = [.. _feedSet];
             NextFeed = [.. _nextFeed];
             Sorted = Sort();
+        }
+
+        /// <summary>A key of hashed postings: the hash of a value's bytes, eight bytes little-endian.</summary>
+        private static byte[] Hashed(ReadOnlySpan<byte> value)
+        {
+            byte[] key = new byte[sizeof(ulong)];
+            BinaryPrimitives.WriteUInt64LittleEndian(key, System.IO.Hashing.XxHash3.HashToUInt64(value));
+            return key;
         }
 
         /// <summary>How the index orders its keys.</summary>
@@ -849,6 +879,7 @@ internal sealed class KeyIndexPruner
     private sealed class Column
     {
         private readonly bool _rows;
+        private readonly bool _hashes;
         private readonly KeyLayout _layout;
 
         /// <summary>The dtypes a segment's arrays decode as: its keys, and its offsets, block lists or rows.</summary>
@@ -869,10 +900,11 @@ internal sealed class KeyIndexPruner
         /// <summary>Whether the runs place each key at its rows, as sorted runs do, rather than at its blocks.</summary>
         internal bool Rows => _rows;
 
-        internal Column(bool rows, Asked asked, DType storage, List<Run> runs, int blocks)
+        internal Column(Placing placing, Asked asked, DType storage, List<Run> runs, int blocks)
         {
             Asked = asked;
-            _rows = rows;
+            _rows = placing == Placing.Rows;
+            _hashes = placing == Placing.Hashes;
             _layout = asked.Layout;
             DTypeArena types = new DTypeArena();
             _keyType = storage.Kind == DTypeKind.Primitive
@@ -898,7 +930,9 @@ internal sealed class KeyIndexPruner
         /// </summary>
         internal string? DictionaryPath { get; init; }
 
-        internal int Stride => _rows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
+        internal int Stride => _hashes
+            ? KeyRunOptions.HashedStride
+            : _rows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
 
         /// <summary>
         /// The segments of <paramref name="table"/> whose range may hold one of the column's keys,
@@ -1125,6 +1159,11 @@ internal sealed class KeyIndexPruner
             int entries = (int)expected;
             try
             {
+                if (_hashes)
+                {
+                    return LookupHashes(context, requests, slots, run, fence, low, high, entries);
+                }
+
                 int keys = Decode(context, requests.GetBuffer(slots[0]), _keyType, entries);
                 CanonicalNode keyNode = context.Canonical.GetNode(keys);
                 if (!Fits(keyNode, entries))
@@ -1192,6 +1231,56 @@ internal sealed class KeyIndexPruner
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Decodes one segment of hashed postings and marks, for every literal, the blocks of the
+        /// pairs whose cut hash is the literal's: the gaps summed from the segment's first hash, cut
+        /// as the run's pair count says, walked beside the literals in hash order.
+        /// </summary>
+        /// <returns>Whether the segment made sense.</returns>
+        private bool LookupHashes(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, Fence fence, int low, int high, int entries)
+        {
+            if (fence.Bounds.Min.Length != sizeof(ulong))
+            {
+                return false;
+            }
+
+            CanonicalNode gapArray = context.Canonical.GetNode(Decode(context, requests.GetBuffer(slots[0]), _u32, entries));
+            if (gapArray.Kind != CanonicalKind.Primitive || gapArray.PType != PType.U32 || gapArray.Length != entries)
+            {
+                return false;
+            }
+
+            CanonicalNode blockArray = context.Canonical.GetNode(Decode(context, requests.GetBuffer(slots[1]), _u32, entries));
+            if (blockArray.Kind != CanonicalKind.Primitive || blockArray.PType != PType.U32 || blockArray.Length != entries)
+            {
+                return false;
+            }
+
+            ReadOnlySpan<uint> gaps = gapArray.Values.Cast<uint>();
+            ReadOnlySpan<uint> blocks = blockArray.Values.Cast<uint>();
+            ReadOnlySpan<(int Literal, byte[] Key, ulong Sort)> wanted = Asked.Sorted.AsSpan(low, high - low);
+            int shift = KeyRunOptions.HashShift(run.Meta.EntryCount);
+            ulong firstBlock = run.Meta.FirstBlock;
+            ulong cut = BinaryPrimitives.ReadUInt64LittleEndian(fence.Bounds.Min) >> shift;
+            int pair = 0;
+            for (int entry = 0; entry < entries && pair < wanted.Length; entry++)
+            {
+                cut += gaps[entry];
+                while (pair < wanted.Length && (wanted[pair].Sort >> shift) < cut)
+                {
+                    pair++;
+                }
+
+                // Every literal cut to this entry's hash: the one asked, or one that shares its bits.
+                for (int next = pair; next < wanted.Length && (wanted[next].Sort >> shift) == cut; next++)
+                {
+                    Present(wanted[next].Literal, firstBlock + blocks[entry]);
+                }
+            }
+
+            return true;
         }
 
         private bool Fits(CanonicalNode keys, int entries) =>

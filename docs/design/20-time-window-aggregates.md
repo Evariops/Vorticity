@@ -163,7 +163,7 @@ finest grain of time, as the order of the rows themselves, and leaves the rest t
 | late level | the level of rows older than the fresh object they would overlap, or than their period's seal, whose objects overlap under a ceiling | a partition |
 | seal | the job that writes a period's object in one pass, once the period's end and the lateness horizon have passed | sealing a file, which checks its order |
 | slice directory | per column, where its chunks lie in the object and the rows each holds, so that the chunks covering a slice are found by its rows | the slice table, which gives a slice's rows |
-| identifier | a column the application declares as one whose values questions look up, which gets a sorted run outside the index budget | a synopsis column |
+| identifier | a column the application declares as one whose values questions look up, which gets hashed postings outside the index budget | a synopsis column |
 | erasure delay | how long a deleted row may stay in the bytes of the store, declared by the application | the retention window |
 | time slice | the rows of an object whose instant falls in `[t, t + w)`, `w` a calendar unit in UTC: a contiguous range of rows | the slices of a sorted run, in key cursors |
 | sorted slice | a time slice whose rows are sorted by its synopsis columns, then by their instant | a sorted object, in key order |
@@ -234,7 +234,7 @@ Seven rules carry the design.
 | [states](#75-states) | exact sums over any window, distributions, distinct sketches, the same bits by every path | the engine | states in index regions, each a versioned kind |
 | [reading the synopsis part without the data](#8-reading-the-synopsis-part-without-the-data) | one round trip per object cold for whole periods, two for a shorter window, no footer, no rows | the open, the dataset | the synopsis part's table of contents in the leaf entry, a slice directory |
 | [answering a question](#9-answering-a-question) | runs and synopses first, rows last, exact edges, exclusions, newest first | the planner, the engine | nothing |
-| [needles](#95-needles) | an identifier found in three dependent reads per object cold, two warm | the index policy | a sorted run per declared identifier, outside the index budget |
+| [needles](#95-needles) | an identifier found in three dependent reads per object cold, two warm | the index policy | hashed postings per declared identifier, outside the index budget |
 | [deletes](#10-deletes) | counts that stay exact under deletion vectors, and tables corrected by the marked rows, without any delta | the planner | nothing |
 | [the synopsis cache](#11-the-synopsis-cache) | warm questions make no request to the store | the session, object storage | nothing |
 | [retention and late rows](#12-retention-and-late-rows) | expiry reads nothing, late rows rewrite nothing large | the dataset, compaction | partition columns |
@@ -1045,38 +1045,44 @@ So the application declares the columns whose values questions look up, its iden
 ([a compaction style by periods](#51-a-compaction-style-by-periods)). Indexing one costs 10 to 25 % of
 an object, a physical choice like the clustering key, and not an aggregate tied to a question.
 
-1. Each identifier gets a sorted run in every object, outside the index budget as the clustering key's
+1. Each identifier gets an index in every object, outside the index budget as the clustering key's
    run already is ([10-indexes.md, The policy](10-indexes.md#6-the-policy)), its bytes reported by the
-   `WriteReport`. On the example that is about 14 % of an object for a trace identifier whose rows come
-   ten to a value, and 20 to 25 % for a span identifier of 8 bytes unique to its row, whose positions
-   take 33 bits past 2³² rows (estimate).
-2. A probe reads the run's root from the table of contents, its fence pages from the synopsis cache,
-   about 2 MB per object of a day (estimate), then one segment of the run, about 650 KB for 65 536
-   entries, then the rows it finds, through the slice directory. That is three dependent round trips
-   cold and two warm, for every object of the window at once.
-3. A hashed index from value to block is measured next (hypothesis). Its (value, block) pairs spread
-   over pages by hash, each page holding fingerprints of 24 bits, sorted and coded in Elias-Fano at
-   about 12 bits an entry, and a block number of 19 bits, its table of pages cached. That is about 3.9
-   bytes a pair, 9 to 10 % of an object per identifier instead of 14 to 25 %, a page of about 64 KB
-   read per probe instead of 650 KB, and about one false block in a thousand probes (estimate). It
-   replaces the sorted run if a bench holds those figures. The index design left exactly this case
-   open, row lookups on long incompressible keys ([10-indexes.md, Considered and not
-   built](10-indexes.md#55-considered-and-not-built)).
+   `WriteReport`. A sorted run would take about 14 % of an object on the example for a trace
+   identifier whose rows come ten to a value, and 20 to 25 % for a span identifier of 8 bytes unique
+   to its row, whose positions take 33 bits past 2³² rows (estimate). Point 3 says what replaced it.
+2. A probe reads the index's root from the table of contents, its fence pages from the synopsis
+   cache, then one segment, then the rows it finds, through the slice directory. That is three
+   dependent round trips cold and two warm, for every object of the window at once. A sorted run's
+   segment of 65 536 entries is about 650 KB, its fence pages about 2 MB per object of a day
+   (estimate). Hashed postings read a segment of about 44 KB, but cut an object of a day into some
+   262 144 segments, whose fences take about 18 MB at about 70 bytes each (computed). Larger segments
+   for the largest runs, or fewer of those pages kept, is a choice the cache's budget makes.
+3. A hashed index from value to block was measured against the run, and replaced it. Its (value,
+   block) pairs are sorted by hash, the hashes cut to the bits their count needs plus ten and kept as
+   gaps of about 13 bits, beside a block number, in segments of about 16 384 pairs. That is about 4
+   bytes a pair with block numbers of 19 bits, a segment of about 44 KB read per probe instead of
+   650 KB, and about one false block in a thousand probes ([hashed
+   postings](10-indexes.md#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash)). The index
+   design had left exactly this case open, lookups on long incompressible keys ([10-indexes.md,
+   Considered and not built](10-indexes.md#55-considered-and-not-built)).
 4. A needle is delivered newest first, as every progressive question is
    ([newest first](#96-newest-first)), and the application stops once it holds what it looks for. A
    trace lives in a few seconds, which Vorticity cannot assume of a needle in general.
 
-As built, every object a dataset writes, appends and jobs alike, carries a required sorted run on each
-identifier, spared by the budget, and Auto tries no Bloom filter on it. A random identifier of 32
-hexadecimal digits takes 19.3 bytes a row in its run, about 43 % of an hour of such rows, since the
-rows here are little else (`IdentifierRunTests`). Positions already take 64 bits past 2³² rows. The
-table of contents names the object's index directory, and a lookup reads, with no open of the
-object, that directory beside every column's chunk directory, then the run's segments that may hold
-the value, then the chunks of the blocks the run leaves: three dependent round trips cold for the
-object that holds the value, two for one whose run rules it out, and none warm once the session's
-cache holds them. The rows of a block are all returned, and the caller keeps those the filter holds
-for. The planner does not route needles to this read yet, and the fence pages are not kept apart
-from the session's cache.
+As built, every object a dataset writes, appends and jobs alike, carries required hashed postings on
+each identifier, spared by the budget, and Auto tries no Bloom filter on it. A sorted run was built
+first. A random identifier of 32 hexadecimal digits took 19.3 bytes a row in it, about 43 % of an
+hour of such rows, since the rows here are little else. The hashed postings of the same hour take
+1.85 bytes a row, and the object shrank from 127 KB to 77 KB (`IdentifierPostingsTests`). Over four
+million rows the postings take 0.14 times the run's bytes for such ids, 0.24 times for ids of 16
+digits, and 0.40 times for ids that come ten rows a value. A probe reads 44 KB instead of 1.2 MB and
+decodes it in 5 µs instead of 1.2 ms (`--micro needles`). The table of contents names the object's
+index directory, and a lookup reads, with no open of the object, that directory beside every
+column's chunk directory, then the segments that may hold the value, then the chunks of the blocks
+they leave: three dependent round trips cold for the object that holds the value, two for one whose
+postings rule it out, and none warm once the session's cache holds them. The rows of a block are all
+returned, and the caller keeps those the filter holds for. The planner does not route needles to this
+read yet, and the fence pages are not kept apart from the session's cache.
 
 Over 1.24 × 10⁶ objects of 4 MiB, a needle costs 1.24 × 10⁶ probes. Over periods of a day it costs
 30. A needle in a path of a variant column, a user's identifier among the attributes, takes the same
@@ -1380,7 +1386,7 @@ their answer.
 | case | what it costs | on the example | what the design does | what remains |
 |---|---|---|---|---|
 | a threshold on a measure | the values of the runs whose minimum and maximum straddle it | `DurationNs > 10⁹`, where fast and slow requests mix in every run: every row, 1.3 × 10¹¹ over 30 days | a threshold on the distribution's grid is answered exactly from the sketches, and a decimal grid would answer every threshold of three significant digits (hypothesis) | a threshold off the grid reads rows |
-| an identifier the application did not declare | its column, over the window | `RequestId` over 30 days: about 2 TB, hours (estimate) | declared, it gets a sorted run in every object written after | the objects written before, until a compaction rewrites them |
+| an identifier the application did not declare | its column, over the window | `RequestId` over 30 days: about 2 TB, hours (estimate) | declared, it gets hashed postings in every object written after | the objects written before, until a compaction rewrites them |
 | a column whose values rarely repeat, under a non-selective predicate: the top 20 raw URLs, an exact distinct count of `RequestId`, a text search on a frequent word | the column, over the window | the URL column over 30 days: about 1.3 TB, hours | progressive, newest first, and a distinct sketch per slice when the budget keeps one | inherent: nothing that ignores the questions answers them without the column |
 | a needle that is not rare | the rows holding it | in proportion to them | nothing: the answer is that large | output-bound |
 | a predicate between two columns, or a function of a column the synopsis does not hold | that column's rows | | evaluated per run when both columns are synopsis columns | rows otherwise |
@@ -1433,7 +1439,7 @@ bytes.
 | 4 | [the synopsis](#7-the-synopsis), [reading the synopsis part without the data](#8-reading-the-synopsis-part-without-the-data) | run statistics, coarse tables, value counts sorted by value with fence pages, postings, the synopsis part, its table of contents |
 | 5 | [answering a question](#9-answering-a-question), [deletes](#10-deletes) | the walk of runs, edges, exclusions, newest first, tables corrected by the marked rows |
 | 6 | [the synopsis cache](#11-the-synopsis-cache) | warm questions without the store |
-| 7 | [needles](#95-needles) | declared identifiers with a sorted run outside the index budget, then the hashed index if a bench holds it |
+| 7 | [needles](#95-needles) | declared identifiers with hashed postings outside the index budget, which the bench held against a sorted run |
 | 8 | [partition columns](#121-partition-columns), [late rows](#123-late-rows), [columns known only at run time](#13-columns-known-only-at-run-time) | retention per row, rows later than the horizon, the tool path |
 
 Each phase ends with its documentation and its ratchets, and each primitive is judged on a targeted
@@ -1468,7 +1474,7 @@ limit already throws on scans of rows, and phase 1 needs the marks, the put's bo
 |---|---|
 | the style by periods, objects sized by volume, retention, late rows | [13-dataset.md](13-dataset.md) (levels and their price, the style by periods, the late level, partition columns, expiry, the footer's length in the leaf entry, the mark limits and the erasure delay, the alternatives table, commit format 4), [15-compaction.md](15-compaction.md) (fresh merges, seals, footprints, the trigger for small neighbours, the cap), [19-object-storage.md](19-object-storage.md) (a dataset's object streamed, the put's bound and the store's choice of path), `dataset-maintenance.md`, a guide page on time-ordered datasets with its sample |
 | the engine's float sum | [16-queries.md](16-queries.md) (the high parts and the capacity, the widened integer sum), `aggregates.md` |
-| needles | [10-indexes.md](10-indexes.md) (identifiers, their sorted runs outside the budget, the hashed index if taken), the guide's `indexes.md` |
+| needles | [10-indexes.md](10-indexes.md) (identifiers, their hashed postings outside the budget, the kind itself), the guide's `indexes.md` |
 | sorted slices | [11-write-strategy.md](11-write-strategy.md) (the writer sorts a slice), [12-index-reads.md](12-index-reads.md) (the slice order as a source of order for the key cursor), [13-dataset.md](13-dataset.md) (an object's order, sealing, "nothing ever sorts" no longer true), [16-queries.md](16-queries.md) (the group by that streams, at slice grain) |
 | states and the synopsis | [10-indexes.md](10-indexes.md) (the synopsis's kinds in the index directory, its budget), [16-queries.md](16-queries.md) (states, distributions, the approximate aggregates leave "Not in it, on purpose"), a guide page on the synopsis with its sample, `aggregates.md` |
 | reading and answering | [12-index-reads.md](12-index-reads.md) (answers from runs and synopses), [16-queries.md](16-queries.md) (the plan, the walk of runs), [01-scope.md](01-scope.md), `queries.md`, `observability.md` |
@@ -1504,7 +1510,7 @@ the documents they extend until only its decisions and alternatives remain.
 | 16 | writing large objects | a bound on a put's length and the spool, the store choosing by its profile and the object's size, decided on 2026-10-18 | the spool alone, or the bound alone |
 | 17 | the size of a chunk in a period | from the footer's cap, chunks ending at slices | 16 MB of the widest column |
 | 18 | reading part of a flat segment | later, after a bench on needles, edges and rows to show | now, for every column |
-| 19 | needles | identifiers declared by the application, decided on 2026-10-18, with a sorted run outside the index budget, then a hashed index from value to block if a bench holds it | Bloom filter trees, or a sorted run inside the budget |
+| 19 | needles | identifiers declared by the application, decided on 2026-10-18, with hashed postings from value to block outside the index budget, which a bench held against a sorted run (0.14 to 0.40 times its bytes, a probe reading 44 KB instead of up to 1.2 MB) | Bloom filter trees, a sorted run inside or outside the budget |
 | 20 | physical erasure | a delay the application declares, decided on 2026-10-18, one purge per object and delay | a purge triggered by the vector's bytes |
 | 21 | the float sum's state | 32 bytes where the source proves its rows within 2^36, and a wide state of 40 bytes with its high parts in a fifth word elsewhere and for persisted states, decided on 2026-10-18 after the bench measured 40 bytes on every group at 3.5 % to 15 % | 40 bytes for every sum, which every group by of floats would pay |
 | 22 | the size of objects for every dataset | 64 MiB at the deep levels, then 256 MiB once the leaf entry records the footer's length, the default set by the churn bench | 4 MiB |

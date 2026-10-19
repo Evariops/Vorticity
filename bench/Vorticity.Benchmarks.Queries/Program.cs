@@ -125,6 +125,12 @@ if (Text(args, "--micro") == "sliceorder")
     return await SliceOrderMicro.Run(rounds, Option(args, "--slice-rows", 500_000));
 }
 
+// --micro needles: what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs).
+if (Text(args, "--micro") == "needles")
+{
+    return await NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds);
+}
+
 // Each file is written the first time a query asks for it, and kept.
 Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Func<ValueTask<string>>>(StringComparer.Ordinal)
 {

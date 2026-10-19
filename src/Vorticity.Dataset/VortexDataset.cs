@@ -653,12 +653,13 @@ public sealed class VortexDataset : IAsyncDisposable
             write = write.WithIndexes(write.WritePolicy.With(schema.IndexPolicy)) with { BudgetSpares = schema.IndexedColumns };
         }
 
-        // Each declared identifier's sorted run, required and spared by the budget as the clustering key's
-        // is: a lookup of one value reads the objects that hold it and no other, and a Bloom filter, which
-        // a tree of them loses past what one filter holds, is never tried on it.
+        // Each declared identifier's hashed postings, required and spared by the budget as the clustering
+        // key's run is: a lookup of one value reads the objects that hold it and almost no other, one
+        // segment of about 64 KiB an object, at about four bytes a (value, block) pair. A Bloom filter,
+        // which a tree of them loses past what one filter holds, is never tried on it.
         foreach (string identifier in Snapshot.Header.Identifiers)
         {
-            write = write.WithIndexes(write.WritePolicy.For(identifier, Indexes.IndexSpec.SortedRuns.AsRequired())) with { BudgetSparesRequired = true };
+            write = write.WithIndexes(write.WritePolicy.For(identifier, Indexes.IndexSpec.HashedPostings.AsRequired())) with { BudgetSparesRequired = true };
         }
 
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
@@ -1892,7 +1893,7 @@ public sealed class VortexDataset : IAsyncDisposable
             Indexes.IndexEntry? located = null;
             foreach (Indexes.IndexEntry index in directory!.Entries)
             {
-                if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks)
+                if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks or Indexes.IndexKinds.PostingsHashed)
                 {
                     located = index;
                     break;

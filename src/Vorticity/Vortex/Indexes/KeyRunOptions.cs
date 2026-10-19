@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Vorticity.Serialization.Protobuf;
+using Vorticity.Types;
 
 namespace Vorticity.Indexes;
 
@@ -199,8 +200,45 @@ internal static class KeyRunOptions
     {
         IndexKinds.PostingsBlocks or IndexKinds.PostingsNgram3 => PostingsStride,
         IndexKinds.SortedRuns => SortedStride,
+        IndexKinds.PostingsHashed => HashedStride,
         _ => 0,
     };
+
+    /// <summary>Payload arrays per segment of hashed postings: the gaps between its hashes, then its blocks.</summary>
+    internal const int HashedStride = 2;
+
+    /// <summary>
+    /// The bits a hashed run keeps of each hash beyond those its pair count needs: a probe of a value
+    /// the run lacks meets one of its pairs about once in 2¹⁰ probes.
+    /// </summary>
+    internal const int HashedSpareBits = 10;
+
+    /// <summary>
+    /// How a hashed run orders its keys and bounds its segments: each key the value's XXH3-64, an
+    /// unsigned integer of eight bytes little-endian.
+    /// </summary>
+    internal static KeyLayout HashedLayout => new KeyLayout(KeyShape.Unsigned, sizeof(ulong), PType.U64);
+
+    /// <summary>
+    /// The shift that cuts a hash to what a hashed run of <paramref name="entries"/> pairs keeps: the
+    /// bits that number its pairs, rounded up, and <see cref="HashedSpareBits"/> more. A run's
+    /// segments hold the gaps between the cut hashes of their pairs, so a gap averages about 2¹⁰ and
+    /// packs into about 13 bits.
+    /// </summary>
+    /// <param name="entries">The run's (value, block) pairs.</param>
+    internal static int HashShift(ulong entries)
+    {
+        int bits = entries <= 1 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount(entries - 1);
+        return Math.Max(0, 64 - bits - HashedSpareBits);
+    }
+
+    /// <summary>
+    /// Whether an append may read the kind's runs back and merge them into its own: a hashed run keeps
+    /// only the bits of its hashes its own pairs need, which a larger run cannot extend, so its runs
+    /// are listed as they are, as a Bloom filter's are.
+    /// </summary>
+    /// <param name="kind">The kind name.</param>
+    internal static bool Absorbs(string kind) => StrideOf(kind) > 0 && kind != IndexKinds.PostingsHashed;
 
     /// <summary>Serializes an entry's options.</summary>
     /// <param name="segmentEntries">The segment size the runs were cut at.</param>

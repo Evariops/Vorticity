@@ -70,6 +70,7 @@ at a time is worth writing with smaller chunks, through `ChunkTargetBytes`
 | `Postings(column)` | value to blocks, exact | equality and `In` on a column of few values |
 | `ForKey([column], IndexKind.NgramPostings)` | trigrams to blocks, exact | `Contains` and `Like` on a text column, larger than the n-gram filter |
 | `SortedRuns(column)` | value to rows, sorted | equality, ranges, and the key cursor over an unsorted column |
+| `HashedPostings(column)` | value to blocks through its hash, about 3 bytes a row | equality and `In` on a long, rare value such as an identifier, a probe reading about 44 KiB |
 | `ForKey(columns, kind, encoder)` | sorted runs over a tuple's row encoding | a composite key |
 
 The locating kinds, measured on the same rows:
@@ -231,9 +232,11 @@ DatasetOptions options = new DatasetOptions
 };
 ```
 
-Every object the dataset writes then carries a sorted run on the column, appends and compactions alike,
-exempt from the index budget as the clustering key's run is. A lookup of one id reads only the blocks of
-the objects that hold it. No Bloom filter is tried on an identifier: its values are as many as its rows,
+Every object the dataset writes then carries hashed postings on the column, appends and compactions
+alike, exempt from the index budget as the clustering key's run is. A lookup of one id reads one segment
+of about 44 KiB per object, then only the blocks that hold it, and about one probe in a thousand keeps a
+block that does not. On ids of 32 hexadecimal digits the postings take under 3 bytes a row, where a
+sorted run took 19.5. No Bloom filter is tried on an identifier: its values are as many as its rows,
 and a tree of filters loses its upper nodes past what one filter holds.
 
 ## Watch out

@@ -396,8 +396,9 @@ lists its key columns in its options together with the name of the encoding its 
 - Hash to rows: sorted runs whose keys are 64-bit hashes. They are smaller than sorted keys only on
   incompressible keys, where a Bloom filter is three times smaller again for the equality they would
   answer. Where keys have structure, the sorted keys compress below the hashes and stay exact.
-  Measured on four key shapes, it was never the best answer. A workload of row-level lookups on long
-  incompressible keys would reopen the question.
+  Measured on four key shapes, it was never the best answer. Lookups on long incompressible keys
+  reopened the question, and [hashed postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash)
+  answer it with hashes cut to what the pairs need, kept as gaps, and blocks rather than rows.
 - A Bloom filter over column pairs. A tuple's cardinality is the product of its columns', which is
   exactly the regime where filters cost more than they save, and a composite sorted run answers the
   same question exactly.
@@ -420,6 +421,45 @@ keeps them, so a state read back is the same bits and merges as the engine merge
 A kind's layout never changes under its name. A reader meeting a version it does not know ignores the
 state and works from the rows, as with any index. Fixed vectors pin the words of three float sums, so
 that the CI's x64 runs hold the bits arm64 computed.
+
+### 5.7 `vorticity.postings.hashed.v1`: value to blocks, through the hash
+
+This kind answers `x = v` and `x IN (…)` on a column of long, rare values, an identifier above all, at
+a fraction of a sorted run's bytes. A sorted run of request ids of 32 hexadecimal digits takes about
+19.5 bytes a row: the key, which no encoding shrinks much, and the row. Hashed postings take about 2.8.
+
+Each value is hashed with XXH3-64 over its bytes in the column's key layout, the same bytes a Bloom
+filter hashes, and the run holds every distinct (hash, block) pair once, sorted by hash. A run keeps of
+each hash only its top bits, as many as number its pairs plus ten: 32 bits for 4 million pairs, 43
+for 2³³. The run's entry count, in the directory, says how many, so no option carries it. A segment
+holds about 16 384 pairs, cut at the end of a hash, as two arrays compressed like data. The first
+holds the gaps between consecutive cut hashes, the first gap 0 since the segment's first hash is its
+lower bound. The gaps average about 2¹⁰ whatever the run's size, so they pack into about 13 bits. The
+second array holds each pair's block, counted from the run's first. The segments' bounds are full
+hashes, so the run's table, inline or in fence pages, finds a probe's segment as it finds a key's in
+any locating run.
+
+A probe hashes its literal, reads the one segment whose bounds hold the hash, sums the gaps from the
+lower bound until it reaches the literal's cut hash, and keeps the blocks of the pairs found there. A
+value the run lacks meets another value's cut hash about once in a thousand probes, which keeps a block
+live for nothing. The kind is therefore a superset at block granularity, as a Bloom filter is, and
+never exact.
+
+Measured on four million identifiers in blocks of 8 192 rows (`--micro needles`), each index's bytes
+from the write report and a probe's from one segment decoded and searched:
+
+| identifier | sorted run | hashed postings | read by a probe | a probe |
+|---|---|---|---|---|
+| 32 hex digits, one a row | 19.46 B/row | 2.78 B/row | 44 KiB instead of 1 246 KiB | 4.7 µs instead of 1 246 µs |
+| 16 hex digits, one a row | 11.50 B/row | 2.78 B/row | 44 KiB instead of 736 KiB | 4.9 µs instead of 717 µs |
+| 32 hex digits, ten rows each | 4.96 B/row | 2.00 B/row | 34 KiB instead of 317 KiB | 7.4 µs instead of 63 µs |
+
+The block numbers take what the run's blocks need, 9 bits here and 19 in an object of 2³² rows, where
+a pair weighs about 4 bytes. Two probes in a thousand for values the column lacks answered a block.
+
+An append adds the kind's runs and never reads old ones back to merge them. A run keeps only the bits
+of its hashes its own pairs need, which a larger run cannot extend, so the runs are listed as they
+are, as a Bloom filter's are, and a probe reads one segment per run.
 
 ## 6. The policy
 
@@ -457,10 +497,11 @@ dataset's clustering key is such an index (see [what a compaction
 does](13-dataset.md#53-what-a-compaction-does)), and the dataset writes it exempt from the budget: it
 is kept even when it alone is over the budget, and reported with what it cost, since a run on a
 narrow table is as large as the column it orders and no object is big enough to bring it under a
-share of the data. A dataset's declared identifiers (`DatasetOptions.Identifiers`) get the same: a
-required sorted run on each, in every object it writes, appends and jobs alike, exempt from the budget.
-A Bloom filter is never tried on one, since a tree of filters loses its upper nodes past what one filter
-holds, which the values of an identifier always pass.
+share of the data. A dataset's declared identifiers (`DatasetOptions.Identifiers`) get the same:
+required [hashed postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash) on each, in
+every object it writes, appends and jobs alike, exempt from the budget. A Bloom filter is never tried
+on one, since a tree of filters loses its upper nodes past what one filter holds, which the values of
+an identifier always pass.
 
 The `WriteReport` names every index built, with its bytes, and every index abandoned, with its
 reason.
