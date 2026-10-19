@@ -297,12 +297,15 @@ public sealed partial class SortedSliceTests
             Assert.Equal(expected[rank], byPeriods.Key.SignedValue);
         }
 
-        // A group by on the instant's minute streams over the sorted objects and gives the same groups.
+        // A group by on the instant's minute holds its groups over the sorted objects, which a read in key
+        // order would sort slice by slice again, streams over the levels, and gives the same groups.
         Vorticity.Aggregation byMinute = periods.Scan<Span>().GroupBy(r => r.At.Truncate(CalendarUnit.Minute)).Select(g => (g.Key, g.Count(), g.Min(r => r.Status)));
-        Assert.True(Vorticity.Aggregating.StreamingGroupBatches.Streaming((Vorticity.Aggregating.AggregationQuery)byMinute.Query) >= 0);
+        Vorticity.Aggregation leveled = levels.Scan<Span>().GroupBy(r => r.At.Truncate(CalendarUnit.Minute)).Select(g => (g.Key, g.Count(), g.Min(r => r.Status)));
+        Assert.True(Vorticity.Aggregating.StreamingGroupBatches.Streaming((Vorticity.Aggregating.AggregationQuery)byMinute.Query) < 0);
+        Assert.True(Vorticity.Aggregating.StreamingGroupBatches.Streaming((Vorticity.Aggregating.AggregationQuery)leveled.Query) >= 0);
         Assert.Equal(
-            await levels.Scan<Span>().GroupBy(r => r.At.Truncate(CalendarUnit.Minute)).Select(g => (g.Key, g.Count(), g.Min(r => r.Status))).As<MinuteCount>().ToRecordsAsync(Ct).ToListAsync(Ct),
-            await byMinute.As<MinuteCount>().ToRecordsAsync(Ct).ToListAsync(Ct));
+            await leveled.As<MinuteCount>().ToRecordsAsync(Ct).ToListAsync(Ct),
+            (await byMinute.As<MinuteCount>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(g => g.Minute).ToList());
     }
 
     private static async Task<List<Span>> OrderedAsync(VortexDataset dataset, bool descending, bool filtered)
