@@ -22,24 +22,24 @@ internal static class ShredCostMicro
     internal static async Task<int> Run()
     {
         Console.WriteLine("paths  held by    class     whole B   shredded B   per path B   per occurrence B   tables per path");
-        foreach (VariantClass @class in new[] { VariantClass.Integer, VariantClass.String, VariantClass.Double })
+        foreach (VariantClass @class in new[] { VariantClass.Integer, VariantClass.String, VariantClass.Double, VariantClass.Boolean })
         {
             foreach (int paths in new[] { 10, 100, 1_000 })
             {
-                foreach (bool everyRow in new[] { false, true })
+                foreach (Held held in new[] { Held.OneRow, Held.EveryRow, Held.FirstHalf })
                 {
-                    if (everyRow && paths > 100)
+                    if (held != Held.OneRow && paths > 100)
                     {
                         continue;
                     }
 
-                    ShredRow[] rows = Generate(paths, everyRow, @class);
+                    ShredRow[] rows = Generate(paths, held, @class);
                     VariantShredding plan = VariantShredding.Object([.. Enumerable.Range(0, paths).Select(p => ($"path-{p:D4}", VariantShredding.Primitive(@class)))]);
                     (long whole, int wholeTables) = await WriteAsync(rows, null);
                     (long shredded, int shreddedTables) = await WriteAsync(rows, plan);
-                    long occurrences = everyRow ? (long)paths * Rows : paths;
+                    long occurrences = held switch { Held.EveryRow => (long)paths * Rows, Held.FirstHalf => (long)paths * Rows / 2, _ => paths };
                     Console.WriteLine(
-                        $"{paths,5}  {(everyRow ? "every row" : "one row"),-9}  {@class,-8} {whole,10} {shredded,12} {(double)(shredded - whole) / paths,12:F1} {(double)(whole - shredded) / occurrences,18:F3} {(double)(shreddedTables - wholeTables) / paths,17:F2}");
+                        $"{paths,5}  {held,-9}  {@class,-8} {whole,10} {shredded,12} {(double)(shredded - whole) / paths,12:F1} {(double)(whole - shredded) / occurrences,18:F3} {(double)(shreddedTables - wholeTables) / paths,17:F2}");
                 }
             }
         }
@@ -47,8 +47,20 @@ internal static class ShredCostMicro
         return 0;
     }
 
-    /// <summary>The rows, each an id and attributes: <paramref name="paths"/> paths of one class held by one row each, or by every row, beside a key no shredding names.</summary>
-    private static ShredRow[] Generate(int paths, bool everyRow, VariantClass @class)
+    /// <summary>Which rows hold each path.</summary>
+    private enum Held
+    {
+        OneRow,
+        EveryRow,
+        FirstHalf,
+    }
+
+    /// <summary>
+    /// The rows, each an id and attributes: <paramref name="paths"/> paths of one class held by one row
+    /// each, by every row, or by the first half of the rows, as rows sorted by shape hold them, beside a
+    /// key no shredding names.
+    /// </summary>
+    private static ShredRow[] Generate(int paths, Held held, VariantClass @class)
     {
         Random random = new Random(3);
         ShredRow[] rows = new ShredRow[Rows];
@@ -57,12 +69,13 @@ internal static class ShredCostMicro
             List<(string, Variant)> fields = [("kept", Variant.From(random.Next(1_000)))];
             for (int p = 0; p < paths; p++)
             {
-                if (everyRow || i == p * (Rows / paths))
+                if (held == Held.EveryRow || (held == Held.FirstHalf && i < Rows / 2) || (held == Held.OneRow && i == p * (Rows / paths)))
                 {
                     fields.Add(($"path-{p:D4}", @class switch
                     {
                         VariantClass.Integer => Variant.From(random.Next(100_000)),
                         VariantClass.String => Variant.From($"value-{random.Next(500)}"),
+                        VariantClass.Boolean => Variant.From(random.Next(2) == 0),
                         _ => Variant.From(random.NextDouble()),
                     }));
                 }

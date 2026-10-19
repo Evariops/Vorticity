@@ -2551,7 +2551,17 @@ internal static class ArrayBlobWriter
         children[0] = Node(
             blob, encodings, "vortex.parquet.variant"u8, ParquetVariantBytes(blob, residualNullable),
             core[..(validityCount + 2)], []);
-        children[1] = WriteChild(blob, arena, tree, encodings, compress);
+        bool encodes = blob.EncodesValidity;
+        blob.EncodesValidity = compress;
+        try
+        {
+            children[1] = WriteChild(blob, arena, tree, encodings, compress);
+        }
+        finally
+        {
+            blob.EncodesValidity = encodes;
+        }
+
         return Node(
             blob, encodings, "vortex.variant"u8, VariantBytes(blob, DTypeProtobuf.Serialize(arena.GetNode(tree).DType)),
             children, []);
@@ -2761,9 +2771,12 @@ internal static class ArrayBlobWriter
             }
 
             default:
-                // Never compressed: a validity bitmap is index machinery, and it is small.
-                destination[0] = WriteNode(
-                    blob, arena, node.Validity.CanonicalNodeIndex, encodings, compress: false);
+                // Never compressed: a validity bitmap is index machinery, and it is small. A shredded
+                // tree's is not: a path its rows hold in stretches would pay a bit a row, so its
+                // validity is a column the compressor writes as runs where they pay.
+                destination[0] = blob.EncodesValidity
+                    ? WriteCompressed(blob, arena, node.Validity.CanonicalNodeIndex, encodings)
+                    : WriteNode(blob, arena, node.Validity.CanonicalNodeIndex, encodings, compress: false);
                 return 1;
         }
     }
@@ -2993,6 +3006,12 @@ internal static class ArrayBlobWriter
 
         /// <summary>The builder, cleared by each blob as it starts.</summary>
         internal FlatBufferBuilder Builder { get; } = new FlatBufferBuilder();
+
+        /// <summary>
+        /// Whether the validities written now are a shredded tree's, which the compressor encodes as
+        /// any column, runs where its rows hold a path in stretches, rather than a bit a row.
+        /// </summary>
+        internal bool EncodesValidity { get; set; }
 
         private readonly DTypeArena? _types;
 

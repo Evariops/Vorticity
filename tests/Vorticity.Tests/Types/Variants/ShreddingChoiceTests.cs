@@ -34,7 +34,7 @@ public sealed partial class ShreddingChoiceTests
                 ("duration", random.Next(10) == 0 ? Variant.From("n/a") : Variant.From(random.NextDouble())),
                 ("user", Variant.Object(("id", random.Next(1_000)), ("name", $"user-{random.Next(80)}"))),
                 ("tags", Variant.Array("a", "b")),
-                ("mixed", random.Next(10) < 6 ? Variant.From(random.Next(9)) : Variant.From("text")),
+                ("mixed", random.Next(10) < 7 ? Variant.From(random.Next(9)) : Variant.From("text")),
                 ($"k{random.Next(10_000):D4}", Variant.From(1L)),
             ];
             if (random.Next(2) == 0)
@@ -56,12 +56,12 @@ public sealed partial class ShreddingChoiceTests
         VariantShredding plan = ShreddingChoice.Choose(census)!;
         Assert.Equal(VariantShreddingKind.Object, plan.Kind);
         Dictionary<string, VariantShredding> keys = plan.Keys.ToDictionary(key => key.Name, key => key.Field);
-        Assert.Equal(["duration", "mixed", "ok", "route", "status", "tags", "user"], keys.Keys.Order(StringComparer.Ordinal));
+        // A boolean held by half the rows writes a slot for every null row, and costs more than it saves.
+        Assert.Equal(["duration", "mixed", "route", "status", "tags", "user"], keys.Keys.Order(StringComparer.Ordinal));
         Assert.Equal((VariantShreddingKind.Primitive, VariantClass.Integer), (keys["status"].Kind, keys["status"].Class));
         Assert.Equal((VariantShreddingKind.Primitive, VariantClass.String), (keys["route"].Kind, keys["route"].Class));
         Assert.Equal((VariantShreddingKind.Primitive, VariantClass.Double), (keys["duration"].Kind, keys["duration"].Class));
         Assert.Equal((VariantShreddingKind.Primitive, VariantClass.Integer), (keys["mixed"].Kind, keys["mixed"].Class));
-        Assert.Equal((VariantShreddingKind.Primitive, VariantClass.Boolean), (keys["ok"].Kind, keys["ok"].Class));
         Assert.Equal((VariantShreddingKind.List, VariantClass.String), (keys["tags"].Kind, keys["tags"].Class));
         Assert.Equal(VariantShreddingKind.Object, keys["user"].Kind);
         Assert.Equal(["id", "name"], keys["user"].Keys.Select(key => key.Name));
@@ -77,22 +77,22 @@ public sealed partial class ShreddingChoiceTests
         Assert.Null(ShreddingChoice.Choose(rare));
     }
 
-    /// <summary>When more paths pay than the tree may hold, the ones that save the most are kept.</summary>
+    /// <summary>When more paths pay than the tree may hold, the ones that save the most, the densest here, are kept.</summary>
     [Fact]
     public void TheBudgetKeepsThePathsThatSaveTheMost()
     {
         PathCensus census = new PathCensus();
+        string[] names = ["e", "d", "c", "b", "a"];
         for (int i = 0; i < 10_000; i++)
         {
-            List<(string, Variant)> fields = [("a", 1L), ("b", 2L), ("c", 3L)];
-            if (i % 2 == 0)
+            // a in every row, b in 95 rows of a hundred, then 90, 85 and 80.
+            List<(string, Variant)> fields = [];
+            for (int k = 0; k < names.Length; k++)
             {
-                fields.Add(("half", 4L));
-            }
-
-            if (i % 4 == 0)
-            {
-                fields.Add(("quarter", 5L));
+                if (i % 100 < 80 + (5 * k))
+                {
+                    fields.Add((names[k], Variant.From(i)));
+                }
             }
 
             Variant row = Variant.Object(fields.ToArray());
@@ -100,8 +100,8 @@ public sealed partial class ShreddingChoiceTests
         }
 
         Assert.Equal(5, ShreddingChoice.Choose(census)!.Keys.Count);
-        VariantShredding kept = ShreddingChoice.Choose(census, tableBudget: 4 * ShreddingChoice.PathTables)!;
-        Assert.Equal(["a", "b", "c", "half"], kept.Keys.Select(key => key.Name));
+        VariantShredding kept = ShreddingChoice.Choose(census, tableBudget: 3 * ShreddingChoice.PathTables)!;
+        Assert.Equal(["a", "b", "c"], kept.Keys.Select(key => key.Name));
     }
 
     /// <summary>

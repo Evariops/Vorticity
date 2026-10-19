@@ -274,14 +274,16 @@ from the counts of every path and type its rows hold.
    every question that touches it, the residual bytes and the parsing of the rows that hold it. It
    costs its `typed_value` and its `value` in the encoding tree of every chunk that shreds it, and
    their entries in the path map (item 3). The costs are measured as everywhere in the time-window
-   design. On one chunk of 10⁵ rows (`vortex-queries --micro shredcost`), a shredded path adds 172 to
-   217 bytes to its chunk, its name included, and 4 to 6 tables to its encoding tree, while each
-   occurrence moved out of the residual saves 1.2 to 1.6 bytes once compressed. So a path pays its
-   bytes from about 170 occurrences a chunk, and the choice shreds a path, in the class most of its
-   values hold, when its occurrences save more than it adds to the object's chunks. The bytes are the
-   lower bound of what a path saves, since a question over it also stops parsing the residual. On
-   attributes of four keys every row holds and ten thousand keys that are data, each held by a few
-   rows, the choice shreds the four and the file is 16 % smaller than unshredded.
+   design. On one chunk of 10⁵ rows (`vortex-queries --micro shredcost`), a shredded path adds 154 to
+   217 bytes to its chunk, its name included, and 4 to 10 tables to its encoding tree. Its typed
+   column then takes a slot a row, null or not, while each occurrence leaves the residual (item 2
+   gives the bytes by class). The choice shreds a path, in the class most of its values hold, when its
+   occurrences save more than its typed column and its fixed cost take over the object's chunks: an
+   integer path held by every row saves 1.5 bytes an occurrence, and one held by half the rows does
+   not pay. The bytes are the lower bound of what a path saves, since a question over it also stops
+   parsing the residual. On attributes of four keys every row holds and ten thousand keys that are
+   data, each held by a few rows, the choice shreds the four and the file is 16 % smaller than
+   unshredded.
 2. Rows are sorted by shape ([shapes](#55-shapes)), so a path held by one source's rows lies in a few
    contiguous ranges, and its column is null everywhere else. Those nulls cost almost nothing only if
    the writer encodes them. Ours keeps a validity bitmap plain, a bit per row, and takes
@@ -289,10 +291,18 @@ from the counts of every path and type its rows hold.
    ([90-registry.md](90-registry.md#5-the-writers-schemes-and-their-ids)). A path held by 10 to 90 % of
    a chunk's rows would pay a bit per row for its typed column, and as much for its field's `value`:
    about 12 to 25 bytes a row over a hundred such paths, against attributes of about a hundred bytes a
-   row (estimate). The writer therefore encodes the validity of a shredded field as runs or sparse,
-   chosen by their cost rather than at nine in ten, which the format allows since validity is a child
-   array, once the cross-check shows a Rust reader reads an encoded validity there. A rare path is then
-   cheap to shred, and what bounds shredding is the column budget, not a frequency threshold.
+   row (estimate). The writer therefore encodes the validity of a shredded tree as any column, which
+   the format allows since validity is a child array: a validity of a few runs is written as runs, and
+   one that alternates as a bitmap. Rust reads such a validity in a shredded field (the cross-check of
+   our shredded files). Measured, the validity was the smaller part. A typed column writes a slot for
+   every row, a null one included, so a null row costs what a held one does: 2.1 bytes for an integer,
+   2.0 for a double, 1.1 for a text, 0.55 for a boolean, against 3.6, 3.2, 2.7 and 0.68 for an
+   occurrence in the residual. An integer path held by half a chunk's rows therefore costs more
+   shredded than whole, and the choice weighs a path's null rows with its occurrences
+   ([what an object shreds](#53-what-an-object-shreds)). What would make a rare path cheap to shred is
+   a typed column without those slots, `vortex.sparse` chosen by its cost rather than at nine nulls in
+   ten, or chunks of the variant cut where the shape changes, so that a chunk holds a path in every row
+   or in none.
 3. A shredded path is a child of the variant's array, not a column of the layout: each chunk of the
    variant is one flat segment, and every path it shreds adds a few nodes to that chunk's encoding tree
    and a field to its shredded dtype, four to six nodes a path (estimate). What a path costs is
@@ -832,7 +842,7 @@ Every figure is an estimate.
 | the path map and the trees stay within the column budget | their bytes, and the nodes of every tree, as ratchets on a bench of 10⁴ paths over a day of chunks |
 | the synopsis counts a path exactly, shredded or not | at every version of the fuzzer, every value count, coarse table and run of a path equals the count of the parsed live rows that hold it |
 | the order pays for itself | the runs of every synopsis column under the measured order, against the order by numbers of distinct values, on real mixes of logs, and the cost of measuring it on a sample against the exact greedy order |
-| nulls cost what they hold | a path held by half of a chunk's rows costs no bit per row once its validity is encoded, on the write bench, and Rust reads it back in the cross-check |
+| nulls cost what they hold | a path held by half of a chunk's rows costs no bit per row once its validity is encoded, on the write bench, and Rust reads it back in the cross-check (`ShreddedVariantWriteTests`: a validity of two runs written as runs; the slots of the null values remain, and the choice weighs them) |
 | a chunk shreds what it holds | the paths each chunk shreds, against the shapes it holds, on real mixes, and the bytes of the path map with a path's encoding fixed per object |
 | keys that are data are counted | at every version of the fuzzer, the key table's counts equal the rows that hold each key, and discovery lists every key of the window |
 | level 0 is parsed once per node | the parses of a level 0 object's path, counted on a query node under a load of questions: one per object, path and type class |

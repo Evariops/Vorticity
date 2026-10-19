@@ -209,6 +209,64 @@ public sealed partial class ShreddedVariantWriteTests
         }
     }
 
+    /// <summary>
+    /// A path the first half of a chunk's rows holds, as rows sorted by shape hold it: its validity is
+    /// two runs, written as such rather than a bit a row, and read back. Every row holding it, there
+    /// is no validity to write and no run.
+    /// </summary>
+    [Fact]
+    public async Task AValidityOfRunsIsWrittenAsRuns()
+    {
+        Doc[] half = [.. Enumerable.Range(0, 4_096).Select(i => new Doc(i, i < 2_048 ? Variant.Object(("n", i), ("kept", "x")) : Variant.Object(("kept", "x")), null))];
+        Doc[] every = [.. Enumerable.Range(0, 4_096).Select(i => new Doc(i, Variant.Object(("n", i), ("kept", "x")), null))];
+        Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = VariantShredding.Object(("n", VariantShredding.Primitive(VariantClass.Integer))) };
+        foreach ((Doc[] rows, bool runs) in new[] { (half, true), (every, false) })
+        {
+            string path = await WriteAsync(rows, shredding, 1, blockRows: rows.Length);
+            try
+            {
+                await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+                Assert.Equal(runs, RunsOfBooleans(file, await System.IO.File.ReadAllBytesAsync(path, Ct)));
+                List<Doc> read = await file.Scan<Doc>().ToRecordsAsync(Ct).ToListAsync(Ct);
+                Assert.Equal(rows.Select(r => r.Attributes), read.Select(r => r.Attributes));
+            }
+            finally
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The .NET half of Rust reading the shredded variants we write: a column whose shredded path's
+    /// validity is runs, and the fuzzer's documents under a random shredding, each beside its twin
+    /// written whole, for `cargo run --example scan_files` and the cross-check of values. It skips
+    /// rather than passes without its directory.
+    /// </summary>
+    [Fact]
+    public async Task WritesShreddedVariantsOutForTheRustCrossCheck()
+    {
+        string? root = Environment.GetEnvironmentVariable("VORTICITY_WRITE_SHREDDED");
+        Assert.SkipWhen(string.IsNullOrEmpty(root), "Set VORTICITY_WRITE_SHREDDED to a directory to produce shredded variants for the Rust cross-check.");
+        Directory.CreateDirectory(root!);
+        Doc[] half = [.. Enumerable.Range(0, 4_096).Select(i => new Doc(i, i < 2_048 ? Variant.Object(("n", i), ("kept", "x")) : Variant.Object(("kept", "x")), null))];
+        await PairAsync("runs", half, new() { [nameof(Doc.Attributes)] = VariantShredding.Object(("n", VariantShredding.Primitive(VariantClass.Integer))) }, half.Length);
+        for (int seed = 1; seed <= 3; seed++)
+        {
+            Random random = new Random(seed);
+            Doc[] rows = [.. Enumerable.Range(0, 3_000).Select(i => new Doc(i, Document(random), random.Next(10) == 0 ? null : Document(random)))];
+            await PairAsync($"fuzz-{seed}", rows, new() { [nameof(Doc.Attributes)] = Shredding(random), [nameof(Doc.Extra)] = Shredding(random) }, 512);
+        }
+
+        async Task PairAsync(string name, Doc[] rows, Dictionary<string, VariantShredding> shredding, int blockRows)
+        {
+            string shredded = await WriteAsync(rows, shredding, 1, blockRows);
+            string whole = await WriteAsync(rows, null, 1, blockRows);
+            System.IO.File.Move(shredded, Path.Combine(root!, $"{name}.shredded.vortex"), overwrite: true);
+            System.IO.File.Move(whole, Path.Combine(root!, $"{name}.whole.vortex"), overwrite: true);
+        }
+    }
+
     /// <summary>A shredding names top-level variant columns only, before anything is written.</summary>
     [Fact]
     public async Task AShreddingOfAnotherColumnIsRefused()
@@ -217,6 +275,53 @@ public sealed partial class ShreddedVariantWriteTests
         await Assert.ThrowsAsync<ArgumentException>(async () => await WriteAsync([new Doc(0, Variant.Null, null)], new() { [nameof(Doc.Id)] = plan }, 1));
         await Assert.ThrowsAsync<ArgumentException>(async () => await WriteAsync([new Doc(0, Variant.Null, null)], new() { ["Missing"] = plan }, 1));
         Assert.Throws<ArgumentException>(() => VariantShredding.Object(("n", plan), ("n", plan)));
+    }
+
+    /// <summary>
+    /// Whether an encoding tree of the file holds runs of booleans: a <c>vortex.runend</c> whose values
+    /// are a <c>vortex.bool</c>, which none of these rows' columns is, so a validity.
+    /// </summary>
+    private static bool RunsOfBooleans(VortexFile file, byte[] bytes)
+    {
+        Vorticity.Arrays.ArrayEncodingId[] encodings = file.ResolvedArrayEncodings.ToArray();
+        foreach (VortexSegment segment in file.SegmentMap)
+        {
+            ReadOnlySpan<byte> blob = bytes.AsSpan((int)segment.Offset, (int)segment.Length);
+            int length = blob.Length < 8 ? 0 : (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(blob[^4..]);
+            if (length <= 0 || length > blob.Length - 4)
+            {
+                continue;
+            }
+
+            try
+            {
+                int budget = VortexLimits.MaxFlatBufferTables;
+                if (Holds(Vorticity.Serialization.Schemas.ArrayView.Root(blob[(blob.Length - 4 - length)..^4], ref budget).Root_))
+                {
+                    return true;
+                }
+            }
+            catch (VortexFormatException)
+            {
+            }
+        }
+
+        return false;
+
+        bool Holds(Vorticity.Serialization.Schemas.ArrayNodeView node)
+        {
+            bool runs = encodings[node.Encoding] == Vorticity.Arrays.ArrayEncodingId.RunEnd;
+            for (int i = 0; i < node.ChildCount; i++)
+            {
+                Vorticity.Serialization.Schemas.ArrayNodeView child = node.GetChild(i);
+                if ((runs && encodings[child.Encoding] == Vorticity.Arrays.ArrayEncodingId.Bool) || Holds(child))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 
     private static async Task<List<Doc>> RoundTripAsync(Doc[] rows, Dictionary<string, VariantShredding> shredding, int degree)
@@ -234,10 +339,10 @@ public sealed partial class ShreddedVariantWriteTests
         }
     }
 
-    private static async Task<string> WriteAsync(Doc[] rows, Dictionary<string, VariantShredding>? shredding, int degree)
+    private static async Task<string> WriteAsync(Doc[] rows, Dictionary<string, VariantShredding>? shredding, int degree, int blockRows = 512)
     {
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-shredded-{Guid.NewGuid():N}.vortex");
-        VortexWriteOptions options = new VortexWriteOptions { BlockRows = 512, ShreddedVariants = shredding, DegreeOfParallelism = degree };
+        VortexWriteOptions options = new VortexWriteOptions { BlockRows = blockRows, ShreddedVariants = shredding, DegreeOfParallelism = degree };
         await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Doc>(path, options);
         await writer.WriteAsync<Doc>(rows, Ct);
         await writer.CompleteAsync(Ct);

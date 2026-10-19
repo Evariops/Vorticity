@@ -7,18 +7,22 @@ namespace Vorticity.Types.Variants;
 
 /// <summary>
 /// The shredding an object's rows pay for, from their census: a path is shredded when the bytes its
-/// occurrences no longer take in the residual pass what it adds to every chunk that shreds it, in the
-/// class most of its values hold. When more paths pay than a chunk's encoding tree may hold, those that
-/// save the most are kept.
+/// occurrences no longer take in the residual pass what its typed column takes over every row of the
+/// chunks that shred it, nulls included, and the fixed cost of the path in each chunk, in the class
+/// most of its values hold. When more paths pay than a chunk's encoding tree may hold, those that save
+/// the most are kept.
 /// </summary>
 /// <remarks>
 /// <para>
 /// The constants were measured on one chunk of 100 000 rows (<c>vortex-queries --micro shredcost</c>,
-/// 2026-10-19). A shredded path held by one row adds 172 to 217 bytes to its chunk: its typed column,
-/// its validity, their encodings and its name in the tree's dtype. Each occurrence moved out of the
-/// residual saves 1.2 to 1.6 bytes once compressed: its field id, its offset and its value's header.
-/// A path adds 4 to 6 tables to the chunk's encoding tree. So a path pays its bytes from about 170
-/// occurrences a chunk. Provisional: measured on drawn attributes, to measure again on real mixes.
+/// 2026-10-19), a hundred paths held by every row and by the first half of the rows. A shredded path
+/// held by one row adds 154 to 217 bytes to its chunk: its typed column, its validity, their encodings
+/// and its name in the tree's dtype, and 4 to 10 tables to the chunk's encoding tree. An occurrence in
+/// the residual takes, once compressed, 3.6 bytes for an integer, 3.2 for a double, 2.7 for a text and
+/// 0.7 for a boolean; a row of the typed column takes 2.1, 2.0, 1.1 and 0.55, a null row as much as
+/// another, since its slot is written. So an integer path held by every row saves 1.5 bytes an
+/// occurrence, and one held by half the rows costs more than it saves. Provisional: measured on drawn
+/// attributes, to measure again on real mixes, and the null slots drop once rows are sorted by shape.
 /// </para>
 /// <para>
 /// The bytes are the lower bound of what a path saves: a question over a shredded path also reads its
@@ -27,14 +31,21 @@ namespace Vorticity.Types.Variants;
 /// </remarks>
 internal static class ShreddingChoice
 {
-    /// <summary>The bytes a shredded path adds to each chunk, its name aside: the upper end of 172 to 217 measured, less the name.</summary>
+    /// <summary>The bytes a shredded path adds to each chunk, its name aside: the upper end of 154 to 217 measured, less the name.</summary>
     internal const int PathBytes = 200;
 
-    /// <summary>The bytes each occurrence of a shredded path saves in the residual: the lower end of 1.2 to 1.6 measured.</summary>
-    internal const double OccurrenceBytes = 1.2;
+    /// <summary>The tables a shredded path adds to a chunk's encoding tree: the upper end of 4 to 10 measured.</summary>
+    internal const int PathTables = 10;
 
-    /// <summary>The tables a shredded path adds to a chunk's encoding tree: the upper end of 4 to 6 measured.</summary>
-    internal const int PathTables = 6;
+    /// <summary>The bytes an occurrence takes in the residual, by class: integer, double, text, boolean.</summary>
+    private static readonly double[] ResidualBytes = [3.6, 3.2, 2.7, 0.68];
+
+    /// <summary>The bytes a row of a typed column takes, a null row as much as another, by class.</summary>
+    private static readonly double[] TypedBytes = [2.1, 2.0, 1.1, 0.55];
+
+    /// <summary>The bytes shredding <paramref name="occurrences"/> of a class over <paramref name="rows"/> rows saves, before the path's fixed cost.</summary>
+    internal static double Saving(VariantClass @class, long occurrences, long rows) =>
+        (occurrences * ResidualBytes[(int)@class]) - (rows * TypedBytes[(int)@class]);
 
     /// <summary>
     /// The rows of a chunk of a shredded variant column: long chunks of its own, so a day of 4.3 × 10⁹
@@ -72,7 +83,7 @@ internal static class ShreddingChoice
         ArgumentNullException.ThrowIfNull(census);
         long chunks = ChunksOf(census.Rows);
         List<Candidate> candidates = [];
-        Collect(census.Root, [], chunks, candidates);
+        Collect(census.Root, [], census.Rows, chunks, candidates);
         if (candidates.Count == 0)
         {
             return null;
@@ -91,8 +102,8 @@ internal static class ShreddingChoice
         return Build(candidates, 0);
     }
 
-    /// <summary>The paths under <paramref name="node"/> that pay for themselves.</summary>
-    private static void Collect(PathCensus.PathCount node, string[] path, long chunks, List<Candidate> into)
+    /// <summary>The paths under <paramref name="node"/> that pay for themselves over the <paramref name="rows"/> rows of <paramref name="chunks"/> chunks.</summary>
+    private static void Collect(PathCensus.PathCount node, string[] path, long rows, long chunks, List<Candidate> into)
     {
         long objects = node.Objects;
         (VariantShredding Shredding, long Count) best = Best(node);
@@ -100,14 +111,14 @@ internal static class ShreddingChoice
         {
             foreach ((string name, PathCensus.PathCount key) in node.Keys.OrderBy(static key => key.Key, StringComparer.Ordinal))
             {
-                Collect(key, [.. path, name], chunks, into);
+                Collect(key, [.. path, name], rows, chunks, into);
             }
 
             return;
         }
 
         long nameBytes = path.Length == 0 ? 0 : Encoding.UTF8.GetByteCount(path[^1]);
-        double net = (best.Count * OccurrenceBytes) - ((PathBytes + nameBytes) * (double)chunks);
+        double net = Saving(best.Shredding.Class, best.Count, rows) - ((PathBytes + nameBytes) * (double)chunks);
         if (best.Count > 0 && net > 0)
         {
             into.Add(new Candidate(path, best.Shredding, net));

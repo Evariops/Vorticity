@@ -142,7 +142,9 @@ The writer's schemes are named after algorithms, and editions constrain the ids:
 
 A compression reaches every child: a list's elements, offsets and sizes, a struct's fields, an
 extension's storage, a dictionary's or a run's values, a sparse chunk's positions and values, a
-decimal's integers and a timestamp's parts. Validity bitmaps are one bit per row and stay plain. How
+decimal's integers and a timestamp's parts. Validity bitmaps are one bit per row and stay plain,
+except in a shredded variant's tree, where a path's rows often hold it in stretches: there a validity
+is compressed as any column, runs where it has few. How
 the chooser prices each scheme is described in [choosing
 encodings](11-write-strategy.md#34-choose-exact-verdicts-then-bounded-trials). Over the 876 files of
 the conformance corpus, the writer's files are smaller than the reference's, held under a ceiling by
