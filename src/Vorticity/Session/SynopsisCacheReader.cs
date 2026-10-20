@@ -11,14 +11,15 @@ namespace Vorticity;
 
 /// <summary>
 /// An object's reader through a <see cref="SynopsisCache"/>: a region its table of contents declares, with a
-/// checksum, comes from the disk when the cache holds it, and goes into the cache when the store sends it;
-/// every other read, its data and its footer, goes to the store untouched.
+/// checksum, or a page or a segment of an index's run whose reader names it with its checksum, comes from the
+/// disk when the cache holds it, and goes into the cache when the store sends it; every other read, its data and
+/// its footer, goes to the store untouched.
 /// </summary>
 /// <remarks>
 /// Readers that miss the same region at once wait for one read of it. A request set whose regions another
 /// reader is fetching reads the rest beside that read, so the wait costs no round trip of its own.
 /// </remarks>
-internal sealed class SynopsisCacheReader : ISegmentReader
+internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
 {
     private readonly ISegmentReader _inner;
     private readonly SynopsisCache _cache;
@@ -133,7 +134,34 @@ internal sealed class SynopsisCacheReader : ISegmentReader
         }
     }
 
-    public async ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+    public ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken) =>
+        ReadSetAsync(requests, default, cancellationToken);
+
+    /// <summary>
+    /// As <see cref="ReadManyAsync"/>, the regions of an index's runs among the slots kept as those the contents declare:
+    /// a lookup of an identifier asked the store for its fence page and its runs' segments at every question, a round
+    /// trip each, where the directory before them came from the disk.
+    /// </summary>
+    public ValueTask ReadRegionsAsync(SegmentRequestSet requests, ReadOnlyMemory<IndexSegment> regions, CancellationToken cancellationToken) =>
+        ReadSetAsync(requests, regions, cancellationToken);
+
+    /// <summary>
+    /// The region slot <paramref name="slot"/> of a set reads, which the cache keeps: one the contents declare, or the
+    /// index region <paramref name="named"/> gives the slot, at its place, with a checksum.
+    /// </summary>
+    private bool TryKept(SegmentSpec spec, int slot, ReadOnlyMemory<IndexSegment> named, out IndexSegment region)
+    {
+        if (_regions.TryGetValue((spec.Offset, spec.Length), out region))
+        {
+            return true;
+        }
+
+        region = slot < named.Length ? named.Span[slot] : default;
+        return region.Checksum is not null && region.Offset == spec.Offset && region.Length == spec.Length;
+    }
+
+    /// <summary>Reads <paramref name="requests"/>, its slot <c>i</c> the index region <paramref name="named"/>[i] where there is one.</summary>
+    private async ValueTask ReadSetAsync(SegmentRequestSet requests, ReadOnlyMemory<IndexSegment> named, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(requests);
         if (requests.IsPopulated)
@@ -141,8 +169,8 @@ internal sealed class SynopsisCacheReader : ISegmentReader
             return;
         }
 
-        // The regions declared: those the disk holds fill their slots, those another reader is fetching are
-        // waited for, and this reader fetches the rest.
+        // The regions kept: those the disk holds fill their slots, those another reader is fetching are waited
+        // for, and this reader fetches the rest.
         List<(int Slot, IndexSegment Region, TaskCompletionSource Mine)> mine = [];
         List<(int Slot, IndexSegment Region, Task Theirs)>? waited = null;
         try
@@ -150,7 +178,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader
             for (int slot = 0; slot < requests.Count; slot++)
             {
                 SegmentSpec spec = requests.GetSpec(slot);
-                if (requests.IsFilled(slot) || !_regions.TryGetValue((spec.Offset, spec.Length), out IndexSegment region))
+                if (requests.IsFilled(slot) || !TryKept(spec, slot, named, out IndexSegment region))
                 {
                     continue;
                 }

@@ -1,8 +1,9 @@
 // The synopsis cache on the local disk: warm, the questions read their tables with no request to the store,
 // across a restart, a sealed dataset's too with no plaintext on the disk; a region torn or flipped, or a
 // sealed frame flipped, is dropped and read again; a region is written behind its reader and served while it
-// waits; one cache owns a directory; only the regions an object's table of contents declares enter it; past
-// its capacity it drops entries; and questions that miss the same region at once make one read of it.
+// waits; one cache owns a directory; only the regions an object's table of contents declares enter it on
+// questions that look no identifier up; past its capacity it drops entries; and questions that miss the same
+// region at once make one read of it.
 using System;
 using System.Buffers;
 using System.Collections.Generic;

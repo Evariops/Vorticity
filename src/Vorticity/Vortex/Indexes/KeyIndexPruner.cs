@@ -316,9 +316,7 @@ internal sealed class KeyIndexPruner
                     int[] slots = new int[column.Stride];
                     for (int array = 0; array < column.Stride; array++)
                     {
-                        IndexSegment payload = fence.Regions[array];
-                        slots[array] = batch.Requests.Add(
-                            new SegmentSpec(payload.Offset, payload.Length, payload.AlignmentExponent, 0, 0));
+                        slots[array] = batch.Add(fence.Regions[array]);
                     }
 
                     batch.Wanted.Add((column, run, fence, low, high, slots));
@@ -338,10 +336,11 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
+            // The runs' segments named, which the session's synopsis cache keeps as it keeps the directory.
             ISegmentReader reader = file.IndexSourceOf(origin);
             Segments += Scanning.ScanCounters.Unread(requests, reader, out long bytes);
             Bytes += bytes;
-            await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            await reader.ReadRegionsAsync(requests, batch.Regions, cancellationToken).ConfigureAwait(false);
             using ScanContext context = file.CreateIndexContext(origin);
             foreach ((Column column, Run run, Fence fence, int low, int high, int[] slots) in batch.Wanted)
             {

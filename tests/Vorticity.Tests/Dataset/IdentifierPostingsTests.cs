@@ -157,6 +157,121 @@ public sealed partial class IdentifierPostingsTests
     }
 
     /// <summary>
+    /// The same lookup through the session's synopsis cache, with no cache of segments, the postings' fence tables
+    /// inline or in pages: warm, the store is asked for the chunks of the blocks left alone, in one round trip in
+    /// the hour that holds the id and none in the other, the postings' pages and segments coming from the disk as
+    /// the directories do; and every file the cache keeps is a region of an index, none of the rows'.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ALookupWarmThroughTheSynopsisCacheAsksTheStoreForItsBlocksAlone(bool paged)
+    {
+        string directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vorticity-postings-cache-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            await using VortexSession session = VortexSession.Create(options => options.SynopsisCache = new SynopsisCache(directory, 64 << 20));
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
+            {
+                Session = session,
+                ClusteringKey = [nameof(Request.At)],
+                Identifiers = [nameof(Request.RequestId)],
+                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+                Write = paged ? new VortexWriteOptions { Fences = new global::Vorticity.Writing.FenceShape(InlineFences: 1, PageBytes: 512) } : VortexWriteOptions.Default,
+            }, Ct);
+            // The same two hours and a quarter; in pages, enough rows that a run of an hour's postings takes more
+            // segments, 16 384 entries each, than its one fence inline holds.
+            Random random = new Random(29);
+            List<Request> appended = [];
+            int perPart = paged ? 5_000 : 400;
+            double apart = 8_000.0 / (16 * perPart);
+            for (int part = 0; part < 16; part++)
+            {
+                Request[] rows = [.. Enumerable.Range(0, perPart).Select(i => new Request(
+                    Noon.AddSeconds((part * perPart + i) * apart), $"{random.NextInt64():x16}{random.NextInt64():x16}", 200 + random.Next(5)))];
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Request>(rows, Ct);
+                await dataset.AppendAsync(draft, Ct);
+                appended.AddRange(rows);
+            }
+
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+            {
+            }
+
+            List<ObjectEntry> hours = [];
+            await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+            {
+                hours.Add(ObjectEntry.FromBytes(leaf.Value.Span));
+            }
+
+            Assert.Equal(2, hours.Count);
+            Request needle = appended[2_345];
+            VortexExpr filter = VortexExpr.Parse($"RequestId = '{needle.RequestId}'");
+            inner.Latency = TimeSpan.FromMilliseconds(20);
+            List<RecordBatch>?[] warm = new List<RecordBatch>?[hours.Count];
+            for (int h = 0; h < hours.Count; h++)
+            {
+                store.Reset();
+                List<RecordBatch>? cold = await dataset.LookupAsync(hours[h], filter, null, Ct);
+                long coldSteps = store.DependentSteps;
+                long coldRequests = store.Requests;
+                store.Reset();
+                warm[h] = await dataset.LookupAsync(hours[h], filter, null, Ct);
+                Console.Out.Write(FormattableString.Invariant(
+                    $"IDENTIFIER LOOKUP CACHED{(paged ? ", PAGED" : string.Empty)}: {coldSteps} dependent steps and {coldRequests} requests cold, {store.DependentSteps} steps and {store.Requests} requests warm.\n"));
+
+                bool holds = cold!.Count > 0;
+                foreach (RecordBatch batch in cold)
+                {
+                    batch.Dispose();
+                }
+
+                Assert.Equal(holds ? 1 : 0, store.DependentSteps);
+                Assert.Equal(holds, store.Requests > 0);
+                Assert.True(coldSteps > store.DependentSteps);
+            }
+
+            Assert.Equal(1, Holding(warm, needle.RequestId));
+
+            // The files kept: the regions the contents declare, and the pages and segments of the postings, which
+            // are in pages when asked; none of the rows' segments.
+            HashSet<string> declared = new HashSet<string>(StringComparer.Ordinal);
+            HashSet<string> data = new HashSet<string>(StringComparer.Ordinal);
+            foreach (ObjectEntry hour in hours)
+            {
+                foreach (IndexSegment region in SynopsisCacheReader.Declared(SynopsisContents.From(hour.Synopsis.Span)!))
+                {
+                    declared.Add(SynopsisCache.NameOf(hour.Uid, region));
+                }
+
+                await using ObjectLease lease = await dataset.RentAsync(hour, Ct);
+                foreach (global::Vorticity.Serialization.Schemas.SegmentSpec segment in lease.File.SegmentSpecs)
+                {
+                    data.Add(FormattableString.Invariant($"{hour.Uid:x32}-{segment.Offset:x}-{segment.Length:x}-"));
+                }
+
+                IndexDirectory index = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
+                IndexEntry postings = index.Entries.Single(e => e.Kind == IndexKinds.PostingsHashed);
+                Assert.Equal(paged, postings.Runs.Any(run => KeyRunOptions.IsPaged(run.OptionBytes)));
+            }
+
+            session.Options.SynopsisCache!.Flush();
+            string[] files = [.. System.IO.Directory.GetFiles(directory, "*", System.IO.SearchOption.AllDirectories)
+                .Select(System.IO.Path.GetFileName)
+                .Where(file => file != ".lock")!];
+            Assert.Contains(files, file => !declared.Contains(file!));
+            Assert.DoesNotContain(files, file => data.Contains(file![..(file.LastIndexOf('-') + 1)]));
+        }
+        finally
+        {
+            System.IO.Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// A user's id among the attributes, declared as <c>Attributes['user'].AsString()</c>, unique to its
     /// row: every sealed hour shreds the key and carries hashed postings on it in its class; a lookup of
     /// one user, with no open, takes three dependent round trips cold in the hour that holds it and two in

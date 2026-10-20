@@ -12,17 +12,19 @@ namespace Vorticity;
 
 /// <summary>
 /// A cache on the local disk of what a question reads of a dataset's objects without the rest of their
-/// data: the tables of their synopses, their slices' chunk directories, their index directories and their
-/// variant columns' path directories. A question over a month answers from the disk once those regions
-/// have been read, and makes no request to the store for them.
+/// data: the tables of their synopses, their slices' chunk directories, their index directories, their
+/// variant columns' path directories, and the pages and segments of their indexes' runs a lookup reads. A
+/// question over a month answers from the disk once those regions have been read, and makes no request to
+/// the store for them.
 /// </summary>
 /// <remarks>
 /// <para>
 /// An object never changes, so an entry needs no invalidation: its key is the object's uid, the region's
-/// place in it and the region's checksum, all known from the dataset's entry before any read. Only a region
-/// its object's table of contents declares, with a checksum, enters the cache, never the data nor the
-/// footer. Every read from the disk checks the checksum, and a region that fails it is dropped and read
-/// again from the store.
+/// place in it and the region's checksum, all known before it is read. Only a region of an index enters the
+/// cache, never the data nor the footer: one its object's table of contents declares, with a checksum, or a
+/// page or a segment of a run its reader names with the checksum its directory or its parent page gave.
+/// Every read from the disk checks the checksum, and a region that fails it is dropped and read again from
+/// the store.
 /// </para>
 /// <para>
 /// A region read from the store enters the cache behind the question that read it: the buffer its reader

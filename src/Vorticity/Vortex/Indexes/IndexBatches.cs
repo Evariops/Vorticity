@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Vorticity.IO;
+using Vorticity.Serialization.Schemas;
 
 namespace Vorticity.Indexes;
 
@@ -36,19 +37,63 @@ internal sealed class IndexBatches<T> : IDisposable
     {
         foreach (Batch batch in _batches.Values)
         {
-            batch.Requests.Dispose();
+            batch.Dispose();
         }
 
         _batches.Clear();
     }
 
     /// <summary>The regions of one origin, and what the caller keeps to decode them.</summary>
-    internal sealed class Batch
+    internal sealed class Batch : IDisposable
     {
+        private IndexSegment[] _regions = [];
+        private int _named;
+
         /// <summary>The regions, read together from the origin's source.</summary>
         internal SegmentRequestSet Requests { get; } = new SegmentRequestSet();
 
         /// <summary>What each region is for.</summary>
         internal List<T> Wanted { get; } = [];
+
+        /// <summary>
+        /// The regions <see cref="Add"/> registered, in slot order, which a reader that keeps index regions keeps
+        /// (<see cref="IndexRegionReads.ReadRegionsAsync"/>); a slot registered otherwise names none.
+        /// </summary>
+        internal ReadOnlyMemory<IndexSegment> Regions => _regions.AsMemory(0, _named);
+
+        /// <summary>Registers <paramref name="region"/> and returns its slot, the one it was given before if it was.</summary>
+        internal int Add(IndexSegment region)
+        {
+            int slot = Requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+            if (slot >= _regions.Length)
+            {
+                IndexSegment[] grown = System.Buffers.ArrayPool<IndexSegment>.Shared.Rent(Math.Max(slot + 1, 16));
+                _regions.AsSpan(0, _named).CopyTo(grown);
+                Return();
+                _regions = grown;
+            }
+
+            // A slot registered without its region, between two that were, names none.
+            _regions.AsSpan(_named, Math.Max(slot - _named, 0)).Clear();
+            _regions[slot] = region;
+            _named = Math.Max(_named, slot + 1);
+            return slot;
+        }
+
+        public void Dispose()
+        {
+            Requests.Dispose();
+            Return();
+            _regions = [];
+            _named = 0;
+        }
+
+        private void Return()
+        {
+            if (_regions.Length > 0)
+            {
+                System.Buffers.ArrayPool<IndexSegment>.Shared.Return(_regions);
+            }
+        }
     }
 }

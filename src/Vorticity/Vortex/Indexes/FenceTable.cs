@@ -498,7 +498,7 @@ internal sealed class FenceTable
             }
 
             baseSegment += page.SegmentStarts[i];
-            page = await PageAsync(source, page.Regions[i][0], page.Level - 1, page.SegmentStarts[i + 1] - page.SegmentStarts[i], cancellationToken).ConfigureAwait(false);
+            page = await PageAsync(source, page.Regions[i], page.Level - 1, page.SegmentStarts[i + 1] - page.SegmentStarts[i], cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -540,7 +540,7 @@ internal sealed class FenceTable
             target -= starts[i];
             baseSegment += page.SegmentStarts[i];
             baseEntry += page.EntryStarts[i];
-            page = await PageAsync(source, page.Regions[i][0], page.Level - 1, page.SegmentStarts[i + 1] - page.SegmentStarts[i], cancellationToken).ConfigureAwait(false);
+            page = await PageAsync(source, page.Regions[i], page.Level - 1, page.SegmentStarts[i + 1] - page.SegmentStarts[i], cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -599,10 +599,14 @@ internal sealed class FenceTable
 
     private IndexSegment[]?[]? _inlineRegions;
 
-    /// <summary>A child page, from the table's own cache or the file.</summary>
+    /// <summary>
+    /// A child page, from the table's own cache or the file: <paramref name="regions"/> are its parent's for it, its
+    /// own region first, which a reader that keeps index regions keeps.
+    /// </summary>
     private async ValueTask<FencePage> PageAsync(
-        ISegmentReader source, IndexSegment region, int level, long segments, CancellationToken cancellationToken)
+        ISegmentReader source, IndexSegment[] regions, int level, long segments, CancellationToken cancellationToken)
     {
+        IndexSegment region = regions[0];
         if (_pages.TryGetValue(region.Offset, out FencePage? cached))
         {
             return cached;
@@ -614,7 +618,7 @@ internal sealed class FenceTable
         {
             int slot = requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
             asked = Scanning.ScanCounters.Unread(requests, source, out _) > 0;
-            await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            await source.ReadRegionsAsync(requests, regions.AsMemory(0, 1), cancellationToken).ConfigureAwait(false);
             VortexBuffer bytes = requests.GetBuffer(slot);
             if (!region.Holds(bytes.Span))
             {

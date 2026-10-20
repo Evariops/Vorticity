@@ -639,10 +639,15 @@ be checked against the service ([Azure's checksums](#83-checksums)).
 
 A session may keep on the local disk what questions read of a dataset's objects without their data
 (`VortexSessionOptions.SynopsisCache`): their synopsis tables, their slices' chunk directories, their
-index directories and their variant columns' path directories. Only a region an object's table of
-contents declares, with a checksum, enters it, never the data nor the footer. An object never changes,
-so an entry is never stale: its key is the object's uid, the region's place and length and its
-checksum, all known from the dataset's entry before any read.
+index directories and their variant columns' path directories, and the fence pages and run segments a
+lookup of an identifier reads. Only a region of an index enters it, never the data nor the footer: one
+an object's table of contents declares, with a checksum, or a page or a segment of a run its reader
+names with the checksum the directory or the parent page gave. An object never changes, so an entry is
+never stale: its key is the object's uid, the region's place and length and its checksum, all known
+before the region is read. Warm, a lookup asks the store for the chunks of the blocks it found alone: a
+count per service and per 12 hours of every row but one request's, over 3 objects of 180 M rows, asked
+for 11 regions in 23 ms, a fence page and two segments of each object's postings beside the chunks of
+the block that holds the id, and asks for those 2 chunks in 12.7 ms.
 
 An entry is a file named by that key, in directories sharded by the uid, written under a temporary
 name and then renamed, so a reader never sees half a file. It is written behind the question that read

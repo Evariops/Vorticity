@@ -263,8 +263,10 @@ Two kinds of rows come out of a table's states rather than make the object read 
 delete marked are found by their positions, charged to the table row of their bucket and keys, and
 their counts and exact sums subtracted. A filter that leaves out one value of a declared identifier,
 `id != v || id == null`, or `id != v` alone on a column without nulls, is the whole minus the part the
-identifier's index finds, taken out the same way. When a removed row holds an extreme the question
-reads, or the top of a float sum, the object is read as rows.
+identifier's index finds, taken out the same way. The pages and segments of the index that lookup
+reads are named with their checksums, which the session's synopsis cache keeps as it keeps the
+directory: warm, only the chunks of the blocks found go to the store. When a removed row holds an
+extreme the question reads, or the top of a float sum, the object is read as rows.
 
 The objects a synopsis answers are read newest first and many at once, as many as the session lets
 reads be in flight, so a day of hourly objects costs one round trip, and the objects read as rows open
