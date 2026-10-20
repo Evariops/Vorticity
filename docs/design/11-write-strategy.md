@@ -434,8 +434,11 @@ object's first slice settles their order greedily, by the runs each adds over a 
 rows. The slice table records it, beside each slice's instants.
 
 A slice aims at 3 × 10⁶ rows, a minute of the design's example. The slicer takes the coarsest calendar
-unit, a second, a minute, an hour, a day or a month, whose units hold no more than that at the median,
-and cuts a burst finer.
+unit, a second, a minute, an hour, a day or a month, whose units hold no more than twice that at the
+median, and cuts a burst finer, a unit past twice the target. At the target itself, the minutes of an
+hour of the example that a few late rows of the next hour took past it went to seconds, every hour of
+a day but the last: tables by slice sixty times the rows, those of the hosts and the endpoints past the
+budget, and an hour 3.7 % larger and half again as long to write.
 
 A target of each object's own, from what a window that cuts one of its hours costs, was built and
 measured, then dropped. The cut hour reads at its edge every row of the slice the edge falls in, and

@@ -68,10 +68,17 @@ internal static class TimeSlicer
     }
 
     /// <summary>
-    /// The coarsest width whose units holding rows hold at most <paramref name="targetRows"/> of them
-    /// at the median; a second when even a second holds more. The median, not the mean, so that a
-    /// burst is cut finer rather than setting the grain of every other unit.
+    /// The coarsest width whose units holding rows hold at most twice <paramref name="targetRows"/> of
+    /// them at the median, the bound past which a unit is a burst and cut again; a second when even a
+    /// second holds more. The median, not the mean, so that a burst is cut finer rather than setting the
+    /// grain of every other unit.
     /// </summary>
+    /// <remarks>
+    /// At the target itself, a minute of the design's rate that rows a little late from the next hour
+    /// took past it went to seconds whole: every hour but the last of a day of the design's requests was
+    /// sliced by the second, its tables by slice sixty times the rows, the hosts' and the endpoints' past
+    /// the budget, and a window's edge read in seconds where a minute was meant.
+    /// </remarks>
     internal static SliceWidth WidthFor(ReadOnlySpan<long> instants, TimeUnit unit, long targetRows)
     {
         SecondCounts seconds = new SecondCounts(unit);
@@ -95,7 +102,7 @@ internal static class TimeSlicer
             }
 
             counts.Sort();
-            if (counts[counts.Count / 2] <= targetRows)
+            if (counts[counts.Count / 2] <= BurstFactor * targetRows)
             {
                 return width;
             }

@@ -40,6 +40,18 @@ public sealed partial class TimeSliceTests
     }
 
     [Fact]
+    public void MinutesALittlePastTheTargetStayMinutes()
+    {
+        // 1 003 rows a minute against a target of 1 000, as late rows from the next hour leave the design's minutes: still
+        // minutes, a burst being one past twice the target; 2 100 a minute, past it, are seconds.
+        long[] over = [.. Enumerable.Range(0, 60 * 1_003).Select(i => Noon + (i * (60 * Second / 1_003)))];
+        long[] far = [.. Enumerable.Range(0, 60 * 2_100).Select(i => Noon + (i * (60 * Second / 2_100)))];
+        Assert.Equal(SliceWidth.Minute, TimeSlicer.WidthFor(over, TimeUnit.Microseconds, 1_000));
+        Assert.Equal(SliceWidth.Second, TimeSlicer.WidthFor(far, TimeUnit.Microseconds, 1_000));
+        Assert.Equal(60, TimeSlicer.Cut(over, TimeUnit.Microseconds, 1_000).Count);
+    }
+
+    [Fact]
     public void SlicesFollowEachOtherAndCoverEveryRowOnce()
     {
         // Ten rows a minute over an hour, a target of ten: slices of a minute.
@@ -103,7 +115,7 @@ public sealed partial class TimeSliceTests
     {
         Reading[] rows = [.. Enumerable.Range(0, 20_000).Select(i => new Reading(DateTimeOffset.FromUnixTimeMilliseconds((Noon / 1000) + (i * 30L)), i % 7))];
         long[] instants = [.. rows.Select(r => r.At.ToUnixTimeMilliseconds() * 1000)];
-        SliceTable table = new(TimeUnit.Microseconds, TimeSlicer.Cut(instants, TimeUnit.Microseconds, targetRows: 1_000));
+        SliceTable table = new(TimeUnit.Microseconds, TimeSlicer.Cut(instants, TimeUnit.Microseconds, targetRows: 900));
         Assert.True(table.Slices.Count > 10);
 
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-slices-{Guid.NewGuid():N}.vortex");
