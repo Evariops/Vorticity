@@ -59,8 +59,12 @@ internal sealed class ShreddedVariant
     /// <summary>Whether an object is shredded anywhere: only then are a row's field names looked up in its metadata.</summary>
     private readonly bool _objects;
 
-    /// <summary>The written values of the batch being built.</summary>
-    private byte[] _scratch = new byte[256];
+    /// <summary>
+    /// The written values of the batch being built, rented and given back once they are copied into the arena: an
+    /// assembler is often made for one span of rows, and its buffer, made at 256 bytes and doubled to the batch's values,
+    /// was most of what a read of a log's attributes allocated.
+    /// </summary>
+    private byte[] _scratch = [];
     private int _used;
 
     /// <summary>The fields and offsets of the objects and arrays being written, the innermost last.</summary>
@@ -157,6 +161,10 @@ internal sealed class ShreddedVariant
         int own = root.ValueBufferCount;
         _used = 0;
         _top = 0;
+        if (_scratch.Length == 0)
+        {
+            _scratch = System.Buffers.ArrayPool<byte>.Shared.Rent(256);
+        }
         VariantDictionary dictionary = default;
         ulong lastLow = 0;
         ulong lastHigh = 0;
@@ -218,6 +226,10 @@ internal sealed class ShreddedVariant
             _scratch.AsSpan(0, _used).CopyTo(written);
             _buffers[count++] = data;
         }
+
+        System.Buffers.ArrayPool<byte>.Shared.Return(_scratch);
+        _scratch = [];
+        _used = 0;
 
         return arena.AddVarBinView(_binary, rows, Validity.NonNullable, views, _buffers.AsSpan(0, count));
     }
@@ -829,8 +841,13 @@ internal sealed class ShreddedVariant
         int needed = checked(_used + bytes);
         if (needed > _scratch.Length)
         {
-            byte[] larger = new byte[Math.Max(needed, 2 * _scratch.Length)];
+            byte[] larger = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(needed, 2 * _scratch.Length));
             _scratch.AsSpan(0, _used).CopyTo(larger);
+            if (_scratch.Length > 0)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(_scratch);
+            }
+
             _scratch = larger;
         }
     }
