@@ -134,9 +134,10 @@ public sealed partial class VariantKeyReadTests
     }
 
     /// <summary>
-    /// A key no chunk shreds, read as stored, converted, for its presence and under a filter: each chunk gives
-    /// its residual alone, the keys it shreds neither decoded nor put back, and every answer is the rows'
-    /// written whole; asked beside a key the chunks shred, or on a file written whole, no chunk does.
+    /// A key no chunk shreds, read as stored, converted, for its presence, under a filter and counted under
+    /// it: each chunk gives its residual alone, the keys it shreds neither decoded nor put back, and every
+    /// answer is the rows' written whole; asked beside a key the chunks shred, or on a file written whole,
+    /// no chunk does.
     /// </summary>
     [Fact]
     public async Task AKeyNoChunkShredsIsReadFromTheResidualsAlone()
@@ -164,6 +165,10 @@ public sealed partial class VariantKeyReadTests
                 rows.Where((_, i) => others[i] >= 4_000).Select(r => r.Id),
                 await filtered.Where(r => r.Attributes["other"].AsInt64() >= 4_000).Select(r => r.Id).ToListAsync(Ct));
             Assert.Equal(residuals, filtered.Counters.ResidualChunks > 0);
+
+            Scan<Doc> counted = file.Scan<Doc>();
+            Assert.Equal(others.Count(other => other >= 4_000), await counted.Where(r => r.Attributes["other"].AsInt64() >= 4_000).CountAsync(Ct));
+            Assert.Equal(residuals, counted.Counters.ResidualChunks > 0);
         }
 
         // Beside a key the chunks shred, each chunk is put back together, as before.

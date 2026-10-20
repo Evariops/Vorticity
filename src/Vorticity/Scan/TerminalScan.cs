@@ -54,6 +54,9 @@ internal sealed class TerminalScan
     /// <summary>The rows a count leaves out whatever the filter says; null for none. Never with a take.</summary>
     private readonly IRowExclusion? _excluded;
 
+    /// <summary>The variant columns a count's filter reads through top-level keys alone, with those keys; null for none.</summary>
+    private readonly IReadOnlyDictionary<string, string[]>? _variantKeys;
+
     internal TerminalScan(
         VortexFile file,
         LayoutTree tree,
@@ -67,9 +70,11 @@ internal sealed class TerminalScan
         TerminalTiers tiers,
         ScanCounters? metrics,
         bool indexes = true,
-        IRowExclusion? excluded = null)
+        IRowExclusion? excluded = null,
+        IReadOnlyDictionary<string, string[]>? variantKeys = null)
     {
         _excluded = excluded;
+        _variantKeys = variantKeys;
         _indexes = indexes;
         _file = file;
         _tree = tree;
@@ -129,6 +134,13 @@ internal sealed class TerminalScan
         using ScanContext context = new ScanContext(_file);
         context.LiveBlocks = live;
         context.Metrics = _metrics;
+
+        // The filter's variant columns read as a scan reads them: through their shredded keys, or their residuals.
+        if (_variantKeys is not null)
+        {
+            context.VariantKeys = await Indexes.VariantKeyReads.LoadAsync(_file, _variantKeys, cancellationToken).ConfigureAwait(false);
+        }
+
         using ScanSegments held = new ScanSegments(1);
         Decodes decodes = new Decodes(plan, held, blockRows, live);
 

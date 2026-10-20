@@ -1227,8 +1227,12 @@ internal sealed class ScanBuilder
                 "Rows left out serve a count of the file's rows, never of rows taken by their places: the caller maps a take past them.");
         }
 
+        // A count reads the filter's variant columns through their keys, as a scan does; an extreme reads its own column whole.
+        IReadOnlyDictionary<string, string[]>? keys = extraPath is null && _filter is not null
+            ? _variantKeys ?? Indexes.VariantKeyReads.Of([], _filter)
+            : null;
         return new TerminalScan(
-            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded);
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys);
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>
