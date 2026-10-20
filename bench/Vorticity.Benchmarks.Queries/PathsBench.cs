@@ -303,11 +303,19 @@ internal static class PathsBench
                 await MeasureAsync(store, dataset, question, options);
             }
 
+            // The first warm round's reads are written down after the cold one's.
             int rounds = synopses ? settings.Rounds : settings.RowsRounds;
             List<Measured> warm = [];
             for (int round = 0; round < rounds; round++)
             {
+                if (round == 0 && trace is not null)
+                {
+                    trace.WriteLine($"# {question.Name} {(synopses ? "synopses" : "rows")} warm, degree {degree}");
+                    remote.Trace = trace;
+                }
+
                 warm.Add(await MeasureAsync(store, dataset, question, options));
+                remote.Trace = null;
             }
 
             warm.Sort((a, b) => a.Milliseconds.CompareTo(b.Milliseconds));
