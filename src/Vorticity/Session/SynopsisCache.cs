@@ -786,12 +786,18 @@ public sealed class SynopsisCache : IDisposable
         }
     }
 
-    /// <summary>Whether the cache holds the region of object <paramref name="uid"/>, without reading it.</summary>
+    /// <summary>Whether the cache holds the region of object <paramref name="uid"/>, without reading it: no hit counted, no string made.</summary>
     internal bool Holds(UInt128 uid, IndexSegment region)
     {
+        Span<char> name = stackalloc char[MaxNameLength];
+        if (!name.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}", out int written))
+        {
+            return false;
+        }
+
         lock (_gate)
         {
-            return _entries.ContainsKey(NameOf(uid, region));
+            return _entries.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name[..written]);
         }
     }
 

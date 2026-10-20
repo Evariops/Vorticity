@@ -2278,6 +2278,13 @@ public sealed class VortexDataset : IAsyncDisposable
     internal async ValueTask<Indexes.SynopsisTableSet> ReadSynopsisAsync(
         ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted, CancellationToken cancellationToken)
     {
+        // Warm, the session's cache holds every chunk wanted of a plain object: read from the disk, no reader opened.
+        if (Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
+            && Indexes.SynopsisTableInfo.ReadCached(cache, entry.Uid, contents, wanted, null) is { } cached)
+        {
+            return cached;
+        }
+
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {

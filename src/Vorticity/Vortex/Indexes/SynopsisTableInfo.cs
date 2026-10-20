@@ -439,8 +439,95 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         IO.ISegmentReader source, SynopsisContents contents, ISynopsisReads? reads, VortexReadOptions? options,
         CancellationToken cancellationToken)
     {
-        // The chunks read, counted then named, in an array of their number: a few an object, where lists of them grew
-        // for each. By index, as every list of the contents: an interface's enumerator is an allocation a list.
+        Wanted[] wanted = WantedOf(contents, reads);
+        (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
+        ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
+        SynopsisTableSet set = await DecodeAsync(source, context, wanted, cancellationToken, Contexts, reads).ConfigureAwait(false);
+        set.Types = contents.TableRowTypes.Arena;
+        return set;
+    }
+
+    /// <summary>
+    /// The tables <see cref="ReadAsync(IO.ISegmentReader, SynopsisContents, ISynopsisReads?, VortexReadOptions?, CancellationToken)"/>
+    /// reads, when the synopsis cache holds every chunk wanted: from the disk, with no reader of the object, no wait and no
+    /// request of its own; null when one is not there, which a reader then reads.
+    /// </summary>
+    /// <remarks>
+    /// A warm question asks every object this, where each opened a reader of the store, one of the cache and one of the
+    /// session over it, a few hundred bytes and three layers of waits an object, for regions the disk held.
+    /// </remarks>
+    /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
+    internal static SynopsisTableSet? ReadCached(SynopsisCache cache, UInt128 uid, SynopsisContents contents, ISynopsisReads? reads, VortexReadOptions? options)
+    {
+        // Every chunk held, asked before one is read: a read that falls back to the reader then counts no hit twice.
+        Wanted[] wanted = WantedOf(contents, reads);
+        if (wanted.Length == 0)
+        {
+            return null;
+        }
+
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            if (!cache.Holds(uid, wanted[i].Chunk.Region))
+            {
+                return null;
+            }
+        }
+
+        (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
+        ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
+        IO.SegmentRequestSet requests = context.Segments;
+        bool missed = false;
+        try
+        {
+            if (Add(requests, wanted) is false)
+            {
+                missed = true;
+                return null;
+            }
+
+            for (int slot = 0; slot < requests.Count; slot++)
+            {
+                Serialization.Schemas.SegmentSpec spec = requests.GetSpec(slot);
+                IndexSegment region = RegionOf(wanted, spec);
+                cache.Asked?.Invoke(uid, region);
+                if (!cache.TryRead(uid, region, out Buffers.SegmentOwner owner))
+                {
+                    missed = true;
+                    return null;
+                }
+
+                requests.SetResult(slot, owner);
+                requests.NoteCacheHit();
+            }
+
+            requests.Complete();
+            SynopsisTableSet set = Decoded(context, wanted, requests, Contexts, reads);
+            set.Types = contents.TableRowTypes.Arena;
+            return set;
+        }
+        catch
+        {
+            context.Dispose();
+            throw;
+        }
+        finally
+        {
+            requests.Release();
+            if (missed)
+            {
+                Contexts.Return(context);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The chunks of <paramref name="contents"/>'s tables <paramref name="reads"/> keeps, every one when it is null, each with
+    /// its table's row type: counted, then named, in an array of their number, a few an object, where lists of them grew for
+    /// each. By index, as every list of the contents: an interface's enumerator is an allocation a list.
+    /// </summary>
+    private static Wanted[] WantedOf(SynopsisContents contents, ISynopsisReads? reads)
+    {
         int count = 0;
         for (int t = 0; t < contents.Tables.Count; t++)
         {
@@ -452,7 +539,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         }
 
         // The tables' row types, built once for the contents and shared by every read of them.
-        (DTypeArena types, DType[] rows, _) = contents.TableRowTypes;
+        DType[] rows = contents.TableRowTypes.Rows;
         Wanted[] wanted = count == 0 ? [] : new Wanted[count];
         int at = 0;
         for (int t = 0; t < contents.Tables.Count && at < count; t++)
@@ -467,11 +554,34 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             }
         }
 
-        (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
-        ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
-        SynopsisTableSet set = await DecodeAsync(source, context, wanted, cancellationToken, Contexts, reads).ConfigureAwait(false);
-        set.Types = types;
-        return set;
+        return wanted;
+    }
+
+    /// <summary>The region of <paramref name="wanted"/>'s chunk <paramref name="spec"/> names: its offset and length.</summary>
+    private static IndexSegment RegionOf(Wanted[] wanted, in Serialization.Schemas.SegmentSpec spec)
+    {
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            IndexSegment region = wanted[i].Chunk.Region;
+            if ((ulong)region.Offset == spec.Offset && (uint)region.Length == spec.Length)
+            {
+                return region;
+            }
+        }
+
+        throw new InvalidOperationException("A slot of a read of tables names no chunk of them.");
+    }
+
+    /// <summary>Registers each chunk's region in <paramref name="requests"/>, its slot noted; false when <paramref name="wanted"/> is empty.</summary>
+    private static bool Add(IO.SegmentRequestSet requests, Wanted[] wanted)
+    {
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            IndexSegment region = wanted[i].Chunk.Region;
+            wanted[i].Slot = requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+        }
+
+        return wanted.Length > 0;
     }
 
     /// <summary>
@@ -496,61 +606,13 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         IO.SegmentRequestSet requests = context.Segments;
         try
         {
-            if (wanted.Length == 0)
+            if (!Add(requests, wanted))
             {
                 return new SynopsisTableSet(context, [], pool);
             }
 
-            for (int i = 0; i < wanted.Length; i++)
-            {
-                IndexSegment region = wanted[i].Chunk.Region;
-                wanted[i].Slot = requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
-            }
-
             await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            ReadTable[] tables = new ReadTable[wanted.Length];
-            int read = 0;
-            for (int i = 0; i < wanted.Length; i++)
-            {
-                (SynopsisTableInfo table, TableChunk chunk, DType row, int slot) = wanted[i];
-                Buffers.VortexBuffer bytes = requests.GetBuffer(slot);
-                if (!chunk.Region.Holds(bytes.Span))
-                {
-                    continue;
-                }
-
-                // A table's rows are a struct of one array node: its decoder reads the fields the projection
-                // names and no others, a question of a count reading 3 of a table's 16 columns.
-                Layouts.FieldMask fields = reads?.Fields(table) ?? Layouts.FieldMask.All;
-                try
-                {
-                    // The rows copied into the arena: the bytes read go back with the requests.
-                    context.Decode.LoadBlob(bytes);
-                    ArrayNode root = context.Nodes.Root;
-                    if (!fields.IsAll)
-                    {
-                        context.ExchangePushedFields(fields);
-                        context.FieldsHonoured = false;
-                    }
-
-                    int node = context.Decode.DecodeRoot(in root, row, chunk.Rows);
-                    bool narrowed = !fields.IsAll && context.FieldsHonoured;
-                    tables[read++] = new ReadTable(table, chunk, context.Canonical.CopyFrom(context.Canonical, node)) { Fields = narrowed ? fields : Layouts.FieldMask.All };
-                }
-                catch (VortexFormatException)
-                {
-                }
-                finally
-                {
-                    // A root no struct decoder read leaves the projection pushed, which no other chunk is to take.
-                    if (!fields.IsAll)
-                    {
-                        context.ExchangePushedFields(Layouts.FieldMask.All);
-                    }
-                }
-            }
-
-            return new SynopsisTableSet(context, read == tables.Length ? tables : tables[..read], pool);
+            return Decoded(context, wanted, requests, pool, reads);
         }
         catch
         {
@@ -561,6 +623,58 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         {
             requests.Release();
         }
+    }
+
+    /// <summary>
+    /// The chunks of <paramref name="wanted"/>, read into <paramref name="requests"/>, each decoded into <paramref name="context"/>'s
+    /// arena at its table's row type, only the fields <paramref name="reads"/> names of it; a chunk whose region does not hold
+    /// its checksum, or does not decode, is left out.
+    /// </summary>
+    private static SynopsisTableSet Decoded(ScanContext context, Wanted[] wanted, IO.SegmentRequestSet requests, ScanContexts? pool, ISynopsisReads? reads)
+    {
+        ReadTable[] tables = new ReadTable[wanted.Length];
+        int read = 0;
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            (SynopsisTableInfo table, TableChunk chunk, DType row, int slot) = wanted[i];
+            Buffers.VortexBuffer bytes = requests.GetBuffer(slot);
+            if (!chunk.Region.Holds(bytes.Span))
+            {
+                continue;
+            }
+
+            // A table's rows are a struct of one array node: its decoder reads the fields the projection
+            // names and no others, a question of a count reading 3 of a table's 16 columns.
+            Layouts.FieldMask fields = reads?.Fields(table) ?? Layouts.FieldMask.All;
+            try
+            {
+                // The rows copied into the arena: the bytes read go back with the requests.
+                context.Decode.LoadBlob(bytes);
+                ArrayNode root = context.Nodes.Root;
+                if (!fields.IsAll)
+                {
+                    context.ExchangePushedFields(fields);
+                    context.FieldsHonoured = false;
+                }
+
+                int node = context.Decode.DecodeRoot(in root, row, chunk.Rows);
+                bool narrowed = !fields.IsAll && context.FieldsHonoured;
+                tables[read++] = new ReadTable(table, chunk, context.Canonical.CopyFrom(context.Canonical, node)) { Fields = narrowed ? fields : Layouts.FieldMask.All };
+            }
+            catch (VortexFormatException)
+            {
+            }
+            finally
+            {
+                // A root no struct decoder read leaves the projection pushed, which no other chunk is to take.
+                if (!fields.IsAll)
+                {
+                    context.ExchangePushedFields(Layouts.FieldMask.All);
+                }
+            }
+        }
+
+        return new SynopsisTableSet(context, read == tables.Length ? tables : tables[..read], pool);
     }
 
     /// <summary>A chunk of a table a read fetches: the table, the chunk, the row type it decodes at, and the slot of its region in the read.</summary>
