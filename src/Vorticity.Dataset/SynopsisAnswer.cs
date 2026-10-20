@@ -466,10 +466,15 @@ internal sealed record SynopsisAnswer(
     }
 
     /// <summary>Whether <paramref name="chunk"/> of <paramref name="table"/> holds a bucket the answer folds, which the read of the synopsis fetches.</summary>
+    /// <remarks>
+    /// By index: asked of every chunk of every table of an object, an enumerator of the parts through their interface
+    /// was an allocation a chunk, a quarter of what a warm question from the tables allocated.
+    /// </remarks>
     internal bool Reads(SynopsisTableInfo table, TableChunk chunk)
     {
-        foreach (SynopsisPart part in Parts)
+        for (int p = 0; p < Parts.Count; p++)
         {
+            SynopsisPart part = Parts[p];
             if (ReferenceEquals(part.Table, table) && part.Folds(chunk))
             {
                 return true;
