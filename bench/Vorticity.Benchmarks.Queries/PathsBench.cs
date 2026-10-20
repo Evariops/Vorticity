@@ -101,7 +101,7 @@ internal static class PathsBench
             settings,
             $"requests-{(settings.Design ? "design-" : string.Empty)}h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}",
             store => settings.Design
-                ? DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes)
+                ? DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"))
                 : FillRequestsAsync(store, settings));
         Built logs = await EnsureAsync(settings, $"logs-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
         if (settings.BuildOnly)

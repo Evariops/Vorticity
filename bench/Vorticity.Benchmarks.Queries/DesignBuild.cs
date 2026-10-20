@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.Indexes;
 using Vorticity.IO;
 
 namespace Vorticity.Benchmarks.Queries;
@@ -18,8 +21,10 @@ namespace Vorticity.Benchmarks.Queries;
 internal static class DesignBuild
 {
     internal static async Task<(long Rows, string Needle)> FillAsync(
-        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes)
+        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes, string scratch)
     {
+        // The runs the writers and the synopsis tables move to disk wait beside the store, on its disk.
+        System.IO.Directory.CreateDirectory(scratch);
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = writeDegree);
         VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedRequest.Schema, new DatasetOptions
         {
@@ -27,7 +32,7 @@ internal static class DesignBuild
             ClusteringKey = [nameof(GeneratedRequest.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
-            Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget) },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
         });
 
         await using (dataset)
@@ -80,7 +85,34 @@ internal static class DesignBuild
 
             await QuestionBench.CompactAsync(dataset);
             await VacuumAsync(dataset);
+            using Process self = Process.GetCurrentProcess();
+            Console.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"  built in {Stopwatch.GetElapsedTime(begin).TotalSeconds:F0} s: a peak of {self.PeakWorkingSet64 / 1e9:F2} GB in memory, {GC.GetTotalAllocatedBytes() / 1e9:F1} GB allocated, {GC.CollectionCount(2)} collections of generation 2"));
+            await TablesAsync(dataset);
             return (hours * perHour, needle);
+        }
+    }
+
+    /// <summary>Each sealed period's synopsis tables: what each holds, its rows, its bytes and its chunks.</summary>
+    private static async Task TablesAsync(VortexDataset dataset)
+    {
+        await foreach (TreeEntry entry in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, default))
+        {
+            ObjectEntry held = ObjectEntry.FromBytes(entry.Value.Span);
+            await using ObjectLease lease = await dataset.RentAsync(held, default);
+            IndexDirectory? directory = await lease.File.ReadIndexDirectoryAsync();
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  period of {held.Rows:N0} rows, {lease.File.FileLength / 1e6:F0} MB:"));
+            foreach (IndexEntry table in directory?.Entries.Where(e => e.Kind == IndexKinds.SynopsisTable) ?? [])
+            {
+                if (SynopsisTableInfo.From(table.Options) is { } info)
+                {
+                    long bytes = table.Runs[0].Payload.Sum(chunk => (long)chunk.Length);
+                    Console.WriteLine(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"    {info.Kind} per {info.Bucket} of {info.Keys.Length} keys: {info.Rows:N0} rows, {bytes / 1e3:F0} KB in {table.Runs[0].Payload.Count} chunks"));
+                }
+            }
         }
     }
 
