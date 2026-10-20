@@ -922,16 +922,16 @@ internal sealed record SynopsisAnswer(
             }
 
             int bucketed = fields[0];
-            if (part.Instants is { Count: > 0 } instants)
+            ReadOnlySpan<long> buckets = arena.GetNode(bucketed).Values.Cast<long>()[..count];
+            if (count > 0)
             {
-                fields[0] = InstantsOf(arena, bucketed, bucketType, count, instants);
+                fields[0] = InstantsOf(arena, bucketed, buckets, RunsOf(buckets), bucketType, part.Instants);
             }
 
             int node = arena.AddStruct(root, count, Validity.NonNullable, fields);
 
             // The rows of the buckets kept, then those the filter on the keys holds for, but a row whose
             // every row was taken out, whose group the rows would not make.
-            ReadOnlySpan<long> buckets = arena.GetNode(bucketed).Values.Cast<long>();
             ReadOnlySpan<long> stood = arena.GetNode(fields[stoodAt]).Values.Cast<long>();
             int words = Math.Max((count + 63) >> 6, 1);
             VortexBuffer selection = arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bits);
@@ -945,23 +945,29 @@ internal sealed record SynopsisAnswer(
                 FilterEvaluator.Evaluate(keyFilter, arena, node, count, states);
             }
 
-            // The rows lie in the order of their buckets: a bucket's verdict is taken once for all its rows.
+            // The rows lie in the order of their buckets: a bucket's verdict is taken once for all its rows, and a row
+            // of a bucket kept is kept where it stands for a row and the filter holds for it, with no branch.
             int selected = 0;
-            long bucket = 0;
-            bool folded = false;
-            for (int r = 0; r < count; r++)
+            for (int start = 0; start < count;)
             {
-                if (r == 0 || buckets[r] != bucket)
+                int end = start + 1;
+                while (end < count && buckets[end] == buckets[start])
                 {
-                    bucket = buckets[r];
-                    folded = part.Holds(bucket);
+                    end++;
                 }
 
-                if (folded && stood[r] > 0 && (states.IsEmpty || states[r] == Trilean.True))
+                if (part.Holds(buckets[start]))
                 {
-                    kept[r >> 6] |= 1UL << (r & 63);
-                    selected++;
+                    for (int r = start; r < end; r++)
+                    {
+                        ulong bit = (ulong)(-stood[r]) >> 63;
+                        bit &= states.IsEmpty || states[r] == Trilean.True ? 1UL : 0UL;
+                        kept[r >> 6] |= bit << (r & 63);
+                        selected += (int)bit;
+                    }
                 }
+
+                start = end;
             }
 
             RecordBatch batch = new RecordBatch(arena, node, startRow) { CarriesStates = true };
@@ -1018,18 +1024,71 @@ internal sealed record SynopsisAnswer(
         return null;
     }
 
-    /// <summary>The instants a table's rows carry as states, by row: each bucket's own value, or the first instant the object holds in it.</summary>
-    private static int InstantsOf(CanonicalArena arena, int buckets, DType type, int count, Dictionary<long, long> instants)
+    /// <summary>
+    /// The instants a table's rows carry as states, as the batch's column: each bucket's own value, or the first instant
+    /// the object holds in it (<paramref name="instants"/>). The rows lie in the order of their buckets, a run each: a
+    /// chunk of one bucket carries one value over its rows, and one of few a value a run, which a key of time maps and
+    /// groups once a value, where a column of every row's had its function applied and its value looked up at each;
+    /// <paramref name="runs"/> runs of equal buckets in all.
+    /// </summary>
+    private static int InstantsOf(CanonicalArena arena, int buckets, ReadOnlySpan<long> values, int runs, DType type, Dictionary<long, long>? instants)
     {
+        int count = values.Length;
+        if (runs == 1)
+        {
+            long carried = Carried(values[0], instants);
+            return arena.AddConstant(type, count, Validity.NonNullable, System.Runtime.InteropServices.MemoryMarshal.AsBytes(new ReadOnlySpan<long>(in carried)));
+        }
+
+        if (runs <= count / 4)
+        {
+            VortexBuffer ends = arena.AllocateUninitialized(runs * sizeof(uint), sizeof(uint), out Span<byte> endBytes);
+            VortexBuffer carried = arena.AllocateUninitialized(runs * sizeof(long), sizeof(long), out Span<byte> valueBytes);
+            Span<uint> end = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(endBytes);
+            Span<long> value = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(valueBytes);
+            int run = 0;
+            for (int r = 1; r <= count; r++)
+            {
+                if (r == count || values[r] != values[r - 1])
+                {
+                    end[run] = (uint)r;
+                    value[run] = Carried(values[r - 1], instants);
+                    run++;
+                }
+            }
+
+            return arena.AddRunEnd(type, count, Validity.NonNullable, ends, arena.AddPrimitive(type, runs, Validity.NonNullable, PType.I64, carried));
+        }
+
+        if (instants is not { Count: > 0 })
+        {
+            return buckets;
+        }
+
         VortexBuffer buffer = arena.AllocateUninitialized(count * sizeof(long), sizeof(long), out Span<byte> bytes);
-        Span<long> carried = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes);
-        ReadOnlySpan<long> values = arena.GetNode(buckets).Values.Cast<long>();
+        Span<long> rows = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes);
         for (int r = 0; r < count; r++)
         {
-            carried[r] = instants.TryGetValue(values[r], out long first) ? first : values[r];
+            rows[r] = r > 0 && values[r] == values[r - 1] ? rows[r - 1] : Carried(values[r], instants);
         }
 
         return arena.AddPrimitive(type, count, Validity.NonNullable, PType.I64, buffer);
+    }
+
+    /// <summary>The instant a bucket's states carry: the first the object holds in it where <paramref name="instants"/> says, its own otherwise.</summary>
+    private static long Carried(long bucket, Dictionary<long, long>? instants) =>
+        instants is not null && instants.TryGetValue(bucket, out long first) ? first : bucket;
+
+    /// <summary>How many runs of equal values <paramref name="values"/> holds.</summary>
+    private static int RunsOf(ReadOnlySpan<long> values)
+    {
+        int runs = values.IsEmpty ? 0 : 1;
+        for (int r = 1; r < values.Length; r++)
+        {
+            runs += values[r] != values[r - 1] ? 1 : 0;
+        }
+
+        return runs;
     }
 
     private enum BucketFate
