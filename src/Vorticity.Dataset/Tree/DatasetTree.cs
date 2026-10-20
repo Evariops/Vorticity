@@ -394,25 +394,27 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         // The stack's top is the walk's future in order, so the pages it names are read a window
         // ahead: one dependent round trip per window rather than one per page. The window is
         // bounded so that a walk which stops early has read at most a window more than it used.
-        List<(PageReference Reference, int Level, long Row, Task<ReadOnlyMemory<byte>>? Read)> stack = [(Root, Depth, 0, null)];
+        // A page the source holds in hand is taken as it lies, where a read was a task a page.
+        List<(PageReference Reference, int Level, long Row, bool Fetched, ReadOnlyMemory<byte> Bytes, Task<ReadOnlyMemory<byte>>? Read)> stack =
+            [(Root, Depth, 0, false, default, null)];
         try
         {
             while (stack.Count > 0)
             {
                 for (int ahead = stack.Count - 1; ahead >= Math.Max(0, stack.Count - PrefetchWindow); ahead--)
                 {
-                    if (stack[ahead].Read is null)
+                    if (!stack[ahead].Fetched)
                     {
-                        stack[ahead] = stack[ahead] with
-                        {
-                            Read = source.ReadPageAsync(stack[ahead].Reference, cancellationToken).AsTask(),
-                        };
+                        PageReference reference = stack[ahead].Reference;
+                        stack[ahead] = source.TryGetInHand(reference, out ReadOnlyMemory<byte> held)
+                            ? stack[ahead] with { Fetched = true, Bytes = held }
+                            : stack[ahead] with { Fetched = true, Read = source.ReadPageAsync(reference, cancellationToken).AsTask() };
                     }
                 }
 
-                (_, int level, long row, Task<ReadOnlyMemory<byte>>? read) = stack[^1];
+                (_, int level, long row, _, ReadOnlyMemory<byte> inHand, Task<ReadOnlyMemory<byte>>? read) = stack[^1];
                 stack.RemoveAt(stack.Count - 1);
-                ReadOnlyMemory<byte> bytes = await read!.ConfigureAwait(false);
+                ReadOnlyMemory<byte> bytes = read is null ? inHand : await read.ConfigureAwait(false);
                 if (level == 1)
                 {
                     foreach (TreeEntry entry in TreePage.ReadLeaf(bytes))
@@ -443,7 +445,7 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
                     long start = at - page[i].Rows;
                     if (start < to && at > from && (descend is null || descend(page[i])))
                     {
-                        stack.Add((page[i].Child, level - 1, start, null));
+                        stack.Add((page[i].Child, level - 1, start, false, default, null));
                     }
 
                     at = start;
@@ -454,7 +456,7 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         {
             // A walk stopped early leaves reads in flight: each is observed, so that one that fails
             // after nobody wants it is not an unobserved exception.
-            foreach ((_, _, _, Task<ReadOnlyMemory<byte>>? pending) in stack)
+            foreach ((_, _, _, _, _, Task<ReadOnlyMemory<byte>>? pending) in stack)
             {
                 _ = pending?.ContinueWith(
                     static read => read.Exception, CancellationToken.None,

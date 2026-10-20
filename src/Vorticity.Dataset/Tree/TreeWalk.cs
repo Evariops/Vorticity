@@ -13,22 +13,32 @@ namespace Vorticity.Dataset;
 /// <see cref="Expand"/>.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Pages are read a window ahead, as <see cref="DatasetTree.WalkAsync"/> reads them, and a subtree
 /// ruled out is not read until it is expanded. Its children meet the same test once it is, so only
 /// the parts of it that interleave with another tree are read down to their leaves.
+/// </para>
+/// <para>
+/// A step names its page by its parent's page and its place in it, a few words where it held its parent's entry
+/// and its reference, 150 bytes, which a walk's stack grew by for each child of each page it crossed; and a page the
+/// source holds in hand is taken as it lies, where a read was a task a page whatever it cost.
+/// </para>
 /// </remarks>
 internal sealed class TreeWalk : IAsyncDisposable
 {
     private readonly IPageSource _source;
     private readonly Func<InternalEntry, bool>? _descend;
     private readonly CancellationToken _cancellationToken;
+    private readonly PageReference _root;
 
-    /// <summary>The walk's future, its top first: pages to read and subtrees ruled out.</summary>
+    /// <summary>The walk's future, its top last: pages to read and subtrees ruled out.</summary>
     private readonly List<Pending> _stack = [];
 
     private IReadOnlyList<TreeEntry>? _leaf;
     private int _next;
-    private int _subtreeLevel;
+
+    // The ruled-out step, which Expand pushes back.
+    private Pending _subtree;
 
     /// <summary>
     /// A walk of <paramref name="tree"/> that keeps out of a subtree when
@@ -41,9 +51,10 @@ internal sealed class TreeWalk : IAsyncDisposable
         _source = source;
         _descend = descend;
         _cancellationToken = cancellationToken;
+        _root = tree.Root;
         if (!tree.IsEmpty)
         {
-            _stack.Add(new Pending(tree.Root, tree.Depth, default, RuledOut: false, Read: null));
+            _stack.Add(new Pending(null, 0, tree.Depth, RuledOut: false));
         }
     }
 
@@ -80,14 +91,16 @@ internal sealed class TreeWalk : IAsyncDisposable
                 return false;
             }
 
+            // The window's pages fetched: taken as they lie when the source holds them, read otherwise.
             for (int ahead = _stack.Count - 1; ahead >= Math.Max(0, _stack.Count - DatasetTree.PrefetchWindow); ahead--)
             {
-                if (!_stack[ahead].RuledOut && _stack[ahead].Read is null)
+                Pending step = _stack[ahead];
+                if (!step.RuledOut && !step.Fetched)
                 {
-                    _stack[ahead] = _stack[ahead] with
-                    {
-                        Read = _source.ReadPageAsync(_stack[ahead].Reference, _cancellationToken).AsTask(),
-                    };
+                    PageReference reference = step.Reference(_root);
+                    _stack[ahead] = _source.TryGetInHand(reference, out ReadOnlyMemory<byte> held)
+                        ? step with { Fetched = true, Bytes = held }
+                        : step with { Fetched = true, Read = _source.ReadPageAsync(reference, _cancellationToken).AsTask() };
                 }
             }
 
@@ -97,11 +110,11 @@ internal sealed class TreeWalk : IAsyncDisposable
             {
                 IsRuledOut = true;
                 Subtree = top.Parent;
-                _subtreeLevel = top.Level;
+                _subtree = top;
                 return true;
             }
 
-            ReadOnlyMemory<byte> bytes = await top.Read!.ConfigureAwait(false);
+            ReadOnlyMemory<byte> bytes = top.Read is { } read ? await read.ConfigureAwait(false) : top.Bytes;
             if (top.Level == 1)
             {
                 _leaf = TreePage.ReadLeaf(bytes);
@@ -114,7 +127,7 @@ internal sealed class TreeWalk : IAsyncDisposable
             for (int i = page.Count - 1; i >= 0; i--)
             {
                 bool ruledOut = _descend is not null && !_descend(page[i]);
-                _stack.Add(new Pending(page[i].Child, top.Level - 1, page[i], ruledOut, Read: null));
+                _stack.Add(new Pending(page, i, top.Level - 1, ruledOut));
             }
         }
     }
@@ -128,7 +141,7 @@ internal sealed class TreeWalk : IAsyncDisposable
             throw new InvalidOperationException("Only a subtree the walk ruled out is read after all.");
         }
 
-        _stack.Add(new Pending(Subtree.Child, _subtreeLevel, Subtree, RuledOut: false, Read: null));
+        _stack.Add(_subtree with { RuledOut = false });
         IsRuledOut = false;
     }
 
@@ -149,7 +162,23 @@ internal sealed class TreeWalk : IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>A page the walk has yet to read, at <paramref name="Level"/> above the leaves, or a subtree it ruled out.</summary>
-    private readonly record struct Pending(
-        PageReference Reference, int Level, InternalEntry Parent, bool RuledOut, Task<ReadOnlyMemory<byte>>? Read);
+    /// <summary>
+    /// A page the walk has yet to read, at <paramref name="Level"/> above the leaves: child <paramref name="Index"/> of
+    /// <paramref name="Page"/>, or the root when it is null; or a subtree it ruled out. Once fetched, its bytes in hand or
+    /// the read of them.
+    /// </summary>
+    private readonly record struct Pending(IReadOnlyList<InternalEntry>? Page, int Index, int Level, bool RuledOut)
+    {
+        internal bool Fetched { get; init; }
+
+        internal ReadOnlyMemory<byte> Bytes { get; init; }
+
+        internal Task<ReadOnlyMemory<byte>>? Read { get; init; }
+
+        /// <summary>The parent's entry for the page: its key span, its rows and its reference.</summary>
+        internal InternalEntry Parent => Page![Index];
+
+        /// <summary>The page's reference: its parent's entry's, or <paramref name="root"/>.</summary>
+        internal PageReference Reference(PageReference root) => Page is null ? root : Page[Index].Child;
+    }
 }
