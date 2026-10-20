@@ -47,6 +47,30 @@ internal sealed class SynopsisPart(SynopsisTableInfo table)
     internal Layouts.FieldMask Fields { get; set; }
 
     /// <summary>
+    /// Whether the answer read only the fields <see cref="Fields"/> names (<see cref="SynopsisAnswer.Project"/>): then the
+    /// keys among them, which the aggregation reads by their codes and runs, may stay a dictionary or run-end node.
+    /// </summary>
+    internal bool Projected { get; set; }
+
+    /// <summary>
+    /// The keys of the table read, a bit each of their fields, from the first to the table's count of them, whose columns
+    /// may stay a dictionary or run-end node: those <see cref="Fields"/> names once <see cref="Projected"/>; none before.
+    /// </summary>
+    internal ulong Encoded
+    {
+        get
+        {
+            ulong encoded = 0;
+            for (int f = 1; Projected && f <= Table.Keys.Length && f < 64; f++)
+            {
+                encoded |= Fields.Includes(f) ? 1UL << f : 0;
+            }
+
+            return encoded;
+        }
+    }
+
+    /// <summary>
     /// Folds <paramref name="bucket"/>, the object's slices <paramref name="firstSlice"/> to <paramref name="lastSlice"/>,
     /// its states carrying <paramref name="instant"/>, the first instant the object holds in it.
     /// </summary>
@@ -704,6 +728,20 @@ internal sealed record SynopsisAnswer(
         return Layouts.FieldMask.All;
     }
 
+    /// <summary>The keys of <paramref name="table"/> its part reads encoded (<see cref="Project"/>); none of a table no part reads.</summary>
+    ulong ISynopsisReads.Encoded(SynopsisTableInfo table)
+    {
+        for (int p = 0; p < Parts.Count; p++)
+        {
+            if (ReferenceEquals(Parts[p].Table, table))
+            {
+                return Parts[p].Encoded;
+            }
+        }
+
+        return 0;
+    }
+
     /// <summary>
     /// Has each part read only the fields of its table's rows the batches of states are read by: the bucket, the rows
     /// each row stands for, the columns of the keys and of the filter on them, and the states of each measure the request
@@ -752,7 +790,10 @@ internal sealed record SynopsisAnswer(
                 }
             }
 
+            // The keys among the fields read by their codes: a table's rows lie in the order of their slices and keys,
+            // its keys a dictionary's and its runs long.
             part.Fields = count < names.Length ? Layouts.FieldMasks.Of(wanted[..count]) : Layouts.FieldMask.All;
+            part.Projected = true;
         }
 
         read.Clear();

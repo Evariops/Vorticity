@@ -240,7 +240,14 @@ answers, or whose every row lies at an edge, is read as rows. The predicates on 
 row. A table's chunk is decoded for the fields its batches are read by alone: the bucket, the count, the
 columns of the keys and of the filter, and the states of the measures the question folds, so that a count
 by service decodes 3 of a table's 16 columns. A table a delete or an identifier corrects is decoded whole,
-since a row comes out of it by every key and state. Over 48 hourly objects warm, from the synopsis cache, a
+since a row comes out of it by every key and state. The keys among the fields decoded stay as they lie, a
+dictionary's codes or a run-end's runs, which the group by reads as they are: a table's rows are one struct,
+whose fields no layout grants their encoding, and its keys came out canonical, their values gathered at
+every row to be looked up again row by row. The rows are decoded where they lie, in the bytes read, which
+the set of tables keeps until it lets the rows go, and an answer's part holds the buckets it folds as runs
+of buckets folded one after another. A count by service per 12 hours over a window that cuts three hours
+of 540 M rows, 3.47 M rows of runs, went from 69 to 33 ms and from 127 to 53 KB allocated warm (`--hours 3
+--rate 50000`). Over 48 hourly objects warm, from the synopsis cache, a
 count by service per 12 hours went from 8.3 to 5.5 ms; with the analysis of the question's filter, keys
 and measures done once for every object, and an object's kept buckets held in order rather than in a set,
 4.9 ms and 232 KB allocated, against 278 (`vortex-queries --micro paths --design --hours 48 --rate 200

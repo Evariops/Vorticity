@@ -598,6 +598,7 @@ internal sealed class ScanContext : IDisposable
         internal bool Prefix;
         internal Layouts.FieldMask Fields;
         internal bool FieldsHonoured;
+        internal ulong EncodedFields;
     }
 
     private Pushed? _pushed;
@@ -676,6 +677,31 @@ internal sealed class ScanContext : IDisposable
         Pushed held = _pushed ??= new Pushed();
         Layouts.FieldMask previous = held.Fields;
         held.Fields = fields;
+        return previous;
+    }
+
+    /// <summary>
+    /// The fields of the next struct decoded, a bit each below 64, whose own nodes may stay a dictionary or run-end
+    /// node rather than be decoded to canonical form, as <see cref="KeepEncodings"/> lets a column's: those its
+    /// consumer reads encoded. A struct stored as one array node has no column of its own a layout reader grants,
+    /// so a table's keys came out canonical, their values gathered at every row for a group by that reads codes.
+    /// Taken and cleared by the struct, as its projection is; none by default.
+    /// </summary>
+    internal ulong EncodedFields => _pushed?.EncodedFields ?? 0;
+
+    /// <summary>Replaces <see cref="EncodedFields"/> and returns what was there, for the caller to restore.</summary>
+    /// <param name="fields">The fields, a bit each; 0 to clear them.</param>
+    /// <returns>The previous fields.</returns>
+    internal ulong ExchangeEncodedFields(ulong fields)
+    {
+        if (_pushed is null && fields == 0)
+        {
+            return 0;
+        }
+
+        Pushed held = _pushed ??= new Pushed();
+        ulong previous = held.EncodedFields;
+        held.EncodedFields = fields;
         return previous;
     }
 
@@ -1447,6 +1473,7 @@ internal sealed class ScanContext : IDisposable
         {
             _pushed.Field = null;
             _pushed.Fields = Layouts.FieldMask.All;
+            _pushed.EncodedFields = 0;
 
             // FieldsHonoured is NOT cleared here, and that is the point: a scan has one projection
             // from beginning to end, so whether the struct decodes take it is a fact about the

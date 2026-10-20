@@ -130,6 +130,12 @@ internal sealed class ArrayDecodeContext
     internal void KeepEncodingInChild() => _keepNext = _keepHere;
 
     /// <summary>
+    /// Grants the next node decoded the encoding, for a struct whose field its consumer reads encoded
+    /// (<see cref="ScanContext.EncodedFields"/>).
+    /// </summary>
+    internal void KeepEncodingInNext() => _keepNext = true;
+
+    /// <summary>
     /// Decodes only <paramref name="wanted"/> rows of a root node. Resets the depth budget.
     /// </summary>
     /// <param name="node">The serialized root node.</param>

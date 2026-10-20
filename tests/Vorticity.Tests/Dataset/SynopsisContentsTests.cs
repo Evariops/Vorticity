@@ -303,6 +303,8 @@ public sealed partial class SynopsisContentsTests
 
         public Vorticity.Layouts.FieldMask Fields(SynopsisTableInfo table) =>
             Vorticity.Layouts.FieldMask.Subset(new Vorticity.Layouts.FieldMaskNode(fields(table), null));
+
+        public ulong Encoded(SynopsisTableInfo table) => 0;
     }
 
     private static bool Same(SynopsisTableInfo left, SynopsisTableInfo right) =>

@@ -658,6 +658,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             // A table's rows are a struct of one array node: its decoder reads the fields the projection
             // names and no others, a question of a count reading 3 of a table's 16 columns.
             Layouts.FieldMask fields = reads?.Fields(table) ?? Layouts.FieldMask.All;
+            ulong encoded = reads?.Encoded(table) ?? 0;
             try
             {
                 // The rows decoded where they lie, in the bytes read, which the set keeps: a copy of them into the arena
@@ -668,6 +669,13 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 {
                     context.ExchangePushedFields(fields);
                     context.FieldsHonoured = false;
+                }
+
+                // The keys a group by reads by their codes stay a dictionary's, where their values were gathered at
+                // every row and then looked up again, a third of a question that folds a million rows of runs.
+                if (encoded != 0)
+                {
+                    context.ExchangeEncodedFields(encoded);
                 }
 
                 int node = context.Decode.DecodeRoot(in root, row, chunk.Rows);
@@ -683,6 +691,11 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 if (!fields.IsAll)
                 {
                     context.ExchangePushedFields(Layouts.FieldMask.All);
+                }
+
+                if (encoded != 0)
+                {
+                    context.ExchangeEncodedFields(0);
                 }
             }
         }
@@ -783,4 +796,10 @@ internal interface ISynopsisReads
 
     /// <summary>The fields of <paramref name="table"/>'s rows decoded: <see cref="Layouts.FieldMask.All"/> for every one.</summary>
     Layouts.FieldMask Fields(SynopsisTableInfo table);
+
+    /// <summary>
+    /// The fields of <paramref name="table"/>'s rows, a bit each below 64, whose columns may stay a dictionary or run-end
+    /// node, which the reader reads encoded (<see cref="Arrays.ScanContext.EncodedFields"/>); 0 for every column canonical.
+    /// </summary>
+    ulong Encoded(SynopsisTableInfo table);
 }

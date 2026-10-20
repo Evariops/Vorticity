@@ -148,6 +148,15 @@ internal sealed class StructDecoder : ArrayDecoder
         return Core(context, in node, dtype, length, 0, wanted.Length, wanted, Rows.Selected);
     }
 
+    /// <summary>Lets field <paramref name="field"/>'s node stay encoded when <paramref name="encoded"/> names it.</summary>
+    private static void Grant(ArrayDecodeContext context, ulong encoded, int field)
+    {
+        if (field < 64 && ((encoded >> field) & 1) != 0)
+        {
+            context.KeepEncodingInNext();
+        }
+    }
+
     /// <summary>One child's rows, as <paramref name="rows"/> asks for them.</summary>
     private static int Child(
         ArrayDecodeContext context, in ArrayNode node, int index, DType type, int length, int start, int count,
@@ -200,9 +209,18 @@ internal sealed class StructDecoder : ArrayDecoder
             context.Scan.ExchangePushedFields(Layouts.FieldMask.All);
         }
 
+        // The fields whose nodes may stay encoded, taken as the projection is; a decode of every row only, which a
+        // dictionary or a run-end node keeps whole.
+        ulong encoded = context.Scan.EncodedFields;
+        if (encoded != 0)
+        {
+            context.Scan.ExchangeEncodedFields(0);
+            encoded = rows == Rows.Whole ? encoded : 0;
+        }
+
         if (Narrows(in projection, fieldCount))
         {
-            return Project(context, in node, dtype, length, validity, fieldBase, in projection, start, count, wanted, rows);
+            return Project(context, in node, dtype, length, validity, fieldBase, in projection, start, count, wanted, rows, encoded);
         }
 
         Span<int> stack = stackalloc int[StackFields];
@@ -212,6 +230,7 @@ internal sealed class StructDecoder : ArrayDecoder
             Span<int> indices = fields.Span;
             for (int i = 0; i < fieldCount; i++)
             {
+                Grant(context, encoded, i);
                 indices[i] = Child(context, in node, fieldBase + i, dtype.GetField(i), length, start, count, wanted, rows);
             }
 
@@ -265,10 +284,11 @@ internal sealed class StructDecoder : ArrayDecoder
     /// <param name="count">The rows produced: the range's, the selection's, or the whole length.</param>
     /// <param name="wanted">The rows a selection names, when <paramref name="rows"/> asks for them.</param>
     /// <param name="rows">Which rows of the fields are decoded.</param>
+    /// <param name="encoded">The fields whose nodes may stay encoded, a bit each (<see cref="ScanContext.EncodedFields"/>).</param>
     /// <returns>The canonical struct, holding only those fields.</returns>
     private static int Project(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Validity validity,
-        int fieldBase, in Layouts.FieldMask projection, int start, int count, ReadOnlySpan<int> wanted, Rows rows)
+        int fieldBase, in Layouts.FieldMask projection, int start, int count, ReadOnlySpan<int> wanted, Rows rows, ulong encoded)
     {
         int selected = projection.SelectedCount(dtype.FieldCount);
         Scratch<int> children = new Scratch<int>(selected, default);
@@ -283,6 +303,7 @@ internal sealed class StructDecoder : ArrayDecoder
             for (int s = 0; s < selected; s++)
             {
                 int i = projection.SelectedField(s);
+                Grant(context, encoded, i);
                 int child = Child(context, in node, fieldBase + i, dtype.GetField(i), length, start, count, wanted, rows);
                 childSpan[s] = child;
                 nameSpan[s] = context.Types.InternName(dtype.GetFieldNameUtf8(i));
