@@ -185,6 +185,79 @@ public sealed class VariantDirectoryTests
         Assert.Same(whole, whole.Within(bytes));
     }
 
+    /// <summary>
+    /// A directory read for some paths holds their entries alone, as the whole one holds them, slices included, and
+    /// answers every question on those paths as the whole one does, slice by slice too; it holds nothing of a path it
+    /// was not read for, and a region that does not decode is no directory either way.
+    /// </summary>
+    [Fact]
+    public void ADirectoryReadForSomePathsAnswersForThemAsTheWholeOne()
+    {
+        VariantDirectory whole = Directory();
+        byte[] bytes = whole.ToBytes();
+        string[][] paths = [["status"], ["user", "id"], ["missing"]];
+        VariantDirectory some = VariantDirectory.From(bytes, Utf8(paths))!;
+        Assert.Equal((whole.Rows, whole.SliceCount, whole.Partial), (some.Rows, some.SliceCount, some.Partial));
+        foreach (string[] path in paths)
+        {
+            AssertSameEntries(whole.Of(path).ToArray(), some.Of(path).ToArray());
+        }
+
+        Assert.False(whole.Of(["route"]).IsEmpty);
+        Assert.True(some.Of(["route"]).IsEmpty);
+        Assert.Equal(whole.Of(["status"]).Length + whole.Of(["user", "id"]).Length, some.Entries.Count);
+
+        Dictionary<string, VariantDirectory> all = new() { ["Attributes"] = whole };
+        Dictionary<string, VariantDirectory> read = new() { ["Attributes"] = some };
+        foreach (VortexExpr filter in new[]
+        {
+            Has("missing"), Has("user", "id"), Expr.Not(Has("missing")),
+            Path(VariantRead.AsInt64, ComparisonOp.Greater, FilterLiteral.From(503L), "status"),
+            Path(VariantRead.AsInt64, ComparisonOp.GreaterOrEqual, FilterLiteral.From(503L), "status"),
+            Path(VariantRead.AsString, ComparisonOp.Equal, FilterLiteral.From("502"), "status"),
+            Path(VariantRead.AsBool, ComparisonOp.Equal, FilterLiteral.From(true), "status"),
+            Expr.And(Has("status"), Has("missing")), Expr.Or(Has("missing"), Has("user", "id")),
+        })
+        {
+            Assert.Equal(VariantDirectory.MayMatch(filter, all), VariantDirectory.MayMatch(filter, read));
+        }
+
+        Assert.Null(VariantDirectory.From(bytes.AsSpan(0, bytes.Length - 3), Utf8(paths)));
+
+        // The slices a path lies in, read for it alone.
+        PathCensus census = new PathCensus();
+        for (int i = 0; i < 100; i++)
+        {
+            Variant row = Variant.Object([("all", Variant.From((long)i)), .. (i < 10 ? [("early", Variant.From(true))] : (i >= 90 ? new[] { ("late", Variant.From("x")) } : []))]);
+            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+        }
+
+        TimeSlice[] slices = [.. Enumerable.Range(0, 4).Select(s => new TimeSlice(s * 25_000L, (s + 1) * 25_000L, s * 25L, 25))];
+        byte[] sliced = VariantDirectory.From(census, null, slices).ToBytes();
+        Dictionary<string, VariantDirectory> early = new() { ["Attributes"] = VariantDirectory.From(sliced, Utf8([["early"]]))! };
+        Dictionary<string, VariantDirectory> everything = new() { ["Attributes"] = VariantDirectory.From(sliced)! };
+        Assert.All(Enumerable.Range(-1, 5), s => Assert.Equal(
+            VariantDirectory.MayMatch(Has("early"), everything, s), VariantDirectory.MayMatch(Has("early"), early, s)));
+        AssertSameEntries(everything["Attributes"].Of(["early"]).ToArray(), early["Attributes"].Of(["early"]).ToArray());
+    }
+
+    private static byte[][][] Utf8(string[][] paths) => [.. paths.Select(path => path.Select(Encoding.UTF8.GetBytes).ToArray())];
+
+    private static void AssertSameEntries(PathEntry[] want, PathEntry[] got)
+    {
+        Assert.Equal(want.Length, got.Length);
+        for (int i = 0; i < want.Length; i++)
+        {
+            Assert.Equal(want[i].Path, got[i].Path);
+            Assert.Equal(
+                (want[i].Class, want[i].Values, want[i].Place, want[i].Low, want[i].High, want[i].NaNs),
+                (got[i].Class, got[i].Values, got[i].Place, got[i].Low, got[i].High, got[i].NaNs));
+            Assert.Equal(want[i].MinText, got[i].MinText);
+            Assert.Equal(want[i].MaxText, got[i].MaxText);
+            Assert.Equal(want[i].Slices, got[i].Slices);
+        }
+    }
+
     /// <summary>Six rows: integers and a text at "status", routes, a flag, numbers and a NaN, a time, a nested key, a list, a null.</summary>
     private static VariantDirectory Directory()
     {

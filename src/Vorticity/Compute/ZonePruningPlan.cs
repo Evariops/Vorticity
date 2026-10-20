@@ -240,6 +240,62 @@ internal static class ZonePruningPlan
     }
 
     /// <summary>
+    /// The paths of <paramref name="column"/> the fenced predicates of <paramref name="filter"/> read, the predicates
+    /// <see cref="Indexes.VariantDirectory.MayMatch(VortexExpr, IReadOnlyDictionary{string, Indexes.VariantDirectory}, int)"/> asks a directory about, each its keys in UTF-8; a path through an
+    /// element of an array, which no directory answers for, is none of them.
+    /// </summary>
+    private static List<byte[][]> PathsOf(VortexExpr filter, string column)
+    {
+        List<byte[][]> paths = [];
+        Collect(filter, column, paths);
+        return paths;
+
+        static void Collect(VortexExpr expr, string column, List<byte[][]> paths)
+        {
+            switch (expr)
+            {
+                case LogicalExpr logical:
+                    Collect(logical.Left, column, paths);
+                    Collect(logical.Right, column, paths);
+                    return;
+                case VariantFilterExpr { Inner: ComparisonExpr { Field: VariantFieldExpr path } }:
+                    Add(path, column, paths);
+                    return;
+                case VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } }:
+                    Add(path, column, paths);
+                    return;
+                case VariantFilterExpr { Inner: NullCheckExpr { Field: VariantFieldExpr path } }:
+                    Add(path, column, paths);
+                    return;
+                case VariantFilterExpr { Inner: StringMatchExpr { Field: VariantFieldExpr path } }:
+                    Add(path, column, paths);
+                    return;
+            }
+        }
+
+        static void Add(VariantFieldExpr path, string column, List<byte[][]> paths)
+        {
+            if (!string.Equals(path.Column.Path, column, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            byte[][] keys = new byte[path.Steps.Length][];
+            for (int i = 0; i < keys.Length; i++)
+            {
+                if (path.Steps[i].KeyUtf8 is not { } key)
+                {
+                    return;
+                }
+
+                keys[i] = key;
+            }
+
+            paths.Add(keys);
+        }
+    }
+
+    /// <summary>
     /// Whether the path directories of <paramref name="columns"/> prove that no row of
     /// <paramref name="file"/> matches <paramref name="filter"/>; when they do not, the rows of the runs
     /// of slices they prove hold none, or null; and the segments and bytes read for them.
@@ -258,8 +314,9 @@ internal static class ZonePruningPlan
                 continue;
             }
 
+            // The directory holds the entries of the filter's paths alone, all its predicates ask of it.
             (Indexes.VariantDirectory? directory, int read, long readBytes) =
-                await Indexes.VariantDirectory.ReadAsync(file, field, cancellationToken).ConfigureAwait(false);
+                await Indexes.VariantDirectory.ReadAsync(file, field, PathsOf(filter, column), cancellationToken).ConfigureAwait(false);
             segments += read;
             bytes += readBytes;
             if (directory is not null)

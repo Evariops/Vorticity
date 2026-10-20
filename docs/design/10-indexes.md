@@ -270,10 +270,12 @@ The directory fits the file's index budget. Over it, the paths of the residual h
 out first, and the directory says it is partial, after which a path's absence proves nothing.
 
 A scan whose filter asks a path for a value reads the directories of the columns it names, one region
-each, before the Bloom filters. It refutes the file when a fenced predicate asks for a path the file
-never holds, for a class the path never holds there, or for values outside its bounds, under the
-filter's conjunctions and disjunctions. A presence asked absent, a conversion of any class, and a
-negation refute nothing. A refuted file reads no block (`ScanPlan.MayMatch` is false, and `Explain`
+each, before the Bloom filters, and makes of each the entries of the filter's paths alone: the region is
+decompressed into a rented buffer and its entries walked as they lie, their keys compared as bytes, where
+parsing every entry made 4 MB of an hour of log records at every question. It refutes the file when a
+fenced predicate asks for a path the file never holds, for a class the path never holds there, or for
+values outside its bounds, under the filter's conjunctions and disjunctions. A presence asked absent, a
+conversion of any class, and a negation refute nothing. A refuted file reads no block (`ScanPlan.MayMatch` is false, and `Explain`
 names the step `path directory`). Otherwise it asks the same of each slice, and kills the blocks that
 lie wholly inside the runs of slices refuted. An append drops the entry, since it parses none of its
 rows.

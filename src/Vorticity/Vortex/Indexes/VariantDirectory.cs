@@ -599,9 +599,22 @@ internal sealed class VariantDirectory
     }
 
     /// <summary>The directory a region <paramref name="bytes"/> holds, or null when it does not decode.</summary>
-    internal static VariantDirectory? From(ReadOnlySpan<byte> bytes)
+    internal static VariantDirectory? From(ReadOnlySpan<byte> bytes) => From(bytes, wanted: null);
+
+    /// <summary>
+    /// The directory a region <paramref name="bytes"/> holds, its entries those of <paramref name="wanted"/>'s paths
+    /// alone, each a path's keys in UTF-8, or every entry for null; null when it does not decode.
+    /// </summary>
+    /// <remarks>
+    /// The body is decompressed into a rented buffer and every entry is walked as it lies, its keys compared as bytes:
+    /// an entry no wanted path names is stepped over with nothing made of it. A question on a path or two asks no more
+    /// of a directory (<see cref="Of"/>), where the whole directory of an hour of log records at a thousand a second made
+    /// its thousands of entries, their keys and their groups, 4 MB at every question.
+    /// </remarks>
+    internal static VariantDirectory? From(ReadOnlySpan<byte> bytes, IReadOnlyList<byte[][]>? wanted)
     {
         byte[] body;
+        int length;
         try
         {
             ProtoReader header = new ProtoReader(bytes);
@@ -611,19 +624,21 @@ internal sealed class VariantDirectory
             }
 
             // A body of more than a thousand times its frame is not one this writer made.
-            ulong length = header.ReadVarint();
+            ulong declared = header.ReadVarint();
             ReadOnlySpan<byte> frame = bytes[(bytes.Length - header.Remaining)..];
-            if (length > (ulong)frame.Length * 1_000 || length > int.MaxValue)
+            if (declared > (ulong)frame.Length * 1_000 || declared > int.MaxValue)
             {
                 return null;
             }
 
-            body = new byte[(int)length];
+            length = (int)declared;
+            body = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
             ZstdDecompressor decoder = ZstdDecoders.Rent();
             try
             {
-                if (decoder.Decompress(frame, body, out _, out int produced) != System.Buffers.OperationStatus.Done || produced != body.Length)
+                if (decoder.Decompress(frame, body.AsSpan(0, length), out _, out int produced) != System.Buffers.OperationStatus.Done || produced != length)
                 {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(body);
                     return null;
                 }
             }
@@ -637,10 +652,17 @@ internal sealed class VariantDirectory
             return null;
         }
 
-        return BodyFrom(body);
+        try
+        {
+            return BodyFrom(body.AsSpan(0, length), wanted);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(body);
+        }
     }
 
-    private static VariantDirectory? BodyFrom(ReadOnlySpan<byte> bytes)
+    private static VariantDirectory? BodyFrom(ReadOnlySpan<byte> bytes, IReadOnlyList<byte[][]>? wanted)
     {
         try
         {
@@ -654,8 +676,9 @@ internal sealed class VariantDirectory
                 return null;
             }
 
-            PathEntry[] entries = new PathEntry[(int)count];
-            for (int i = 0; i < entries.Length; i++)
+            List<PathEntry> entries = new List<PathEntry>(wanted is null ? (int)count : 4);
+            Span<int> stack = stackalloc int[32];
+            for (ulong i = 0; i < count; i++)
             {
                 ulong depth = reader.ReadVarint();
                 if (depth > (ulong)bytes.Length)
@@ -663,10 +686,14 @@ internal sealed class VariantDirectory
                     return null;
                 }
 
-                string[] path = new string[(int)depth];
-                for (int k = 0; k < path.Length; k++)
+                // Where each key lies, a start and a length, compared to the wanted paths before any is made a string.
+                Span<int> keys = depth <= 16 ? stack[..(2 * (int)depth)] : new int[2 * (int)depth];
+                for (int k = 0; k < (int)depth; k++)
                 {
-                    path[k] = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    ReadOnlySpan<byte> key = reader.ReadLengthDelimited();
+                    int end = bytes.Length - reader.Remaining;
+                    keys[2 * k] = end - key.Length;
+                    keys[(2 * k) + 1] = key.Length;
                 }
 
                 ulong @class = reader.ReadVarint();
@@ -675,15 +702,28 @@ internal sealed class VariantDirectory
                 long low = Unzigzag(reader.ReadVarint());
                 long high = Unzigzag(reader.ReadVarint());
                 ulong flags = reader.ReadVarint();
-                byte[]? min = (flags & 2) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
-                byte[]? max = (flags & 4) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
-                byte[]? held = (flags & 8) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
-                if (@class > (ulong)PathClass.Other || place > (ulong)PathPlace.Value || (held is not null && held.Length != (slices + 7) / 8))
+                ReadOnlySpan<byte> min = (flags & 2) != 0 ? reader.ReadLengthDelimited() : default;
+                ReadOnlySpan<byte> max = (flags & 4) != 0 ? reader.ReadLengthDelimited() : default;
+                ReadOnlySpan<byte> held = (flags & 8) != 0 ? reader.ReadLengthDelimited() : default;
+                if (@class > (ulong)PathClass.Other || place > (ulong)PathPlace.Value || ((flags & 8) != 0 && held.Length != (slices + 7) / 8))
                 {
                     return null;
                 }
 
-                entries[i] = new PathEntry(path, (PathClass)@class, values, (PathPlace)place, low, high, (flags & 1) != 0, min, max, held);
+                if (wanted is not null && !Wanted(bytes, keys, wanted))
+                {
+                    continue;
+                }
+
+                string[] path = new string[(int)depth];
+                for (int k = 0; k < path.Length; k++)
+                {
+                    path[k] = Encoding.UTF8.GetString(bytes.Slice(keys[2 * k], keys[(2 * k) + 1]));
+                }
+
+                entries.Add(new PathEntry(
+                    path, (PathClass)@class, values, (PathPlace)place, low, high, (flags & 1) != 0,
+                    (flags & 2) != 0 ? min.ToArray() : null, (flags & 4) != 0 ? max.ToArray() : null, (flags & 8) != 0 ? held.ToArray() : null));
             }
 
             return reader.End ? new VariantDirectory(rows, entries, slices, partial) : null;
@@ -694,12 +734,47 @@ internal sealed class VariantDirectory
         }
     }
 
+    /// <summary>Whether the keys at <paramref name="keys"/>' places in <paramref name="bytes"/> are those of a path of <paramref name="wanted"/>.</summary>
+    private static bool Wanted(ReadOnlySpan<byte> bytes, ReadOnlySpan<int> keys, IReadOnlyList<byte[][]> wanted)
+    {
+        int depth = keys.Length / 2;
+        foreach (byte[][] path in wanted)
+        {
+            if (path.Length != depth)
+            {
+                continue;
+            }
+
+            int k = 0;
+            while (k < depth && bytes.Slice(keys[2 * k], keys[(2 * k) + 1]).SequenceEqual(path[k]))
+            {
+                k++;
+            }
+
+            if (k == depth)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// The directory of the variant column at top-level field <paramref name="field"/> of
     /// <paramref name="file"/>; null when the file carries none, or one that does not decode.
     /// </summary>
+    internal static ValueTask<(VariantDirectory? Directory, int Segments, long Bytes)> ReadAsync(
+        VortexFile file, int field, CancellationToken cancellationToken) =>
+        ReadAsync(file, field, wanted: null, cancellationToken);
+
+    /// <summary>
+    /// The directory of the variant column at top-level field <paramref name="field"/> of <paramref name="file"/>, its
+    /// entries those of <paramref name="wanted"/>'s paths alone (<see cref="From(ReadOnlySpan{byte}, IReadOnlyList{byte[][]})"/>),
+    /// or every entry for null; null when the file carries none, or one that does not decode.
+    /// </summary>
     internal static async ValueTask<(VariantDirectory? Directory, int Segments, long Bytes)> ReadAsync(
-        VortexFile file, int field, CancellationToken cancellationToken)
+        VortexFile file, int field, IReadOnlyList<byte[][]>? wanted, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);
         IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
@@ -720,7 +795,7 @@ internal sealed class VariantDirectory
             int slot = requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
             await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             ReadOnlySpan<byte> bytes = requests.GetBuffer(slot).Span;
-            return (region.Holds(bytes) ? From(bytes) : null, 1, region.Length);
+            return (region.Holds(bytes) ? From(bytes, wanted) : null, 1, region.Length);
         }
 
         return (null, 0, 0);
