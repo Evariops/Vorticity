@@ -652,9 +652,16 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         VortexSessionOptions options = _query.Host.Source.Session.Options;
         DType dtype = VortexTypes.ToDType(_query.Schema, new DTypeArena());
         _store = (StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
-        _arena = new CanonicalArena(64, options.EnginePool);
+        _arena = new CanonicalArena(ResultNodes(dtype.FieldCount), options.EnginePool);
         return _store;
     }
+
+    /// <summary>
+    /// The nodes an arena of a result's batches starts with room for: its struct and twice its columns, a column's and
+    /// its validity's or its views'. A record is a hundred bytes or so, and sixty-four of them were a sixth of what a
+    /// warm group by answered from the tables allocated; a result of more columns grows its arena once.
+    /// </summary>
+    internal static int ResultNodes(int columns) => Math.Max(4, 1 + (2 * columns));
 
     private void Release()
     {
@@ -1063,7 +1070,7 @@ internal static class GroupSelection
 
                 VortexSessionOptions options = query.Session.Options;
                 store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-                arena = new CanonicalArena(64, options.EnginePool);
+                arena = new CanonicalArena(GroupBatches.ResultNodes(built.Count), options.EnginePool);
                 for (int c = 0; c < built.Count; c++)
                 {
                     built[c].Append(outcome, store.Children[c], all);
@@ -1162,7 +1169,7 @@ internal static class GroupSelection
 
             VortexSessionOptions options = query.Session.Options;
             _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-            _arena = new CanonicalArena(64, options.EnginePool);
+            _arena = new CanonicalArena(GroupBatches.ResultNodes(fields.Length), options.EnginePool);
             _evaluator = new FilterEvaluator(filter.Predicate);
         }
 
