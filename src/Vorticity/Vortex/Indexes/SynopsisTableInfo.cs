@@ -478,6 +478,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
         IO.SegmentRequestSet requests = context.Segments;
         bool missed = false;
+        bool kept = false;
         try
         {
             if (Add(requests, wanted) is false)
@@ -504,6 +505,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             requests.Complete();
             SynopsisTableSet set = Decoded(context, wanted, requests, Contexts, reads);
             set.Types = contents.TableRowTypes.Arena;
+            kept = true;
             return set;
         }
         catch
@@ -513,7 +515,11 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         }
         finally
         {
-            requests.Release();
+            if (!kept)
+            {
+                requests.Release();
+            }
+
             if (missed)
             {
                 Contexts.Return(context);
@@ -601,9 +607,10 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         IO.ISegmentReader source, ScanContext context, Wanted[] wanted, CancellationToken cancellationToken, ScanContexts? pool = null,
         ISynopsisReads? reads = null)
     {
-        // The context's set, which a context given back holds empty: the rows are copied out of the bytes read, which
-        // go back once every chunk is decoded.
+        // The context's set, which a context given back holds empty: the rows lie in the bytes read, which the set of
+        // tables keeps and lets go with them.
         IO.SegmentRequestSet requests = context.Segments;
+        bool kept = false;
         try
         {
             if (!Add(requests, wanted))
@@ -612,7 +619,9 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             }
 
             await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            return Decoded(context, wanted, requests, pool, reads);
+            SynopsisTableSet set = Decoded(context, wanted, requests, pool, reads);
+            kept = true;
+            return set;
         }
         catch
         {
@@ -621,7 +630,10 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         }
         finally
         {
-            requests.Release();
+            if (!kept)
+            {
+                requests.Release();
+            }
         }
     }
 
@@ -648,7 +660,8 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             Layouts.FieldMask fields = reads?.Fields(table) ?? Layouts.FieldMask.All;
             try
             {
-                // The rows copied into the arena: the bytes read go back with the requests.
+                // The rows decoded where they lie, in the bytes read, which the set keeps: a copy of them into the arena
+                // was a tenth of a question that folds a million rows of runs.
                 context.Decode.LoadBlob(bytes);
                 ArrayNode root = context.Nodes.Root;
                 if (!fields.IsAll)
@@ -659,7 +672,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
 
                 int node = context.Decode.DecodeRoot(in root, row, chunk.Rows);
                 bool narrowed = !fields.IsAll && context.FieldsHonoured;
-                tables[read++] = new ReadTable(table, chunk, context.Canonical.CopyFrom(context.Canonical, node)) { Fields = narrowed ? fields : Layouts.FieldMask.All };
+                tables[read++] = new ReadTable(table, chunk, node) { Fields = narrowed ? fields : Layouts.FieldMask.All };
             }
             catch (VortexFormatException)
             {
@@ -732,7 +745,7 @@ internal sealed class SynopsisTableSet : IDisposable
     /// <summary>The arena of the rows' dtypes, where a struct over their columns is built; null when the reader does not say.</summary>
     internal DTypeArena? Types { get; set; }
 
-    /// <summary>Lets the rows go, once: a context given back twice would be lent to two readers.</summary>
+    /// <summary>Lets the rows go, once, and the bytes they lie in: a context given back twice would be lent to two readers.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -740,6 +753,7 @@ internal sealed class SynopsisTableSet : IDisposable
             return;
         }
 
+        _context.Segments.Release();
         if (_pool is { } pool)
         {
             pool.Return(_context);
