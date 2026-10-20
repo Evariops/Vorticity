@@ -2272,15 +2272,23 @@ public sealed class VortexDataset : IAsyncDisposable
             Session);
 
     /// <summary>
+    /// The chunks <see cref="ReadSynopsisAsync(ObjectEntry, Indexes.SynopsisContents, Indexes.ISynopsisReads?, CancellationToken)"/>
+    /// reads, when the session's synopsis cache holds every one of a plain object: read from the disk on the spot, with no
+    /// reader opened; null when one is not there, or the object is sealed.
+    /// </summary>
+    internal Indexes.SynopsisTableSet? ReadSynopsisCached(ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted) =>
+        Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
+            ? Indexes.SynopsisTableInfo.ReadCached(cache, entry.Uid, contents, wanted, null)
+            : null;
+
+    /// <summary>
     /// As <see cref="ReadSynopsisAsync(ObjectEntry, Indexes.ISynopsisReads?, CancellationToken)"/>, with the entry's
     /// table of contents already read: <paramref name="wanted"/> is asked of its tables, and of the fields of their rows.
     /// </summary>
     internal async ValueTask<Indexes.SynopsisTableSet> ReadSynopsisAsync(
         ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted, CancellationToken cancellationToken)
     {
-        // Warm, the session's cache holds every chunk wanted of a plain object: read from the disk, no reader opened.
-        if (Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
-            && Indexes.SynopsisTableInfo.ReadCached(cache, entry.Uid, contents, wanted, null) is { } cached)
+        if (ReadSynopsisCached(entry, contents, wanted) is { } cached)
         {
             return cached;
         }

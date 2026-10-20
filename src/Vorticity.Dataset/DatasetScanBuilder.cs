@@ -639,9 +639,9 @@ internal sealed class DatasetScanBuilder
                 while (ahead.Count < width && next < count)
                 {
                     PositionedObject held = objects[next++];
-                    ahead.Enqueue(new Turn(held, Answer(held, request) is ({ } answer, { } contents, string instant)
-                        ? AnswerObjectAsync(held, answer, contents, instant, stopped.Token)
-                        : null));
+                    ahead.Enqueue(Answer(held, request) is not ({ } answer, { } contents, string instant) ? new Turn(held)
+                        : TryAnswerNow(held, answer, contents, instant, out AnsweredObject? done) ? new Turn(held, done)
+                        : new Turn(held, AnswerObjectAsync(held, answer, contents, instant, stopped.Token)));
                 }
 
                 if (!ahead.TryDequeue(out Turn? turn))
@@ -649,14 +649,36 @@ internal sealed class DatasetScanBuilder
                     break;
                 }
 
-                // The answer was started by this walk, a few turns before.
+                // The answer was done, or started by this walk a few turns before. Its batches go as the dataset's,
+                // each counted, then the rows its edges keep; the answer given back once the last is read, or the
+                // consumer stops.
 #pragma warning disable VSTHRD003
-                if (turn.Answer is not null && await turn.Answer.ConfigureAwait(false) is { } answered)
+                if (turn.Answers && (turn.Done ?? await turn.Answer!.ConfigureAwait(false)) is { } answered)
 #pragma warning restore VSTHRD003
                 {
-                    foreach (RecordBatch batch in Delivered(turn.Held, answered))
+                    try
                     {
-                        yield return batch;
+                        for (int b = 0; b < answered.States.Count; b++)
+                        {
+                            RecordBatch batch = answered.States[b];
+                            _counters?.AddSynopsisRows(batch.SelectedRows);
+                            yield return batch;
+                        }
+
+                        for (int e = 0; e < answered.Edges.Count; e++)
+                        {
+                            RecordBatch slice = answered.Edges[e];
+                            using RecordBatch rows = slice.Rebased(turn.Held.FirstRow + slice.StartRow);
+                            _counters?.AddEdgeRows(rows.SelectedRows);
+                            if (rows.SelectedRows > 0)
+                            {
+                                yield return rows;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        answered.Dispose();
                     }
 
                     continue;
@@ -704,7 +726,7 @@ internal sealed class DatasetScanBuilder
     {
         foreach (Turn turn in ahead)
         {
-            if (turn.Answer is null)
+            if (!turn.Answers)
             {
                 return turn;
             }
@@ -732,17 +754,43 @@ internal sealed class DatasetScanBuilder
     /// An object of a walk that takes states, in the queue of those read ahead: the answer of its synopsis, started
     /// when it has one, and its rows, once opened ahead.
     /// </summary>
-    private sealed class Turn(PositionedObject held, Task<AnsweredObject?>? answer)
+    private sealed class Turn
     {
-        internal PositionedObject Held { get; } = held;
+        /// <summary>An object read as rows.</summary>
+        internal Turn(PositionedObject held) => Held = held;
 
-        internal Task<AnsweredObject?>? Answer { get; } = answer;
+        /// <summary>An object its synopsis answers, its answer started.</summary>
+        internal Turn(PositionedObject held, Task<AnsweredObject?> answer)
+        {
+            Held = held;
+            Answer = answer;
+            Answers = true;
+        }
+
+        /// <summary>An object its synopsis answered on the spot: <paramref name="done"/>, or null when its rows are read after all.</summary>
+        internal Turn(PositionedObject held, AnsweredObject? done)
+        {
+            Held = held;
+            Done = done;
+            Answers = true;
+        }
+
+        internal PositionedObject Held { get; }
+
+        /// <summary>Whether its synopsis answers it: an answer done or started, which may still find its rows read.</summary>
+        internal bool Answers { get; }
+
+        /// <summary>The answer done on the spot, the walk's to deliver or to let go.</summary>
+        internal AnsweredObject? Done { get; }
+
+        internal Task<AnsweredObject?>? Answer { get; }
 
         internal Task<ObjectBatches>? Rows { get; set; }
 
         /// <summary>Lets go what was read ahead and never delivered: the answer's states, the rows' lease.</summary>
         internal async ValueTask ReleaseAsync()
         {
+            Done?.Dispose();
             if (Answer is { } answer)
             {
                 try
@@ -874,6 +922,64 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
+    /// What an object's synopsis answers when its tables alone answer it, no row read beside them, and the session's
+    /// synopsis cache holds every chunk of them: read, decoded and folded on the spot, with no task, null when a row
+    /// cannot come out of a table exactly; false when the answer needs a read of its own, which
+    /// <see cref="AnswerObjectAsync"/> makes. A walk of a warm question over many objects answers each so, where a task an
+    /// object was the most it allocated for one.
+    /// </summary>
+    private bool TryAnswerNow(PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, out AnsweredObject? answered)
+    {
+        answered = null;
+        if (held.Entry.HasDeletions || answer.Edges.Count > 0 || answer.Excluded.Count > 0 || answer.Parts.Count == 0)
+        {
+            return false;
+        }
+
+        answer.Project(contents);
+        if (_dataset.ReadSynopsisCached(held.Entry, contents, answer) is not { } tables)
+        {
+            return false;
+        }
+
+        DType schema = contents.SchemaType;
+        List<RecordBatch> states = new List<RecordBatch>(tables.Tables.Count);
+        bool exact = true;
+        try
+        {
+            for (int p = 0; p < answer.Parts.Count && exact; p++)
+            {
+                exact = answer.TryBatches(tables, answer.Parts[p], contents, instant, held.FirstRow, states, null, schema, contents.Slices);
+            }
+        }
+        catch
+        {
+            LetGo(states, tables);
+            throw;
+        }
+
+        if (!exact)
+        {
+            LetGo(states, tables);
+            return true;
+        }
+
+        answered = new AnsweredObject(states, tables, NoRows);
+        return true;
+    }
+
+    /// <summary>The batches and tables of an answer given back.</summary>
+    private static void LetGo(List<RecordBatch> states, SynopsisTableSet tables)
+    {
+        foreach (RecordBatch batch in states)
+        {
+            batch.Dispose();
+        }
+
+        tables.Dispose();
+    }
+
+    /// <summary>
     /// Reads what an object's synopsis answers, with no open of it, as <see cref="AnsweredAsync"/> delivers it;
     /// null, with nothing held, when a row cannot come out of a table exactly or an identifier's index cannot
     /// find the rows left out.
@@ -938,7 +1044,11 @@ internal sealed class DatasetScanBuilder
         }
 
         // The rows taken out are spent once the states are corrected.
-        await LetGoAsync([], null, marked, excluded).ConfigureAwait(false);
+        if (marked is not null || excluded is not null)
+        {
+            await LetGoAsync(NoRows, null, marked, excluded).ConfigureAwait(false);
+        }
+
         if (!exact)
         {
             await LetGoAsync(states, tables, edges).ConfigureAwait(false);
@@ -947,7 +1057,7 @@ internal sealed class DatasetScanBuilder
 
         try
         {
-            return new AnsweredObject(states, tables, edges is null ? [] : await edges.ConfigureAwait(false));
+            return new AnsweredObject(states, tables, edges is null ? NoRows : await edges.ConfigureAwait(false));
         }
         catch
         {
@@ -958,6 +1068,9 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>What <see cref="ExcludedAsync"/> answers when an identifier's index cannot find the rows left out.</summary>
     private static readonly List<RecordBatch> Unfound = [];
+
+    /// <summary>No batch: the edges of an answer that cuts none, the rows of none taken out. Never added to.</summary>
+    private static readonly List<RecordBatch> NoRows = [];
 
     /// <summary>
     /// The rows the filter leaves out by an identifier's value, found by the identifier's index with no open
@@ -1037,7 +1150,11 @@ internal sealed class DatasetScanBuilder
             batch.Dispose();
         }
 
-        states.Clear();
+        if (!ReferenceEquals(states, NoRows))
+        {
+            states.Clear();
+        }
+
         tables?.Dispose();
         foreach (Task<List<RecordBatch>>? read in reads)
         {
