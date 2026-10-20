@@ -380,7 +380,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             object? known = Volatile.Read(ref _contents);
             if (known is null)
             {
-                known = (object?)Indexes.SynopsisContents.From(Synopsis.Span) ?? NoContents;
+                known = (object?)Indexes.SynopsisContents.From(Synopsis) ?? NoContents;
                 known = Interlocked.CompareExchange(ref _contents, known, null) ?? known;
             }
 
