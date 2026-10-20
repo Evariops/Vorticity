@@ -48,6 +48,18 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         ReadOnlySpan<TValue> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
+
+        // Every row of the range, none of them null: the group's values a block at a time.
+        if (input.Selection.IsEmpty && valid.IsEmpty)
+        {
+            if (end > start)
+            {
+                _bytes += Sketch(group).AddAll(values[start..end]);
+            }
+
+            return;
+        }
+
         Selection rows = start == 0 && end == input.Rows && input.Selection.IsEmpty
             ? new Selection(input.Rows)
             : RowMasks.Window(input.Selection, input.Rows, start, end, ref _clip);

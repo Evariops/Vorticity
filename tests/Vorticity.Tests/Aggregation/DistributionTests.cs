@@ -90,6 +90,67 @@ public sealed partial class DistributionTests
     }
 
     /// <summary>
+    /// A block of values counted at once leaves the sketch a value at a time leaves, and grows it by as many bytes: blocks
+    /// of every length, from a sketch empty, sparse or dense, of values in its window and past it either way, zeros,
+    /// negatives, NaNs and infinities among them, as doubles and as integers.
+    /// </summary>
+    [Fact]
+    public void ABlockCountsAsItsValuesOneAtATime()
+    {
+        Random random = new Random(11);
+        for (int trial = 0; trial < 300; trial++)
+        {
+            QuantileSketch alone = new QuantileSketch(1 + random.Next(10));
+            QuantileSketch blocks = new QuantileSketch(alone.Bits);
+            long grownAlone = 0;
+            long grownBlocks = 0;
+            int spread = random.Next(4);
+            for (int block = random.Next(1, 12); block > 0; block--)
+            {
+                double[] values = new double[random.Next(0, 400)];
+                for (int i = 0; i < values.Length; i++)
+                {
+                    values[i] = random.Next(40) switch
+                    {
+                        0 => 0,
+                        1 => double.NaN,
+                        2 => double.PositiveInfinity,
+                        3 => double.NegativeInfinity,
+                        4 => -Math.Exp(random.NextDouble() * 10),
+                        5 => Math.Exp((random.NextDouble() * 80) - 40),
+                        _ => Math.Exp((random.NextDouble() * (1 + (spread * 6))) + 3),
+                    };
+                }
+
+                foreach (double value in values)
+                {
+                    grownAlone += alone.Add(value);
+                }
+
+                grownBlocks += blocks.AddAll<double>(values);
+                Assert.Equal(alone.Buckets(), blocks.Buckets());
+                Assert.Equal(alone.Count, blocks.Count);
+                Assert.Equal(alone.Zeros, blocks.Zeros);
+                Assert.Equal(alone.Bytes, blocks.Bytes);
+                Assert.Equal(grownAlone, grownBlocks);
+            }
+
+            QuantileSketch longsAlone = new QuantileSketch(alone.Bits);
+            QuantileSketch longs = new QuantileSketch(alone.Bits);
+            long[] integers = [.. Enumerable.Range(0, random.Next(0, 3_000)).Select(_ => random.Next(8) == 0 ? -random.NextInt64(1_000) : random.NextInt64(1_000_000_000))];
+            foreach (long value in integers)
+            {
+                longsAlone.Add(value);
+            }
+
+            longs.AddAll<long>(integers);
+            Assert.Equal(longsAlone.Buckets(), longs.Buckets());
+            Assert.Equal(longsAlone.Count, longs.Count);
+            Assert.Equal(longsAlone.Bytes, longs.Bytes);
+        }
+    }
+
+    /// <summary>
     /// The quantiles of a group by over a file are the bits of a sketch fed the group's values one at a
     /// time, at every degree; a distribution over the whole scan counts every row.
     /// </summary>

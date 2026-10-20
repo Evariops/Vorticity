@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 
 namespace Vorticity.Aggregating;
 
@@ -102,6 +103,55 @@ internal sealed class QuantileSketch
 
         Zeros += count;
         return 0;
+    }
+
+    /// <summary>
+    /// Counts each of <paramref name="values"/> once, as <see cref="Add(double)"/> one at a time would, and returns the
+    /// bytes the sketch grew by.
+    /// </summary>
+    /// <remarks>
+    /// A positive value whose bucket the positive store's dense window holds, the run of a distribution's values once its
+    /// buckets are known, is counted in a loop of its own, the window, its first index and the count held in locals:
+    /// a value at a time, <see cref="Add(double)"/> wrote the sketch's count and read the store's fields back for every
+    /// one, about eight cycles a value and half of a lane's over a percentile of 540 million durations. Any other value,
+    /// a zero, a negative, a NaN, a bucket past the window or a store still sparse, goes through <see cref="Add(double)"/>,
+    /// and the loop goes on with the window that left.
+    /// </remarks>
+    internal long AddAll<TValue>(ReadOnlySpan<TValue> values)
+        where TValue : unmanaged, INumberBase<TValue>
+    {
+        long grown = 0;
+        int i = 0;
+        while (i < values.Length)
+        {
+            if (_positive.Dense(out long[] window, out int low))
+            {
+                int start = i;
+                int shift = _shift;
+                for (; i < values.Length; i++)
+                {
+                    double value = double.CreateTruncating(values[i]);
+                    int at = (int)(BitConverter.DoubleToInt64Bits(value) >> shift) - low;
+                    if (!(value > 0) || (uint)at >= (uint)window.Length)
+                    {
+                        break;
+                    }
+
+                    window[at]++;
+                }
+
+                Count += i - start;
+                if (i == values.Length)
+                {
+                    break;
+                }
+            }
+
+            grown += Add(double.CreateTruncating(values[i]));
+            i++;
+        }
+
+        return grown;
     }
 
     /// <summary>Adds <paramref name="other"/>'s counts, a sketch of the same grid.</summary>
@@ -236,6 +286,14 @@ internal sealed class QuantileSketch
 
         internal readonly long Bytes =>
             _window is { } window ? (long)window.Length * sizeof(long) : ((long)(_keys?.Length ?? 0) * sizeof(int)) + ((long)(_counts?.Length ?? 0) * sizeof(long));
+
+        /// <summary>Whether the store is a dense window, and its counts and the index of its first, which a run of adds reads in place.</summary>
+        internal readonly bool Dense(out long[] window, out int low)
+        {
+            window = _window!;
+            low = _low;
+            return window is not null;
+        }
 
         /// <summary>Adds a bucket's count, and returns the bytes the store grew by: zero unless an array grew.</summary>
         internal long Add(int index, long count)
