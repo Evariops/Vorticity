@@ -79,6 +79,9 @@ internal static class PathsBench
 
         internal bool Verify { get; init; }
 
+        /// <summary>Whether each question's plan is printed once warm: what each object reads, a table, its edges or its rows, and why.</summary>
+        internal bool Explain { get; init; }
+
         internal bool Design { get; init; }
 
         internal int ParallelHours { get; init; } = 4;
@@ -116,6 +119,11 @@ internal static class PathsBench
             $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows); {label}");
         Console.WriteLine(
             $"{"question",-62} {"path",-8} {"",-4} {"dop",3} {"ms",9} {"cpu ms",9} {"alloc MB",9} {"req",6} {"steps",6} {"MB",8} {"states",9} {"rows",11} {"groups",7}");
+
+        if (settings.Explain)
+        {
+            await TablesAsync(requests);
+        }
 
         DateTimeOffset end = QuestionBench.Start.AddHours(settings.Hours);
         DateTimeOffset lastHour = end.AddHours(-1);
@@ -203,18 +211,44 @@ internal static class PathsBench
         return failed ? 1 : 0;
     }
 
+    /// <summary>The synopsis tables each object of the store holds, as its entry's table of contents names them.</summary>
+    private static async Task TablesAsync(Built built)
+    {
+        await using FileObjectStore files = new FileObjectStore(built.Directory);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(files, new DatasetOptions());
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
+        {
+            if (held.Entry.Contents is not { } contents)
+            {
+                Console.WriteLine($"    tables {held.Entry.Key}: none, {held.Entry.Rows:N0} rows");
+                continue;
+            }
+
+            Vorticity.Types.DType schema = contents.SchemaType;
+            foreach ((Vorticity.Indexes.SynopsisTableInfo table, IReadOnlyList<Vorticity.Indexes.TableChunk> chunks) in contents.Tables)
+            {
+                string keys = string.Join(", ", table.Keys.Select(field => Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths)));
+                string measures = string.Join(", ", table.Measures.Select(field => Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths)));
+                Console.WriteLine($"    tables {held.Entry.Key}: {table.Kind} by {table.Bucket} on ({keys}) of [{measures}], {table.Rows:N0} rows in {chunks.Count} chunks");
+            }
+        }
+    }
+
     /// <summary>A question of the catalogue: its dataset, its name, and how it is asked of a dataset under scan options.</summary>
     private sealed record Question(string Set, string Name, bool Aggregates, Func<VortexDataset, ScanOptions, Asking> Ask);
 
-    /// <summary>A question asked: its batches, and what the scan did once they are read.</summary>
-    private sealed record Asking(IAsyncEnumerator<RecordBatch> Batches, Func<ScanMetrics> Metrics);
+    /// <summary>A question asked: its batches, and what the scan did once they are read; its plan, for an aggregation.</summary>
+    private sealed record Asking(IAsyncEnumerator<RecordBatch> Batches, Func<ScanMetrics> Metrics)
+    {
+        internal Func<ValueTask<ScanPlan>>? Explain { get; init; }
+    }
 
     private static Question Asked<TRecord>(string set, string name, Func<Scan<TRecord>, Aggregation> ask, bool align = false)
         where TRecord : IVortexRecord<TRecord> =>
         new Question(set, name, true, (dataset, options) =>
         {
             Aggregation aggregation = ask(dataset.Scan<TRecord>().With(options with { AlignWindow = align }));
-            return new Asking(aggregation.Query.Batches(default), () => aggregation.Metrics);
+            return new Asking(aggregation.Query.Batches(default), () => aggregation.Metrics) { Explain = () => aggregation.ExplainAsync() };
         });
 
     private static Question Rows<TRecord>(string set, string name, Func<Scan<TRecord>, Scan<TRecord>> ask)
@@ -277,6 +311,16 @@ internal static class PathsBench
             }
 
             warm.Sort((a, b) => a.Milliseconds.CompareTo(b.Milliseconds));
+
+            // --explain: what each object reads, once warm.
+            if (settings.Explain && question.Ask(dataset, options) is { Explain: { } explain } asked)
+            {
+                await asked.Batches.DisposeAsync();
+                foreach (StatesStep step in (await explain()).States)
+                {
+                    Console.WriteLine($"    plan {step.Object}: {step.Read} {step.Detail} x{step.Count}");
+                }
+            }
 
             // --loop: the warm ask again and again for as long, for a profiler, and its mean.
             if (settings.LoopSeconds > 0)

@@ -226,6 +226,7 @@ if (Text(args, "--micro") == "paths")
         Rebuild = args.Contains("--rebuild"),
         BuildOnly = args.Contains("--build-only"),
         Verify = args.Contains("--verify"),
+        Explain = args.Contains("--explain"),
         Tsv = Text(args, "--tsv"),
         Label = Text(args, "--label"),
         TraceReads = Text(args, "--trace-reads"),
