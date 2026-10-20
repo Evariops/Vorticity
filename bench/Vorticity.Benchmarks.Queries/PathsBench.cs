@@ -102,6 +102,9 @@ internal static class PathsBench
         /// <summary>The reads each session keeps in flight at most (<see cref="VortexSessionOptions.MaxConcurrentReads"/>); zero for the session's default.</summary>
         internal int MaxReads { get; init; }
 
+        /// <summary>Whether the store keeps each object it reads open (<see cref="HeldFileObjectStore"/>) rather than open and close its file at every read.</summary>
+        internal bool KeepHandles { get; init; }
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }
@@ -334,7 +337,7 @@ internal static class PathsBench
     {
         ScanOptions options = new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = degree };
         await using FileObjectStore files = new FileObjectStore(built.Directory);
-        LatencyObjectStore remote = new LatencyObjectStore(files);
+        LatencyObjectStore remote = new LatencyObjectStore(settings.KeepHandles ? new HeldFileObjectStore(files) : files);
         await using CountingObjectStore store = new CountingObjectStore(remote);
         {
             await using VortexSession session = VortexSession.Create(o =>

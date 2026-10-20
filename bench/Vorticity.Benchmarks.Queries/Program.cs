@@ -240,6 +240,7 @@ if (Text(args, "--micro") == "paths")
         LoopColdSeconds = Option(args, "--loop-cold", 0),
         NoDigest = args.Contains("--no-digest"),
         MaxReads = Option(args, "--max-reads", 0),
+        KeepHandles = args.Contains("--keep-handles"),
     });
 }
 
