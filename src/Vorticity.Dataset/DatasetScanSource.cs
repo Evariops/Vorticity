@@ -163,9 +163,6 @@ internal sealed class DatasetScanSource : ScanSource
         return _version.Bounds(key.Path);
     }
 
-    /// <summary>The rows a range takes at least: below, opening its scan costs more than the rows it reads.</summary>
-    private const long PieceRows = 8_192;
-
     /// <summary>
     /// The objects the summaries keep, each a range of the dataset's rows, an object of two shares of
     /// the rows or more cut between its chunks into ranges of a share or more: about four a lane, so
@@ -205,7 +202,7 @@ internal sealed class DatasetScanSource : ScanSource
 
         // The objects to cut are opened side by side to read where their chunks end; the scan finds
         // them open after. Each cut gives its object back, whatever another one's open did.
-        long share = System.Math.Max(PieceRows, total / (degree * 4L));
+        long share = System.Math.Max(_dataset.Options.LeastPieceRows, total / (degree * 4L));
         Task<RowRange[]>?[] cuts = new Task<RowRange[]>?[objects.Count];
         List<Task> cutting = [];
         for (int o = 0; o < objects.Count; o++)

@@ -158,6 +158,15 @@ public sealed record DatasetOptions
     internal long MarkedObjectBytes { get; init; } = 1L << 20;
 
     /// <summary>
+    /// The rows a lane's range of an object takes at least, when a pass on several lanes cuts the object: 2^20 by
+    /// default. Each range's scan reads the structures its filter asks of the object, its path directories and its
+    /// keys' statistics among them, whatever its rows: an hour of 36 000 log records cut into four ranges of about
+    /// 9 000, at 16 lanes, read 3.18 MB where the whole object read 1.06 MB, and allocated 17.9 MB where it
+    /// allocated 4.7 MB, no faster. A test cuts its small objects with less.
+    /// </summary>
+    internal long LeastPieceRows { get; init; } = 1L << 20;
+
+    /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
     /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
     /// </summary>
