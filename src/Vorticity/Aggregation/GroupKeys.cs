@@ -467,6 +467,16 @@ internal abstract class GroupKeys
         return _codeGroups.AsSpan(0, entries);
     }
 
+    /// <summary>
+    /// The table of <see cref="CodeGroups"/> back to the process's shelf, for a release of the keys' arrays: kept by the
+    /// keys, a query that grouped a dictionary's codes took one new, with every lane.
+    /// </summary>
+    private protected void ReleaseCodes()
+    {
+        Scratch.Return(ref _codeGroups);
+        _codeOrigin = default;
+    }
+
     private protected static int[] Identity(int count)
     {
         int[] order = new int[count];
@@ -1864,6 +1874,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         Scratch.Return(ref _homes);
         Scratch.Return(ref _left);
         Scratch.Return(ref _values);
+        ReleaseCodes();
 
         // The slabs of the pages of a key numbered by value, each given once, by the page that starts it.
         if (_pages is not null)
@@ -2626,6 +2637,7 @@ internal sealed class BytesKeys : GroupKeys
         _table.Release();
         _null = -1;
         Count = 0;
+        ReleaseCodes();
     }
 
     internal override int NullNumber => _null;
