@@ -65,7 +65,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
         ["synopses: count by route, a shredded path"] = new(8, 268148, 4, 5902, 65216),
         ["rows: count by service and hour"] = new(8, 392758, 4, 130512, 43520),
         ["rows: count by route, a shredded path"] = new(8, 268148, 4, 5902, 58816),
-        ["rows: the rows of one id"] = new(6, 335643, 2, 73408, 194432),
+        ["rows: the rows of one id"] = new(6, 335643, 2, 73408, 60864),
     };
 
     private readonly Fixture _fixture;
