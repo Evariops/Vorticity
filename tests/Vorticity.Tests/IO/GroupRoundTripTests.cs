@@ -138,9 +138,9 @@ public sealed partial class GroupRoundTripTests
     }
 
     // The reads a lane has in flight over a source that copies them, positional reads here, are reserved
-    // with its working memory when it is admitted: two splits a lane, each the largest of the layout.
-    // Over a mapping, a read is a view, and nothing more is reserved. Under a budget short of them, the
-    // lanes read fewer ahead and the query ends within it.
+    // with its working memory when it is admitted: its share of the pass's splits ahead, four each of four
+    // lanes, each the largest of the layout. Over a mapping, a read is a view, and nothing more is reserved.
+    // Under a budget short of them, the lanes read fewer ahead and the query ends within it.
     [Fact]
     public async Task AGroupByOverACopyingSourceReservesItsReadsInFlight()
     {
@@ -154,7 +154,8 @@ public sealed partial class GroupRoundTripTests
             {
                 long split = new FileScanSource(file).ReadAheadBytes(new ScanSpec());
                 Assert.True(split > 0);
-                Assert.Equal(mapped + (4 * Vorticity.Scanning.BatchAsyncEnumerator.ReadAheadSplits * split), copied);
+                int ahead = Math.Max(Vorticity.Scanning.BatchAsyncEnumerator.ReadAheadSplits, Vorticity.Aggregating.AggregationEngine.ReadAheadTotal / 4);
+                Assert.Equal(mapped + (4 * ahead * split), copied);
             }
 
             // One lane reads nothing ahead, whatever its source; and under a budget a split short of what

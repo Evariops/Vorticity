@@ -162,6 +162,13 @@ internal abstract class ScanSource
     internal virtual long ReadAheadBytes(ScanSpec spec) => 0;
 
     /// <summary>
+    /// Whether a read of the source is a round trip, to an object store rather than to memory or a local file: a
+    /// pass of one lane then reads its splits ahead as a wider pass's lanes do, its reads overlapping instead of
+    /// waiting one after another.
+    /// </summary>
+    internal virtual bool ReadsRoundTrips => false;
+
+    /// <summary>
     /// The ranges of rows a pass of <paramref name="degree"/> lanes reads side by side, each a range
     /// of <see cref="ScanSpec.Rows"/> the source reads alone: the objects of a dataset, or parts of a
     /// large one. Null when the source has none of its own; a file's are cut by the engine, at its
@@ -323,6 +330,9 @@ internal sealed class FileScanSource : ScanSource
     }
 
     internal override long RowBound => _file.RowCount;
+
+    /// <summary>A file read from an object store, a request a read; not one read from the local disk or memory.</summary>
+    internal override bool ReadsRoundTrips => SessionReader.Unwrap(_file.Source) is IO.ObjectStoreSource;
 
     /// <summary>The segments the largest split of the scan asks for, over a source that copies them: the layout walked once, nothing read.</summary>
     internal override long ReadAheadBytes(ScanSpec spec) =>

@@ -453,11 +453,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _cursor = plan.CreateCursor(reverse);
 
         // A scan of one lane that asks for it, an aggregation's lane, whose decode is the caller's,
-        // reads ahead over a source whose read is a round trip, as many splits as its admission granted.
-        // Over a mapping a read is a view, and there is nothing to overlap; the file the scan reads through
-        // may be the one the open read whole, which is asked of its source.
+        // reads ahead over a source whose read is a round trip, as many splits as its admission granted,
+        // and as its plan holds. Over a mapping a read is a view, and there is nothing to overlap; the file
+        // the scan reads through may be the one the open read whole, which is asked of its source.
         _extras = readAhead > 0 && window == 1 && !file.Source.ReadsInPlace
-            ? new AheadReads(readAhead)
+            ? new AheadReads(Math.Min(readAhead, Math.Max(1, plan.BoundaryCount - 1)))
             : window > 1 ? NewWindow(file, schema, plan, window) : null;
         _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : degree);
 
@@ -701,9 +701,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// a scan of one lane decodes.
     /// </summary>
     /// <remarks>
-    /// A read in flight is a <see cref="Task"/>, awaited by this step or by the dispose: a value task
-    /// kept to be awaited later is one a failure could leave unawaited. A read that fails gives up
-    /// its claims and resets its lane itself.
+    /// A read in flight is a pooled value task, awaited once, by this step or by the dispose, which
+    /// awaits every read still in flight whatever failed: none is left unawaited, and none allocates.
+    /// A read that fails gives up its claims and resets its lane itself.
     /// </remarks>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> MoveNextAheadAsync(AheadReads ahead)
@@ -714,7 +714,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return false;
         }
 
-        (Lane lane, Task read) = ahead.TakeOldest(_started);
+        (Lane lane, ValueTask read) = ahead.TakeOldest(_started);
         await read.ConfigureAwait(false);
 
         _currentLane = lane;
@@ -732,6 +732,17 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>Starts reads until <paramref name="ahead"/> has as many in flight as it reads ahead, or no split is left.</summary>
     private void FillAhead(AheadReads ahead)
     {
+        // Every lane the reads take, made at the first, so that no split read ahead makes one: a lane is made
+        // as the first's, its variant keys among what it copies, set by then.
+        if (!ahead.Made)
+        {
+            ahead.Made = true;
+            for (int slot = 0; slot < ahead.Lanes.Length; slot++)
+            {
+                ahead.Lanes[slot] ??= NextLane();
+            }
+        }
+
         while (ahead.Count < ahead.Reads.Length && !_drained)
         {
             if (!TryNextSplit(out RowRange split))
@@ -771,9 +782,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>
     /// A split's read, started ahead: its claims, waiting for a segment an earlier split is reading
     /// rather than reading it twice, then the read of what it claimed, published at once for the
-    /// splits after it.
+    /// splits after it. Pooled, as the scan's own steps are: a split read ahead allocates nothing.
     /// </summary>
-    private async Task ReadAheadAsync(Lane lane)
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask ReadAheadAsync(Lane lane)
     {
         try
         {
@@ -811,7 +823,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ReleaseCurrent();
         while (ahead.Count > 0)
         {
-            (Lane lane, Task read) = ahead.TakeOldest(_started);
+            (Lane lane, ValueTask read) = ahead.TakeOldest(_started);
             try
             {
                 await read.ConfigureAwait(false);
@@ -986,28 +998,31 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         internal AheadReads(int depth)
         {
             Lanes = new Lane?[depth + 1];
-            Reads = new Task?[depth];
+            Reads = new ValueTask[depth];
         }
 
         internal Lane?[] Lanes { get; }
 
-        internal Task?[] Reads { get; }
+        internal ValueTask[] Reads { get; }
+
+        /// <summary>Whether every lane was made.</summary>
+        internal bool Made { get; set; }
 
         /// <summary>The reads in flight.</summary>
         internal int Count { get; private set; }
 
-        internal void Add(Task read)
+        internal void Add(ValueTask read)
         {
             Reads[(_first + Count) % Reads.Length] = read;
             Count++;
         }
 
         /// <summary>The oldest read in flight and its lane, given the number of the next split to start.</summary>
-        internal (Lane Lane, Task Read) TakeOldest(long started)
+        internal (Lane Lane, ValueTask Read) TakeOldest(long started)
         {
             Lane lane = Lanes[(int)((started - Count) % Lanes.Length)]!;
-            Task read = Reads[_first]!;
-            Reads[_first] = null;
+            ValueTask read = Reads[_first];
+            Reads[_first] = default;
             _first = (_first + 1) % Reads.Length;
             Count--;
             return (lane, read);

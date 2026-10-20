@@ -35,6 +35,9 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>A dataset compacted by periods: its sealed objects carry synopses.</summary>
     internal override bool KeepsStates => _dataset.Options.Periods is not null;
 
+    /// <summary>Its objects are read from its store, a request each.</summary>
+    internal override bool ReadsRoundTrips => true;
+
     /// <summary>Whether the synopsis of an object the scan covers answers: its entry's table of contents says, with no read of the object.</summary>
     internal override async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
         KeepsStates && spec.Options.UseSynopses && !spec.MatchesNothing
