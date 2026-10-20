@@ -79,6 +79,16 @@ internal sealed class ScanCounters
 
     internal void AddEdgeRows(long rows) => Interlocked.Add(ref _edgeRows, rows);
 
+    private long _answeredParts;
+
+    /// <summary>
+    /// Parts of objects a lane answered from their synopses alone, a window that ends where the part does: the pieces a
+    /// pass on several lanes cut an answer into, which folds more rows of tables than a lane's share.
+    /// </summary>
+    public long AnsweredParts => Interlocked.Read(ref _answeredParts);
+
+    internal void AddAnsweredPart() => Interlocked.Increment(ref _answeredParts);
+
     /// <summary>The first instant of the window a scan aligned to its slices answered; null when it aligned none.</summary>
     public System.DateTimeOffset? WindowFrom { get; internal set; }
 

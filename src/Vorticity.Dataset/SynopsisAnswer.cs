@@ -235,9 +235,18 @@ internal sealed record SynopsisAnswer(
     /// measures sorted once for every object it asks (<see cref="SynopsisQuestion"/>): an object's answer builds its
     /// parts, its buckets and its edges, and no set, list or closure besides.
     /// </summary>
+    /// <param name="question">The question, analysed once for every object.</param>
+    /// <param name="contents">The object's table of contents.</param>
+    /// <param name="schema">The object's schema, which names the tables' keys and measures.</param>
+    /// <param name="held">The least and the greatest instant the object's rows hold, from its summary; null when it does not say.</param>
+    /// <param name="partition">The one value each partition column holds in the object; null without partition columns.</param>
+    /// <param name="within">
+    /// The instants of a part of the object's slices, the first's start to the last's end, inclusive, when a lane answers
+    /// that part alone (<see cref="Cuts"/>): the window ends where the part does. Null for the whole object.
+    /// </param>
     internal static SynopsisAnswer? Of(
         SynopsisQuestion question, SynopsisContents contents, DType schema, (long Least, long Greatest)? held = null,
-        IReadOnlyDictionary<string, FilterLiteral>? partition = null)
+        IReadOnlyDictionary<string, FilterLiteral>? partition = null, (long Low, long High)? within = null)
     {
         string instant = question.Instant;
         StateRequest request = question.Request;
@@ -293,6 +302,13 @@ internal sealed record SynopsisAnswer(
 
             onKeys[onKeyCount++] = c;
             joined |= c < 64 ? 1UL << c : 0;
+        }
+
+        // A part of the object's slices, which a lane answers alone: its buckets meet a window that ends where it does.
+        if (within is { } piece)
+        {
+            low = Math.Max(low, piece.Low);
+            high = Math.Min(high, piece.High);
         }
 
         // The keys: a column a table keys, or functions of one; a function of the instant, a key of time; a partition
@@ -713,6 +729,170 @@ internal sealed record SynopsisAnswer(
     }
 
     bool ISynopsisReads.Reads(SynopsisTableInfo table, TableChunk chunk) => Reads(table, chunk);
+
+    /// <summary>
+    /// The rows the answer reads: those of the tables, the states it folds, every row of each chunk that holds a bucket a
+    /// part folds, and those of the slices at its edges.
+    /// </summary>
+    internal long Weight(SynopsisContents contents)
+    {
+        long rows = 0;
+        for (int t = 0; t < contents.Tables.Count; t++)
+        {
+            (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
+            for (int c = 0; c < chunks.Count; c++)
+            {
+                rows += Reads(table, chunks[c]) ? chunks[c].Rows : 0;
+            }
+        }
+
+        for (int e = 0; e < Edges.Count; e++)
+        {
+            rows += Edges[e].Rows;
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The slices before which the object may be cut into parts of about <paramref name="share"/> rows read each, every
+    /// part answered as the object is under a window that ends where the part does: at the first slice of a chunk read,
+    /// where no bucket a part folds whole straddles the cut, so that each part reads the chunks of its own slices and the
+    /// rows of its own edges (<see cref="Weight"/>). Added to <paramref name="into"/>, ascending.
+    /// </summary>
+    /// <remarks>
+    /// An object answered whole was a lane's piece, however many rows of runs its window folds: a count per service and
+    /// per 12 hours over a window that cuts three hours folds 3.47 M rows of runs, one lane's, at sixteen as at one.
+    /// </remarks>
+    internal void Cuts(SynopsisContents contents, long share, List<int> into)
+    {
+        IReadOnlyList<TimeSlice> slices = contents.Slices.Slices;
+        TimeUnit unit = contents.Slices.Unit;
+        int parts = Math.Min(Parts.Count, 2);
+        Span<int> tables = stackalloc int[2];
+        Span<int> next = stackalloc int[2];
+        for (int p = 0; p < parts; p++)
+        {
+            tables[p] = -1;
+            for (int t = 0; t < contents.Tables.Count; t++)
+            {
+                tables[p] = ReferenceEquals(contents.Tables[t].Table, Parts[p].Table) ? t : tables[p];
+            }
+
+            if (tables[p] < 0)
+            {
+                return;
+            }
+        }
+
+        // The chunks read, the parts' in the order of their first buckets, each table's lying in that order: a cut falls
+        // before one once the chunks before it, since the last cut, hold a share, the rows of the edges before it counted.
+        int first = into.Count;
+        long states = 0;
+        int edge = 0;
+        while (true)
+        {
+            int pick = -1;
+            TableChunk chunk = default;
+            for (int p = 0; p < parts; p++)
+            {
+                IReadOnlyList<TableChunk> chunks = contents.Tables[tables[p]].Chunks;
+                while (next[p] < chunks.Count && !Parts[p].Folds(chunks[next[p]]))
+                {
+                    next[p]++;
+                }
+
+                if (next[p] < chunks.Count && (pick < 0 || chunks[next[p]].FirstBucket < chunk.FirstBucket))
+                {
+                    pick = p;
+                    chunk = chunks[next[p]];
+                }
+            }
+
+            if (pick < 0)
+            {
+                break;
+            }
+
+            for (; edge < Edges.Count && Edges[edge].Start < chunk.FirstBucket; edge++)
+            {
+                states += Edges[edge].Rows;
+            }
+
+            int slice = states >= share ? FirstSliceFrom(slices, chunk.FirstBucket) : -1;
+            if (slice > 0 && (into.Count == first || slice > into[^1]) && CutsNoBucket(slices, unit, slice))
+            {
+                into.Add(slice);
+                states = 0;
+            }
+
+            states += chunk.Rows;
+            next[pick]++;
+        }
+
+        // A last part of less than half a share joins the one before.
+        for (; edge < Edges.Count; edge++)
+        {
+            states += Edges[edge].Rows;
+        }
+
+        if (into.Count > first && states < share / 2)
+        {
+            into.RemoveAt(into.Count - 1);
+        }
+    }
+
+    /// <summary>The first of <paramref name="slices"/> that starts at or after <paramref name="instant"/>; their count for none.</summary>
+    private static int FirstSliceFrom(IReadOnlyList<TimeSlice> slices, long instant)
+    {
+        int low = 0;
+        int high = slices.Count;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            if (slices[middle].Start < instant)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return low < slices.Count ? low : -1;
+    }
+
+    /// <summary>Whether a cut before slice <paramref name="slice"/> leaves whole every bucket a part folds whole: an hour it starts, or one no part folds.</summary>
+    private bool CutsNoBucket(IReadOnlyList<TimeSlice> slices, TimeUnit unit, int slice)
+    {
+        for (int p = 0; p < Parts.Count; p++)
+        {
+            SynopsisPart part = Parts[p];
+            switch (part.Table.Bucket)
+            {
+                case SynopsisBucket.Slice:
+                    break;
+                case SynopsisBucket.Hour:
+                    long hour = TimeSlicer.Floor(slices[slice].Start, unit, SliceWidth.Hour);
+                    if (part.Holds(hour) && TimeSlicer.Floor(slices[slice - 1].Start, unit, SliceWidth.Hour) == hour)
+                    {
+                        return false;
+                    }
+
+                    break;
+                default:
+                    if (part.KeptCount > 0)
+                    {
+                        return false;
+                    }
+
+                    break;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>The fields of <paramref name="table"/>'s rows its part reads (<see cref="Project"/>); every one of a table no part reads.</summary>
     Layouts.FieldMask ISynopsisReads.Fields(SynopsisTableInfo table)

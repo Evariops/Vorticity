@@ -182,12 +182,13 @@ internal sealed class DatasetScanSource : ScanSource
         long from = spec.Rows?.Start ?? 0;
         long to = spec.Rows?.End ?? long.MaxValue;
 
-        // An object its synopsis answers stays whole, since states answer an object, not a part of it,
-        // and counts for none of the rows the lanes share; one whose rows are read is cut as any other,
-        // however many tables it holds, which would otherwise leave a lane alone over a period of rows.
+        // An object its synopsis answers counts for none of the rows the lanes share, but for the rows of the tables its
+        // answer folds, its states; one whose rows are read is cut as any other, however many tables it holds, which would
+        // otherwise leave a lane alone over a period of rows.
         DatasetScanBuilder? answering = spec.States is null ? null : Builder(spec, null);
-        List<(PositionedObject Held, RowRange Rows, bool Answered, bool Light)> objects = [];
+        List<(PositionedObject Held, RowRange Rows, bool Answered, bool Light, long States)> objects = [];
         long total = 0;
+        long totalStates = 0;
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
@@ -195,9 +196,12 @@ internal sealed class DatasetScanSource : ScanSource
             if (end > start)
             {
                 bool light = false;
-                bool answered = answering?.Answers(held, out light) == true;
-                objects.Add((held, new RowRange(start, end), answered, light));
-                total += answered ? 0 : end - start;
+                Indexes.SynopsisContents? contents = null;
+                SynopsisAnswer? answer = answering?.AnswerOf(held, out light, out contents);
+                long states = answer is not null && Cuttable(answer, held) ? answer.Weight(contents!) : 0;
+                objects.Add((held, new RowRange(start, end), answer is not null, light, states));
+                total += answer is not null ? 0 : end - start;
+                totalStates += states;
             }
         }
 
@@ -215,13 +219,19 @@ internal sealed class DatasetScanSource : ScanSource
             }
         }
 
-        // Objects their tables alone answer, in a row, make one piece, up to a few: such an answer reads a few tables
-        // and folds their rows, where a piece costs a walk of the tree to its rows and a lane's turn, which made a warm
-        // question over 48 hourly objects at 16 lanes spend more of its lanes' time waiting than answering. An answer
-        // that reads rows beside its tables, of its edges, of an identifier left out or of a delete, keeps a piece.
+        // Objects their tables alone answer, in a row, make one piece, up to a few and while they fold less than a share of
+        // states together: such an answer reads a few tables and folds their rows, where a piece costs a walk of the tree
+        // to its rows and a lane's turn, which made a warm question over 48 hourly objects at 16 lanes spend more of its
+        // lanes' time waiting than answering. An answer that folds two shares or more, its edges' rows counted, is cut
+        // between the chunks of its tables, a lane's part of its slices each, its edges read by the part that holds them;
+        // one that reads the rows of an identifier left out or of a delete keeps a piece, as one that reads its edges'
+        // rows beside a few states does.
         await Task.WhenAll(cutting).ConfigureAwait(false);
+        long stateShare = System.Math.Max(_dataset.Options.LeastPieceStates, totalStates / (degree * 4L));
         List<RowRange> pieces = [];
+        List<int>? slices = null;
         int answers = 0;
+        long folded = 0;
         for (int o = 0; o < objects.Count; o++)
         {
             RowRange rows = objects[o].Rows;
@@ -230,19 +240,62 @@ internal sealed class DatasetScanSource : ScanSource
                 pieces.AddRange(await cut.ConfigureAwait(false));
                 answers = 0;
             }
-            else if (objects[o].Light && answers is > 0 && answers < _dataset.Options.AnswersPerPiece && pieces[^1].End == rows.Start)
+            else if (degree > 1 && objects[o].States >= 2 * stateShare && rows.Length == objects[o].Held.Entry.Rows
+                && answering!.AnswerOf(objects[o].Held, out _, out Indexes.SynopsisContents? contents) is { } answer
+                && CutAnswer(objects[o].Held, rows, answer, contents!, stateShare, slices ??= [], pieces))
+            {
+                answers = 0;
+            }
+            else if (objects[o].Light && answers is > 0 && answers < _dataset.Options.AnswersPerPiece
+                && folded + objects[o].States <= stateShare && pieces[^1].End == rows.Start)
             {
                 pieces[^1] = new RowRange(pieces[^1].Start, rows.End);
                 answers++;
+                folded += objects[o].States;
             }
             else
             {
                 pieces.Add(rows);
                 answers = objects[o].Light ? 1 : 0;
+                folded = objects[o].States;
             }
         }
 
         return pieces.Count > 1 ? [.. pieces] : null;
+    }
+
+    /// <summary>
+    /// Whether the answer of <paramref name="held"/> may be cut into parts its lanes answer apart: one that takes no row of
+    /// a delete or of an identifier left out of its tables, which the object's rows and indexes find whole.
+    /// </summary>
+    private static bool Cuttable(SynopsisAnswer answer, in PositionedObject held) => answer.Excluded.Count == 0 && !held.Entry.HasDeletions;
+
+    /// <summary>
+    /// The rows <paramref name="rows"/> of an object its synopsis answers, cut before the slices its answer may be cut at
+    /// into pieces of about <paramref name="share"/> states each (<see cref="SynopsisAnswer.Cuts"/>), each piece's lane
+    /// answering its part of the slices alone; added to <paramref name="pieces"/>, false when the answer cuts nowhere.
+    /// </summary>
+    private static bool CutAnswer(
+        in PositionedObject held, RowRange rows, SynopsisAnswer answer, Indexes.SynopsisContents contents, long share, List<int> slices, List<RowRange> pieces)
+    {
+        slices.Clear();
+        answer.Cuts(contents, share, slices);
+        if (slices.Count == 0)
+        {
+            return false;
+        }
+
+        IReadOnlyList<Indexes.TimeSlice> table = contents.Slices.Slices;
+        long start = rows.Start;
+        for (int s = 0; s < slices.Count; s++)
+        {
+            long at = held.FirstRow + table[slices[s]].FirstRow;
+            pieces.Add(new RowRange(start, at));
+            start = at;
+        }
+
+        pieces.Add(new RowRange(start, rows.End));
+        return true;
     }
 
     /// <summary>

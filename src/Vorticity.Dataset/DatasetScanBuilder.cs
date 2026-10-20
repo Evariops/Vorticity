@@ -498,16 +498,30 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
-    /// What the synopsis of an object the scan covers whole, with no row marked and of the version's
-    /// schema, answers of <paramref name="request"/>: the answer, the object's table of contents, and the
-    /// dataset's instant; nothing when its rows are read.
+    /// What the synopsis of an object the scan covers, of the version's schema, answers of <paramref name="request"/>:
+    /// the answer, the object's table of contents, and the dataset's instant; nothing when its rows are read. An object
+    /// covered in part, from the first row of a slice to the last of one and with no row marked, as a lane covers a part
+    /// of an object its pieces cut (<see cref="SynopsisAnswer.Cuts"/>), is answered under a window that ends where the
+    /// part does; one covered in part otherwise is read.
     /// </summary>
     private (SynopsisAnswer? Answer, SynopsisContents? Contents, string? Instant) Answer(in PositionedObject held, StateRequest request)
     {
-        if (Covered(held) != held.Entry.Rows || _dataset.Key is not { } key
-            || held.Entry.Contents is not { } contents)
+        long covered = Covered(held);
+        if (covered == 0 || _dataset.Key is not { } key || held.Entry.Contents is not { } contents)
         {
             return default;
+        }
+
+        (long, long)? within = null;
+        if (covered != held.Entry.Rows)
+        {
+            if (held.Entry.HasDeletions || _take is not null
+                || Within(contents.Slices.Slices, Math.Max(_from, held.FirstRow) - held.FirstRow, covered) is not { } part)
+            {
+                return default;
+            }
+
+            within = part;
         }
 
         DType schema;
@@ -526,9 +540,57 @@ internal sealed class DatasetScanBuilder
             ? (summary.Min.SignedValue, summary.Max.SignedValue)
             : null;
         return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
-            && SynopsisAnswer.Of(QuestionOf(request, key.InstantPath), contents, schema, instants, PartitionFilter.ValuesOf(held.Entry, key)) is { } answer
+            && SynopsisAnswer.Of(QuestionOf(request, key.InstantPath), contents, schema, instants, PartitionFilter.ValuesOf(held.Entry, key), within) is { } answer
             ? (answer, contents, key.InstantPath)
             : default;
+    }
+
+    /// <summary>
+    /// The instants of the slices that hold rows <paramref name="first"/> to <paramref name="first"/> +
+    /// <paramref name="count"/> of an object, the first's start to the last's end, inclusive; null when those rows do
+    /// not begin and end with slices.
+    /// </summary>
+    private static (long Low, long High)? Within(IReadOnlyList<TimeSlice> slices, long first, long count)
+    {
+        // The first slice that begins at the first row, then the last that ends at the end.
+        int low = 0;
+        int high = slices.Count;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            if (slices[middle].FirstRow < first)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        if (low == slices.Count || slices[low].FirstRow != first)
+        {
+            return null;
+        }
+
+        int start = low;
+        long end = first + count;
+        high = slices.Count;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            if (slices[middle].FirstRow + slices[middle].Rows <= end)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        int last = low - 1;
+        return last >= start && slices[last].FirstRow + slices[last].Rows == end ? (slices[start].Start, slices[last].End - 1) : null;
     }
 
 
@@ -559,11 +621,19 @@ internal sealed class DatasetScanBuilder
     /// find: what its entry holds, with no read of it; and whether the answer is <paramref name="light"/>, its
     /// tables alone, no row read beside them at its edges, of an identifier left out or of a delete.
     /// </summary>
-    internal bool Answers(in PositionedObject held, out bool light)
+    internal bool Answers(in PositionedObject held, out bool light) => AnswerOf(held, out light, out _) is not null;
+
+    /// <summary>
+    /// The answer of <paramref name="held"/>'s synopsis to the states the scan asks, as its scan would find it, and the
+    /// object's table of contents: what its entry holds, with no read of it; null when its rows are read. The answer is
+    /// <paramref name="light"/> when it reads its tables alone, no row beside them at its edges, of an identifier left out
+    /// or of a delete.
+    /// </summary>
+    internal SynopsisAnswer? AnswerOf(in PositionedObject held, out bool light, out SynopsisContents? contents)
     {
-        SynopsisAnswer? answer = _states is { } request && _orderPaths is null && _take is null ? Answer(held, request).Answer : null;
+        (SynopsisAnswer? answer, contents, _) = _states is { } request && _orderPaths is null && _take is null ? Answer(held, request) : default;
         light = answer is { Edges.Count: 0, Excluded.Count: 0 } && !held.Entry.HasDeletions;
-        return answer is not null;
+        return answer;
     }
 
     /// <summary>
@@ -658,6 +728,11 @@ internal sealed class DatasetScanBuilder
                 {
                     try
                     {
+                        if (Covered(turn.Held) != turn.Held.Entry.Rows)
+                        {
+                            _counters?.AddAnsweredPart();
+                        }
+
                         for (int b = 0; b < answered.States.Count; b++)
                         {
                             RecordBatch batch = answered.States[b];

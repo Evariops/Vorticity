@@ -922,14 +922,20 @@ chosen row and a tie keep the earlier range's.
 
 On a dataset, a range is an object, and an object holding two shares of the rows or more is cut
 between its chunks, as a file's rows are, so no chunk is read by two ranges. An object whose synopsis
-answers the pass's states stays whole and counts for none of the shares, since states answer an object
-and not a part of it; whether it does, its entry says, as its scan would find, so that one whose tables
-do not hold the question is cut as any other. Up to eight objects in a row that their tables alone answer,
-with no row read at an edge, of an identifier left out or of a delete, make one range: such an answer
-takes a tenth of a millisecond warm, where a range costs a walk of the tree to its rows and a lane's
-turn, so that a warm count over 48 hourly objects at 16 lanes took 3.8 ms and allocated 1.7 MB with a
-range an object, against 3.1 ms and 221 KB. The objects that are cut are opened side by side to
-learn where their chunks end, and the ranges then find them already open.
+answers the pass's states counts for none of the shares of rows, but for the rows its answer reads, the
+rows of its tables' chunks and of its edges' slices; whether it answers, its entry says, as its scan would
+find, so that one whose tables do not hold the question is cut as any other. Up to eight objects in a row
+that their tables alone answer, with no row read at an edge, of an identifier left out or of a delete, make
+one range while they read less than a share of tables' rows together, 2^16 at least: such an answer takes
+a tenth of a millisecond warm, where a range costs a walk of the tree to its rows and a lane's turn, so that
+a warm count over 48 hourly objects at 16 lanes took 3.8 ms and allocated 1.7 MB with a range an object,
+against 3.1 ms and 221 KB. An answer that reads two shares or more, and takes no row of an identifier left
+out or of a delete, is cut between the chunks of its tables into ranges of its slices, at a slice that no
+bucket a table folds whole straddles: a lane answers its range as the object is answered under a window
+that ends where the range does, and reads the slices of the edges it holds. A count per service and per
+12 hours over a window that cuts three hours of 540 M rows, 3.47 M rows of runs, one lane's whole when an
+answer was, took 32 ms at 16 lanes as at one; cut, 11 ms. The objects that are cut are opened side by side
+to learn where their chunks end, and the ranges then find them already open.
 No object settles ([statistics and zone maps](#93-statistics-and-zone-maps), and see
 [13-dataset.md](13-dataset.md)). A group by that streams runs as [in parallel, in
 order](#25-in-parallel-in-order) describes, its ranges grouped side by side and followed in row order,

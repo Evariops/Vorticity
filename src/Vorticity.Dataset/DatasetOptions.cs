@@ -175,6 +175,23 @@ public sealed record DatasetOptions
     internal int AnswersPerPiece { get; init; } = 8;
 
     /// <summary>
+    /// The rows of synopsis tables, the states, a lane's piece of answers folds at least, when a pass on several lanes
+    /// cuts the objects their synopses answer: 2^16 by default, about a millisecond of folding, against the tenth a piece
+    /// costs. Answers in a row share a piece while they fold less together, and an answer that folds twice as many or more
+    /// is cut between the chunks of its tables into pieces of about a share each, a lane's part of the slices of its
+    /// window, where every answer was a lane's whole: a window that cuts three hours folds 3.47 M rows of runs. A test
+    /// cuts its small tables with less.
+    /// </summary>
+    internal long LeastPieceStates { get; init; } = 1L << 16;
+
+    /// <summary>
+    /// The rows of a chunk of a synopsis table and the bytes past which an hour's rows are chunks of their own, as the
+    /// compaction writes them; null for the defaults (<see cref="SynopsisTables.ChunkRows"/>). A test cuts tables of a few
+    /// rows into chunks, which an answer is cut between.
+    /// </summary>
+    internal (int Rows, long HourBytes)? SynopsisChunking { get; init; }
+
+    /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
     /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
     /// </summary>

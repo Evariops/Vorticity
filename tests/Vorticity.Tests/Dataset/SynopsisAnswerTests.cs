@@ -36,6 +36,7 @@ public sealed partial class SynopsisAnswerTests
         "a window across hours",
         "a cut hour without runs",
         "by the hour",
+        "a window on slices",
     ];
 
     [Theory]
@@ -57,6 +58,35 @@ public sealed partial class SynopsisAnswerTests
         // slices of the hour it cuts come from the service's value counts per slice, beside the rows of the
         // slices it cuts.
         Assert.Equal(question is "an unaligned window" or "a window across hours" or "a cut hour without runs", metrics.EdgeRows > 0);
+    }
+
+    /// <summary>
+    /// The objects' tables cut in chunks of a few rows, and an answer that folds more of their rows than a lane's share,
+    /// however few, cut between them: at four lanes each lane answers its part of an object's slices under a window that
+    /// ends where the part does, and every question gives the bits its rows give; a window on the slices' bounds, which
+    /// reads no row at its edges, is answered in parts.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Questions))]
+    public async Task AnAnswerCutAcrossLanesGivesTheBitsOfItsRows(string question)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store, tuned: options => options with { LeastPieceStates = 1, SynopsisChunking = (8, 256) });
+        Vorticity.Aggregation aggregation = Question(dataset.Scan<Request>().With(new ScanOptions { DegreeOfParallelism = 4 }), question);
+        (List<string> cut, ScanMetrics metrics) = await GroupsAsync(aggregation);
+        long parts = aggregation.Query.Counters.AnsweredParts;
+        (List<string> off, _) = await AskAsync(dataset, question, synopses: false);
+        (List<string> whole, ScanMetrics alone) = await AskAsync(dataset, question, synopses: true, degree: 1);
+        Console.Out.Write(
+            $"CUT {question}: {parts} parts answered, {metrics.SynopsisRows} table rows, {metrics.Rows} rows ({metrics.EdgeRows} at edges); " +
+            $"at one lane {alone.SynopsisRows} table rows, {alone.Rows} rows ({alone.EdgeRows} at edges).\n");
+        Assert.Equal(off, cut);
+        Assert.Equal(whole, cut);
+        if (question == "a window on slices")
+        {
+            Assert.Equal(0, metrics.EdgeRows);
+            Assert.True(parts > 1, $"{parts} parts answered");
+        }
     }
 
     /// <summary>
@@ -493,14 +523,18 @@ public sealed partial class SynopsisAnswerTests
     private List<Totals> WindowTotals { get; } = [];
 
     /// <summary>The question's groups, each a line of its key and results, and what reading them did.</summary>
-    private static async Task<(List<string> Groups, ScanMetrics Metrics)> AskAsync(VortexDataset dataset, string question, bool synopses, int degree = 0)
+    private static Task<(List<string> Groups, ScanMetrics Metrics)> AskAsync(VortexDataset dataset, string question, bool synopses, int degree = 0) =>
+        GroupsAsync(Question(dataset.Scan<Request>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = degree }), question));
+
+    /// <summary>The aggregation <paramref name="question"/> names, over <paramref name="scan"/>.</summary>
+    private static Vorticity.Aggregation Question(Scan<Request> scan, string question)
     {
-        Scan<Request> scan = dataset.Scan<Request>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = degree });
         DateTimeOffset from = Noon.AddHours(1);
         DateTimeOffset to = Noon.AddHours(2);
         DateTimeOffset cutFrom = Noon.AddMinutes(37.5);
         DateTimeOffset cutTo = Noon.AddMinutes(101);
-        Vorticity.Aggregation aggregation = question switch
+        DateTimeOffset sliced = Noon.AddMinutes(40);
+        return question switch
         {
             "count by service" => scan.GroupBy(r => r.Service).Select(g => (g.Key, g.Count())),
             "every measure by service and method" => scan.GroupBy(r => (r.Service, r.Method)).Select(g => (
@@ -516,10 +550,9 @@ public sealed partial class SynopsisAnswerTests
             "a negation" => scan.Where(r => !(r.Method == "GET")).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Average(r => r.Duration))),
             "either of two keys" => scan.Where(r => r.Service == "api" || r.Method == "PUT").GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
             "a measure's bound" => scan.Where(r => r.Bytes > 1L << 39).GroupBy(r => r.Service).Select(g => (g.Key, g.Count())),
+            "a window on slices" => scan.Where(r => r.At >= sliced && r.At < Noon.AddMinutes(100)).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
             _ => scan.GroupBy(r => (r.At.Truncate(CalendarUnit.Hour), r.Service)).Select(g => (g.Key.Item1, g.Key.Service, g.Count(), g.Sum(r => r.Bytes))),
         };
-
-        return await GroupsAsync(aggregation);
     }
 
     /// <summary>An aggregation's groups, each a line of its key and results, and what reading them did.</summary>
@@ -544,10 +577,11 @@ public sealed partial class SynopsisAnswerTests
     /// compacted: the first two hours sealed with their synopses, the rest in the fresh levels, whose jobs
     /// write synopses too. Slices of a minute, and every table kept.
     /// </summary>
-    private static async Task<VortexDataset> FilledAsync(Vorticity.IO.IObjectStore store, bool marking = false, VortexSession? session = null, bool encrypted = false)
+    private static async Task<VortexDataset> FilledAsync(
+        Vorticity.IO.IObjectStore store, bool marking = false, VortexSession? session = null, bool encrypted = false, Func<DatasetOptions, DatasetOptions>? tuned = null)
     {
         // A budget of the data's bytes ten times over keeps every table, even on hours this small.
-        VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
+        DatasetOptions options = new DatasetOptions
         {
             Session = session ?? VortexSession.Default,
             Encrypted = encrypted,
@@ -556,7 +590,8 @@ public sealed partial class SynopsisAnswerTests
             Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000) },
             MarkedObjectBytes = marking ? 0 : 1L << 20,
             MarkedShare = marking ? 1 : 8,
-        }, Ct);
+        };
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, tuned?.Invoke(options) ?? options, Ct);
         Random random = new Random(41);
         for (int part = 0; part < 16; part++)
         {
