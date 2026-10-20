@@ -179,7 +179,7 @@ internal static class ZonePruningPlan
         if (locating is not null && !live.IsEmpty)
         {
             before = Counted(live, scope);
-            await locating.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
+            await locating.RefineAsync(file, live, scope, cancellationToken).ConfigureAwait(false);
             Scanning.ScanCounters.Note(metrics, locating.Segments, locating.Bytes);
             Diagnostics.VortexEventSource.RunsRead(locating.Segments);
             steps?.Add(new PruningStep("locating index", before - Counted(live, scope), locating.Segments, locating.Bytes));

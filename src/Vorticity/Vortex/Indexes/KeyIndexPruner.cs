@@ -235,7 +235,20 @@ internal sealed class KeyIndexPruner
     /// <param name="file">The file's indexes: the open file, or what a read with no open has of it.</param>
     /// <param name="live">The mask, which only loses blocks.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
-    internal async ValueTask RefineAsync(IIndexHost file, BlockMask live, CancellationToken cancellationToken)
+    internal ValueTask RefineAsync(IIndexHost file, BlockMask live, CancellationToken cancellationToken) =>
+        RefineAsync(file, live, scope: null, cancellationToken);
+
+    /// <summary>
+    /// Refines <paramref name="live"/> within <paramref name="scope"/>, the blocks a scan's rows reach, reading the segments
+    /// that can hold the filter's keys there: a run or a chunk none of whose live blocks the scope holds is not read, and
+    /// its blocks stay live, which the scan never reads. A scan of one part of a file then reads its part's structures,
+    /// not the file's.
+    /// </summary>
+    /// <param name="file">The file's indexes: the open file, or what a read with no open has of it.</param>
+    /// <param name="live">The mask, which only loses blocks.</param>
+    /// <param name="scope">A mask over the same blocks, live where the scan's rows reach; null for the whole file.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal async ValueTask RefineAsync(IIndexHost file, BlockMask live, BlockMask? scope, CancellationToken cancellationToken)
     {
         foreach (Column column in _columns.Values)
         {
@@ -244,7 +257,7 @@ internal sealed class KeyIndexPruner
 
         try
         {
-            await ClaimAsync(file, live, cancellationToken).ConfigureAwait(false);
+            await ClaimAsync(file, live, scope, cancellationToken).ConfigureAwait(false);
             Kill(live);
         }
         finally
@@ -256,8 +269,8 @@ internal sealed class KeyIndexPruner
         }
     }
 
-    /// <summary>Reads the runs and the dictionaries, and records what they claim.</summary>
-    private async ValueTask ClaimAsync(IIndexHost file, BlockMask live, CancellationToken cancellationToken)
+    /// <summary>Reads the runs and the dictionaries the scope reaches, and records what they claim.</summary>
+    private async ValueTask ClaimAsync(IIndexHost file, BlockMask live, BlockMask? scope, CancellationToken cancellationToken)
     {
         using IndexBatches<(Column Column, Run Run, Fence Fence, int Low, int High, int[] Slots)> batches = new();
         foreach (Column column in _columns.Values)
@@ -267,7 +280,7 @@ internal sealed class KeyIndexPruner
             {
                 if (file is VortexFile open)
                 {
-                    await ProbeAsync(open, column, dictionary, live, cancellationToken).ConfigureAwait(false);
+                    await ProbeAsync(open, column, dictionary, live, scope, cancellationToken).ConfigureAwait(false);
                 }
 
                 continue;
@@ -275,7 +288,7 @@ internal sealed class KeyIndexPruner
 
             foreach (Run run in column.Runs)
             {
-                if (!AnyLive(live, run.Meta))
+                if (!AnyLive(live, run.Meta) || (scope is not null && !AnyLive(scope, run.Meta)))
                 {
                     continue;
                 }
@@ -425,37 +438,43 @@ internal sealed class KeyIndexPruner
     }
 
     /// <summary>
-    /// Fills a dictionary-backed column's claims: opens the column's chunks' dictionaries and asks
-    /// each one whether it holds the filter's literals.
+    /// Fills a dictionary-backed column's claims: reads the dictionaries of the column's chunks that hold a live block
+    /// inside the scope, together, and asks each one which of the filter's literals it holds.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <param name="column">The column, whose claims are empty until this runs.</param>
     /// <param name="path">Its path.</param>
     /// <param name="live">The mask as the earlier structures left it.</param>
+    /// <param name="scope">The blocks the scan's rows reach, or null for the whole file.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <remarks>
-    /// A source that refuses claims nothing: a chunk the entry claims and that is not a dictionary
-    /// makes the source refuse whole, and the column then proves no literal absent anywhere --
-    /// which is what an index that cannot be read must do.
+    /// A chunk that is not a dictionary claims nothing, and neither does a file whose probe leaves blocks uncovered: the
+    /// column then proves no literal absent there -- which is what an index that cannot be read must do.
     /// </remarks>
     private async ValueTask ProbeAsync(
-        VortexFile file, Column column, string path, BlockMask live, CancellationToken cancellationToken)
+        VortexFile file, Column column, string path, BlockMask live, BlockMask? scope, CancellationToken cancellationToken)
     {
-        (Keys.SortedRunsSource? source, _) = await Keys.SortedRunsSource
-            .OpenAsync(file, path, KeySourceKind.Dictionary, cancellationToken).ConfigureAwait(false);
-        if (source is null)
+        bool Wanted(long start, long rows)
+        {
+            RowRange chunk = new RowRange(start, start + rows);
+            return live.AnyLive(chunk) && (scope is null || scope.AnyLive(chunk));
+        }
+
+        // A literal's key, then each float zero's other, which the dictionary may hold instead.
+        int literals = column.Asked.Literals;
+        byte[]?[] keys = new byte[]?[2 * literals];
+        column.Asked.Keys.CopyTo(keys, 0);
+        column.Asked.OtherZeros.CopyTo(keys, literals);
+        if (await Keys.SortedRunsSource.ClaimDictionariesAsync(file, path, keys, Wanted, cancellationToken).ConfigureAwait(false) is not { } claims)
         {
             return;
         }
 
-        await using (source.ConfigureAwait(false))
+        Segments += claims.Read;
+        Bytes += claims.Bytes;
+        for (int chunk = 0; chunk < claims.Count; chunk++)
         {
-            Segments += source.DictionariesRead;
-            Bytes += source.DictionaryBytes;
-            for (int chunk = 0; chunk < source.Dictionaries; chunk++)
-            {
-                column.Dictionary(source, chunk, live.BlockRows);
-            }
+            column.Dictionary(claims, chunk, live.BlockRows);
         }
     }
 
@@ -1083,8 +1102,8 @@ internal sealed class KeyIndexPruner
         /// Claims one chunk's blocks from its dictionary: a literal the chunk's values do not hold
         /// is absent from every block the chunk covers whole.
         /// </summary>
-        /// <param name="source">The column's dictionary source, open over the claimed chunks.</param>
-        /// <param name="chunk">The chunk, under the source's count.</param>
+        /// <param name="claims">What the column's dictionaries the probe read hold: each literal's key, then each float zero's other.</param>
+        /// <param name="chunk">The chunk, under the claims' count.</param>
         /// <param name="blockRows">Rows per block.</param>
         /// <remarks>
         /// Only the blocks the chunk covers whole are claimed. A dictionary says what its own rows
@@ -1092,9 +1111,9 @@ internal sealed class KeyIndexPruner
         /// neighbour is left live -- the writer aligns chunks to blocks, so this costs nothing
         /// there and stays right on a file whose chunks are not aligned.
         /// </remarks>
-        internal void Dictionary(Keys.SortedRunsSource source, int chunk, long blockRows)
+        internal void Dictionary(Keys.DictionaryClaims claims, int chunk, long blockRows)
         {
-            (long firstRow, long rows) = source.DictionaryExtent(chunk);
+            (long firstRow, long rows) = claims.Extent(chunk);
             long last = firstRow + rows;
             ulong first = (ulong)((firstRow + blockRows - 1) / blockRows);
 
@@ -1107,22 +1126,15 @@ internal sealed class KeyIndexPruner
             }
 
             Fill(Covered, first, end, true);
-            byte[]?[] keys = Asked.Keys;
-            for (int i = 0; i < keys.Length; i++)
-            {
-                if (keys[i] is not { } key)
-                {
-                    continue;
-                }
 
-                // The two zeros of a float are one literal, and a dictionary may hold either.
-                if (source.DictionaryHolds(chunk, key)
-                    || (Asked.OtherZeros[i] is { } other && source.DictionaryHolds(chunk, other)))
+            // The two zeros of a float are one literal, and a dictionary may hold either.
+            int literals = Asked.Literals;
+            foreach (int key in claims.HeldBy(chunk))
+            {
+                int literal = key < literals ? key : key - literals;
+                for (int feed = Asked.FirstFeed[literal]; feed >= 0; feed = Asked.NextFeed[feed])
                 {
-                    for (int feed = Asked.FirstFeed[i]; feed >= 0; feed = Asked.NextFeed[feed])
-                    {
-                        Fill(Set(Asked.FeedSet[feed]), first, end, true);
-                    }
+                    Fill(Set(Asked.FeedSet[feed]), first, end, true);
                 }
             }
         }

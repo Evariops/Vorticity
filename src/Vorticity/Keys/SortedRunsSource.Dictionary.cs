@@ -53,8 +53,6 @@ internal sealed partial class SortedRunsSource
         }
 
         List<Run> runs = [];
-        int asked = 0;
-        long read = 0;
         using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
         foreach (IndexRun meta in entry.Runs)
         {
@@ -69,12 +67,6 @@ internal sealed partial class SortedRunsSource
 
                 context.ResetBatch();
                 int slot = context.Segments.Add(SpecOf(file, flat));
-                if (Scanning.ScanCounters.Unread(context.Segments, file.Segments, out long bytes) > 0)
-                {
-                    asked++;
-                    read += bytes;
-                }
-
                 await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
                 Diagnostics.VortexEventSource.RunsRead(1);
                 RunSegment? values = Values(context, flat, slot, layout);
@@ -99,13 +91,7 @@ internal sealed partial class SortedRunsSource
             }
         }
 
-        return (
-            new SortedRunsSource(file, layout, storage, kind, [.. runs], KeySourceKind.Dictionary)
-            {
-                DictionariesRead = asked,
-                DictionaryBytes = read,
-            },
-            null);
+        return (new SortedRunsSource(file, layout, storage, kind, [.. runs], KeySourceKind.Dictionary), null);
     }
 
     /// <summary>The spec of a flat node's one segment.</summary>
@@ -121,13 +107,181 @@ internal sealed partial class SortedRunsSource
         return specs[(int)ids[0]];
     }
 
+    /// <summary>The bytes of chunks a dictionary probe asks for in one round trip: enough to ride a store's latency, few enough to hold.</summary>
+    private const long ProbeBatchBytes = 32L << 20;
+
     /// <summary>
-    /// The chunk's values, sorted and deduplicated, nulls dropped; null when the chunk is not a
-    /// dictionary.
+    /// Which of <paramref name="keys"/> the dictionaries of the chunks of <paramref name="path"/> hold, for a pruner: the
+    /// chunks the file's dictionary probe claims and <paramref name="wanted"/> keeps, asked with each one's first row and
+    /// rows. They are read together, <see cref="ProbeBatchBytes"/> at a time, a round trip a batch however many chunks it
+    /// holds, and a chunk's values child is decoded alone and its values looked up among the keys, sorted once, as they
+    /// lie: nothing is copied nor sorted per chunk, where a walk over the values needs them sorted and deduplicated. A
+    /// null key is never held. A chunk that is not a dictionary claims nothing, and its blocks stay live. Null when the
+    /// file has no probe of the column, or one whose runs leave blocks uncovered.
     /// </summary>
-    private static RunSegment? Values(ScanContext context, LayoutNode flat, int slot, KeyLayout layout)
+    internal static async ValueTask<DictionaryClaims?> ClaimDictionariesAsync(
+        VortexFile file, string path, byte[]?[] keys, Func<long, long, bool> wanted, CancellationToken cancellationToken)
     {
-        VortexBuffer segment = context.Segments.GetBuffer(slot);
+        if (!file.HasIndexDirectory || await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false) is not { } directory)
+        {
+            return null;
+        }
+
+        foreach (IndexEntry entry in directory.Entries)
+        {
+            if (entry.Kind == IndexKinds.DictProbe
+                && KeyIndexPruner.TryResolve(file.DType, entry.ColumnPath, out string resolved, out DType dtype)
+                && string.Equals(resolved, path, StringComparison.Ordinal)
+                && entry.BlockLength > 0
+                && Uncovered(file, entry) is null
+                && Shape(dtype, out _, out KeyLayout layout, out _) is null
+                && Chunks(file.LayoutTree, path) is { } chunks)
+            {
+                return await ClaimAsync(file, entry, layout, chunks, keys, wanted, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        return null;
+    }
+
+    private static async ValueTask<DictionaryClaims> ClaimAsync(
+        VortexFile file, IndexEntry entry, KeyLayout layout, List<(LayoutNode Flat, long Start)> chunks, byte[]?[] keys,
+        Func<long, long, bool> wanted, CancellationToken cancellationToken)
+    {
+        // The chunks the entry's runs claim and the caller wants, in the file's order: the runs are contiguous, from the
+        // first block, which Uncovered checked.
+        List<(LayoutNode Flat, long Start)> asked = [];
+        int r = 0;
+        foreach ((LayoutNode flat, long start) in chunks)
+        {
+            while (r < entry.Runs.Count && Math.Min(checked((long)(entry.Runs[r].EndBlock * entry.BlockLength)), file.RowCount) <= start)
+            {
+                r++;
+            }
+
+            if (r < entry.Runs.Count && start >= checked((long)(entry.Runs[r].FirstBlock * entry.BlockLength)) && wanted(start, (long)flat.RowCount))
+            {
+                asked.Add((flat, start));
+            }
+        }
+
+        // The keys in the layout's order, each by its place among those asked.
+        List<int> sorted = [];
+        for (int k = 0; k < keys.Length; k++)
+        {
+            if (keys[k] is not null)
+            {
+                sorted.Add(k);
+            }
+        }
+
+        sorted.Sort((a, b) => layout.Compare(keys[a], keys[b]));
+        int[] order = [.. sorted];
+        DictionaryClaims claims = new DictionaryClaims(keys.Length);
+
+        // A batch's segments in one context, each chunk decoded alone in another, both the process's: the
+        // pruning of a scan of one part of an object probes a chunk or two.
+        ScanContext reading = ScanContexts.Shared.Rent(file);
+        ScanContext decoding = ScanContexts.Shared.Rent(file);
+        try
+        {
+            int[] slots = new int[asked.Count];
+            for (int at = 0; at < asked.Count;)
+            {
+                reading.ResetBatch();
+                int from = at;
+                long bytes = 0;
+                for (; at < asked.Count && (at == from || bytes < ProbeBatchBytes); at++)
+                {
+                    SegmentSpec spec = SpecOf(file, asked[at].Flat);
+                    slots[at] = reading.Segments.Add(spec);
+                    bytes += spec.Length;
+                }
+
+                claims.Read += Scanning.ScanCounters.Unread(reading.Segments, file.Segments, out long unread);
+                claims.Bytes += unread;
+                await file.Segments.ReadManyAsync(reading.Segments, cancellationToken).ConfigureAwait(false);
+                Diagnostics.VortexEventSource.RunsRead(at - from);
+                for (int c = from; c < at; c++)
+                {
+                    decoding.ResetBatch();
+                    Claim(decoding, asked[c].Flat, asked[c].Start, reading.Segments.GetBuffer(slots[c]), layout, keys, order, claims);
+                }
+            }
+        }
+        finally
+        {
+            decoding.ResetBatch();
+            reading.ResetBatch();
+            ScanContexts.Shared.Return(decoding);
+            ScanContexts.Shared.Return(reading);
+        }
+
+        return claims;
+    }
+
+    /// <summary>Adds a chunk to <paramref name="claims"/> with the keys its dictionary holds, when it is one.</summary>
+    private static void Claim(
+        ScanContext context, LayoutNode flat, long start, VortexBuffer segment, KeyLayout layout, byte[]?[] keys, int[] order, DictionaryClaims claims)
+    {
+        if (!DictionaryValues(context, flat, segment, layout, out CanonicalNode node, out int length))
+        {
+            return;
+        }
+
+        claims.Open(start, (long)flat.RowCount);
+        ValidityMask validity = ValidityMask.From(context.Canonical, node.Validity);
+        bool bytes = layout.Shape == KeyShape.Bytes;
+        int width = layout.Width;
+        int held = 0;
+        for (int i = 0; i < length && held < order.Length; i++)
+        {
+            if (!validity.IsValid(i))
+            {
+                continue;
+            }
+
+            ReadOnlySpan<byte> value = bytes ? LiteralReader.ViewAt(node, i) : node.Values.Span.Slice(i * width, width);
+            int low = 0;
+            int high = order.Length - 1;
+            while (low <= high)
+            {
+                int middle = (int)(((uint)low + (uint)high) >> 1);
+                int compared = layout.Compare(keys[order[middle]], value);
+                if (compared == 0)
+                {
+                    // Keys asked twice, as a zero and its other, are held together.
+                    for (int equal = middle; equal >= 0 && layout.Compare(keys[order[equal]], value) == 0; equal--)
+                    {
+                        held += claims.Hold(order[equal]) ? 1 : 0;
+                    }
+
+                    for (int equal = middle + 1; equal < order.Length && layout.Compare(keys[order[equal]], value) == 0; equal++)
+                    {
+                        held += claims.Hold(order[equal]) ? 1 : 0;
+                    }
+
+                    break;
+                }
+
+                if (compared < 0)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle - 1;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The values child of a chunk's segment decoded alone into <paramref name="node"/>, an extension's storage, when the
+    /// chunk is a dictionary; false otherwise.
+    /// </summary>
+    private static bool DictionaryValues(ScanContext context, LayoutNode flat, VortexBuffer segment, KeyLayout layout, out CanonicalNode node, out int length)
+    {
         FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(flat.Metadata);
         if (metadata.HasArrayEncodingTree)
         {
@@ -141,25 +295,42 @@ internal sealed partial class SortedRunsSource
         ArrayNode root = context.Nodes.Root;
         if (root.Encoding != ArrayEncodingId.Dict || root.ChildCount != 2)
         {
-            return null;
+            node = default;
+            length = 0;
+            return false;
         }
 
         DictMetadata dict = DictMetadata.Read(root.Metadata);
-        int length = ArrayDecodeContext.CheckedLength(dict.ValuesLength, "vortex.dict values_len");
-        CanonicalNode node = context.Canonical.GetNode(context.Decode.DecodeChild(in root, 1, flat.DType, length));
+        length = ArrayDecodeContext.CheckedLength(dict.ValuesLength, "vortex.dict values_len");
+        node = context.Canonical.GetNode(context.Decode.DecodeChild(in root, 1, flat.DType, length));
         while (node.Kind == CanonicalKind.Extension)
         {
             node = context.Canonical.GetNode(node.StorageIndex);
         }
 
-        bool bytes = layout.Shape == KeyShape.Bytes;
-        bool shaped = bytes
+        bool shaped = layout.Shape == KeyShape.Bytes
             ? node.Kind == CanonicalKind.VarBinView
             : node.Kind == CanonicalKind.Primitive && node.PType == layout.PType;
         if (!shaped || node.Length != length)
         {
             throw Malformed("a dictionary's values do not decode to one key of the column's type each");
         }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The chunk's values, sorted and deduplicated, nulls dropped; null when the chunk is not a
+    /// dictionary.
+    /// </summary>
+    private static RunSegment? Values(ScanContext context, LayoutNode flat, int slot, KeyLayout layout)
+    {
+        if (!DictionaryValues(context, flat, context.Segments.GetBuffer(slot), layout, out CanonicalNode node, out int length))
+        {
+            return null;
+        }
+
+        bool bytes = layout.Shape == KeyShape.Bytes;
 
         // The valid values copied out first, in the writer's order: the canonical node is a view
         // that cannot be held by the comparer.
@@ -239,62 +410,6 @@ internal sealed partial class SortedRunsSource
                 ? Math.Sign(left.SequenceCompareTo(right))
                 : KeyOrder.Total(LiteralOf(_layout, left), LiteralOf(_layout, right));
         }
-    }
-
-    /// <summary>
-    /// The chunks this dictionary source read, for a caller that wants the sets themselves rather
-    /// than a walk over their union: the block pruner answers an equality from the values child
-    /// alone.
-    /// </summary>
-    internal int Dictionaries => _source == KeySourceKind.Dictionary ? _runs.Length : 0;
-
-    /// <summary>The chunks read at open whose segment was asked of the source: one the file holds in its tail is not.</summary>
-    internal int DictionariesRead { get; private init; }
-
-    /// <summary>What those segments cost, summed.</summary>
-    internal long DictionaryBytes { get; private init; }
-
-    /// <summary>Chunk <paramref name="chunk"/>'s first row and its rows.</summary>
-    /// <param name="chunk">The chunk, under <see cref="Dictionaries"/>.</param>
-    internal (long FirstRow, long Rows) DictionaryExtent(int chunk) =>
-        (_runs[chunk].FirstRow, _runs[chunk].RowLimit);
-
-    /// <summary>Whether chunk <paramref name="chunk"/>'s dictionary holds <paramref name="key"/>.</summary>
-    /// <param name="chunk">The chunk, under <see cref="Dictionaries"/>.</param>
-    /// <param name="key">The key, encoded as the column's layout encodes one.</param>
-    /// <remarks>
-    /// The values were sorted and deduplicated at open, so this is a binary search over the
-    /// chunk's distinct values -- `O(log d)` and no read at all.
-    /// </remarks>
-    internal bool DictionaryHolds(int chunk, ReadOnlySpan<byte> key)
-    {
-        if (_runs[chunk].Probe is not { } probe)
-        {
-            return false;
-        }
-
-        int low = 0;
-        int high = probe.Count - 1;
-        while (low <= high)
-        {
-            int middle = (int)(((uint)low + (uint)high) >> 1);
-            int order = _layout.Compare(KeyBytesAt(probe, _layout, middle), key);
-            if (order == 0)
-            {
-                return true;
-            }
-
-            if (order < 0)
-            {
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle - 1;
-            }
-        }
-
-        return false;
     }
 
     private static ReadOnlySpan<byte> KeyBytesAt(RunSegment segment, KeyLayout layout, int index) =>

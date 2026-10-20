@@ -56,7 +56,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     {
         ["synopses: count by service"] = new(4, 6880, 0, 0, 77248),
         ["synopses: count by service and hour"] = new(4, 6880, 0, 0, 86912),
-        ["synopses: by minute, the last hour, under a predicate"] = new(3, 100970, 2, 35424, 77376),
+        ["synopses: by minute, the last hour, under a predicate"] = new(3, 100970, 2, 35424, 72192),
         ["synopses: an unaligned window"] = new(5, 198994, 2, 66728, 79104),
         ["synopses: every row but one id"] = new(8, 297003, 4, 34768, 71232),
         ["synopses: measures by region and hour"] = new(4, 4112, 0, 0, 95232),
