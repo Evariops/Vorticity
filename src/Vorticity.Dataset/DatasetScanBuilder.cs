@@ -1096,7 +1096,7 @@ internal sealed class DatasetScanBuilder
             ? ReadSpansAsync(held, contents, MarkedSpans(held.Entry.Deletions), MeasuredColumns(answer), select: false, cancellationToken)
             : null;
         Task<List<RecordBatch>>? excluded = answer.Excluded.Count > 0 && answer.Parts.Count > 0
-            ? ExcludedAsync(held, answer.Excluded, cancellationToken)
+            ? ExcludedAsync(held, answer.Excluded, ExcludedColumns(answer, schema), cancellationToken)
             : null;
         List<RecordBatch> states = [];
         SynopsisTableSet? tables = null;
@@ -1173,12 +1173,12 @@ internal sealed class DatasetScanBuilder
     /// when an index cannot say.
     /// </summary>
     private async Task<List<RecordBatch>> ExcludedAsync(
-        PositionedObject held, IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> excluded, CancellationToken cancellationToken)
+        PositionedObject held, IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> excluded, int[]? columns, CancellationToken cancellationToken)
     {
         Task<List<RecordBatch>?>[] lookups = new Task<List<RecordBatch>?>[excluded.Count];
         for (int i = 0; i < lookups.Length; i++)
         {
-            lookups[i] = _dataset.LookupAsync(held.Entry, excluded[i].Part, cancellationToken).AsTask();
+            lookups[i] = _dataset.LookupAsync(held.Entry, excluded[i].Part, columns, cancellationToken).AsTask();
         }
 
         try
@@ -1320,6 +1320,35 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>The columns the answer's tables key and measure: what charges a row taken out to its table's row.</summary>
+    /// <summary>
+    /// The columns the rows an identifier's index finds are read for: the keys and the measures of the tables they come out
+    /// of, and the columns of the filters that leave them out and keep the rest; null, every one, when a filter names a
+    /// column that is none of the schema's. Every column's chunk directory was read and parsed for them, at every question.
+    /// </summary>
+    private static int[]? ExcludedColumns(SynopsisAnswer answer, DType schema)
+    {
+        SortedSet<int> fields = [.. MeasuredColumns(answer)];
+        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
+        foreach ((VortexExpr part, VortexExpr kept) in answer.Excluded)
+        {
+            part.CollectFields(named);
+            kept.CollectFields(named);
+        }
+
+        foreach (string name in named)
+        {
+            int field = schema.IndexOfField(name);
+            if (field < 0)
+            {
+                return null;
+            }
+
+            fields.Add(field);
+        }
+
+        return [.. fields];
+    }
+
     private static int[] MeasuredColumns(SynopsisAnswer answer)
     {
         SortedSet<int> fields = [];

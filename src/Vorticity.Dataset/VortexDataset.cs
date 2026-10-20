@@ -2302,6 +2302,35 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Whether an index on the column of a field of <paramref name="schema"/>'s root is one <paramref name="filter"/> may
+    /// read, by the columns it names, their first field from the root; null, every one, when a name is none of the
+    /// schema's or past the 64th field.
+    /// </summary>
+    private static Func<uint, bool>? ColumnsOf(VortexExpr filter, DType schema)
+    {
+        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
+        filter.CollectFields(named);
+        ulong roots = 0;
+        foreach (string path in named)
+        {
+            int field = schema.IndexOfField(path);
+            if (field < 0 && path.IndexOf('.', StringComparison.Ordinal) is int dot and > 0)
+            {
+                field = schema.IndexOfField(path[..dot]);
+            }
+
+            if (field is < 0 or >= 64)
+            {
+                return null;
+            }
+
+            roots |= 1UL << field;
+        }
+
+        return column => column < 64 && ((roots >> (int)column) & 1) != 0;
+    }
+
+    /// <summary>
     /// The rows of the object <paramref name="entry"/> names that its locating indexes, its identifiers'
     /// runs among them, leave for <paramref name="filter"/>, read with no open of the object: its index
     /// directory beside every column's chunk directory, then the runs' segments that may hold the values,
@@ -2309,7 +2338,11 @@ public sealed class VortexDataset : IAsyncDisposable
     /// out are all returned: the caller keeps those the filter holds for. Null when the entry carries no
     /// table of contents this library reads, or the object no locating index the filter asks.
     /// </summary>
-    internal async ValueTask<List<RecordBatch>?> LookupAsync(ObjectEntry entry, VortexExpr filter, CancellationToken cancellationToken)
+    /// <param name="entry">The object.</param>
+    /// <param name="filter">What the rows are found for.</param>
+    /// <param name="columns">The fields of the object's schema the rows are read for, the filter's among them; null for every one.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal async ValueTask<List<RecordBatch>?> LookupAsync(ObjectEntry entry, VortexExpr filter, int[]? columns, CancellationToken cancellationToken)
     {
         if (entry.Contents is not { DirectoryRegion: { } region } contents)
         {
@@ -2329,18 +2362,24 @@ public sealed class VortexDataset : IAsyncDisposable
             DType schema = contents.SchemaType;
             ValueTask<Buffers.SegmentOwner> read = reader.ReadAsync(
                 new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken);
-            Task<long>[] chunks = new Task<long>[schema.FieldCount];
-            for (int field = 0; field < chunks.Length; field++)
+            // The chunk directories of the columns the rows are read for: each read and parsed for every column, at every
+            // lookup, was a fifth of what a question that leaves an identifier out allocated.
+            Task<long>[] chunks = new Task<long>[columns?.Length ?? schema.FieldCount];
+            for (int c = 0; c < chunks.Length; c++)
             {
-                chunks[field] = slices.ColumnBytesAsync(field, cancellationToken).AsTask();
+                chunks[c] = slices.ColumnBytesAsync(columns?[c] ?? c, cancellationToken).AsTask();
             }
 
+            // The directory's entries on the columns the filter reads alone: its runs' segments were a list each, every
+            // index of the object parsed at every lookup, three fifths of what a question that leaves an identifier out
+            // allocated.
             Indexes.IndexDirectory? directory;
+            Func<uint, bool>? indexed = ColumnsOf(filter, schema);
             using (Buffers.SegmentOwner bytes = await read.ConfigureAwait(false))
             {
                 await Task.WhenAll(chunks).ConfigureAwait(false);
                 if (!region.Holds(bytes.Buffer.Span)
-                    || !Indexes.IndexDirectory.TryParse(bytes.Buffer.Span, Indexes.IndexDirectory.UnknownRows, region.Offset, out directory, out _))
+                    || !Indexes.IndexDirectory.TryParse(bytes.Buffer.Span, Indexes.IndexDirectory.UnknownRows, region.Offset, indexed, out directory, out _))
                 {
                     return null;
                 }
@@ -2391,7 +2430,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 ranges.Add(new Indexes.TimeSlice(0, 1, start, end - start));
             }
 
-            return [.. await slices.ReadSpansAsync(ranges, null, cancellationToken).ConfigureAwait(false)];
+            return [.. await slices.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
         }
     }
 

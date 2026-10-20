@@ -136,11 +136,11 @@ public sealed partial class IdentifierPostingsTests
         for (int h = 0; h < hours.Count; h++)
         {
             store.Reset();
-            cold[h] = await dataset.LookupAsync(hours[h], filter, Ct);
+            cold[h] = await dataset.LookupAsync(hours[h], filter, null, Ct);
             long coldSteps = store.DependentSteps;
             long coldRequests = store.Requests;
             store.Reset();
-            warm[h] = await dataset.LookupAsync(hours[h], filter, Ct);
+            warm[h] = await dataset.LookupAsync(hours[h], filter, null, Ct);
             Console.Out.Write(FormattableString.Invariant(
                 $"IDENTIFIER LOOKUP: {coldSteps} dependent steps and {coldRequests} requests cold, {store.DependentSteps} steps and {store.Requests} requests warm.\n"));
 
@@ -214,7 +214,7 @@ public sealed partial class IdentifierPostingsTests
         foreach (ObjectEntry hour in hours)
         {
             store.Reset();
-            List<RecordBatch> cold = (await dataset.LookupAsync(hour, filter, Ct))!;
+            List<RecordBatch> cold = (await dataset.LookupAsync(hour, filter, null, Ct))!;
             long coldSteps = store.DependentSteps;
             Console.Out.Write(FormattableString.Invariant($"PATH IDENTIFIER LOOKUP: {coldSteps} dependent steps and {store.Requests} requests cold, {cold.Count} batches.\n"));
             bool holds = cold.Count > 0;

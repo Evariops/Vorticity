@@ -463,6 +463,23 @@ internal sealed record IndexDirectory(
     /// </returns>
     public static bool TryParse(
         ReadOnlySpan<byte> bytes, ulong fileRowCount, ulong dataEnd,
+        out IndexDirectory? directory, out string? reason) =>
+        TryParse(bytes, fileRowCount, dataEnd, null, out directory, out reason);
+
+    /// <summary>
+    /// <see cref="TryParse(ReadOnlySpan{byte}, ulong, ulong, out IndexDirectory?, out string?)"/>, keeping only the entries on
+    /// the columns <paramref name="columns"/> says yes of, by the first field of their path from the root, every one when it
+    /// is null: an entry on another column is passed over before its runs are read.
+    /// </summary>
+    /// <param name="bytes">The metadata segment.</param>
+    /// <param name="fileRowCount">The file's own row count, or <see cref="UnknownRows"/>.</param>
+    /// <param name="dataEnd">The first byte a run may not reach: the footer's start.</param>
+    /// <param name="columns">Whether an entry on the column of this field of the root is kept; null for every entry.</param>
+    /// <param name="directory">The directory, holding only the entries that passed.</param>
+    /// <param name="reason">Why the whole directory was refused, when it was.</param>
+    /// <returns>Whether the directory is usable.</returns>
+    public static bool TryParse(
+        ReadOnlySpan<byte> bytes, ulong fileRowCount, ulong dataEnd, Func<uint, bool>? columns,
         out IndexDirectory? directory, out string? reason)
     {
         directory = null;
@@ -485,7 +502,7 @@ internal sealed record IndexDirectory(
 
         try
         {
-            return TryParseBody(bytes[1..^ChecksumSize], FormatVersion, fileRowCount, dataEnd, out directory, out reason);
+            return TryParseBody(bytes[1..^ChecksumSize], FormatVersion, fileRowCount, dataEnd, columns, out directory, out reason);
         }
         catch (VortexFormatException e)
         {
@@ -498,7 +515,7 @@ internal sealed record IndexDirectory(
     }
 
     private static bool TryParseBody(
-        ReadOnlySpan<byte> body, byte expectedVersion, ulong fileRowCount, ulong dataEnd,
+        ReadOnlySpan<byte> body, byte expectedVersion, ulong fileRowCount, ulong dataEnd, Func<uint, bool>? columns,
         out IndexDirectory? directory, out string? reason)
     {
         directory = null;
@@ -551,7 +568,7 @@ internal sealed record IndexDirectory(
                     policy = ReadPolicy(reader.ReadMessage());
                     break;
                 case DirEntries when wire == ProtoWireType.LengthDelimited:
-                    if (TryReadEntry(reader.ReadMessage(), out IndexEntry? entry))
+                    if (TryReadEntry(reader.ReadMessage(), columns, out IndexEntry? entry))
                     {
                         entries.Add(entry!);
                     }
@@ -640,9 +657,18 @@ internal sealed record IndexDirectory(
         return true;
     }
 
-    private static bool TryReadEntry(ProtoReader reader, out IndexEntry? entry)
+    private static bool TryReadEntry(ProtoReader reader, Func<uint, bool>? columns, out IndexEntry? entry)
     {
         entry = null;
+
+        // An entry on a column its reader asks nothing of is passed over before its runs are read: a lookup of one
+        // column's values parsed every index of the object, a list of segments a run, the most a question that leaves
+        // an identifier out allocated.
+        if (columns is not null && !OnColumn(reader, columns))
+        {
+            return false;
+        }
+
         string? kind = null;
         List<uint> path = [];
         ulong blockLength = 0;
@@ -708,6 +734,27 @@ internal sealed record IndexDirectory(
             VariantPath = variantPath,
             VariantClass = (Types.Variants.PathClass?)variantClass,
         };
+        return true;
+    }
+
+    /// <summary>Whether the entry the message holds lies on a column <paramref name="columns"/> keeps, by the first field of its path; one on the root is kept.</summary>
+    private static bool OnColumn(ProtoReader reader, Func<uint, bool> columns)
+    {
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field)
+            {
+                case EntryColumnPath when wire == ProtoWireType.Varint:
+                    return columns(reader.ReadVarint32());
+                case EntryColumnPath when wire == ProtoWireType.LengthDelimited:
+                    ProtoReader packed = reader.ReadMessage();
+                    return packed.End || columns(packed.ReadVarint32());
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
         return true;
     }
 
