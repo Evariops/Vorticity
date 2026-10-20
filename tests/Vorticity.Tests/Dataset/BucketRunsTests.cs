@@ -2,7 +2,8 @@
 //
 // WHAT IS HELD: the vector path finds the ends of the runs its scalar twin finds, one past each run's last row and the
 // last the values' length, over lengths on and around a vector's, runs of one row to thousands, every value apart and
-// one value throughout; an empty span has no run, and a span of ends too short for the values is refused.
+// one value throughout; an empty span has no run, and a span of ends too short for the values is refused. The rows a
+// bucket keeps are those the scalar twin keeps, from anywhere to anywhere, with states or without.
 using System;
 using Vorticity.Dataset;
 using Xunit;
@@ -70,5 +71,48 @@ public sealed class BucketRunsTests
     {
         Assert.Equal(0, BucketRuns.Ends(ReadOnlySpan<long>.Empty, []));
         Assert.Throws<ArgumentException>(() => BucketRuns.Ends(new long[10], new int[9]));
+    }
+
+    /// <summary>
+    /// The vector path keeps, of rows from anywhere to anywhere, the rows its twin keeps: counts zero, negative, positive
+    /// and at the ends of their type, states false, true and unknown or none, into words some of whose bits are set
+    /// already, which it keeps; and it says as many.
+    /// </summary>
+    [Fact]
+    public void TheVectorPathKeepsTheRowsItsTwinKeeps()
+    {
+        Random random = new Random(41);
+        const int Rows = 1_000;
+        long[] stood = new long[Rows];
+        byte[] states = new byte[Rows];
+        for (int row = 0; row < Rows; row++)
+        {
+            stood[row] = random.Next(8) switch
+            {
+                0 => 0,
+                1 => -random.Next(1, 1_000),
+                2 => long.MinValue,
+                3 => long.MaxValue,
+                _ => random.Next(1, 1_000),
+            };
+            states[row] = (byte)random.Next(3);
+        }
+
+        for (int trial = 0; trial < 2_000; trial++)
+        {
+            int start = random.Next(Rows);
+            int end = Math.Min(Rows, start + random.Next(0, trial % 2 == 0 ? 300 : Rows));
+            ulong[] vector = new ulong[(Rows + 63) / 64];
+            for (int word = 0; word < vector.Length; word++)
+            {
+                vector[word] = random.Next(4) == 0 ? (ulong)random.NextInt64() : 0;
+            }
+
+            ulong[] scalar = [.. vector];
+            ReadOnlySpan<byte> asked = trial % 3 == 0 ? ReadOnlySpan<byte>.Empty : states;
+            int kept = BucketRuns.Keep(stood, asked, start, end, vector);
+            Assert.Equal(BucketRuns.KeepScalar(stood, asked, start, end, scalar), kept);
+            Assert.Equal(scalar, vector);
+        }
     }
 }

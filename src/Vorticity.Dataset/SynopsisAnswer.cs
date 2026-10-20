@@ -1292,13 +1292,7 @@ internal sealed record SynopsisAnswer(
         {
             if (part.Holds(buckets[start]))
             {
-                for (int r = start; r < end; r++)
-                {
-                    ulong bit = (ulong)(-stood[r]) >> 63;
-                    bit &= states.IsEmpty || states[r] == Trilean.True ? 1UL : 0UL;
-                    kept[r >> 6] |= bit << (r & 63);
-                    selected += (int)bit;
-                }
+                selected += BucketRuns.Keep(stood, states, start, end, kept);
             }
 
             start = end;
