@@ -12,8 +12,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// What the synopsis tables cost a job (<c>--micro synopsistables</c>): a million spans over twenty slices
 /// of 50 000 rows, sorted by region (5 values), status (5) and service (600), with a duration, a size and a
 /// count of retries, a quarter of them null, as measures. Each slice sorted is counted at every depth
-/// (<see cref="SynopsisTables.AddSlice"/>), then the object's tables are built and merged
-/// (<see cref="SynopsisTables.Build"/>): per row, against the sort itself.
+/// (<see cref="SynopsisTables.AddSliceAsync"/>), then the hours and the object are merged into their tables
+/// (<see cref="SynopsisTables.FinishAsync"/>), their chunks counted and not encoded: per row, against the sort itself.
 /// </summary>
 /// <remarks>Run it with <c>DOTNET_TieredCompilation=0</c>.</remarks>
 internal static class SynopsisTablesMicro
@@ -77,16 +77,15 @@ internal static class SynopsisTablesMicro
             for (int round = 0; round < rounds; round++)
             {
                 using SortedSlices sorter = new SortedSlices(table, instant, file.DType);
-                using SynopsisTables synopsis = new SynopsisTables(file.DType, TimeUnit.Microseconds, measures);
+                using SynopsisTables synopsis = new SynopsisTables(file.DType, TimeUnit.Microseconds, measures, new CountingSink(), slices: table.Slices);
                 int next = 0;
                 long counting = 0;
-                ValueTask Count(RecordBatch sorted, System.Threading.CancellationToken _)
+                async ValueTask Count(RecordBatch sorted, System.Threading.CancellationToken token)
                 {
                     long begin = Stopwatch.GetTimestamp();
-                    synopsis.AddSlice(sorted, table.Slices[next].Start, sorter.Order, sorter.SortedCodes);
+                    await synopsis.AddSliceAsync(sorted, table.Slices[next].Start, sorter.Order, sorter.SortedCodes, cancellationToken: token);
                     counting += Stopwatch.GetTimestamp() - begin;
                     next++;
-                    return ValueTask.CompletedTask;
                 }
 
                 long total = Stopwatch.GetTimestamp();
@@ -97,7 +96,7 @@ internal static class SynopsisTablesMicro
 
                 double totalMs = Stopwatch.GetElapsedTime(total).TotalMilliseconds;
                 long built = Stopwatch.GetTimestamp();
-                List<(SynopsisTableInfo Table, int Node)> result = synopsis.Build();
+                List<(SynopsisTableInfo Table, int Held)> result = await synopsis.FinishAsync();
                 double buildMs = Stopwatch.GetElapsedTime(built).TotalMilliseconds;
                 bestTotal = Math.Min(bestTotal, totalMs);
                 bestCount = Math.Min(bestCount, counting * 1000.0 / Stopwatch.Frequency);
@@ -148,6 +147,27 @@ internal static class SynopsisTablesMicro
         }
 
         return 0;
+    }
+
+    /// <summary>A writer's place for the tables' chunks that counts them and keeps nothing, so that the builder's own cost shows.</summary>
+    private sealed class CountingSink : Vorticity.Writing.ISynopsisChunkSink
+    {
+        private int _tables;
+
+        public long BudgetSoFar => long.MaxValue;
+
+        public long RowsSoFar => 0;
+
+        public (long Memory, string? Directory, bool Seal) Scratch => (64L << 20, null, false);
+
+        public int OpenTable() => _tables++;
+
+        public ValueTask<long> SpoolChunkAsync(int table, Vorticity.Arrays.CanonicalArena arena, int node, long firstBucket, long lastBucket, System.Threading.CancellationToken cancellationToken) =>
+            new ValueTask<long>(arena.GetNode(node).Length * 8L);
+
+        public void DropTable(int table, string verdict)
+        {
+        }
     }
 }
 

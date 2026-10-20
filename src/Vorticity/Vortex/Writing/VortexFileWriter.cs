@@ -35,7 +35,7 @@ namespace Vorticity;
 /// A writer is used by one thread at a time. Disposing it without <see cref="CompleteAsync"/>
 /// abandons the file, as <see cref="Abandon"/> does.
 /// </remarks>
-public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, IFanWork
+public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, IFanWork, ISynopsisChunkSink
 {
     private readonly ISegmentSink _sink;
     private readonly DType _schema;
@@ -316,10 +316,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         private readonly List<(int Field, int Chunk, long At, int Length)> _chunks = [];
         private readonly List<(int Field, IndexSegment Region)> _regions = [];
 
-        // The tables declared, their rows in the caller's arena; then, once written, each with its region and its dtype.
-        private CanonicalArena? _arena;
-        private IReadOnlyList<(SynopsisTableInfo Table, int Node)> _declared = [];
+        // The tables as their chunks arrive, encoded and held in the scratch store with the columns' chunks; the tables
+        // declared once the rows are all in, each by what it holds and its place among those held; then, once written,
+        // each with its chunks' regions and their dtypes.
+        private readonly List<HeldTable> _heldTables = [];
+        private IReadOnlyList<(SynopsisTableInfo Table, int Held)> _declared = [];
         private readonly List<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> _tables = [];
+
+        // What encodes the tables' chunks: the writer's own may be encoding its data's chunks on its fan at the time.
+        private ArrayBlobWriter.Workspace? _tableBlobs;
 
         /// <summary>Each chunk of the part as written: its column, and its region with its checksum.</summary>
         internal IReadOnlyList<(int Field, IndexSegment Region)> Regions => _regions;
@@ -327,11 +332,44 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// <summary>Each table of the part as written: what it is, its chunks, and the dtype of each one's rows.</summary>
         internal IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> Tables => _tables;
 
-        /// <summary>The tables to write after the columns, their rows nodes of <paramref name="arena"/>.</summary>
-        internal void Declare(CanonicalArena arena, IReadOnlyList<(SynopsisTableInfo Table, int Node)> tables)
+        /// <summary>A table whose chunks are held as they come, by its place among those held.</summary>
+        internal int OpenTable()
         {
-            _arena = arena;
-            _declared = tables;
+            _heldTables.Add(new HeldTable());
+            return _heldTables.Count - 1;
+        }
+
+        /// <summary>Encodes the rows <paramref name="node"/> holds as a chunk of held table <paramref name="table"/>, and holds it; its bytes.</summary>
+        internal async ValueTask<long> SpoolTableChunkAsync(
+            VortexFileWriter writer, int table, CanonicalArena arena, int node, long firstBucket, long lastBucket, CancellationToken cancellationToken)
+        {
+            HeldTable held = _heldTables[table];
+            _tableBlobs ??= new ArrayBlobWriter.Workspace { FrameRows = writer._rowBlock, SizeFirst = writer._sizeFirst, ZstdLevel = writer._zstdLevel };
+            using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(_tableBlobs, arena, node, writer._arrayEncodings, writer._compress);
+            held.DType ??= Types.Serialization.DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
+            long at = await _held.AppendAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
+            held.Chunks.Add((at, blob.Length, firstBucket, lastBucket, arena.GetNode(node).Length));
+            held.Bytes += blob.Length;
+            return blob.Length;
+        }
+
+        /// <summary>Gives up held table <paramref name="table"/>, for the reason <paramref name="verdict"/>: its chunks stay in the scratch store, never written.</summary>
+        internal void DropTable(int table, string verdict) => _heldTables[table].Dropped = verdict;
+
+        /// <summary>The tables to write after the columns, each by what it holds and its place among those held.</summary>
+        internal void Declare(IReadOnlyList<(SynopsisTableInfo Table, int Held)> tables) => _declared = tables;
+
+        /// <summary>A table held as its chunks come: where each waits, its bytes, its buckets and its rows, and its rows' dtype.</summary>
+        private sealed class HeldTable
+        {
+            internal List<(long At, int Length, long First, long Last, int Rows)> Chunks { get; } = [];
+
+            internal byte[]? DType { get; set; }
+
+            internal long Bytes { get; set; }
+
+            /// <summary>Why the table was given up as it grew; null while it is not.</summary>
+            internal string? Dropped { get; set; }
         }
 
         /// <summary>The bytes of the tables written, which count with the indexes rather than the data.</summary>
@@ -342,11 +380,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         internal long End { get; private set; }
 
+        /// <summary>The bytes of the columns' chunks held so far, data that the file has yet to write.</summary>
+        internal long ColumnBytes { get; private set; }
+
         /// <summary>Holds chunk <paramref name="chunk"/> of column <paramref name="field"/>, whose segment is recorded when the part is written.</summary>
         internal async ValueTask HoldAsync(int field, int chunk, ReadOnlyMemory<byte> blob, CancellationToken cancellationToken)
         {
             long at = await _held.AppendAsync(blob, cancellationToken).ConfigureAwait(false);
             _chunks.Add((field, chunk, at, blob.Length));
+            ColumnBytes += blob.Length;
         }
 
         /// <summary>
@@ -393,66 +435,68 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// </summary>
         private async ValueTask WriteTablesAsync(VortexFileWriter writer, CancellationToken cancellationToken)
         {
-            List<(ArrayBlobWriter.BlobLease Blob, byte[] DType)> encoded = new List<(ArrayBlobWriter.BlobLease, byte[])>(_declared.Count);
+            List<(SynopsisTableInfo Table, long Bytes)> sizes = new List<(SynopsisTableInfo, long)>(_declared.Count);
+            int longest = 0;
+            foreach ((SynopsisTableInfo table, int held) in _declared)
+            {
+                // A table given up still asks its grain's question, at bytes no budget holds.
+                HeldTable chunks = _heldTables[held];
+                sizes.Add((table, chunks.Dropped is not null ? long.MaxValue : chunks.Bytes + (chunks.DType?.Length ?? 0)));
+                foreach ((long _, int length, long _, long _, int _) in chunks.Chunks)
+                {
+                    longest = Math.Max(longest, length);
+                }
+            }
+
+            IndexWriter indexes = writer._indexes!;
+            long dataBytes = writer._sink.Position - indexes.FileBytes;
+
+            // A path's values are read from its variant column, at that column's bytes at most.
+            IReadOnlyList<SynopsisPath> paths = writer._slices?.Table.Paths ?? [];
+            long ColumnBytes(int entry) => indexes.ColumnBytes(SynopsisPath.Names(entry) ? paths[SynopsisPath.Place(entry)].Field : entry);
+            (bool[] kept, string[] verdicts) = SynopsisTableInfo.Choose(
+                sizes, ColumnBytes, writer._rowCount, indexes.SynopsisBudget(dataBytes), SynopsisPrices.Default);
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(Math.Max(longest, 1));
             try
             {
-                List<(SynopsisTableInfo Table, long Bytes)> sizes = new List<(SynopsisTableInfo, long)>(_declared.Count);
-                foreach ((SynopsisTableInfo table, int node) in _declared)
+                for (int i = 0; i < _declared.Count; i++)
                 {
-                    ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(writer.Blobs, _arena!, node, writer._arrayEncodings, writer._compress);
-                    byte[] dtype = Types.Serialization.DTypeFlatBuffers.Serialize(_arena!.GetNode(node).DType);
-                    encoded.Add((blob, dtype));
-                    sizes.Add((table, blob.Length + dtype.Length));
-                }
-
-                IndexWriter indexes = writer._indexes!;
-                long dataBytes = writer._sink.Position - indexes.FileBytes;
-
-                // A path's values are read from its variant column, at that column's bytes at most.
-                IReadOnlyList<SynopsisPath> paths = writer._slices?.Table.Paths ?? [];
-                long ColumnBytes(int entry) => indexes.ColumnBytes(SynopsisPath.Names(entry) ? paths[SynopsisPath.Place(entry)].Field : entry);
-                (bool[] kept, string[] verdicts) = SynopsisTableInfo.Choose(
-                    sizes, ColumnBytes, writer._rowCount, indexes.SynopsisBudget(dataBytes), SynopsisPrices.Default);
-                for (int i = 0; i < encoded.Count; i++)
-                {
-                    indexes.ReportSynopsis(sizes[i].Table, paths, kept[i], verdicts[i], sizes[i].Bytes);
+                    HeldTable held = _heldTables[_declared[i].Held];
+                    indexes.ReportSynopsis(sizes[i].Table, paths, kept[i], held.Dropped ?? verdicts[i], held.Dropped is null ? sizes[i].Bytes : held.Bytes);
                     if (!kept[i])
                     {
                         continue;
                     }
 
-                    ReadOnlyMemory<byte> bytes = encoded[i].Blob.Memory;
-                    long aligned = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
-                    await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
-                    TableBytes += bytes.Length;
-                    (long first, long last) = BucketsOf(_arena!, _declared[i].Node);
-                    TableChunk chunk = new TableChunk(IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent), first, last, _declared[i].Table.Rows);
-                    _tables.Add((_declared[i].Table, [chunk], [encoded[i].DType]));
+                    // The chunks one after another, each aligned as a segment is, read back from where they waited.
+                    TableChunk[] chunks = new TableChunk[held.Chunks.Count];
+                    byte[][] dtypes = new byte[chunks.Length][];
+                    for (int c = 0; c < chunks.Length; c++)
+                    {
+                        (long at, int length, long first, long last, int rows) = held.Chunks[c];
+                        Memory<byte> bytes = buffer.AsMemory(0, length);
+                        await _held.ReadAsync(at, bytes, cancellationToken).ConfigureAwait(false);
+                        long aligned = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
+                        await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+                        TableBytes += length;
+                        chunks[c] = new TableChunk(IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent), first, last, rows);
+                        dtypes[c] = held.DType!;
+                    }
+
+                    _tables.Add((_declared[i].Table, chunks, dtypes));
                 }
             }
             finally
             {
-                foreach ((ArrayBlobWriter.BlobLease blob, byte[] _) in encoded)
-                {
-                    blob.Dispose();
-                }
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
 
-        /// <summary>The bucket of a table's first row and of its last, the rows lying in the order of their buckets.</summary>
-        private static (long First, long Last) BucketsOf(CanonicalArena arena, int node)
+        public void Dispose()
         {
-            CanonicalNode rows = arena.GetNode(node);
-            if (rows.Length == 0)
-            {
-                return (0, 0);
-            }
-
-            ReadOnlySpan<long> buckets = arena.GetNode(rows.GetFieldIndex(0)).Values.Cast<long>();
-            return (buckets[0], buckets[^1]);
+            _held.Dispose();
+            _tableBlobs?.Dispose();
         }
-
-        public void Dispose() => _held.Dispose();
     }
 
     /// <summary>The rows past which the batches waiting go through the writer, as one.</summary>
@@ -535,20 +579,40 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// Declares the tables of the file's synopsis, their rows nodes of <paramref name="arena"/>, which the
-    /// caller keeps until the file is completed: written in the synopsis part after its columns, each an
-    /// array payload its index entry names.
+    /// Declares the tables of the file's synopsis, each by what it holds and the table its chunks were held under
+    /// (<see cref="ISynopsisChunkSink"/>): written in the synopsis part after its columns, those the choice keeps,
+    /// each chunk an array payload of its index entry.
     /// </summary>
     /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold them.</exception>
-    internal void DeclareSynopsisTables(CanonicalArena arena, IReadOnlyList<(SynopsisTableInfo Table, int Node)> tables)
+    internal void DeclareSynopsisTables(IReadOnlyList<(SynopsisTableInfo Table, int Held)> tables) => Part().Declare(tables);
+
+    /// <summary>The synopsis part, made with its first table or column chunk.</summary>
+    /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold the tables.</exception>
+    private SynopsisPart Part()
     {
         if (_indexes is null)
         {
             throw new InvalidOperationException("A file's synopsis tables ride in its index directory, which a writer that builds no index does not write.");
         }
 
-        (_synopsisPart ??= new SynopsisPart(_synopsisSpool)).Declare(arena, tables);
+        return _synopsisPart ??= new SynopsisPart(_synopsisSpool);
     }
+
+    int ISynopsisChunkSink.OpenTable() => Part().OpenTable();
+
+    ValueTask<long> ISynopsisChunkSink.SpoolChunkAsync(int table, CanonicalArena arena, int node, long firstBucket, long lastBucket, CancellationToken cancellationToken) =>
+        Part().SpoolTableChunkAsync(this, table, arena, node, firstBucket, lastBucket, cancellationToken);
+
+    void ISynopsisChunkSink.DropTable(int table, string verdict) => Part().DropTable(table, verdict);
+
+    // The data so far: what the file holds but its indexes, and the synopsis columns' chunks it holds aside.
+    long ISynopsisChunkSink.BudgetSoFar => _indexes is { } indexes
+        ? indexes.SynopsisBudgetSoFar(_sink.Position - indexes.FileBytes + (_synopsisPart?.ColumnBytes ?? 0))
+        : long.MaxValue;
+
+    long ISynopsisChunkSink.RowsSoFar => _rowCount;
+
+    (long Memory, string? Directory, bool Seal) ISynopsisChunkSink.Scratch => _synopsisSpool;
 
     /// <summary>Where every column's chunks lie and the encodings their trees name, as the layout will say.</summary>
     private SliceChunks ChunkDirectory()
@@ -879,6 +943,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (writer._indexes is { } built)
         {
             built.Spared = options.BudgetSpares;
+            built.EarlyChoiceFloor = options.SynopsisEarlyChoiceBytes;
         }
 
         // The entries rather than Keys, whose enumerator is an allocated iterator.
@@ -887,6 +952,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             (writer._gathering ??= new Gathering?[writer._fieldCount])[schema.IndexOfField(target.Key)] = new Gathering(target.Value);
         }
 
+        // The synopsis part's chunks wait where the indexes' runs do, its tables' with its columns'.
+        writer._synopsisSpool = (options.ScratchMemoryBytes, options.ScratchDirectory, options.SealScratch);
         foreach (string column in options.SynopsisColumns ?? [])
         {
             int field = writer._isTabular ? schema.IndexOfField(column) : -1;
@@ -896,7 +963,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             (writer._synopsis ??= new bool[writer._fieldCount])[field] = true;
-            writer._synopsisSpool = (options.ScratchMemoryBytes, options.ScratchDirectory, options.SealScratch);
         }
 
         foreach (KeyValuePair<string, VariantDirectory> column in options.VariantDirectories ?? ImmutableDictionary<string, VariantDirectory>.Empty)

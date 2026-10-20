@@ -161,19 +161,20 @@ internal static class SliceBytesMicro
         await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<SliceRequest>(path, synopsis))
         {
             using SortedSlices slices = new SortedSlices(table, instant, schema);
-            using SynopsisTables tables = new SynopsisTables(schema, table.Unit, SynopsisTables.Measures(schema, instant, table.Order));
+            using SynopsisTables tables = new SynopsisTables(
+                schema, table.Unit, SynopsisTables.Measures(schema, instant, table.Order), writer, slices: table.Slices);
             int next = 0;
             foreach (RecordBatch batch in batches)
             {
-                await slices.AppendAsync(batch, (rows, token) =>
+                await slices.AppendAsync(batch, async (rows, token) =>
                 {
-                    tables.AddSlice(rows, table.Slices[next++].Start, slices.Order, slices.SortedCodes);
-                    return writer.WriteBatchAsync(rows, token);
+                    await tables.AddSliceAsync(rows, table.Slices[next++].Start, slices.Order, slices.SortedCodes, cancellationToken: token);
+                    await writer.WriteBatchAsync(rows, token);
                 }, default);
             }
 
             writer.DeclareSlices(nameof(SliceRequest.At), slices.Table);
-            writer.DeclareSynopsisTables(tables.Arena, tables.Build());
+            writer.DeclareSynopsisTables(await tables.FinishAsync());
             report = await writer.CompleteAsync();
         }
 

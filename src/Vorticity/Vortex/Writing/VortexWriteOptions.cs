@@ -276,6 +276,13 @@ public sealed record VortexWriteOptions
     /// </summary>
     internal IReadOnlyList<string>? SynopsisColumns { get; init; }
 
+    /// <summary>
+    /// The data under which no synopsis table is given up before the end, every one weighed by the choice against the
+    /// whole data: <see cref="IndexWriter.DefaultEarlyChoiceBytes"/>. Lowered by tests, so that objects of a few rows
+    /// meet the early verdicts that only large ones do otherwise.
+    /// </summary>
+    internal long SynopsisEarlyChoiceBytes { get; init; } = IndexWriter.DefaultEarlyChoiceBytes;
+
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
 

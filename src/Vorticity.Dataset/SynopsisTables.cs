@@ -2,14 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
-using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Indexes;
 using Vorticity.RowEncoding;
 using Vorticity.Types;
+using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
@@ -36,27 +37,75 @@ namespace Vorticity.Dataset;
 /// The measures are folded once, into the deepest groups, whose states merge into each shallower depth's.
 /// </para>
 /// <para>
-/// The coarse tables and value counts merge the deepest run statistics of every slice: their keys coded
-/// across the object, sorted by bucket and codes with a counting sort a column, and the states of each
-/// combination added, without a hash table.
+/// Nothing is held for longer than a slice but a chunk of each table and what a merge reads. A slice's runs go
+/// out as rows of the tables of slices at once; its groups at the deepest depth a coarser table still asks for,
+/// and the values of each column, in the order of their keys, go to a scratch store as runs of records, memory
+/// up to its budget and the disk past it. At the end of each hour, a merge of those runs gives every depth of
+/// the hour's coarse tables in one pass, a group of a depth ending where its prefix of the keys does, and the
+/// value counts likewise; the hour's deepest groups go on to the object's store, whose merge at the end gives
+/// the object's tables. Every table goes to the writer a chunk at a time (<see cref="ISynopsisChunkSink"/>),
+/// <see cref="ChunkRows"/> rows at most, so that no array holds more than a chunk, whatever the object's rows;
+/// an hour's rows are chunks of their own when they weigh enough for a question of the hour to read them alone.
+/// </para>
+/// <para>
+/// A table whose chunks take more than the budget of the data written so far alone is not worth its bytes, and
+/// is given up as it grows. So is a coarser table that the rows counted already rule out against the budget of
+/// the whole object, which its rows, known before a row is written, scale: it holds at least the groups an hour
+/// or a slice held at its depth, each at the fewest bytes a row of a table has taken yet. The merges then read
+/// the shallower depths only, which cuts the runs of the hours that follow.
 /// </para>
 /// </remarks>
 internal sealed class SynopsisTables : IDisposable
 {
-    private static readonly long NoFloat = BitConverter.DoubleToInt64Bits(double.NaN);
+    /// <summary>The rows a chunk of a table holds at most: what a reader decodes at once, and what a stage holds.</summary>
+    internal const int ChunkRows = 1 << 16;
+
+    /// <summary>
+    /// The rows of a table's first chunk, at most: enough for the bytes a row takes once encoded to say what the rest will
+    /// take, few enough for a table that grows fast to say it early.
+    /// </summary>
+    internal const int ProbeRows = 1 << 12;
+
+    /// <summary>
+    /// The bytes, before they are encoded, past which the rows of an hour go out as chunks of their own when the hour
+    /// ends, so that a question of an hour reads that hour's alone: about what a round trip to an object store costs
+    /// in transfer once they are encoded. Fewer wait for the next hour's, since a read of them costs its round trip
+    /// whatever it holds.
+    /// </summary>
+    private const long HourChunkBytes = 4L << 20;
+
+    /// <summary>The bytes of records a merge's output holds before it goes to its store.</summary>
+    private const int RunFlushBytes = 1 << 20;
+
+    /// <summary>
+    /// How many times the budget a coarser table's projected rows must take for it to be given up before its rows are
+    /// all counted: a projection fitted to the growth so far overshoots where a key's values come in a burst and then
+    /// repeat, while a table of keys almost unique to each row, the waste worth cutting, takes many times the budget.
+    /// </summary>
+    private const double ProjectionMargin = 2;
 
     private readonly DType _schema;
     private readonly IReadOnlyList<SynopsisPath> _paths;
     private readonly TimeUnit _unit;
+    private readonly ISynopsisChunkSink _sink;
+    private readonly bool _spansHours;
+    private readonly long _objectRows;
+    private readonly (int Rows, long HourBytes) _chunking;
+    private readonly Dictionary<long, long> _hourRows = [];
     private readonly ScanContext _context = new ScanContext([]);
     private readonly DTypeArena _types = new DTypeArena();
     private readonly Dictionary<int, DType> _keyTypes = [];
-    private readonly List<Slice> _slices = [];
     private readonly Dictionary<long, int> _pairs = [];
+    private readonly RunBuffer _run = new RunBuffer();
+    private readonly RunBuffer _key = new RunBuffer();
     private int[] _measures;
-    private Kind[] _kinds;
+    private MeasureKind[] _kinds;
+    private int _words;
+    private long[] _state = [];
     private int[] _keys = [];
-    private DType? _keysType;
+    private int _first;
+    private bool _settled;
+    private KeyShape[] _keyShapes = [];
 
     // The columns of the slice being counted's paths, in its batch's arena, -1 for a path not read.
     private IReadOnlyList<int> _pathColumns = [];
@@ -64,33 +113,96 @@ internal sealed class SynopsisTables : IDisposable
     // Each depth's group of every row of the slice counted, reused from slice to slice.
     private int[][] _groups = [];
 
+    // The paths left in the residual whose values the tables count, which the first slice settles.
+    private int[] _counted = [];
+
+    // The tables the object may keep, in the order the choice weighs them; and each kind by its depth, the value
+    // counts by the key they count, the paths counted after the keys.
+    private readonly List<Candidate> _candidates = [];
+    private Candidate?[] _runs = [];
+    private Candidate?[] _hourly = [];
+    private Candidate?[] _whole = [];
+    private Candidate?[] _values = [];
+
+    // What the coarser tables' rows are weighed from: at each depth, the groups of the hours merged, and the distinct
+    // groups of the hour and of the object as their slices come; for each column counted, its values of the hours merged
+    // and the distinct ones of the hour.
+    private long[] _hourSum = [];
+    private Growth?[] _hourGrowth = [];
+    private Growth?[] _objectGrowth = [];
+    private long[] _valueSum = [];
+    private Growth?[] _valueGrowth = [];
+
+    // The hash of each group's keys at each depth of the slice counted, and the bytes of one key being hashed.
+    private ulong[][] _prefixHashes = [];
+    private readonly RunBuffer _component = new RunBuffer();
+
+    // The rows of the slices counted, the one being counted's among them; of those handed to the writer since; of the
+    // hours merged, and of the hour's. Once the last slice is counted, the tables are finished, and none is given up.
+    private long _rowsCounted;
+    private long _rowsWritten;
+    private long _rowsClosed;
+    private long _hourRowsSeen;
+    private bool _finishing;
+
+    // The hour being counted, the depth its runs hold, the runs of its slices, each column's runs of values, and the
+    // store they wait in.
+    private long _hour = long.MinValue;
+    private int _hourDepth = -1;
+    private RunScratch? _hourScratch;
+    private readonly List<RunSpan> _hourRuns = [];
+    private List<RunSpan>[] _valueRuns = [];
+    private long _hours;
+
+    // The object's hours at the depth of its own tables, and the store they wait in.
+    private int _wholeDepth = -1;
+    private RunScratch? _wholeScratch;
+    private readonly List<RunSpan> _wholeRuns = [];
+
     /// <summary>
     /// The tables of an object of <paramref name="schema"/>, its instant in <paramref name="unit"/>, the
-    /// measures <paramref name="measures"/>, its synopsis paths <paramref name="paths"/>: the first slice adds
-    /// to the measures the numeric paths the order does not place.
+    /// measures <paramref name="measures"/>, its synopsis paths <paramref name="paths"/>, its chunks handed to
+    /// <paramref name="sink"/>: the first slice adds to the measures the numeric paths the order does not place.
+    /// Its slices <paramref name="slices"/>, known before a row is written, say whether it spans hours, which its
+    /// tables of the object then sum up, and its rows and each hour's, which weigh what its tables may take; without
+    /// them, it is taken to span hours, and no table is given up before the end. A test sets <paramref name="chunking"/>,
+    /// the rows of a chunk and the bytes past which an hour's rows are chunks of their own, to cut tables of a few rows.
     /// </summary>
-    internal SynopsisTables(DType schema, TimeUnit unit, int[] measures, IReadOnlyList<SynopsisPath>? paths = null)
+    internal SynopsisTables(
+        DType schema, TimeUnit unit, int[] measures, ISynopsisChunkSink sink, IReadOnlyList<SynopsisPath>? paths = null,
+        IReadOnlyList<TimeSlice>? slices = null, (int Rows, long HourBytes)? chunking = null)
     {
         _schema = schema;
         _unit = unit;
         _paths = paths ?? [];
+        _sink = sink;
+        _chunking = chunking ?? (ChunkRows, HourChunkBytes);
         (_measures, _kinds) = KindsOf(measures);
+        _spansHours = slices is null;
+        for (int s = 0; s < (slices?.Count ?? 0); s++)
+        {
+            long hour = TimeSlicer.Floor(slices![s].Start, unit, SliceWidth.Hour);
+            _hourRows[hour] = _hourRows.GetValueOrDefault(hour) + slices[s].Rows;
+            _objectRows += slices[s].Rows;
+        }
+
+        _spansHours |= _hourRows.Count > 1;
     }
 
     /// <summary>The measures <paramref name="measures"/>, fields or paths, and how each one's states are kept.</summary>
-    private (int[] Measures, Kind[] Kinds) KindsOf(int[] measures)
+    private (int[] Measures, MeasureKind[] Kinds) KindsOf(int[] measures)
     {
-        Kind[] kinds = new Kind[measures.Length];
+        MeasureKind[] kinds = new MeasureKind[measures.Length];
         for (int m = 0; m < measures.Length; m++)
         {
             if (SynopsisPath.Names(measures[m]))
             {
-                kinds[m] = _paths[SynopsisPath.Place(measures[m])].Class == Types.Variants.VariantClass.Double ? Kind.Float : Kind.Signed;
+                kinds[m] = _paths[SynopsisPath.Place(measures[m])].Class == Types.Variants.VariantClass.Double ? MeasureKind.Float : MeasureKind.Signed;
                 continue;
             }
 
             PType ptype = Storage(_schema.GetField(measures[m])).PType;
-            kinds[m] = ptype.IsFloat() ? Kind.Float : ptype.IsUnsignedInteger() ? Kind.Unsigned : Kind.Signed;
+            kinds[m] = ptype.IsFloat() ? MeasureKind.Float : ptype.IsUnsignedInteger() ? MeasureKind.Unsigned : MeasureKind.Signed;
         }
 
         return (measures, kinds);
@@ -119,31 +231,18 @@ internal sealed class SynopsisTables : IDisposable
     /// Counts the slice starting at <paramref name="start"/>, its rows in <paramref name="sorted"/>, sorted by
     /// the entries <paramref name="order"/> names, whose codes in the sorted order <paramref name="codes"/>
     /// holds, the columns of its paths in <paramref name="paths"/>, the paths left in the residual whose
-    /// values it counts <paramref name="counted"/>: the states of its groups at every depth, the keys of its
-    /// deepest groups, and the states of each counted path's values.
+    /// values it counts <paramref name="counted"/>: its runs go out as rows of the tables of slices, and its
+    /// groups and values to the runs the hour's merge reads. Slices come in time order.
     /// </summary>
-    internal void AddSlice(
+    internal async ValueTask AddSliceAsync(
         RecordBatch sorted, long start, IReadOnlyList<int> order, IReadOnlyList<int[]> codes, IReadOnlyList<int>? paths = null,
-        IReadOnlyList<int>? counted = null)
+        IReadOnlyList<int>? counted = null, CancellationToken cancellationToken = default)
     {
         _pathColumns = paths ?? [];
-        if (_slices.Count == 0)
+        int rows = sorted.RowCount;
+        if (rows == 0)
         {
-            // The numeric paths the order does not place, and whose values are not counted, are measures,
-            // summed as the numbers of the schema are.
-            _counted = [.. counted ?? []];
-            List<int> measures = [.. _measures];
-            for (int p = 0; p < _paths.Count; p++)
-            {
-                if (_paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double
-                    && !Contains(order, SynopsisPath.Entry(p)) && !Contains(_counted, SynopsisPath.Entry(p))
-                    && p < _pathColumns.Count && _pathColumns[p] >= 0)
-                {
-                    measures.Add(SynopsisPath.Entry(p));
-                }
-            }
-
-            (_measures, _kinds) = KindsOf([.. measures]);
+            return;
         }
 
         // The keys, and how many lead the order before a variant's shapes.
@@ -163,38 +262,52 @@ internal sealed class SynopsisTables : IDisposable
             }
         }
 
-        _keys = [.. keys];
-        int depth = _keys.Length;
-        leading = leading < 0 ? depth : leading;
-        int rows = sorted.RowCount;
-        if (rows == 0)
+        if (!_settled)
         {
-            return;
+            Settle(order, keys, counted);
         }
 
-        // Each depth's groups, numbered in the order of their first rows.
-        Grow(depth, rows);
-        int[] counts = new int[depth + 1];
+        int depth = _keys.Length;
+        leading = leading < 0 ? depth : leading;
+        long hour = TimeSlicer.Floor(start, _unit, SliceWidth.Hour);
+        if (hour != _hour)
+        {
+            if (_hour != long.MinValue)
+            {
+                await CloseHourAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            OpenHour(hour);
+        }
+
+        _rowsCounted = _rowsWritten + rows;
+
+        // Each depth's groups, numbered in the order of their first rows, down to the deepest a table still asks for: the
+        // tables of slices', or the hour's runs'. Past it, no group is counted, so a depth all of whose tables were given
+        // up costs nothing more.
+        int used = Math.Max(Math.Max(Deepest(_runs), _hourDepth), 0);
+        Grow(used, rows);
+        int[] counts = new int[used + 1];
         _groups[0].AsSpan(0, rows).Clear();
         counts[0] = 1;
-        for (int d = 1; d <= depth; d++)
+        for (int d = 1; d <= used; d++)
         {
             counts[d] = d <= leading
                 ? Runs(keyCodes[d - 1], _groups[d - 1], _groups[d], rows)
                 : Pairs(keyCodes[d - 1], _groups[d - 1], _groups[d], rows, _pairs);
         }
 
-        int[][] firsts = new int[depth + 1][];
-        for (int d = 0; d <= depth; d++)
+        int[][] firsts = new int[used + 1][];
+        for (int d = 0; d <= used; d++)
         {
             firsts[d] = Firsts(_groups[d], counts[d], rows);
         }
 
         // The measures folded into the deepest groups, then merged up a depth at a time.
         CanonicalArena arena = sorted.Arena;
-        Accumulators[] states = new Accumulators[depth + 1];
-        states[depth] = Fold(arena, sorted.RootIndex, rows, _groups[depth], counts[depth]);
-        for (int d = depth - 1; d >= 0; d--)
+        Accumulators[] states = new Accumulators[used + 1];
+        states[used] = Fold(arena, sorted.RootIndex, rows, _groups[used], counts[used]);
+        for (int d = used - 1; d >= 0; d--)
         {
             int[] parent = new int[counts[d + 1]];
             for (int g = 0; g < parent.Length; g++)
@@ -205,150 +318,278 @@ internal sealed class SynopsisTables : IDisposable
             states[d] = states[d + 1].Merge(parent, counts[d]);
         }
 
-        // Each depth's groups in the order of their keys' values, which their numbering is down to the
-        // shapes; and where each finds its keys among the deepest groups'.
-        int[]?[] places = new int[]?[depth + 1];
-        for (int d = leading + 1; d <= depth; d++)
+        // Each depth's groups in the order of their keys' values, which their numbering is down to the shapes, and
+        // the first row of each in that order.
+        int[][] keyed = new int[used + 1][];
+        for (int d = 0; d <= used; d++)
         {
-            places[d] = Places(firsts[d], keyCodes, d);
-            states[d] = states[d].Merge(places[d], counts[d]);
-        }
-
-        int[][] keyRows = new int[depth + 1][];
-        for (int d = 0; d <= depth; d++)
-        {
-            keyRows[d] = new int[counts[d]];
-            for (int g = 0; g < counts[d]; g++)
+            keyed[d] = firsts[d];
+            if (d > leading)
             {
-                int deep = _groups[depth][firsts[d][g]];
-                keyRows[d][places[d]?[g] ?? g] = places[depth]?[deep] ?? deep;
+                int[] places = Places(firsts[d], keyCodes, d);
+                states[d] = states[d].Merge(places, counts[d]);
+                keyed[d] = new int[counts[d]];
+                for (int g = 0; g < counts[d]; g++)
+                {
+                    keyed[d][places[g]] = firsts[d][g];
+                }
             }
         }
 
-        _slices.Add(new Slice(start, depth == 0 ? -1 : Keys(sorted, firsts[depth], places[depth]), counts[depth], states, keyRows, Counted(sorted)));
+        // The key columns as their values lie, a column's encodings decoded.
+        CanonicalNode node = arena.GetNode(sorted.RootIndex);
+        int[] columns = new int[depth];
+        for (int k = 0; k < depth; k++)
+        {
+            columns[k] = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, ColumnOf(node, _keys[k])));
+        }
+
+        CountDistinct(arena, columns, counts, firsts);
+
+        // The slice's runs, rows of the tables of slices.
+        for (int d = _first; d <= used; d++)
+        {
+            if (_runs[d] is { Dead: false } table)
+            {
+                for (int p = 0; p < counts[d]; p++)
+                {
+                    EncodeKey(arena, columns, keyed[d][p], d);
+                    states[d].Words(p, _state);
+                    if (Hold(table, start, _key.Span, _state))
+                    {
+                        await FlushAsync(table, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+
+        // Its groups at the depth the hour's merge reads, in the order of their keys.
+        if (_hourDepth >= 0)
+        {
+            int at = _hourDepth;
+            _run.Clear();
+            for (int p = 0; p < counts[at]; p++)
+            {
+                EncodeKey(arena, columns, keyed[at][p], at);
+                _run.Bytes(_key.Span);
+                states[at].Words(p, _state);
+                _run.Words(_state);
+            }
+
+            _hourRuns.Add(await AppendAsync(HourStore(), at, cancellationToken).ConfigureAwait(false));
+        }
+
+        // Each later key's values, and each counted path's, in their order, with their states.
+        for (int k = 1; k < depth; k++)
+        {
+            if (_values[k] is { Dead: false })
+            {
+                int[] valueCodes = keyCodes[k];
+                int distinct = 0;
+                for (int row = 0; row < rows; row++)
+                {
+                    distinct = Math.Max(distinct, valueCodes[row] + 1);
+                }
+
+                await ValuesAsync(k, arena, sorted.RootIndex, rows, columns[k], _keyShapes[k], valueCodes, distinct, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        for (int c = 0; c < _counted.Length; c++)
+        {
+            if (_values[depth + c] is { Dead: false } table)
+            {
+                int column = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, _pathColumns[SynopsisPath.Place(_counted[c])]));
+                (int[] valueCodes, int distinct) = SliceSort.CodesOfColumn(arena, column, rows);
+                await ValuesAsync(depth + c, arena, sorted.RootIndex, rows, column, table.Shapes[0], valueCodes, distinct, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        _hourRowsSeen += rows;
+        Note(_hourly, _hourGrowth, _hourRowsSeen);
+        Note(_whole, _objectGrowth, _rowsWritten + rows);
+        Note(_values, _valueGrowth, _hourRowsSeen);
+        Prune();
+        _rowsWritten += rows;
     }
 
     /// <summary>
-    /// The object's tables: the run statistics at every depth, the coarse tables per hour, and per object
-    /// when the object spans more than an hour, at every depth, and the value counts per hour of every
-    /// synopsis column after the first.
+    /// Adds each group of the slice to the distinct groups of its depth, the hour's and the object's, down to the deepest
+    /// depth a coarser table still counts: a group's hash its parent's mixed with its own key's.
     /// </summary>
-    internal List<(SynopsisTableInfo Table, int Node)> Build()
+    private void CountDistinct(CanonicalArena arena, int[] columns, int[] counts, int[][] firsts)
+    {
+        int deepest = 0;
+        for (int d = 1; d < _hourGrowth.Length; d++)
+        {
+            deepest = Counts(_hourly[d], _hourGrowth[d]) is not null || Counts(_whole[d], _objectGrowth[d]) is not null ? d : deepest;
+        }
+
+        if (deepest == 0)
+        {
+            return;
+        }
+
+        if (_prefixHashes.Length <= deepest)
+        {
+            Array.Resize(ref _prefixHashes, deepest + 1);
+        }
+
+        ulong[] parents = Hashes(0, 1);
+        parents[0] = 0;
+        for (int d = 1; d <= deepest; d++)
+        {
+            ulong[] hashes = Hashes(d, counts[d]);
+            int[] parentOf = _groups[d - 1];
+            int[] first = firsts[d];
+            for (int g = 0; g < counts[d]; g++)
+            {
+                int row = first[g];
+                _component.Clear();
+                KeyCodec.Append(_component, arena, columns[d - 1], row, _keyShapes[d - 1]);
+                hashes[g] = Mix(parents[parentOf[row]], CardinalitySlot.Hash(_component.Span));
+            }
+
+            Add(Counts(_hourly[d], _hourGrowth[d]), hashes, counts[d]);
+            Add(Counts(_whole[d], _objectGrowth[d]), hashes, counts[d]);
+            parents = hashes;
+        }
+
+        // The hashes of depth d's groups, in an array at least as long as they are many.
+        ulong[] Hashes(int d, int count)
+        {
+            if (_prefixHashes[d] is null || _prefixHashes[d].Length < count)
+            {
+                _prefixHashes[d] = new ulong[Math.Max(count, 64)];
+            }
+
+            return _prefixHashes[d];
+        }
+    }
+
+    /// <summary>The growth that counts the distinct rows of <paramref name="table"/>, while it is still kept.</summary>
+    private static Growth? Counts(Candidate? table, Growth? growth) => table is { Dead: false } ? growth : null;
+
+    private static void Add(Growth? growth, ulong[] hashes, int count)
+    {
+        if (growth is null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            growth.Sketch.Add(hashes[i]);
+        }
+    }
+
+    /// <summary>Notes what the growth of each table of <paramref name="tables"/> still kept holds after <paramref name="rows"/> rows.</summary>
+    private static void Note(Candidate?[] tables, Growth?[] growths, long rows)
+    {
+        for (int i = 0; i < growths.Length; i++)
+        {
+            Counts(tables[i], growths[i])?.Note(rows);
+        }
+    }
+
+    /// <summary>Two hashes mixed into one, as the finalizer of MurmurHash3 mixes a word.</summary>
+    private static ulong Mix(ulong parent, ulong own)
+    {
+        ulong h = (parent * 0x9E3779B97F4A7C15UL) ^ own;
+        h ^= h >> 33;
+        h *= 0xFF51AFD7ED558CCDUL;
+        h ^= h >> 33;
+        h *= 0xC4CEB9FE1A85EC53UL;
+        h ^= h >> 33;
+        return h;
+    }
+
+    /// <summary>
+    /// The value counts of the slice for counted column <paramref name="slot"/>: its rows grouped by their codes, a
+    /// value's code its rank, a null's coded last and left out of a path's counts, as a run of the hour's.
+    /// </summary>
+    private async ValueTask ValuesAsync(
+        int slot, CanonicalArena arena, int root, int rows, int column, KeyShape shape, int[] valueCodes, int distinct, CancellationToken cancellationToken)
+    {
+        // A null codes after every value: a group of its own, which a path's counts leave out.
+        bool path = slot >= _keys.Length;
+        int groups = path ? distinct + 1 : distinct;
+        Accumulators states = Fold(arena, root, rows, valueCodes, groups);
+        int[] first = new int[groups];
+        first.AsSpan().Fill(-1);
+        for (int row = 0; row < rows; row++)
+        {
+            if (first[valueCodes[row]] < 0)
+            {
+                first[valueCodes[row]] = row;
+            }
+        }
+
+        int kept = path ? distinct : groups;
+        Growth? growth = Counts(_values[slot], _valueGrowth[slot]);
+        _run.Clear();
+        for (int g = 0; g < kept; g++)
+        {
+            if (first[g] < 0)
+            {
+                continue;
+            }
+
+            int at = _run.Length;
+            KeyCodec.Append(_run, arena, column, first[g], shape);
+            growth?.Sketch.Add(CardinalitySlot.Hash(_run.Span[at..]));
+            states.Words(g, _state);
+            _run.Words(_state);
+        }
+
+        _valueRuns[slot].Add(await AppendAsync(HourStore(), 1, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// The object's tables, once every slice is counted: the last hour merged, then the object's hours when it spans
+    /// more than one; each table still kept with the place its chunks are held under in the writer, which chooses.
+    /// </summary>
+    internal async ValueTask<List<(SynopsisTableInfo Table, int Held)>> FinishAsync(CancellationToken cancellationToken = default)
     {
         List<(SynopsisTableInfo, int)> tables = [];
-        int depth = _keys.Length;
-        int first = _measures.Length > 0 ? 0 : 1;
-        if (_slices.Count == 0)
+        if (!_settled)
         {
             return tables;
         }
 
-        CountedTables(tables);
-        if (first > depth)
+        if (_hour != long.MinValue)
         {
-            return tables;
+            await CloseHourAsync(cancellationToken).ConfigureAwait(false);
+            _hour = long.MinValue;
         }
 
-        // The deepest groups of every slice, one after another: their keys, and where each slice's begin.
-        int deepRows = 0;
-        int[] offsets = new int[_slices.Count];
-        for (int s = 0; s < _slices.Count; s++)
+        // The object's tables, when its hours are several: one table of each depth over them all. An object of one hour
+        // has none, as its coarse tables of the hour say the same.
+        _finishing = true;
+        if (_hours > 1 && _wholeDepth >= 0 && _wholeRuns.Count > 0)
         {
-            offsets[s] = deepRows;
-            deepRows += _slices[s].Deep;
+            await MergeAsync(_wholeScratch!, _wholeRuns, _wholeDepth, _whole, 0, wholeRuns: false, cancellationToken).ConfigureAwait(false);
         }
-
-        int keys = depth == 0 ? -1 : ConcatKeys(deepRows);
-
-        // The run statistics at every depth, a slice's groups after another's.
-        for (int d = first; d <= depth; d++)
+        else if (_hours <= 1)
         {
-            List<Accumulators> parts = new List<Accumulators>(_slices.Count);
-            int count = 0;
-            foreach (Slice slice in _slices)
+            foreach (Candidate? table in _whole)
             {
-                parts.Add(slice.States[d]);
-                count += slice.States[d].Groups;
-            }
-
-            int[] at = new int[count];
-            long[] buckets = new long[count];
-            int row = 0;
-            for (int s = 0; s < _slices.Count; s++)
-            {
-                foreach (int key in _slices[s].KeyRows[d])
+                if (table is not null)
                 {
-                    at[row] = offsets[s] + key;
-                    buckets[row++] = _slices[s].Start;
+                    table.Dead = true;
+                    table.Held = -1;
+                    table.Stage.Release();
                 }
             }
-
-            Accumulators states = Accumulators.Concat(_kinds, parts);
-            Add(tables, Info(SynopsisTableKind.Runs, SynopsisBucket.Slice, _keys[..d], count), keys, Positions(d), at, buckets, states);
         }
 
-        // The deepest run statistics coded across the object: each one's hour, and its keys' codes.
-        List<Accumulators> deepest = new List<Accumulators>(_slices.Count);
-        long[] hours = new long[deepRows];
-        for (int s = 0; s < _slices.Count; s++)
+        // Every table with rows, and every one given up, which the choice still weighs as a grain asked.
+        foreach (Candidate table in _candidates)
         {
-            deepest.Add(_slices[s].States[depth]);
-            hours.AsSpan(offsets[s], _slices[s].Deep).Fill(TimeSlicer.Floor(_slices[s].Start, _unit, SliceWidth.Hour));
-        }
-
-        Accumulators all = Accumulators.Concat(_kinds, deepest);
-        (int[] Codes, int Distinct) hourCodes = Dense(hours);
-        List<(int[] Codes, int Distinct)> keyCodes = [];
-        for (int k = 0; k < depth; k++)
-        {
-            keyCodes.Add(SliceSort.CodesOf(_context.Canonical, keys, k, deepRows, null));
-        }
-
-        // The coarse tables per hour, the deepest first, each depth merged from the one below it.
-        int[] prefixes = new int[depth - first + 1];
-        for (int i = 0; i < prefixes.Length; i++)
-        {
-            prefixes[i] = 1 + depth - i;
-        }
-
-        List<(int[] Firsts, Accumulators States)> hourly = Levels([hourCodes, .. keyCodes], prefixes, all);
-        for (int i = 0; i < hourly.Count; i++)
-        {
-            (int[] at, Accumulators states) = hourly[i];
-            Add(tables, Info(SynopsisTableKind.Coarse, SynopsisBucket.Hour, _keys[..(depth - i)], states.Groups), keys, Positions(depth - i), at, Gather(hours, at), states);
-        }
-
-        // From the deepest of them, each later key's value counts per hour, the first key's being the coarse
-        // table of depth 1, and the object's coarse tables when it spans more than an hour.
-        (int[] deepFirsts, Accumulators deepHourly) = hourly[0];
-        (int[] Codes, int Distinct) hourOf = (Gather(hourCodes.Codes, deepFirsts), hourCodes.Distinct);
-        for (int k = 1; k < depth; k++)
-        {
-            (int[] firsts, Accumulators states) = Levels([hourOf, (Gather(keyCodes[k].Codes, deepFirsts), keyCodes[k].Distinct)], [2], deepHourly)[0];
-            int[] at = Gather(deepFirsts, firsts);
-            Add(tables, Info(SynopsisTableKind.Values, SynopsisBucket.Hour, [_keys[k]], states.Groups), keys, [k], at, Gather(hours, at), states);
-        }
-
-        if (hourCodes.Distinct > 1)
-        {
-            List<(int[] Codes, int Distinct)> columns = [];
-            foreach ((int[] codes, int distinct) in keyCodes)
+            await FlushAsync(table, cancellationToken).ConfigureAwait(false);
+            if (table.Held >= 0)
             {
-                columns.Add((Gather(codes, deepFirsts), distinct));
-            }
-
-            int[] keyPrefixes = new int[prefixes.Length];
-            for (int i = 0; i < keyPrefixes.Length; i++)
-            {
-                keyPrefixes[i] = prefixes[i] - 1;
-            }
-
-            List<(int[] Firsts, Accumulators States)> whole = Levels(columns, keyPrefixes, deepHourly);
-            for (int i = 0; i < whole.Count; i++)
-            {
-                (int[] firsts, Accumulators states) = whole[i];
-                int[] at = Gather(deepFirsts, firsts);
-                Add(tables, Info(SynopsisTableKind.Coarse, SynopsisBucket.Object, _keys[..(depth - i)], states.Groups), keys, Positions(depth - i), at, new long[at.Length], states);
+                tables.Add((new SynopsisTableInfo(table.Kind, table.Bucket, table.Keys, _measures, checked((int)table.Rows)), table.Held));
             }
         }
 
@@ -356,175 +597,500 @@ internal sealed class SynopsisTables : IDisposable
     }
 
     /// <summary>
-    /// The value counts per hour of each path left in the residual whose values repeat: every slice's values
-    /// and their states, coded across the object, sorted by hour and value, and merged.
+    /// Settles what the first slice says of every other: the keys, the measures with the numeric paths the order does
+    /// not place, the counted paths, and the tables the object may keep, in the order the choice weighs them.
     /// </summary>
-    private void CountedTables(List<(SynopsisTableInfo, int)> tables)
+    private void Settle(IReadOnlyList<int> order, List<int> keys, IReadOnlyList<int>? counted)
     {
+        _settled = true;
+
+        // The numeric paths the order does not place, and whose values are not counted, are measures,
+        // summed as the numbers of the schema are.
+        _counted = [.. counted ?? []];
+        List<int> measures = [.. _measures];
+        for (int p = 0; p < _paths.Count; p++)
+        {
+            if (_paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double
+                && !Contains(order, SynopsisPath.Entry(p)) && !Contains(_counted, SynopsisPath.Entry(p))
+                && p < _pathColumns.Count && _pathColumns[p] >= 0)
+            {
+                measures.Add(SynopsisPath.Entry(p));
+            }
+        }
+
+        (_measures, _kinds) = KindsOf([.. measures]);
+        _words = StateWords.Count(_kinds);
+        _state = new long[_words];
+        _keys = [.. keys];
+        int depth = _keys.Length;
+        _first = _measures.Length > 0 ? 0 : 1;
+        _keyShapes = new KeyShape[depth];
+        for (int k = 0; k < depth; k++)
+        {
+            _keyShapes[k] = KeyShape.Of(KeyType(_keys[k]));
+        }
+
+        _runs = new Candidate?[depth + 1];
+        _hourly = new Candidate?[depth + 1];
+        _whole = new Candidate?[depth + 1];
+        _values = new Candidate?[depth + _counted.Length];
+        _valueRuns = new List<RunSpan>[depth + _counted.Length];
+        for (int v = 0; v < _valueRuns.Length; v++)
+        {
+            _valueRuns[v] = [];
+        }
+
+        _hourSum = new long[depth + 1];
+        _valueSum = new long[depth + _counted.Length];
         for (int c = 0; c < _counted.Length; c++)
         {
-            int total = 0;
-            int[] nodes = new int[_slices.Count];
-            List<Accumulators> parts = new List<Accumulators>(_slices.Count);
-            for (int s = 0; s < _slices.Count; s++)
-            {
-                nodes[s] = _slices[s].Counted[c].Values;
-                parts.Add(_slices[s].Counted[c].States);
-                total += _slices[s].Counted[c].States.Groups;
-            }
+            _values[depth + c] = Add(SynopsisTableKind.Values, SynopsisBucket.Hour, [_counted[c]], [KeyShape.Of(KeyType(_counted[c]))]);
+        }
 
-            if (total == 0)
-            {
-                continue;
-            }
+        for (int d = _first; d <= depth; d++)
+        {
+            _runs[d] = Add(SynopsisTableKind.Runs, SynopsisBucket.Slice, _keys[..d], _keyShapes[..d]);
+        }
 
-            long[] hours = new long[total];
-            int at = 0;
-            foreach (Slice slice in _slices)
-            {
-                hours.AsSpan(at, slice.Counted[c].States.Groups).Fill(TimeSlicer.Floor(slice.Start, _unit, SliceWidth.Hour));
-                at += slice.Counted[c].States.Groups;
-            }
+        for (int d = depth; d >= _first; d--)
+        {
+            _hourly[d] = Add(SynopsisTableKind.Coarse, SynopsisBucket.Hour, _keys[..d], _keyShapes[..d]);
+        }
 
-            CanonicalArena arena = _context.Canonical;
-            int values = nodes.Length == 1 ? nodes[0] : CanonicalConcat.Concat(_context.Decode, CountedType(_counted[c]), total, nodes);
-            (int[] Codes, int Distinct) codes = SliceSort.CodesOfColumn(arena, arena.GetNode(values).GetFieldIndex(0), total);
-            (int[] firsts, Accumulators states) = Levels([Dense(hours), codes], [2], Accumulators.Concat(_kinds, parts))[0];
-            Add(tables, Info(SynopsisTableKind.Values, SynopsisBucket.Hour, [_counted[c]], states.Groups), values, [0], firsts, Gather(hours, firsts), states);
+        for (int k = 1; k < depth; k++)
+        {
+            _values[k] = Add(SynopsisTableKind.Values, SynopsisBucket.Hour, [_keys[k]], [_keyShapes[k]]);
+        }
+
+        if (_spansHours)
+        {
+            for (int d = depth; d >= _first; d--)
+            {
+                _whole[d] = Add(SynopsisTableKind.Coarse, SynopsisBucket.Object, _keys[..d], _keyShapes[..d]);
+            }
+        }
+
+        // The distinct groups and values of each coarser table with keys, counted for an object whose rows weigh its
+        // tables before the end.
+        _hourGrowth = new Growth?[depth + 1];
+        _objectGrowth = new Growth?[depth + 1];
+        _valueGrowth = new Growth?[_values.Length];
+        for (int d = 1; d <= depth && _objectRows > 0; d++)
+        {
+            _hourGrowth[d] = _hourly[d] is null ? null : new Growth();
+            _objectGrowth[d] = _whole[d] is null ? null : new Growth();
+        }
+
+        for (int v = 0; v < _values.Length && _objectRows > 0; v++)
+        {
+            _valueGrowth[v] = _values[v] is null ? null : new Growth();
         }
     }
 
-    /// <summary>The arena the tables' nodes lie in.</summary>
-    internal CanonicalArena Arena => _context.Canonical;
+    /// <summary>A table the object may keep, added to those the choice weighs.</summary>
+    private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes)
+    {
+        DType rowType = new SynopsisTableInfo(kind, bucket, keys, _measures, 0).RowType(_schema, _paths, _types);
+        Candidate table = new Candidate(kind, bucket, keys, shapes, rowType, new ChunkStage(shapes, _words));
+        _candidates.Add(table);
+        return table;
+    }
 
-    public void Dispose() => _context.Dispose();
+    /// <summary>Starts counting the hour <paramref name="hour"/>, its runs at the deepest depth a coarser table still asks for.</summary>
+    private void OpenHour(long hour)
+    {
+        _hour = hour;
+        _hourDepth = DeepestCoarse();
+        _wholeDepth = Deepest(_whole);
+    }
 
     /// <summary>
-    /// The rows of <paramref name="source"/> grouped by each prefix of <paramref name="columns"/> that
-    /// <paramref name="prefixes"/> lists, longest first, in the order the codes sort them: each group's first
-    /// row of <paramref name="source"/>, and its states, each prefix's merged from the previous one's groups.
+    /// Ends the hour: the chunks of its slices' tables, then its runs merged into every depth of its coarse tables, its
+    /// value counts, and, when the object's tables are kept, its deepest groups for the object's merge.
     /// </summary>
-    private static List<(int[] Firsts, Accumulators States)> Levels(List<(int[] Codes, int Distinct)> columns, int[] prefixes, Accumulators source)
+    private async ValueTask CloseHourAsync(CancellationToken cancellationToken)
     {
-        int rows = source.Groups;
-        int[] permutation = SliceSort.Permutation(columns, rows);
-
-        // For each row in that order, the first column whose code differs from the row before's.
-        int[] differs = new int[rows];
-        for (int i = 1; i < rows; i++)
+        await FlushHourAsync(_runs, cancellationToken).ConfigureAwait(false);
+        _hourDepth = Math.Min(_hourDepth, DeepestCoarse());
+        _wholeDepth = Math.Min(_wholeDepth, Deepest(_whole));
+        if (_hourDepth >= 0 && _hourRuns.Count > 0)
         {
-            int c = 0;
-            while (c < columns.Count && columns[c].Codes[permutation[i]] == columns[c].Codes[permutation[i - 1]])
+            long[] groups = await MergeAsync(_hourScratch!, _hourRuns, _hourDepth, _hourly, _hour, wholeRuns: _wholeDepth >= 0, cancellationToken).ConfigureAwait(false);
+            for (int d = 0; d < groups.Length; d++)
             {
-                c++;
+                _hourSum[d] += groups[d];
             }
-
-            differs[i] = c;
         }
 
-        List<(int[], Accumulators)> levels = [];
-        Accumulators states = source;
-        int[]? starts = null;
-        List<int> begins = [];
-        foreach (int prefix in prefixes)
+        for (int v = 0; v < _values.Length; v++)
         {
-            // A group starts where a code of the prefix changes, among the rows, then among the groups before.
-            begins.Clear();
-            int[] groupOf = new int[starts?.Length ?? rows];
-            for (int j = 0; j < groupOf.Length; j++)
+            if (_values[v] is { Dead: false } table && _valueRuns[v].Count > 0)
             {
-                int i = starts?[j] ?? j;
-                if (i == 0 || differs[i] < prefix)
+                using RunMerger merger = await RunMerger.OpenAsync(_hourScratch!, _valueRuns[v], table.Shapes, 1, _kinds, cancellationToken).ConfigureAwait(false);
+                while (await merger.MoveNextAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    begins.Add(i);
+                    _valueSum[v]++;
+                    if (Hold(table, _hour, merger.Key, merger.Words))
+                    {
+                        await FlushAsync(table, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+
+            _valueRuns[v].Clear();
+        }
+
+        await FlushHourAsync(_hourly, cancellationToken).ConfigureAwait(false);
+        await FlushHourAsync(_values, cancellationToken).ConfigureAwait(false);
+        _hourRuns.Clear();
+        _hourScratch?.Dispose();
+        _hourScratch = null;
+        _hours++;
+        _rowsClosed += _hourRowsSeen;
+        _hourRowsSeen = 0;
+        foreach (Growth? growth in _hourGrowth)
+        {
+            growth?.Clear();
+        }
+
+        foreach (Growth? growth in _valueGrowth)
+        {
+            growth?.Clear();
+        }
+
+        Prune();
+    }
+
+    /// <summary>
+    /// Merges <paramref name="runs"/> of <paramref name="scratch"/> at depth <paramref name="depth"/> into each depth of
+    /// <paramref name="into"/>, its rows in bucket <paramref name="bucket"/>: a group of a depth ends where its prefix of
+    /// the keys changes. With <paramref name="wholeRuns"/>, the groups at the object's depth go on as a run of its store.
+    /// </summary>
+    /// <returns>The groups of each depth, whether its table is kept or not.</returns>
+    private async ValueTask<long[]> MergeAsync(
+        RunScratch scratch, List<RunSpan> runs, int depth, Candidate?[] into, long bucket, bool wholeRuns, CancellationToken cancellationToken)
+    {
+        long[] emitted = new long[depth + 1];
+        long[][] groups = new long[depth + 1][];
+        for (int d = _first; d <= depth; d++)
+        {
+            groups[d] = new long[_words];
+            StateWords.Clear(groups[d], _kinds);
+        }
+
+        long runStart = -1;
+        long runLength = 0;
+        _run.Clear();
+        bool any = false;
+        using (RunMerger merger = await RunMerger.OpenAsync(scratch, runs, _keyShapes, depth, _kinds, cancellationToken).ConfigureAwait(false))
+        {
+            while (await merger.MoveNextAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (any)
+                {
+                    KeyCodec.Compare(_keyShapes, depth, _key.Span, merger.Key, out int differs);
+                    for (int d = depth; d >= Math.Max(_first, differs + 1); d--)
+                    {
+                        await EmitAsync(d).ConfigureAwait(false);
+                    }
                 }
 
-                groupOf[starts is null ? permutation[i] : j] = begins.Count - 1;
-            }
+                for (int d = _first; d <= depth; d++)
+                {
+                    StateWords.Merge(groups[d], merger.Words, _kinds);
+                }
 
-            states = states.Merge(groupOf, begins.Count);
-            starts = [.. begins];
-            int[] firsts = new int[starts.Length];
-            for (int g = 0; g < firsts.Length; g++)
-            {
-                firsts[g] = permutation[starts[g]];
+                _key.Clear();
+                _key.Bytes(merger.Key);
+                any = true;
             }
-
-            levels.Add((firsts, states));
         }
 
-        return levels;
+        if (any)
+        {
+            for (int d = depth; d >= _first; d--)
+            {
+                await EmitAsync(d).ConfigureAwait(false);
+            }
+        }
+
+        if (wholeRuns)
+        {
+            await FlushRunAsync().ConfigureAwait(false);
+            if (runLength > 0)
+            {
+                _wholeRuns.Add(new RunSpan(runStart, runLength, _wholeDepth));
+            }
+        }
+
+        return emitted;
+
+        // The group of depth d that the next key leaves: its prefix of the previous key, its states.
+        async ValueTask EmitAsync(int d)
+        {
+            emitted[d]++;
+            int prefix = KeyCodec.Prefix(_keyShapes, d, _key.Span);
+            if (into[d] is { Dead: false } table && Hold(table, bucket, _key.Span[..prefix], groups[d]))
+            {
+                await FlushAsync(table, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (wholeRuns && d == _wholeDepth)
+            {
+                _run.Bytes(_key.Span[..prefix]);
+                _run.Words(groups[d]);
+                if (_run.Length >= RunFlushBytes)
+                {
+                    await FlushRunAsync().ConfigureAwait(false);
+                }
+            }
+
+            StateWords.Clear(groups[d], _kinds);
+        }
+
+        // The object's run so far, appended to its store, where it lies after its earlier bytes.
+        async ValueTask FlushRunAsync()
+        {
+            if (_run.Length == 0)
+            {
+                return;
+            }
+
+            _wholeScratch ??= NewStore();
+            long at = await _wholeScratch.AppendAsync(_run.Memory, cancellationToken).ConfigureAwait(false);
+            runStart = runStart < 0 ? at : runStart;
+            runLength += _run.Length;
+            _run.Clear();
+        }
+    }
+
+    /// <summary>At an hour's end, hands its rows to the writer as chunks of their own for those of <paramref name="tables"/> that hold enough.</summary>
+    private async ValueTask FlushHourAsync(Candidate?[] tables, CancellationToken cancellationToken)
+    {
+        foreach (Candidate? table in tables)
+        {
+            if (table is not null && table.Stage.RawBytes >= _chunking.HourBytes)
+            {
+                await FlushAsync(table, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>Holds a row of <paramref name="table"/>; whether its stage is full, for the caller to flush.</summary>
+    private bool Hold(Candidate table, long bucket, ReadOnlySpan<byte> key, ReadOnlySpan<long> words)
+    {
+        if (table.Dead)
+        {
+            return false;
+        }
+
+        table.Stage.Append(bucket, key, words);
+        return table.Stage.Rows >= (table.Held < 0 ? Math.Max(_chunking.Rows / (ChunkRows / ProbeRows), 1) : _chunking.Rows);
     }
 
     /// <summary>
-    /// Adds table <paramref name="info"/>, its rows a struct node at <see cref="SynopsisTableInfo.RowType"/>:
-    /// the bucket, the keys at <paramref name="positions"/> of <paramref name="keys"/> gathered at rows
-    /// <paramref name="at"/>, the count, then each measure's states.
+    /// Hands the rows <paramref name="table"/>'s stage holds to the writer as a chunk. Before the end, a table whose bytes
+    /// already take more than the budget of the whole object is given up, and so is one whose bytes so far, scaled to the
+    /// object's rows from those they cover, take <see cref="ProjectionMargin"/> times more.
     /// </summary>
-    private void Add(
-        List<(SynopsisTableInfo, int)> tables, SynopsisTableInfo info, int keys, int[] positions, int[] at, long[] buckets, Accumulators states)
+    private async ValueTask FlushAsync(Candidate table, CancellationToken cancellationToken)
     {
+        if (table.Dead || table.Stage.Rows == 0)
+        {
+            return;
+        }
+
         CanonicalArena arena = _context.Canonical;
-        DType longs = _types.Primitive(PType.I64, Nullability.NonNullable);
-        List<int> fields = [Longs(arena, longs, buckets)];
-        foreach (int k in positions)
+        try
         {
-            fields.Add(CanonicalFilter.Apply(arena, arena.GetNode(keys).GetFieldIndex(k), at));
-        }
-
-        states.Emit(arena, longs, fields);
-        tables.Add((info, arena.AddStruct(info.RowType(_schema, _paths, _types), buckets.Length, Validity.NonNullable, [.. fields])));
-    }
-
-    /// <summary>The keys of a slice's deepest groups, gathered at their first rows in the order of their keys, copied into the tables' arena.</summary>
-    private int Keys(RecordBatch sorted, int[] firsts, int[]? places)
-    {
-        int[] at = new int[firsts.Length];
-        for (int g = 0; g < firsts.Length; g++)
-        {
-            at[places?[g] ?? g] = firsts[g];
-        }
-
-        CanonicalArena arena = sorted.Arena;
-        CanonicalNode node = arena.GetNode(sorted.RootIndex);
-        if (_keysType is null)
-        {
-            string[] names = new string[_keys.Length];
-            DType[] dtypes = new DType[_keys.Length];
-            for (int k = 0; k < _keys.Length; k++)
+            int rows = table.Stage.Rows;
+            int node = table.Stage.Build(arena, table.RowType, _types);
+            if (table.Held < 0)
             {
-                names[k] = SynopsisTableInfo.NameOf(_keys[k], _schema, _paths);
-                dtypes[k] = KeyType(_keys[k]);
+                table.Held = _sink.OpenTable();
             }
 
-            _keysType = _types.Struct(names, dtypes, Nullability.NonNullable);
+            long bytes = await _sink.SpoolChunkAsync(table.Held, arena, node, table.Stage.FirstBucket, table.Stage.LastBucket, cancellationToken).ConfigureAwait(false);
+            table.Rows += rows;
+            table.Bytes += bytes;
         }
-
-        int[] fields = new int[_keys.Length];
-        for (int k = 0; k < _keys.Length; k++)
+        finally
         {
-            fields[k] = CanonicalFilter.Apply(arena, ColumnOf(node, _keys[k]), at);
+            table.Stage.Clear();
+            arena.Reset();
         }
 
-        int keys = arena.AddStruct(_keysType.Value, at.Length, Validity.NonNullable, fields);
-        return _context.Canonical.CopyFrom(arena, keys);
+        if (_finishing || ObjectBudget() is not { } whole)
+        {
+            return;
+        }
+
+        double projected = table.Bytes * (double)_objectRows / Math.Max(_rowsCounted, 1);
+        if (table.Bytes > whole || projected > ProjectionMargin * whole)
+        {
+            Drop(table, FormattableString.Invariant(
+                $"given up as it grew: {table.Bytes} bytes over {_rowsCounted} rows, {projected:F0} over the object's {_objectRows}, against a budget of {whole:F0}"));
+        }
     }
 
-    /// <summary>The keys of every slice's deepest groups, one slice after another.</summary>
-    private int ConcatKeys(int rows)
+    /// <summary>
+    /// The budget of the whole object, that of the data so far scaled to the object's rows from those it holds; null while
+    /// it cannot be said, its rows unknown or its data too little.
+    /// </summary>
+    private double? ObjectBudget()
     {
-        if (_slices.Count == 1)
+        long budget = _sink.BudgetSoFar;
+        long rows = _sink.RowsSoFar;
+        return budget == long.MaxValue || _objectRows <= 0 || rows <= 0 ? null : budget * (double)_objectRows / rows;
+    }
+
+    /// <summary>
+    /// Gives a table up, for the reason <paramref name="verdict"/>: it is not written, its rows are no longer held, and the
+    /// choice still weighs it, as a grain asked.
+    /// </summary>
+    private void Drop(Candidate table, string verdict)
+    {
+        if (table.Dead)
         {
-            return _slices[0].Keys;
+            return;
         }
 
-        int[] nodes = new int[_slices.Count];
-        for (int s = 0; s < nodes.Length; s++)
+        table.Dead = true;
+        table.Stage.Release();
+        if (table.Held < 0)
         {
-            nodes[s] = _slices[s].Keys;
+            table.Held = _sink.OpenTable();
         }
 
-        return CanonicalConcat.Concat(_context.Decode, _keysType!.Value, rows, nodes);
+        _sink.DropTable(table.Held, verdict);
+    }
+
+    /// <summary>
+    /// Gives up the tables the rows counted rule out against the budget of the whole object, the budget of the data so
+    /// far scaled to the object's rows: those whose rows so far already take more, and those whose projection takes
+    /// <see cref="ProjectionMargin"/> times more. A table of slices holds the rows its slices gave, scaled to the
+    /// object's rows; a coarse table of an hour, or a value count, the groups of the hours merged and the hour's
+    /// projected to its rows, scaled likewise; one of the object, its distinct groups projected to the object's rows.
+    /// A row takes the bytes a row of its table took, or the fewest a row of any table took.
+    /// </summary>
+    private void Prune()
+    {
+        if (ObjectBudget() is not { } whole)
+        {
+            return;
+        }
+
+        double perRow = double.MaxValue;
+        foreach (Candidate table in _candidates)
+        {
+            if (table.Rows > 0)
+            {
+                perRow = Math.Min(perRow, table.Bytes / (double)table.Rows);
+            }
+        }
+
+        if (perRow == double.MaxValue)
+        {
+            return;
+        }
+
+        // A table of slices holds the rows its slices gave, scaled to the object's rows, each at the bytes a row of it took.
+        for (int d = _first; d < _runs.Length; d++)
+        {
+            if (_runs[d] is { Dead: false } runs && runs.Rows + runs.Stage.Rows > 0)
+            {
+                double seen = runs.Rows + runs.Stage.Rows;
+                RuleOut(runs, seen, seen * _objectRows / Math.Max(_rowsCounted, 1), runs.Rows > 0 ? runs.Bytes / (double)runs.Rows : perRow);
+            }
+        }
+
+        long hourRows = _hourRowsSeen > 0 ? _hourRows.GetValueOrDefault(_hour, _hourRowsSeen) : 0;
+        double scale = (double)_objectRows / Math.Max(_rowsClosed + hourRows, 1);
+        for (int d = 1; d < _hourGrowth.Length; d++)
+        {
+            if (Counts(_hourly[d], _hourGrowth[d]) is { } hour)
+            {
+                RuleOut(_hourly[d]!, _hourSum[d] + hour.Distinct, (_hourSum[d] + hour.Projected(hourRows)) * scale, perRow);
+            }
+
+            if (Counts(_whole[d], _objectGrowth[d]) is { } all)
+            {
+                RuleOut(_whole[d]!, all.Distinct, all.Projected(_objectRows), perRow);
+            }
+        }
+
+        for (int v = 0; v < _valueGrowth.Length; v++)
+        {
+            if (Counts(_values[v], _valueGrowth[v]) is { } values)
+            {
+                RuleOut(_values[v]!, _valueSum[v] + values.Distinct, (_valueSum[v] + values.Projected(hourRows)) * scale, perRow);
+            }
+        }
+
+        _hourDepth = Math.Min(_hourDepth, DeepestCoarse());
+        _wholeDepth = Math.Min(_wholeDepth, Deepest(_whole));
+
+        // Gives the table up when its rows seen so far, or projected, take more than the object's budget allows.
+        void RuleOut(Candidate table, double seen, double projected, double rowBytes)
+        {
+            if (seen * rowBytes > whole || projected * rowBytes > ProjectionMargin * whole)
+            {
+                Drop(table, FormattableString.Invariant(
+                    $"given up as its rows were counted: {seen:F0} rows so far, {projected:F0} projected, at {rowBytes:F1} bytes a row against a budget of {whole:F0}"));
+            }
+        }
+    }
+
+    /// <summary>The deepest depth of a coarse table of the hour or of the object still kept; -1 for none.</summary>
+    private int DeepestCoarse() => Math.Max(Deepest(_hourly), Deepest(_whole));
+
+    private static int Deepest(Candidate?[] tables)
+    {
+        for (int d = tables.Length - 1; d >= 0; d--)
+        {
+            if (tables[d] is { Dead: false })
+            {
+                return d;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>The first <paramref name="depth"/> keys of row <paramref name="row"/> into <see cref="_key"/>, encoded as a run's records hold them.</summary>
+    private void EncodeKey(CanonicalArena arena, int[] columns, int row, int depth)
+    {
+        _key.Clear();
+        for (int k = 0; k < depth; k++)
+        {
+            KeyCodec.Append(_key, arena, columns[k], row, _keyShapes[k]);
+        }
+    }
+
+    /// <summary>The run of records <see cref="_run"/> holds, appended to <paramref name="store"/>, its keys of <paramref name="components"/> components.</summary>
+    private async ValueTask<RunSpan> AppendAsync(RunScratch store, int components, CancellationToken cancellationToken)
+    {
+        long at = await store.AppendAsync(_run.Memory, cancellationToken).ConfigureAwait(false);
+        return new RunSpan(at, _run.Length, components);
+    }
+
+    private RunScratch HourStore() => _hourScratch ??= NewStore();
+
+    /// <summary>A store for runs, as the writer's scratch is, at half its memory: the hour's and the object's may both be open.</summary>
+    private RunScratch NewStore()
+    {
+        (long memory, string? directory, bool seal) = _sink.Scratch;
+        return new RunScratch(memory / 2, directory, seal);
+    }
+
+    public void Dispose()
+    {
+        _hourScratch?.Dispose();
+        _wholeScratch?.Dispose();
+        _run.Dispose();
+        _key.Dispose();
+        _component.Dispose();
+        _context.Dispose();
     }
 
     /// <summary>Makes room for the groups of <paramref name="rows"/> rows at depths 0 to <paramref name="depth"/>.</summary>
@@ -645,44 +1211,6 @@ internal sealed class SynopsisTables : IDisposable
         return states;
     }
 
-    /// <summary>Each value's rank among the distinct ones, and how many there are.</summary>
-    private static (int[] Codes, int Distinct) Dense(long[] values)
-    {
-        long[] distinct = [.. new SortedSet<long>(values)];
-        int[] codes = new int[values.Length];
-        for (int i = 0; i < values.Length; i++)
-        {
-            codes[i] = Array.BinarySearch(distinct, values[i]);
-        }
-
-        return (codes, distinct.Length);
-    }
-
-    private static T[] Gather<T>(T[] values, int[] at)
-    {
-        T[] gathered = new T[at.Length];
-        for (int i = 0; i < at.Length; i++)
-        {
-            gathered[i] = values[at[i]];
-        }
-
-        return gathered;
-    }
-
-    /// <summary>The positions of the first <paramref name="depth"/> keys among the object's.</summary>
-    private static int[] Positions(int depth)
-    {
-        int[] positions = new int[depth];
-        for (int k = 0; k < depth; k++)
-        {
-            positions[k] = k;
-        }
-
-        return positions;
-    }
-
-    private SynopsisTableInfo Info(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, int rows) => new SynopsisTableInfo(kind, bucket, keys, _measures, rows);
-
     /// <summary>The dtype of key <paramref name="entry"/>, a field or a path, in the tables' arena.</summary>
     private DType KeyType(int entry)
     {
@@ -699,14 +1227,6 @@ internal sealed class SynopsisTables : IDisposable
     /// <summary>The column of a slice's struct <paramref name="node"/> a key or measure <paramref name="entry"/> reads: its field's, or its path's.</summary>
     private int ColumnOf(CanonicalNode node, int entry) =>
         SynopsisPath.Names(entry) ? _pathColumns[SynopsisPath.Place(entry)] : node.GetFieldIndex(entry);
-
-    /// <summary>A non-null column of longs.</summary>
-    private static int Longs(CanonicalArena arena, DType longs, ReadOnlySpan<long> values)
-    {
-        VortexBuffer buffer = arena.Allocate(Math.Max(values.Length * 8, 8), 64, out Span<byte> into).Slice(0, values.Length * 8);
-        MemoryMarshal.AsBytes(values).CopyTo(into);
-        return arena.AddPrimitive(longs, values.Length, Validity.NonNullable, PType.I64, buffer);
-    }
 
     private static DType Storage(DType dtype)
     {
@@ -732,68 +1252,88 @@ internal sealed class SynopsisTables : IDisposable
     }
 
     /// <summary>
-    /// A slice counted: its start, the keys of its deepest groups (a struct node of the tables' arena, -1
-    /// without keys) and how many, each depth's states, and where each depth's groups find their keys.
+    /// The distinct groups or values of a scope, an hour or the object, as its slices come: a sketch of their hashes,
+    /// and what it held after each slice, which the scope's end is projected from.
     /// </summary>
-    private sealed record Slice(long Start, int Keys, int Deep, Accumulators[] States, int[][] KeyRows, (int Values, Accumulators States)[] Counted);
-
-    /// <summary>
-    /// Each counted path's values in the slice <paramref name="sorted"/>, in their order, and the states of the
-    /// rows holding each: the rows that do not hold the path are left out. The values are a struct node of
-    /// one field, copied into the tables' arena.
-    /// </summary>
-    private (int Values, Accumulators States)[] Counted(RecordBatch sorted)
+    private sealed class Growth
     {
-        (int, Accumulators)[] counted = new (int, Accumulators)[_counted.Length];
-        CanonicalArena arena = sorted.Arena;
-        int rows = sorted.RowCount;
-        for (int c = 0; c < counted.Length; c++)
-        {
-            int column = _pathColumns[SynopsisPath.Place(_counted[c])];
-            (int[] codes, int distinct) = SliceSort.CodesOfColumn(arena, column, rows);
+        private readonly List<(long Rows, long Distinct)> _points = [];
 
-            // A null codes after every value: a group of its own, folded, then left out.
-            int[] first = new int[distinct];
-            first.AsSpan().Fill(-1);
-            for (int row = 0; row < rows; row++)
+        internal CardinalitySketch Sketch { get; private set; } = new CardinalitySketch();
+
+        /// <summary>The distinct ones after the last slice noted.</summary>
+        internal long Distinct => _points.Count == 0 ? 0 : _points[^1].Distinct;
+
+        /// <summary>Notes what the sketch holds after <paramref name="rows"/> rows of the scope.</summary>
+        internal void Note(long rows) => _points.Add((rows, Sketch.Estimate()));
+
+        /// <summary>Forgets the scope, for the next one.</summary>
+        internal void Clear()
+        {
+            Sketch = new CardinalitySketch();
+            _points.Clear();
+        }
+
+        /// <summary>
+        /// The distinct ones projected to <paramref name="rows"/> rows of the scope, their count taken as a power of its
+        /// rows, as Heaps' law has it, through the last point and the latest at half its rows or fewer; the distinct
+        /// ones seen while no point lies that far back, or they stopped growing.
+        /// </summary>
+        internal double Projected(long rows)
+        {
+            if (_points.Count == 0)
             {
-                if (codes[row] < distinct && first[codes[row]] < 0)
-                {
-                    first[codes[row]] = row;
-                }
+                return 0;
             }
 
-            Accumulators states = Fold(arena, sorted.RootIndex, rows, codes, distinct + 1).Prefix(distinct);
-            int values = CanonicalFilter.Apply(arena, column, first);
-            int node = arena.AddStruct(CountedType(_counted[c]), distinct, Validity.NonNullable, [values]);
-            counted[c] = (_context.Canonical.CopyFrom(arena, node), states);
-        }
+            (long lastRows, long last) = _points[^1];
+            for (int i = _points.Count - 2; i >= 0; i--)
+            {
+                (long earlierRows, long earlier) = _points[i];
+                if (earlierRows * 2 > lastRows)
+                {
+                    continue;
+                }
 
-        return counted;
+                if (earlier <= 0 || last <= earlier || rows <= lastRows)
+                {
+                    return last;
+                }
+
+                double exponent = Math.Clamp(Math.Log((double)last / earlier) / Math.Log((double)lastRows / earlierRows), 0, 1);
+                return last * Math.Pow((double)rows / lastRows, exponent);
+            }
+
+            return last;
+        }
     }
 
-    /// <summary>The struct of one field that holds a counted path's values.</summary>
-    private DType CountedType(int entry)
+    /// <summary>
+    /// A table the object may keep: what it holds, its keys and their shapes, its rows' struct, the stage of its chunk
+    /// being filled, and what the writer holds of it so far.
+    /// </summary>
+    private sealed class Candidate(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes, DType rowType, ChunkStage stage)
     {
-        if (!_countedTypes.TryGetValue(entry, out DType dtype))
-        {
-            _countedTypes[entry] = dtype = _types.Struct([SynopsisTableInfo.NameOf(entry, _schema, _paths)], [KeyType(entry)], Nullability.NonNullable);
-        }
+        internal SynopsisTableKind Kind { get; } = kind;
 
-        return dtype;
-    }
+        internal SynopsisBucket Bucket { get; } = bucket;
 
-    private readonly Dictionary<int, DType> _countedTypes = [];
+        internal int[] Keys { get; } = keys;
 
-    // The paths left in the residual whose values the tables count, which the first slice settles.
-    private int[] _counted = [];
+        internal KeyShape[] Shapes { get; } = shapes;
 
-    /// <summary>How a measure's states are kept: an exact signed or unsigned integer sum, or a float sum.</summary>
-    private enum Kind : byte
-    {
-        Signed,
-        Unsigned,
-        Float,
+        internal DType RowType { get; } = rowType;
+
+        internal ChunkStage Stage { get; } = stage;
+
+        /// <summary>The place the writer holds its chunks under; -1 before its first.</summary>
+        internal int Held { get; set; } = -1;
+
+        internal long Rows { get; set; }
+
+        internal long Bytes { get; set; }
+
+        internal bool Dead { get; set; }
     }
 
     /// <summary>
@@ -802,14 +1342,16 @@ internal sealed class SynopsisTables : IDisposable
     /// </summary>
     private sealed class Accumulators
     {
-        private readonly Kind[] _kinds;
+        private static readonly long NoFloat = BitConverter.DoubleToInt64Bits(double.NaN);
+
+        private readonly MeasureKind[] _kinds;
         private readonly long[][] _values;
         private readonly Int128[][] _integers;
         private readonly WideIndexedSum[][] _floats;
         private readonly long[][] _least;
         private readonly long[][] _greatest;
 
-        internal Accumulators(Kind[] kinds, int groups)
+        internal Accumulators(MeasureKind[] kinds, int groups)
         {
             _kinds = kinds;
             Count = new long[groups];
@@ -823,7 +1365,7 @@ internal sealed class SynopsisTables : IDisposable
                 _values[m] = new long[groups];
                 _least[m] = new long[groups];
                 _greatest[m] = new long[groups];
-                if (kinds[m] == Kind.Float)
+                if (kinds[m] == MeasureKind.Float)
                 {
                     _floats[m] = new WideIndexedSum[groups];
                     _least[m].AsSpan().Fill(NoFloat);
@@ -840,67 +1382,32 @@ internal sealed class SynopsisTables : IDisposable
 
         internal long[] Count { get; }
 
-        /// <summary>The states of the first <paramref name="count"/> groups.</summary>
-        internal Accumulators Prefix(int count)
+        /// <summary>Group <paramref name="group"/>'s states as the words of a record (<see cref="StateWords"/>).</summary>
+        internal void Words(int group, Span<long> words)
         {
-            Accumulators head = new Accumulators(_kinds, count);
-            Count.AsSpan(0, count).CopyTo(head.Count);
+            words[0] = Count[group];
+            int at = 1;
             for (int m = 0; m < _kinds.Length; m++)
             {
-                _values[m].AsSpan(0, count).CopyTo(head._values[m]);
-                _least[m].AsSpan(0, count).CopyTo(head._least[m]);
-                _greatest[m].AsSpan(0, count).CopyTo(head._greatest[m]);
-                if (_kinds[m] == Kind.Float)
+                words[at] = _values[m][group];
+                if (_kinds[m] == MeasureKind.Float)
                 {
-                    _floats[m].AsSpan(0, count).CopyTo(head._floats[m]);
+                    ref readonly WideIndexedSum sum = ref _floats[m][group];
+                    (words[at + 1], words[at + 2], words[at + 3], words[at + 4], words[at + 5]) = (sum.Sum.M0, sum.Sum.M1, sum.Sum.M2, sum.Sum.Meta, sum.High);
+                    words[at + 6] = _least[m][group];
+                    words[at + 7] = _greatest[m][group];
+                    at += 8;
                 }
                 else
                 {
-                    _integers[m].AsSpan(0, count).CopyTo(head._integers[m]);
+                    Int128 sum = _integers[m][group];
+                    words[at + 1] = unchecked((long)(ulong)sum);
+                    words[at + 2] = (long)(sum >> 64);
+                    words[at + 3] = _least[m][group];
+                    words[at + 4] = _greatest[m][group];
+                    at += 5;
                 }
             }
-
-            return head;
-        }
-
-        /// <summary>The states of <paramref name="parts"/>, one after another.</summary>
-        internal static Accumulators Concat(Kind[] kinds, List<Accumulators> parts)
-        {
-            if (parts.Count == 1)
-            {
-                return parts[0];
-            }
-
-            int total = 0;
-            foreach (Accumulators part in parts)
-            {
-                total += part.Groups;
-            }
-
-            Accumulators all = new Accumulators(kinds, total);
-            int at = 0;
-            foreach (Accumulators part in parts)
-            {
-                part.Count.CopyTo(all.Count, at);
-                for (int m = 0; m < kinds.Length; m++)
-                {
-                    part._values[m].CopyTo(all._values[m], at);
-                    part._least[m].CopyTo(all._least[m], at);
-                    part._greatest[m].CopyTo(all._greatest[m], at);
-                    if (kinds[m] == Kind.Float)
-                    {
-                        part._floats[m].CopyTo(all._floats[m], at);
-                    }
-                    else
-                    {
-                        part._integers[m].CopyTo(all._integers[m], at);
-                    }
-                }
-
-                at += part.Groups;
-            }
-
-            return all;
         }
 
         /// <summary>The states merged into <paramref name="count"/> groups, each group's into group <paramref name="groupOf"/> of it.</summary>
@@ -920,7 +1427,7 @@ internal sealed class SynopsisTables : IDisposable
                 long[] intoValues = merged._values[m];
                 long[] intoLeast = merged._least[m];
                 long[] intoGreatest = merged._greatest[m];
-                if (_kinds[m] == Kind.Float)
+                if (_kinds[m] == MeasureKind.Float)
                 {
                     WideIndexedSum[] sums = _floats[m];
                     WideIndexedSum[] intoSums = merged._floats[m];
@@ -940,7 +1447,7 @@ internal sealed class SynopsisTables : IDisposable
                     continue;
                 }
 
-                bool unsigned = _kinds[m] == Kind.Unsigned;
+                bool unsigned = _kinds[m] == MeasureKind.Unsigned;
                 Int128[] integers = _integers[m];
                 Int128[] intoIntegers = merged._integers[m];
                 for (int g = 0; g < groupOf.Length; g++)
@@ -1091,43 +1598,6 @@ internal sealed class SynopsisTables : IDisposable
                 double high = BitConverter.Int64BitsToDouble(greatest[group]);
                 least[group] = double.IsNaN(low) || value < low ? BitConverter.DoubleToInt64Bits(value) : least[group];
                 greatest[group] = double.IsNaN(high) || value > high ? BitConverter.DoubleToInt64Bits(value) : greatest[group];
-            }
-        }
-
-        /// <summary>Appends the count and each measure's state columns, in the order <see cref="SynopsisTableInfo.RowType"/> names them.</summary>
-        internal void Emit(CanonicalArena arena, DType longs, List<int> fields)
-        {
-            void Column(ReadOnlySpan<long> values) => fields.Add(Longs(arena, longs, values));
-
-            Column(Count);
-            for (int m = 0; m < _kinds.Length; m++)
-            {
-                Column(_values[m]);
-                if (_kinds[m] == Kind.Float)
-                {
-                    long[] m0 = new long[Groups];
-                    long[] m1 = new long[Groups];
-                    long[] m2 = new long[Groups];
-                    long[] meta = new long[Groups];
-                    long[] high = new long[Groups];
-                    PersistedStates.Write(_floats[m], m0, m1, m2, meta, high);
-                    Column(m0);
-                    Column(m1);
-                    Column(m2);
-                    Column(meta);
-                    Column(high);
-                }
-                else
-                {
-                    long[] low = new long[Groups];
-                    long[] high = new long[Groups];
-                    PersistedStates.Write(_integers[m], low, high);
-                    Column(low);
-                    Column(high);
-                }
-
-                Column(_least[m]);
-                Column(_greatest[m]);
             }
         }
     }

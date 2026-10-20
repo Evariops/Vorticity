@@ -401,6 +401,7 @@ of a day under late rows and four writers, 2.7 times when rows come in order (me
 | 24 | the order of the fresh levels' rows | sorted slices, as in periods: they already serve the newest rows first through their last slices | time order with a synopsis beside them, which would add a write and save the page no request |
 | 25 | the placement of a period's chunks | interleaved by chunk | a range of part numbers per column while streaming, which encryption's nonces, the memory of a part per column in flight and R2's parts of one size forbid |
 | 26 | a page's questions | answered one by one: a shared walk saves at most 0.7 ms of a warm page of 2.3 ms, and the reads are already shared by the cache (measured) | answered together, walking each object's tables once |
+| 27 | building the tables of a large object | as the slices come: each slice's runs sorted already, merged per hour and then per object through a scratch store on disk, every depth in one pass, the tables in chunks of 65 536 rows, those the rows project past the budget given up as they grow ([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)) | the object's deepest groups held in memory and concatenated at its end, which an hour of the example outgrows: 360 MB of keys, then 2.9 GB of views past the arrays' 32-bit lengths (measured) |
 
 ## 8. Alternatives weighed
 

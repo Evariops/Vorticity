@@ -468,6 +468,30 @@ synopsis columns, which it encodes as runs, and the job counts the synopsis tabl
 while the slice is still in memory. An object written so is 4 % smaller than the same rows in time
 order, and 10 % smaller than a leveled object with its sorted run.
 
+Nothing of the tables outlives a slice in memory but a chunk of each and what a merge reads, whatever
+the object's rows: an hour of requests at 5 × 10⁴ a second holds 1.8 × 10⁸ rows, a day 4.3 × 10⁹. A
+slice's groups at every depth are in the order of their keys already, so its runs go out at once as rows
+of the tables of slices, and its groups at the deepest depth a coarser table still asks for, with each
+later column's values, go to the hour's scratch store as a run of compact records, in memory up to half
+the writer's scratch budget and on disk past it. At the end of the hour, a k-way merge of those runs
+gives every depth of the hour's coarse tables in one pass, a group of a depth ending where its prefix
+of the keys changes, and the value counts likewise; the hour's deepest groups go on to the object's
+store, whose merge at the end gives the object's tables. Each table goes to the writer a chunk at a
+time, which encodes it and holds it in the synopsis part's spool until the choice.
+
+A table that cannot be worth its bytes is given up as it grows, before it costs the merges and the
+spool anything more. The budget of the whole object is projected from the data written so far, scaled
+to the object's rows, which the job's first pass counted; a table of slices is projected from its rows
+so far, scaled likewise; a coarse table of an hour, and a column's value counts, from the distinct
+groups of the hour, counted by a HyperLogLog sketch per depth and projected to the hour's rows by a
+power of its rows fitted through two points, as Heaps' law has it; a table of the object from its own
+sketch. A table whose rows so far take more than the budget, or whose projection takes twice as much,
+is given up, the margin against values that come in a burst and then repeat. Under 64 MiB of data, and
+during the merges at the end, nothing is given up, and the choice weighs every table against the whole
+data. On three hours of 60 000 rows whose third column is almost unique to each row, the four tables of
+that column were given up at the sixth of thirty slices, the projection 58 846 rows for about 57 000,
+and the choice kept the same tables, to the byte, as when every one was built to the end.
+
 A variant column is written whole by an append, and shredded by the job that rewrites it, so that
 ingestion pays nothing for shredding. Until that job runs, a query node that reads the variants of an
 object of level 0 shreds a copy of them in memory, once per object and under the session's budget,

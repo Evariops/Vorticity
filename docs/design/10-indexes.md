@@ -319,14 +319,21 @@ An append drops the entries, since its chunks go after the part.
 ### 4.9 `vorticity.synopsis.table.v1`: the synopsis tables
 
 The tables of an object's synopsis ([what reads them](12-index-reads.md#45-aggregations-from-a-datasets-synopsis))
-follow the synopsis columns in the synopsis part, one array payload each, in the file's encodings and
-checksummed with XXH3-64. A table's rows are a struct: the start of its bucket, the values of its keys,
-a count of rows, then for each measure column the count of its values, its exact sum in the words
-of its persisted state (two for an integer's 128 bits, five for a float's indexed sum), and its least and
-greatest widened to 64 bits. The entry sits on the root, takes no column, and holds in its options what
-the table is (run statistics per slice, a coarse table per hour or per object, or one column's value
-counts per hour), its key fields, its measure fields and its row count. Its run's payload names the
-region, and its payload dtype the struct's.
+follow the synopsis columns in the synopsis part, each a list of chunks, each chunk an array payload in
+the file's encodings, checksummed with XXH3-64. A table's rows are a struct: the start of its bucket,
+the values of its keys, a count of rows, then for each measure column the count of its values, its
+exact sum in the words of its persisted state (two for an integer's 128 bits, five for a float's indexed
+sum), and its least and greatest widened to 64 bits. The entry sits on the root, takes no column, and
+holds in its options what the table is (run statistics per slice, a coarse table per hour or per object,
+or one column's value counts per hour), its key fields, its measure fields and its row count, then, for
+a table of more than one chunk, each chunk's first and last bucket and its rows. Its run's payloads name
+the chunks' regions, and its payload dtypes their structs'. A question reads only the chunks that hold a
+bucket it folds. A chunk holds 65 536 rows at most, so that no array outgrows its 32-bit lengths whatever
+the object's rows, and its first 4 096, so that the bytes a row of the table takes are known early. An
+hour's rows end a chunk when they weigh 4 MiB before encoding, about what a round trip to an object
+store costs in transfer once they are encoded: a question over an hour of an object of a day then reads
+that hour's chunk alone, while smaller tables stay whole, since a read of them costs its round trip
+whatever it holds.
 
 The writer chooses which tables to keep, greedily, as views are classically selected. The questions are
 the grains the tables hold, a bucket and keys each, weighed alike. Answering one costs its source's
@@ -334,9 +341,12 @@ bytes at a price per byte and its rows at a price per row grouped: the columns i
 rows, or the cheapest table kept that answers it by merging its rows, a finer bucket with the same keys
 and more. Each round keeps the table that lowers the questions' costs the most per byte it holds, while
 it lowers them and fits the budget: the indexes' share of the data's bytes, with no floor, so that a
-small object keeps none. The tables' bytes count with the indexes in the write report, which also
-holds every table's verdict with its numbers, as it holds `Auto`'s. An append drops the entries, as it
-does the part's.
+small object keeps none. A table its builder gave up as it grew ([sorted time
+slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)) is weighed too, at bytes no
+budget holds, so the questions are the grains of every table and the choice keeps what it would have
+kept had each been built to the end. The tables' bytes count with the indexes in the write report,
+which also holds every table's verdict with its numbers, as it holds `Auto`'s, a table given up with
+the rows and the projection that ruled it out. An append drops the entries, as it does the part's.
 
 ### 4.10 The file-level filter
 

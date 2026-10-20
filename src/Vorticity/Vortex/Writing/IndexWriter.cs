@@ -978,6 +978,23 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal long SynopsisBudget(long dataBytes) => dataBytes * _budgetPerMille / 1000;
 
+    /// <summary>
+    /// <see cref="SynopsisBudget"/> over the data written so far, <see cref="long.MaxValue"/> while that data is
+    /// under <see cref="EarlyChoiceFloor"/>: past it, what a table built as the data goes takes says whether it can be
+    /// worth its bytes, and one that cannot is given up before it grows further.
+    /// </summary>
+    internal long SynopsisBudgetSoFar(long dataBytes) => dataBytes < EarlyChoiceFloor ? long.MaxValue : SynopsisBudget(dataBytes);
+
+    /// <summary>
+    /// The data under which no synopsis table is given up before the end: the columns still gathered and the chunks
+    /// in flight would weigh too much of so little, and the tables cost too little for an early verdict to save
+    /// anything, so the choice at the end weighs them all, against the whole data.
+    /// </summary>
+    internal const long DefaultEarlyChoiceBytes = 64L << 20;
+
+    /// <summary>The data under which no synopsis table is given up before the end (<see cref="VortexWriteOptions.SynopsisEarlyChoiceBytes"/>).</summary>
+    internal long EarlyChoiceFloor { get; set; } = DefaultEarlyChoiceBytes;
+
     /// <summary>Reports what became of a synopsis table, its keys fields or the paths <paramref name="paths"/> lists, and why, with the choice's numbers.</summary>
     internal void ReportSynopsis(SynopsisTableInfo table, IReadOnlyList<SynopsisPath> paths, bool kept, string verdict, long bytes)
     {

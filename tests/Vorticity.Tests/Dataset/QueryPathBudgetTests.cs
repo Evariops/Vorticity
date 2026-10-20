@@ -32,6 +32,7 @@ using Xunit;
 namespace Vorticity.Tests.Dataset;
 
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudgetTests.Fixture>
 {
     private static readonly DateTimeOffset Noon = new(2026, 10, 19, 12, 0, 0, TimeSpan.Zero);

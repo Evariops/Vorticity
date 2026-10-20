@@ -983,9 +983,11 @@ internal static class DatasetCompactor
                     int instant = _schema.DType.IndexOfField(InstantPath!);
                     _sorter = new SortedSlices(_table, instant, _schema.DType, Shapes(plan.Shredded));
 
-                    // The synopsis's tables, counted from each slice as it is sorted.
-                    _synopsis = new SynopsisTables(_schema.DType, _table.Unit, SynopsisTables.Measures(_schema.DType, instant, _table.Order), _table.Paths);
-                    _slice = 0;                }
+                    // The synopsis's tables, counted from each slice as it is sorted, their chunks held by the writer.
+                    _synopsis = new SynopsisTables(
+                        _schema.DType, _table.Unit, SynopsisTables.Measures(_schema.DType, instant, _table.Order), _draft.Writer, _table.Paths, _table.Slices);
+                    _slice = 0;
+                }
             }
 
             _rows += batch.RowCount;
@@ -1030,11 +1032,16 @@ internal static class DatasetCompactor
             return shapes;
         }
 
-        private ValueTask WriteSortedAsync(RecordBatch sorted, CancellationToken cancellationToken)
+        private async ValueTask WriteSortedAsync(RecordBatch sorted, CancellationToken cancellationToken)
         {
-            _synopsis?.AddSlice(sorted, _table!.Slices[_slice].Start, _sorter!.Order, _sorter.SortedCodes, _sorter.PathColumns, _sorter.CountedPaths);
+            if (_synopsis is { } synopsis)
+            {
+                await synopsis.AddSliceAsync(
+                    sorted, _table!.Slices[_slice].Start, _sorter!.Order, _sorter.SortedCodes, _sorter.PathColumns, _sorter.CountedPaths, cancellationToken).ConfigureAwait(false);
+            }
+
             _slice++;
-            return _draft!.Writer.WriteBatchAsync(sorted, cancellationToken);
+            await _draft!.Writer.WriteBatchAsync(sorted, cancellationToken).ConfigureAwait(false);
         }
 
         // The tables of the object's synopsis as its slices are sorted, and the next slice's index.
@@ -1078,7 +1085,7 @@ internal static class DatasetCompactor
                 {
                     if (synopsis is not null)
                     {
-                        draft.Writer.DeclareSynopsisTables(synopsis.Arena, synopsis.Build());
+                        draft.Writer.DeclareSynopsisTables(await synopsis.FinishAsync(cancellationToken).ConfigureAwait(false));
                     }
 
                     await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
