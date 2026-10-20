@@ -215,6 +215,7 @@ if (Text(args, "--micro") == "paths")
         Tsv = Text(args, "--tsv"),
         Label = Text(args, "--label"),
         TraceReads = Text(args, "--trace-reads"),
+        LoopSeconds = Option(args, "--loop", 0),
     });
 }
 

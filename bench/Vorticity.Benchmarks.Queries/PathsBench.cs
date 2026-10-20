@@ -85,6 +85,8 @@ internal static class PathsBench
 
         internal int PartMinutes { get; init; } = 10;
 
+        internal double LoopSeconds { get; init; }
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }
@@ -275,6 +277,26 @@ internal static class PathsBench
             }
 
             warm.Sort((a, b) => a.Milliseconds.CompareTo(b.Milliseconds));
+
+            // --loop: the warm ask again and again for as long, for a profiler, and its mean.
+            if (settings.LoopSeconds > 0)
+            {
+                long until = Stopwatch.GetTimestamp() + (long)(settings.LoopSeconds * Stopwatch.Frequency);
+                int asks = 0;
+                double milliseconds = 0;
+                long allocated = 0;
+                while (Stopwatch.GetTimestamp() < until)
+                {
+                    Measured again = await MeasureAsync(store, dataset, question, options);
+                    asks++;
+                    milliseconds += again.Milliseconds;
+                    allocated += again.Allocated;
+                }
+
+                Console.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture, $"    loop: {asks} asks, {milliseconds / asks:F3} ms and {allocated / (double)asks / 1e3:F1} KB allocated each"));
+            }
+
             return (cold, warm[warm.Count / 2]);
         }
         finally
