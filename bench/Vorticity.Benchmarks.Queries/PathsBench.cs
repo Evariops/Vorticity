@@ -93,6 +93,12 @@ internal static class PathsBench
         /// <summary>How long to ask the question cold again and again, each by a handle and a cache of its own, for a profiler; zero for no loop.</summary>
         internal double LoopColdSeconds { get; init; }
 
+        /// <summary>
+        /// Whether the batches are taken without a digest, for a profiler: a digest of a question's rows runs while the
+        /// scan decodes its next split, which leaving its time out of the measure does not undo.
+        /// </summary>
+        internal bool NoDigest { get; init; }
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }
@@ -102,6 +108,12 @@ internal static class PathsBench
 
     internal static async Task<int> Run(Settings settings)
     {
+        if (settings.Verify && settings.NoDigest)
+        {
+            Console.Error.WriteLine("--verify holds answers to their digests, which --no-digest leaves untaken.");
+            return 2;
+        }
+
         Directory.CreateDirectory(settings.Store);
         Built requests = await EnsureAsync(
             settings,
@@ -288,7 +300,7 @@ internal static class PathsBench
                     o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
                 });
                 await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
-                Measured again = await MeasureAsync(store, dataset, question, options);
+                Measured again = await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
                 asks++;
                 milliseconds += again.Milliseconds;
                 allocated += again.Allocated;
@@ -323,7 +335,7 @@ internal static class PathsBench
         {
             await using VortexSession session = VortexSession.Create(o => o.MaxDegreeOfParallelism = degree);
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
-            await MeasureAsync(store, dataset, question, options);
+            await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
         }
 
         remote.Latency = TimeSpan.FromMilliseconds(settings.Latency);
@@ -341,7 +353,7 @@ internal static class PathsBench
             using TextWriter? trace = settings.TraceReads is { } traced ? TextWriter.Synchronized(new StreamWriter(traced, append: true)) : null;
             trace?.WriteLine($"# {question.Name} {(synopses ? "synopses" : "rows")} cold, degree {degree}");
             remote.Trace = trace;
-            Measured cold = settings.Temperatures is "all" or "cold" ? await MeasureAsync(store, dataset, question, options) : default;
+            Measured cold = settings.Temperatures is "all" or "cold" ? await MeasureAsync(store, dataset, question, options, !settings.NoDigest) : default;
             remote.Trace = null;
             await LoopColdAsync(settings, store, question, options, degree);
             if (settings.Temperatures is "cold")
@@ -351,7 +363,7 @@ internal static class PathsBench
 
             if (settings.Temperatures is "warm")
             {
-                await MeasureAsync(store, dataset, question, options);
+                await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
             }
 
             // The first warm round's reads are written down after the cold one's.
@@ -365,7 +377,7 @@ internal static class PathsBench
                     remote.Trace = trace;
                 }
 
-                warm.Add(await MeasureAsync(store, dataset, question, options));
+                warm.Add(await MeasureAsync(store, dataset, question, options, !settings.NoDigest));
                 remote.Trace = null;
             }
 
@@ -390,7 +402,7 @@ internal static class PathsBench
                 long allocated = 0;
                 while (Stopwatch.GetTimestamp() < until)
                 {
-                    Measured again = await MeasureAsync(store, dataset, question, options);
+                    Measured again = await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
                     asks++;
                     milliseconds += again.Milliseconds;
                     allocated += again.Allocated;
@@ -414,7 +426,7 @@ internal static class PathsBench
         }
     }
 
-    private static async Task<Measured> MeasureAsync(CountingObjectStore store, VortexDataset dataset, Question question, ScanOptions options)
+    private static async Task<Measured> MeasureAsync(CountingObjectStore store, VortexDataset dataset, Question question, ScanOptions options, bool digests)
     {
         store.Reset();
         Asking asking = question.Ask(dataset, options);
@@ -433,9 +445,12 @@ internal static class PathsBench
             {
                 RecordBatch batch = asking.Batches.Current;
                 groups += batch.SelectedRows;
-                long taken = Stopwatch.GetTimestamp();
-                digest.Add(batch);
-                digesting += Stopwatch.GetTimestamp() - taken;
+                if (digests)
+                {
+                    long taken = Stopwatch.GetTimestamp();
+                    digest.Add(batch);
+                    digesting += Stopwatch.GetTimestamp() - taken;
+                }
             }
         }
 
@@ -444,7 +459,8 @@ internal static class PathsBench
         long bytes = GC.GetTotalAllocatedBytes(precise: true) - allocated;
         ScanMetrics metrics = asking.Metrics();
         return new Measured(
-            store.Requests, store.DependentSteps, store.BytesRead, metrics.SynopsisRows, metrics.Rows, milliseconds, cpuMilliseconds, bytes, groups, digest.ToString());
+            store.Requests, store.DependentSteps, store.BytesRead, metrics.SynopsisRows, metrics.Rows, milliseconds, cpuMilliseconds, bytes, groups,
+            digests ? digest.ToString() : "-");
     }
 
     private static void Print(Settings settings, string label, Question question, string path, string temperature, int degree, Measured m)

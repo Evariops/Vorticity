@@ -232,6 +232,7 @@ if (Text(args, "--micro") == "paths")
         TraceReads = Text(args, "--trace-reads"),
         LoopSeconds = Option(args, "--loop", 0),
         LoopColdSeconds = Option(args, "--loop-cold", 0),
+        NoDigest = args.Contains("--no-digest"),
     });
 }
 
