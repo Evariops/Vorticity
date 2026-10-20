@@ -188,7 +188,7 @@ internal sealed class DatasetScanSource : ScanSource
         // The objects of a pass that takes states are walked as its pieces' scans walk them, which then take them as they
         // are (Planned).
         DatasetScanBuilder? answering = spec.States is null ? null : Builder(spec, null);
-        List<(PositionedObject Held, RowRange Rows, bool Answered, bool Light, long States)> objects = [];
+        List<(PositionedObject Held, RowRange Rows, bool Answered, bool Light, long States, SynopsisAnswer? Answer)> objects = [];
         long total = 0;
         long totalStates = 0;
         IAsyncEnumerable<PositionedObject> walked = answering?.ObjectsAsync(cancellationToken) ?? _version.WalkAsync(pruner, from, to, null, cancellationToken);
@@ -202,7 +202,7 @@ internal sealed class DatasetScanSource : ScanSource
                 Indexes.SynopsisContents? contents = null;
                 SynopsisAnswer? answer = answering?.AnswerOf(held, out light, out contents);
                 long states = answer is not null && Cuttable(answer, held) ? answer.Weight(contents!) : 0;
-                objects.Add((held, new RowRange(start, end), answer is not null, light, states));
+                objects.Add((held, new RowRange(start, end), answer is not null, light, states, answer));
                 total += answer is not null ? 0 : end - start;
                 totalStates += states;
             }
@@ -234,6 +234,34 @@ internal sealed class DatasetScanSource : ScanSource
             }
         }
 
+        // The edges of an answer, the slices its window cuts, are read as rows by the piece that holds them, a lane's: a
+        // window that cuts a minute of 3 M rows decoded it in 38.7 ms at sixteen lanes as at one. Over several lanes, an
+        // edge of two edge shares or more is cut between its chunks into pieces of its rows alone, which read them as the
+        // edge was read, the window's filter over them; the pieces answered around it end and begin with its neighbours'
+        // slices, and so answer no row of it.
+        Task<RowRange[]>[]?[] edges = new Task<RowRange[]>[]?[objects.Count];
+        for (int o = 0; o < objects.Count && degree > 1; o++)
+        {
+            if (objects[o].Answer is not { Edges.Count: > 0 } answer || !Cuttable(answer, objects[o].Held) || objects[o].Rows.Length != objects[o].Held.Entry.Rows)
+            {
+                continue;
+            }
+
+            List<Task<RowRange[]>>? cut = null;
+            foreach (Indexes.TimeSlice edge in answer.Edges)
+            {
+                long edgeShare = System.Math.Max(_dataset.Options.LeastEdgePieceRows, edge.Rows / degree);
+                if (edge.Rows >= 2 * edgeShare)
+                {
+                    long first = objects[o].Held.FirstRow + edge.FirstRow;
+                    (cut ??= []).Add(CutAsync(objects[o].Held, new RowRange(first, first + edge.Rows), edgeShare, spec.Projection, cancellationToken));
+                    cutting.Add(cut[^1]);
+                }
+            }
+
+            edges[o] = cut is null ? null : [.. cut];
+        }
+
         // Objects their tables alone answer, in a row, make one piece, up to a few and while they fold less than a share of
         // states together: such an answer reads a few tables and folds their rows, where a piece costs a walk of the tree
         // to its rows and a lane's turn, which made a warm question over 48 hourly objects at 16 lanes spend more of its
@@ -256,6 +284,27 @@ internal sealed class DatasetScanSource : ScanSource
                 RowRange[] parts = await cut.ConfigureAwait(false);
                 pieces.AddRange(parts);
                 reading += parts.Length;
+                answers = 0;
+            }
+            else if (edges[o] is { } cutEdges
+                && answering!.AnswerOf(objects[o].Held, out _, out Indexes.SynopsisContents? edgeContents) is { } edged)
+            {
+                // The answered parts between the edges, cut at the slices the answer may be cut at that fall inside them.
+                slices ??= [];
+                slices.Clear();
+                edged.Cuts(edgeContents!, stateShare, slices);
+                IReadOnlyList<Indexes.TimeSlice> table = edgeContents!.Slices.Slices;
+                long start = rows.Start;
+                foreach (Task<RowRange[]> edge in cutEdges)
+                {
+                    RowRange[] parts = await edge.ConfigureAwait(false);
+                    Answered(objects[o].Held, table, slices, start, parts[0].Start, pieces);
+                    pieces.AddRange(parts);
+                    reading += parts.Length;
+                    start = parts[^1].End;
+                }
+
+                Answered(objects[o].Held, table, slices, start, rows.End, pieces);
                 answers = 0;
             }
             else if (degree > 1 && objects[o].States >= 2 * stateShare && rows.Length == objects[o].Held.Entry.Rows
@@ -298,6 +347,32 @@ internal sealed class DatasetScanSource : ScanSource
     /// a delete or of an identifier left out of its tables, which the object's rows and indexes find whole.
     /// </summary>
     private static bool Cuttable(SynopsisAnswer answer, in PositionedObject held) => answer.Excluded.Count == 0 && !held.Entry.HasDeletions;
+
+    /// <summary>
+    /// The rows from <paramref name="start"/> to <paramref name="end"/> of an object its synopsis answers, slices whole,
+    /// cut before those of <paramref name="cuts"/> that fall inside them; added to <paramref name="pieces"/>, nothing when
+    /// they are none.
+    /// </summary>
+    private static void Answered(
+        in PositionedObject held, IReadOnlyList<Indexes.TimeSlice> table, List<int> cuts, long start, long end, List<RowRange> pieces)
+    {
+        if (end <= start)
+        {
+            return;
+        }
+
+        foreach (int slice in cuts)
+        {
+            long at = held.FirstRow + table[slice].FirstRow;
+            if (at > start && at < end)
+            {
+                pieces.Add(new RowRange(start, at));
+                start = at;
+            }
+        }
+
+        pieces.Add(new RowRange(start, end));
+    }
 
     /// <summary>
     /// The rows <paramref name="rows"/> of an object its synopsis answers, cut before the slices its answer may be cut at

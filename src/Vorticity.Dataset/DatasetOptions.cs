@@ -167,6 +167,14 @@ public sealed record DatasetOptions
     internal long LeastPieceRows { get; init; } = 1L << 20;
 
     /// <summary>
+    /// The rows of an edge of a synopsis answer, a slice its window cuts, that a piece of a pass on several lanes reads at
+    /// least: 2^17 by default, four chunks of the design's requests. An edge of twice as many or more is cut between its
+    /// chunks into pieces of its rows alone, as many as the lanes but none smaller, where one lane read the whole edge
+    /// while the others waited. A test cuts its small edges with less.
+    /// </summary>
+    internal long LeastEdgePieceRows { get; init; } = 1L << 17;
+
+    /// <summary>
     /// The objects in a row their synopses answer that one lane's piece of a pass on several lanes takes at most: 8 by
     /// default. An answer reads a few tables and folds their rows, a tenth of a millisecond warm, where a piece costs a
     /// walk of the tree to its rows and a lane's turn: a piece an object made a warm question over 48 hourly objects at

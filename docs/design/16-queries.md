@@ -937,8 +937,13 @@ out or of a delete, is cut between the chunks of its tables into ranges of its s
 bucket a table folds whole straddles: a lane answers its range as the object is answered under a window
 that ends where the range does, and reads the slices of the edges it holds. A count per service and per
 12 hours over a window that cuts three hours of 540 M rows, 3.47 M rows of runs, one lane's whole when an
-answer was, took 32 ms at 16 lanes as at one; cut, 11 ms. The objects that are cut are opened side by side
-to learn where their chunks end, and the ranges then find them already open.
+answer was, took 32 ms at 16 lanes as at one; cut, 11 ms. Over several lanes, an edge of the answer of two
+edge shares of rows or more, 2^17 at least, is cut between its chunks into ranges of its rows alone, which
+read them under the window's filter as the edge was read, and the ranges answered around it end and begin
+with its neighbours' slices: a window whose edge cuts a minute of 3 M rows, one lane's to decode, took 38.7
+ms at 16 lanes as at one without latency, 83 ms over a store of 5 ms; cut, 3.3 and 39.8 ms. The objects
+that are cut are opened side by side to learn where their chunks end, and the ranges then find them
+already open.
 No object settles ([statistics and zone maps](#93-statistics-and-zone-maps), and see
 [13-dataset.md](13-dataset.md)). A group by that streams runs as [in parallel, in
 order](#25-in-parallel-in-order) describes, its ranges grouped side by side and followed in row order,

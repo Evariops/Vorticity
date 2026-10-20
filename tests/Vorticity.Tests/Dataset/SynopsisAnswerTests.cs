@@ -90,6 +90,36 @@ public sealed partial class SynopsisAnswerTests
     }
 
     /// <summary>
+    /// The objects written in chunks of a block of 16 rows, and every edge of an answer, a slice its window cuts, cut at
+    /// four lanes between them into pieces of its rows alone: every question gives the bits its rows give and its answer
+    /// at one lane, and a window that cuts slices reads fewer of their rows as an answer's edges than one lane does, the
+    /// rest by pieces of their own.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Questions))]
+    public async Task AnEdgeCutAcrossLanesGivesTheBitsOfItsRows(string question)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store, tuned: options => options with
+        {
+            LeastEdgePieceRows = 1,
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000), BlockRows = 16, ChunkTargetBytes = 1 },
+        });
+        Vorticity.Aggregation aggregation = Question(dataset.Scan<Request>().With(new ScanOptions { DegreeOfParallelism = 4 }), question);
+        (List<string> cut, ScanMetrics metrics) = await GroupsAsync(aggregation);
+        (List<string> off, _) = await AskAsync(dataset, question, synopses: false);
+        (List<string> whole, ScanMetrics alone) = await AskAsync(dataset, question, synopses: true, degree: 1);
+        Console.Out.Write(
+            $"EDGES {question}: {metrics.Rows} rows ({metrics.EdgeRows} at edges); at one lane {alone.Rows} rows ({alone.EdgeRows} at edges).\n");
+        Assert.Equal(off, cut);
+        Assert.Equal(whole, cut);
+        if (alone.EdgeRows > 0)
+        {
+            Assert.True(metrics.EdgeRows < alone.EdgeRows, $"{metrics.EdgeRows} rows at edges, {alone.EdgeRows} at one lane");
+        }
+    }
+
+    /// <summary>
     /// The plan of a question over a window across hours says, per object, what it reads: the coarse table of
     /// the whole hour, the runs and the edges of the hour cut, and the rows of an object of level 0 or of
     /// the window's last hour, cut where no table of slices keys the service.
