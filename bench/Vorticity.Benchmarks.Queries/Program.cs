@@ -89,6 +89,22 @@ if (Text(args, "--micro") == "slicesort")
     return await SliceSortMicro.Run(rounds, args.Contains("--deep"));
 }
 
+// --micro load: the write path of a load of sealed periods at the design's density, a few seconds a round (LoadMicro.cs).
+if (Text(args, "--micro") == "load")
+{
+    int periods = Option(args, "--periods", 4);
+    return await LoadMicro.Run(
+        Text(args, "--store") ?? "E:/vorticity-load-micro",
+        periods,
+        Option(args, "--parallel", periods),
+        Option(args, "--minutes", 3),
+        Option(args, "--rate", 50_000),
+        Option(args, "--rounds", 3),
+        Option(args, "--budget", 100),
+        Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
+        args.Contains("--disk"));
+}
+
 // --micro seal: what the compaction of a period costs at the design's scale, job by job and pass by pass (SealBench.cs).
 if (Text(args, "--micro") == "seal")
 {
@@ -212,6 +228,8 @@ if (Text(args, "--micro") == "paths")
     {
         Store = Text(args, "--store") ?? new PathsBench.Settings().Store,
         Design = args.Contains("--design"),
+        Incremental = args.Contains("--incremental"),
+        ParallelPeriods = Option(args, "--parallel-periods", 4),
         Hours = Option(args, "--hours", args.Contains("--design") ? 240 : 24),
         Rate = Option(args, "--rate", args.Contains("--design") ? 50_000 : 1_000),
         ParallelHours = Option(args, "--parallel-hours", 4),

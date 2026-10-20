@@ -66,19 +66,31 @@ internal sealed class RequestGenerator
     /// <summary>One request at <paramref name="at"/>, its other columns drawn.</summary>
     internal GeneratedRequest Next(DateTimeOffset at)
     {
+        RequestDraw draw = Draw(out long id);
+        return new GeneratedRequest(
+            at, _serviceNames[draw.Service], _endpointNames[draw.Service][draw.Endpoint], Methods[draw.Method], draw.Status, Regions[draw.Region],
+            _versionNames[draw.Service][draw.Version], _hostNames[draw.Service][draw.Host], $"req-{id:x12}", draw.DurationNs, draw.Weight);
+    }
+
+    /// <summary>
+    /// One request's draws, the indices of its names among <see cref="ServiceNames"/> and the others and its numbers, and
+    /// the number of its id: what a record of it holds, or a batch's columns, in the order <see cref="Next"/> draws them.
+    /// </summary>
+    internal RequestDraw Draw(out long id)
+    {
         // A service runs in its home region, which serves nearly all its requests.
         int service = Lower(_serviceWeights, _random.NextDouble());
         int home = HomeOf(service);
         // Four services in five only read: their writes are reads. One in ten takes health checks and probes.
         int method = Pick(MethodWeights);
         method = (service % 5 < 4 && method is >= 1 and <= 4) || (service % 10 != 0 && method >= 5) ? 0 : method;
-        string region = method switch
+        int region = method switch
         {
             // The rare methods are health checks and probes, sent from one monitoring region each.
-            5 => Regions[1],
-            6 => Regions[2],
-            7 => Regions[3],
-            _ => Regions[home],
+            5 => 1,
+            6 => 2,
+            7 => 3,
+            _ => home,
         };
         short status = StatusOf(method);
 
@@ -89,12 +101,28 @@ internal sealed class RequestGenerator
         // The current version takes most of the rows, the others the rest.
         int version = _random.NextDouble() < 0.97 ? 0 : 1 + _random.Next(_versions[service] - 1);
         int host = _random.Next(HostsPerService);
-        long id = _next++;
+        id = _next++;
         double duration = Math.Exp(15 + (_random.NextDouble() * 3));
-        return new GeneratedRequest(
-            at, _serviceNames[service], _endpointNames[service][endpoint], Methods[method], status, region,
-            _versionNames[service][version], _hostNames[service][host], $"req-{id:x12}", (long)duration, _random.NextDouble());
+        return new RequestDraw(service, endpoint, method, region, status, version, host, (long)duration, _random.NextDouble());
     }
+
+    /// <summary>The services' names, by index.</summary>
+    internal IReadOnlyList<string> ServiceNames => _serviceNames;
+
+    /// <summary>Each service's endpoints' names, by service then endpoint.</summary>
+    internal IReadOnlyList<string[]> EndpointNames => _endpointNames;
+
+    /// <summary>Each service's versions' names, by service then version.</summary>
+    internal IReadOnlyList<string[]> VersionNames => _versionNames;
+
+    /// <summary>Each service's hosts' names, by service then host.</summary>
+    internal IReadOnlyList<string[]> HostNames => _hostNames;
+
+    /// <summary>The methods' names, by index.</summary>
+    internal static IReadOnlyList<string> MethodNames => Methods;
+
+    /// <summary>The regions' names, by index.</summary>
+    internal static IReadOnlyList<string> RegionNames => Regions;
 
     /// <summary>
     /// The rows of <paramref name="span"/> from <paramref name="start"/>, at <paramref name="perSecond"/>, appended by
@@ -273,6 +301,9 @@ internal sealed class RequestGenerator
         return Math.Min(index >= 0 ? index : ~index, cumulative.Length - 1);
     }
 }
+
+/// <summary>A request's draws (<see cref="RequestGenerator.Draw"/>): the indices of its names, its status, its duration and its weight.</summary>
+internal readonly record struct RequestDraw(int Service, int Endpoint, int Method, int Region, short Status, int Version, int Host, long DurationNs, double Weight);
 
 /// <summary>A request, as the time-window design writes its table.</summary>
 [VortexRecord]

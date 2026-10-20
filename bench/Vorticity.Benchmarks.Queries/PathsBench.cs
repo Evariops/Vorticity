@@ -24,8 +24,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// tenth of a millisecond (<see cref="PreciseDelay"/>), the reads' bytes crossing one link of <c>--gbps</c> (10 by
 /// default, 0 for none) and each read's at most <c>--mbps</c> when set; the synopsis cache reads its own disk, with
 /// neither. A dataset is written the first time its parameters are asked for (<c>--hours</c>, <c>--rate</c> requests a
-/// second, <c>--log-rate</c> log records, <c>--design</c> at the design's own scale, <see cref="DesignBuild"/>) and
-/// kept beside a note of what it holds; <c>--rebuild</c> writes it again.
+/// second, <c>--log-rate</c> log records, <c>--design</c> at the design's own scale, its days loaded as sealed periods or,
+/// with <c>--incremental</c>, its hours appended and compacted as they come, <see cref="DesignBuild"/>) and kept beside a
+/// note of what it holds; <c>--rebuild</c> writes it again.
 /// </para>
 /// <para>
 /// Each line says what the store saw (requests, dependent round trips, bytes), what the answer read (states, rows),
@@ -84,6 +85,12 @@ internal static class PathsBench
 
         internal bool Design { get; init; }
 
+        /// <summary>Whether <c>--design</c> appends its hours and compacts them as they come (<see cref="DesignBuild.FillAsync"/>) rather than load its days as sealed periods (<see cref="DesignBuild.LoadAsync"/>).</summary>
+        internal bool Incremental { get; init; }
+
+        /// <summary>The days a load of <c>--design</c> writes at once.</summary>
+        internal int ParallelPeriods { get; init; } = 4;
+
         internal int ParallelHours { get; init; } = 4;
 
         internal int PartMinutes { get; init; } = 10;
@@ -126,10 +133,11 @@ internal static class PathsBench
         Directory.CreateDirectory(settings.Store);
         Built requests = await EnsureAsync(
             settings,
-            $"requests-{(settings.Design ? "design-" : string.Empty)}h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}",
-            store => settings.Design
+            $"requests-{(!settings.Design ? string.Empty : settings.Incremental ? "design-" : "design-load-")}h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}",
+            store => !settings.Design ? FillRequestsAsync(store, settings)
+                : settings.Incremental
                 ? DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"))
-                : FillRequestsAsync(store, settings));
+                : DesignBuild.LoadAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelPeriods, settings.WriteDegree, Path.Combine(settings.Store, "scratch")));
         Built logs = await EnsureAsync(settings, $"logs-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
         if (settings.BuildOnly)
         {
