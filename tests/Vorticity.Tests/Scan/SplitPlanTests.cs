@@ -210,6 +210,32 @@ public sealed class SplitPlanTests
             Splits(tree, new RowRange(0, 300), 8192, Mask(0, 1)));
     }
 
+    /// <summary>
+    /// Fields chunked alike plan as one of them does, a field's run dropped where it repeats the run before it; fields
+    /// chunked apart in turn, a run repeated only past another, still plan the union of every field's boundaries, over
+    /// the whole and over a range that starts and ends inside chunks.
+    /// </summary>
+    [Fact]
+    public void FieldsChunkedAlikePlanAsOneAndFieldsApartInTurnAsTheirUnion()
+    {
+        LayoutSpecNode At100() => Node(Chunked, 300, children: [Node(Flat, 100, segments: [0]), Node(Flat, 200, segments: [1])]);
+        LayoutSpecNode At150() => Node(Chunked, 300, children: [Node(Flat, 150, segments: [2]), Node(Flat, 150, segments: [3])]);
+        LayoutTree alike = Tree(Node(Struct, 300, children: [At100(), At100(), At100()]), StructOf(3));
+        LayoutTree apart = Tree(Node(Struct, 300, children: [At100(), At150(), At100()]), StructOf(3));
+
+        Assert.Equal([new RowRange(0, 100), new RowRange(100, 300)], Splits(alike, new RowRange(0, 300), 8192));
+        Assert.Equal([new RowRange(50, 100), new RowRange(100, 250)], Splits(alike, new RowRange(50, 250), 8192));
+        Assert.Equal(
+            [new RowRange(0, 100), new RowRange(100, 150), new RowRange(150, 300)],
+            Splits(apart, new RowRange(0, 300), 8192));
+        Assert.Equal(
+            [new RowRange(120, 150), new RowRange(150, 160)],
+            Splits(apart, new RowRange(120, 160), 8192));
+        Assert.Equal(
+            [new RowRange(0, 100), new RowRange(100, 150), new RowRange(150, 300)],
+            Splits(apart, new RowRange(0, 300), 8192, Mask(1, 2)));
+    }
+
     [Fact]
     public void AStructWithNoFieldSelectedStillCoversItsRows()
     {
@@ -343,6 +369,21 @@ public sealed class SplitPlanTests
         DTypeArena arena = new DTypeArena();
         DType i64 = arena.Primitive(PType.I64, Nullability.NonNullable);
         return arena.Struct(["a", "b"], [i64, i64], Nullability.NonNullable);
+    }
+
+    private static DType StructOf(int fields)
+    {
+        DTypeArena arena = new DTypeArena();
+        DType i64 = arena.Primitive(PType.I64, Nullability.NonNullable);
+        string[] names = new string[fields];
+        DType[] types = new DType[fields];
+        for (int i = 0; i < fields; i++)
+        {
+            names[i] = ((char)('a' + i)).ToString();
+            types[i] = i64;
+        }
+
+        return arena.Struct(names, types, Nullability.NonNullable);
     }
 
     private static LayoutTree Tree(LayoutSpecNode root, DType schema)

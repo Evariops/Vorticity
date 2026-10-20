@@ -151,6 +151,12 @@ if (Text(args, "--micro") == "sparsecost")
     return await SparseCostMicro.Run(Option(args, "--rows", 1_000_000), rounds);
 }
 
+// --micro splitplan --file F: the plan of splits a scan of a file's every row draws before its first read (SplitPlanMicro.cs).
+if (Text(args, "--micro") == "splitplan")
+{
+    return await SplitPlanMicro.Run(Text(args, "--file") ?? throw new ArgumentException("--micro splitplan needs --file F."), rounds);
+}
+
 // --micro slicecost: the price of a row at a window's edge and of a row of a table of slices, the two a slice's target trades (SliceCostMicro.cs).
 if (Text(args, "--micro") == "slicecost")
 {
