@@ -181,7 +181,12 @@ internal sealed class DatasetScanSource : ScanSource
         SummaryPruner? pruner = spec.Options.UseStatistics && spec.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
         long from = spec.Rows?.Start ?? 0;
         long to = spec.Rows?.End ?? long.MaxValue;
-        List<(PositionedObject Held, RowRange Rows)> objects = [];
+
+        // An object its synopsis answers stays whole, since states answer an object, not a part of it,
+        // and counts for none of the rows the lanes share; one whose rows are read is cut as any other,
+        // however many tables it holds, which would otherwise leave a lane alone over a period of rows.
+        DatasetScanBuilder? answering = spec.States is null ? null : Builder(spec, null);
+        List<(PositionedObject Held, RowRange Rows, bool Answered)> objects = [];
         long total = 0;
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
@@ -189,20 +194,20 @@ internal sealed class DatasetScanSource : ScanSource
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
             if (end > start)
             {
-                objects.Add((held, new RowRange(start, end)));
-                total += end - start;
+                bool answered = answering?.Answers(held) == true;
+                objects.Add((held, new RowRange(start, end), answered));
+                total += answered ? 0 : end - start;
             }
         }
 
         // The objects to cut are opened side by side to read where their chunks end; the scan finds
-        // them open after. Each cut gives its object back, whatever another one's open did. An object a
-        // synopsis may answer stays whole, since states answer an object, not a part of it.
+        // them open after. Each cut gives its object back, whatever another one's open did.
         long share = System.Math.Max(PieceRows, total / (degree * 4L));
         Task<RowRange[]>?[] cuts = new Task<RowRange[]>?[objects.Count];
         List<Task> cutting = [];
         for (int o = 0; o < objects.Count; o++)
         {
-            if (objects[o].Rows.Length >= 2 * share && (spec.States is null || objects[o].Held.Entry.Synopsis.IsEmpty))
+            if (objects[o].Rows.Length >= 2 * share && !objects[o].Answered)
             {
                 cuts[o] = CutAsync(objects[o].Held, objects[o].Rows, share, spec.Projection, cancellationToken);
                 cutting.Add(cuts[o]!);
@@ -266,7 +271,8 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>The engine's scan for <paramref name="spec"/>, adding what the objects' scans count to <paramref name="counters"/>.</summary>
     internal DatasetScanBuilder Builder(ScanSpec spec, ScanCounters? counters)
     {
-        DatasetScanBuilder builder = new DatasetScanBuilder(_dataset, _version).WithVariantKeys(spec.VariantKeys).WithStates(spec.States);
+        DatasetScanBuilder builder = new DatasetScanBuilder(_dataset, _version)
+            .WithVariantKeys(spec.VariantKeys).WithStates(spec.States).WithReadAhead(spec.ReadAhead);
         if (spec.Projection is { } mask)
         {
             builder.Project(in mask);

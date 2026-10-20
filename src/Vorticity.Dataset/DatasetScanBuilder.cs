@@ -256,6 +256,19 @@ internal sealed class DatasetScanBuilder
     private StateRequest? _states;
 
     /// <summary>
+    /// The splits each object's scan of one lane reads ahead of the one it decodes, over a store whose read is a round
+    /// trip (<see cref="ScanSpec.ReadAhead"/>): what an aggregation's lane is granted, which an object's scan reads as a
+    /// file's would.
+    /// </summary>
+    internal DatasetScanBuilder WithReadAhead(int splits)
+    {
+        _readAhead = splits;
+        return this;
+    }
+
+    private int _readAhead;
+
+    /// <summary>
     /// A lease of <paramref name="held"/>: for a scan that reads keys of variant columns, an object of level 0
     /// through the node's memo of it shredded in memory, which parses its keys once; the object itself otherwise.
     /// </summary>
@@ -531,6 +544,13 @@ internal sealed class DatasetScanBuilder
 
         return false;
     }
+
+    /// <summary>
+    /// Whether the synopsis of <paramref name="held"/> answers the states the scan asks, as its scan would
+    /// find: what its entry holds, with no read of it.
+    /// </summary>
+    internal bool Answers(in PositionedObject held) =>
+        _states is { } request && _orderPaths is null && _take is null && Answer(held, request).Answer is not null;
 
     /// <summary>
     /// An object answered by its synopsis, with no open of it: the batches of states of its tables' kept
@@ -2384,6 +2404,11 @@ internal sealed class DatasetScanBuilder
             .WithPrefetch(_options.Prefetch)
             .WithCompaction(_options.Compact)
             .WithEncodings(!canonical && _keepEncodings, !canonical && _sinkDecodes);
+        if (_readAhead > 0)
+        {
+            scan.WithReadAhead(_readAhead);
+        }
+
         return _counters is { } counters ? scan.WithMetrics(counters) : scan;
     }
 }
