@@ -2525,12 +2525,72 @@ internal sealed class DatasetScanBuilder
 
         // The range is the dataset's; the file's is the part of it that falls inside this object.
         (long lower, long upper) = PhysicalRange(held);
+
+        // An object sliced by time holds its rows slice by slice, every row's instant within its slice's bounds, so the
+        // filter's window on the instant is a range of its rows: the slices it reaches. The scan's plan, its zone maps and
+        // its walk then cover those alone, where they covered every row of the object at every question, the window's
+        // slices a day's object's 1 440 minutes for a window of an hour.
+        long low = long.MinValue;
+        long high = long.MaxValue;
+        if (held.Entry.Deletions.IsEmpty && filter is not null && _dataset.Key is { } key && Bound(filter, key.InstantPath, ref low, ref high)
+            && held.Entry.Contents is { } contents && WindowRows(contents.Slices.Slices, low, high) is { } window)
+        {
+            lower = Math.Max(lower, window.Start);
+            upper = Math.Min(upper, window.End);
+        }
+
         if (lower > 0 || upper < held.Entry.PhysicalRows)
         {
             scan.Rows(new RowRange(lower, Math.Max(upper, lower)));
         }
 
         return scan;
+    }
+
+    /// <summary>
+    /// Narrows <paramref name="low"/> and <paramref name="high"/>, inclusive, by the conjuncts of <paramref name="filter"/>
+    /// that compare <paramref name="instant"/> itself, as an answer reads its window (<see cref="SynopsisAnswer.Bound"/>);
+    /// whether one did. A walk of the conjunctions, which allocates nothing.
+    /// </summary>
+    private static bool Bound(VortexExpr filter, string instant, ref long low, ref long high)
+    {
+        if (filter is LogicalExpr { IsAnd: true } both)
+        {
+            bool left = Bound(both.Left, instant, ref low, ref high);
+            return Bound(both.Right, instant, ref low, ref high) | left;
+        }
+
+        return SynopsisAnswer.Bound(filter, instant, ref low, ref high);
+    }
+
+    /// <summary>
+    /// The rows of the slices of <paramref name="slices"/> the window from <paramref name="low"/> to <paramref name="high"/>,
+    /// inclusive, reaches, from the first's first row to the last's last, empty when it reaches none; null when the object
+    /// has no slice.
+    /// </summary>
+    private static RowRange? WindowRows(IReadOnlyList<Indexes.TimeSlice> slices, long low, long high)
+    {
+        if (slices.Count == 0)
+        {
+            return null;
+        }
+
+        // A slice [Start, End) the window [low, high] reaches: one that ends past its low and starts at its high or before.
+        int first = 0;
+        while (first < slices.Count && slices[first].End <= low)
+        {
+            first++;
+        }
+
+        int last = slices.Count - 1;
+        while (last >= first && slices[last].Start > high)
+        {
+            last--;
+        }
+
+        return last < first
+            ? RowRange.Empty
+            : new RowRange(slices[first].FirstRow, slices[last].FirstRow + slices[last].Rows);
     }
 
     /// <summary>

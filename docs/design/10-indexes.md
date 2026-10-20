@@ -222,7 +222,10 @@ The writer that sorts the rows declares the slices before it completes the file,
 they cover its rows ([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)),
 and writes an index directory for them even when its policy asks for no index. The table is also the
 instant's key source, so an object of a dataset of periods carries no sorted run on a key of its
-instant alone ([sources of order](12-index-reads.md#2-sources-of-order)).
+instant alone ([sources of order](12-index-reads.md#2-sources-of-order)). A scan of an object's rows
+under a window on the instant covers the rows of the slices the window reaches, which the table of the
+object's entry names before any read: its plan, its zone maps and its walk then count those slices'
+blocks alone, where they went over the object's every block at every question.
 
 A sliced file also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
 root. Its options hold the file's table of array encodings, and its one run has a payload region per

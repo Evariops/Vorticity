@@ -120,6 +120,29 @@ public sealed partial class SynopsisAnswerTests
     }
 
     /// <summary>
+    /// A window read by its rows, the objects written in blocks of 16 rows: each object's scan covers the rows of the
+    /// slices the window reaches and none of the rest, its plan and its zone maps counting their blocks alone, and the
+    /// answer is the one its tables give.
+    /// </summary>
+    [Fact]
+    public async Task AWindowReadByItsRowsCoversTheRowsOfItsSlicesAlone()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store, tuned: options => options with
+        {
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000), BlockRows = 16, ChunkTargetBytes = 1 },
+        });
+        (List<string> rows, ScanMetrics metrics) = await AskAsync(dataset, "an unaligned window", synopses: false);
+        (List<string> tables, _) = await AskAsync(dataset, "an unaligned window", synopses: true);
+        long considered = metrics.BlocksDecoded + metrics.BlocksPruned;
+        Console.Out.Write($"WINDOW ROWS: {considered} blocks considered, {metrics.BlocksDecoded} decoded, {metrics.Rows} rows.\n");
+        Assert.Equal(tables, rows);
+
+        // 12:37:30 to 13:41 reaches 64 slices of a minute, 48 rows each: about 192 blocks of 16, where its two hours hold 360.
+        Assert.InRange(considered, 1, 200);
+    }
+
+    /// <summary>
     /// The plan of a question over a window across hours says, per object, what it reads: the coarse table of
     /// the whole hour, the runs and the edges of the hour cut, and the rows of an object of level 0 or of
     /// the window's last hour, cut where no table of slices keys the service.
