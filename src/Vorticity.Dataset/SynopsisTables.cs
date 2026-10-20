@@ -98,6 +98,9 @@ internal sealed class SynopsisTables : IDisposable
     private readonly Dictionary<long, int> _pairs = [];
     private readonly RunBuffer _run = new RunBuffer();
     private readonly RunBuffer _key = new RunBuffer();
+
+    // The first key of each depth's group a merge is in, which the group's row carries.
+    private RunBuffer?[] _starts = [];
     private int[] _measures;
     private MeasureKind[] _kinds;
     private int _words;
@@ -782,10 +785,18 @@ internal sealed class SynopsisTables : IDisposable
         long runLength = 0;
         _run.Clear();
         bool any = false;
+        if (_starts.Length <= depth)
+        {
+            Array.Resize(ref _starts, depth + 1);
+        }
+
         using (RunMerger merger = await RunMerger.OpenAsync(scratch, runs, _keyShapes, depth, _kinds, cancellationToken).ConfigureAwait(false))
         {
             while (await merger.MoveNextAsync(cancellationToken).ConfigureAwait(false))
             {
+                // The groups the key leaves end, and those it enters start with it: a group's key is its first's, as a
+                // slice's group's is its first row's.
+                int from = _first;
                 if (any)
                 {
                     KeyCodec.Compare(_keyShapes, depth, _key.Span, merger.Key, out int differs);
@@ -793,6 +804,15 @@ internal sealed class SynopsisTables : IDisposable
                     {
                         await EmitAsync(d).ConfigureAwait(false);
                     }
+
+                    from = Math.Max(_first, differs + 1);
+                }
+
+                for (int d = from; d <= depth; d++)
+                {
+                    RunBuffer start = _starts[d] ??= new RunBuffer();
+                    start.Clear();
+                    start.Bytes(merger.Key[..KeyCodec.Prefix(_keyShapes, d, merger.Key)]);
                 }
 
                 for (int d = _first; d <= depth; d++)
@@ -825,19 +845,19 @@ internal sealed class SynopsisTables : IDisposable
 
         return emitted;
 
-        // The group of depth d that the next key leaves: its prefix of the previous key, its states.
+        // The group of depth d that the next key leaves: the prefix of its first key, its states.
         async ValueTask EmitAsync(int d)
         {
             emitted[d]++;
-            int prefix = KeyCodec.Prefix(_keyShapes, d, _key.Span);
-            if (into[d] is { Dead: false } table && Hold(table, bucket, _key.Span[..prefix], groups[d]))
+            ReadOnlySpan<byte> key = _starts[d]!.Span;
+            if (into[d] is { Dead: false } table && Hold(table, bucket, key, groups[d]))
             {
                 await FlushAsync(table, cancellationToken).ConfigureAwait(false);
             }
 
             if (wholeRuns && d == _wholeDepth)
             {
-                _run.Bytes(_key.Span[..prefix]);
+                _run.Bytes(_starts[d]!.Span);
                 _run.Words(groups[d]);
                 if (_run.Length >= RunFlushBytes)
                 {
@@ -1090,6 +1110,11 @@ internal sealed class SynopsisTables : IDisposable
         _run.Dispose();
         _key.Dispose();
         _component.Dispose();
+        foreach (RunBuffer? start in _starts)
+        {
+            start?.Dispose();
+        }
+
         _context.Dispose();
     }
 

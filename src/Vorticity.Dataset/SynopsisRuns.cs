@@ -56,8 +56,8 @@ internal readonly record struct KeyShape(KeyForm Form, int Width, PType PType)
 /// <summary>
 /// The keys of a run's records: each component a byte that says whether it holds a value, then the value, a
 /// primitive's bytes in its width, a boolean's byte, or bytes behind their length. They compare as a slice orders
-/// its rows (<see cref="SliceSort.Compare"/>): by value, nulls last, a float's zero of either sign alike and then
-/// told apart by its bits, so that two keys compare equal exactly when a slice codes them alike.
+/// its rows (<see cref="SliceSort.Compare"/>): by value, nulls last, a float's zeros of either sign one value and
+/// its NaNs another, so that two keys compare equal exactly when a slice codes them alike, whatever their bits.
 /// </summary>
 internal static class KeyCodec
 {
@@ -160,8 +160,7 @@ internal static class KeyCodec
             case KeyForm.Float:
                 double a = Float(left, shape.PType);
                 double b = Float(right, shape.PType);
-                int compared = (a == 0 ? 0 : a).CompareTo(b == 0 ? 0 : b);
-                return compared != 0 ? compared : Unsigned(left).CompareTo(Unsigned(right));
+                return (a == 0 ? 0 : a).CompareTo(b == 0 ? 0 : b);
             case KeyForm.Bool:
                 return left[0].CompareTo(right[0]);
             default:
@@ -390,8 +389,9 @@ internal sealed class RunCursor : IDisposable
     private int _keyEnd;
     private int _wordsAt;
 
-    internal RunCursor(RunScratch scratch, RunSpan run, KeyShape[] shapes, int components, int words)
+    internal RunCursor(RunScratch scratch, RunSpan run, KeyShape[] shapes, int components, int words, int order = 0)
     {
+        Order = order;
         _scratch = scratch;
         _shapes = shapes;
         _components = Math.Min(components, run.Components);
@@ -400,6 +400,9 @@ internal sealed class RunCursor : IDisposable
         _next = run.At;
         _end = run.At + run.Length;
     }
+
+    /// <summary>The run's place among those a merge reads, which breaks its ties: the earliest run's record first.</summary>
+    internal int Order { get; }
 
     /// <summary>The current record's key, cut to the components read.</summary>
     internal ReadOnlySpan<byte> Key => _buffer.AsSpan(_record, _keyEnd - _record);
@@ -539,7 +542,8 @@ internal sealed class RunCursor : IDisposable
 
 /// <summary>
 /// The records of several runs, each in the order of its keys, merged into one stream in that order: the records
-/// of equal keys merged into one, their states together. A heap of the runs' cursors, by their current key.
+/// of equal keys merged into one, their states together, under the key of the earliest run's, as the first row of a
+/// group gives the slice's. A heap of the runs' cursors, by their current key, then by their run's place.
 /// </summary>
 internal sealed class RunMerger : IDisposable
 {
@@ -567,7 +571,7 @@ internal sealed class RunMerger : IDisposable
         {
             for (int r = 0; r < runs.Count; r++)
             {
-                RunCursor cursor = new RunCursor(scratch, runs[r], shapes, components, merger._words.Length);
+                RunCursor cursor = new RunCursor(scratch, runs[r], shapes, components, merger._words.Length, r);
                 if (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
                 {
                     merger.Push(cursor);
@@ -628,7 +632,11 @@ internal sealed class RunMerger : IDisposable
         }
     }
 
-    private int CompareAt(int left, int right) => KeyCodec.Compare(_shapes, _components, _heap[left].Key, _heap[right].Key, out _);
+    private int CompareAt(int left, int right)
+    {
+        int compared = KeyCodec.Compare(_shapes, _components, _heap[left].Key, _heap[right].Key, out _);
+        return compared != 0 ? compared : _heap[left].Order.CompareTo(_heap[right].Order);
+    }
 
     private void Push(RunCursor cursor)
     {
