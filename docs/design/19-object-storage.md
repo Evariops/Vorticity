@@ -647,8 +647,15 @@ checksum, all known from the dataset's entry before any read.
 An entry is a file named by that key, in directories sharded by the uid, written under a temporary
 name and then renamed, so a reader never sees half a file. The cache walks its directory when it opens,
 and the entries an earlier cache left are its own. One cache owns a directory, through a lock of the
-operating system. Every read from the disk checks the checksum, and a region that fails it is dropped
-and read again from the store. Questions that miss the same region at once wait for one read.
+operating system. On Windows, an entry's file is opened at its first read and mapped, and kept so while
+the cache keeps up to 4 096 files open: a region read from the disk is a view of the mapping, with no
+read of the system and no copy, and its batches decode from it. A read took a fifth of a warm question
+over 48 hourly objects' tables, 5.8 ms a question against 4.6 mapped. A file the cache maps is one no
+other writer changes while it does, as the system refuses to write a mapped file. Elsewhere a region is
+read, a read of the system's cache costing less, and a file cut short under a mapping faulting its
+reader where a read finds it torn. Every read from the disk
+checks the checksum, and a region that fails it is dropped, its mapping let go, and read again from the
+store. Questions that miss the same region at once wait for one read.
 
 A sealed object leaves no plaintext on the disk. The cache keeps the bytes the store holds: the
 object's trailer, which names its data key wrapped and its epochs, and the frames that hold a region its

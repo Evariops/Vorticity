@@ -156,7 +156,39 @@ public sealed class SynopsisCache : IDisposable
             return false;
         }
 
+        // On Windows, the entry's file mapped, once, while the cache keeps its handle: a region read is then a view of
+        // it, with no read of the system's and no copy, where a read took a fifth of a warm question over 48 objects'
+        // tables. Elsewhere a read of the system's cache costs less, and a file cut short under a mapping faults its
+        // reader, where a read finds it torn.
         int length = checked((int)region.Length);
+        if (OperatingSystem.IsWindows() && entry.Bytes == length && length > 0 && LeaseMap(entry) is { } map)
+        {
+            bool held;
+            try
+            {
+                VortexBuffer view = map.View(0, length, region.AlignmentExponent);
+                held = region.Holds(view.Span);
+                if (held)
+                {
+                    owner = new IO.SliceSegmentOwner(map, view);
+                }
+            }
+            finally
+            {
+                map.Release();
+            }
+
+            // A torn file is let go of, its mapping first, then deleted.
+            if (!held)
+            {
+                Drop(entry, corrupt: true);
+                return false;
+            }
+
+            Served(length);
+            return true;
+        }
+
         NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
         try
         {
@@ -384,9 +416,87 @@ public sealed class SynopsisCache : IDisposable
         }
     }
 
-    /// <summary>Takes the handle an entry keeps out of it, for the caller to dispose; null when it keeps none. Under the gate.</summary>
+    /// <summary>
+    /// The mapping of <paramref name="entry"/>'s file, a reference to it taken for the caller to release: the one the
+    /// entry keeps while the cache keeps its handle, made at its first read; one made for the read alone when the entry
+    /// left the cache meanwhile. Null when the file does not map.
+    /// </summary>
+    private IO.MappedFileOwner? LeaseMap(Entry entry)
+    {
+        lock (_gate)
+        {
+            if (entry.Map is { } held)
+            {
+                held.Retain();
+                return held;
+            }
+        }
+
+        IO.MappedFileOwner made;
+        bool kept;
+        try
+        {
+            (SafeFileHandle file, kept) = Lease(entry);
+            try
+            {
+                // A file cut short maps no region of its length: the read finds it torn.
+                if (RandomAccess.GetLength(file) != entry.Bytes)
+                {
+                    return null;
+                }
+
+                made = IO.MappedFileOwner.Map(file, entry.Bytes, ownsHandle: false);
+            }
+            finally
+            {
+                if (kept)
+                {
+                    file.DangerousRelease();
+                }
+                else
+                {
+                    file.Dispose();
+                }
+            }
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        lock (_gate)
+        {
+            if (entry.Map is { } raced)
+            {
+                made.Dispose();
+                raced.Retain();
+                return raced;
+            }
+
+            // Kept by the entry, the reference it was made with the entry's, and one more the caller's.
+            if (kept && entry.Handle is not null && entry.Node is not null)
+            {
+                entry.Map = made;
+                made.Retain();
+            }
+
+            return made;
+        }
+    }
+
+    /// <summary>Takes the handle an entry keeps out of it, for the caller to dispose, and lets its mapping go; null when it keeps none. Under the gate.</summary>
     private SafeFileHandle? Close(Entry entry)
     {
+        if (entry.Map is { } map)
+        {
+            entry.Map = null;
+            map.Dispose();
+        }
+
         if (entry.Handle is not { } handle)
         {
             return null;
@@ -519,6 +629,30 @@ public sealed class SynopsisCache : IDisposable
         }
 
         mine.TrySetResult();
+    }
+
+    /// <summary>
+    /// Closes every file the cache keeps open, and lets their mappings go once the regions read from them are: what a
+    /// writer of the files from outside the cache, a test's, waits on, a mapped file being one no one writes.
+    /// </summary>
+    internal void CloseFiles()
+    {
+        List<SafeFileHandle> closed = [];
+        lock (_gate)
+        {
+            while (_open.First is { } open)
+            {
+                if (Close(open.Value) is { } handle)
+                {
+                    closed.Add(handle);
+                }
+            }
+        }
+
+        foreach (SafeFileHandle handle in closed)
+        {
+            handle.Dispose();
+        }
     }
 
     /// <summary>Releases the directory's lock; the entries stay on the disk for the next cache that opens it.</summary>
@@ -786,5 +920,8 @@ public sealed class SynopsisCache : IDisposable
 
         /// <summary>Its place among the entries whose handle is open, the most recently opened first.</summary>
         internal LinkedListNode<Entry>? OpenNode { get; set; }
+
+        /// <summary>Its file mapped, while its handle is kept open: what a region read is a view of; null before.</summary>
+        internal IO.MappedFileOwner? Map { get; set; }
     }
 }

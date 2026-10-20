@@ -192,8 +192,10 @@ public sealed partial class SynopsisAnswerTests
             long dropped = 0;
             for (int i = 0; i < bytes.Length; i++)
             {
+                // The cache maps the files it read, which no one writes then: it lets them go first.
                 byte[] flipped = [.. bytes];
                 flipped[i] ^= 1;
+                cache.CloseFiles();
                 System.IO.File.WriteAllBytes(file, flipped);
                 Assert.False(cache.TryRead(uid, region, out _), $"byte {i} flipped");
                 Assert.False(System.IO.File.Exists(file));
@@ -203,6 +205,7 @@ public sealed partial class SynopsisAnswerTests
 
             for (int length = 0; length < bytes.Length; length += 7)
             {
+                cache.CloseFiles();
                 System.IO.File.WriteAllBytes(file, bytes[..length]);
                 Assert.False(cache.TryRead(uid, region, out _), $"cut at {length}");
                 dropped++;
