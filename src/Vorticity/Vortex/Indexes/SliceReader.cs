@@ -31,8 +31,13 @@ namespace Vorticity.Indexes;
 /// do not cover the file's rows, opens no reader here, and its rows read through a whole open. Reads
 /// may run at once: a column's chunks loaded twice are the same chunks.
 /// </para>
+/// <para>
+/// A column's chunks lie in an array rented from the shared pool, given back when the reader is let go: a reader is
+/// made for a read or two, the rows of a window's edges or of the blocks a lookup found, and each parsed its columns'
+/// directories into arrays of their own, a quarter of a megabyte a column of an hour of 180 M rows.
+/// </para>
 /// </remarks>
-internal sealed class SliceReader
+internal sealed class SliceReader : IDisposable
 {
     private readonly ISegmentReader _source;
     private readonly DType _schema;
@@ -40,6 +45,8 @@ internal sealed class SliceReader
     private readonly string[] _encodings;
     private readonly IReadOnlyList<IndexSegment> _regions;
     private readonly ChunkSpan[]?[] _columns;
+    private readonly int[] _counts;
+    private readonly System.Threading.Lock _gate = new System.Threading.Lock();
     private readonly long _rows;
 
     private SliceReader(
@@ -52,12 +59,33 @@ internal sealed class SliceReader
         _encodings = encodings;
         _regions = regions;
         _columns = new ChunkSpan[]?[regions.Count];
+        _counts = new int[regions.Count];
         _rows = rows;
         Slices = slices;
     }
 
     /// <summary>The file's time slices.</summary>
     internal SliceTable Slices { get; }
+
+    /// <summary>The chunks of column <paramref name="field"/>, loaded first.</summary>
+    private ReadOnlySpan<ChunkSpan> Chunks(int field) =>
+        System.Threading.Volatile.Read(ref _columns[field]) is { } chunks ? chunks.AsSpan(0, _counts[field]) : throw new InvalidOperationException($"Column {field}'s chunks were not loaded.");
+
+    /// <summary>Gives the columns' chunks back to the shared pool: no read of the reader after.</summary>
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            for (int field = 0; field < _columns.Length; field++)
+            {
+                if (_columns[field] is { } chunks)
+                {
+                    _columns[field] = null;
+                    System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
+                }
+            }
+        }
+    }
 
     /// <summary>
     /// A reader of the slices of the file <paramref name="source"/> holds, or null when it carries no
@@ -245,14 +273,14 @@ internal sealed class SliceReader
         int chunkCount = 0;
         foreach (int field in fields)
         {
-            chunkCount += SliceChunks.Overlapping(_columns[field]!, span.FirstRow, span.Rows).Length;
+            chunkCount += SliceChunks.Overlapping(Chunks(field), span.FirstRow, span.Rows).Length;
         }
 
         int[] slots = new int[chunkCount];
         int next = 0;
         foreach (int field in fields)
         {
-            foreach (ChunkSpan chunk in SliceChunks.Overlapping(_columns[field]!, span.FirstRow, span.Rows))
+            foreach (ChunkSpan chunk in SliceChunks.Overlapping(Chunks(field), span.FirstRow, span.Rows))
             {
                 slots[next++] = requests.Add(new SegmentSpec(chunk.Offset, chunk.Length, chunk.AlignmentExponent, 0, 0));
             }
@@ -273,7 +301,7 @@ internal sealed class SliceReader
         int next = 0;
         for (int i = 0; i < fields.Length; i++)
         {
-            decoded[i] = Column(context, schema.GetField(i), _columns[fields[i]]!, span, length, slots, ref next);
+            decoded[i] = Column(context, schema.GetField(i), Chunks(fields[i]), span, length, slots, ref next);
         }
 
         int root = context.Canonical.AddStruct(
@@ -289,7 +317,7 @@ internal sealed class SliceReader
     {
         await LoadChunksAsync([field], cancellationToken).ConfigureAwait(false);
         long bytes = 0;
-        foreach (ChunkSpan chunk in _columns[field]!)
+        foreach (ChunkSpan chunk in Chunks(field))
         {
             bytes += chunk.Length;
         }
@@ -319,7 +347,7 @@ internal sealed class SliceReader
                 throw new ArgumentOutOfRangeException(nameof(fields), field, $"The file has {_columns.Length} columns.");
             }
 
-            missing += _columns[field] is null ? 1 : 0;
+            missing += System.Threading.Volatile.Read(ref _columns[field]) is null ? 1 : 0;
         }
 
         if (missing == 0)
@@ -332,7 +360,7 @@ internal sealed class SliceReader
         for (int i = 0; i < fields.Length; i++)
         {
             IndexSegment region = _regions[fields[i]];
-            slots[i] = _columns[fields[i]] is null
+            slots[i] = System.Threading.Volatile.Read(ref _columns[fields[i]]) is null
                 ? requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
                 : -1;
         }
@@ -346,14 +374,31 @@ internal sealed class SliceReader
             }
 
             ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
-            ChunkSpan[]? chunks = _regions[fields[i]].Holds(bytes) ? SliceChunks.ColumnFrom(bytes) : null;
-            if (chunks is null || (chunks.Length == 0 ? 0 : chunks[^1].EndRow) != _rows)
+            ChunkSpan[] chunks = [];
+            int count = _regions[fields[i]].Holds(bytes) ? SliceChunks.ColumnInto(bytes, out chunks) : -1;
+            if (count < 0 || (count == 0 ? 0 : chunks[count - 1].EndRow) != _rows)
             {
+                if (count >= 0)
+                {
+                    System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
+                }
+
                 throw new VortexFormatException(
                     $"The chunk directory of column {fields[i]} does not decode, or does not cover the file's {_rows} rows.");
             }
 
-            _columns[fields[i]] = chunks;
+            // A column two reads loaded at once keeps the first's chunks; the other's go back.
+            lock (_gate)
+            {
+                if (_columns[fields[i]] is null)
+                {
+                    _counts[fields[i]] = count;
+                    System.Threading.Volatile.Write(ref _columns[fields[i]], chunks);
+                    continue;
+                }
+            }
+
+            System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
         }
     }
 
@@ -373,7 +418,7 @@ internal sealed class SliceReader
 
     /// <summary>One column's rows of the slice: its overlapping chunks decoded, cut to the slice and joined.</summary>
     private static int Column(
-        ScanContext context, DType type, ChunkSpan[] column, TimeSlice span, int length, int[] slots, ref int next)
+        ScanContext context, DType type, ReadOnlySpan<ChunkSpan> column, TimeSlice span, int length, int[] slots, ref int next)
     {
         ReadOnlySpan<ChunkSpan> chunks = SliceChunks.Overlapping(column, span.FirstRow, span.Rows);
         int[] parts = new int[chunks.Length];

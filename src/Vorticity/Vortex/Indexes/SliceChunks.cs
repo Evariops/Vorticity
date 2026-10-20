@@ -49,7 +49,11 @@ internal sealed class SliceChunks
     internal IReadOnlyList<ChunkSpan[]> Columns { get; }
 
     /// <summary>The chunks of <paramref name="chunks"/> that hold a row of <c>[first, first + rows)</c>.</summary>
-    internal static ReadOnlySpan<ChunkSpan> Overlapping(ChunkSpan[] chunks, long first, long rows)
+    internal static ReadOnlySpan<ChunkSpan> Overlapping(ChunkSpan[] chunks, long first, long rows) =>
+        Overlapping(chunks.AsSpan(), first, rows);
+
+    /// <summary>The chunks of <paramref name="chunks"/>, in row order, that hold a row of <c>[first, first + rows)</c>.</summary>
+    internal static ReadOnlySpan<ChunkSpan> Overlapping(ReadOnlySpan<ChunkSpan> chunks, long first, long rows)
     {
         long end = first + rows;
         int low = 0;
@@ -73,7 +77,7 @@ internal sealed class SliceChunks
             stop++;
         }
 
-        return chunks.AsSpan(low, stop - low);
+        return chunks.Slice(low, stop - low);
     }
 
     /// <summary>The entry's options: the encodings, each its length and its bytes, behind a version byte.</summary>
@@ -152,6 +156,62 @@ internal sealed class SliceChunks
         catch (VortexFormatException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// The chunks a column's region <paramref name="bytes"/> holds, in an array rented from the shared pool, which its
+    /// caller gives back; their count, or -1 when they do not decode, nothing rented then.
+    /// </summary>
+    internal static int ColumnInto(ReadOnlySpan<byte> bytes, out ChunkSpan[] chunks)
+    {
+        chunks = [];
+        try
+        {
+            ProtoReader reader = new ProtoReader(bytes);
+            if (reader.ReadVarint() != Version)
+            {
+                return -1;
+            }
+
+            ulong count = reader.ReadVarint();
+            if (count > (ulong)bytes.Length)
+            {
+                return -1;
+            }
+
+            ChunkSpan[] rented = System.Buffers.ArrayPool<ChunkSpan>.Shared.Rent(Math.Max((int)count, 1));
+            try
+            {
+                long row = 0;
+                for (int i = 0; i < (int)count; i++)
+                {
+                    ulong offset = reader.ReadVarint();
+                    uint length = checked((uint)reader.ReadVarint());
+                    byte alignment = checked((byte)reader.ReadVarint());
+                    long rows = checked((long)reader.ReadVarint());
+                    rented[i] = new ChunkSpan(offset, length, alignment, row, rows);
+                    row = checked(row + rows);
+                }
+
+                if (!reader.End)
+                {
+                    System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(rented);
+                    return -1;
+                }
+            }
+            catch
+            {
+                System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(rented);
+                throw;
+            }
+
+            chunks = rented;
+            return (int)count;
+        }
+        catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)
+        {
+            return -1;
         }
     }
 

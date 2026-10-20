@@ -2353,10 +2353,12 @@ public sealed class VortexDataset : IAsyncDisposable
         await using (source.ConfigureAwait(false))
         {
             ISegmentReader reader = Footerless(source, entry, contents);
-            if (Indexes.SliceReader.Open(reader, null, contents) is not { } slices)
+            if (Indexes.SliceReader.Open(reader, null, contents) is not { } opened)
             {
                 return null;
             }
+
+            using Indexes.SliceReader slices = opened;
 
             // The first round trip: the index directory, beside every column's chunk directory.
             DType schema = contents.SchemaType;
@@ -2486,10 +2488,12 @@ public sealed class VortexDataset : IAsyncDisposable
         await using (source.ConfigureAwait(false))
         {
             ISegmentReader reader = Footerless(source, entry, contents);
-            if (Indexes.SliceReader.Open(reader, null, contents) is not { } slices)
+            if (Indexes.SliceReader.Open(reader, null, contents) is not { } opened)
             {
                 return null;
             }
+
+            using Indexes.SliceReader slices = opened;
 
             // The first round trip: the path directory beside the column's chunk directory.
             ValueTask<Indexes.VariantDirectory?> directory = ReadPathDirectoryAsync(entry, field, cancellationToken);
@@ -2540,7 +2544,7 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            Indexes.SliceReader reader = Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents)
+            using Indexes.SliceReader reader = Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents)
                 ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
             return await reader.ReadSpansAsync(slices, columns, cancellationToken).ConfigureAwait(false);
         }
@@ -2562,9 +2566,13 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            return Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents) is { } reader
-                ? await reader.ReadSliceAsync(slice, columns, cancellationToken).ConfigureAwait(false)
-                : null;
+            if (Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents) is not { } opened)
+            {
+                return null;
+            }
+
+            using Indexes.SliceReader reader = opened;
+            return await reader.ReadSliceAsync(slice, columns, cancellationToken).ConfigureAwait(false);
         }
     }
 
