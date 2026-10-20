@@ -147,7 +147,11 @@ public sealed class SynopsisCache : IDisposable
     internal bool TryRead(UInt128 uid, IndexSegment region, out SegmentOwner owner)
     {
         owner = null!;
-        if (Find(NameOf(uid, region)) is not { } entry)
+        // The region's name made on the stack and looked up as it lies: a string made for each read was one an object
+        // a question read.
+        Span<char> name = stackalloc char[MaxNameLength];
+        if (!name.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}", out int written)
+            || Find(name[..written]) is not { } entry)
         {
             return false;
         }
@@ -268,11 +272,14 @@ public sealed class SynopsisCache : IDisposable
     }
 
     /// <summary>The entry kept under <paramref name="name"/>, a read of it counted; null, counted a miss, when there is none.</summary>
-    private Entry? Find(string name)
+    private Entry? Find(string name) => Find(name.AsSpan());
+
+    /// <summary>As <see cref="Find(string)"/>, the name as characters a caller made where it liked.</summary>
+    private Entry? Find(ReadOnlySpan<char> name)
     {
         lock (_gate)
         {
-            if (!_entries.TryGetValue(name, out Entry? entry))
+            if (!_entries.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Entry? entry))
             {
                 _misses++;
                 VortexTelemetry.SynopsisMiss();
@@ -535,6 +542,9 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>The file name of a region of an object: its uid, its place, its length and its checksum.</summary>
     internal static string NameOf(UInt128 uid, IndexSegment region) => string.Create(
         CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}");
+
+    /// <summary>The characters of a region's name at most (<see cref="NameOf"/>): a uid's 32, two places' 16 each, a checksum's 16 and three dashes.</summary>
+    private const int MaxNameLength = 32 + 16 + 16 + 16 + 3;
 
     /// <summary>The file name of a frame of a sealed object: its uid, the frame's place in the object and its length.</summary>
     internal static string FrameNameOf(UInt128 uid, long cipherOffset, int length) => string.Create(

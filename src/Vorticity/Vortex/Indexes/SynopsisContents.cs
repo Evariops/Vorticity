@@ -184,6 +184,38 @@ internal sealed record SynopsisContents(
         }
     }
 
+    // Per table, the struct its batches of states were last read under.
+    private StatesStruct?[]? _states;
+
+    /// <summary>
+    /// The struct the batches of states of table <paramref name="table"/> were last read under, when it was its fields
+    /// <paramref name="fields"/> keeps, the bucket named <paramref name="instant"/>: what a question asked again of the
+    /// object finds built, where it built the names and types of its columns and interned them at each answer.
+    /// </summary>
+    internal bool TryStatesStruct(int table, Layouts.FieldMask fields, string instant, out DType root)
+    {
+        if (System.Threading.Volatile.Read(ref _states) is { } kept && kept[table] is { } last && last.Fields.Is(fields)
+            && ReferenceEquals(last.Instant, instant))
+        {
+            root = last.Root;
+            return true;
+        }
+
+        root = default;
+        return false;
+    }
+
+    /// <summary>Keeps <paramref name="root"/>, of the arena of <see cref="TableRowTypes"/>, as the struct table <paramref name="table"/> was read under (<see cref="TryStatesStruct"/>).</summary>
+    internal void KeepStatesStruct(int table, Layouts.FieldMask fields, string instant, DType root)
+    {
+        StatesStruct?[] kept = System.Threading.Volatile.Read(ref _states)
+            ?? System.Threading.Interlocked.CompareExchange(ref _states, new StatesStruct?[Tables.Count], null) ?? _states!;
+        System.Threading.Volatile.Write(ref kept[table], new StatesStruct(fields, instant, root));
+    }
+
+    /// <summary>A struct a table's batches of states were read under: its fields, and the instant its bucket was named.</summary>
+    private sealed record StatesStruct(Layouts.FieldMask Fields, string Instant, DType Root);
+
     /// <summary>The contents as an entry carries them: tagged fields, in the order of their tags.</summary>
     internal byte[] ToBytes()
     {

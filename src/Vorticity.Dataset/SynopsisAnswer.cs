@@ -301,7 +301,7 @@ internal sealed record SynopsisAnswer(
             switch (window.FateOf(start, end))
             {
                 case BucketFate.Kept:
-                    whole.Fold(bucket, Math.Max(start, window.Least));
+                    whole.Fold(bucket, window.Carried(bucket, Math.Max(start, window.Least)));
                     break;
                 case BucketFate.Edge:
                     for (int e = first; e <= last; e++)
@@ -309,7 +309,7 @@ internal sealed record SynopsisAnswer(
                         BucketFate fate = coarsest.Bucket == SynopsisBucket.Slice ? BucketFate.Edge : window.FateOf(slices[e].Start, slices[e].End);
                         if (fate == BucketFate.Kept && runs is not null)
                         {
-                            runs.Fold(slices[e].Start, Math.Max(slices[e].Start, window.Least));
+                            runs.Fold(slices[e].Start, window.Carried(slices[e].Start, Math.Max(slices[e].Start, window.Least)));
                         }
                         else if (fate != BucketFate.Out)
                         {
@@ -389,6 +389,29 @@ internal sealed record SynopsisAnswer(
         /// <summary>The fate of the bucket of instants [<paramref name="start"/>, <paramref name="end"/>), cut to the instants the object holds.</summary>
         internal BucketFate FateOf(long start, long end) =>
             Math.Max(start, Least) >= Math.Min(end, Past) ? BucketFate.Out : Fate(Math.Max(start, Least), Math.Min(end, Past), Low, High, Times);
+
+        /// <summary>
+        /// The instant a kept bucket's states carry: the bucket's own value where every key of time maps it as it maps
+        /// <paramref name="first"/>, the first instant the object holds in it, as it does for an hour's object keyed
+        /// by its day; <paramref name="first"/> where one does not, and the column of instants is made again.
+        /// </summary>
+        internal long Carried(long bucket, long first)
+        {
+            if (first == bucket)
+            {
+                return bucket;
+            }
+
+            foreach (FunctionFieldExpr time in Times)
+            {
+                if (Image(time, bucket) is not { } own || Image(time, first) is not { } held || own != held)
+                {
+                    return first;
+                }
+            }
+
+            return bucket;
+        }
     }
 
     /// <summary>
@@ -734,12 +757,14 @@ internal sealed record SynopsisAnswer(
         }
 
         // The chunks the part folds, each of which must have been read: one whose region failed its checksum is not.
+        int table = -1;
         int wanted = 0;
         for (int t = 0; t < contents.Tables.Count; t++)
         {
-            (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
-            if (ReferenceEquals(table, part.Table))
+            (SynopsisTableInfo info, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
+            if (ReferenceEquals(info, part.Table))
             {
+                table = t;
                 for (int c = 0; c < chunks.Count; c++)
                 {
                     wanted += part.Folds(chunks[c]) ? 1 : 0;
@@ -747,37 +772,31 @@ internal sealed record SynopsisAnswer(
             }
         }
 
+        // Every chunk read of the table holds the same fields, those the read projected or every one.
         CanonicalArena arena = tables.Arena;
-        List<int[]> chunkFields = [];
+        int read = 0;
         DType rowType = default;
         Layouts.FieldMask projected = Layouts.FieldMask.All;
         for (int t = 0; t < tables.Tables.Count; t++)
         {
-            ReadTable read = tables.Tables[t];
-            if (!ReferenceEquals(read.Table, part.Table) || !part.Folds(read.Chunk))
+            ReadTable chunk = tables.Tables[t];
+            if (!ReferenceEquals(chunk.Table, part.Table) || !part.Folds(chunk.Chunk))
             {
                 continue;
             }
 
-            // Every chunk of the table holds the same fields, those the read projected or every one.
-            CanonicalNode rows = arena.GetNode(read.Node);
-            if (chunkFields.Count > 0 && (read.Fields.IsAll != projected.IsAll || rows.DType.FieldCount != rowType.FieldCount))
+            CanonicalNode rows = arena.GetNode(chunk.Node);
+            if (read > 0 && (!chunk.Fields.Is(projected) || rows.DType.FieldCount != rowType.FieldCount))
             {
                 return false;
             }
 
             rowType = rows.DType;
-            projected = read.Fields;
-            int[] stated = new int[rowType.FieldCount];
-            for (int f = 0; f < stated.Length; f++)
-            {
-                stated[f] = rows.GetFieldIndex(f);
-            }
-
-            chunkFields.Add(stated);
+            projected = chunk.Fields;
+            read++;
         }
 
-        if (chunkFields.Count != wanted)
+        if (read != wanted)
         {
             return false;
         }
@@ -787,18 +806,19 @@ internal sealed record SynopsisAnswer(
             return true;
         }
 
-        // A row comes out of a table by every key and state of it: the table's rows read whole.
-        if (removed is { Count: > 0 }
-            && (!projected.IsAll || slices is null
-                || !SynopsisCorrection.TryRemove(arena, part.Table, rowType, chunkFields, schema, removed, slices.Slices, slices.Unit, part, Request.Reads)))
+        // A row comes out of a table by every key and state of it: the table's rows read whole, and the columns of
+        // each chunk those the correction made in their place.
+        List<int[]>? corrected = null;
+        if (removed is { Count: > 0 })
         {
-            return false;
+            corrected = ChunkFields(tables, part);
+            if (!projected.IsAll || slices is null
+                || !SynopsisCorrection.TryRemove(arena, part.Table, rowType, corrected, schema, removed, slices.Slices, slices.Unit, part, Request.Reads))
+            {
+                return false;
+            }
         }
 
-        // The batch's struct: the table's columns renamed as the question reads them, then the partition's values. A
-        // field's name is the contents' own, read once with the table's row type, where a name read from a dtype is a
-        // string made at each read; its type is the contents' too, where the struct is built, a projection's struct
-        // lying in the arena of the context that decoded it.
         int width = rowType.FieldCount;
         (DType full, string[]? fieldNames) = RowOf(contents, part.Table);
         int bucketAt = Position(projected, 0, width);
@@ -808,17 +828,11 @@ internal sealed record SynopsisAnswer(
             return false;
         }
 
-        string[] names = new string[width + Constants.Count];
-        DType[] dtypes = new DType[names.Length];
-        for (int f = 0; f < width; f++)
-        {
-            int field = projected.IsAll ? f : projected.SelectedField(f);
-            names[f] = f == 0 ? instant : Renamed(fieldNames?[field] ?? rowType.GetFieldName(f));
-            dtypes[f] = projected.IsAll ? rowType.GetField(f) : full.GetField(field);
-        }
-
-        int[] constantColumns = new int[Constants.Count];
-        for (int c = 0; c < Constants.Count; c++)
+        // The partition's values, a column each beside the table's, of the schema's types in the contents' arena.
+        int extra = Constants.Count;
+        Span<int> constantColumns = extra <= 16 ? stackalloc int[16] : new int[extra];
+        DType[]? constantTypes = extra == 0 ? null : new DType[extra];
+        for (int c = 0; c < extra; c++)
         {
             int column = schema.IsDefault ? -1 : schema.IndexOfField(Constants[c].Name);
             if (column < 0)
@@ -826,52 +840,94 @@ internal sealed record SynopsisAnswer(
                 return false;
             }
 
-            names[width + c] = Constants[c].Name;
             constantColumns[c] = column;
+            lock (types)
+            {
+                constantTypes![c] = DTypeImport.Into(types, schema.GetField(column));
+            }
         }
 
-        DType? root = null;
-        foreach (int[] stated in chunkFields)
+        // The batch's struct: the table's columns renamed as the question reads them, then the partition's values. A
+        // field's name is the contents' own, read once with the table's row type, where a name read from a dtype is a
+        // string made at each read; its type is the contents' too, where the struct is built, a projection's struct
+        // lying in the arena of the context that decoded it. The types are the object's contents', which every
+        // question over it shares: what adds to them, once for each shape a question asks, does so alone, and the
+        // arena keeps a node it holds where it lies, so its readers take no lock. A struct of the table's columns
+        // alone the contents keep for the next answer read under the same fields.
+        bool keeps = extra == 0 && Renames is null && table >= 0;
+        DType bucketType = projected.IsAll ? rowType.GetField(0) : full.GetField(0);
+        if (!keeps || !contents.TryStatesStruct(table, projected, instant, out DType root))
         {
-            int count = arena.GetNode(stated[0]).Length;
-            int[] fields = new int[names.Length];
-            stated.AsSpan().CopyTo(fields);
+            string[] names = new string[width + extra];
+            DType[] dtypes = new DType[names.Length];
+            for (int f = 0; f < width; f++)
+            {
+                int field = projected.IsAll ? f : projected.SelectedField(f);
+                names[f] = f == 0 ? instant : Renamed(fieldNames?[field] ?? rowType.GetFieldName(f));
+                dtypes[f] = projected.IsAll ? rowType.GetField(f) : full.GetField(field);
+            }
+
+            for (int c = 0; c < extra; c++)
+            {
+                names[width + c] = Constants[c].Name;
+                dtypes[width + c] = constantTypes![c];
+            }
+
+            lock (types)
+            {
+                root = types.Struct(names, dtypes, Nullability.NonNullable);
+            }
+
+            if (keeps)
+            {
+                contents.KeepStatesStruct(table, projected, instant, root);
+            }
+        }
+
+        Span<int> fields = width + extra <= 64 ? stackalloc int[64] : new int[width + extra];
+        fields = fields[..(width + extra)];
+        int made = 0;
+        for (int t = 0; t < tables.Tables.Count; t++)
+        {
+            ReadTable chunk = tables.Tables[t];
+            if (!ReferenceEquals(chunk.Table, part.Table) || !part.Folds(chunk.Chunk))
+            {
+                continue;
+            }
+
+            if (corrected is not null)
+            {
+                corrected[made++].AsSpan().CopyTo(fields);
+            }
+            else
+            {
+                CanonicalNode rows = arena.GetNode(chunk.Node);
+                for (int f = 0; f < width; f++)
+                {
+                    fields[f] = rows.GetFieldIndex(f);
+                }
+            }
+
+            int count = arena.GetNode(fields[0]).Length;
 
             // The partition's one value, a column of the table's rows.
-            for (int c = 0; c < Constants.Count; c++)
+            for (int c = 0; c < extra; c++)
             {
-                DType constantType;
-                lock (types)
-                {
-                    constantType = DTypeImport.Into(types, schema.GetField(constantColumns[c]));
-                }
-
-                if (ConstantColumn(arena, constantType, count, Constants[c].Value) is not { } constant)
+                if (ConstantColumn(arena, constantTypes![c], count, Constants[c].Value) is not { } constant)
                 {
                     return false;
                 }
 
-                dtypes[width + c] = arena.GetNode(constant).DType;
                 fields[width + c] = constant;
             }
 
             int bucketed = fields[0];
             if (part.Instants is { Count: > 0 } instants)
             {
-                fields[0] = InstantsOf(arena, bucketed, dtypes[0], count, instants);
+                fields[0] = InstantsOf(arena, bucketed, bucketType, count, instants);
             }
 
-            // The types are the object's contents', which every question over it shares: what adds to them, once
-            // for each shape a question asks, does so alone; the arena keeps a node it holds where it lies, so
-            // its readers take no lock.
-            if (root is null)
-            {
-                lock (types)
-                {
-                    root = types.Struct(names, dtypes, Nullability.NonNullable);
-                }
-            }
-            int node = arena.AddStruct(root.Value, count, Validity.NonNullable, fields);
+            int node = arena.AddStruct(root, count, Validity.NonNullable, fields);
 
             // The rows of the buckets kept, then those the filter on the keys holds for, but a row whose
             // every row was taken out, whose group the rows would not make.
@@ -914,6 +970,29 @@ internal sealed record SynopsisAnswer(
         }
 
         return true;
+    }
+
+    /// <summary>The fields of every chunk read of <paramref name="part"/>'s table that holds a bucket it folds, as their nodes, which a correction reads.</summary>
+    private static List<int[]> ChunkFields(SynopsisTableSet tables, SynopsisPart part)
+    {
+        List<int[]> chunkFields = [];
+        for (int t = 0; t < tables.Tables.Count; t++)
+        {
+            ReadTable chunk = tables.Tables[t];
+            if (ReferenceEquals(chunk.Table, part.Table) && part.Folds(chunk.Chunk))
+            {
+                CanonicalNode rows = tables.Arena.GetNode(chunk.Node);
+                int[] stated = new int[rows.DType.FieldCount];
+                for (int f = 0; f < stated.Length; f++)
+                {
+                    stated[f] = rows.GetFieldIndex(f);
+                }
+
+                chunkFields.Add(stated);
+            }
+        }
+
+        return chunkFields;
     }
 
     /// <summary>

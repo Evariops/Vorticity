@@ -600,26 +600,38 @@ internal sealed class DatasetScanBuilder
     /// </remarks>
     private async IAsyncEnumerable<RecordBatch> StatesAsync(StateRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        List<PositionedObject> objects = [];
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
-        {
-            if (Covered(held) > 0)
-            {
-                objects.Add(held);
-            }
-        }
-
-        NewestFirst(objects);
+        // The objects walked, in an array of the process's pool grown as the walk goes and given back at the end: a list
+        // of them grew for each question, five arrays for 48 objects.
+        PositionedObject[] objects = System.Buffers.ArrayPool<PositionedObject>.Shared.Rent(16);
+        int count = 0;
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         int width = _dataset.Session.Options.MaxConcurrentReads;
         bool prefetch = _options.Prefetch > 0;
-        Queue<Turn> ahead = new Queue<Turn>(Math.Min(width, objects.Count));
+        Queue<Turn>? ahead = null;
         int next = 0;
         try
         {
+            await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (Covered(held) > 0)
+                {
+                    if (count == objects.Length)
+                    {
+                        PositionedObject[] grown = System.Buffers.ArrayPool<PositionedObject>.Shared.Rent(2 * count);
+                        objects.AsSpan(0, count).CopyTo(grown);
+                        System.Buffers.ArrayPool<PositionedObject>.Shared.Return(objects, clearArray: true);
+                        objects = grown;
+                    }
+
+                    objects[count++] = held;
+                }
+            }
+
+            NewestFirst(objects.AsSpan(0, count));
+            ahead = new Queue<Turn>(Math.Min(width, count));
             while (true)
             {
-                while (ahead.Count < width && next < objects.Count)
+                while (ahead.Count < width && next < count)
                 {
                     PositionedObject held = objects[next++];
                     ahead.Enqueue(new Turn(held, Answer(held, request) is ({ } answer, { } contents, string instant)
@@ -673,10 +685,12 @@ internal sealed class DatasetScanBuilder
         {
             // The answers and the rows read ahead of a consumer that stopped, or of a failure, are nobody's.
             await stopped.CancelAsync().ConfigureAwait(false);
-            foreach (Turn left in ahead)
+            foreach (Turn left in ahead ?? [])
             {
                 await left.ReleaseAsync().ConfigureAwait(false);
             }
+
+            System.Buffers.ArrayPool<PositionedObject>.Shared.Return(objects, clearArray: true);
         }
     }
 
@@ -756,14 +770,14 @@ internal sealed class DatasetScanBuilder
     /// Orders <paramref name="objects"/> by the newest instant each holds, newest first, those whose
     /// summary does not say last, each kind in the walk's order.
     /// </summary>
-    private void NewestFirst(List<PositionedObject> objects)
+    private void NewestFirst(Span<PositionedObject> objects)
     {
         if (_dataset.Key is not { } key)
         {
             return;
         }
 
-        (long Newest, int At)[] order = new (long, int)[objects.Count];
+        Span<(long Newest, int At)> order = objects.Length <= 512 ? stackalloc (long, int)[objects.Length] : new (long, int)[objects.Length];
         for (int i = 0; i < order.Length; i++)
         {
             long newest = objects[i].Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
@@ -773,11 +787,31 @@ internal sealed class DatasetScanBuilder
             order[i] = (newest, i);
         }
 
-        Array.Sort(order, static (a, b) => a.Newest != b.Newest ? b.Newest.CompareTo(a.Newest) : a.At.CompareTo(b.At));
-        PositionedObject[] walked = [.. objects];
+        order.Sort(static (a, b) => a.Newest != b.Newest ? b.Newest.CompareTo(a.Newest) : a.At.CompareTo(b.At));
+
+        // Each place takes the object the order puts there, a cycle of places at a time, in place: a place done is
+        // marked by its source made -1.
         for (int i = 0; i < order.Length; i++)
         {
-            objects[i] = walked[order[i].At];
+            if (order[i].At < 0)
+            {
+                continue;
+            }
+
+            PositionedObject first = objects[i];
+            for (int place = i; ;)
+            {
+                int from = order[place].At;
+                order[place].At = -1;
+                if (from == i)
+                {
+                    objects[place] = first;
+                    break;
+                }
+
+                objects[place] = objects[from];
+                place = from;
+            }
         }
     }
 

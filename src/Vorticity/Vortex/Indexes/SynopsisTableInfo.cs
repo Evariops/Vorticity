@@ -384,7 +384,8 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     internal static async ValueTask<SynopsisTableSet> ReadAsync(VortexFile file, CancellationToken cancellationToken)
     {
         IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
-        List<(SynopsisTableInfo Table, TableChunk Chunk, byte[] DType)> found = [];
+        DTypeArena types = new DTypeArena();
+        List<Wanted> found = [];
         foreach (IndexEntry entry in directory?.Entries ?? [])
         {
             // The tables lie in the file itself: an append drops them. A table's chunks are its run's payloads, the
@@ -403,7 +404,18 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                         break;
                     }
 
-                    found.Add((table, new TableChunk(payload[c], first, last, rows), dtypes[c]));
+                    // A chunk whose struct does not decode is left out, as one whose rows do not.
+                    DType row;
+                    try
+                    {
+                        row = DTypeFlatBuffers.Read(dtypes[c], types);
+                    }
+                    catch (VortexFormatException)
+                    {
+                        continue;
+                    }
+
+                    found.Add(new Wanted(table, new TableChunk(payload[c], first, last, rows), row));
                 }
             }
         }
@@ -413,10 +425,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             return new SynopsisTableSet(new ScanContext([]), []);
         }
 
-        DTypeArena types = new DTypeArena();
-        return await DecodeAsync(
-            file.Segments, file.CreateIndexContext(0), [.. found.Select(f => (f.Table, f.Chunk))], (_, i) => DTypeFlatBuffers.Read(found[i].DType, types), cancellationToken)
-            .ConfigureAwait(false);
+        return await DecodeAsync(file.Segments, file.CreateIndexContext(0), [.. found], cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -430,27 +439,37 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         IO.ISegmentReader source, SynopsisContents contents, ISynopsisReads? reads, VortexReadOptions? options,
         CancellationToken cancellationToken)
     {
-        List<(SynopsisTableInfo, TableChunk)> found = [];
-        List<int> of = [];
-        // By index, as every list of the contents: an interface's enumerator is an allocation a list.
+        // The chunks read, counted then named, in an array of their number: a few an object, where lists of them grew
+        // for each. By index, as every list of the contents: an interface's enumerator is an allocation a list.
+        int count = 0;
         for (int t = 0; t < contents.Tables.Count; t++)
+        {
+            (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
+            for (int c = 0; c < chunks.Count; c++)
+            {
+                count += reads?.Reads(table, chunks[c]) ?? true ? 1 : 0;
+            }
+        }
+
+        // The tables' row types, built once for the contents and shared by every read of them.
+        (DTypeArena types, DType[] rows, _) = contents.TableRowTypes;
+        Wanted[] wanted = count == 0 ? [] : new Wanted[count];
+        int at = 0;
+        for (int t = 0; t < contents.Tables.Count && at < count; t++)
         {
             (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
             for (int c = 0; c < chunks.Count; c++)
             {
                 if (reads?.Reads(table, chunks[c]) ?? true)
                 {
-                    found.Add((table, chunks[c]));
-                    of.Add(t);
+                    wanted[at++] = new Wanted(table, chunks[c], rows[t]);
                 }
             }
         }
 
-        // The tables' row types, built once for the contents and shared by every read of them.
-        (DTypeArena types, DType[] rows, _) = contents.TableRowTypes;
         (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
         ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
-        SynopsisTableSet set = await DecodeAsync(source, context, found, (_, i) => rows[of[i]], cancellationToken, Contexts, reads).ConfigureAwait(false);
+        SynopsisTableSet set = await DecodeAsync(source, context, wanted, cancellationToken, Contexts, reads).ConfigureAwait(false);
         set.Types = types;
         return set;
     }
@@ -464,36 +483,37 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     private static ScanContexts Contexts { get; } = new ScanContexts(Math.Max(16, 3 * Environment.ProcessorCount)) { KeepsTypes = true }.Swept();
 
     /// <summary>
-    /// Reads the chunks of <paramref name="found"/> in one request set and decodes each into
-    /// <paramref name="context"/>'s arena at the dtype <paramref name="dtypeOf"/> gives its table, only the fields
-    /// <paramref name="reads"/> names of it; a chunk whose region does not hold its checksum, or does not decode,
-    /// is left out.
+    /// Reads the chunks of <paramref name="wanted"/> in one request set, the context's own, and decodes each into
+    /// <paramref name="context"/>'s arena at its table's row type, only the fields <paramref name="reads"/> names of
+    /// it; a chunk whose region does not hold its checksum, or does not decode, is left out.
     /// </summary>
     private static async ValueTask<SynopsisTableSet> DecodeAsync(
-        IO.ISegmentReader source, ScanContext context, List<(SynopsisTableInfo Table, TableChunk Chunk)> found,
-        Func<SynopsisTableInfo, int, DType> dtypeOf, CancellationToken cancellationToken, ScanContexts? pool = null, ISynopsisReads? reads = null)
+        IO.ISegmentReader source, ScanContext context, Wanted[] wanted, CancellationToken cancellationToken, ScanContexts? pool = null,
+        ISynopsisReads? reads = null)
     {
+        // The context's set, which a context given back holds empty: the rows are copied out of the bytes read, which
+        // go back once every chunk is decoded.
+        IO.SegmentRequestSet requests = context.Segments;
         try
         {
-            using IO.SegmentRequestSet requests = new IO.SegmentRequestSet(Math.Max(found.Count, 1));
-            int[] slots = new int[found.Count];
-            for (int i = 0; i < found.Count; i++)
+            if (wanted.Length == 0)
             {
-                IndexSegment region = found[i].Chunk.Region;
-                slots[i] = requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+                return new SynopsisTableSet(context, [], pool);
             }
 
-            List<ReadTable> tables = [];
-            if (found.Count == 0)
+            for (int i = 0; i < wanted.Length; i++)
             {
-                return new SynopsisTableSet(context, tables, pool);
+                IndexSegment region = wanted[i].Chunk.Region;
+                wanted[i].Slot = requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
             }
 
             await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            for (int i = 0; i < found.Count; i++)
+            ReadTable[] tables = new ReadTable[wanted.Length];
+            int read = 0;
+            for (int i = 0; i < wanted.Length; i++)
             {
-                (SynopsisTableInfo table, TableChunk chunk) = found[i];
-                Buffers.VortexBuffer bytes = requests.GetBuffer(slots[i]);
+                (SynopsisTableInfo table, TableChunk chunk, DType row, int slot) = wanted[i];
+                Buffers.VortexBuffer bytes = requests.GetBuffer(slot);
                 if (!chunk.Region.Holds(bytes.Span))
                 {
                     continue;
@@ -513,9 +533,9 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                         context.FieldsHonoured = false;
                     }
 
-                    int node = context.Decode.DecodeRoot(in root, dtypeOf(table, i), chunk.Rows);
+                    int node = context.Decode.DecodeRoot(in root, row, chunk.Rows);
                     bool narrowed = !fields.IsAll && context.FieldsHonoured;
-                    tables.Add(new ReadTable(table, chunk, context.Canonical.CopyFrom(context.Canonical, node)) { Fields = narrowed ? fields : Layouts.FieldMask.All });
+                    tables[read++] = new ReadTable(table, chunk, context.Canonical.CopyFrom(context.Canonical, node)) { Fields = narrowed ? fields : Layouts.FieldMask.All };
                 }
                 catch (VortexFormatException)
                 {
@@ -530,13 +550,26 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 }
             }
 
-            return new SynopsisTableSet(context, tables, pool);
+            return new SynopsisTableSet(context, read == tables.Length ? tables : tables[..read], pool);
         }
         catch
         {
             context.Dispose();
             throw;
         }
+        finally
+        {
+            requests.Release();
+        }
+    }
+
+    /// <summary>A chunk of a table a read fetches: the table, the chunk, the row type it decodes at, and the slot of its region in the read.</summary>
+    private record struct Wanted(SynopsisTableInfo Table, TableChunk Chunk, DType Row)
+    {
+        internal int Slot { get; set; }
+
+        internal readonly void Deconstruct(out SynopsisTableInfo table, out TableChunk chunk, out DType row, out int slot) =>
+            (table, chunk, row, slot) = (Table, Chunk, Row, Slot);
     }
 }
 

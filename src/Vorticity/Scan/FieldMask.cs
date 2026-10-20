@@ -57,6 +57,12 @@ internal readonly struct FieldMask
     /// <summary><see langword="true"/> when every field is wanted, recursively.</summary>
     public bool IsAll => _kind == KindAll;
 
+    /// <summary>
+    /// Whether <paramref name="other"/> is this mask: the same kind, field and node. Two masks of the same fields built
+    /// apart are not, but those <see cref="FieldMasks.Of"/> keeps are.
+    /// </summary>
+    internal bool Is(in FieldMask other) => _kind == other._kind && _field == other._field && ReferenceEquals(_node, other._node);
+
     /// <summary><see langword="true"/> when no field is wanted.</summary>
     public bool IsEmpty => _kind == KindEmpty || (_kind == KindSubset && _node!.Count == 0);
 
