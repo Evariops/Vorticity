@@ -99,6 +99,9 @@ internal static class PathsBench
         /// </summary>
         internal bool NoDigest { get; init; }
 
+        /// <summary>The reads each session keeps in flight at most (<see cref="VortexSessionOptions.MaxConcurrentReads"/>); zero for the session's default.</summary>
+        internal int MaxReads { get; init; }
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }
@@ -297,6 +300,7 @@ internal static class PathsBench
                 await using VortexSession session = VortexSession.Create(o =>
                 {
                     o.MaxDegreeOfParallelism = degree;
+                    o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
                     o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
                 });
                 await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
@@ -333,7 +337,11 @@ internal static class PathsBench
         LatencyObjectStore remote = new LatencyObjectStore(files);
         await using CountingObjectStore store = new CountingObjectStore(remote);
         {
-            await using VortexSession session = VortexSession.Create(o => o.MaxDegreeOfParallelism = degree);
+            await using VortexSession session = VortexSession.Create(o =>
+            {
+                o.MaxDegreeOfParallelism = degree;
+                o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
+            });
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
             await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
         }
@@ -347,6 +355,7 @@ internal static class PathsBench
             await using VortexSession session = VortexSession.Create(o =>
             {
                 o.MaxDegreeOfParallelism = degree;
+                o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
                 o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
             });
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
