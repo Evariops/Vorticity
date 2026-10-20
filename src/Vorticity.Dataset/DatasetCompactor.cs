@@ -1015,7 +1015,7 @@ internal static class DatasetCompactor
 
                     // The synopsis's tables, counted from each slice as it is sorted, their chunks held by the writer.
                     _synopsis = new SynopsisTables(
-                        _schema.DType, _table.Unit, SynopsisTables.Measures(_schema.DType, instant, _table.Order), _draft.Writer, _table.Paths, _table.Slices);
+                        _schema.DType, _table.Unit, SynopsisTables.Measures(_schema.DType, instant), _draft.Writer, _table.Paths, _table.Slices);
                     _slice = 0;
                 }
             }

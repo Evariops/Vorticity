@@ -68,7 +68,7 @@ internal static class SynopsisTablesMicro
                 TimeUnit.Microseconds,
                 slices,
                 [file.DType.IndexOfField(nameof(SynopsisSpan.Region)), file.DType.IndexOfField(nameof(SynopsisSpan.Status)), file.DType.IndexOfField(nameof(SynopsisSpan.Service))]);
-            int[] measures = SynopsisTables.Measures(file.DType, instant, table.Order);
+            int[] measures = SynopsisTables.Measures(file.DType, instant);
             double bestTotal = double.MaxValue;
             double bestCount = double.MaxValue;
             double bestBuild = double.MaxValue;

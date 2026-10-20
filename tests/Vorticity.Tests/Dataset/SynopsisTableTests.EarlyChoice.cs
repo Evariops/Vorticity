@@ -138,7 +138,7 @@ public sealed partial class SynopsisTableTests
         {
             using SortedSlices slices = new SortedSlices(table, instant, schema);
             using SynopsisTables tables = new SynopsisTables(
-                schema, table.Unit, SynopsisTables.Measures(schema, instant, table.Order), writer, slices: table.Slices, chunking: chunking);
+                schema, table.Unit, SynopsisTables.Measures(schema, instant), writer, slices: table.Slices, chunking: chunking);
             int next = 0;
             await foreach (RecordBatch batch in file.Scan<Spread>().ToBatchesAsync(Ct))
             {
@@ -172,8 +172,10 @@ public sealed partial class SynopsisTableTests
         SliceTable slices = (await SliceTable.ReadAsync(file, Ct))!;
         DType dtype = file.DType;
         int[] keys = [.. slices.Order];
-        int[] measures = [dtype.IndexOfField(nameof(Spread.Duration))];
-        Kind[] kinds = Kinds(dtype, measures);
+
+        // Every number may be a measure of the tables it is no key of: the request, which seldom repeats in a slice, of
+        // those before it.
+        int[] numbers = [dtype.IndexOfField(nameof(Spread.Status)), dtype.IndexOfField(nameof(Spread.Request)), dtype.IndexOfField(nameof(Spread.Duration))];
         List<object?[]> fields = [];
         await foreach (Spread row in file.Scan<Spread>().ToRecordsAsync(Ct))
         {
@@ -209,7 +211,14 @@ public sealed partial class SynopsisTableTests
         Assert.NotEmpty(tables);
         foreach ((SynopsisTableInfo info, List<TableRow> rows, int _) in tables)
         {
-            Assert.Equal(measures, info.Measures);
+            int[] measures = info.Measures;
+            Assert.All(measures, m => Assert.True(numbers.Contains(m) && !info.Keys.Contains(m)));
+            Assert.All(numbers.Where(m => !keys.Contains(m)), m => Assert.Contains(m, measures));
+
+            // The request seldom repeats in a slice: a measure of every table it is no key of; the status, which repeats, never.
+            Assert.Equal(!info.Keys.Contains(dtype.IndexOfField(nameof(Spread.Request))), measures.Contains(dtype.IndexOfField(nameof(Spread.Request))));
+            Assert.DoesNotContain(dtype.IndexOfField(nameof(Spread.Status)), measures);
+            Kind[] kinds = Kinds(dtype, measures);
             Assert.Equal(info.Rows, rows.Count);
             List<TableRow> units = [];
             for (int row = 0; row < fields.Count; row++)

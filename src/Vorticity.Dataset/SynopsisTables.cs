@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -212,16 +213,17 @@ internal sealed class SynopsisTables : IDisposable
     }
 
     /// <summary>
-    /// The measure columns of <paramref name="schema"/>: its top-level numbers, but the instant and the
-    /// synopsis columns <paramref name="order"/> names.
+    /// The measure columns of <paramref name="schema"/>: its top-level numbers but the instant. A synopsis column among
+    /// them is a measure of every table it is no key of: a duration the order places last, its values repeating a few
+    /// times over a large object, keeps its sums and extremes in the tables of the columns before it.
     /// </summary>
-    internal static int[] Measures(DType schema, int instant, IReadOnlyList<int> order)
+    internal static int[] Measures(DType schema, int instant)
     {
         List<int> measures = [];
         for (int field = 0; field < schema.FieldCount; field++)
         {
             DType dtype = Storage(schema.GetField(field));
-            if (field != instant && !Contains(order, field) && dtype.Kind == DTypeKind.Primitive && PTypeExtensions.IsDefined(dtype.PType) && dtype.PType != PType.F16)
+            if (field != instant && dtype.Kind == DTypeKind.Primitive && PTypeExtensions.IsDefined(dtype.PType) && dtype.PType != PType.F16)
             {
                 measures.Add(field);
             }
@@ -267,7 +269,7 @@ internal sealed class SynopsisTables : IDisposable
 
         if (!_settled)
         {
-            Settle(order, keys, counted);
+            Settle(keys, keyCodes, rows, counted);
         }
 
         int depth = _keys.Length;
@@ -626,7 +628,7 @@ internal sealed class SynopsisTables : IDisposable
             await FlushAsync(table, cancellationToken).ConfigureAwait(false);
             if (table.Held >= 0)
             {
-                tables.Add((new SynopsisTableInfo(table.Kind, table.Bucket, table.Keys, _measures, checked((int)table.Rows)), table.Held));
+                tables.Add((new SynopsisTableInfo(table.Kind, table.Bucket, table.Keys, table.Measures, checked((int)table.Rows)), table.Held));
             }
         }
 
@@ -634,22 +636,42 @@ internal sealed class SynopsisTables : IDisposable
     }
 
     /// <summary>
-    /// Settles what the first slice says of every other: the keys, the measures with the numeric paths the order does
-    /// not place, the counted paths, and the tables the object may keep, in the order the choice weighs them.
+    /// Settles what the first slice says of every other: the keys, the measures with the numeric paths read, the counted
+    /// paths, and the tables the object may keep, in the order the choice weighs them.
     /// </summary>
-    private void Settle(IReadOnlyList<int> order, List<int> keys, IReadOnlyList<int>? counted)
+    private void Settle(List<int> keys, List<int[]> keyCodes, int rows, IReadOnlyList<int>? counted)
     {
         _settled = true;
 
-        // The numeric paths the order does not place, and whose values are not counted, are measures,
-        // summed as the numbers of the schema are.
+        // A number the order places is a key, and a measure too of the tables it is no key of when its values repeat less
+        // than twice in the slice, as a duration's do, which the object's rows admitted into the order but which forms no
+        // runs, where a status code repeats and is a key alone.
+        bool Measured(int entry)
+        {
+            int k = keys.IndexOf(entry);
+            if (k < 0)
+            {
+                return true;
+            }
+
+            int distinct = 0;
+            foreach (int code in keyCodes[k])
+            {
+                distinct = Math.Max(distinct, code + 1);
+            }
+
+            return distinct * 2L > rows;
+        }
+
+        // The numeric paths whose values are not counted are measures, summed as the numbers of the schema are.
         _counted = [.. counted ?? []];
-        List<int> measures = [.. _measures];
+        List<int> measures = [.. _measures.Where(Measured)];
         for (int p = 0; p < _paths.Count; p++)
         {
             if (_paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double
-                && !Contains(order, SynopsisPath.Entry(p)) && !Contains(_counted, SynopsisPath.Entry(p))
-                && p < _pathColumns.Count && _pathColumns[p] >= 0)
+                && !Contains(_counted, SynopsisPath.Entry(p))
+                && p < _pathColumns.Count && _pathColumns[p] >= 0
+                && Measured(SynopsisPath.Entry(p)))
             {
                 measures.Add(SynopsisPath.Entry(p));
             }
@@ -724,11 +746,33 @@ internal sealed class SynopsisTables : IDisposable
         }
     }
 
-    /// <summary>A table the object may keep, added to those the choice weighs.</summary>
+    /// <summary>
+    /// A table the object may keep, added to those the choice weighs: its measures every measure but its keys, whose
+    /// states would only repeat them, and the words of a record that hold the count and those measures' states.
+    /// </summary>
     private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes)
     {
-        DType rowType = new SynopsisTableInfo(kind, bucket, keys, _measures, 0).RowType(_schema, _paths, _types);
-        Candidate table = new Candidate(kind, bucket, keys, shapes, rowType, new ChunkStage(shapes, _words));
+        List<int> measures = [];
+        List<int> words = [0];
+        int at = 1;
+        for (int m = 0; m < _measures.Length; m++)
+        {
+            int width = _kinds[m] == MeasureKind.Float ? 8 : 5;
+            if (!Contains(keys, _measures[m]))
+            {
+                measures.Add(_measures[m]);
+                for (int w = 0; w < width; w++)
+                {
+                    words.Add(at + w);
+                }
+            }
+
+            at += width;
+        }
+
+        int[] kept = [.. measures];
+        DType rowType = new SynopsisTableInfo(kind, bucket, keys, kept, 0).RowType(_schema, _paths, _types);
+        Candidate table = new Candidate(kind, bucket, keys, kept, shapes, rowType, new ChunkStage(shapes, [.. words]));
         _candidates.Add(table);
         return table;
     }
@@ -1371,13 +1415,17 @@ internal sealed class SynopsisTables : IDisposable
     /// A table the object may keep: what it holds, its keys and their shapes, its rows' struct, the stage of its chunk
     /// being filled, and what the writer holds of it so far.
     /// </summary>
-    private sealed class Candidate(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes, DType rowType, ChunkStage stage)
+    private sealed class Candidate(
+        SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, int[] measures, KeyShape[] shapes, DType rowType, ChunkStage stage)
     {
         internal SynopsisTableKind Kind { get; } = kind;
 
         internal SynopsisBucket Bucket { get; } = bucket;
 
         internal int[] Keys { get; } = keys;
+
+        /// <summary>The measures it keeps states of: every measure but its keys.</summary>
+        internal int[] Measures { get; } = measures;
 
         internal KeyShape[] Shapes { get; } = shapes;
 

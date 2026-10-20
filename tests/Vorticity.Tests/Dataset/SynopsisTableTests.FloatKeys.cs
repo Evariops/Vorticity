@@ -67,7 +67,7 @@ public sealed partial class SynopsisTableTests
             {
                 using SortedSlices slices = new SortedSlices(table, instant, schema);
                 using SynopsisTables tables = new SynopsisTables(
-                    schema, table.Unit, SynopsisTables.Measures(schema, instant, table.Order), writer, slices: table.Slices);
+                    schema, table.Unit, SynopsisTables.Measures(schema, instant), writer, slices: table.Slices);
                 int next = 0;
                 await foreach (RecordBatch batch in file.Scan<Leveled>().ToBatchesAsync(Ct))
                 {

@@ -164,7 +164,7 @@ internal static class SliceBytesMicro
         {
             using SortedSlices slices = new SortedSlices(table, instant, schema);
             using SynopsisTables tables = new SynopsisTables(
-                schema, table.Unit, SynopsisTables.Measures(schema, instant, table.Order), writer, slices: table.Slices);
+                schema, table.Unit, SynopsisTables.Measures(schema, instant), writer, slices: table.Slices);
             int next = 0;
             foreach (RecordBatch batch in batches)
             {

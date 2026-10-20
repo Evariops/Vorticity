@@ -194,7 +194,13 @@ public sealed partial class SynopsisTableTests
     {
         DType dtype = file.DType;
         int[] keys = [.. slices.Order];
-        int[] measures = [dtype.IndexOfField(nameof(Call.Duration)), dtype.IndexOfField(nameof(Call.Bytes)), dtype.IndexOfField(nameof(Call.Retries))];
+
+        // Every number but the instant may be a measure of the tables it is no key of.
+        int[] numbers =
+        [
+            dtype.IndexOfField(nameof(Call.Status)), dtype.IndexOfField(nameof(Call.Duration)), dtype.IndexOfField(nameof(Call.Bytes)),
+            dtype.IndexOfField(nameof(Call.Retries)),
+        ];
         Assert.Equal([dtype.IndexOfField(nameof(Call.Region)), dtype.IndexOfField(nameof(Call.Status))], keys.Order());
 
         // Each stored row's fields, and the start of its slice.
@@ -218,10 +224,14 @@ public sealed partial class SynopsisTableTests
 
         Assert.Equal(fields.Count, starts.Count);
         List<(SynopsisTableInfo Info, List<TableRow> Rows)> tables = await TablesAsync(file);
-        Kind[] kinds = Kinds(dtype, measures);
         foreach ((SynopsisTableInfo info, List<TableRow> rows) in tables)
         {
-            Assert.Equal(measures, info.Measures);
+            // A table measures every number the order does not place, and a number it places when its values seldom
+            // repeat, never one of its own keys.
+            int[] measures = info.Measures;
+            Assert.All(measures, m => Assert.True(numbers.Contains(m) && !info.Keys.Contains(m), $"measure {m} of a table keyed by [{string.Join(", ", info.Keys)}]"));
+            Assert.All(numbers.Where(m => !keys.Contains(m)), m => Assert.Contains(m, measures));
+            Kind[] kinds = Kinds(dtype, measures);
             Assert.Equal(info.Kind == SynopsisTableKind.Values ? [keys[Array.IndexOf(keys, info.Keys[0])]] : keys[..info.Keys.Length], info.Keys);
             Assert.Equal(info.Rows, rows.Count);
             List<TableRow> units = [];
@@ -296,7 +306,6 @@ public sealed partial class SynopsisTableTests
             return 0;
         }
 
-        Kind[] kinds = Kinds(file.DType, tables[0].Info.Measures, slices.Paths);
         long BucketOf(long start, SynopsisBucket bucket) => bucket switch
         {
             SynopsisBucket.Slice => start,
@@ -306,6 +315,7 @@ public sealed partial class SynopsisTableTests
 
         foreach ((SynopsisTableInfo table, List<TableRow> rows) in tables)
         {
+            Kind[] kinds = Kinds(file.DType, table.Measures, slices.Paths);
             Dictionary<long, long> expected = [];
             foreach (TimeSlice slice in slices.Slices.Where(s => s.Rows > 0))
             {
@@ -340,11 +350,58 @@ public sealed partial class SynopsisTableTests
 
                 Assert.False(finer.Bucket == table.Bucket && finer.Keys.Length == table.Keys.Length, "two tables hold the same rows");
                 int[] positions = [.. table.Keys.Select(k => Array.IndexOf(finer.Keys, k))];
-                Assert.Equal(Show(Merge(finerRows, row => BucketOf(row.Bucket, table.Bucket), positions, kinds), kinds), Show(rows, kinds));
+                List<TableRow> widened = [.. finerRows.Select(row => Widened(row, finer, table, kinds))];
+                Assert.Equal(Show(Merge(widened, row => BucketOf(row.Bucket, table.Bucket), positions, kinds), kinds), Show(rows, kinds));
             }
         }
 
         return tables.Count;
+    }
+
+    /// <summary>
+    /// A row of the finer table <paramref name="finer"/> with the states of <paramref name="table"/>'s measures, which
+    /// hold those of the finer one and the numbers among its keys: a key's value counted as many times as its row's rows.
+    /// </summary>
+    private static TableRow Widened(TableRow row, SynopsisTableInfo finer, SynopsisTableInfo table, Kind[] kinds)
+    {
+        State[] states = new State[table.Measures.Length];
+        for (int m = 0; m < states.Length; m++)
+        {
+            int at = Array.IndexOf(finer.Measures, table.Measures[m]);
+            if (at >= 0)
+            {
+                states[m] = row.States[at];
+                continue;
+            }
+
+            // A key reads back as a number of the switch's common type, whatever its own: its measure's kind says which.
+            object? key = row.Keys[Array.IndexOf(finer.Keys, table.Measures[m])];
+            states[m] = (key, kinds[m]) switch
+            {
+                (null, _) => new State(0, 0, default, 0, 0),
+                (_, Kind.Float) => FloatTimes(Convert.ToDouble(key, CultureInfo.InvariantCulture), row.Count),
+                (_, Kind.Unsigned) => Unsigned(Convert.ToUInt64(key, CultureInfo.InvariantCulture), row.Count),
+                _ => Signed(Convert.ToInt64(key, CultureInfo.InvariantCulture), row.Count),
+            };
+        }
+
+        return row with { States = states };
+
+        static State Signed(long number, long count) => new State(count, (Int128)number * count, default, number, number);
+
+        static State Unsigned(ulong number, long count) => new State(count, (Int128)(UInt128)number * count, default, (long)number, (long)number);
+
+        static State FloatTimes(double number, long count)
+        {
+            WideIndexedSum sum = default;
+            for (long i = 0; i < count; i++)
+            {
+                sum.Add(number);
+            }
+
+            long bits = BitConverter.DoubleToInt64Bits(number);
+            return new State(count, 0, sum, bits, bits);
+        }
     }
 
     /// <summary>Every synopsis table of <paramref name="file"/>, its rows read.</summary>

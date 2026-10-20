@@ -164,7 +164,7 @@ finest grain of time, as the order of the rows themselves, and leaves the rest t
 | time slice | the rows of an object whose instant falls in a range of time: a contiguous range of rows | the slices of a sorted run, in key cursors |
 | sorted slice | a time slice whose rows are sorted by its synopsis columns, then by their instant | a sorted object, in key order |
 | synopsis column | a column, or a shredded path of a variant column, whose values repeat, by which slices are sorted | a measure column |
-| measure column | a numeric column, or a numeric path of a variant column, whose values rarely repeat, whose states the synopsis keeps | a dimension, in other tools |
+| measure column | a numeric column, or a numeric path of a variant column, whose values rarely repeat, whose states the synopsis keeps. A synopsis column is one too, of the tables it is no key of, when its values repeat less than twice in the object's first slice: a duration a large object's rows admit into the order, but which forms no runs | a dimension, in other tools |
 | run | a range of consecutive rows of a sorted slice holding the same value of a synopsis column, and so the same values of every synopsis column before it | a sorted run, the index kind |
 | synopsis part | the synopsis columns and the synopsis tables, written together near the end of the object | the data's footer |
 | run statistics | per slice and per combination of synopsis columns, the count and the states of the measure columns | zone maps, which are per block of 8 192 rows |

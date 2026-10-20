@@ -709,22 +709,27 @@ internal sealed class ChunkStage
     private long[][] _states;
     private int _rows;
 
-    internal ChunkStage(KeyShape[] shapes, int words)
+    /// <summary>A stage of rows of keys of <paramref name="shapes"/> and the words <paramref name="words"/> names of each record's states.</summary>
+    internal ChunkStage(KeyShape[] shapes, int[] words)
     {
         _shapes = shapes;
-        _words = words;
+        _wordsKept = words;
+        _words = words.Length;
         _keys = new KeyColumn[shapes.Length];
         for (int k = 0; k < shapes.Length; k++)
         {
             _keys[k] = new KeyColumn(shapes[k]);
         }
 
-        _states = new long[words][];
-        for (int w = 0; w < words; w++)
+        _states = new long[_words][];
+        for (int w = 0; w < _words; w++)
         {
             _states[w] = new long[64];
         }
     }
+
+    // The words of a record's states the table keeps: its count, and the states of its measures.
+    private readonly int[] _wordsKept;
 
     /// <summary>The rows held.</summary>
     internal int Rows => _rows;
@@ -772,7 +777,7 @@ internal sealed class ChunkStage
 
         for (int w = 0; w < _words; w++)
         {
-            _states[w][_rows] = words[w];
+            _states[w][_rows] = words[_wordsKept[w]];
         }
 
         _rows++;
