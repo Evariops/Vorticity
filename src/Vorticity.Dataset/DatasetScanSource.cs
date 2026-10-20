@@ -208,6 +208,7 @@ internal sealed class DatasetScanSource : ScanSource
             }
         }
 
+        Planned? plan = null;
         if (answering is not null && spec.States is { } asked)
         {
             PositionedObject[] planned = new PositionedObject[objects.Count];
@@ -216,7 +217,7 @@ internal sealed class DatasetScanSource : ScanSource
                 planned[o] = objects[o].Held;
             }
 
-            System.Threading.Volatile.Write(ref _planned, new Planned(spec.Filter, asked, planned, answering.Question));
+            plan = new Planned(spec.Filter, asked, planned, answering.Question);
         }
 
         // The objects to cut are opened side by side to read where their chunks end; the scan finds
@@ -246,12 +247,15 @@ internal sealed class DatasetScanSource : ScanSource
         List<int>? slices = null;
         int answers = 0;
         long folded = 0;
+        int reading = 0;
         for (int o = 0; o < objects.Count; o++)
         {
             RowRange rows = objects[o].Rows;
             if (cuts[o] is { } cut)
             {
-                pieces.AddRange(await cut.ConfigureAwait(false));
+                RowRange[] parts = await cut.ConfigureAwait(false);
+                pieces.AddRange(parts);
+                reading += parts.Length;
                 answers = 0;
             }
             else if (degree > 1 && objects[o].States >= 2 * stateShare && rows.Length == objects[o].Held.Entry.Rows
@@ -272,11 +276,22 @@ internal sealed class DatasetScanSource : ScanSource
                 pieces.Add(rows);
                 answers = objects[o].Light ? 1 : 0;
                 folded = objects[o].States;
+                reading += objects[o].Answered ? 0 : 1;
             }
         }
 
-        return pieces.Count > 1 ? [.. pieces] : null;
+        RowRange[]? result = pieces.Count > 1 ? [.. pieces] : null;
+        if (plan is not null)
+        {
+            System.Threading.Volatile.Write(ref _planned, plan with { Pieces = result, ReadingRows = reading });
+        }
+
+        return result;
     }
+
+    /// <summary>The pieces of the last plan that read rows from the store, the objects no synopsis answers; every one of other pieces.</summary>
+    internal override int RangesReadingRows(RowRange[] ranges) =>
+        System.Threading.Volatile.Read(ref _planned) is { } planned && ReferenceEquals(planned.Pieces, ranges) ? planned.ReadingRows : ranges.Length;
 
     /// <summary>
     /// Whether the answer of <paramref name="held"/> may be cut into parts its lanes answer apart: one that takes no row of
@@ -401,5 +416,12 @@ internal sealed class DatasetScanSource : ScanSource
     private Planned? _planned;
 
     /// <summary>What a plan of pieces walked and worked out, for the pieces' scans to take as they are.</summary>
-    private sealed record Planned(VortexExpr? Filter, Aggregating.StateRequest States, PositionedObject[] Objects, SynopsisQuestion? Question);
+    private sealed record Planned(VortexExpr? Filter, Aggregating.StateRequest States, PositionedObject[] Objects, SynopsisQuestion? Question)
+    {
+        /// <summary>The pieces the plan cut, which the engine runs on its lanes.</summary>
+        internal RowRange[]? Pieces { get; init; }
+
+        /// <summary>How many of them read rows from the store: those of the objects no synopsis answers.</summary>
+        internal int ReadingRows { get; init; }
+    }
 }

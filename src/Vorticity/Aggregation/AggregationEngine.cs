@@ -5004,7 +5004,12 @@ internal static class AggregationEngine
         // The degree is the parallelism: a partition already runs on the pool, and decoding ahead
         // inside each one would put twice the degree's lanes on it. Its reads go ahead of its decode
         // instead, on a source whose read is a round trip: the splits its admission granted.
-        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = ahead };
+        // The splits the lanes were granted together go to those that read rows: lanes that answer a dataset's objects
+        // from their synopses read none, and two lanes left reading rows among sixteen waited on each of their reads.
+        // As many in flight as the lanes were granted, ReadAheadTotal a lane at most.
+        int readers = Math.Clamp(source.RangesReadingRows(ranges), 1, partitions.Length);
+        int shared = ahead > 0 ? Math.Max(ahead, Math.Min(ReadAheadTotal, ahead * partitions.Length / readers)) : ahead;
+        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = shared };
         int[] next = [-1];
 
         // The ranges the fan's first ranges took, each its lane's before any lane starts, which the queue

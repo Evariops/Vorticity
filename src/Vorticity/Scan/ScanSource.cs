@@ -177,6 +177,13 @@ internal abstract class ScanSource
     internal virtual ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken) => default;
 
     /// <summary>
+    /// How many of <paramref name="ranges"/>, the pieces <see cref="PiecesAsync"/> cut, read rows from the store, and so
+    /// read their splits ahead: every one by default; a dataset's pieces its synopses answer read a few tables instead,
+    /// whose lanes leave the splits they were granted to the lanes that read rows.
+    /// </summary>
+    internal virtual int RangesReadingRows(RowRange[] ranges) => ranges.Length;
+
+    /// <summary>
     /// Whether a scan that asks for the order of <paramref name="column"/> (<see cref="ScanSpec.OrderPath"/>)
     /// brings its rows in it at a cost a stream can bear: a dataset on the first column of its
     /// clustering key, whose objects a key-ordered read opens as the order reaches them. A file
