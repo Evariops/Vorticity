@@ -458,9 +458,10 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// <summary>
     /// The contexts the tables of objects read without their open are decoded into, kept from one object to the next:
     /// a context is a dozen arrays, which every object of a question built and dropped, half of what a warm question
-    /// over 48 objects allocated.
+    /// over 48 objects allocated. Their arenas of dtypes are kept too, the batches of a set holding none of them once
+    /// the set is let go: an arena made for each object was a sixth of what such a question allocated.
     /// </summary>
-    private static ScanContexts Contexts { get; } = new ScanContexts(Math.Max(16, 3 * Environment.ProcessorCount)).Swept();
+    private static ScanContexts Contexts { get; } = new ScanContexts(Math.Max(16, 3 * Environment.ProcessorCount)) { KeepsTypes = true }.Swept();
 
     /// <summary>
     /// Reads the chunks of <paramref name="found"/> in one request set and decodes each into

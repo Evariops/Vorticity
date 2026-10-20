@@ -43,6 +43,14 @@ internal sealed class ScanContexts : ISweptAfterCollections
         _contexts = new ScanContext?[capacity];
     }
 
+    /// <summary>
+    /// Whether a detached context keeps its arena of dtypes from one scan to the next: a pool whose scans hold none of its
+    /// dtypes once they give the context back, as the reads of synopsis tables, which derive the same few from each
+    /// object of a schema. A pool of contexts whose batches outlive them, a reader's of another format, makes each scan
+    /// an arena of its own, which no later scan mutates under a dtype it handed out.
+    /// </summary>
+    internal bool KeepsTypes { get; init; }
+
     /// <summary>The pool every scan takes its contexts from.</summary>
     internal static ScanContexts Shared { get; } = new ScanContexts(Math.Max(16, 3 * Environment.ProcessorCount)).Swept();
 
@@ -109,7 +117,7 @@ internal sealed class ScanContexts : ISweptAfterCollections
             return new ScanContext([], options);
         }
 
-        context.RebindDetached(options);
+        context.RebindDetached(options, KeepsTypes);
         return context;
     }
 
@@ -135,7 +143,7 @@ internal sealed class ScanContexts : ISweptAfterCollections
             return new ScanContext(ids, options);
         }
 
-        context.RebindDetached(options, encodings, ids);
+        context.RebindDetached(options, encodings, ids, KeepsTypes);
         return context;
     }
 

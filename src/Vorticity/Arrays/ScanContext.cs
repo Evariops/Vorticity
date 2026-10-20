@@ -1505,24 +1505,31 @@ internal sealed class ScanContext : IDisposable
     /// a context made over an explicit encoding table, which a reader of another format decodes into.
     /// </summary>
     /// <param name="options">The read options the next scan decodes under.</param>
-    internal void RebindDetached(VortexReadOptions options)
+    /// <param name="keepTypes">
+    /// Whether the context's arena of dtypes is kept for the next scan, up to <see cref="KeptTypeNodes"/>: a pool whose
+    /// scans hold none of its dtypes once they give the context back (<see cref="ScanContexts.KeepsTypes"/>).
+    /// </param>
+    internal void RebindDetached(VortexReadOptions options, bool keepTypes = false)
     {
         Options = options;
-        if (_types is { NodeCount: not 0 } types)
+        if (_types is { NodeCount: var nodes } types && nodes > (keepTypes ? KeptTypeNodes : 0))
         {
             _typesShape = types.Shape;
             _types = null;
         }
     }
 
+    /// <summary>The dtypes past which an arena kept from scan to scan is let go, and another made at its shape.</summary>
+    private const int KeptTypeNodes = 1 << 10;
+
     /// <summary>
-    /// As <see cref="RebindDetached(VortexReadOptions)"/>, over the encoding table <paramref name="encodings"/>, resolved
+    /// As <see cref="RebindDetached(VortexReadOptions, bool)"/>, over the encoding table <paramref name="encodings"/>, resolved
     /// from <paramref name="ids"/>: a detached context that reads one file's regions after another's, files whose tables
     /// may differ. The table is copied, and the ids are kept for the messages that name one.
     /// </summary>
-    internal void RebindDetached(VortexReadOptions options, ReadOnlySpan<ArrayEncodingId> encodings, string[] ids)
+    internal void RebindDetached(VortexReadOptions options, ReadOnlySpan<ArrayEncodingId> encodings, string[] ids, bool keepTypes = false)
     {
-        RebindDetached(options);
+        RebindDetached(options, keepTypes);
         if (_arrayEncodings.Length != encodings.Length)
         {
             _arrayEncodings = encodings.Length == 0 ? [] : new ArrayEncodingId[encodings.Length];

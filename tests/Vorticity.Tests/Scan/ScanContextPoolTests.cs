@@ -221,6 +221,51 @@ public sealed class ScanContextPoolTests
         pool.Return(again);
     }
 
+    /// <summary>
+    /// A pool whose scans hold none of its dtypes once they give a context back keeps a detached context's arena of
+    /// dtypes for the next scan, the dtypes the last one derived the same nodes, until it holds more than a thousand;
+    /// any other pool makes each scan an arena of its own.
+    /// </summary>
+    [Fact]
+    public void ADetachedContextKeepsItsArenaOfTypesInAPoolThatSaysSo()
+    {
+        VortexReadOptions options = new();
+        ScanContexts keeping = new ScanContexts(4) { KeepsTypes = true };
+        ScanContext context = keeping.RentDetached(options);
+        DTypeArena types = context.Types;
+        DType derived = types.Primitive(PType.I64, Nullability.NonNullable);
+        keeping.Return(context);
+        ScanContext again = keeping.RentDetached(options);
+        Assert.Same(context, again);
+        Assert.Same(types, again.Types);
+        Assert.Equal(1, types.NodeCount);
+        Assert.Equal(derived, again.Types.Primitive(PType.I64, Nullability.NonNullable));
+        Assert.Equal(1, types.NodeCount);
+
+        // Past a thousand dtypes, the next scan starts an arena of its own.
+        DType[] column = [derived];
+        for (int i = 0; i < 1_100; i++)
+        {
+            types.Struct([$"field {i}"], column, Nullability.NonNullable);
+        }
+
+        keeping.Return(again);
+        ScanContext past = keeping.RentDetached(options);
+        Assert.Same(context, past);
+        Assert.NotSame(types, past.Types);
+        keeping.Return(past);
+
+        ScanContexts fresh = new ScanContexts(4);
+        ScanContext other = fresh.RentDetached(options);
+        DTypeArena first = other.Types;
+        first.Primitive(PType.I64, Nullability.NonNullable);
+        fresh.Return(other);
+        ScanContext next = fresh.RentDetached(options);
+        Assert.Same(other, next);
+        Assert.NotSame(first, next.Types);
+        fresh.Return(next);
+    }
+
     [Fact]
     public void APoolIsSweptByACollection()
     {
