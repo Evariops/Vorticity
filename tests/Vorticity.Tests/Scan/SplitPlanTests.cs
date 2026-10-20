@@ -236,6 +236,63 @@ public sealed class SplitPlanTests
             Splits(apart, new RowRange(0, 300), 8192, Mask(1, 2)));
     }
 
+    /// <summary>
+    /// A walk moved on to the split holding a row goes on with the splits the whole walk gives from that split, chunks of
+    /// any length cut under a cap or not, a row before the walk's next one leaving it where it is and a row past the end
+    /// ending it; a reverse walk does not move.
+    /// </summary>
+    [Fact]
+    public void AWalkMovedOnToARowGoesOnAsTheWholeWalkFromItsSplit()
+    {
+        Random random = new Random(29);
+        for (int trial = 0; trial < 200; trial++)
+        {
+            LayoutSpecNode[] chunks = new LayoutSpecNode[random.Next(1, 12)];
+            ulong total = 0;
+            for (int c = 0; c < chunks.Length; c++)
+            {
+                ulong rows = (ulong)random.Next(1, 400);
+                chunks[c] = Node(Flat, rows, segments: [(uint)c]);
+                total += rows;
+            }
+
+            LayoutTree tree = Tree(Node(Chunked, total, children: chunks), I64());
+            SplitPlan plan = SplitPlan.Compute(tree, new RowRange(0, (long)total), FieldMask.All, random.Next(2) == 0 ? 8192 : random.Next(1, 120));
+            List<RowRange> whole = [];
+            SplitCursor walk = plan.CreateCursor();
+            while (walk.TryNext(out RowRange split))
+            {
+                whole.Add(split);
+            }
+
+            int before = random.Next(0, whole.Count);
+            long row = random.NextInt64(0, (long)total + 50);
+            SplitCursor moved = plan.CreateCursor();
+            for (int i = 0; i <= before; i++)
+            {
+                Assert.True(moved.TryNext(out _));
+            }
+
+            moved.SkipTo(row);
+            List<RowRange> rest = [];
+            while (moved.TryNext(out RowRange split))
+            {
+                rest.Add(split);
+            }
+
+            int holding = whole.FindIndex(split => split.Start <= row && row < split.End);
+            int from = holding < 0 ? whole.Count : Math.Max(holding, before + 1);
+            Assert.Equal(whole.GetRange(from, whole.Count - from), rest);
+        }
+
+        LayoutTree three = Tree(Node(Chunked, 300, children: [Node(Flat, 100, segments: [0]), Node(Flat, 100, segments: [1]), Node(Flat, 100, segments: [2])]), I64());
+        SplitCursor reverse = SplitPlan.Compute(three, new RowRange(0, 300), FieldMask.All, 8192).CreateCursor(reverse: true);
+        Assert.True(reverse.TryNext(out RowRange last));
+        reverse.SkipTo(50);
+        Assert.True(reverse.TryNext(out RowRange next));
+        Assert.Equal((new RowRange(200, 300), new RowRange(100, 200)), (last, next));
+    }
+
     [Fact]
     public void AStructWithNoFieldSelectedStillCoversItsRows()
     {

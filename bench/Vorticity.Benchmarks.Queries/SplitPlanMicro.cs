@@ -38,6 +38,47 @@ internal static class SplitPlanMicro
                 CultureInfo.InvariantCulture, $"  {name,-14} {boundaries,9:N0} boundaries  {micros,10:F1} us a plan  {bytes,12:N0} B a plan"));
         }
 
+        // The walk a filtered scan takes over the plan of every column, a mask keeping 96 blocks spread over the file as a
+        // question of a few endpoints' errors keeps them: every split asked whether it lives, or the dead ones stepped
+        // over to the split of the next live block, as the scan's enumerator does.
+        SplitPlan every = SplitPlan.Compute(tree, rows, FieldMask.All, natural);
+        Vorticity.Compute.BlockMask kept = new Vorticity.Compute.BlockMask(rows.Length, natural);
+        int keep = Math.Min(96, kept.BlockCount);
+        for (int block = 0; block < kept.BlockCount; block++)
+        {
+            if (block % Math.Max(1, kept.BlockCount / keep) != 0)
+            {
+                kept.Kill(block);
+            }
+        }
+
+        foreach (bool skips in new[] { false, true })
+        {
+            int walks = Math.Max(1, rounds) * 200;
+            long live = 0;
+            long begin = Stopwatch.GetTimestamp();
+            for (int w = 0; w < walks; w++)
+            {
+                SplitCursor cursor = every.CreateCursor();
+                while (cursor.TryNext(out RowRange split))
+                {
+                    if (kept.AnyLive(split))
+                    {
+                        live++;
+                    }
+                    else if (skips)
+                    {
+                        int next = kept.NextLive((int)Math.Min((split.End + natural - 1) / natural, kept.BlockCount));
+                        cursor.SkipTo(next >= kept.BlockCount ? long.MaxValue : next * natural);
+                    }
+                }
+            }
+
+            double micros = (Stopwatch.GetTimestamp() - begin) * 1e6 / Stopwatch.Frequency / walks;
+            Console.WriteLine(string.Create(
+                CultureInfo.InvariantCulture, $"  walk {(skips ? "skipping" : "split by split"),-15} {live / walks,6:N0} live splits of {every.BoundaryCount - 1:N0}  {micros,10:F1} us a walk"));
+        }
+
         return 0;
     }
 }

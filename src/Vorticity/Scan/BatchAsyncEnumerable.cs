@@ -1102,9 +1102,46 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
                 return true;
             }
+
+            if (_take is null && !_cursor.Reverse)
+            {
+                SkipDead(split);
+            }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Moves the walk past a dead split on to the split that holds the next live block, the blocks between counted as
+    /// pruned at once: every one of them is dead, and no take asks for a row of them. A forward walk only; the cursor of a
+    /// reverse one does not move.
+    /// </summary>
+    private void SkipDead(RowRange split)
+    {
+        BlockMask live = _live!;
+        long blockRows = live.BlockRows;
+        int next = live.NextLive((int)Math.Min((split.End + blockRows - 1) / blockRows, live.BlockCount));
+        long row = next >= live.BlockCount ? long.MaxValue : next * blockRows;
+        if (row <= split.End)
+        {
+            return;
+        }
+
+        SplitPlan plan = _cursor.Plan;
+        long end = plan.BoundaryAt(plan.BoundaryCount - 1);
+        long resume = row >= end ? end : plan.SplitOf(row).Start;
+        if (resume <= split.End)
+        {
+            return;
+        }
+
+        if (_metrics is not null)
+        {
+            _metrics.AddBlocksPruned(_prunedBlocks.Add(new RowRange(split.End, resume)));
+        }
+
+        _cursor.SkipTo(row);
     }
 
     /// <summary>

@@ -191,6 +191,16 @@ public sealed class BlockMaskTests
             }
 
             Assert.Equal(anyLiveBlock, mask.AnyLiveBlocks(first, past));
+
+            // The next live block a word at a time, as the walk over the blocks finds it.
+            int from = random.Next(0, mask.BlockCount + 3);
+            int found = from;
+            while (found < mask.BlockCount && !mask.IsLive(found))
+            {
+                found++;
+            }
+
+            Assert.Equal(Math.Min(found, mask.BlockCount), mask.NextLive(from));
         }
     }
 

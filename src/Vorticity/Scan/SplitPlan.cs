@@ -523,6 +523,62 @@ internal struct SplitCursor
     /// <summary>The plan this cursor walks.</summary>
     internal readonly SplitPlan Plan => _plan;
 
+    /// <summary>Whether the walk goes from the last split to the first.</summary>
+    internal readonly bool Reverse => _reverse;
+
+    /// <summary>
+    /// Moves a forward walk on to the split that holds <paramref name="row"/>, cut exactly as the walk would have cut it,
+    /// past the splits before it; nothing when that split is not past the walk's next, or the walk goes backwards. A row
+    /// past the plan's end ends the walk.
+    /// </summary>
+    /// <remarks>
+    /// What a scan whose mask keeps few blocks walks to, rather than every split between: a day's object of the design's
+    /// requests holds 132 000 of them, each asked whether a block of it lives.
+    /// </remarks>
+    internal void SkipTo(long row)
+    {
+        SplitPlan plan = _plan;
+        int boundaries = plan.BoundaryCount;
+        if (_reverse || boundaries < 2)
+        {
+            return;
+        }
+
+        if (row >= plan.BoundaryAt(boundaries - 1))
+        {
+            _span = boundaries - 2;
+            _cursor = plan.BoundaryAt(boundaries - 1);
+            return;
+        }
+
+        int low = 0;
+        int high = boundaries - 2;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high + 1) >> 1);
+            if (plan.BoundaryAt(middle) <= row)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        long start = plan.BoundaryAt(low);
+        long size = SubSize(plan.BoundaryAt(low + 1) - start, plan.MaxRows);
+        long first = start + ((Math.Max(row, start) - start) / size * size);
+        if (low < _span || (low == _span && first <= _cursor))
+        {
+            return;
+        }
+
+        _span = low;
+        _subSize = size;
+        _cursor = first;
+    }
+
     /// <summary>
     /// The spans last first, and each span's sub-divisions last first, which is the forward walk
     /// read backwards and not a second way of cutting the same rows.
