@@ -645,7 +645,14 @@ so an entry is never stale: its key is the object's uid, the region's place and 
 checksum, all known from the dataset's entry before any read.
 
 An entry is a file named by that key, in directories sharded by the uid, written under a temporary
-name and then renamed, so a reader never sees half a file. The cache walks its directory when it opens,
+name and then renamed, so a reader never sees half a file. It is written behind the question that read
+its region: the buffer the region was read into is held until one of two writers of the cache's own has
+written it, and a read of the region meanwhile is served from that buffer. A file costs about 1.7 ms to
+create, close and rename on Windows, which the question paid for each region it read: an unaligned
+window over 3 objects of 180 M rows, which read 104 MB of tables, took 276 ms cold against 159 written
+behind, and a count per service over 48 hourly objects 50 ms against 38 at one lane, 44 against 27 at
+sixteen. Past 256 MiB waiting, a region is written before its reader goes on, and the cache's dispose
+writes what waits. A sealed object's frames are written at once. The cache walks its directory when it opens,
 and the entries an earlier cache left are its own. One cache owns a directory, through a lock of the
 operating system. On Windows, an entry's file is opened at its first read and mapped, and kept so while
 the cache keeps up to 4 096 files open: a region read from the disk is a view of the mapping, with no

@@ -120,7 +120,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader
             try
             {
                 SegmentOwner owner = await _inner.ReadAsync(spec, cancellationToken).ConfigureAwait(false);
-                _cache.Admit(_uid, region, owner.Buffer.Span);
+                _cache.Admit(_uid, region, owner, owner.Buffer);
                 return owner;
             }
             finally
@@ -182,7 +182,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader
 
             foreach ((int slot, IndexSegment region, _) in mine)
             {
-                _cache.Admit(_uid, region, requests.GetBuffer(slot).Span);
+                _cache.Admit(_uid, region, requests.GetOwner(slot), requests.GetBuffer(slot));
             }
         }
         catch

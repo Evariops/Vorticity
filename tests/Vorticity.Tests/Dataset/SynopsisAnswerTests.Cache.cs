@@ -1,8 +1,8 @@
 // The synopsis cache on the local disk: warm, the questions read their tables with no request to the store,
 // across a restart, a sealed dataset's too with no plaintext on the disk; a region torn or flipped, or a
-// sealed frame flipped, is dropped and read again; one cache owns a directory; only the regions an object's
-// table of contents declares enter it; past its capacity it drops entries; and questions that miss the same
-// region at once make one read of it.
+// sealed frame flipped, is dropped and read again; a region is written behind its reader and served while it
+// waits; one cache owns a directory; only the regions an object's table of contents declares enter it; past
+// its capacity it drops entries; and questions that miss the same region at once make one read of it.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -224,6 +224,65 @@ public sealed partial class SynopsisAnswerTests
     }
 
     /// <summary>
+    /// A region admitted behind its reader, the reader's buffer let go at once: the cache holds it and serves it,
+    /// waiting for its write or written; it is on the disk once the writes waiting are done; and one admitted just
+    /// before the cache is disposed is on the disk for the next cache of the directory.
+    /// </summary>
+    [Fact]
+    public void ARegionAdmittedBehindItsReaderIsServedAndWrittenBeforeTheCacheCloses()
+    {
+        string directory = CacheDirectory();
+        try
+        {
+            UInt128 uid = 0x5eed;
+            (IndexSegment Region, byte[] Bytes) Admitted(SynopsisCache cache, int seed)
+            {
+                byte[] bytes = new byte[4_096 + seed];
+                new Random(seed).NextBytes(bytes);
+                IndexSegment region = IndexSegment.Of(seed * 65_536L, bytes, 6);
+                Vorticity.Buffers.NativeSegmentOwner block = Vorticity.Buffers.AlignedBufferPool.Shared.Rent(bytes.Length, 64);
+                bytes.CopyTo(block.WritableSpan);
+                cache.Admit(uid, region, block, Vorticity.Buffers.VortexBuffer.FromPinned(block.WritableSpan[..bytes.Length], 6));
+                block.Release();
+                return (region, bytes);
+            }
+
+            IndexSegment first;
+            IndexSegment last;
+            byte[] firstBytes;
+            byte[] lastBytes;
+            using (SynopsisCache cache = new SynopsisCache(directory, 1 << 20))
+            {
+                (first, firstBytes) = Admitted(cache, 1);
+                Assert.True(cache.Holds(uid, first));
+                Assert.Equal(firstBytes.Length, cache.HeldBytes);
+                Assert.True(cache.TryRead(uid, first, out Vorticity.Buffers.SegmentOwner read));
+                Assert.Equal(firstBytes, read.Buffer.Span.ToArray());
+                read.Release();
+
+                cache.Flush();
+                Assert.Single(Directory.GetFiles(directory, SynopsisCache.NameOf(uid, first), SearchOption.AllDirectories));
+                Assert.Equal(firstBytes.Length, cache.HeldBytes);
+                (last, lastBytes) = Admitted(cache, 2);
+            }
+
+            using SynopsisCache reopened = new SynopsisCache(directory, 1 << 20);
+            foreach ((IndexSegment region, byte[] bytes) in new[] { (first, firstBytes), (last, lastBytes) })
+            {
+                Assert.True(reopened.TryRead(uid, region, out Vorticity.Buffers.SegmentOwner owner));
+                Assert.Equal(bytes, owner.Buffer.Span.ToArray());
+                owner.Release();
+            }
+
+            Assert.Equal(firstBytes.Length + lastBytes.Length, reopened.HeldBytes);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// One cache owns a directory: a second is refused while the first is open. Once it is disposed, the next
     /// one finds every entry the first kept, and deletes what a write left under its temporary name.
     /// </summary>
@@ -299,7 +358,9 @@ public sealed partial class SynopsisAnswerTests
                 }
             }
 
+            // The regions read last are written behind their questions: all of them, before the directory is read.
             SynopsisCache cache = session.Options.SynopsisCache!;
+            cache.Flush();
             string[] files = [.. Directory.GetFiles(directory, "*", SearchOption.AllDirectories).Where(file => Path.GetFileName(file) != ".lock")];
             Console.Out.Write($"CACHED at {capacity} bytes: {files.Length} files, {cache.HeldBytes} bytes, {cache.Hits} hits, {cache.Misses} misses, {cache.Evictions} evictions.\n");
             Assert.NotEmpty(files);

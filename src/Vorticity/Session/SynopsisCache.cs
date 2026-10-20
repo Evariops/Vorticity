@@ -25,6 +25,14 @@ namespace Vorticity;
 /// again from the store.
 /// </para>
 /// <para>
+/// A region read from the store enters the cache behind the question that read it: the buffer its reader
+/// read it into is held until a writer of the cache's own has written it, and a read of the region meanwhile
+/// is served from that buffer. A file costs about 1.7 ms to create, close and rename on Windows, which the
+/// question paid for each region it read: past a quarter of a second of a cold question that read 104 MB of
+/// tables. Past <see cref="MaxPendingBytes"/> waiting, a region is written before its reader goes on. A sealed
+/// object's frames are written at once.
+/// </para>
+/// <para>
 /// A sealed object leaves no plaintext on the disk. The cache keeps its trailer and the frames that hold a
 /// region its table of contents declares, the bytes its store holds, and its reader decrypts them at each
 /// read: a frame whose tag fails, or a region whose plaintext fails its checksum, is dropped and read again
@@ -58,6 +66,12 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>The files the cache keeps open at most, the least recently opened closed first.</summary>
     private const int MaxOpenHandles = 4096;
 
+    /// <summary>The bytes of regions waiting for their write at most, past which a region is written before its reader goes on.</summary>
+    private const long MaxPendingBytes = 256L << 20;
+
+    /// <summary>The writers of the regions waiting that run at once at most.</summary>
+    private const int MaxWriters = 2;
+
     private readonly FileStream _lock;
     private readonly object _gate = new object();
     private readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
@@ -67,6 +81,10 @@ public sealed class SynopsisCache : IDisposable
     private readonly LinkedList<(string Name, long Bytes)> _ghost = new LinkedList<(string, long)>();
     private readonly Dictionary<string, LinkedListNode<(string Name, long Bytes)>> _ghosts = new Dictionary<string, LinkedListNode<(string Name, long Bytes)>>(StringComparer.Ordinal);
     private readonly Dictionary<string, TaskCompletionSource> _reading = new Dictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
+    private readonly Dictionary<string, Pending> _pending = new Dictionary<string, Pending>(StringComparer.Ordinal);
+    private readonly Queue<Pending> _queue = new Queue<Pending>();
+    private long _pendingHeld;
+    private int _writers;
     private long _held;
     private long _smallHeld;
     private long _ghostHeld;
@@ -107,14 +125,14 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>The bytes of regions the cache keeps at most.</summary>
     public long CapacityBytes { get; }
 
-    /// <summary>The bytes of regions the cache holds now.</summary>
+    /// <summary>The bytes of regions the cache holds now, on the disk or waiting for their write.</summary>
     public long HeldBytes
     {
         get
         {
             lock (_gate)
             {
-                return _held;
+                return _held + _pendingHeld;
             }
         }
     }
@@ -150,8 +168,17 @@ public sealed class SynopsisCache : IDisposable
         // The region's name made on the stack and looked up as it lies: a string made for each read was one an object
         // a question read.
         Span<char> name = stackalloc char[MaxNameLength];
-        if (!name.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}", out int written)
-            || Find(name[..written]) is not { } entry)
+        if (!name.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}", out int written))
+        {
+            return false;
+        }
+
+        if (TryPending(name[..written], out owner))
+        {
+            return true;
+        }
+
+        if (Find(name[..written]) is not { } entry)
         {
             return false;
         }
@@ -265,7 +292,7 @@ public sealed class SynopsisCache : IDisposable
 
     /// <summary>
     /// Keeps the region of object <paramref name="uid"/> read from the store, when it holds its checksum and
-    /// fits the capacity, and drops what the capacity no longer holds.
+    /// fits the capacity, and drops what the capacity no longer holds: on the disk before it returns.
     /// </summary>
     internal void Admit(UInt128 uid, IndexSegment region, ReadOnlySpan<byte> bytes)
     {
@@ -275,6 +302,154 @@ public sealed class SynopsisCache : IDisposable
         }
 
         Keep(uid, NameOf(uid, region), bytes);
+    }
+
+    /// <summary>
+    /// As <see cref="Admit(UInt128, IndexSegment, ReadOnlySpan{byte})"/>, behind its caller: <paramref name="owner"/>,
+    /// whose memory holds <paramref name="bytes"/>, is held until a writer of the cache's has written them, and a read
+    /// of the region meanwhile is served from them; written at once past <see cref="MaxPendingBytes"/> waiting.
+    /// </summary>
+    internal void Admit(UInt128 uid, IndexSegment region, SegmentOwner owner, VortexBuffer bytes)
+    {
+        if (region.Checksum is null || !region.Holds(bytes.Span))
+        {
+            return;
+        }
+
+        string name = NameOf(uid, region);
+        if (!TryQueue(uid, name, owner, bytes))
+        {
+            Keep(uid, name, bytes.Span);
+        }
+    }
+
+    /// <summary>
+    /// Waits for every region waiting for its write to be written: what the cache's dispose waits on, and a reader of
+    /// its directory from outside it, a test.
+    /// </summary>
+    internal void Flush()
+    {
+        lock (_gate)
+        {
+            // A writer stops once no region waits, and one starts whenever a region comes to wait.
+            while (_writers > 0)
+            {
+                Monitor.Wait(_gate);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Puts a region read from the store to wait for its write, a writer started if fewer than <see cref="MaxWriters"/>
+    /// run; false when the caller writes it, past the bytes waiting or the capacity.
+    /// </summary>
+    private bool TryQueue(UInt128 uid, string name, SegmentOwner owner, VortexBuffer bytes)
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return true;
+        }
+
+        if (bytes.Length > CapacityBytes)
+        {
+            return false;
+        }
+
+        bool start;
+        lock (_gate)
+        {
+            if (_entries.ContainsKey(name) || _pending.ContainsKey(name))
+            {
+                return true;
+            }
+
+            if (_pendingHeld + bytes.Length > Math.Min(MaxPendingBytes, CapacityBytes))
+            {
+                return false;
+            }
+
+            Pending pending = new Pending(new Entry(name, ShardOf(uid), bytes.Length), owner.Retain(), bytes);
+            _pending[name] = pending;
+            _queue.Enqueue(pending);
+            _pendingHeld += bytes.Length;
+            start = _writers < MaxWriters;
+            _writers += start ? 1 : 0;
+        }
+
+        VortexTelemetry.SynopsisFetched(bytes.Length);
+        if (start)
+        {
+            ThreadPool.UnsafeQueueUserWorkItem(static cache => cache.Drain(), this, preferLocal: false);
+        }
+
+        return true;
+    }
+
+    /// <summary>Writes the regions waiting, the oldest first, until none is left.</summary>
+    private void Drain()
+    {
+        while (true)
+        {
+            Pending? pending;
+            lock (_gate)
+            {
+                if (!_queue.TryDequeue(out pending))
+                {
+                    if (--_writers == 0)
+                    {
+                        Monitor.PulseAll(_gate);
+                    }
+
+                    return;
+                }
+            }
+
+            bool written = false;
+            List<Entry> evicted = [];
+            try
+            {
+                written = Write(pending.Entry, pending.Bytes.Span);
+            }
+            finally
+            {
+                // Read meanwhile, it comes in with its reads, as it would have from the disk.
+                lock (_gate)
+                {
+                    _pending.Remove(pending.Entry.Name);
+                    _pendingHeld -= pending.Entry.Bytes;
+                    if (written)
+                    {
+                        Enter(pending.Entry, pending.Hits, evicted);
+                    }
+                }
+
+                pending.Owner.Release();
+            }
+
+            foreach (Entry victim in evicted)
+            {
+                TryDelete(PathOf(victim));
+            }
+        }
+    }
+
+    /// <summary>A region waiting for its write, served from the buffer its reader handed over, the read counted; false when none waits under <paramref name="name"/>.</summary>
+    private bool TryPending(ReadOnlySpan<char> name, out SegmentOwner owner)
+    {
+        lock (_gate)
+        {
+            if (_pending.Count == 0 || !_pending.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Pending? pending))
+            {
+                owner = null!;
+                return false;
+            }
+
+            pending.Hits = Math.Min(MaxHits, pending.Hits + 1);
+            owner = new IO.SliceSegmentOwner(pending.Owner, pending.Bytes);
+        }
+
+        Served(owner.Length);
+        return true;
     }
 
     /// <summary>
@@ -546,12 +721,32 @@ public sealed class SynopsisCache : IDisposable
         Entry entry = new Entry(name, ShardOf(uid), bytes.Length);
         lock (_gate)
         {
-            if (_entries.ContainsKey(name))
+            if (_entries.ContainsKey(name) || _pending.ContainsKey(name))
             {
                 return;
             }
         }
 
+        if (!Write(entry, bytes))
+        {
+            return;
+        }
+
+        List<Entry> evicted = [];
+        lock (_gate)
+        {
+            Enter(entry, 0, evicted);
+        }
+
+        foreach (Entry victim in evicted)
+        {
+            TryDelete(PathOf(victim));
+        }
+    }
+
+    /// <summary>Writes the file of <paramref name="entry"/>, under a temporary name then renamed, so a reader never sees half of it; false when the disk refused it.</summary>
+    private bool Write(Entry entry, ReadOnlySpan<byte> bytes)
+    {
         string path = PathOf(entry);
         string temporary = path + "." + Guid.NewGuid().ToString("N") + TemporaryExtension;
         try
@@ -563,42 +758,42 @@ public sealed class SynopsisCache : IDisposable
             }
 
             System.IO.File.Move(temporary, path, overwrite: true);
+            return true;
         }
         catch (IOException)
         {
             TryDelete(temporary);
-            return;
+            return false;
         }
         catch (UnauthorizedAccessException)
         {
             TryDelete(temporary);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Takes in an entry whose file is written, with the reads it had while it waited, unless another came in under
+    /// its name meanwhile, and drops what the capacity no longer holds. Under the gate.
+    /// </summary>
+    private void Enter(Entry entry, int hits, List<Entry> evicted)
+    {
+        if (_entries.ContainsKey(entry.Name))
+        {
             return;
         }
 
-        List<Entry> evicted = [];
-        lock (_gate)
+        // A region dropped not long ago and asked again goes to the main queue at once.
+        bool returning = _ghosts.Remove(entry.Name, out LinkedListNode<(string Name, long Bytes)>? ghost);
+        if (returning)
         {
-            if (_entries.ContainsKey(name))
-            {
-                return;
-            }
-
-            // A region dropped not long ago and asked again goes to the main queue at once.
-            bool returning = _ghosts.Remove(name, out LinkedListNode<(string Name, long Bytes)>? ghost);
-            if (returning)
-            {
-                _ghost.Remove(ghost!);
-                _ghostHeld -= ghost!.Value.Bytes;
-            }
-
-            Add(entry, main: returning);
-            Evict(evicted);
+            _ghost.Remove(ghost!);
+            _ghostHeld -= ghost!.Value.Bytes;
         }
 
-        foreach (Entry victim in evicted)
-        {
-            TryDelete(PathOf(victim));
-        }
+        entry.Hits = hits;
+        Add(entry, main: returning);
+        Evict(evicted);
     }
 
     /// <summary>
@@ -636,11 +831,13 @@ public sealed class SynopsisCache : IDisposable
     }
 
     /// <summary>
-    /// Closes every file the cache keeps open, and lets their mappings go once the regions read from them are: what a
-    /// writer of the files from outside the cache, a test's, waits on, a mapped file being one no one writes.
+    /// Writes every region waiting, closes every file the cache keeps open, and lets their mappings go once the regions
+    /// read from them are: what a writer of the files from outside the cache, a test's, waits on, a mapped file being
+    /// one no one writes.
     /// </summary>
     internal void CloseFiles()
     {
+        Flush();
         List<SafeFileHandle> closed = [];
         lock (_gate)
         {
@@ -664,6 +861,8 @@ public sealed class SynopsisCache : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            // What waits for its write is written: the next cache to open the directory finds it.
+            Flush();
             lock (_gate)
             {
                 while (_open.First is { } open)
@@ -801,7 +1000,8 @@ public sealed class SynopsisCache : IDisposable
 
         lock (_gate)
         {
-            return _entries.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name[..written]);
+            return _entries.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name[..written])
+                || (_pending.Count > 0 && _pending.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name[..written]));
         }
     }
 
@@ -936,5 +1136,17 @@ public sealed class SynopsisCache : IDisposable
 
         /// <summary>The mapping whose bytes a read found to hold their region's checksum; null before one did.</summary>
         internal IO.MappedFileOwner? Verified { get; set; }
+    }
+
+    /// <summary>A region waiting for its write: its entry to be, the buffer its reader handed over, held, and its reads meanwhile.</summary>
+    private sealed class Pending(Entry entry, SegmentOwner owner, VortexBuffer bytes)
+    {
+        internal Entry Entry { get; } = entry;
+
+        internal SegmentOwner Owner { get; } = owner;
+
+        internal VortexBuffer Bytes { get; } = bytes;
+
+        internal int Hits { get; set; }
     }
 }
