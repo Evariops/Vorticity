@@ -382,20 +382,45 @@ internal sealed class SynopsisTables : IDisposable
             _hourRuns.Add(await AppendAsync(HourStore(), at, cancellationToken).ConfigureAwait(false));
         }
 
-        // Each later key's values, and each counted path's, in their order, with their states.
+        // Each later key's values, and each counted path's, in their order, with their states: a key the deepest groups
+        // counted hold folds from their states, a group a value, one deeper from the rows.
         for (int k = 1; k < depth; k++)
         {
-            if (_values[k] is { Dead: false })
+            if (_values[k] is not { Dead: false })
             {
-                int[] valueCodes = keyCodes[k];
+                continue;
+            }
+
+            int[] valueCodes = keyCodes[k];
+            if (k < used)
+            {
+                int[] at = keyed[used];
+                int[] groupOf = new int[counts[used]];
                 int distinct = 0;
-                for (int row = 0; row < rows; row++)
+                for (int p = 0; p < groupOf.Length; p++)
                 {
-                    distinct = Math.Max(distinct, valueCodes[row] + 1);
+                    groupOf[p] = valueCodes[at[p]];
+                    distinct = Math.Max(distinct, groupOf[p] + 1);
                 }
 
-                await ValuesAsync(k, arena, sorted.RootIndex, rows, columns[k], _keyShapes[k], valueCodes, distinct, cancellationToken).ConfigureAwait(false);
+                int[] first = new int[distinct];
+                first.AsSpan().Fill(-1);
+                for (int p = 0; p < groupOf.Length; p++)
+                {
+                    first[groupOf[p]] = first[groupOf[p]] < 0 ? at[p] : first[groupOf[p]];
+                }
+
+                await EmitValuesAsync(k, arena, columns[k], _keyShapes[k], states[used].Merge(groupOf, distinct), first, distinct, cancellationToken).ConfigureAwait(false);
+                continue;
             }
+
+            int values = 0;
+            for (int row = 0; row < rows; row++)
+            {
+                values = Math.Max(values, valueCodes[row] + 1);
+            }
+
+            await ValuesAsync(k, arena, sorted.RootIndex, rows, columns[k], _keyShapes[k], valueCodes, values, cancellationToken).ConfigureAwait(false);
         }
 
         for (int c = 0; c < _counted.Length; c++)
@@ -528,7 +553,16 @@ internal sealed class SynopsisTables : IDisposable
             }
         }
 
-        int kept = path ? distinct : groups;
+        await EmitValuesAsync(slot, arena, column, shape, states, first, path ? distinct : groups, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The value counts of the slice for counted column <paramref name="slot"/>, the states of its <paramref name="kept"/>
+    /// first values in their order and the row that holds each, -1 for a value the slice does not hold, as a run of the hour's.
+    /// </summary>
+    private async ValueTask EmitValuesAsync(
+        int slot, CanonicalArena arena, int column, KeyShape shape, Accumulators states, int[] first, int kept, CancellationToken cancellationToken)
+    {
         Growth? growth = Counts(_values[slot], _valueGrowth[slot]);
         _run.Clear();
         for (int g = 0; g < kept; g++)
