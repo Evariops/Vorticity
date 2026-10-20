@@ -89,7 +89,7 @@ public sealed partial class SynopsisTableTests
             {
                 await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(entry.Value.Span), Ct);
                 IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
-                long bytes = directory.Entries.Where(e => e.Kind == IndexKinds.SynopsisTable).Sum(e => (long)e.Runs[0].Payload[0].Length);
+                long bytes = directory.Entries.Where(e => e.Kind == IndexKinds.SynopsisTable).Sum(e => e.Runs[0].Payload.Sum(chunk => (long)chunk.Length));
                 Assert.InRange(bytes, 0, lease.File.FileLength / 10);
                 Assert.True(level != PeriodLevels.Periods || bytes > 0, "a sealed hour keeps tables");
             }
