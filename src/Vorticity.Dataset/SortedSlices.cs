@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,6 +10,7 @@ using Vorticity.Compute;
 using Vorticity.Indexes;
 using Vorticity.RowEncoding;
 using Vorticity.Types;
+using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
@@ -69,6 +71,19 @@ internal sealed class SortedSlices : IDisposable
         _shapes = shapes is { Count: > 0 } ? shapes : null;
     }
 
+    /// <summary>Where the stages of its slices take their time is added; null for no count.</summary>
+    internal WriteTimings? Timings { get; init; }
+
+    /// <summary>
+    /// The session's lanes a slice is written on, one a slice, and its columns coded and gathered on; null for writes on no
+    /// lane. <see cref="Hold"/>, when set, is the lane of the step that hands the rows over, given back while it waits for
+    /// the slice before to be written.
+    /// </summary>
+    internal LaneBudget? Lanes { get; init; }
+
+    /// <inheritdoc cref="Lanes"/>
+    internal LaneHold? Hold { get; init; }
+
     /// <summary>The order the slices are sorted in: the table's until the first slice settles it.</summary>
     internal IReadOnlyList<int> Order => _order ?? (IReadOnlyList<int>)_table.Order;
 
@@ -106,7 +121,9 @@ internal sealed class SortedSlices : IDisposable
             int take = (int)Math.Min(wanted, rows.RowCount - at);
             RecordBatch part = at == 0 && take == rows.RowCount ? rows : rows.Window(at, take);
             Buffer buffer = _buffers[_filling];
+            long begin = Stopwatch.GetTimestamp();
             buffer.Parts.Add(buffer.Context.Canonical.CopyFrom(part.Arena, part.RootIndex));
+            Timings?.AddCopy(Stopwatch.GetTimestamp() - begin);
             _held += take;
             at += take;
             if (_held == _table.Slices[_slice].Rows)
@@ -119,13 +136,20 @@ internal sealed class SortedSlices : IDisposable
     /// <summary>Whether every slice of the table was handed to its write; <see cref="DrainAsync"/> says when the last is written.</summary>
     internal bool Complete => _slice == _table.Slices.Count && _held == 0;
 
-    /// <summary>Waits for the slice being written, and throws what its write threw.</summary>
+    /// <summary>Waits for the slice being written, on no lane, and throws what its write threw.</summary>
     internal async ValueTask DrainAsync()
     {
         if (_writing is { } writing)
         {
             _writing = null;
-            await writing.ConfigureAwait(false);
+            if (Hold is { } hold)
+            {
+                await hold.WaitAsync(writing, CancellationToken.None).ConfigureAwait(false);
+            }
+            else
+            {
+                await writing.ConfigureAwait(false);
+            }
         }
     }
 
@@ -146,6 +170,12 @@ internal sealed class SortedSlices : IDisposable
         {
             buffer.Dispose();
         }
+
+        if (_fan is { } fan)
+        {
+            _fan = null;
+            WorkFan.Return(fan);
+        }
     }
 
     /// <summary>
@@ -157,23 +187,37 @@ internal sealed class SortedSlices : IDisposable
         Buffer buffer = _buffers[_filling];
         CanonicalArena arena = buffer.Context.Canonical;
         int rows = checked((int)_held);
+        long begin = Stopwatch.GetTimestamp();
         int whole = buffer.Parts.Count == 1
             ? buffer.Parts[0]
             : CanonicalConcat.Concat(buffer.Context.Decode, _schema, rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(buffer.Parts));
+        long joined = Stopwatch.GetTimestamp();
         int sorted = Sort(buffer, whole, rows);
+        long ordered = Stopwatch.GetTimestamp();
 
         // The slice before is written first, and its buffer, the one the next rows go to, let go.
         await DrainAsync().ConfigureAwait(false);
+        Timings?.AddJoin(joined - begin);
+        Timings?.AddSort(ordered - joined);
+        Timings?.AddWait(Stopwatch.GetTimestamp() - ordered);
+        LaneBudget? lanes = Lanes;
         _writing = Task.Run(async () =>
         {
+            // A slice is written on a lane of its own, beside the step that sorts the next.
+            long entered = -1;
             try
             {
+                entered = lanes is null ? -1 : await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
                 using RecordBatch batch = new RecordBatch(arena, sorted, 0);
                 await write(new SortedSlice(batch, buffer.Codes, buffer.PathColumns), cancellationToken).ConfigureAwait(false);
             }
             finally
             {
                 buffer.Clear();
+                if (entered >= 0)
+                {
+                    lanes!.Exit(entered);
+                }
             }
         }, CancellationToken.None);
         _held = 0;
@@ -208,13 +252,7 @@ internal sealed class SortedSlices : IDisposable
         else
         {
             _order ??= [.. _table.Order];
-            columns = new List<(int[], int)>(_order.Count);
-            foreach (int entry in _order)
-            {
-                columns.Add(SynopsisPath.Names(entry)
-                    ? SliceSort.CodesOfColumn(arena, paths[SynopsisPath.Place(entry)], rows)
-                    : SliceSort.CodesOf(arena, node, entry, rows, _shapes));
-            }
+            columns = Coded(arena, node, rows, paths, _order);
         }
 
         int[]? permutation = columns.Count == 0 ? null : SliceSort.Permutation(columns, rows);
@@ -231,31 +269,116 @@ internal sealed class SortedSlices : IDisposable
             return node;
         }
 
-        // Each entry's codes, in the order the rows are sorted in: what the slice's synopsis groups by.
-        if (_gathered.Length < rows)
+        // Each entry's codes, in the order the rows are sorted in: what the slice's synopsis groups by, a column a lane.
+        if (!identity)
         {
-            _gathered = new int[rows];
+            _gather.Columns = columns;
+            _gather.Permutation = permutation;
+            _gather.Rows = rows;
+            if (_gather.Scratch.Length < columns.Count)
+            {
+                Array.Resize(ref _gather.Scratch, columns.Count);
+            }
+
+            Fan.Run(_gather, columns.Count);
+            _gather.Columns = null;
+            _gather.Permutation = null;
         }
 
         foreach ((int[] codes, int _) in columns)
         {
-            if (!identity)
-            {
-                for (int i = 0; i < rows; i++)
-                {
-                    _gathered[i] = codes[permutation[i]];
-                }
-
-                _gathered.AsSpan(0, rows).CopyTo(codes);
-            }
-
             buffer.Codes.Add(codes);
         }
 
-        return identity ? node : CanonicalFilter.Apply(arena, node, permutation);
+        return identity ? node : CanonicalFilter.Apply(arena, node, permutation!);
     }
 
-    private int[] _gathered = [];
+    /// <summary>
+    /// Each entry of <paramref name="order"/>'s codes over the slice: the columns a lane each, every one laid in the arena
+    /// first, the shapes and the paths after them on this thread.
+    /// </summary>
+    private List<(int[] Codes, int Distinct)> Coded(CanonicalArena arena, int node, int rows, int[] paths, IReadOnlyList<int> order)
+    {
+        (int[] Codes, int Distinct)[] coded = new (int[] Codes, int Distinct)[order.Count];
+        int[] columns = new int[order.Count];
+        int fields = 0;
+        for (int k = 0; k < order.Count; k++)
+        {
+            int entry = order[k];
+            columns[k] = entry >= 0 && !SynopsisPath.Names(entry) ? SliceSort.CanonicalOf(arena, node, entry) : -1;
+            fields += columns[k] >= 0 ? 1 : 0;
+        }
+
+        if (fields > 0)
+        {
+            _codes.Arena = arena;
+            _codes.Columns = columns;
+            _codes.Rows = rows;
+            _codes.Results = coded;
+            Fan.Run(_codes, order.Count);
+            _codes.Arena = null;
+            _codes.Results = null;
+        }
+
+        for (int k = 0; k < order.Count; k++)
+        {
+            if (columns[k] < 0)
+            {
+                int entry = order[k];
+                coded[k] = SynopsisPath.Names(entry)
+                    ? SliceSort.CodesOfColumn(arena, paths[SynopsisPath.Place(entry)], rows)
+                    : SliceSort.CodesOf(arena, node, entry, rows, _shapes);
+            }
+        }
+
+        return [.. coded];
+    }
+
+    /// <summary>The lanes of the session's the columns of a slice are coded and gathered on, the calling thread's included.</summary>
+    private WorkFan Fan => _fan ??= WorkFan.Rent(Lanes?.Lanes ?? 1, Lanes);
+
+    private WorkFan? _fan;
+    private readonly ColumnCodes _codes = new ColumnCodes();
+    private readonly CodesGather _gather = new CodesGather();
+
+    /// <summary>The codes of a slice's columns, an item a column, laid in the arena before: an item reads it alone.</summary>
+    private sealed class ColumnCodes : IFanWork
+    {
+        internal CanonicalArena? Arena;
+        internal int[] Columns = [];
+        internal int Rows;
+        internal (int[] Codes, int Distinct)[]? Results;
+
+        public void Run(WorkFan fan, int item)
+        {
+            if (Columns[item] >= 0)
+            {
+                Results![item] = SliceSort.CodesOfCanonical(Arena!, Columns[item], Rows);
+            }
+        }
+    }
+
+    /// <summary>Each column's codes gathered into the rows' sorted order, an item a column, through a scratch of its own.</summary>
+    private sealed class CodesGather : IFanWork
+    {
+        internal List<(int[] Codes, int Distinct)>? Columns;
+        internal int[]? Permutation;
+        internal int Rows;
+        internal int[][] Scratch = [];
+
+        public void Run(WorkFan fan, int item)
+        {
+            int[] codes = Columns![item].Codes;
+            int[] permutation = Permutation!;
+            int[] gathered = Scratch[item] is { } kept && kept.Length >= Rows ? kept : Scratch[item] = new int[Rows];
+            for (int i = 0; i < Rows; i++)
+            {
+                gathered[i] = codes[permutation[i]];
+            }
+
+            gathered.AsSpan(0, Rows).CopyTo(codes);
+        }
+    }
 
     /// <summary>
     /// The rows of a slice the order is measured on, at most: on mixes of columns independent, correlated,

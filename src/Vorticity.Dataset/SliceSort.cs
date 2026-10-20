@@ -167,6 +167,29 @@ internal static class SliceSort
         Codes(arena, EncodedForms.Canonical(arena, RowEncoder.Storage(arena, column)), rows);
 
     /// <summary>
+    /// The canonical node <see cref="CodesOfCanonical"/> codes for field <paramref name="entry"/> of the struct node
+    /// <paramref name="root"/>, its words of validity and bits built: what is laid in the arena before codes are
+    /// counted on several threads, which then only read it.
+    /// </summary>
+    internal static int CanonicalOf(CanonicalArena arena, int root, int entry)
+    {
+        int column = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, arena.GetNode(root).GetFieldIndex(entry)));
+        _ = ArenaWords.Validity(arena, column);
+        if (arena.RecordRef(column).Kind == CanonicalKind.Bool)
+        {
+            _ = ArenaWords.Bits(arena, column);
+        }
+
+        return column;
+    }
+
+    /// <summary>
+    /// <see cref="CodesOf"/> for the canonical column <paramref name="column"/> <see cref="CanonicalOf"/> made: it reads
+    /// the arena and writes nothing to it, so that the columns of a slice are coded on threads of their own.
+    /// </summary>
+    internal static (int[] Codes, int Distinct) CodesOfCanonical(CanonicalArena arena, int column, int rows) => Codes(arena, column, rows);
+
+    /// <summary>
     /// How two rows of a column compare in a slice's order: by value, nulls last. The order
     /// <see cref="CodesOf"/> codes a column in.
     /// </summary>

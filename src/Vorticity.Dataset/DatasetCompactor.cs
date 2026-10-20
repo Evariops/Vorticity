@@ -65,6 +65,30 @@ public sealed record CompactionResult
     public OperationOutcome Outcome { get; init; }
 }
 
+/// <summary>
+/// A period a load writes as its sealed object (<see cref="DatasetCompactor.LoadPeriodsAsync"/>): <paramref name="Period"/>, its
+/// start in the instant's units as the dataset's calendar floors its rows, and <paramref name="Parts"/>, which read its rows in
+/// the order of their instants, a part's after the rows of the part before, each the same rows every time it is called. A
+/// load reads them twice: its parts at once to plan the object, then one after the other to write it.
+/// </summary>
+internal sealed record PeriodRows(long Period, IReadOnlyList<Func<CancellationToken, IAsyncEnumerable<RecordBatch>>> Parts);
+
+/// <summary>A period a load wrote: its start, its rows, its object's bytes, and the version its commit made; no rows, no object.</summary>
+internal readonly record struct LoadedPeriod(long Period, long Rows, long Bytes, ulong Version)
+{
+    /// <summary>The first pass: its rows read and counted, and its object planned.</summary>
+    internal TimeSpan Plan { get; init; }
+
+    /// <summary>The second pass, until its last row is handed to the object.</summary>
+    internal TimeSpan Write { get; init; }
+
+    /// <summary>From its last row to its object put: the last slice, the indexes' merges, the tables, the footer.</summary>
+    internal TimeSpan Finish { get; init; }
+
+    /// <summary>The commit, the wait for the commits of the periods before it included.</summary>
+    internal TimeSpan Commit { get; init; }
+}
+
 /// <summary>Runs one compaction: a k-way merge of the inputs on the clustering key when there is
 /// one, a concatenation otherwise.</summary>
 internal static class DatasetCompactor
@@ -105,6 +129,244 @@ internal static class DatasetCompactor
 
         DatasetTelemetry.CompactionEnded(activity, result);
         return result;
+    }
+
+    /// <summary>
+    /// Writes each period of <paramref name="periods"/> as its sealed object, straight from its rows, as a seal writes it,
+    /// up to <paramref name="degree"/> periods at once, and commits each into the periods level once it is written.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// What a load of finished periods takes in place of their appends: no object of level 0, no fresh merge, and no seal
+    /// that reads again what they wrote, where an incremental build wrote each row three times over on a core or two, a
+    /// day's seal 105 GB at once. Each period's rows are read twice, in the order of their instants: once to plan its
+    /// object, its slices, the order inside them and what its variant columns shred, as a seal's first pass does, then to
+    /// write it in sorted slices with its synopsis tables and its indexes.
+    /// </para>
+    /// <para>
+    /// The periods are the dataset's own, each a start the calendar floors its rows to: their objects hold no row of
+    /// another, and a commit adds each beside those already there, as the outputs of a replacement that reads nothing. The
+    /// dataset keeps the length its header names; a load weighs no period.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">The dataset is not one of periods, or holds rows of a period the load writes.</exception>
+    /// <exception cref="ArgumentException">A period is named twice, does not start a period of the dataset's calendar, or reads rows of another, or out of the order of their instants.</exception>
+    /// <exception cref="DatasetIntegrityException">A period's second read gave other rows than its first.</exception>
+    internal static async Task<IReadOnlyList<LoadedPeriod>> LoadPeriodsAsync(
+        VortexDataset dataset, IReadOnlyList<PeriodRows> periods, int degree, WriteTimings? timings = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataset);
+        ArgumentNullException.ThrowIfNull(periods);
+        if (dataset.Options.Periods is null || dataset.Key is not { } key || key.InstantPath.Contains('.'))
+        {
+            throw new InvalidOperationException("A load of periods writes into a dataset of periods, its instant a top-level column.");
+        }
+
+        DatasetSchema schema = dataset.Snapshot.Schema;
+        TimeUnit unit = PeriodOptions.InstantOf(key);
+        PeriodCalendar calendar = PeriodCalendar.Of(dataset.Snapshot.Header, unit);
+        HashSet<long> starts = [];
+        foreach (PeriodRows period in periods)
+        {
+            if (calendar.Floor(period.Period) != period.Period || !starts.Add(period.Period))
+            {
+                throw new ArgumentException($"The period at {period.Period} is named twice, or starts no period of the dataset's calendar.", nameof(periods));
+            }
+        }
+
+        // Its objects lie beside the others: a period the dataset holds a row of would overlap them.
+        for (int level = 0; level < dataset.Levels.Count; level++)
+        {
+            await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
+            {
+                if (!ObjectEntry.FromBytes(entry.Value.Span).Summaries.TryGet(key.InstantPath, out ColumnSummary instants)
+                    || !instants.HasMin || !instants.HasMax
+                    || starts.Any(start => instants.Min.SignedValue < calendar.Next(start) && instants.Max.SignedValue >= start))
+                {
+                    throw new InvalidOperationException($"The dataset holds rows of a period the load writes, in an object of level {level}.");
+                }
+            }
+        }
+
+        LoadedPeriod[] loaded = new LoadedPeriod[periods.Count];
+        using SemaphoreSlim commits = new SemaphoreSlim(1, 1);
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, periods.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, degree), CancellationToken = cancellationToken },
+            async (index, token) => loaded[index] = await LoadPeriodAsync(dataset, schema, key, calendar, periods[index], commits, timings, token).ConfigureAwait(false))
+            .ConfigureAwait(false);
+        return loaded;
+    }
+
+    /// <summary>One period of a load: planned, written, and committed.</summary>
+    private static async ValueTask<LoadedPeriod> LoadPeriodAsync(
+        VortexDataset dataset, DatasetSchema schema, ClusteringKey key, PeriodCalendar calendar, PeriodRows period, SemaphoreSlim commits,
+        WriteTimings? timings, CancellationToken cancellationToken)
+    {
+        const int Level = PeriodLevels.Periods;
+        long begin = Stopwatch.GetTimestamp();
+        PeriodPlanner planner = await PlanAsync(dataset, schema, key, calendar.Unit, period, cancellationToken).ConfigureAwait(false);
+        long rows = planner.RowsOf(Level, period.Period);
+        if (rows == 0)
+        {
+            return new LoadedPeriod(period.Period, 0, 0, 0);
+        }
+
+        long planned = Stopwatch.GetTimestamp();
+        long fed = planned;
+
+        // The counts hold the rows in the order of their instants; the first and the last say whether they are the period's.
+        (long first, long last) = planner.SecondsOf(Level, period.Period);
+        if (calendar.Floor(first) != period.Period || calendar.Floor(last) != period.Period)
+        {
+            throw new ArgumentException(
+                $"The period at {period.Period} reads rows of the periods at {calendar.Floor(first)} to {calendar.Floor(last)}: a load writes each period's rows alone.", nameof(period));
+        }
+
+        // The step that hands the rows over computes on a lane of the session's, which it gives back while it waits for a
+        // slice to be written, each slice written on a lane of its own.
+        LaneHold hold = new LaneHold(dataset.Session.WriteLanes);
+        ObjectStream outputs = new ObjectStream(
+            dataset, schema, target: long.MaxValue, firstRow: 0, inKeyOrder: false, rowBound: rows, Level, byteBound: -1)
+        {
+            Plans = planner.Plans(),
+            InstantPath = key.InstantPath,
+            Timings = timings,
+            Hold = hold,
+        };
+        long written = 0;
+        try
+        {
+            await hold.EnterAsync(cancellationToken).ConfigureAwait(false);
+            await outputs.RouteAsync(Level, period.Period, cancellationToken).ConfigureAwait(false);
+            foreach (Func<CancellationToken, IAsyncEnumerable<RecordBatch>> part in period.Parts)
+            {
+                // The time between two batches handed over is the caller's: what its rows took to come.
+                long asked = Stopwatch.GetTimestamp();
+                await foreach (RecordBatch batch in part(cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    long came = Stopwatch.GetTimestamp();
+                    timings?.AddFeed(came - asked);
+                    await outputs.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                    written += batch.RowCount;
+                    asked = Stopwatch.GetTimestamp();
+                }
+            }
+
+            fed = Stopwatch.GetTimestamp();
+            await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await outputs.AbandonAsync().ConfigureAwait(false);
+            throw;
+        }
+        finally
+        {
+            hold.Exit();
+        }
+
+        if (written != rows)
+        {
+            throw new DatasetIntegrityException(
+                $"The period at {period.Period} read {rows} row(s) to plan its object and {written} to write it: a load reads the same rows twice.");
+        }
+
+        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = [];
+        for (int i = 0; i < outputs.Written.Count; i++)
+        {
+            produced.Add((outputs.Levels[i], outputs.Written[i].Key, outputs.Written[i].Entry));
+        }
+
+        long finished = Stopwatch.GetTimestamp();
+        CommitResult commit;
+        await commits.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            commit = await dataset.CommitAsync(
+                [new DatasetOperation.ReplaceObjects([], produced)], CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            commits.Release();
+        }
+
+        return new LoadedPeriod(period.Period, rows, outputs.Bytes, commit.Version)
+        {
+            Plan = Stopwatch.GetElapsedTime(begin, planned),
+            Write = Stopwatch.GetElapsedTime(planned, fed),
+            Finish = Stopwatch.GetElapsedTime(fed, finished),
+            Commit = Stopwatch.GetElapsedTime(finished),
+        };
+    }
+
+    /// <summary>
+    /// The first pass of a load's period: its parts counted at once, each by a planner of its own, and the counts merged in
+    /// the parts' order into the plan one count of every row would make; one part after the other when a variant column's
+    /// census, which follows its rows in their order, has to count them.
+    /// </summary>
+    private static async ValueTask<PeriodPlanner> PlanAsync(
+        VortexDataset dataset, DatasetSchema schema, ClusteringKey key, TimeUnit unit, PeriodRows period, CancellationToken cancellationToken)
+    {
+        const int Level = PeriodLevels.Periods;
+        LaneBudget lanes = dataset.Session.WriteLanes;
+        PeriodPlanner planner = new PeriodPlanner(dataset, schema, key, unit);
+        if (period.Parts.Count == 1 || !planner.Merges)
+        {
+            long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                foreach (Func<CancellationToken, IAsyncEnumerable<RecordBatch>> part in period.Parts)
+                {
+                    await foreach (RecordBatch batch in part(cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
+                    {
+                        planner.Add(Level, period.Period, batch);
+                    }
+                }
+            }
+            finally
+            {
+                lanes.Exit(entered);
+            }
+
+            return planner;
+        }
+
+        // Each part is counted on a lane of the session's: as many at once as the lanes the other writes leave.
+        PeriodPlanner[] parts = new PeriodPlanner[period.Parts.Count];
+        Task[] counted = new Task[parts.Length];
+        for (int index = 0; index < parts.Length; index++)
+        {
+            int at = index;
+            counted[index] = Task.Run(
+                async () =>
+                {
+                    long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        PeriodPlanner part = new PeriodPlanner(dataset, schema, key, unit);
+                        await foreach (RecordBatch batch in period.Parts[at](cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
+                        {
+                            part.Add(Level, period.Period, batch);
+                        }
+
+                        parts[at] = part;
+                    }
+                    finally
+                    {
+                        lanes.Exit(entered);
+                    }
+                },
+                cancellationToken);
+        }
+
+        await Task.WhenAll(counted).ConfigureAwait(false);
+        foreach (PeriodPlanner part in parts)
+        {
+            planner.Merge(part);
+        }
+
+        return planner;
     }
 
     /// <summary>The job's rows read, merged or concatenated, written, and its replacement committed.</summary>
@@ -575,12 +837,7 @@ internal static class DatasetCompactor
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
     {
         PeriodCut cut = job.Cut!;
-        string instant = key.InstantPath;
-        long target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
-        int[] candidates = SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers);
-        int[] variants = VariantColumns(schema.DType);
-        int textBound = dataset.Options.Write.StringBoundBytes;
-        Dictionary<(int, long), (SecondCounts Seconds, CardinalitySketch[] Sketches, PathCensus[] Paths)> tallies = [];
+        PeriodPlanner planner = new PeriodPlanner(dataset, schema, key, cut.Unit);
         List<Cut> cuts = [];
         KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
         await using (merge.ConfigureAwait(false))
@@ -588,66 +845,153 @@ internal static class DatasetCompactor
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
                 RecordBatch run = merge.Current;
-                CutRun(run, instant, cut, job.ToLevel, cuts);
+                CutRun(run, key.InstantPath, cut, job.ToLevel, cuts);
                 int at = 0;
                 foreach ((int end, int level, long period) in cuts)
                 {
-                    if (!tallies.TryGetValue((level, period), out var tally))
-                    {
-                        tally = (new SecondCounts(cut.Unit), [.. candidates.Select(static _ => new CardinalitySketch())], [.. variants.Select(_ => new PathCensus(textBound, target))]);
-                        tallies[(level, period)] = tally;
-                    }
-
-                    RecordBatch part = at == 0 && end == run.RowCount ? run : run.Window(at, end - at);
-                    ReadOnlySpan<long> instants = Instants(part, instant);
-                    tally.Seconds.Add(instants);
-                    SynopsisOrder.Count(part, candidates, tally.Sketches);
-                    for (int v = 0; v < variants.Length; v++)
-                    {
-                        tally.Paths[v].Add(part, variants[v], instants);
-                    }
-
+                    planner.Add(level, period, at == 0 && end == run.RowCount ? run : run.Window(at, end - at));
                     at = end;
                 }
             }
         }
 
-        Dictionary<(int Level, long Period), ObjectPlan> plans = [];
-        foreach (((int level, long period), (SecondCounts seconds, CardinalitySketch[] sketches, PathCensus[] paths)) in tallies)
+        return planner.Plans();
+    }
+
+    /// <summary>
+    /// The first pass of a write of a dataset of periods, over rows in the order of their instants, each object it writes
+    /// told apart by its level and its period: the object's rows per second, the distinct values of the columns that may
+    /// be synopsis columns, and the paths of its variant columns; then each object's plan, from what its rows counted,
+    /// before a row is written. A seal's first pass feeds it the rows its inputs merge into, a load of periods the rows
+    /// it is given.
+    /// </summary>
+    private sealed class PeriodPlanner
+    {
+        private readonly VortexDataset _dataset;
+        private readonly DatasetSchema _schema;
+        private readonly string _instant;
+        private readonly TimeUnit _unit;
+        private readonly long _target;
+        private readonly int[] _candidates;
+        private readonly int[] _variants;
+        private readonly int _textBound;
+        private readonly Dictionary<(int Level, long Period), (SecondCounts Seconds, CardinalitySketch[] Sketches, PathCensus[] Paths)> _tallies = [];
+
+        internal PeriodPlanner(VortexDataset dataset, DatasetSchema schema, ClusteringKey key, TimeUnit unit)
         {
-            (int, long)[] counted = new (int, long)[candidates.Length];
-            for (int i = 0; i < candidates.Length; i++)
-            {
-                counted[i] = (candidates[i], sketches[i].Estimate());
-            }
-
-            // Each variant column shreds what its rows in the object pay for, in chunks of its own, and
-            // lists every path and class they hold, shredded or not, with the slices that hold it.
-            SliceTable table = new SliceTable(cut.Unit, TimeSlicer.Cut(seconds.Seconds, cut.Unit, target), SynopsisOrder.Choose(counted, seconds.Rows));
-            ImmutableDictionary<string, VariantShredding> shredded = ImmutableDictionary<string, VariantShredding>.Empty;
-            ImmutableDictionary<string, int> chunks = ImmutableDictionary<string, int>.Empty;
-            ImmutableDictionary<string, VariantDirectory> directories = ImmutableDictionary<string, VariantDirectory>.Empty;
-            for (int v = 0; v < variants.Length; v++)
-            {
-                string name = schema.DType.GetFieldName(variants[v]);
-                VariantShredding? chosen = ShreddingChoice.Choose(paths[v], required: IdentifierKeys(dataset, schema.DType, variants[v]));
-                if (chosen is not null)
-                {
-                    shredded = shredded.SetItem(name, chosen);
-                    chunks = chunks.SetItem(name, ShreddingChoice.ChunkTargetBytes(paths[v]));
-                }
-
-                directories = directories.SetItem(name, VariantDirectory.From(paths[v], chosen, table.Slices));
-            }
-
-            plans[(level, period)] = new ObjectPlan(
-                new SliceTable(table.Unit, table.Slices, table.Order, SynopsisPaths(schema.DType, variants, paths, shredded)),
-                shredded,
-                chunks,
-                directories);
+            _dataset = dataset;
+            _schema = schema;
+            _instant = key.InstantPath;
+            _unit = unit;
+            _target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
+            _candidates = SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers);
+            _variants = VariantColumns(schema.DType);
+            _textBound = dataset.Options.Write.StringBoundBytes;
         }
 
-        return plans;
+        /// <summary>Counts the rows of <paramref name="part"/>, every one of which goes to the object of <paramref name="level"/> and <paramref name="period"/>.</summary>
+        internal void Add(int level, long period, RecordBatch part)
+        {
+            if (!_tallies.TryGetValue((level, period), out var tally))
+            {
+                tally = (new SecondCounts(_unit), [.. _candidates.Select(static _ => new CardinalitySketch())], [.. _variants.Select(_ => new PathCensus(_textBound, _target))]);
+                _tallies[(level, period)] = tally;
+            }
+
+            ReadOnlySpan<long> instants = Instants(part, _instant);
+            tally.Seconds.Add(instants);
+            SynopsisOrder.Count(part, _candidates, tally.Sketches);
+            for (int v = 0; v < _variants.Length; v++)
+            {
+                tally.Paths[v].Add(part, _variants[v], instants);
+            }
+        }
+
+        /// <summary>
+        /// Whether a planner's counts merge into another's (<see cref="Merge"/>): with no variant column, whose census
+        /// counts the slices that hold each path as the rows come.
+        /// </summary>
+        internal bool Merges => _variants.Length == 0;
+
+        /// <summary>
+        /// Counts what <paramref name="later"/> counted, of the same schema, every row of which follows the rows of the same
+        /// object counted here: the counts one planner of every row would hold, since a sketch merged holds the registers of
+        /// the values of both.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The schema has a variant column.</exception>
+        internal void Merge(PeriodPlanner later)
+        {
+            if (!Merges)
+            {
+                throw new InvalidOperationException("A planner of variant columns counts their paths in the order of the rows: it merges no other.");
+            }
+
+            foreach (((int level, long period), (SecondCounts seconds, CardinalitySketch[] sketches, PathCensus[] _)) in later._tallies)
+            {
+                if (!_tallies.TryGetValue((level, period), out var tally))
+                {
+                    _tallies[(level, period)] = later._tallies[(level, period)];
+                    continue;
+                }
+
+                tally.Seconds.Append(seconds);
+                for (int i = 0; i < sketches.Length; i++)
+                {
+                    tally.Sketches[i].Merge(sketches[i]);
+                }
+            }
+        }
+
+        /// <summary>The rows counted for the object of <paramref name="level"/> and <paramref name="period"/>.</summary>
+        internal long RowsOf(int level, long period) => _tallies.TryGetValue((level, period), out var tally) ? tally.Seconds.Rows : 0;
+
+        /// <summary>The first and the last second the object of <paramref name="level"/> and <paramref name="period"/> holds a row in; it holds one.</summary>
+        internal (long First, long Last) SecondsOf(int level, long period)
+        {
+            ReadOnlySpan<SecondCount> seconds = _tallies[(level, period)].Seconds.Seconds;
+            return (seconds[0].Start, seconds[^1].Start);
+        }
+
+        /// <summary>Each object's plan, by level and period: its slices and the order inside them, what each variant column shreds, and each one's path directory.</summary>
+        internal IReadOnlyDictionary<(int Level, long Period), ObjectPlan> Plans()
+        {
+            Dictionary<(int Level, long Period), ObjectPlan> plans = [];
+            foreach (((int level, long period), (SecondCounts seconds, CardinalitySketch[] sketches, PathCensus[] paths)) in _tallies)
+            {
+                (int, long)[] counted = new (int, long)[_candidates.Length];
+                for (int i = 0; i < _candidates.Length; i++)
+                {
+                    counted[i] = (_candidates[i], sketches[i].Estimate());
+                }
+
+                // Each variant column shreds what its rows in the object pay for, in chunks of its own, and
+                // lists every path and class they hold, shredded or not, with the slices that hold it.
+                SliceTable table = new SliceTable(_unit, TimeSlicer.Cut(seconds.Seconds, _unit, _target), SynopsisOrder.Choose(counted, seconds.Rows));
+                ImmutableDictionary<string, VariantShredding> shredded = ImmutableDictionary<string, VariantShredding>.Empty;
+                ImmutableDictionary<string, int> chunks = ImmutableDictionary<string, int>.Empty;
+                ImmutableDictionary<string, VariantDirectory> directories = ImmutableDictionary<string, VariantDirectory>.Empty;
+                for (int v = 0; v < _variants.Length; v++)
+                {
+                    string name = _schema.DType.GetFieldName(_variants[v]);
+                    VariantShredding? chosen = ShreddingChoice.Choose(paths[v], required: IdentifierKeys(_dataset, _schema.DType, _variants[v]));
+                    if (chosen is not null)
+                    {
+                        shredded = shredded.SetItem(name, chosen);
+                        chunks = chunks.SetItem(name, ShreddingChoice.ChunkTargetBytes(paths[v]));
+                    }
+
+                    directories = directories.SetItem(name, VariantDirectory.From(paths[v], chosen, table.Slices));
+                }
+
+                plans[(level, period)] = new ObjectPlan(
+                    new SliceTable(table.Unit, table.Slices, table.Order, SynopsisPaths(_schema.DType, _variants, paths, shredded)),
+                    shredded,
+                    chunks,
+                    directories);
+            }
+
+            return plans;
+        }
     }
 
     /// <summary>
@@ -943,6 +1287,15 @@ internal static class DatasetCompactor
         /// <summary>The partition every input holds, which every output then holds; null without one.</summary>
         internal Vorticity.Expressions.FilterLiteral[]? Partition { get; init; }
 
+        /// <summary>Where the stages of its sorted slices take their time is added; null for no count.</summary>
+        internal WriteTimings? Timings { get; init; }
+
+        /// <summary>
+        /// The lane of the step that hands the rows over, which its sorted slices give back while it waits for the one before to
+        /// be written, each of them written on a lane of the session's own; null for a write on no lane.
+        /// </summary>
+        internal LaneHold? Hold { get; init; }
+
         // The slices of the object being written, sorted as they fill; null without plans.
         private SortedSlices? _sorter;
         private SliceTable? _table;
@@ -1011,7 +1364,12 @@ internal static class DatasetCompactor
                 {
                     _table = plan.Slices;
                     int instant = _schema.DType.IndexOfField(InstantPath!);
-                    _sorter = new SortedSlices(_table, instant, _schema.DType, Shapes(plan.Shredded));
+                    _sorter = new SortedSlices(_table, instant, _schema.DType, Shapes(plan.Shredded))
+                    {
+                        Timings = Timings,
+                        Lanes = _dataset.Session.WriteLanes,
+                        Hold = Hold,
+                    };
 
                     // The synopsis's tables, counted from each slice as it is sorted, their chunks held by the writer.
                     _synopsis = new SynopsisTables(
@@ -1066,14 +1424,18 @@ internal static class DatasetCompactor
         /// <summary>A slice sorted, counted into the synopsis and written: on the sorter's thread for writes, one slice at a time.</summary>
         private async ValueTask WriteSortedAsync(SortedSlice sorted, CancellationToken cancellationToken)
         {
+            long begin = Stopwatch.GetTimestamp();
             if (_synopsis is { } synopsis)
             {
                 await synopsis.AddSliceAsync(
                     sorted.Batch, _table!.Slices[_slice].Start, _sorter!.Order, sorted.Codes, sorted.PathColumns, _sorter.CountedPaths, cancellationToken).ConfigureAwait(false);
             }
 
+            long counted = Stopwatch.GetTimestamp();
             _slice++;
             await _draft!.Writer.WriteBatchAsync(sorted.Batch, cancellationToken).ConfigureAwait(false);
+            Timings?.AddSynopsis(counted - begin);
+            Timings?.AddWrite(Stopwatch.GetTimestamp() - counted);
         }
 
         // The tables of the object's synopsis as its slices are sorted, and the next slice's index.
