@@ -503,7 +503,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             }
 
             requests.Complete();
-            SynopsisTableSet set = Decoded(context, wanted, requests, Contexts, reads);
+            SynopsisTableSet set = Decoded(context, wanted, requests, Contexts, reads, verified: true);
             set.Types = contents.TableRowTypes.Arena;
             kept = true;
             return set;
@@ -619,7 +619,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             }
 
             await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            SynopsisTableSet set = Decoded(context, wanted, requests, pool, reads);
+            SynopsisTableSet set = Decoded(context, wanted, requests, pool, reads, verified: false);
             kept = true;
             return set;
         }
@@ -640,9 +640,11 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// <summary>
     /// The chunks of <paramref name="wanted"/>, read into <paramref name="requests"/>, each decoded into <paramref name="context"/>'s
     /// arena at its table's row type, only the fields <paramref name="reads"/> names of it; a chunk whose region does not hold
-    /// its checksum, or does not decode, is left out.
+    /// its checksum, or does not decode, is left out. The checksums of regions the synopsis cache served, which verified
+    /// them, are not reckoned again (<paramref name="verified"/>).
     /// </summary>
-    private static SynopsisTableSet Decoded(ScanContext context, Wanted[] wanted, IO.SegmentRequestSet requests, ScanContexts? pool, ISynopsisReads? reads)
+    private static SynopsisTableSet Decoded(
+        ScanContext context, Wanted[] wanted, IO.SegmentRequestSet requests, ScanContexts? pool, ISynopsisReads? reads, bool verified)
     {
         ReadTable[] tables = new ReadTable[wanted.Length];
         int read = 0;
@@ -650,7 +652,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         {
             (SynopsisTableInfo table, TableChunk chunk, DType row, int slot) = wanted[i];
             Buffers.VortexBuffer bytes = requests.GetBuffer(slot);
-            if (!chunk.Region.Holds(bytes.Span))
+            if (!verified && !chunk.Region.Holds(bytes.Span))
             {
                 continue;
             }

@@ -655,7 +655,10 @@ other writer changes while it does, as the system refuses to write a mapped file
 read, a read of the system's cache costing less, and a file cut short under a mapping faulting its
 reader where a read finds it torn. Every read from the disk
 checks the checksum, and a region that fails it is dropped, its mapping let go, and read again from the
-store. Questions that miss the same region at once wait for one read.
+store; a mapping checks it once, its bytes holding it for every next read of the same mapping, which
+no writer changes: a region hashed at each read, then again by the decode of its rows, took a sixth
+of a question at sixteen lanes, whose reads of the disk's cache contend for the memory's bandwidth
+(11 ms a question against 5.7 once). Questions that miss the same region at once wait for one read.
 
 A sealed object leaves no plaintext on the disk. The cache keeps the bytes the store holds: the
 object's trailer, which names its data key wrapped and its epochs, and the frames that hold a region its

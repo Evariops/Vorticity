@@ -166,10 +166,14 @@ public sealed class SynopsisCache : IDisposable
             bool held;
             try
             {
+                // Its bytes verified once a mapping: no one writes a file mapped, which Windows refuses, so a region its
+                // checksum held holds it at every next read of the same mapping, where each read hashed it again, a sixth
+                // of a question at sixteen lanes; a file mapped again, once let go, is verified again.
                 VortexBuffer view = map.View(0, length, region.AlignmentExponent);
-                held = region.Holds(view.Span);
+                held = ReferenceEquals(entry.Verified, map) || region.Holds(view.Span);
                 if (held)
                 {
+                    entry.Verified = map;
                     owner = new IO.SliceSegmentOwner(map, view);
                 }
             }
@@ -929,5 +933,8 @@ public sealed class SynopsisCache : IDisposable
 
         /// <summary>Its file mapped, while its handle is kept open: what a region read is a view of; null before.</summary>
         internal IO.MappedFileOwner? Map { get; set; }
+
+        /// <summary>The mapping whose bytes a read found to hold their region's checksum; null before one did.</summary>
+        internal IO.MappedFileOwner? Verified { get; set; }
     }
 }
