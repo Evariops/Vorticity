@@ -241,6 +241,7 @@ if (Text(args, "--micro") == "paths")
         NoDigest = args.Contains("--no-digest"),
         MaxReads = Option(args, "--max-reads", 0),
         KeepHandles = args.Contains("--keep-handles"),
+        WarmSeconds = args.Contains("--warm") ? double.Parse(Text(args, "--warm")!, CultureInfo.InvariantCulture) : 3,
     });
 }
 

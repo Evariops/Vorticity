@@ -105,6 +105,9 @@ internal static class PathsBench
         /// <summary>Whether the store keeps each object it reads open (<see cref="HeldFileObjectStore"/>) rather than open and close its file at every read.</summary>
         internal bool KeepHandles { get; init; }
 
+        /// <summary>How long each question is asked untimed before its warm rounds, its code compiled past the JIT's first tier.</summary>
+        internal double WarmSeconds { get; init; } = 3;
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }
@@ -373,7 +376,12 @@ internal static class PathsBench
                 return (cold, default);
             }
 
-            if (settings.Temperatures is "warm")
+            // Untimed asks before the timed rounds, for as long as --warm says: a question of a few milliseconds asked a
+            // few times after its cold round ran the JIT's first tier still, 25.3 ms a round where it takes 6.6 ms
+            // compiled (one host per minute over probe7, 2026-10-20), and 23.7 ms after a second of asks, 6.1 after
+            // three. Once at least where no cold round came first.
+            long warmUntil = Stopwatch.GetTimestamp() + (long)(settings.WarmSeconds * Stopwatch.Frequency);
+            for (bool once = settings.Temperatures is "warm"; once || Stopwatch.GetTimestamp() < warmUntil; once = false)
             {
                 await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
             }
