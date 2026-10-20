@@ -147,6 +147,7 @@ internal static class PathsBench
         if (settings.Explain)
         {
             await TablesAsync(requests);
+            await TablesAsync(logs);
         }
 
         DateTimeOffset end = QuestionBench.Start.AddHours(settings.Hours);
