@@ -54,11 +54,12 @@ internal sealed class FlatLayoutReader : LayoutReader
             return;
         }
 
-        // A chunk of a variant read through some shredded keys alone: their ranges, not the segment.
+        // A chunk of a variant read through some shredded keys alone: their ranges, not the segment. One read for keys
+        // its shredding does not hold reads its segment as any.
         if (segments.VariantKeys is { } reads)
         {
             SegmentSpec spec = SpecOf(in node, 0);
-            if (reads.Find(spec.Offset, spec.Length) is { } chunk)
+            if (reads.Find(spec.Offset, spec.Length) is { Residual: false } chunk)
             {
                 chunk.Register(segments);
                 return;
@@ -95,16 +96,36 @@ internal sealed class FlatLayoutReader : LayoutReader
         int total = NodeLength(in node);
         int length = BatchLength(rows);
 
-        // A chunk of a variant read through some shredded keys alone, each decoded from its range.
+        // A chunk of a variant read through some shredded keys alone, each decoded from its range; one read for keys its
+        // shredding does not hold, decoded as any chunk, its variant giving its residual alone.
         if (context.VariantKeys is { } reads && !node.Bufferless)
         {
             SegmentSpec spec = SpecOf(in node, 0);
             if (reads.Find(spec.Offset, spec.Length) is { } chunk && chunk.Rows == total)
             {
-                return ExecuteKeys(in node, rows, in fields, context, chunk, total, length);
+                if (!chunk.Residual)
+                {
+                    return ExecuteKeys(in node, rows, in fields, context, chunk, total, length);
+                }
+
+                context.Decode.ResidualNext = true;
+                try
+                {
+                    return ExecuteChunk(in node, rows, in fields, context, total, length);
+                }
+                finally
+                {
+                    context.Decode.ResidualNext = false;
+                }
             }
         }
 
+        return ExecuteChunk(in node, rows, in fields, context, total, length);
+    }
+
+    /// <summary>The batch's rows of a chunk read as an array: decoded, retained or sliced, as the batch asks.</summary>
+    private int ExecuteChunk(in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, int total, int length)
+    {
         // The blob is loaded where it is read, not on the way past. Parsing it means copying the
         // array flatbuffer into a node arena, walking the node tree and resolving every buffer spec
         // in the segment; the parse is kept for the next batch that holds the same bytes, and a

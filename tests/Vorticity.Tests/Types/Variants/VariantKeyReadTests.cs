@@ -1,7 +1,7 @@
 // Questions over the shredded keys of a variant column, read through the path map: every key read
 // alone from its own ranges, decoded as a column, no variant rebuilt. The same questions over the
 // same rows written whole give the same answers, and a question on one key reads none of the bytes
-// of the column's other keys.
+// of the column's other keys. A key no chunk shreds is read from the chunks' residuals alone.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -133,6 +133,47 @@ public sealed partial class VariantKeyReadTests
         Assert.True(read < bytes.Length / 2, $"{read} bytes read of a file of {bytes.Length}");
     }
 
+    /// <summary>
+    /// A key no chunk shreds, read as stored, converted, for its presence and under a filter: each chunk gives
+    /// its residual alone, the keys it shreds neither decoded nor put back, and every answer is the rows'
+    /// written whole; asked beside a key the chunks shred, or on a file written whole, no chunk does.
+    /// </summary>
+    [Fact]
+    public async Task AKeyNoChunkShredsIsReadFromTheResidualsAlone()
+    {
+        Doc[] rows = Rows();
+        await using VortexFile shredded = await OpenAsync(await WriteAsync(rows, Plan), out _);
+        await using VortexFile whole = await OpenAsync(await WriteAsync(rows, null), out _);
+        long?[] others = [.. rows.Select(r => r.Attributes.Kind == VariantKind.Object ? r.Attributes["other"]?.AsInt64() : null)];
+
+        foreach (VortexFile file in new[] { shredded, whole })
+        {
+            bool residuals = ReferenceEquals(file, shredded);
+            Scan<Doc> stored = file.Scan<Doc>();
+            Assert.Equal(others, await stored.Select(r => r.Attributes["other"].AsInt64()).ToListAsync(Ct));
+            Assert.Equal(residuals, stored.Counters.ResidualChunks > 0);
+
+            Scan<Doc> converted = file.Scan<Doc>();
+            Assert.Equal(others, await converted.Select(r => r.Attributes["other"].ToInt64()).ToListAsync(Ct));
+            Assert.Equal(residuals, converted.Counters.ResidualChunks > 0);
+
+            Assert.Equal(others.Count(other => other is not null), await file.Scan<Doc>().Where(r => r.Attributes.Has("other")).CountAsync(Ct));
+
+            Scan<Doc> filtered = file.Scan<Doc>();
+            Assert.Equal(
+                rows.Where((_, i) => others[i] >= 4_000).Select(r => r.Id),
+                await filtered.Where(r => r.Attributes["other"].AsInt64() >= 4_000).Select(r => r.Id).ToListAsync(Ct));
+            Assert.Equal(residuals, filtered.Counters.ResidualChunks > 0);
+        }
+
+        // Beside a key the chunks shred, each chunk is put back together, as before.
+        Scan<Doc> both = shredded.Scan<Doc>();
+        Assert.Equal(
+            rows.Select(r => r.Attributes.Kind == VariantKind.Object ? new OtherRoute(r.Attributes["other"]?.AsInt64(), r.Attributes["route"]?.AsString()) : new OtherRoute(null, null)),
+            await both.Select(r => (r.Attributes["other"].AsInt64(), r.Attributes["route"].AsString())).As<OtherRoute>().ToRecordsAsync(Ct).ToListAsync(Ct));
+        Assert.Equal(0, both.Counters.ResidualChunks);
+    }
+
     private static Doc[] Rows()
     {
         Random random = new Random(8);
@@ -182,4 +223,7 @@ public sealed partial class VariantKeyReadTests
 
     [VortexRecord]
     public partial record struct RouteSum(string? Route, long Rows, long Statuses);
+
+    [VortexRecord]
+    public partial record struct OtherRoute(long? Other, string? Route);
 }

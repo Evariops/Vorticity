@@ -225,6 +225,7 @@ rows and the 640 rows of one object when one of its rows holds a float.
 | a range on a shredded path whose values the order scatters, such as a duration | the path's typed column in every chunk that holds it | block statistics kept where they prune, those that prune least dropped first under the budget ([columns nothing summarizes](20-time-window-aggregates.md#55-columns-nothing-summarizes)) | the path's bytes, as for a declared column |
 | rows not yet out of level 0, which appends write unshredded | every variant of those rows parsed, for any path: eight appends of three seconds hold 1.2 × 10⁶ rows, about 120 MB of attributes and 60 to 120 ms of one core to parse, spread over the lanes (estimate) | the compaction loop shreds them as they leave level 0, and each query node keeps a shredded copy of an object of level 0 until it leaves | a parse per node and per object of level 0, and more behind a lagging loop |
 | an object at its column budget | the paths left over stay in the residual | the paths that pay least are the ones left | their rows' residual |
+| a question over keys no chunk shreds | each chunk's segment, its residual parsed | the chunk gives its residual alone, the keys it shreds neither decoded nor put back, three times faster over log records | the residual's parse |
 | many whole rows shown | a take per shredded column of each row's shape | rows of one shape read the same columns | in proportion to the rows and their paths |
 | text searched in every attribute at once | every text column of every shape, and the residual | trigram indexes per column | inherent to a search with no key |
 | a comparison across types (`"200"` against 200) | both representations of the path | the question names the conversion it means, `ToInt64()`, and `As…` never converts | rows of the type that is not shredded |
@@ -252,6 +253,7 @@ rows and the 640 rows of one object when one of its rows holds a float.
 | the synopsis counts a path exactly, shredded or not | every value count and table of a path equals the count of the parsed live rows that hold it, at every version of a schedule of appends, deletes and compactions (`SynopsisPathTests`) |
 | nulls cost what they hold | a validity of two runs written as runs, and Rust reads it back (`ShreddedVariantWriteTests`) |
 | a chunk shreds what it holds | each chunk's tree holds its rows' keys alone, and keyed reads serve the chunks that lack one (`VariantKeyReadTests`) |
+| a key in the residual puts nothing back | a key no chunk shreds, read as stored, converted and under a filter, from the residuals alone, answers as on the rows written whole; beside a shredded key, the chunks are put back as before (`VariantKeyReadTests`) |
 | keys that are data are counted | four hundred user keys among others, at every append and compaction, appended and written objects alike (`VariantDiscoveryTests`) |
 | a path with dots stays one key | `http.route` and `http` holding `route` are two paths, in an index policy, the tool path and a plan |
 

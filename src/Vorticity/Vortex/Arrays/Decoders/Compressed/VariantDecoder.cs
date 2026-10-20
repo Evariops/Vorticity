@@ -65,6 +65,7 @@ internal sealed class VariantDecoder : ArrayDecoder
     {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         VariantMetadata metadata = VariantMetadata.Read(node.Metadata);
+        bool residual = context.TakeResidual();
 
         if (dtype.Kind != DTypeKind.Variant)
         {
@@ -86,7 +87,15 @@ internal sealed class VariantDecoder : ArrayDecoder
             return core;
         }
 
+        // A chunk read for keys its shredding does not hold gives its residual alone, where such a key lies and nowhere
+        // else: putting the shredded keys back, row by row, took two thirds of a question over one key of the residual.
         DType shreddedType = DTypeProtobuf.Read(metadata.ShreddedDType, context.Types);
+        if (residual && context.Scan.VariantKeys is { } reads && reads.LeavesUnshredded(shreddedType))
+        {
+            context.Scan.Metrics?.AddResidualChunk();
+            return core;
+        }
+
         int shredded = selective
             ? context.DecodeChildSelected(in node, 1, shreddedType, length, wanted)
             : context.DecodeChild(in node, 1, shreddedType, length);

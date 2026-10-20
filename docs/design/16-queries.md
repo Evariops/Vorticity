@@ -346,6 +346,9 @@ shredded key's block statistics kill the blocks they refute, and a Bloom filter 
 a key in its class probe it ([10-indexes.md, the variant's kinds](10-indexes.md#45-vorticityvariantpathsv1-where-each-shredded-key-of-a-variant-lies)).
 A key an object shreds is read from its typed column through the chunk's path map, without the bytes
 of the other keys, and a key left in the residual is parsed from the rows of the shapes that hold it.
+A key no chunk of the object shreds is parsed from each chunk's residual alone, the keys the chunk
+shreds neither decoded nor put back into its rows: a question over such a key of 36 000 log records
+took 6.6 ms of a core, two thirds of it putting the shredded keys back, against 2.2.
 A dataset's synopsis counts a shredded path as a column, so a question that groups or filters by it
 answers from the tables ([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
 The keys a window holds, with their counts, are the union of its objects' path directories.

@@ -89,6 +89,16 @@ internal sealed class ScanCounters
 
     internal void AddAnsweredPart() => Interlocked.Increment(ref _answeredParts);
 
+    private long _residualChunks;
+
+    /// <summary>
+    /// Chunks of variant columns read for keys their shredding does not hold, decoded through their residual alone: the
+    /// keys they shred neither decoded nor put back into their rows.
+    /// </summary>
+    public long ResidualChunks => Interlocked.Read(ref _residualChunks);
+
+    internal void AddResidualChunk() => Interlocked.Increment(ref _residualChunks);
+
     /// <summary>The first instant of the window a scan aligned to its slices answered; null when it aligned none.</summary>
     public System.DateTimeOffset? WindowFrom { get; internal set; }
 

@@ -27,6 +27,10 @@ internal sealed class ArrayDecodeContext
     private bool _keepNext;
     private bool _keepHere;
 
+    // Whether the variant of the chunk a flat layout decodes now may give its residual alone; taken by that variant's
+    // decoder, so that none below it does, and cleared by the reader after the decode.
+    private bool _residualNext;
+
     internal ArrayDecodeContext(ScanContext scan)
     {
         _scan = scan;
@@ -914,6 +918,25 @@ internal sealed class ArrayDecodeContext
         _depth = 0;
         _keepNext = false;
         _keepHere = false;
+        _residualNext = false;
+    }
+
+    /// <summary>
+    /// Lets the variant of the chunk a flat layout decodes next give its residual alone, when its shredding holds none
+    /// of the keys the scan reads from residuals (<see cref="Indexes.VariantKeyReads.LeavesUnshredded"/>); false
+    /// clears it, which the reader does after the decode.
+    /// </summary>
+    internal bool ResidualNext
+    {
+        set => _residualNext = value;
+    }
+
+    /// <summary>Takes <see cref="ResidualNext"/>, clearing it, so that no variant decoded below the one that takes it reads its residual alone.</summary>
+    internal bool TakeResidual()
+    {
+        bool residual = _residualNext;
+        _residualNext = false;
+        return residual;
     }
 
     private int DecodeNode(in ArrayNode node, DType dtype, int length)
