@@ -592,7 +592,13 @@ internal sealed record SynopsisAnswer(
             // The partition's one value, a column of the table's rows.
             for (int c = 0; c < Constants.Count; c++)
             {
-                if (ConstantColumn(arena, DTypeImport.Into(types, schema.GetField(constantColumns[c])), count, Constants[c].Value) is not { } constant)
+                DType constantType;
+                lock (types)
+                {
+                    constantType = DTypeImport.Into(types, schema.GetField(constantColumns[c]));
+                }
+
+                if (ConstantColumn(arena, constantType, count, Constants[c].Value) is not { } constant)
                 {
                     return false;
                 }
@@ -607,7 +613,16 @@ internal sealed record SynopsisAnswer(
                 fields[0] = InstantsOf(arena, bucketed, dtypes[0], count, part.Instants);
             }
 
-            root ??= types.Struct(names, dtypes, Nullability.NonNullable);
+            // The types are the object's contents', which every question over it shares: what adds to them, once
+            // for each shape a question asks, does so alone; the arena keeps a node it holds where it lies, so
+            // its readers take no lock.
+            if (root is null)
+            {
+                lock (types)
+                {
+                    root = types.Struct(names, dtypes, Nullability.NonNullable);
+                }
+            }
             int node = arena.AddStruct(root.Value, count, Validity.NonNullable, fields);
 
             // The rows of the buckets kept, then those the filter on the keys holds for, but a row whose
