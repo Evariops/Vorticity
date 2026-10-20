@@ -89,6 +89,20 @@ if (Text(args, "--micro") == "slicesort")
     return await SliceSortMicro.Run(rounds, args.Contains("--deep"));
 }
 
+// --micro seal: what the compaction of a period costs at the design's scale, job by job and pass by pass (SealBench.cs).
+if (Text(args, "--micro") == "seal")
+{
+    return await SealBench.Run(
+        Text(args, "--store") ?? "E:/vorticity-seal",
+        Option(args, "--minutes", 10),
+        Option(args, "--rate", 50_000),
+        Option(args, "--part-minutes", 10),
+        Option(args, "--ceiling", 2),
+        Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
+        Option(args, "--budget", 100),
+        !args.Contains("--no-late"));
+}
+
 // --micro shredcost: what shredding a path costs and saves in a file's bytes (ShredCostMicro.cs).
 if (Text(args, "--micro") == "shredcost")
 {

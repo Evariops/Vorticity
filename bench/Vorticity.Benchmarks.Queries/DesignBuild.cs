@@ -118,8 +118,11 @@ internal static class DesignBuild
 
     private static int s_appended;
 
-    /// <summary>The rows of one hour, drawn by a generator seeded by the hour, written into drafts of <paramref name="partMinutes"/> minutes each.</summary>
-    private static async Task<List<ObjectDraft>> WriteHourAsync(VortexDataset dataset, int hour, long perHour, int partMinutes)
+    /// <summary>
+    /// The rows of one hour, drawn by a generator seeded by the hour, written into drafts of <paramref name="partMinutes"/> minutes each;
+    /// its first <paramref name="minutes"/> minutes alone when fewer than 60.
+    /// </summary>
+    internal static async Task<List<ObjectDraft>> WriteHourAsync(VortexDataset dataset, int hour, long perHour, int partMinutes, int minutes = 60, bool lateRows = true)
     {
         RequestGenerator generator = new RequestGenerator(1_000 + hour, hour * perHour);
         Random late = new Random(7_000 + hour);
@@ -130,11 +133,12 @@ internal static class DesignBuild
         GeneratedRequest[] batch = new GeneratedRequest[1 << 18];
         try
         {
-            for (long first = 0; first < perHour; first += perPart)
+            long rows = perHour * Math.Min(minutes, 60) / 60;
+            for (long first = 0; first < rows; first += perPart)
             {
                 ObjectDraft draft = dataset.StartObject();
                 drafts.Add(draft);
-                long last = Math.Min(perHour, first + perPart);
+                long last = Math.Min(rows, first + perPart);
                 for (long row = first; row < last;)
                 {
                     int count = (int)Math.Min(batch.Length, last - row);
@@ -142,7 +146,7 @@ internal static class DesignBuild
                     {
                         // Mostly in time order: one row in fifty a few seconds late, one in ten thousand up to an hour.
                         DateTimeOffset at = start.AddSeconds(row * step);
-                        double lag = late.NextDouble();
+                        double lag = lateRows ? late.NextDouble() : 1;
                         at = lag < 0.0001 ? at.AddSeconds(-late.Next(60, 3_600))
                             : lag < 0.02 ? at.AddSeconds(-late.Next(1, 10))
                             : at;
