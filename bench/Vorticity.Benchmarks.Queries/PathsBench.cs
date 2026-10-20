@@ -423,17 +423,23 @@ internal static class PathsBench
         long begin = Stopwatch.GetTimestamp();
         long groups = 0;
         ResultDigest digest = default;
+
+        // The digest is taken of each batch while it is current, and its time left out: over 20 280 groups it was
+        // three tenths of a question's.
+        long digesting = 0;
         await using (asking.Batches)
         {
             while (await asking.Batches.MoveNextAsync())
             {
                 RecordBatch batch = asking.Batches.Current;
                 groups += batch.SelectedRows;
+                long taken = Stopwatch.GetTimestamp();
                 digest.Add(batch);
+                digesting += Stopwatch.GetTimestamp() - taken;
             }
         }
 
-        double milliseconds = Stopwatch.GetElapsedTime(begin).TotalMilliseconds;
+        double milliseconds = (Stopwatch.GetTimestamp() - begin - digesting) * 1000.0 / Stopwatch.Frequency;
         double cpuMilliseconds = (Environment.CpuUsage.TotalTime - cpu).TotalMilliseconds;
         long bytes = GC.GetTotalAllocatedBytes(precise: true) - allocated;
         ScanMetrics metrics = asking.Metrics();
