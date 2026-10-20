@@ -90,6 +90,9 @@ internal static class PathsBench
 
         internal double LoopSeconds { get; init; }
 
+        /// <summary>How long to ask the question cold again and again, each by a handle and a cache of its own, for a profiler; zero for no loop.</summary>
+        internal double LoopColdSeconds { get; init; }
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }
@@ -260,6 +263,53 @@ internal static class PathsBench
         });
 
     /// <summary>
+    /// <c>--loop-cold</c>: the cold ask again and again for as long, for a profiler, and its mean: each by a session and a
+    /// handle opened for it, with an empty synopsis cache, disposed and deleted after it.
+    /// </summary>
+    private static async Task LoopColdAsync(Settings settings, CountingObjectStore store, Question question, ScanOptions options, int degree)
+    {
+        if (settings.LoopColdSeconds <= 0)
+        {
+            return;
+        }
+
+        long until = Stopwatch.GetTimestamp() + (long)(settings.LoopColdSeconds * Stopwatch.Frequency);
+        int asks = 0;
+        double milliseconds = 0;
+        long allocated = 0;
+        while (Stopwatch.GetTimestamp() < until)
+        {
+            string cache = Path.Combine(settings.Store, "cache", Guid.NewGuid().ToString("N"));
+            try
+            {
+                await using VortexSession session = VortexSession.Create(o =>
+                {
+                    o.MaxDegreeOfParallelism = degree;
+                    o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
+                });
+                await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
+                Measured again = await MeasureAsync(store, dataset, question, options);
+                asks++;
+                milliseconds += again.Milliseconds;
+                allocated += again.Allocated;
+            }
+            finally
+            {
+                try
+                {
+                    Directory.Delete(cache, recursive: true);
+                }
+                catch (IOException)
+                {
+                }
+            }
+        }
+
+        Console.WriteLine(string.Create(
+            CultureInfo.InvariantCulture, $"    cold loop: {asks} asks, {milliseconds / asks:F3} ms and {allocated / (double)asks / 1e3:F1} KB allocated each"));
+    }
+
+    /// <summary>
     /// One question by one path: cold by a session and a handle opened for it, with an empty synopsis cache, then warm
     /// by the same handle, the median of the rounds; each asked once first, with no wait and nothing kept, so that
     /// neither pays the question's first compile.
@@ -293,6 +343,7 @@ internal static class PathsBench
             remote.Trace = trace;
             Measured cold = settings.Temperatures is "all" or "cold" ? await MeasureAsync(store, dataset, question, options) : default;
             remote.Trace = null;
+            await LoopColdAsync(settings, store, question, options, degree);
             if (settings.Temperatures is "cold")
             {
                 return (cold, default);

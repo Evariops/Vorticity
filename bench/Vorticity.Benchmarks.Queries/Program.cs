@@ -231,6 +231,7 @@ if (Text(args, "--micro") == "paths")
         Label = Text(args, "--label"),
         TraceReads = Text(args, "--trace-reads"),
         LoopSeconds = Option(args, "--loop", 0),
+        LoopColdSeconds = Option(args, "--loop-cold", 0),
     });
 }
 
