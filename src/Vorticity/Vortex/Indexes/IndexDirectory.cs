@@ -468,13 +468,14 @@ internal sealed record IndexDirectory(
 
     /// <summary>
     /// <see cref="TryParse(ReadOnlySpan{byte}, ulong, ulong, out IndexDirectory?, out string?)"/>, keeping only the entries on
-    /// the columns <paramref name="columns"/> says yes of, by the first field of their path from the root, every one when it
-    /// is null: an entry on another column is passed over before its runs are read.
+    /// the columns <paramref name="columns"/> says yes of, by the first field of their path from the root, those on the root
+    /// itself by <see cref="RootColumn"/>, every one when it is null: an entry on another column is passed over before its
+    /// runs are read.
     /// </summary>
     /// <param name="bytes">The metadata segment.</param>
     /// <param name="fileRowCount">The file's own row count, or <see cref="UnknownRows"/>.</param>
     /// <param name="dataEnd">The first byte a run may not reach: the footer's start.</param>
-    /// <param name="columns">Whether an entry on the column of this field of the root is kept; null for every entry.</param>
+    /// <param name="columns">Whether an entry on the column of this field of the root, or on the root, is kept; null for every entry.</param>
     /// <param name="directory">The directory, holding only the entries that passed.</param>
     /// <param name="reason">Why the whole directory was refused, when it was.</param>
     /// <returns>Whether the directory is usable.</returns>
@@ -737,7 +738,13 @@ internal sealed record IndexDirectory(
         return true;
     }
 
-    /// <summary>Whether the entry the message holds lies on a column <paramref name="columns"/> keeps, by the first field of its path; one on the root is kept.</summary>
+    /// <summary>
+    /// The column <c>TryParse</c> asks its predicate of for an entry on the root itself, a table of a synopsis or a slice's
+    /// chunks: a reader that asks only of some columns says whether it wants them too.
+    /// </summary>
+    internal const uint RootColumn = uint.MaxValue;
+
+    /// <summary>Whether the entry the message holds lies on a column <paramref name="columns"/> keeps, by the first field of its path, or on the root.</summary>
     private static bool OnColumn(ProtoReader reader, Func<uint, bool> columns)
     {
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
@@ -748,14 +755,14 @@ internal sealed record IndexDirectory(
                     return columns(reader.ReadVarint32());
                 case EntryColumnPath when wire == ProtoWireType.LengthDelimited:
                     ProtoReader packed = reader.ReadMessage();
-                    return packed.End || columns(packed.ReadVarint32());
+                    return columns(packed.End ? RootColumn : packed.ReadVarint32());
                 default:
                     reader.SkipField(wire);
                     break;
             }
         }
 
-        return true;
+        return columns(RootColumn);
     }
 
     private static IndexRun ReadRun(ProtoReader reader)

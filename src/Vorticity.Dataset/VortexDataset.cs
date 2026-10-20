@@ -2303,8 +2303,9 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// Whether an index on the column of a field of <paramref name="schema"/>'s root is one <paramref name="filter"/> may
-    /// read, by the columns it names, their first field from the root; null, every one, when a name is none of the
-    /// schema's or past the 64th field.
+    /// read, by the columns it names, their first field from the root; none on the root itself, the synopsis tables and the
+    /// slices' chunks, whose runs a lookup parsed at every question for nothing; null, every one, when a name is none of
+    /// the schema's or past the 64th field.
     /// </summary>
     private static Func<uint, bool>? ColumnsOf(VortexExpr filter, DType schema)
     {
