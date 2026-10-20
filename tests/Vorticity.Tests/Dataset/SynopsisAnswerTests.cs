@@ -53,9 +53,10 @@ public sealed partial class SynopsisAnswerTests
         Assert.True(metrics.SynopsisRows > 0, "no state folded");
         Assert.True(metrics.Rows < without.Rows, $"{metrics.Rows} rows read, as many as without");
         // A window across hours reads its whole hours from their coarse tables, the slices of the hours it
-        // cuts from their runs and the slices it cuts as rows; where no table of slices keys the service, the
-        // hour it cuts is read as rows, its object's every row.
-        Assert.Equal(question is "an unaligned window" or "a window across hours", metrics.EdgeRows > 0);
+        // cuts from their runs and the slices it cuts as rows; where no run of slices keys the service, the
+        // slices of the hour it cuts come from the service's value counts per slice, beside the rows of the
+        // slices it cuts.
+        Assert.Equal(question is "an unaligned window" or "a window across hours" or "a cut hour without runs", metrics.EdgeRows > 0);
     }
 
     /// <summary>
@@ -227,10 +228,10 @@ public sealed partial class SynopsisAnswerTests
     /// <summary>
     /// A page of the 200 newest rows under a broad filter, three rows in four, on a store that answers in
     /// 20 ms, from the fresh tail and from inside a sealed hour: the rows the rows' own sort gives, and what
-    /// reading them costs. The objects open as the merge reaches their newest instant, so the fresh tail,
-    /// held whole since its open, answers with no request, and the older hours are never read; inside the
-    /// sealed hour, the segment of instants its slices lie in is read once for all of them, then the rows,
-    /// two round trips.
+    /// reading them costs. The objects open as the merge reaches their newest instant, so the older hours
+    /// are never read; in the fresh tail as inside the sealed hour, the segment of instants its slices lie in
+    /// is read once for all of them, then the rows, two round trips. The fresh tail, of a quarter of an hour,
+    /// outgrows the first read of its open once its tables count each column's values per slice.
     /// </summary>
     [Theory]
     [InlineData(false)]
@@ -249,8 +250,8 @@ public sealed partial class SynopsisAnswerTests
         List<Request> newest = await page.ToRecordsAsync(Ct).Take(200).ToListAsync(Ct);
         Console.Out.Write($"NEWEST PAGE {(sealedHour ? "sealed" : "fresh")}: {store.DependentSteps} dependent steps, {store.Requests} requests, {store.BytesRead} bytes, {page.Metrics.Rows} rows of {all.Count}.\n");
         Assert.Equal(all.Where(r => r.Status != 500 && r.At < before).OrderByDescending(r => r.At).Take(200), newest);
-        Assert.Equal(sealedHour ? 2 : 0, store.Requests);
-        Assert.Equal(sealedHour ? 2 : 0, store.DependentSteps);
+        Assert.Equal(2, store.Requests);
+        Assert.Equal(2, store.DependentSteps);
     }
 
     /// <summary>

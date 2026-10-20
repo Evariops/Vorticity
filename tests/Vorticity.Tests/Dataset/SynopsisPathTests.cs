@@ -89,8 +89,8 @@ public sealed partial class SynopsisPathTests
     /// <summary>
     /// Calls whose attributes hold a route on every row, a flag on one row in three and a count of retries on
     /// one in four: the objects shred the route and leave the flag and the retries in the residual. The sealed
-    /// hour counts the flag's values per hour, as many as the parsed rows that hold each, and sums the
-    /// retries over the rows that hold them, in its value counts as in its other tables.
+    /// hour counts the flag's values per hour and per slice, as many as the parsed rows that hold each, and sums
+    /// the retries over the rows that hold them, in its value counts as in its other tables.
     /// </summary>
     [Fact]
     public async Task APathLeftInTheResidualIsCountedFromTheParsedRows()
@@ -145,24 +145,30 @@ public sealed partial class SynopsisPathTests
             expected[value] = (seen + 1, held + (count is null ? 0 : 1), sum + (count ?? 0));
         }
 
+        // The value counts of the hour, a row a value, and those of its slices, a row a value of each slice, summed.
         using SynopsisTableSet tables = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
-        (SynopsisTableInfo info, TableChunk _, int node) = Assert.Single(tables.Tables, t => t.Table.Kind == SynopsisTableKind.Values && t.Table.Keys.SequenceEqual([SynopsisPath.Entry(flag)]));
-        Assert.Contains(SynopsisPath.Entry(retries), info.Measures);
-        int measure = Array.IndexOf(info.Measures, SynopsisPath.Entry(retries));
-        CanonicalNode table = tables.Arena.GetNode(node);
-        Dictionary<string, (long Rows, long Retries, long Sum)> counted = [];
-        for (int row = 0; row < info.Rows; row++)
+        foreach (SynopsisBucket bucket in (SynopsisBucket[])[SynopsisBucket.Hour, SynopsisBucket.Slice])
         {
-            // The bucket, the flag, the count, then each measure's values, two words of its sum, least and greatest.
-            int states = 3 + (5 * measure);
-            long low = ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(states + 1))[row];
-            counted[Encoding.UTF8.GetString(ColumnData.Bytes(tables.Arena, table.GetFieldIndex(1), row))] = (
-                ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(2))[row],
-                ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(states))[row],
-                low);
-        }
+            (SynopsisTableInfo info, TableChunk _, int node) = Assert.Single(
+                tables.Tables, t => t.Table.Kind == SynopsisTableKind.Values && t.Table.Bucket == bucket && t.Table.Keys.SequenceEqual([SynopsisPath.Entry(flag)]));
+            Assert.Contains(SynopsisPath.Entry(retries), info.Measures);
+            int measure = Array.IndexOf(info.Measures, SynopsisPath.Entry(retries));
+            CanonicalNode table = tables.Arena.GetNode(node);
+            Dictionary<string, (long Rows, long Retries, long Sum)> counted = [];
+            for (int row = 0; row < info.Rows; row++)
+            {
+                // The bucket, the flag, the count, then each measure's values, two words of its sum, least and greatest.
+                int states = 3 + (5 * measure);
+                string value = Encoding.UTF8.GetString(ColumnData.Bytes(tables.Arena, table.GetFieldIndex(1), row));
+                (long seen, long held, long sum) = counted.GetValueOrDefault(value);
+                counted[value] = (
+                    seen + ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(2))[row],
+                    held + ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(states))[row],
+                    sum + ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(states + 1))[row]);
+            }
 
-        Assert.Equal(expected.OrderBy(e => e.Key, StringComparer.Ordinal), counted.OrderBy(e => e.Key, StringComparer.Ordinal));
+            Assert.Equal(expected.OrderBy(e => e.Key, StringComparer.Ordinal), counted.OrderBy(e => e.Key, StringComparer.Ordinal));
+        }
     }
 
     /// <summary>

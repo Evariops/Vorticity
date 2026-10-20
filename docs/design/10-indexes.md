@@ -327,7 +327,7 @@ sum), and its least and greatest widened to 64 bits. Its measures are the object
 that a number the order places last and that seldom repeats, a duration, keeps its states in the tables
 before it, and tables of one object may name different ones. The entry sits on the root, takes no column, and
 holds in its options what the table is (run statistics per slice, a coarse table per hour or per object,
-or one column's value counts per hour), its key fields, its measure fields and its row count, then, for
+or one column's value counts per hour or per slice), its key fields, its measure fields and its row count, then, for
 a table of more than one chunk, each chunk's first and last bucket and its rows. Its run's payloads name
 the chunks' regions, and its payload dtypes their structs'. A question reads only the chunks that hold a
 bucket it folds. A chunk holds 65 536 rows at most, so that no array outgrows its 32-bit lengths whatever

@@ -121,12 +121,13 @@ internal sealed class SynopsisTables : IDisposable
     private int[] _counted = [];
 
     // The tables the object may keep, in the order the choice weighs them; and each kind by its depth, the value
-    // counts by the key they count, the paths counted after the keys.
+    // counts by the key they count, the paths counted after the keys, of the hour and of each slice.
     private readonly List<Candidate> _candidates = [];
     private Candidate?[] _runs = [];
     private Candidate?[] _hourly = [];
     private Candidate?[] _whole = [];
     private Candidate?[] _values = [];
+    private Candidate?[] _sliceValues = [];
 
     // What the coarser tables' rows are weighed from: at each depth, the groups of the hours merged, and the distinct
     // groups of the hour and of the object as their slices come; for each column counted, its values of the hours merged
@@ -183,15 +184,21 @@ internal sealed class SynopsisTables : IDisposable
         _chunking = chunking ?? (ChunkRows, HourChunkBytes);
         (_measures, _kinds) = KindsOf(measures);
         _spansHours = slices is null;
+        _cutsHours = slices is null;
         for (int s = 0; s < (slices?.Count ?? 0); s++)
         {
             long hour = TimeSlicer.Floor(slices![s].Start, unit, SliceWidth.Hour);
+            _cutsHours |= _hourRows.ContainsKey(hour);
             _hourRows[hour] = _hourRows.GetValueOrDefault(hour) + slices[s].Rows;
             _objectRows += slices[s].Rows;
         }
 
         _spansHours |= _hourRows.Count > 1;
     }
+
+    // Whether an hour of the object holds several slices: otherwise a slice is its hour, and a table of its slices'
+    // value counts holds the rows of its hour's.
+    private readonly bool _cutsHours;
 
     /// <summary>The measures <paramref name="measures"/>, fields or paths, and how each one's states are kept.</summary>
     private (int[] Measures, MeasureKind[] Kinds) KindsOf(int[] measures)
@@ -388,7 +395,7 @@ internal sealed class SynopsisTables : IDisposable
         // counted hold folds from their states, a group a value, one deeper from the rows.
         for (int k = 1; k < depth; k++)
         {
-            if (_values[k] is not { Dead: false })
+            if (!CountsValues(k))
             {
                 continue;
             }
@@ -412,7 +419,8 @@ internal sealed class SynopsisTables : IDisposable
                     first[groupOf[p]] = first[groupOf[p]] < 0 ? at[p] : first[groupOf[p]];
                 }
 
-                await EmitValuesAsync(k, arena, columns[k], _keyShapes[k], states[used].Merge(groupOf, distinct), first, distinct, cancellationToken).ConfigureAwait(false);
+                await EmitValuesAsync(k, start, arena, columns[k], _keyShapes[k], states[used].Merge(groupOf, distinct), first, distinct, cancellationToken)
+                    .ConfigureAwait(false);
                 continue;
             }
 
@@ -422,16 +430,17 @@ internal sealed class SynopsisTables : IDisposable
                 values = Math.Max(values, valueCodes[row] + 1);
             }
 
-            await ValuesAsync(k, arena, sorted.RootIndex, rows, columns[k], _keyShapes[k], valueCodes, values, cancellationToken).ConfigureAwait(false);
+            await ValuesAsync(k, start, arena, sorted.RootIndex, rows, columns[k], _keyShapes[k], valueCodes, values, cancellationToken).ConfigureAwait(false);
         }
 
         for (int c = 0; c < _counted.Length; c++)
         {
-            if (_values[depth + c] is { Dead: false } table)
+            if (CountsValues(depth + c))
             {
                 int column = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, _pathColumns[SynopsisPath.Place(_counted[c])]));
                 (int[] valueCodes, int distinct) = SliceSort.CodesOfColumn(arena, column, rows);
-                await ValuesAsync(depth + c, arena, sorted.RootIndex, rows, column, table.Shapes[0], valueCodes, distinct, cancellationToken).ConfigureAwait(false);
+                await ValuesAsync(depth + c, start, arena, sorted.RootIndex, rows, column, _values[depth + c]!.Shapes[0], valueCodes, distinct, cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
 
@@ -534,12 +543,17 @@ internal sealed class SynopsisTables : IDisposable
         return h;
     }
 
+    /// <summary>Whether a value count of slot <paramref name="slot"/> is still kept, the hour's or the slices'.</summary>
+    private bool CountsValues(int slot) => _values[slot] is { Dead: false } || _sliceValues[slot] is { Dead: false };
+
     /// <summary>
-    /// The value counts of the slice for counted column <paramref name="slot"/>: its rows grouped by their codes, a
-    /// value's code its rank, a null's coded last and left out of a path's counts, as a run of the hour's.
+    /// The value counts of the slice starting at <paramref name="start"/> for counted column <paramref name="slot"/>: its
+    /// rows grouped by their codes, a value's code its rank, a null's coded last and left out of a path's counts, as
+    /// rows of the slices' table and a run of the hour's.
     /// </summary>
     private async ValueTask ValuesAsync(
-        int slot, CanonicalArena arena, int root, int rows, int column, KeyShape shape, int[] valueCodes, int distinct, CancellationToken cancellationToken)
+        int slot, long start, CanonicalArena arena, int root, int rows, int column, KeyShape shape, int[] valueCodes, int distinct,
+        CancellationToken cancellationToken)
     {
         // A null codes after every value: a group of its own, which a path's counts leave out.
         bool path = slot >= _keys.Length;
@@ -555,16 +569,19 @@ internal sealed class SynopsisTables : IDisposable
             }
         }
 
-        await EmitValuesAsync(slot, arena, column, shape, states, first, path ? distinct : groups, cancellationToken).ConfigureAwait(false);
+        await EmitValuesAsync(slot, start, arena, column, shape, states, first, path ? distinct : groups, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// The value counts of the slice for counted column <paramref name="slot"/>, the states of its <paramref name="kept"/>
-    /// first values in their order and the row that holds each, -1 for a value the slice does not hold, as a run of the hour's.
+    /// The value counts of the slice starting at <paramref name="start"/> for counted column <paramref name="slot"/>, the
+    /// states of its <paramref name="kept"/> first values in their order and the row that holds each, -1 for a value the
+    /// slice does not hold: rows of the slices' table, and a run of the hour's.
     /// </summary>
     private async ValueTask EmitValuesAsync(
-        int slot, CanonicalArena arena, int column, KeyShape shape, Accumulators states, int[] first, int kept, CancellationToken cancellationToken)
+        int slot, long start, CanonicalArena arena, int column, KeyShape shape, Accumulators states, int[] first, int kept,
+        CancellationToken cancellationToken)
     {
+        bool hourly = _values[slot] is { Dead: false };
         Growth? growth = Counts(_values[slot], _valueGrowth[slot]);
         _run.Clear();
         for (int g = 0; g < kept; g++)
@@ -574,14 +591,26 @@ internal sealed class SynopsisTables : IDisposable
                 continue;
             }
 
-            int at = _run.Length;
-            KeyCodec.Append(_run, arena, column, first[g], shape);
-            growth?.Sketch.Add(CardinalitySlot.Hash(_run.Span[at..]));
+            _key.Clear();
+            KeyCodec.Append(_key, arena, column, first[g], shape);
             states.Words(g, _state);
-            _run.Words(_state);
+            if (hourly)
+            {
+                growth?.Sketch.Add(CardinalitySlot.Hash(_key.Span));
+                _run.Bytes(_key.Span);
+                _run.Words(_state);
+            }
+
+            if (_sliceValues[slot] is { Dead: false } slices && Hold(slices, start, _key.Span, _state))
+            {
+                await FlushAsync(slices, cancellationToken).ConfigureAwait(false);
+            }
         }
 
-        _valueRuns[slot].Add(await AppendAsync(HourStore(), 1, cancellationToken).ConfigureAwait(false));
+        if (hourly)
+        {
+            _valueRuns[slot].Add(await AppendAsync(HourStore(), 1, cancellationToken).ConfigureAwait(false));
+        }
     }
 
     /// <summary>
@@ -693,6 +722,7 @@ internal sealed class SynopsisTables : IDisposable
         _hourly = new Candidate?[depth + 1];
         _whole = new Candidate?[depth + 1];
         _values = new Candidate?[depth + _counted.Length];
+        _sliceValues = new Candidate?[depth + _counted.Length];
         _valueRuns = new List<RunSpan>[depth + _counted.Length];
         for (int v = 0; v < _valueRuns.Length; v++)
         {
@@ -719,6 +749,18 @@ internal sealed class SynopsisTables : IDisposable
         for (int k = 1; k < depth; k++)
         {
             _values[k] = Add(SynopsisTableKind.Values, SynopsisBucket.Hour, [_keys[k]], [_keyShapes[k]]);
+        }
+
+        // Each value count of a slice too, where an hour holds several: a question of one column past the first of the
+        // order, at the grain of a slice or over a window that cuts hours, reads its values rather than the runs of
+        // every key before it, nor the rows of a column no run holds. Where a slice is its hour, the table would hold
+        // the hour's rows again, a grain more for the choice to weigh them by.
+        for (int v = 0; v < _values.Length && _cutsHours; v++)
+        {
+            if (_values[v] is { } hour)
+            {
+                _sliceValues[v] = Add(SynopsisTableKind.Values, SynopsisBucket.Slice, hour.Keys, hour.Shapes);
+            }
         }
 
         if (_spansHours)
@@ -792,6 +834,7 @@ internal sealed class SynopsisTables : IDisposable
     private async ValueTask CloseHourAsync(CancellationToken cancellationToken)
     {
         await FlushHourAsync(_runs, cancellationToken).ConfigureAwait(false);
+        await FlushHourAsync(_sliceValues, cancellationToken).ConfigureAwait(false);
         _hourDepth = Math.Min(_hourDepth, DeepestCoarse());
         _wholeDepth = Math.Min(_wholeDepth, Deepest(_whole));
         if (_hourDepth >= 0 && _hourRuns.Count > 0)
@@ -1093,12 +1136,15 @@ internal sealed class SynopsisTables : IDisposable
         }
 
         // A table of slices holds the rows its slices gave, scaled to the object's rows, each at the bytes a row of it took.
-        for (int d = _first; d < _runs.Length; d++)
+        foreach (Candidate?[] sliced in (ReadOnlySpan<Candidate?[]>)[_runs, _sliceValues])
         {
-            if (_runs[d] is { Dead: false } runs && runs.Rows + runs.Stage.Rows > 0)
+            foreach (Candidate? table in sliced)
             {
-                double seen = runs.Rows + runs.Stage.Rows;
-                RuleOut(runs, seen, seen * _objectRows / Math.Max(_rowsCounted, 1), runs.Rows > 0 ? runs.Bytes / (double)runs.Rows : perRow);
+                if (table is { Dead: false } && table.Rows + table.Stage.Rows > 0)
+                {
+                    double seen = table.Rows + table.Stage.Rows;
+                    RuleOut(table, seen, seen * _objectRows / Math.Max(_rowsCounted, 1), table.Rows > 0 ? table.Bytes / (double)table.Rows : perRow);
+                }
             }
         }
 
