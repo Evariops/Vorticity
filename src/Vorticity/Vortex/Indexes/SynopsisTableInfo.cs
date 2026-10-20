@@ -421,13 +421,13 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
 
     /// <summary>
     /// The synopsis tables of a file its table of contents <paramref name="contents"/> names, read from
-    /// <paramref name="source"/> without an open: the chunks <paramref name="wanted"/> keeps, every one when it
+    /// <paramref name="source"/> without an open: the chunks <paramref name="reads"/> keeps, every one when it
     /// is null, their regions in one request set, each chunk's rows decoded at its table's <see cref="RowType"/>
-    /// over the file's schema, which the contents hold.
+    /// over the file's schema, which the contents hold, and only the fields of them <paramref name="reads"/> names.
     /// </summary>
     /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
     internal static async ValueTask<SynopsisTableSet> ReadAsync(
-        IO.ISegmentReader source, SynopsisContents contents, Func<SynopsisTableInfo, TableChunk, bool>? wanted, VortexReadOptions? options,
+        IO.ISegmentReader source, SynopsisContents contents, ISynopsisReads? reads, VortexReadOptions? options,
         CancellationToken cancellationToken)
     {
         List<(SynopsisTableInfo, TableChunk)> found = [];
@@ -438,7 +438,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
             for (int c = 0; c < chunks.Count; c++)
             {
-                if (wanted?.Invoke(table, chunks[c]) ?? true)
+                if (reads?.Reads(table, chunks[c]) ?? true)
                 {
                     found.Add((table, chunks[c]));
                     of.Add(t);
@@ -450,7 +450,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         (DTypeArena types, DType[] rows, _) = contents.TableRowTypes;
         (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
         ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
-        SynopsisTableSet set = await DecodeAsync(source, context, found, (_, i) => rows[of[i]], cancellationToken, Contexts).ConfigureAwait(false);
+        SynopsisTableSet set = await DecodeAsync(source, context, found, (_, i) => rows[of[i]], cancellationToken, Contexts, reads).ConfigureAwait(false);
         set.Types = types;
         return set;
     }
@@ -464,12 +464,13 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
 
     /// <summary>
     /// Reads the chunks of <paramref name="found"/> in one request set and decodes each into
-    /// <paramref name="context"/>'s arena at the dtype <paramref name="dtypeOf"/> gives its table; a chunk whose
-    /// region does not hold its checksum, or does not decode, is left out.
+    /// <paramref name="context"/>'s arena at the dtype <paramref name="dtypeOf"/> gives its table, only the fields
+    /// <paramref name="reads"/> names of it; a chunk whose region does not hold its checksum, or does not decode,
+    /// is left out.
     /// </summary>
     private static async ValueTask<SynopsisTableSet> DecodeAsync(
         IO.ISegmentReader source, ScanContext context, List<(SynopsisTableInfo Table, TableChunk Chunk)> found,
-        Func<SynopsisTableInfo, int, DType> dtypeOf, CancellationToken cancellationToken, ScanContexts? pool = null)
+        Func<SynopsisTableInfo, int, DType> dtypeOf, CancellationToken cancellationToken, ScanContexts? pool = null, ISynopsisReads? reads = null)
     {
         try
         {
@@ -497,16 +498,34 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                     continue;
                 }
 
+                // A table's rows are a struct of one array node: its decoder reads the fields the projection
+                // names and no others, a question of a count reading 3 of a table's 16 columns.
+                Layouts.FieldMask fields = reads?.Fields(table) ?? Layouts.FieldMask.All;
                 try
                 {
                     // The rows copied into the arena: the bytes read go back with the requests.
                     context.Decode.LoadBlob(bytes);
                     ArrayNode root = context.Nodes.Root;
+                    if (!fields.IsAll)
+                    {
+                        context.ExchangePushedFields(fields);
+                        context.FieldsHonoured = false;
+                    }
+
                     int node = context.Decode.DecodeRoot(in root, dtypeOf(table, i), chunk.Rows);
-                    tables.Add(new ReadTable(table, chunk, context.Canonical.CopyFrom(context.Canonical, node)));
+                    bool narrowed = !fields.IsAll && context.FieldsHonoured;
+                    tables.Add(new ReadTable(table, chunk, context.Canonical.CopyFrom(context.Canonical, node)) { Fields = narrowed ? fields : Layouts.FieldMask.All });
                 }
                 catch (VortexFormatException)
                 {
+                }
+                finally
+                {
+                    // A root no struct decoder read leaves the projection pushed, which no other chunk is to take.
+                    if (!fields.IsAll)
+                    {
+                        context.ExchangePushedFields(Layouts.FieldMask.All);
+                    }
                 }
             }
 
@@ -588,4 +607,18 @@ internal sealed class SynopsisTableSet : IDisposable
 /// <param name="Table">The table.</param>
 /// <param name="Chunk">The chunk read of it.</param>
 /// <param name="Node">Its rows.</param>
-internal readonly record struct ReadTable(SynopsisTableInfo Table, TableChunk Chunk, int Node);
+internal readonly record struct ReadTable(SynopsisTableInfo Table, TableChunk Chunk, int Node)
+{
+    /// <summary>The fields of the table's row its struct holds, in their order: every one, or those a projection named.</summary>
+    internal Layouts.FieldMask Fields { get; init; }
+}
+
+/// <summary>What a read of an object's synopsis tables fetches: the chunks it decodes, and the fields of each table's rows it decodes.</summary>
+internal interface ISynopsisReads
+{
+    /// <summary>Whether <paramref name="chunk"/> of <paramref name="table"/> is read.</summary>
+    bool Reads(SynopsisTableInfo table, TableChunk chunk);
+
+    /// <summary>The fields of <paramref name="table"/>'s rows decoded: <see cref="Layouts.FieldMask.All"/> for every one.</summary>
+    Layouts.FieldMask Fields(SynopsisTableInfo table);
+}

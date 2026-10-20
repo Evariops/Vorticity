@@ -36,14 +36,14 @@ internal static class SynopsisCorrection
     /// </param>
     /// <param name="slices">The object's slices, which place a row in its bucket.</param>
     /// <param name="unit">Their unit.</param>
-    /// <param name="folded">The buckets folded; a row of another is not charged, since nothing reads it.</param>
+    /// <param name="folded">The part, whose buckets are folded; a row of another bucket is not charged, since nothing reads it.</param>
     /// <param name="reads">
     /// Which of a measure's states the question reads, by its column: its sum, its least, its greatest. A state
     /// no question reads is left as it is, and cannot make a row fail to come out.
     /// </param>
     internal static bool TryRemove(
         CanonicalArena arena, SynopsisTableInfo table, DType rowType, IReadOnlyList<int[]> chunks, DType schema,
-        IReadOnlyList<RecordBatch> removed, IReadOnlyList<TimeSlice> slices, TimeUnit unit, HashSet<long> folded,
+        IReadOnlyList<RecordBatch> removed, IReadOnlyList<TimeSlice> slices, TimeUnit unit, SynopsisPart folded,
         Func<string, (bool Sum, bool Least, bool Greatest)> reads)
     {
         int keys = table.Keys.Length;
@@ -167,7 +167,7 @@ internal static class SynopsisCorrection
                     SynopsisBucket.Hour => TimeSlicer.Floor(slice.Start, unit, SliceWidth.Hour),
                     _ => 0,
                 };
-                if (!folded.Contains(bucket))
+                if (!folded.Holds(bucket))
                 {
                     continue;
                 }

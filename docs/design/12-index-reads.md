@@ -237,7 +237,14 @@ by slice folds the whole slices of a bucket the window cuts, and the slices the 
 are read as rows, through the chunk directories, without the footer
 ([the rows of a time slice](#51-the-rows-of-a-time-slice-without-the-footer)). An object that no table
 answers, or whose every row lies at an edge, is read as rows. The predicates on keys run once per table
-row. A key may be a column, a function of the instant, a partition column, whose one value the object
+row. A table's chunk is decoded for the fields its batches are read by alone: the bucket, the count, the
+columns of the keys and of the filter, and the states of the measures the question folds, so that a count
+by service decodes 3 of a table's 16 columns. A table a delete or an identifier corrects is decoded whole,
+since a row comes out of it by every key and state. Over 48 hourly objects warm, from the synopsis cache, a
+count by service per 12 hours went from 8.3 to 5.5 ms; with the analysis of the question's filter, keys
+and measures done once for every object, and an object's kept buckets held in order rather than in a set,
+4.9 ms and 232 KB allocated, against 278 (`vortex-queries --micro paths --design --hours 48 --rate 200
+--loop`). A key may be a column, a function of the instant, a partition column, whose one value the object
 holds, or a key of a variant column read strictly as an integer, a double, a text or a boolean, which
 the object's synopsis path of the same class stands for, a double only where the object holds no float
 there. A key the object leaves in its residual is counted over the rows that hold it alone, so it

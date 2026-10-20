@@ -255,6 +255,15 @@ internal sealed class DatasetScanBuilder
 
     private StateRequest? _states;
 
+    /// <summary>What the answers of the objects to the states asked share, worked out at the first object's.</summary>
+    private SynopsisQuestion? _question;
+
+    /// <summary>The question of <paramref name="request"/> under the scan's filter, worked out once for every object it asks.</summary>
+    private SynopsisQuestion QuestionOf(StateRequest request, string instant) =>
+        _question is { } known && ReferenceEquals(known.Request, request) && ReferenceEquals(known.Filter, _filter)
+            ? known
+            : _question = new SynopsisQuestion(request, _filter, instant, _version.Header.Identifiers);
+
     /// <summary>
     /// The splits each object's scan of one lane reads ahead of the one it decodes, over a store whose read is a round
     /// trip (<see cref="ScanSpec.ReadAhead"/>): what an aggregation's lane is granted, which an object's scan reads as a
@@ -517,7 +526,7 @@ internal sealed class DatasetScanBuilder
             ? (summary.Min.SignedValue, summary.Max.SignedValue)
             : null;
         return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
-            && SynopsisAnswer.Of(contents, schema, key.InstantPath, request, _filter, instants, _version.Header.Identifiers, PartitionFilter.ValuesOf(held.Entry, key)) is { } answer
+            && SynopsisAnswer.Of(QuestionOf(request, key.InstantPath), contents, schema, instants, PartitionFilter.ValuesOf(held.Entry, key)) is { } answer
             ? (answer, contents, key.InstantPath)
             : default;
     }
@@ -858,7 +867,13 @@ internal sealed class DatasetScanBuilder
         {
             if (answer.Parts.Count > 0)
             {
-                tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer.Reads, cancellationToken).ConfigureAwait(false);
+                // The fields the batches of states are read by, but every one where a row comes out of a table.
+                if (!held.Entry.HasDeletions && answer.Excluded.Count == 0)
+                {
+                    answer.Project(contents);
+                }
+
+                tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer, cancellationToken).ConfigureAwait(false);
                 List<RecordBatch>? removed = marked is null ? null : await marked.ConfigureAwait(false);
                 if (excluded is not null)
                 {
@@ -1491,7 +1506,7 @@ internal sealed class DatasetScanBuilder
         foreach (SynopsisPart part in answer.Parts)
         {
             string[] keys = Array.ConvertAll(part.Table.Keys, field => SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths));
-            into.Add(new StatesStep(key, "table", $"{part.Table.Kind} by {part.Table.Bucket} on ({string.Join(", ", keys)})", part.Kept.Count));
+            into.Add(new StatesStep(key, "table", $"{part.Table.Kind} by {part.Table.Bucket} on ({string.Join(", ", keys)})", part.KeptCount));
         }
 
         if (answer.Edges.Count > 0)

@@ -237,6 +237,74 @@ public sealed partial class SynopsisContentsTests
         Assert.Equal(read.Synopsis.ToArray(), read.WithMarkedAt(1_000).Synopsis.ToArray());
     }
 
+    /// <summary>
+    /// A read of an object's tables that names some fields of their rows decodes those alone, in their order and under
+    /// their names, their values a whole read's: a count by no key reads a table's bucket and count, of its eight
+    /// columns and more.
+    /// </summary>
+    [Fact]
+    public async Task AReadDecodesTheFieldsItNamesAlone()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Call.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },
+        }, Ct);
+        Random random = new Random(11);
+        for (int part = 0; part < 8; part++)
+        {
+            Call[] rows = [.. Enumerable.Range(0, 400).Select(i => new Call(
+                Noon.AddSeconds((part * 400 + i) * 1.25), $"region-{random.Next(3)}", 200 + (random.Next(5) * 100), random.NextInt64(1_000_000)))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Call>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        ObjectEntry? period = null;
+        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        {
+            period ??= ObjectEntry.FromBytes(leaf.Value.Span);
+        }
+
+        SynopsisContents contents = SynopsisContents.From(period!.Synopsis.Span)!;
+        using SynopsisTableSet whole = await dataset.ReadSynopsisAsync(period, contents, null, Ct);
+        using SynopsisTableSet projected = await dataset.ReadSynopsisAsync(period, contents, new FieldsRead(table => [0, table.Keys.Length + 1]), Ct);
+        Assert.NotEmpty(whole.Tables);
+        Assert.Equal(whole.Tables.Select(t => t.Table), projected.Tables.Select(t => t.Table));
+        for (int t = 0; t < whole.Tables.Count; t++)
+        {
+            ReadTable full = whole.Tables[t];
+            ReadTable part = projected.Tables[t];
+            int count = full.Table.Keys.Length + 1;
+            CanonicalNode all = whole.Arena.GetNode(full.Node);
+            CanonicalNode narrowed = projected.Arena.GetNode(part.Node);
+            Assert.True(full.Fields.IsAll);
+            Assert.False(part.Fields.IsAll);
+            Assert.True(all.DType.FieldCount > 2);
+            Assert.Equal(["bucket", "count"], [narrowed.DType.GetFieldName(0), narrowed.DType.GetFieldName(1)]);
+            Assert.Equal(2, narrowed.DType.FieldCount);
+            Assert.Equal(
+                ColumnData.Values<long>(whole.Arena, all.GetFieldIndex(0)).ToArray(), ColumnData.Values<long>(projected.Arena, narrowed.GetFieldIndex(0)).ToArray());
+            Assert.Equal(
+                ColumnData.Values<long>(whole.Arena, all.GetFieldIndex(count)).ToArray(), ColumnData.Values<long>(projected.Arena, narrowed.GetFieldIndex(1)).ToArray());
+        }
+    }
+
+    /// <summary>A read of every chunk, of the fields <paramref name="fields"/> names of each table's rows.</summary>
+    private sealed class FieldsRead(Func<SynopsisTableInfo, int[]> fields) : ISynopsisReads
+    {
+        public bool Reads(SynopsisTableInfo table, TableChunk chunk) => true;
+
+        public Vorticity.Layouts.FieldMask Fields(SynopsisTableInfo table) =>
+            Vorticity.Layouts.FieldMask.Subset(new Vorticity.Layouts.FieldMaskNode(fields(table), null));
+    }
+
     private static bool Same(SynopsisTableInfo left, SynopsisTableInfo right) =>
         left.Kind == right.Kind && left.Bucket == right.Bucket && left.Keys.SequenceEqual(right.Keys) && left.Measures.SequenceEqual(right.Measures) && left.Rows == right.Rows;
 

@@ -11,39 +11,69 @@ using Vorticity.Types;
 namespace Vorticity.Dataset;
 
 /// <summary>One table of an answer, and the buckets of it whose rows are folded as states: each inside the window, with one value of every key of time over it.</summary>
-/// <param name="Table">The table read.</param>
-/// <param name="Kept">Its buckets folded.</param>
-internal sealed record SynopsisPart(SynopsisTableInfo Table, HashSet<long> Kept)
+/// <param name="table">The table read.</param>
+/// <remarks>
+/// The buckets are held in order, as an object's slices come: a few an object, searched where a set of them was a
+/// set to build for each object and a hash for each row of its tables.
+/// </remarks>
+internal sealed class SynopsisPart(SynopsisTableInfo table)
 {
+    private long[] _kept = [];
+    private int _count;
+
+    /// <summary>The table read.</summary>
+    internal SynopsisTableInfo Table { get; } = table;
+
+    /// <summary>Its buckets folded, ascending.</summary>
+    internal ReadOnlySpan<long> Kept => _kept.AsSpan(0, _count);
+
+    /// <summary>How many buckets it folds.</summary>
+    internal int KeptCount => _count;
+
     /// <summary>
     /// The instant a folded bucket's states carry where it is not the bucket's own value: the first the
     /// object holds in it. A bucket is named by its start, which a slice wider than the object's rows puts
     /// before them, and an object's bucket by zero, while a key of time is one value over the instants held.
+    /// Null while every bucket carries its own.
     /// </summary>
-    internal Dictionary<long, long> Instants { get; } = [];
+    internal Dictionary<long, long>? Instants { get; private set; }
+
+    /// <summary>The fields of the table's rows read: every one, or those the answer reads of them (<see cref="SynopsisAnswer.Project"/>).</summary>
+    internal Layouts.FieldMask Fields { get; set; }
 
     /// <summary>Folds <paramref name="bucket"/>, its states carrying <paramref name="first"/>, the first instant the object holds in it.</summary>
     internal void Fold(long bucket, long first)
     {
-        Kept.Add(bucket);
+        // In order as they come, a bucket coming twice held once.
+        int at = Kept.BinarySearch(bucket);
+        if (at < 0)
+        {
+            at = ~at;
+            if (_count == _kept.Length)
+            {
+                Array.Resize(ref _kept, Math.Max(4, 2 * _count));
+            }
+
+            _kept.AsSpan(at, _count - at).CopyTo(_kept.AsSpan(at + 1));
+            _kept[at] = bucket;
+            _count++;
+        }
+
         if (first != bucket)
         {
-            Instants[bucket] = first;
+            (Instants ??= [])[bucket] = first;
         }
     }
+
+    /// <summary>Whether the part folds <paramref name="bucket"/>.</summary>
+    internal bool Holds(long bucket) => Kept.BinarySearch(bucket) >= 0;
 
     /// <summary>Whether <paramref name="chunk"/> holds a bucket the part folds.</summary>
     internal bool Folds(TableChunk chunk)
     {
-        foreach (long bucket in Kept)
-        {
-            if (bucket >= chunk.FirstBucket && bucket <= chunk.LastBucket)
-            {
-                return true;
-            }
-        }
-
-        return false;
+        int at = Kept.BinarySearch(chunk.FirstBucket);
+        at = at < 0 ? ~at : at;
+        return at < _count && _kept[at] <= chunk.LastBucket;
     }
 }
 
@@ -65,7 +95,7 @@ internal sealed record SynopsisPart(SynopsisTableInfo Table, HashSet<long> Kept)
 /// </param>
 internal sealed record SynopsisAnswer(
     IReadOnlyList<SynopsisPart> Parts, IReadOnlyList<TimeSlice> Edges, VortexExpr? KeyFilter, StateRequest Request,
-    IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> Excluded)
+    IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> Excluded) : ISynopsisReads
 {
     /// <summary>
     /// The keys of the question no table holds but the object holds one value of, its partition columns: each a
@@ -103,8 +133,20 @@ internal sealed record SynopsisAnswer(
     /// </param>
     internal static SynopsisAnswer? Of(
         SynopsisContents contents, DType schema, string instant, StateRequest request, VortexExpr? filter, (long Least, long Greatest)? held = null,
-        IReadOnlyList<string>? identifiers = null, IReadOnlyDictionary<string, FilterLiteral>? partition = null)
+        IReadOnlyList<string>? identifiers = null, IReadOnlyDictionary<string, FilterLiteral>? partition = null) =>
+        Of(new SynopsisQuestion(request, filter, instant, identifiers), contents, schema, held, partition);
+
+    /// <summary>
+    /// The answer of the object of <paramref name="contents"/> to <paramref name="question"/>, its filter, keys and
+    /// measures sorted once for every object it asks (<see cref="SynopsisQuestion"/>): an object's answer builds its
+    /// parts, its buckets and its edges, and no set, list or closure besides.
+    /// </summary>
+    internal static SynopsisAnswer? Of(
+        SynopsisQuestion question, SynopsisContents contents, DType schema, (long Least, long Greatest)? held = null,
+        IReadOnlyDictionary<string, FilterLiteral>? partition = null)
     {
+        string instant = question.Instant;
+        StateRequest request = question.Request;
         if (contents.Tables.Count == 0 || contents.Slices.Slices.Count == 0 || schema.IndexOfField(instant) < 0)
         {
             return null;
@@ -113,12 +155,16 @@ internal sealed record SynopsisAnswer(
         // The filter, as conjuncts: bounds on the instant make the window, the rest must read keys alone.
         long low = long.MinValue;
         long high = long.MaxValue;
-        List<VortexExpr> onKeys = [];
-        List<(VortexExpr, VortexExpr)> excluded = [];
-        HashSet<int> keyed = [];
+        VortexExpr[] conjuncts = question.Conjuncts;
+        Span<int> onKeys = conjuncts.Length <= MaxFields ? stackalloc int[MaxFields] : new int[conjuncts.Length];
+        int onKeyCount = 0;
+        ulong joined = 0;
+        List<(VortexExpr, VortexExpr)>? excluded = null;
+        FieldSet keyed = new FieldSet(stackalloc int[MaxFields]);
         Dictionary<string, string>? renames = null;
-        foreach (VortexExpr conjunct in Conjuncts(filter))
+        for (int c = 0; c < conjuncts.Length; c++)
         {
+            VortexExpr conjunct = conjuncts[c];
             if (partition is not null && PartitionFilter.Decided(conjunct, partition) is { } holds)
             {
                 if (!holds)
@@ -129,17 +175,16 @@ internal sealed record SynopsisAnswer(
                 continue;
             }
 
-            if (Exclusion(conjunct, identifiers, schema) is { } part)
+            if (Exclusion(conjunct, question.Identifiers, schema) is { } part)
             {
-                excluded.Add((part, conjunct));
+                (excluded ??= []).Add((part, conjunct));
                 continue;
             }
 
-            HashSet<string> paths = new(StringComparer.Ordinal);
-            conjunct.CollectFields(paths);
-            if (paths.Contains(instant))
+            string[] columns = question.Columns[c];
+            if (Array.IndexOf(columns, instant) >= 0)
             {
-                if (paths.Count != 1 || !Bound(conjunct, instant, ref low, ref high))
+                if (columns.Length != 1 || !Bound(conjunct, instant, ref low, ref high))
                 {
                     return null;
                 }
@@ -147,34 +192,34 @@ internal sealed record SynopsisAnswer(
                 continue;
             }
 
-            if (!KeyedBy(conjunct, contents, schema, keyed, ref renames))
+            if (!(question.ReadsPaths[c] ? KeyedBy(conjunct, contents, schema, ref keyed, ref renames) : KeyedBy(columns, schema, ref keyed)))
             {
                 return null;
             }
 
-            onKeys.Add(conjunct);
+            onKeys[onKeyCount++] = c;
+            joined |= c < 64 ? 1UL << c : 0;
         }
 
         // The keys: a column a table keys, or functions of one; a function of the instant, a key of time; a partition
         // column, one value over the object.
-        List<FunctionFieldExpr> times = [];
-        List<(string, FilterLiteral)> constants = [];
-        foreach (FieldExpr key in request.Keys)
+        List<(string, FilterLiteral)>? constants = null;
+        for (int k = 0; k < request.Keys.Count; k++)
         {
+            FieldExpr key = request.Keys[k];
             if (key.GetType() == typeof(FieldExpr) && partition is not null && partition.TryGetValue(key.Path, out FilterLiteral constant))
             {
-                constants.Add((key.Path, constant));
+                (constants ??= []).Add((key.Path, constant));
                 continue;
             }
 
             if (key is VariantFieldExpr path)
             {
-                if (Counted(contents, schema, path, ref renames) is not { } entry)
+                if (Counted(contents, schema, path, ref renames) is not { } entry || !keyed.Add(entry))
                 {
                     return null;
                 }
 
-                keyed.Add(entry);
                 continue;
             }
 
@@ -184,47 +229,41 @@ internal sealed record SynopsisAnswer(
                 column = function.Column;
             }
 
+            // A key of time is one of the question's, which the fates of the buckets read.
             if (string.Equals(column.Path, instant, StringComparison.Ordinal))
             {
-                if (key is not FunctionFieldExpr time)
+                if (key is not FunctionFieldExpr)
                 {
                     return null;
                 }
 
-                times.Add(time);
                 continue;
             }
 
             int field = schema.IndexOfField(column.Path);
-            if (field < 0)
+            if (field < 0 || !keyed.Add(field))
             {
                 return null;
             }
-
-            keyed.Add(field);
         }
 
-        HashSet<int> measured = [];
+        FieldSet measured = new FieldSet(stackalloc int[MaxFields]);
         for (int i = 0; i < request.Inputs.Count; i++)
         {
             if (request.InputFields[i] is VariantFieldExpr path)
             {
-                if (Counted(contents, schema, path, ref renames, measure: true) is not { } entry)
+                if (Counted(contents, schema, path, ref renames, measure: true) is not { } entry || !measured.Add(entry))
                 {
                     return null;
                 }
-
-                measured.Add(entry);
             }
             else if (request.Inputs[i] is { } input)
             {
                 int field = schema.IndexOfField(input);
-                if (field < 0)
+                if (field < 0 || !measured.Add(field))
                 {
                     return null;
                 }
-
-                measured.Add(field);
             }
         }
 
@@ -233,9 +272,10 @@ internal sealed record SynopsisAnswer(
         // and the slices cut are read as rows. Without a table of slices, a bucket cut is read as rows.
         SynopsisTableInfo? coarsest = null;
         SynopsisTableInfo? sliced = null;
-        foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> _) in contents.Tables)
+        for (int t = 0; t < contents.Tables.Count; t++)
         {
-            if (Holds(table.Keys, keyed) && Holds(table.Measures, measured))
+            SynopsisTableInfo table = contents.Tables[t].Table;
+            if (Holds(table.Keys, keyed.Fields) && Holds(table.Measures, measured.Fields))
             {
                 coarsest = coarsest is null || table.Rows < coarsest.Rows ? table : coarsest;
                 sliced = table.Bucket == SynopsisBucket.Slice && (sliced is null || table.Rows < sliced.Rows) ? table : sliced;
@@ -248,31 +288,32 @@ internal sealed record SynopsisAnswer(
         }
 
         IReadOnlyList<TimeSlice> slices = contents.Slices.Slices;
-        SynopsisPart whole = new SynopsisPart(coarsest, []);
-        SynopsisPart? runs = sliced is null || ReferenceEquals(sliced, coarsest) ? null : new SynopsisPart(sliced, []);
-        List<TimeSlice> edges = [];
-        long least = held?.Least ?? long.MinValue;
-        long past = held is { Greatest: < long.MaxValue } bounds ? bounds.Greatest + 1 : long.MaxValue;
-        BucketFate FateOf(long start, long end) =>
-            Math.Max(start, least) >= Math.Min(end, past) ? BucketFate.Out : Fate(Math.Max(start, least), Math.Min(end, past), low, high, times);
-        foreach ((long bucket, long start, long end, int first, int last) in Buckets(coarsest.Bucket, slices, contents.Slices.Unit))
+        TimeUnit unit = contents.Slices.Unit;
+        SynopsisPart whole = new SynopsisPart(coarsest);
+        SynopsisPart? runs = sliced is null || ReferenceEquals(sliced, coarsest) ? null : new SynopsisPart(sliced);
+        List<TimeSlice>? edges = null;
+        Window window = new Window(
+            held?.Least ?? long.MinValue, held is { Greatest: < long.MaxValue } bounds ? bounds.Greatest + 1 : long.MaxValue, low, high, question.Times);
+        for (int s = 0; s < slices.Count;)
         {
-            switch (FateOf(start, end))
+            (long bucket, long start, long end, int first, int last) = BucketAt(coarsest.Bucket, slices, unit, s);
+            s = last + 1;
+            switch (window.FateOf(start, end))
             {
                 case BucketFate.Kept:
-                    whole.Fold(bucket, Math.Max(start, least));
+                    whole.Fold(bucket, Math.Max(start, window.Least));
                     break;
                 case BucketFate.Edge:
-                    for (int s = first; s <= last; s++)
+                    for (int e = first; e <= last; e++)
                     {
-                        BucketFate fate = coarsest.Bucket == SynopsisBucket.Slice ? BucketFate.Edge : FateOf(slices[s].Start, slices[s].End);
+                        BucketFate fate = coarsest.Bucket == SynopsisBucket.Slice ? BucketFate.Edge : window.FateOf(slices[e].Start, slices[e].End);
                         if (fate == BucketFate.Kept && runs is not null)
                         {
-                            runs.Fold(slices[s].Start, Math.Max(slices[s].Start, least));
+                            runs.Fold(slices[e].Start, Math.Max(slices[e].Start, window.Least));
                         }
                         else if (fate != BucketFate.Out)
                         {
-                            edges.Add(slices[s]);
+                            (edges ??= []).Add(slices[e]);
                         }
                     }
 
@@ -283,20 +324,89 @@ internal sealed record SynopsisAnswer(
         }
 
         // An object whose every row the edges hold is read as rows, with no table.
-        List<SynopsisPart> parts = [];
-        if (whole.Kept.Count > 0)
+        int count = (whole.KeptCount > 0 ? 1 : 0) + (runs is { KeptCount: > 0 } ? 1 : 0);
+        if (count == 0 && edges is not null)
         {
-            parts.Add(whole);
+            return null;
         }
 
-        if (runs is { Kept.Count: > 0 })
+        SynopsisPart[] parts = count == 0 ? [] : new SynopsisPart[count];
+        if (whole.KeptCount > 0)
         {
-            parts.Add(runs);
+            parts[0] = whole;
         }
 
-        return parts.Count == 0 && edges.Count > 0
-            ? null
-            : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys), request, excluded) { Constants = constants, Renames = renames };
+        if (runs is { KeptCount: > 0 })
+        {
+            parts[count - 1] = runs;
+        }
+
+        return new SynopsisAnswer(
+            parts, (IReadOnlyList<TimeSlice>?)edges ?? [], onKeyCount == 0 ? null : question.KeyFilter(joined, onKeys[..onKeyCount]), request,
+            (IReadOnlyList<(VortexExpr, VortexExpr)>?)excluded ?? [])
+        {
+            Constants = (IReadOnlyList<(string, FilterLiteral)>?)constants ?? [],
+            Renames = renames,
+        };
+    }
+
+    /// <summary>The keys, filters and measures an answer holds at most, the fields it reads each held once.</summary>
+    private const int MaxFields = 64;
+
+    /// <summary>A few fields, each held once, in a span its holder lends.</summary>
+    private ref struct FieldSet(Span<int> held)
+    {
+        private readonly Span<int> _held = held;
+        private int _count;
+
+        /// <summary>The fields held.</summary>
+        internal readonly ReadOnlySpan<int> Fields => _held[.._count];
+
+        /// <summary>Holds <paramref name="field"/>; false when the span is full.</summary>
+        internal bool Add(int field)
+        {
+            if (Fields.Contains(field))
+            {
+                return true;
+            }
+
+            if (_count == _held.Length)
+            {
+                return false;
+            }
+
+            _held[_count++] = field;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The window an object's buckets meet: the instants its rows hold, from <see cref="Least"/> to before
+    /// <see cref="Past"/>, the filter's bounds, and the question's keys of time.
+    /// </summary>
+    private readonly record struct Window(long Least, long Past, long Low, long High, FunctionFieldExpr[] Times)
+    {
+        /// <summary>The fate of the bucket of instants [<paramref name="start"/>, <paramref name="end"/>), cut to the instants the object holds.</summary>
+        internal BucketFate FateOf(long start, long end) =>
+            Math.Max(start, Least) >= Math.Min(end, Past) ? BucketFate.Out : Fate(Math.Max(start, Least), Math.Min(end, Past), Low, High, Times);
+    }
+
+    /// <summary>
+    /// Adds to <paramref name="keyed"/> the columns a predicate on keys reads, <paramref name="columns"/>, each a
+    /// table's key; false when one is no column of the schema.
+    /// </summary>
+    private static bool KeyedBy(string[] columns, DType schema, ref FieldSet keyed)
+    {
+        foreach (string column in columns)
+        {
+            int field = schema.IndexOfField(column);
+            if (field < 0 || !keyed.Add(field))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -304,37 +414,20 @@ internal sealed record SynopsisAnswer(
     /// of a variant a table counts, evaluated on the table's rows as columns are, through <c>and</c>, <c>or</c> and
     /// <c>not</c>; false when it reads a column or a path no table could key.
     /// </summary>
-    private static bool KeyedBy(VortexExpr predicate, SynopsisContents contents, DType schema, HashSet<int> keyed, ref Dictionary<string, string>? renames)
+    private static bool KeyedBy(VortexExpr predicate, SynopsisContents contents, DType schema, ref FieldSet keyed, ref Dictionary<string, string>? renames)
     {
         switch (predicate)
         {
             case LogicalExpr logical:
-                return KeyedBy(logical.Left, contents, schema, keyed, ref renames) && KeyedBy(logical.Right, contents, schema, keyed, ref renames);
+                return KeyedBy(logical.Left, contents, schema, ref keyed, ref renames) && KeyedBy(logical.Right, contents, schema, ref keyed, ref renames);
             case NotExpr not:
-                return KeyedBy(not.Operand, contents, schema, keyed, ref renames);
+                return KeyedBy(not.Operand, contents, schema, ref keyed, ref renames);
             case VariantFilterExpr:
-                if (PathOf(predicate) is not { } path || Counted(contents, schema, path, ref renames) is not { } entry)
-                {
-                    return false;
-                }
-
-                keyed.Add(entry);
-                return true;
+                return PathOf(predicate) is { } path && Counted(contents, schema, path, ref renames) is { } entry && keyed.Add(entry);
             default:
                 HashSet<string> columns = new(StringComparer.Ordinal);
                 predicate.CollectFields(columns);
-                foreach (string column in columns)
-                {
-                    int field = schema.IndexOfField(column);
-                    if (field < 0)
-                    {
-                        return false;
-                    }
-
-                    keyed.Add(field);
-                }
-
-                return true;
+                return KeyedBy([.. columns], schema, ref keyed);
         }
     }
 
@@ -465,19 +558,22 @@ internal sealed record SynopsisAnswer(
         return null;
     }
 
-    /// <summary>The names of <paramref name="table"/>'s fields as its contents keep them, when they are its row's <paramref name="width"/>; null otherwise.</summary>
-    private static string[]? NamesOf(SynopsisContents contents, SynopsisTableInfo table, int width)
+    /// <summary>
+    /// <paramref name="table"/>'s row type and the names of its fields as its contents keep them, read once; a default
+    /// type and null when the contents hold no such table, or names of another width.
+    /// </summary>
+    private static (DType Row, string[]? Names) RowOf(SynopsisContents contents, SynopsisTableInfo table)
     {
         for (int t = 0; t < contents.Tables.Count; t++)
         {
             if (ReferenceEquals(contents.Tables[t].Table, table))
             {
-                string[] names = contents.TableRowTypes.Names[t];
-                return names.Length == width ? names : null;
+                (_, DType[] rows, string[][] names) = contents.TableRowTypes;
+                return names[t].Length == rows[t].FieldCount ? (rows[t], names[t]) : (rows[t], null);
             }
         }
 
-        return null;
+        return (default, null);
     }
 
     /// <summary>Whether <paramref name="chunk"/> of <paramref name="table"/> holds a bucket the answer folds, which the read of the synopsis fetches.</summary>
@@ -497,6 +593,116 @@ internal sealed record SynopsisAnswer(
         }
 
         return false;
+    }
+
+    bool ISynopsisReads.Reads(SynopsisTableInfo table, TableChunk chunk) => Reads(table, chunk);
+
+    /// <summary>The fields of <paramref name="table"/>'s rows its part reads (<see cref="Project"/>); every one of a table no part reads.</summary>
+    Layouts.FieldMask ISynopsisReads.Fields(SynopsisTableInfo table)
+    {
+        for (int p = 0; p < Parts.Count; p++)
+        {
+            if (ReferenceEquals(Parts[p].Table, table))
+            {
+                return Parts[p].Fields;
+            }
+        }
+
+        return Layouts.FieldMask.All;
+    }
+
+    /// <summary>
+    /// Has each part read only the fields of its table's rows the batches of states are read by: the bucket, the rows
+    /// each row stands for, the columns of the keys and of the filter on them, and the states of each measure the request
+    /// folds, where a table holds 16 columns for the 3 a count by one key reads. The rows of a table a deletion or an
+    /// identifier corrects are read whole, every key and state of a row taken out; so are those of a table whose paths
+    /// the question reads by their text (<see cref="Renames"/>).
+    /// </summary>
+    internal void Project(SynopsisContents contents)
+    {
+        if (Renames is not null)
+        {
+            return;
+        }
+
+        // The names the batches are read by, the question's: a key's column under its functions, a filter's. The set is
+        // the process's one, taken for the answer and given back cleared; one another answer holds leaves this one its own.
+        HashSet<string> read = System.Threading.Interlocked.Exchange(ref s_read, null) ?? new HashSet<string>(StringComparer.Ordinal);
+        read.Add(StateRequest.RowsColumn);
+        for (int k = 0; k < Request.Keys.Count; k++)
+        {
+            FieldExpr column = Request.Keys[k];
+            while (column is FunctionFieldExpr function)
+            {
+                column = function.Column;
+            }
+
+            read.Add(column.Path);
+        }
+
+        KeyFilter?.CollectFields(read);
+        Span<int> wanted = stackalloc int[ProjectedFields];
+        for (int p = 0; p < Parts.Count; p++)
+        {
+            SynopsisPart part = Parts[p];
+            if (RowOf(contents, part.Table) is not (_, { } names) || names.Length > ProjectedFields)
+            {
+                continue;
+            }
+
+            int count = 0;
+            for (int f = 0; f < names.Length; f++)
+            {
+                if (f == 0 || read.Contains(names[f]) || Measured(names[f]))
+                {
+                    wanted[count++] = f;
+                }
+            }
+
+            part.Fields = count < names.Length ? Layouts.FieldMasks.Of(wanted[..count]) : Layouts.FieldMask.All;
+        }
+
+        read.Clear();
+        System.Threading.Volatile.Write(ref s_read, read);
+    }
+
+    /// <summary>The fields of a table past which its rows are read whole: a table's are its keys, a count and five to eight states a measure.</summary>
+    private const int ProjectedFields = 256;
+
+    /// <summary>The names <see cref="Project"/> reads a table's fields by, held between answers.</summary>
+    private static HashSet<string>? s_read;
+
+    /// <summary>Whether <paramref name="name"/> is a state of a measure the request folds: its name, a dot, then the state's.</summary>
+    private bool Measured(string name)
+    {
+        for (int i = 0; i < Request.Inputs.Count; i++)
+        {
+            if (Request.Inputs[i] is { } input && name.Length > input.Length && name[input.Length] == '.' && name.StartsWith(input, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Where the table's field <paramref name="field"/> lies among the <paramref name="width"/> fields <paramref name="fields"/> holds; -1 for none.</summary>
+    private static int Position(Layouts.FieldMask fields, int field, int width)
+    {
+        if (fields.IsAll)
+        {
+            return field < width ? field : -1;
+        }
+
+        for (int s = 0; s < width; s++)
+        {
+            if (fields.SelectedField(s) == field)
+            {
+                return s;
+            }
+        }
+
+        return -1;
     }
 
     /// <summary>
@@ -544,6 +750,7 @@ internal sealed record SynopsisAnswer(
         CanonicalArena arena = tables.Arena;
         List<int[]> chunkFields = [];
         DType rowType = default;
+        Layouts.FieldMask projected = Layouts.FieldMask.All;
         for (int t = 0; t < tables.Tables.Count; t++)
         {
             ReadTable read = tables.Tables[t];
@@ -552,8 +759,15 @@ internal sealed record SynopsisAnswer(
                 continue;
             }
 
+            // Every chunk of the table holds the same fields, those the read projected or every one.
             CanonicalNode rows = arena.GetNode(read.Node);
+            if (chunkFields.Count > 0 && (read.Fields.IsAll != projected.IsAll || rows.DType.FieldCount != rowType.FieldCount))
+            {
+                return false;
+            }
+
             rowType = rows.DType;
+            projected = read.Fields;
             int[] stated = new int[rowType.FieldCount];
             for (int f = 0; f < stated.Length; f++)
             {
@@ -573,23 +787,34 @@ internal sealed record SynopsisAnswer(
             return true;
         }
 
+        // A row comes out of a table by every key and state of it: the table's rows read whole.
         if (removed is { Count: > 0 }
-            && (slices is null || !SynopsisCorrection.TryRemove(arena, part.Table, rowType, chunkFields, schema, removed, slices.Slices, slices.Unit, part.Kept, Request.Reads)))
+            && (!projected.IsAll || slices is null
+                || !SynopsisCorrection.TryRemove(arena, part.Table, rowType, chunkFields, schema, removed, slices.Slices, slices.Unit, part, Request.Reads)))
         {
             return false;
         }
 
         // The batch's struct: the table's columns renamed as the question reads them, then the partition's values. A
         // field's name is the contents' own, read once with the table's row type, where a name read from a dtype is a
-        // string made at each read.
+        // string made at each read; its type is the contents' too, where the struct is built, a projection's struct
+        // lying in the arena of the context that decoded it.
         int width = rowType.FieldCount;
+        (DType full, string[]? fieldNames) = RowOf(contents, part.Table);
+        int bucketAt = Position(projected, 0, width);
+        int stoodAt = Position(projected, part.Table.Keys.Length + 1, width);
+        if (bucketAt != 0 || stoodAt < 0 || (!projected.IsAll && (full.IsDefault || fieldNames is null)))
+        {
+            return false;
+        }
+
         string[] names = new string[width + Constants.Count];
         DType[] dtypes = new DType[names.Length];
-        string[]? fieldNames = NamesOf(contents, part.Table, width);
         for (int f = 0; f < width; f++)
         {
-            names[f] = f == 0 ? instant : Renamed(fieldNames?[f] ?? rowType.GetFieldName(f));
-            dtypes[f] = rowType.GetField(f);
+            int field = projected.IsAll ? f : projected.SelectedField(f);
+            names[f] = f == 0 ? instant : Renamed(fieldNames?[field] ?? rowType.GetFieldName(f));
+            dtypes[f] = projected.IsAll ? rowType.GetField(f) : full.GetField(field);
         }
 
         int[] constantColumns = new int[Constants.Count];
@@ -631,9 +856,9 @@ internal sealed record SynopsisAnswer(
             }
 
             int bucketed = fields[0];
-            if (part.Instants.Count > 0)
+            if (part.Instants is { Count: > 0 } instants)
             {
-                fields[0] = InstantsOf(arena, bucketed, dtypes[0], count, part.Instants);
+                fields[0] = InstantsOf(arena, bucketed, dtypes[0], count, instants);
             }
 
             // The types are the object's contents', which every question over it shares: what adds to them, once
@@ -651,21 +876,32 @@ internal sealed record SynopsisAnswer(
             // The rows of the buckets kept, then those the filter on the keys holds for, but a row whose
             // every row was taken out, whose group the rows would not make.
             ReadOnlySpan<long> buckets = arena.GetNode(bucketed).Values.Cast<long>();
-            ReadOnlySpan<long> stood = arena.GetNode(fields[part.Table.Keys.Length + 1]).Values.Cast<long>();
+            ReadOnlySpan<long> stood = arena.GetNode(fields[stoodAt]).Values.Cast<long>();
             int words = Math.Max((count + 63) >> 6, 1);
             VortexBuffer selection = arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bits);
             bits.Clear();
             Span<ulong> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bits);
-            Span<byte> states = KeyFilter is null ? default : new byte[count];
+            Span<byte> states = default;
             if (KeyFilter is { } keyFilter)
             {
+                _ = arena.Allocate(count, 1, out states);
+                states.Clear();
                 FilterEvaluator.Evaluate(keyFilter, arena, node, count, states);
             }
 
+            // The rows lie in the order of their buckets: a bucket's verdict is taken once for all its rows.
             int selected = 0;
+            long bucket = 0;
+            bool folded = false;
             for (int r = 0; r < count; r++)
             {
-                if (part.Kept.Contains(buckets[r]) && stood[r] > 0 && (states.IsEmpty || states[r] == Trilean.True))
+                if (r == 0 || buckets[r] != bucket)
+                {
+                    bucket = buckets[r];
+                    folded = part.Holds(bucket);
+                }
+
+                if (folded && stood[r] > 0 && (states.IsEmpty || states[r] == Trilean.True))
                 {
                     kept[r >> 6] |= 1UL << (r & 63);
                     selected++;
@@ -729,7 +965,7 @@ internal sealed record SynopsisAnswer(
     /// window [<paramref name="low"/>, <paramref name="high"/>] with one value of each key of time over it,
     /// outside the window, or across one of them.
     /// </summary>
-    private static BucketFate Fate(long start, long end, long low, long high, List<FunctionFieldExpr> times)
+    private static BucketFate Fate(long start, long end, long low, long high, FunctionFieldExpr[] times)
     {
         long last = end - 1;
         if (last < low || start > high)
@@ -764,48 +1000,37 @@ internal sealed record SynopsisAnswer(
 
         return mapped.SignedValue;
     }
-
     /// <summary>
-    /// Each bucket of a table over <paramref name="slices"/>: its value in the table's rows, the instants
-    /// its slices span, and the first and last of them. A slice is its own bucket; an hour holds the slices
-    /// that start in it, which a slice wider than an hour carries past it; the object holds every slice.
+    /// The bucket of a table over <paramref name="slices"/> that starts at slice <paramref name="first"/>: its value in
+    /// the table's rows, the instants its slices span, and the first and last of them, the next bucket starting past
+    /// the last. A slice is its own bucket; an hour holds the slices that start in it, which a slice wider than an hour
+    /// carries past it; the object holds every slice.
     /// </summary>
-    private static IEnumerable<(long Bucket, long Start, long End, int First, int Last)> Buckets(SynopsisBucket kind, IReadOnlyList<TimeSlice> slices, TimeUnit unit)
+    private static (long Bucket, long Start, long End, int First, int Last) BucketAt(SynopsisBucket kind, IReadOnlyList<TimeSlice> slices, TimeUnit unit, int first)
     {
         switch (kind)
         {
             case SynopsisBucket.Slice:
-                for (int s = 0; s < slices.Count; s++)
-                {
-                    yield return (slices[s].Start, slices[s].Start, slices[s].End, s, s);
-                }
-
-                break;
+                return (slices[first].Start, slices[first].Start, slices[first].End, first, first);
             case SynopsisBucket.Hour:
-                for (int s = 0; s < slices.Count;)
+                long hour = TimeSlicer.Floor(slices[first].Start, unit, SliceWidth.Hour);
+                int last = first;
+                long end = slices[first].End;
+                while (last + 1 < slices.Count && TimeSlicer.Floor(slices[last + 1].Start, unit, SliceWidth.Hour) == hour)
                 {
-                    long hour = TimeSlicer.Floor(slices[s].Start, unit, SliceWidth.Hour);
-                    int last = s;
-                    long end = slices[s].End;
-                    while (last + 1 < slices.Count && TimeSlicer.Floor(slices[last + 1].Start, unit, SliceWidth.Hour) == hour)
-                    {
-                        last++;
-                        end = Math.Max(end, slices[last].End);
-                    }
-
-                    yield return (hour, slices[s].Start, end, s, last);
-                    s = last + 1;
+                    last++;
+                    end = Math.Max(end, slices[last].End);
                 }
 
-                break;
+                return (hour, slices[first].Start, end, first, last);
             default:
-                yield return (0, slices[0].Start, slices[^1].End, 0, slices.Count - 1);
-                break;
+                return (0, slices[0].Start, slices[^1].End, 0, slices.Count - 1);
         }
     }
 
+
     /// <summary>Whether <paramref name="have"/> holds every field of <paramref name="need"/>.</summary>
-    private static bool Holds(int[] have, HashSet<int> need)
+    private static bool Holds(int[] have, ReadOnlySpan<int> need)
     {
         foreach (int field in need)
         {
