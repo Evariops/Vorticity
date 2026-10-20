@@ -662,24 +662,38 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         // The parts' numbers here become their numbers in the target's parts, then each tuple its
         // group there. The target's table learns them as its rows meet them: a tuple new to it had
-        // no slot, and its next batch covers its parts' new numbers first.
-        int[][] partMaps = new int[_parts.Length][];
+        // no slot, and its next batch covers its parts' new numbers first. The parts' maps lie in one
+        // array rented for the merge, where every lane's merge made one a part, a tenth of what a
+        // question answered at sixteen lanes allocated.
+        Span<int> starts = stackalloc int[_parts.Length + 1];
         for (int p = 0; p < _parts.Length; p++)
         {
-            partMaps[p] = new int[_parts[p].Count];
-            _parts[p].MergeInto(into._parts[p], partMaps[p]);
+            starts[p + 1] = starts[p] + _parts[p].Count;
         }
 
-        Span<int> ids = stackalloc int[_parts.Length];
-        for (int i = 0; i < groups.Length; i++)
+        int[] partMaps = System.Buffers.ArrayPool<int>.Shared.Rent(Math.Max(starts[^1], 1));
+        try
         {
-            TKey key = _keys[groups[i]];
             for (int p = 0; p < _parts.Length; p++)
             {
-                ids[p] = partMaps[p][Id(key, p)];
+                _parts[p].MergeInto(into._parts[p], partMaps.AsSpan(starts[p], _parts[p].Count));
             }
 
-            map[i] = into.Lookup(Pack(ids));
+            Span<int> ids = stackalloc int[_parts.Length];
+            for (int i = 0; i < groups.Length; i++)
+            {
+                TKey key = _keys[groups[i]];
+                for (int p = 0; p < _parts.Length; p++)
+                {
+                    ids[p] = partMaps[starts[p] + Id(key, p)];
+                }
+
+                map[i] = into.Lookup(Pack(ids));
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<int>.Shared.Return(partMaps);
         }
 
         MergeSeen(target);
