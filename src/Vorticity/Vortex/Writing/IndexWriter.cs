@@ -1577,7 +1577,7 @@ internal sealed class IndexWriter : IDisposable
             IndexSegment[] children = new IndexSegment[root.Count];
             for (int i = 0; i < children.Length; i++)
             {
-                children[i] = root.Regions[i][0];
+                children[i] = root.FirstRegionOf(i);
             }
 
             int slot = pages.Runs.FindIndex(r => ReferenceEquals(r, pages.Placeholder));

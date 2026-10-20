@@ -94,7 +94,11 @@ Long runs are paged. A locating run of at most 64 segments of 65 536 entries lis
 inline. A longer one writes its segment table as fence pages of at most 64 KiB, forming a tree whose
 root is inline in the run's options and whose pages carry their children's checksums. Two levels
 cover more than 10¹² entries, so a lookup reads at most two fence pages before its payload
-(`Vortex/Indexes/FenceTable.cs`).
+(`Vortex/Indexes/FenceTable.cs`). A page read is checked whole in one pass, then held as its bytes and
+where each fence's keys lie in them: a descent compares keys where the page holds them, and parses
+the regions of the fence it takes alone. Parsed into a key array and a region array a fence, the
+pages of a lookup that leaves one identifier out over three objects of 180 M rows were half of what
+it allocated.
 
 Bloom filters form a tree. A run's filters are laid out with a fan-out of 16: the leaves are the
 per-block filters, an internal node filters the union of its 16 children and lists their sizes, and

@@ -168,7 +168,7 @@ internal static class KeyRunOptions
                         version = reader.ReadVarint32();
                         break;
                     case 3 when wire == ProtoWireType.LengthDelimited:
-                        page = FencePage.Read(reader.ReadMessage(), stride, null, layout);
+                        page = FencePage.Read(reader.ReadLengthDelimited(), stride, null, layout);
                         break;
                     case 4 when wire == ProtoWireType.LengthDelimited:
                         types.Add(reader.ReadLengthDelimited().ToArray());
