@@ -90,6 +90,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     // The lane's shelf its tables grow from, under the query's memory; null for tables nothing counts.
     private readonly ArrayShelf? _shelf;
 
+    // Whether the columns' indexes are its own, and whether they were lent to the parts of a merge or to the partitions
+    // rebased on them: a release gives back only indexes of its own it never lent, which nothing else reads.
+    private bool _ownsParts;
+    private bool _lentParts;
+
     /// <param name="shapes">The key's columns.</param>
     /// <param name="facts">What the statistics say of them.</param>
     /// <param name="shared">The indexes of the columns, shared by the parts of a parallel merge; fresh ones when null.</param>
@@ -99,6 +104,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         _shapes = shapes;
         _facts = facts;
         _shelf = shelf;
+        _ownsParts = shared is null;
         _parts = new GroupKeys[shapes.Length];
         _ids = new int[shapes.Length][];
         _partRanges = new GroupRanges[shapes.Length];
@@ -513,6 +519,49 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
     internal override GroupKeys Fresh() => new PackedKeys<TKey>(_shapes, _facts);
 
+    /// <summary>
+    /// The tuples' arrays back to the shelf they grew from, each column's index's to its own unless a merge's parts
+    /// share them, and the scratch of the calls back to the process's shelf; the keys are empty after. Left to the
+    /// collector, every question grouped by a key of several columns grew them again: a count per service and per
+    /// 12 hours from the tables made 180 KB of arrays a question.
+    /// </summary>
+    internal override void Release()
+    {
+        if (_ownsParts && !_lentParts)
+        {
+            foreach (GroupKeys part in _parts)
+            {
+                part.Release();
+            }
+        }
+
+        if (_shelf is not null)
+        {
+            _shelf.Give(_keys);
+            _shelf.Give(_tags);
+            _shelf.Give(_hashed);
+            if (_table is not null)
+            {
+                _shelf.Give(_table);
+            }
+        }
+
+        _keys = [];
+        _tags = [];
+        _hashed = [];
+        _table = null;
+        for (int p = 0; p < _ids.Length; p++)
+        {
+            Scratch.Return(ref _ids[p]);
+        }
+
+        Scratch.Return(ref _slots);
+        Scratch.Return(ref _partIds);
+        Scratch.Return(ref _renumbered);
+        Scratch.Return(ref _held);
+        Count = 0;
+    }
+
     /// <summary>The parts' indexes, the packed keys of the groups, the slots or the table that find them, and the scratch a keep reuses.</summary>
     internal override long Footprint
     {
@@ -646,7 +695,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
     }
 
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new PackedKeys<TKey>(_shapes, _facts, _parts);
+    internal override GroupKeys ForPart(ArrayShelf? shelf = null)
+    {
+        _lentParts = true;
+        return new PackedKeys<TKey>(_shapes, _facts, _parts);
+    }
 
     internal override bool Spills => Array.TrueForAll(_parts, part => part.Spills);
 
@@ -782,6 +835,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     /// </summary>
     internal override async Task RebaseAsync(GroupKeys[] partitions, CancellationToken cancellationToken)
     {
+        _lentParts = true;
         int[][][] maps = new int[partitions.Length][][];
         for (int l = 1; l < partitions.Length; l++)
         {
@@ -834,6 +888,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         // Its own slots and table no longer find the words; a rebased index is read, not assigned.
         parts.CopyTo(_parts, 0);
+        _ownsParts = false;
         DropTable();
     }
 
