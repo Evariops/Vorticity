@@ -86,7 +86,7 @@ if (Text(args, "--micro") == "synopsistables")
 // --micro slicesort: one time slice sorted as a dataset of periods writes it (SliceSortMicro.cs).
 if (Text(args, "--micro") == "slicesort")
 {
-    return await SliceSortMicro.Run(rounds);
+    return await SliceSortMicro.Run(rounds, args.Contains("--deep"));
 }
 
 // --micro shredcost: what shredding a path costs and saves in a file's bytes (ShredCostMicro.cs).

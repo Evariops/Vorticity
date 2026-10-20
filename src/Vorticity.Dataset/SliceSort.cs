@@ -270,8 +270,23 @@ internal static class SliceSort
             byValue[i] = i;
         }
 
-        int[] rowsOf = [.. firsts];
-        Array.Sort(byValue, (left, right) => Compare(arena, column, rowsOf[left], rowsOf[right]));
+        if (hashed)
+        {
+            int[] rowsOf = [.. firsts];
+            Array.Sort(byValue, (left, right) => Compare(arena, column, rowsOf[left], rowsOf[right]));
+        }
+        else
+        {
+            // A number's keys sort as unsigned numbers in its values' order, without a comparison called per pair.
+            ulong[] ordered = new ulong[distinct];
+            for (int i = 0; i < distinct; i++)
+            {
+                ordered[i] = Ordered(kind, ptype, keys[i]);
+            }
+
+            Array.Sort(ordered, byValue);
+        }
+
         int[] rank = new int[distinct];
         for (int i = 0; i < distinct; i++)
         {
@@ -340,6 +355,47 @@ internal static class SliceSort
     }
 
     private static ulong Mix(ulong key) => (key ^ (key >> 29)) * 0x9E3779B97F4A7C15UL;
+
+    private const ulong SignBit = 1UL << 63;
+
+    /// <summary>
+    /// A key of <see cref="Key"/> as an unsigned number in its value's order, as <see cref="Compare"/> orders them:
+    /// a signed integer's sign flipped, a float's bits flipped as its sign says, its NaNs first, a bool as it is.
+    /// </summary>
+    private static ulong Ordered(CanonicalKind kind, PType ptype, ulong key)
+    {
+        if (kind == CanonicalKind.Bool)
+        {
+            return key;
+        }
+
+        return ptype switch
+        {
+            PType.I8 => (ulong)(long)(sbyte)key ^ SignBit,
+            PType.I16 => (ulong)(long)(short)key ^ SignBit,
+            PType.I32 => (ulong)(long)(int)key ^ SignBit,
+            PType.I64 => key ^ SignBit,
+            PType.F64 => Ordered(BitConverter.UInt64BitsToDouble(key)),
+            PType.F32 => Ordered(BitConverter.UInt32BitsToSingle((uint)key)),
+            PType.F16 => Ordered((double)BitConverter.UInt16BitsToHalf((ushort)key)),
+            _ => key,
+        };
+    }
+
+    /// <summary>
+    /// A float as an unsigned number in its order: 0 for a NaN, which comes first, and past it every other value,
+    /// the least -∞ at 2^52 - 1, a zero its sign put away by <see cref="Key"/>.
+    /// </summary>
+    private static ulong Ordered(double value)
+    {
+        if (double.IsNaN(value))
+        {
+            return 0;
+        }
+
+        ulong bits = BitConverter.DoubleToUInt64Bits(value);
+        return (bits & SignBit) != 0 ? ~bits : bits | SignBit;
+    }
 
     private static int ComparePrimitive(PType ptype, ReadOnlySpan<byte> values, int left, int right) => ptype switch
     {
