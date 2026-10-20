@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -90,11 +91,18 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
         return regions;
     }
 
+    /// <summary>The store's reader under the cache's.</summary>
+    internal ISegmentReader Inner => _inner;
+
+    /// <summary>What the store's reader reads first of the object's tail.</summary>
+    public int TailReadSize => _inner.TailReadSize;
+
     public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => _inner.GetLengthAsync(cancellationToken);
 
     public ValueTask<SegmentOwner> ReadRangeAsync(long offset, int length, int alignment, CancellationToken cancellationToken) =>
         _inner.ReadRangeAsync(offset, length, alignment, cancellationToken);
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
     {
         if (!_regions.TryGetValue((spec.Offset, spec.Length), out IndexSegment region))
@@ -161,6 +169,8 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
     }
 
     /// <summary>Reads <paramref name="requests"/>, its slot <c>i</c> the index region <paramref name="named"/>[i] where there is one.</summary>
+    /// <remarks>Its state is pooled: every read of an object a dataset opened goes through it, the data's too.</remarks>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask ReadSetAsync(SegmentRequestSet requests, ReadOnlyMemory<IndexSegment> named, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(requests);

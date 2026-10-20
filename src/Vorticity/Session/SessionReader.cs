@@ -37,7 +37,12 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
             ? inner
             : new SessionReader(inner, session.ReadGate, session.Options.SegmentCache);
 
-    internal static ISegmentReader Unwrap(ISegmentReader reader) => reader is SessionReader session ? session._inner : reader;
+    /// <summary>The store's reader under the session's, and under the synopsis cache's when there is one.</summary>
+    internal static ISegmentReader Unwrap(ISegmentReader reader)
+    {
+        ISegmentReader under = reader is SessionReader session ? session._inner : reader;
+        return under is SynopsisCacheReader cached ? cached.Inner : under;
+    }
 
     public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => _inner.GetLengthAsync(cancellationToken);
 

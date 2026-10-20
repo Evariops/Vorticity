@@ -12,7 +12,7 @@ namespace Vorticity;
 // the open read is a view of it, and the source reads the others. Such a segment is not asked of the source, so it
 // is not counted among a scan's requests either: a scan fills it with FillFromTail before it
 // counts, and every other count asks Holds.
-public sealed partial class VortexFile : ISegmentReader
+public sealed partial class VortexFile : ISegmentReader, global::Vorticity.Indexes.IIndexRegionReader
 {
     /// <summary>
     /// A view of the segment <paramref name="spec"/> names inside the tail the open read, when the
@@ -109,13 +109,43 @@ public sealed partial class VortexFile : ISegmentReader
         return ValueTask.CompletedTask;
     }
 
+    // The regions of an index's runs its reader names go on to the file's source, which may keep them: an object a dataset
+    // opened reads its lookups' fence pages and segments from the session's synopsis cache.
+    ValueTask global::Vorticity.Indexes.IIndexRegionReader.ReadRegionsAsync(SegmentRequestSet requests, System.ReadOnlyMemory<global::Vorticity.Indexes.IndexSegment> regions, CancellationToken cancellationToken)
+    {
+        if (requests.IsPopulated)
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (Serve(requests))
+        {
+            return ReadLeftAsync(requests, regions, cancellationToken);
+        }
+
+        requests.Complete();
+        return ValueTask.CompletedTask;
+    }
+
     /// <summary>Reads what the tail does not hold, and on a failure gives back what it served too.</summary>
+    private ValueTask ReadLeftAsync(SegmentRequestSet requests, CancellationToken cancellationToken) =>
+        ReadLeftAsync(requests, default, cancellationToken);
+
+    /// <summary>Reads what the tail does not hold, its slot <c>i</c> the index region <paramref name="regions"/>[i] where there is one.</summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask ReadLeftAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+    private async ValueTask ReadLeftAsync(SegmentRequestSet requests, System.ReadOnlyMemory<global::Vorticity.Indexes.IndexSegment> regions, CancellationToken cancellationToken)
     {
         try
         {
-            await _source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            if (regions.IsEmpty)
+            {
+                await _source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await global::Vorticity.Indexes.IndexRegionReads.ReadRegionsAsync(_source, requests, regions, cancellationToken).ConfigureAwait(false);
+            }
         }
         catch
         {

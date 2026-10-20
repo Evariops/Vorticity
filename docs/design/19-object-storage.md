@@ -647,7 +647,9 @@ never stale: its key is the object's uid, the region's place and length and its 
 before the region is read. Warm, a lookup asks the store for the chunks of the blocks it found alone: a
 count per service and per 12 hours of every row but one request's, over 3 objects of 180 M rows, asked
 for 11 regions in 23 ms, a fence page and two segments of each object's postings beside the chunks of
-the block that holds the id, and asks for those 2 chunks in 12.7 ms.
+the block that holds the id, and asks for those 2 chunks in 12.7 ms. An object the dataset opens to
+read its rows reads the same regions through the cache: the rows of one request id over the same
+objects take 2 requests in one round trip warm, against 7 in 5, 14.6 ms against 37.4.
 
 An entry is a file named by that key, in directories sharded by the uid, written under a temporary
 name and then renamed, so a reader never sees half a file. It is written behind the question that read
