@@ -921,8 +921,11 @@ with nothing cut first, its own table homing them by the bits below the part's, 
 chosen row and a tie keep the earlier range's.
 
 On a dataset, a range is an object, and an object holding two shares of the rows or more is cut
-between its chunks, as a file's rows are, so no chunk is read by two ranges. The objects that are cut
-are opened side by side to learn where their chunks end, and the ranges then find them already open.
+between its chunks, as a file's rows are, so no chunk is read by two ranges. An object whose synopsis
+answers the pass's states stays whole and counts for none of the shares, since states answer an object
+and not a part of it; whether it does, its entry says, as its scan would find, so that one whose tables
+do not hold the question is cut as any other. The objects that are cut are opened side by side to
+learn where their chunks end, and the ranges then find them already open.
 No object settles ([statistics and zone maps](#93-statistics-and-zone-maps), and see
 [13-dataset.md](13-dataset.md)). A group by that streams runs as [in parallel, in
 order](#25-in-parallel-in-order) describes, its ranges grouped side by side and followed in row order,
@@ -1034,11 +1037,15 @@ result and their order until they are delivered. A lane's working memory besides
 scratch and its decoding, is admitted with the query, at 16 bytes per row of its batches between
 64 KiB and a megabyte, or a megabyte when the scan sets no batch size. A query whose budget cannot
 give every lane that much starts on half as many lanes, down to one. Over a source that copies what it
-reads (a store, or positional reads), a lane's two splits read ahead of its decode are admitted with
-it, each as large as the layout's largest split, which a walk of the layout finds before the pass.
-Under a budget short of them, the lanes read one split ahead, then none, before they are halved, and
-give them back when the pass ends. A mapping reads in place, its reads being views of it, so nothing
-more is admitted. What the queries release stays in the heap until a collection, so when that memory,
+reads (a store, or positional reads), a lane's splits read ahead of its decode are admitted with it,
+each as large as the layout's largest split, which a walk of the layout finds before the pass: its
+share of sixteen for the pass, two at least, so that one lane reads sixteen ahead, two lanes eight,
+four lanes four and eight or more two each. A pass of one lane reads ahead too over an object store,
+its decode on the caller's flow, where it decoded a split ahead on a lane of its own and waited on
+each read in turn; its reads past two take a quarter of the ceiling at most. Under a budget short of
+them, the lanes read one split fewer ahead at a time, down to none, before they are halved, and give
+them back when the pass ends. A mapping reads in place, its reads being views of it, so nothing more
+is admitted. What the queries release stays in the heap until a collection, so when that memory,
 or what the collector keeps committed beyond its heap, stands between a reservation and the ceiling, a
 collection that gives it back comes first. A query that is refused fails with a
 `VortexMemoryException` naming the operator, its groups and its bytes, with everything it held given

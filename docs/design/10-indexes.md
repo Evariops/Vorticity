@@ -194,7 +194,10 @@ codes, last in the chain since it reads the column's own bytes. A chunk only cla
 covers whole. It costs nothing to write. Reading it costs the chunk's segment, since a flat chunk is
 one segment, so it pays off when the probed column is one of several (on a 1M-row table of six
 columns, an absent value reads 0.073× the bytes of the scan) and breaks even on a file with a single
-column.
+column. A scan probes only the chunks that hold a block the earlier structures left live among its
+own rows, a lane's part of an object its part's, and reads them together, 32 MiB a round trip; each
+chunk's values are looked up among the literals, sorted once, where they lie, nothing sorted per
+chunk, and a chunk that is not a dictionary claims nothing.
 
 ### 4.4 `vorticity.slices.v1`: the time slices of a file
 
