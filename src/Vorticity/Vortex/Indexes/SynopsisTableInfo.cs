@@ -430,8 +430,8 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         IO.ISegmentReader source, SynopsisContents contents, Func<SynopsisTableInfo, TableChunk, bool>? wanted, VortexReadOptions? options,
         CancellationToken cancellationToken)
     {
-        DType schema = contents.SchemaType;
         List<(SynopsisTableInfo, TableChunk)> found = [];
+        List<int> of = [];
         // By index, as every list of the contents: an interface's enumerator is an allocation a list.
         for (int t = 0; t < contents.Tables.Count; t++)
         {
@@ -441,16 +441,16 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 if (wanted?.Invoke(table, chunks[c]) ?? true)
                 {
                     found.Add((table, chunks[c]));
+                    of.Add(t);
                 }
             }
         }
 
-        DTypeArena types = new DTypeArena();
+        // The tables' row types, built once for the contents and shared by every read of them.
+        (DTypeArena types, DType[] rows) = contents.TableRowTypes;
         (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
         ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
-        SynopsisTableSet set = await DecodeAsync(
-            source, context, found, (table, _) => table.RowType(schema, contents.Slices.Paths, types), cancellationToken, Contexts)
-            .ConfigureAwait(false);
+        SynopsisTableSet set = await DecodeAsync(source, context, found, (_, i) => rows[of[i]], cancellationToken, Contexts).ConfigureAwait(false);
         set.Types = types;
         return set;
     }

@@ -148,6 +148,36 @@ internal sealed record SynopsisContents(
         }
     }
 
+    /// <summary>The row types <see cref="TableRowTypes"/> built, and their arena, which nothing adds to after; null until then.</summary>
+    private System.Runtime.CompilerServices.StrongBox<(DTypeArena Arena, DType[] Rows)>? _rowTypes;
+
+    /// <summary>
+    /// The row type of each table, by its place among <see cref="Tables"/>, built the first time a read of the tables
+    /// asks for them into an arena of their own, which only readers share: each question over the object built them
+    /// again into an arena of its own, a tenth of what a warm question answered from the tables allocated.
+    /// </summary>
+    internal (DTypeArena Arena, DType[] Rows) TableRowTypes
+    {
+        get
+        {
+            if (System.Threading.Volatile.Read(ref _rowTypes) is { } known)
+            {
+                return known.Value;
+            }
+
+            DTypeArena arena = new DTypeArena();
+            DType schema = SchemaType;
+            DType[] rows = new DType[Tables.Count];
+            for (int t = 0; t < rows.Length; t++)
+            {
+                rows[t] = Tables[t].Table.RowType(schema, Slices.Paths, arena);
+            }
+
+            System.Runtime.CompilerServices.StrongBox<(DTypeArena, DType[])> built = new((arena, rows));
+            return (System.Threading.Interlocked.CompareExchange(ref _rowTypes, built, null) ?? built).Value;
+        }
+    }
+
     /// <summary>The contents as an entry carries them: tagged fields, in the order of their tags.</summary>
     internal byte[] ToBytes()
     {
