@@ -8,52 +8,82 @@ namespace Vorticity.Writing;
 /// builders that hold none.
 /// </summary>
 /// <remarks>
+/// <para>
 /// A builder enters the heap when its queue fills from empty and leaves it when a take empties it.
 /// An abandoned builder's queue is emptied in place, and its entry is dropped when it reaches the
 /// top, as is the stale one a builder refilled since leaves behind.
+/// </para>
+/// <para>
+/// The builders of a chunk's columns are fed on the writer's threads, a column's on one, and queue
+/// what they close there: the ledger takes them under a lock, which a queue a generation or a chunk
+/// costs nothing a row.
+/// </para>
 /// </remarks>
 internal sealed class PendingLedger
 {
     private readonly List<IndexBuilder> _heap = [];
+    private readonly System.Threading.Lock _gate = new System.Threading.Lock();
+    private int _payloads;
 
     /// <summary>The payloads queued across every builder.</summary>
-    internal int Payloads { get; private set; }
+    internal int Payloads
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _payloads;
+            }
+        }
+    }
 
     /// <summary>A builder queued a payload.</summary>
     internal void Queued(IndexBuilder builder)
     {
-        Payloads++;
-        if (builder.Pending.Count == 1)
+        lock (_gate)
         {
-            Push(builder);
+            _payloads++;
+            if (builder.Pending.Count == 1)
+            {
+                Push(builder);
+            }
         }
     }
 
     /// <summary>A builder dropped its queued payloads.</summary>
-    internal void Dropped(int payloads) => Payloads -= payloads;
+    internal void Dropped(int payloads)
+    {
+        lock (_gate)
+        {
+            _payloads -= payloads;
+        }
+    }
 
     /// <summary>The next payload: the first of the lowest-ranked builder that holds one.</summary>
     internal bool TryTake(out PendingPayload? payload)
     {
-        while (_heap.Count > 0)
+        lock (_gate)
         {
-            IndexBuilder top = _heap[0];
-            if (top.Pending.TryDequeue(out payload))
+            while (_heap.Count > 0)
             {
-                Payloads--;
-                if (top.Pending.Count == 0)
+                IndexBuilder top = _heap[0];
+                if (top.Pending.TryDequeue(out payload))
                 {
-                    Pop();
+                    _payloads--;
+                    if (top.Pending.Count == 0)
+                    {
+                        Pop();
+                    }
+
+                    return true;
                 }
 
-                return true;
+                Pop();
             }
 
-            Pop();
+            payload = null;
+            return false;
         }
-
-        payload = null;
-        return false;
     }
 
     private void Push(IndexBuilder builder)

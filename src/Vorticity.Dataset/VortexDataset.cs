@@ -888,7 +888,8 @@ public sealed class VortexDataset : IAsyncDisposable
             write = clustering.Applied(write);
         }
 
-        return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write))
+        // The session's degree and its lanes, which every writer of the session shares.
+        return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session))
         {
             BySortedColumn = bySortedColumn,
             BySlices = bySlices,

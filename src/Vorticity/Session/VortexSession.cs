@@ -104,8 +104,10 @@ public sealed class VortexSessionOptions
 
     /// <summary>
     /// How many chunks a scan of the session decodes and aggregates at once, unless its
-    /// <see cref="ScanOptions.DegreeOfParallelism"/> says otherwise, and how many threads a writer of
-    /// the session works on, unless its <see cref="VortexWriteOptions.DegreeOfParallelism"/> does.
+    /// <see cref="ScanOptions.DegreeOfParallelism"/> says otherwise, and how many threads the writes
+    /// of the session compute on at once, all of them together: the lanes every writer of the
+    /// session shares, whose helpers join a piece of work only on a lane free. A writer spreads its
+    /// work over as many of them as its <see cref="VortexWriteOptions.DegreeOfParallelism"/> asks.
     /// 1 by default: a library does not take a host's cores without being asked.
     /// </summary>
     /// <remarks>
@@ -325,6 +327,7 @@ public sealed class VortexSession : IAsyncDisposable
     {
         Options = options;
         ReadGate = new SemaphoreSlim(options.MaxConcurrentReads, options.MaxConcurrentReads);
+        WriteLanes = new Writing.LaneBudget(options.MaxDegreeOfParallelism);
         Mappings = options.MapFiles && options.MappedFileCacheCount > 0 && FileInode.IsSupported
             ? new MappedFileCache(options.MappedFileCacheCount)
             : null;
@@ -342,6 +345,12 @@ public sealed class VortexSession : IAsyncDisposable
 
     /// <summary>The bound on reads in flight across the session.</summary>
     internal SemaphoreSlim ReadGate { get; }
+
+    /// <summary>
+    /// The lanes every write of the session computes on, <see cref="VortexSessionOptions.MaxDegreeOfParallelism"/> of
+    /// them, shared by all its writers: the bound reads in flight have in <see cref="ReadGate"/>, on the processors.
+    /// </summary>
+    internal Writing.LaneBudget WriteLanes { get; }
 
     /// <summary>The files kept mapped once closed, or null when the session keeps none.</summary>
     internal MappedFileCache? Mappings { get; }

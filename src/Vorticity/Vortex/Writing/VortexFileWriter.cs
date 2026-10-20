@@ -645,6 +645,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The threads the writer spreads its work over: the columns' ingest, a column's zstd frames.</summary>
     private int _lanes = 1;
 
+    /// <summary>The session's lanes its helpers compute on, shared with every writer of the session; null outside one.</summary>
+    private LaneBudget? _budget;
+
     /// <summary>The threads above one, rented with the first piece of work that uses them.</summary>
     private WorkFan? _fan;
     private WriteBytes _reportBytes;
@@ -938,6 +941,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _metadata = UserMetadata.Ordered(options.Metadata),
             _automaticChunks = options.AutomaticChunks,
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
+            _budget = session?.WriteLanes,
         };
         writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
         if (writer._indexes is { } built)
@@ -1636,9 +1640,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             return;
         }
 
-        // The index builders read every column at every block close, so a write that builds some
-        // ingests on one thread.
-        if (_indexes is null or { AsksNothing: true } && rows >= _blockRows && Fan is { } fan)
+        // A builder that reads several columns at a block close ingests on one thread with them, the
+        // file's first block too; past it, a builder that reads its own column alone is fed on the
+        // thread that ingests that column (IndexWriter.FeedsAcross).
+        if ((_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross) && rows >= _blockRows && Fan is { } fan)
         {
             IngestAcross(fan, arena, rows);
             return;
@@ -1671,14 +1676,37 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     /// <remarks>
     /// An item is an accumulator, its field above three bits of
-    /// <see cref="ColumnWriter.IngestParts"/>, and the batch and its rows travel with the fan.
+    /// <see cref="ColumnWriter.IngestParts"/>, and the batch and its rows travel with the fan. A
+    /// column's index builders are an item of their own, its field above three bits of zero, which
+    /// feeds them the batch block by block as the ingest on one thread does.
     /// </remarks>
     private void IngestAcross(WorkFan fan, CanonicalArena arena, int rows)
     {
-        int count = IngestItems(arena, fan.Items(_fieldCount * 3));
+        Span<int> items = fan.Items(_fieldCount * 4);
+        int count = FeedItems(items, IngestItems(arena, items));
         fan.Run(this, count, arena, rows);
         _blockFilled = (_blockFilled + rows) % _blockRows;
         BatchesIngestedAcross++;
+    }
+
+    /// <summary>
+    /// After the <paramref name="count"/> accumulators of <paramref name="items"/>, an item for the index builders of
+    /// each column that feeds some, its field above three bits of zero; how many items there are then.
+    /// </summary>
+    private int FeedItems(Span<int> items, int count)
+    {
+        if (_indexes is { AsksNothing: false, Streams: true } indexes)
+        {
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                if (indexes.Feeds(field))
+                {
+                    items[count++] = field << 3;
+                }
+            }
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -1708,11 +1736,37 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         return count;
     }
 
-    /// <summary>Runs one accumulator of <see cref="IngestAcross"/> over the batch, block by block.</summary>
+    /// <summary>Runs one accumulator of <see cref="IngestAcross"/> over the batch, block by block, or one column's index builders.</summary>
     void IFanWork.Run(WorkFan fan, int item)
     {
         int entry = fan.Item(item);
+        if ((entry & 7) == 0)
+        {
+            FeedPart(entry >> 3, (CanonicalArena)fan.State!, fan.Value);
+            return;
+        }
+
         IngestPart(entry >> 3, (ColumnWriter.IngestParts)(entry & 7), (CanonicalArena)fan.State!, fan.Value);
+    }
+
+    /// <summary>Feeds column <paramref name="field"/>'s index builders the batch's <paramref name="rows"/>, block by block, closing each block as it fills.</summary>
+    private void FeedPart(int field, CanonicalArena arena, int rows)
+    {
+        IndexWriter indexes = _indexes!;
+        int node = _fieldNodes[field];
+        int filled = _blockFilled;
+        for (int offset = 0; offset < rows;)
+        {
+            int take = Math.Min(_blockRows - filled, rows - offset);
+            indexes.Accumulate(field, arena, node, offset, take);
+            offset += take;
+            filled += take;
+            if (filled == _blockRows)
+            {
+                indexes.CloseBlock(field);
+                filled = 0;
+            }
+        }
     }
 
     /// <summary>Runs accumulator <paramref name="parts"/> of column <paramref name="field"/> over the batch's <paramref name="rows"/>, block by block.</summary>
@@ -1830,7 +1884,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock, Fan = Fan, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel };
 
     /// <summary>The writer's threads, or null when it has one.</summary>
-    private WorkFan? Fan => _lanes > 1 ? _fan ??= WorkFan.Rent(_lanes) : null;
+    private WorkFan? Fan => _lanes > 1 ? _fan ??= WorkFan.Rent(_lanes, _budget) : null;
 
     /// <summary>The arena the pending rows live in, created on first use.</summary>
     private CanonicalArena Transit()

@@ -947,6 +947,44 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether a chunk's rows may feed the builders on the writer's threads, each column's builders on the thread that
+    /// ingests the column: once the first block is closed, which tells them once what the statistics say of it, and when no
+    /// builder reads several columns at once, as a composite key's, a nested column's and a variant's paths do.
+    /// </summary>
+    internal bool FeedsAcross
+    {
+        get
+        {
+            if (!_firstBlockClosed || _nested is not null || _variants is not null)
+            {
+                return false;
+            }
+
+            for (int composite = _fieldCount; composite < _builders.Length; composite++)
+            {
+                if (_builders[composite].Count > 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>Whether column <paramref name="field"/> feeds a builder.</summary>
+    internal bool Feeds(int field) => _builders[field].Count > 0;
+
+    /// <summary>Seals the open block of column <paramref name="field"/>'s builders, past the first block of the file.</summary>
+    internal void CloseBlock(int field)
+    {
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            builder.CloseBlock();
+        }
+    }
+
     /// <summary>Seals every builder's open block, telling them once what the statistics say of it.</summary>
     internal void CloseBlock(IReadOnlyList<ColumnWriter> columns)
     {

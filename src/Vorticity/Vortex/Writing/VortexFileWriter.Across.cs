@@ -152,7 +152,8 @@ public sealed partial class VortexFileWriter
     /// side by side, and the batch would be ingested across the threads too.
     /// </summary>
     private bool IngestsWithColumns(int rows) =>
-        CompressesAcross && _gathering is null && _indexes is null or { AsksNothing: true } && _blockRows > 0 && rows >= _blockRows && Fan is not null;
+        CompressesAcross && _gathering is null && (_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross)
+        && _blockRows > 0 && rows >= _blockRows && Fan is not null;
 
     /// <summary>
     /// Ingests a chunk cut whole from a batch and compresses its columns in one pass across the
@@ -183,8 +184,8 @@ public sealed partial class VortexFileWriter
         WorkFan fan = Fan!;
         try
         {
-            Span<int> items = fan.Items(_fieldCount * 3);
-            int count = IngestItems(arena, items);
+            Span<int> items = fan.Items(_fieldCount * 4);
+            int count = FeedItems(items, IngestItems(arena, items));
             columns.Fuse(items[..count], rows, firstBlock, blocks);
             fan.Run(columns, count, arena, rows);
             _blockFilled = (_blockFilled + rows) % _blockRows;
@@ -411,8 +412,9 @@ public sealed partial class VortexFileWriter
 
             for (int i = 0; i < items.Length; i++)
             {
+                // A column's index builders are fed beside its accumulators, and its compression waits for none of them.
                 int entry = items[i];
-                _parts[entry >> 3]++;
+                _parts[entry >> 3] += (entry & 7) == 0 ? 0 : 1;
                 int at = i;
                 while (at > 0 && _took[items[at - 1] >> 3] < _took[entry >> 3])
                 {
@@ -494,6 +496,12 @@ public sealed partial class VortexFileWriter
             int entry = fan.Item(item);
             int field = entry >> 3;
             VortexFileWriter writer = _writer!;
+            if ((entry & 7) == 0)
+            {
+                writer.FeedPart(field, chunk, _rows);
+                return;
+            }
+
             writer.IngestPart(field, (ColumnWriter.IngestParts)(entry & 7), chunk, _rows);
 
             // The decrement orders every accumulator of the column before the compression that
@@ -697,14 +705,14 @@ public sealed partial class VortexFileWriter
         internal static CompressionLane Take(VortexFileWriter writer)
         {
             CompressionLane lane = SpareSlots<CompressionLane>.Take() ?? new CompressionLane();
-            if (lane._fan?.Lanes != writer._lanes)
+            if (lane._fan is not { } held || held.Lanes != writer._lanes || held.Budget != writer._budget)
             {
                 if (lane._fan is { } kept)
                 {
                     WorkFan.Return(kept);
                 }
 
-                lane._fan = WorkFan.Rent(writer._lanes);
+                lane._fan = WorkFan.Rent(writer._lanes, writer._budget);
             }
 
             if (lane._blobs.FrameRows != writer._rowBlock || lane._blobs.SizeFirst != writer._sizeFirst
