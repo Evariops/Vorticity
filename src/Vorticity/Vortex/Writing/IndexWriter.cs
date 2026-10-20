@@ -976,6 +976,24 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>Whether column <paramref name="field"/> feeds a builder.</summary>
     internal bool Feeds(int field) => _builders[field].Count > 0;
 
+    /// <summary>The rows the file is bounded by, 0 when unknown: what a hashed postings builder sizes its buckets by.</summary>
+    internal long ExpectedRows
+    {
+        set
+        {
+            foreach (List<IndexBuilder> builders in _builders)
+            {
+                foreach (IndexBuilder builder in builders)
+                {
+                    if (builder is KeyIndexBuilder key)
+                    {
+                        key.ExpectedRows = value;
+                    }
+                }
+            }
+        }
+    }
+
     /// <summary>Seals the open block of column <paramref name="field"/>'s builders, past the first block of the file.</summary>
     internal void CloseBlock(int field)
     {

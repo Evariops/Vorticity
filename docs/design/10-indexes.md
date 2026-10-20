@@ -548,6 +548,15 @@ runs, fence pages and upper tree levels after the last chunk, before the zone ma
 last. Nothing is buffered across chunks except the open nodes and the spilled chunk runs, which go to
 pooled memory and then to a scratch file.
 
+Hashed postings keep no run a chunk. Each value's hash is noted once a block, told apart by a table of
+the block's hashes, and appended to the bucket of its top bits, a bucket for about four million pairs
+of the file's row bound, up to 1 024; a bucket's full pages go to the scratch at each chunk's close.
+After the last chunk the buckets are sorted one at a time, in the hashes' order, stably on the bits
+under the bucket's, so a hash's blocks keep their order, and fed to the runs the merge of chunk runs
+would have made: the same pairs, the same segments. An identifier of a day of the design's requests,
+4.3 × 10⁹ pairs, then takes two passes over its pairs, where its runs of 33 000 pairs a chunk, 130 000
+of them, took a k-way merge in passes of 64.
+
 When appending (see [appending to a file](11-write-strategy.md#38-appending-to-a-file)), runs that end
 before the append's first block are kept and listed again next to the new ones, a run reaching into a
 reopened chunk is dropped and rebuilt, and once an entry has more than four runs they are merged.

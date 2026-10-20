@@ -114,7 +114,22 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The row span above which the rows are written at 64 bits; set by the index writer.</summary>
     internal long WideRowsAbove { get; set; } = uint.MaxValue;
 
+    /// <summary>The rows the file is bounded by, 0 when unknown: what hashed postings size their buckets by; set by the index writer.</summary>
+    internal long ExpectedRows { get; set; }
+
     private readonly List<RawRun> _chunkRuns = [];
+
+    // Hashed postings: the pairs in buckets of their hashes' high bits (see HashedBuckets), made with the first pair; the
+    // pairs noted at the close of each block from _baseBlock on; and the chunks closed, the first's first block, the last's.
+    private HashedBuckets? _buckets;
+    private readonly List<long> _pairsAtBlockClose = [];
+    private int _baseBlock;
+    private int _chunks;
+    private int _firstChunkBlock;
+    private int _lastChunkBlock;
+    private int _lastChunkBlocks;
+
+    private HashedBuckets Buckets => _buckets ??= new HashedBuckets(ExpectedRows);
 
     /// <summary>
     /// Runs read from the file an append continues, merged in front of the chunk runs because the
@@ -217,12 +232,19 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                 return;
 
             case CanonicalKind.Constant:
-                // One key for every valid row, so its id is looked up once.
+                // One key for every valid row, so its id is looked up once; a hash, once, noted in every block.
                 int constant = -1;
+                ulong constantHash = _hashed ? XxHash3.HashToUInt64(node.ConstantElement) : 0;
                 for (int row = start; row < start + count; row++)
                 {
                     if (own.IsValid(row) && wrapper.IsValid(row))
                     {
+                        if (_hashed)
+                        {
+                            Buckets.Note(constantHash, checked((uint)_block));
+                            continue;
+                        }
+
                         if (constant < 0)
                         {
                             constant = Intern(node.ConstantElement);
@@ -276,7 +298,17 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>Counts rows that feed nothing, so the next rows keep their numbers.</summary>
     internal void Skip(int count) => _row += count;
 
-    private void Note(ReadOnlySpan<byte> key, long row) => NoteId(Intern(key), row);
+    private void Note(ReadOnlySpan<byte> key, long row)
+    {
+        // Hashed postings place a value's hash at its block, once a block, in its bucket.
+        if (_hashed)
+        {
+            Buckets.Note(XxHash3.HashToUInt64(key), checked((uint)_block));
+            return;
+        }
+
+        NoteId(Intern(key), row);
+    }
 
     /// <summary>The id of a value's key: its bytes, or for hashed postings its hash's eight.</summary>
     private int Intern(ReadOnlySpan<byte> key) => _hashed ? InternHash(key) : _table.Intern(key);
@@ -308,12 +340,24 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
     }
 
-    internal override void CloseBlock() => _block++;
+    internal override void CloseBlock()
+    {
+        _block++;
+        if (_hashed)
+        {
+            HashedBuckets buckets = Buckets;
+            buckets.CloseBlock();
+            _pairsAtBlockClose.Add(buckets.Pairs);
+        }
+    }
 
     internal override void Start(int block, long row)
     {
         _block = block;
         _row = row;
+        _baseBlock = block;
+        _pairsAtBlockClose.Clear();
+        _buckets?.CloseBlock();
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
@@ -322,6 +366,17 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     {
         if (Abandoned is not null)
         {
+            return;
+        }
+
+        if (_hashed)
+        {
+            // A chunk's full pages go to the scratch; what the end needs of the chunks is where the first and the last lie.
+            RunScratch hashScratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
+            await Buckets.SpillAsync(hashScratch, cancellationToken).ConfigureAwait(false);
+            _firstChunkBlock = _chunks++ == 0 ? firstBlock : _firstChunkBlock;
+            _lastChunkBlock = firstBlock;
+            _lastChunkBlocks = blocks;
             return;
         }
 
@@ -367,6 +422,12 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// </summary>
     internal override async ValueTask EndOfDataAsync(CancellationToken cancellationToken)
     {
+        if (_hashed)
+        {
+            await EndHashedAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         if (Abandoned is not null || (_chunkRuns.Count == 0 && Absorbed is not { Count: > 0 }))
         {
             return;
@@ -403,6 +464,102 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _chunkRuns.Clear();
         _chunkPairs.Clear();
         Absorbed = null;
+    }
+
+    /// <summary>
+    /// The hashed postings' runs, from the buckets, a bucket sorted at a time in the hashes' order: the run of every chunk but
+    /// the last, and the last's of its own when the data ends inside a block, which an append re-opens, as the merge of the
+    /// chunks' runs cuts them. A hash's blocks go to the run whose chunks hold them.
+    /// </summary>
+    private async ValueTask EndHashedAsync(CancellationToken cancellationToken)
+    {
+        if (Abandoned is not null || _chunks == 0 || _buckets is not { } buckets)
+        {
+            return;
+        }
+
+        RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
+        await buckets.SpillAsync(scratch, cancellationToken).ConfigureAwait(false);
+        bool tail = BlockRows > 0 && _row % BlockRows != 0;
+        long tailPairs = tail ? buckets.Pairs - PairsBefore(_lastChunkBlock) : 0;
+        int mainEnd = tail ? _lastChunkBlock : _lastChunkBlock + _lastChunkBlocks;
+        HashedRunSink? main = !tail || _chunks > 1
+            ? new HashedRunSink(_segmentEntries, _firstChunkBlock, mainEnd - _firstChunkBlock, buckets.Pairs - tailPairs)
+            : null;
+        HashedRunSink? last = tail ? new HashedRunSink(_segmentEntries, _lastChunkBlock, _lastChunkBlocks, tailPairs) : null;
+        uint split = tail ? (uint)_lastChunkBlock : uint.MaxValue;
+        BucketBuffers buffers = new BucketBuffers();
+        for (int bucket = 0; bucket < buckets.Buckets; bucket++)
+        {
+            int count = await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
+            Feed(buffers, count, split, main, last);
+        }
+
+        if (main is not null)
+        {
+            Emit(main.Finish());
+        }
+
+        if (last is not null)
+        {
+            Emit(last.Finish());
+        }
+
+        buckets.Dispose();
+        _buckets = null;
+        _chunks = 0;
+        _pairsAtBlockClose.Clear();
+    }
+
+    /// <summary>
+    /// A sorted bucket's pairs into the runs, a hash at a time: its blocks before <paramref name="split"/> into
+    /// <paramref name="main"/>, the others into <paramref name="last"/>.
+    /// </summary>
+    private static void Feed(BucketBuffers buffers, int count, uint split, HashedRunSink? main, HashedRunSink? last)
+    {
+        Span<byte> key = stackalloc byte[sizeof(ulong)];
+        ulong[] hashes = buffers.Hashes;
+        uint[] blocks = buffers.Blocks;
+        for (int at = 0; at < count;)
+        {
+            ulong hash = hashes[at];
+            int end = at + 1;
+            while (end < count && hashes[end] == hash)
+            {
+                end++;
+            }
+
+            // The blocks of a hash come in their order: those of the main run first.
+            int cut = at;
+            while (cut < end && blocks[cut] < split)
+            {
+                cut++;
+            }
+
+            BucketBuffers.Key(hash, key);
+            if (cut > at)
+            {
+                main!.BeginKey(key);
+                main.AddBlocks(blocks.AsSpan(at, cut - at));
+                main.EndKey();
+            }
+
+            if (end > cut)
+            {
+                last!.BeginKey(key);
+                last.AddBlocks(blocks.AsSpan(cut, end - cut));
+                last.EndKey();
+            }
+
+            at = end;
+        }
+    }
+
+    /// <summary>The pairs noted before block <paramref name="block"/>, at or past the first block of the write.</summary>
+    private long PairsBefore(int block)
+    {
+        int closed = block - _baseBlock;
+        return closed <= 0 ? 0 : _pairsAtBlockClose[Math.Min(closed, _pairsAtBlockClose.Count) - 1];
     }
 
     private void Emit(KeyRun run)
@@ -770,5 +927,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     {
         _table.Dispose();
         _spare.Dispose();
+        _buckets?.Dispose();
+        _buckets = null;
     }
 }
