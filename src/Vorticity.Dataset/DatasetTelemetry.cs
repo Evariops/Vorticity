@@ -225,6 +225,14 @@ internal static class DatasetTelemetry
     }
 
     /// <summary>
+    /// Starts the activity of one pass of a compaction job, a child of the job's, or returns null when nothing
+    /// listens: <c>plan</c>, the first pass of a job that writes sorted slices, which cuts them from the rows,
+    /// or <c>write</c>, the pass that reads the rows again and writes the outputs.
+    /// </summary>
+    internal static Activity? StartCompactionPass(string pass) =>
+        VortexTelemetry.Source.StartActivity($"vortex.dataset.compaction.{pass}", ActivityKind.Internal);
+
+    /// <summary>
     /// Counts a compaction that reached its commit, applied or abandoned, with what it read and wrote,
     /// and tags and ends its activity.
     /// </summary>

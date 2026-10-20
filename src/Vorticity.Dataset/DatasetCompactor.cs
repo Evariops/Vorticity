@@ -131,40 +131,52 @@ internal static class DatasetCompactor
         // cuts each object's slices, picks the order inside them and the paths its variant columns
         // shred, the second sorts and writes them. The instant must be a top-level column, which
         // slices are declared on. Appends write neither slices nor shredded variants.
-        IReadOnlyDictionary<(int Level, long Period), ObjectPlan>? plans = merge && job.Cut is not null && !key!.InstantPath.Contains('.')
-            ? await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false)
-            : null;
+        IReadOnlyDictionary<(int Level, long Period), ObjectPlan>? plans = null;
+        if (merge && job.Cut is not null && !key!.InstantPath.Contains('.'))
+        {
+            using Activity? planning = DatasetTelemetry.StartCompactionPass("plan");
+            plans = await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false);
+        }
+
         // Each object it streams is announced to the store as at most what the job reads, times what a job
         // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
         ObjectStream outputs;
         long rows;
-        for (int doublings = 0; ; doublings++)
+        Activity? writing = DatasetTelemetry.StartCompactionPass("write");
+        try
         {
-            outputs = new ObjectStream(
-                dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null, rowBound: job.Rows, job.ToLevel,
-                ObjectBound.Of(job.Bytes, doublings, dataset.Options.BoundOutPerIn))
+            for (int doublings = 0; ; doublings++)
             {
-                Plans = plans,
-                InstantPath = plans is null ? null : key!.InstantPath,
-                Partition = key?.SharedPartition(job.Inputs.Select(static input => input.Entry.Summaries)),
-            };
-            try
-            {
-                rows = merge
-                    ? await MergeAsync(dataset, schema, job, key!, outputs, cancellationToken).ConfigureAwait(false)
-                    : await ConcatenateAsync(dataset, schema, job, outputs, cancellationToken).ConfigureAwait(false);
-                await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
-                break;
+                outputs = new ObjectStream(
+                    dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null, rowBound: job.Rows, job.ToLevel,
+                    ObjectBound.Of(job.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                {
+                    Plans = plans,
+                    InstantPath = plans is null ? null : key!.InstantPath,
+                    Partition = key?.SharedPartition(job.Inputs.Select(static input => input.Entry.Summaries)),
+                };
+                try
+                {
+                    rows = merge
+                        ? await MergeAsync(dataset, schema, job, key!, outputs, cancellationToken).ConfigureAwait(false)
+                        : await ConcatenateAsync(dataset, schema, job, outputs, cancellationToken).ConfigureAwait(false);
+                    await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+                catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
+                {
+                    await outputs.AbandonAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    await outputs.AbandonAsync().ConfigureAwait(false);
+                    throw;
+                }
             }
-            catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
-            {
-                await outputs.AbandonAsync().ConfigureAwait(false);
-            }
-            catch
-            {
-                await outputs.AbandonAsync().ConfigureAwait(false);
-                throw;
-            }
+        }
+        finally
+        {
+            writing?.Dispose();
         }
 
         if (rows != job.Rows)
