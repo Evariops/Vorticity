@@ -148,15 +148,15 @@ internal sealed record SynopsisContents(
         }
     }
 
-    /// <summary>The row types <see cref="TableRowTypes"/> built, and their arena, which nothing adds to after; null until then.</summary>
-    private System.Runtime.CompilerServices.StrongBox<(DTypeArena Arena, DType[] Rows)>? _rowTypes;
+    /// <summary>The row types <see cref="TableRowTypes"/> built, their arena, which nothing adds to after, and their fields' names; null until then.</summary>
+    private System.Runtime.CompilerServices.StrongBox<(DTypeArena Arena, DType[] Rows, string[][] Names)>? _rowTypes;
 
     /// <summary>
     /// The row type of each table, by its place among <see cref="Tables"/>, built the first time a read of the tables
     /// asks for them into an arena of their own, which only readers share: each question over the object built them
     /// again into an arena of its own, a tenth of what a warm question answered from the tables allocated.
     /// </summary>
-    internal (DTypeArena Arena, DType[] Rows) TableRowTypes
+    internal (DTypeArena Arena, DType[] Rows, string[][] Names) TableRowTypes
     {
         get
         {
@@ -168,12 +168,18 @@ internal sealed record SynopsisContents(
             DTypeArena arena = new DTypeArena();
             DType schema = SchemaType;
             DType[] rows = new DType[Tables.Count];
+            string[][] names = new string[rows.Length][];
             for (int t = 0; t < rows.Length; t++)
             {
                 rows[t] = Tables[t].Table.RowType(schema, Slices.Paths, arena);
+                names[t] = new string[rows[t].FieldCount];
+                for (int f = 0; f < names[t].Length; f++)
+                {
+                    names[t][f] = rows[t].GetFieldName(f);
+                }
             }
 
-            System.Runtime.CompilerServices.StrongBox<(DTypeArena, DType[])> built = new((arena, rows));
+            System.Runtime.CompilerServices.StrongBox<(DTypeArena, DType[], string[][])> built = new((arena, rows, names));
             return (System.Threading.Interlocked.CompareExchange(ref _rowTypes, built, null) ?? built).Value;
         }
     }

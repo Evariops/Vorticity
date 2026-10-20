@@ -465,6 +465,21 @@ internal sealed record SynopsisAnswer(
         return null;
     }
 
+    /// <summary>The names of <paramref name="table"/>'s fields as its contents keep them, when they are its row's <paramref name="width"/>; null otherwise.</summary>
+    private static string[]? NamesOf(SynopsisContents contents, SynopsisTableInfo table, int width)
+    {
+        for (int t = 0; t < contents.Tables.Count; t++)
+        {
+            if (ReferenceEquals(contents.Tables[t].Table, table))
+            {
+                string[] names = contents.TableRowTypes.Names[t];
+                return names.Length == width ? names : null;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>Whether <paramref name="chunk"/> of <paramref name="table"/> holds a bucket the answer folds, which the read of the synopsis fetches.</summary>
     /// <remarks>
     /// By index: asked of every chunk of every table of an object, an enumerator of the parts through their interface
@@ -564,13 +579,16 @@ internal sealed record SynopsisAnswer(
             return false;
         }
 
-        // The batch's struct: the table's columns renamed as the question reads them, then the partition's values.
+        // The batch's struct: the table's columns renamed as the question reads them, then the partition's values. A
+        // field's name is the contents' own, read once with the table's row type, where a name read from a dtype is a
+        // string made at each read.
         int width = rowType.FieldCount;
         string[] names = new string[width + Constants.Count];
         DType[] dtypes = new DType[names.Length];
+        string[]? fieldNames = NamesOf(contents, part.Table, width);
         for (int f = 0; f < width; f++)
         {
-            names[f] = f == 0 ? instant : Renamed(rowType.GetFieldName(f));
+            names[f] = f == 0 ? instant : Renamed(fieldNames?[f] ?? rowType.GetFieldName(f));
             dtypes[f] = rowType.GetField(f);
         }
 

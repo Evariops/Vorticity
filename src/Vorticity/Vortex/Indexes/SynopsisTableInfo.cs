@@ -447,7 +447,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         }
 
         // The tables' row types, built once for the contents and shared by every read of them.
-        (DTypeArena types, DType[] rows) = contents.TableRowTypes;
+        (DTypeArena types, DType[] rows, _) = contents.TableRowTypes;
         (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
         ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
         SynopsisTableSet set = await DecodeAsync(source, context, found, (_, i) => rows[of[i]], cancellationToken, Contexts).ConfigureAwait(false);
