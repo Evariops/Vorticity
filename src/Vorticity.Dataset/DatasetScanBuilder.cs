@@ -556,10 +556,15 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>
     /// Whether the synopsis of <paramref name="held"/> answers the states the scan asks, as its scan would
-    /// find: what its entry holds, with no read of it.
+    /// find: what its entry holds, with no read of it; and whether the answer is <paramref name="light"/>, its
+    /// tables alone, no row read beside them at its edges, of an identifier left out or of a delete.
     /// </summary>
-    internal bool Answers(in PositionedObject held) =>
-        _states is { } request && _orderPaths is null && _take is null && Answer(held, request).Answer is not null;
+    internal bool Answers(in PositionedObject held, out bool light)
+    {
+        SynopsisAnswer? answer = _states is { } request && _orderPaths is null && _take is null ? Answer(held, request).Answer : null;
+        light = answer is { Edges.Count: 0, Excluded.Count: 0 } && !held.Entry.HasDeletions;
+        return answer is not null;
+    }
 
     /// <summary>
     /// An object answered by its synopsis, with no open of it: the batches of states of its tables' kept

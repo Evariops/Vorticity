@@ -167,6 +167,14 @@ public sealed record DatasetOptions
     internal long LeastPieceRows { get; init; } = 1L << 20;
 
     /// <summary>
+    /// The objects in a row their synopses answer that one lane's piece of a pass on several lanes takes at most: 8 by
+    /// default. An answer reads a few tables and folds their rows, a tenth of a millisecond warm, where a piece costs a
+    /// walk of the tree to its rows and a lane's turn: a piece an object made a warm question over 48 hourly objects at
+    /// 16 lanes spend more of its lanes' time waiting than answering.
+    /// </summary>
+    internal int AnswersPerPiece { get; init; } = 8;
+
+    /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
     /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
     /// </summary>

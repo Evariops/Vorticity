@@ -186,7 +186,7 @@ internal sealed class DatasetScanSource : ScanSource
         // and counts for none of the rows the lanes share; one whose rows are read is cut as any other,
         // however many tables it holds, which would otherwise leave a lane alone over a period of rows.
         DatasetScanBuilder? answering = spec.States is null ? null : Builder(spec, null);
-        List<(PositionedObject Held, RowRange Rows, bool Answered)> objects = [];
+        List<(PositionedObject Held, RowRange Rows, bool Answered, bool Light)> objects = [];
         long total = 0;
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
@@ -194,8 +194,9 @@ internal sealed class DatasetScanSource : ScanSource
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
             if (end > start)
             {
-                bool answered = answering?.Answers(held) == true;
-                objects.Add((held, new RowRange(start, end), answered));
+                bool light = false;
+                bool answered = answering?.Answers(held, out light) == true;
+                objects.Add((held, new RowRange(start, end), answered, light));
                 total += answered ? 0 : end - start;
             }
         }
@@ -214,17 +215,30 @@ internal sealed class DatasetScanSource : ScanSource
             }
         }
 
+        // Objects their tables alone answer, in a row, make one piece, up to a few: such an answer reads a few tables
+        // and folds their rows, where a piece costs a walk of the tree to its rows and a lane's turn, which made a warm
+        // question over 48 hourly objects at 16 lanes spend more of its lanes' time waiting than answering. An answer
+        // that reads rows beside its tables, of its edges, of an identifier left out or of a delete, keeps a piece.
         await Task.WhenAll(cutting).ConfigureAwait(false);
         List<RowRange> pieces = [];
+        int answers = 0;
         for (int o = 0; o < objects.Count; o++)
         {
+            RowRange rows = objects[o].Rows;
             if (cuts[o] is { } cut)
             {
                 pieces.AddRange(await cut.ConfigureAwait(false));
+                answers = 0;
+            }
+            else if (objects[o].Light && answers is > 0 && answers < _dataset.Options.AnswersPerPiece && pieces[^1].End == rows.Start)
+            {
+                pieces[^1] = new RowRange(pieces[^1].Start, rows.End);
+                answers++;
             }
             else
             {
-                pieces.Add(objects[o].Rows);
+                pieces.Add(rows);
+                answers = objects[o].Light ? 1 : 0;
             }
         }
 

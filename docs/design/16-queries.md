@@ -924,7 +924,11 @@ On a dataset, a range is an object, and an object holding two shares of the rows
 between its chunks, as a file's rows are, so no chunk is read by two ranges. An object whose synopsis
 answers the pass's states stays whole and counts for none of the shares, since states answer an object
 and not a part of it; whether it does, its entry says, as its scan would find, so that one whose tables
-do not hold the question is cut as any other. The objects that are cut are opened side by side to
+do not hold the question is cut as any other. Up to eight objects in a row that their tables alone answer,
+with no row read at an edge, of an identifier left out or of a delete, make one range: such an answer
+takes a tenth of a millisecond warm, where a range costs a walk of the tree to its rows and a lane's
+turn, so that a warm count over 48 hourly objects at 16 lanes took 3.8 ms and allocated 1.7 MB with a
+range an object, against 3.1 ms and 221 KB. The objects that are cut are opened side by side to
 learn where their chunks end, and the ranges then find them already open.
 No object settles ([statistics and zone maps](#93-statistics-and-zone-maps), and see
 [13-dataset.md](13-dataset.md)). A group by that streams runs as [in parallel, in

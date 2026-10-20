@@ -13,7 +13,8 @@
 // THE PATHS are the ones `vortex-queries --micro paths` measures at scale: the tables of whole hours, a
 // window that cuts slices (its edges read as rows), an identifier left out (the rows its postings find,
 // taken out of the tables), a variant's shredded path, the measures' states, the rows when the
-// synopses are off (a group by of time once read every object twice in key order), and a needle.
+// synopses are off (a group by of time once read every object twice in key order), and a needle;
+// and the tables of whole hours on eight lanes, which once made each object a lane's piece of its own.
 //
 // WHY THE FLOOR OF SEVERAL WARM ASKS: the first asks pay the JIT's tiering and the pools' first rents;
 // the least of several is the steady state, and anything allocated on every ask still raises it.
@@ -55,6 +56,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["synopses: count by service"] = new(4, 6880, 0, 0, 29312),
+        ["synopses: count by service, at eight lanes"] = new(4, 6880, 0, 0, 34752),
         ["synopses: count by service and hour"] = new(4, 6880, 0, 0, 34944),
         ["synopses: by minute, the last hour, under a predicate"] = new(3, 101020, 2, 35424, 64704),
         ["synopses: an unaligned window"] = new(7, 107472, 2, 66728, 86592),
@@ -131,7 +133,10 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     private static async Task<List<string>> AskAsync(VortexDataset dataset, string path, bool? synopses = null, bool describe = true)
     {
         bool fromTables = synopses ?? !path.StartsWith("rows: ", StringComparison.Ordinal);
-        Scan<Hit> scan = dataset.Scan<Hit>().With(new ScanOptions { UseSynopses = fromTables, DegreeOfParallelism = 1 });
+        const string Lanes = ", at eight lanes";
+        bool wide = path.EndsWith(Lanes, StringComparison.Ordinal);
+        path = wide ? path[..^Lanes.Length] : path;
+        Scan<Hit> scan = dataset.Scan<Hit>().With(new ScanOptions { UseSynopses = fromTables, DegreeOfParallelism = wide ? 8 : 1 });
         DateTimeOffset lastHour = Noon.AddHours(Hours - 1);
         DateTimeOffset cutFrom = Noon.AddMinutes(37.5);
         DateTimeOffset cutTo = Noon.AddMinutes(155.25);
