@@ -56,7 +56,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["synopses: count by service"] = new(4, 6880, 0, 0, 25152),
-        ["synopses: count by service, at eight lanes"] = new(4, 6880, 0, 0, 29568),
+        ["synopses: count by service, at eight lanes"] = new(4, 6880, 0, 0, 27328),
         ["synopses: count by service and hour"] = new(4, 6880, 0, 0, 29888),
         ["synopses: by minute, the last hour, under a predicate"] = new(3, 101020, 2, 35424, 61440),
         ["synopses: an unaligned window"] = new(7, 107472, 2, 66728, 81280),

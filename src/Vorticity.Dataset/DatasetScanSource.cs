@@ -185,11 +185,14 @@ internal sealed class DatasetScanSource : ScanSource
         // An object its synopsis answers counts for none of the rows the lanes share, but for the rows of the tables its
         // answer folds, its states; one whose rows are read is cut as any other, however many tables it holds, which would
         // otherwise leave a lane alone over a period of rows.
+        // The objects of a pass that takes states are walked as its pieces' scans walk them, which then take them as they
+        // are (Planned).
         DatasetScanBuilder? answering = spec.States is null ? null : Builder(spec, null);
         List<(PositionedObject Held, RowRange Rows, bool Answered, bool Light, long States)> objects = [];
         long total = 0;
         long totalStates = 0;
-        await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
+        IAsyncEnumerable<PositionedObject> walked = answering?.ObjectsAsync(cancellationToken) ?? _version.WalkAsync(pruner, from, to, null, cancellationToken);
+        await foreach (PositionedObject held in walked.ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
@@ -203,6 +206,17 @@ internal sealed class DatasetScanSource : ScanSource
                 total += answer is not null ? 0 : end - start;
                 totalStates += states;
             }
+        }
+
+        if (answering is not null && spec.States is { } asked)
+        {
+            PositionedObject[] planned = new PositionedObject[objects.Count];
+            for (int o = 0; o < planned.Length; o++)
+            {
+                planned[o] = objects[o].Held;
+            }
+
+            System.Threading.Volatile.Write(ref _planned, new Planned(spec.Filter, asked, planned, answering.Question));
         }
 
         // The objects to cut are opened side by side to read where their chunks end; the scan finds
@@ -367,6 +381,25 @@ internal sealed class DatasetScanSource : ScanSource
 
         ScanOptions options = spec.Options;
         builder.WithOptions(options, spec.KeepEncodings, spec.SinkDecodes, spec.PositionsUnread).WithIndexes(options.UseIndexes).WithSummaries(options.UseStatistics);
+
+        // A piece of the pass the last plan of pieces cut takes the objects it walked and the question it worked out.
+        if (spec.States is { } states && System.Threading.Volatile.Read(ref _planned) is { } planned
+            && ReferenceEquals(planned.States, states) && ReferenceEquals(planned.Filter, spec.Filter))
+        {
+            builder.WithPlanned(planned.Objects, planned.Question);
+        }
+
         return counters is null ? builder : builder.WithCounters(counters);
     }
+
+    /// <summary>
+    /// The objects the last plan of pieces of a pass that takes states walked, in their order, and the question their
+    /// answers share, with the spec's filter and states they were worked out for; null before. Every piece's scan
+    /// walked the tree to its rows again and worked the question out again, its pruner, its walk's pages and their
+    /// summaries made a piece: at sixteen lanes, a window cut in 55 pieces walked the tree 55 times a question.
+    /// </summary>
+    private Planned? _planned;
+
+    /// <summary>What a plan of pieces walked and worked out, for the pieces' scans to take as they are.</summary>
+    private sealed record Planned(VortexExpr? Filter, Aggregating.StateRequest States, PositionedObject[] Objects, SynopsisQuestion? Question);
 }

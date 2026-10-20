@@ -264,6 +264,24 @@ internal sealed class DatasetScanBuilder
             ? known
             : _question = new SynopsisQuestion(request, _filter, instant, _version.Header.Identifiers);
 
+    /// <summary>The question the answers of the scan's objects share, once one was asked; null before.</summary>
+    internal SynopsisQuestion? Question => _question;
+
+    /// <summary>The objects a plan of pieces walked, in their order, which the scan of a piece takes as they are; null to walk the tree.</summary>
+    private PositionedObject[]? _planned;
+
+    /// <summary>
+    /// Has the scan, a piece of a pass on several lanes, take the objects the plan of its pieces walked, the pass's every
+    /// one in their order, those its rows cover among them, rather than walk the tree to its rows again; and the question
+    /// their answers share, which the plan worked out (<see cref="QuestionOf"/> takes it when it is the scan's own).
+    /// </summary>
+    internal DatasetScanBuilder WithPlanned(PositionedObject[] objects, SynopsisQuestion? question)
+    {
+        _planned = objects;
+        _question ??= question;
+        return this;
+    }
+
     /// <summary>
     /// The splits each object's scan of one lane reads ahead of the one it decodes, over a store whose read is a round
     /// trip (<see cref="ScanSpec.ReadAhead"/>): what an aggregation's lane is granted, which an object's scan reads as a
@@ -1965,7 +1983,69 @@ internal sealed class DatasetScanBuilder
     private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? new SummaryPruner(filter) : null;
 
     private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken) =>
-        _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
+        _planned is { } planned ? new PlannedObjects(planned, _from, _to) : _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
+
+    /// <summary>
+    /// The objects of a plan of pieces the rows <c>[from, to)</c> overlap, in their order, from the first found by its
+    /// place: what a walk of the tree over those rows gives, with no page read and no pruner made.
+    /// </summary>
+    private sealed class PlannedObjects(PositionedObject[] planned, long from, long to) : IAsyncEnumerable<PositionedObject>, IAsyncEnumerator<PositionedObject>
+    {
+        private int _next = First(planned, from);
+        private bool _taken;
+
+        public PositionedObject Current { get; private set; }
+
+        public IAsyncEnumerator<PositionedObject> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            // An enumeration of its own each time, as a walk is: the first takes this one.
+            if (_taken)
+            {
+                return new PlannedObjects(planned, from, to).GetAsyncEnumerator(cancellationToken);
+            }
+
+            _taken = true;
+            return this;
+        }
+
+        public ValueTask<bool> MoveNextAsync()
+        {
+            while (_next < planned.Length && planned[_next].FirstRow < to)
+            {
+                PositionedObject held = planned[_next++];
+                if (held.FirstRow + held.Entry.Rows > from)
+                {
+                    Current = held;
+                    return new ValueTask<bool>(true);
+                }
+            }
+
+            return new ValueTask<bool>(false);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        /// <summary>The first of <paramref name="objects"/>, in the order of their rows, that ends past <paramref name="row"/>.</summary>
+        private static int First(PositionedObject[] objects, long row)
+        {
+            int low = 0;
+            int high = objects.Length;
+            while (low < high)
+            {
+                int middle = (int)((uint)(low + high) >> 1);
+                if (objects[middle].FirstRow + objects[middle].Entry.Rows <= row)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+
+            return low;
+        }
+    }
 
     private void RecordOpen(ObjectLease lease, int open = 1)
     {
