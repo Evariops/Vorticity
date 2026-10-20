@@ -13,19 +13,24 @@ namespace Vorticity.Dataset;
 /// <summary>One table of an answer, and the buckets of it whose rows are folded as states: each inside the window, with one value of every key of time over it.</summary>
 /// <param name="table">The table read.</param>
 /// <remarks>
-/// The buckets are held in order, as an object's slices come: a few an object, searched where a set of them was a
-/// set to build for each object and a hash for each row of its tables.
+/// The buckets are held as runs of them folded one after another, as an object's slices come: the first and the last
+/// bucket of each run, searched where a set of them was a set to build for each object and a hash for each row of its
+/// tables, and an array of every bucket after that, a long a slice, a third of what a question over a window cutting
+/// thousands of slices allocated. A run holds exactly the buckets between its ends, since the buckets a table's rows
+/// and chunks name are the object's own and a bucket not folded ends a run.
 /// </remarks>
 internal sealed class SynopsisPart(SynopsisTableInfo table)
 {
-    private long[] _kept = [];
+    // The runs, ascending and apart: the first and the last bucket of each, a pair of longs.
+    private long[] _runs = [];
+    private int _runCount;
     private int _count;
+
+    // The slice past the last bucket folded: a bucket that starts there extends its run.
+    private int _next = -1;
 
     /// <summary>The table read.</summary>
     internal SynopsisTableInfo Table { get; } = table;
-
-    /// <summary>Its buckets folded, ascending.</summary>
-    internal ReadOnlySpan<long> Kept => _kept.AsSpan(0, _count);
 
     /// <summary>How many buckets it folds.</summary>
     internal int KeptCount => _count;
@@ -41,39 +46,104 @@ internal sealed class SynopsisPart(SynopsisTableInfo table)
     /// <summary>The fields of the table's rows read: every one, or those the answer reads of them (<see cref="SynopsisAnswer.Project"/>).</summary>
     internal Layouts.FieldMask Fields { get; set; }
 
-    /// <summary>Folds <paramref name="bucket"/>, its states carrying <paramref name="first"/>, the first instant the object holds in it.</summary>
-    internal void Fold(long bucket, long first)
+    /// <summary>
+    /// Folds <paramref name="bucket"/>, the object's slices <paramref name="firstSlice"/> to <paramref name="lastSlice"/>,
+    /// its states carrying <paramref name="instant"/>, the first instant the object holds in it.
+    /// </summary>
+    internal void Fold(long bucket, long instant, int firstSlice, int lastSlice)
     {
-        // In order as they come, a bucket coming twice held once.
-        int at = Kept.BinarySearch(bucket);
-        if (at < 0)
+        if (_runCount > 0 && bucket <= _runs[(2 * _runCount) - 1])
         {
-            at = ~at;
-            if (_count == _kept.Length)
+            // Out of the order slices come in: a bucket held once, one not held a run of its own.
+            if (!Holds(bucket))
             {
-                Array.Resize(ref _kept, Math.Max(4, 2 * _count));
+                Insert(bucket);
             }
 
-            _kept.AsSpan(at, _count - at).CopyTo(_kept.AsSpan(at + 1));
-            _kept[at] = bucket;
+            _next = -1;
+        }
+        else if (_runCount > 0 && firstSlice == _next)
+        {
+            _runs[(2 * _runCount) - 1] = bucket;
             _count++;
+            _next = lastSlice + 1;
+        }
+        else
+        {
+            Insert(bucket);
+            _next = lastSlice + 1;
         }
 
-        if (first != bucket)
+        if (instant != bucket)
         {
-            (Instants ??= [])[bucket] = first;
+            (Instants ??= [])[bucket] = instant;
         }
     }
 
     /// <summary>Whether the part folds <paramref name="bucket"/>.</summary>
-    internal bool Holds(long bucket) => Kept.BinarySearch(bucket) >= 0;
+    internal bool Holds(long bucket)
+    {
+        // The last run that starts at or before the bucket.
+        int low = 0;
+        int high = _runCount - 1;
+        while (low <= high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            if (_runs[2 * middle] <= bucket)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return high >= 0 && bucket <= _runs[(2 * high) + 1];
+    }
 
     /// <summary>Whether <paramref name="chunk"/> holds a bucket the part folds.</summary>
     internal bool Folds(TableChunk chunk)
     {
-        int at = Kept.BinarySearch(chunk.FirstBucket);
-        at = at < 0 ? ~at : at;
-        return at < _count && _kept[at] <= chunk.LastBucket;
+        // The first run that ends at or after the chunk's first bucket.
+        int low = 0;
+        int high = _runCount;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            if (_runs[(2 * middle) + 1] < chunk.FirstBucket)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return low < _runCount && _runs[2 * low] <= chunk.LastBucket;
+    }
+
+    /// <summary>Holds <paramref name="bucket"/>, which no run holds, as a run of its own in its place.</summary>
+    private void Insert(long bucket)
+    {
+        // Past every run as slices come, before the first that starts above it otherwise.
+        int at = _runCount;
+        while (at > 0 && _runs[2 * (at - 1)] > bucket)
+        {
+            at--;
+        }
+
+        if (2 * _runCount == _runs.Length)
+        {
+            Array.Resize(ref _runs, Math.Max(4, 2 * _runs.Length));
+        }
+
+        _runs.AsSpan(2 * at, 2 * (_runCount - at)).CopyTo(_runs.AsSpan((2 * at) + 2));
+        _runs[2 * at] = bucket;
+        _runs[(2 * at) + 1] = bucket;
+        _runCount++;
+        _count++;
     }
 }
 
@@ -301,7 +371,7 @@ internal sealed record SynopsisAnswer(
             switch (window.FateOf(start, end))
             {
                 case BucketFate.Kept:
-                    whole.Fold(bucket, window.Carried(bucket, Math.Max(start, window.Least)));
+                    whole.Fold(bucket, window.Carried(bucket, Math.Max(start, window.Least)), first, last);
                     break;
                 case BucketFate.Edge:
                     for (int e = first; e <= last; e++)
@@ -309,7 +379,7 @@ internal sealed record SynopsisAnswer(
                         BucketFate fate = coarsest.Bucket == SynopsisBucket.Slice ? BucketFate.Edge : window.FateOf(slices[e].Start, slices[e].End);
                         if (fate == BucketFate.Kept && runs is not null)
                         {
-                            runs.Fold(slices[e].Start, window.Carried(slices[e].Start, Math.Max(slices[e].Start, window.Least)));
+                            runs.Fold(slices[e].Start, window.Carried(slices[e].Start, Math.Max(slices[e].Start, window.Least)), e, e);
                         }
                         else if (fate != BucketFate.Out)
                         {
