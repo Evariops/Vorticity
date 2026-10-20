@@ -289,6 +289,58 @@ public sealed partial class ValueFunctionTests
         }
     }
 
+    /// <summary>
+    /// A bucket, and a truncation to a minute, an hour or a day as stored, over blocks of values in time order, in
+    /// none, backwards, repeated, around zero and at the storage's ends: each value's image in the block is the one
+    /// the function gives it alone, whose run of one bucket a block keeps rather than dividing again.
+    /// </summary>
+    [Fact]
+    public void ABlockMapsEachValueAsTheFunctionMapsItAlone()
+    {
+        ValueFunction[] functions =
+        [
+            new InstantBucket(7_000, TimeSpan.FromMilliseconds(7)),
+            new InstantBucket(43_200_000_000, TimeSpan.FromHours(12)),
+            new InstantTruncate(CalendarUnit.Minute, TimeUnit.Microseconds, null),
+            new InstantTruncate(CalendarUnit.Hour, TimeUnit.Nanoseconds, null),
+            new InstantTruncate(CalendarUnit.Day, TimeUnit.Nanoseconds, null),
+            new InstantTruncate(CalendarUnit.Day, TimeUnit.Seconds, null),
+        ];
+
+        Random random = new Random(11);
+        long[] ordered = [.. Enumerable.Range(0, 5_000).Select(i => 1_760_000_000_000_000L + (i * 37_000_000L))];
+        long[] ends = [long.MinValue, long.MinValue + 1, long.MinValue + 999, -1, 0, 1, long.MaxValue - 1, long.MaxValue, long.MinValue, 0, 0];
+        long[][] blocks =
+        [
+            ordered,
+            [.. ordered.OrderBy(_ => random.Next())],
+            [.. ordered.Reverse()],
+            ends,
+            [.. ordered.Concat(ends).Concat(ordered)],
+        ];
+
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        DType dtype = types.Primitive(PType.I64, Nullability.NonNullable);
+        foreach (ValueFunction function in functions)
+        {
+            foreach (long[] values in blocks)
+            {
+                Vorticity.Arrays.CanonicalArena arena = new Vorticity.Arrays.CanonicalArena();
+                Vorticity.Buffers.VortexBuffer buffer = arena.Allocate(values.Length * sizeof(long), sizeof(long), out Span<byte> bytes);
+                values.AsSpan().CopyTo(System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes));
+                int column = arena.AddPrimitive(dtype, values.Length, Vorticity.Arrays.Validity.NonNullable, PType.I64, buffer);
+                ReadOnlySpan<long> mapped = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(arena.GetNode(function.Apply(arena, column)).Values.Span);
+                for (int i = 0; i < values.Length; i++)
+                {
+                    Assert.True(Image(function, values[i]) == mapped[i], $"{function.Text} sends {values[i]} to {mapped[i]} in a block, {Image(function, values[i])} alone");
+                }
+
+                // Its blocks given back once read, the arena held until then.
+                arena.Reset();
+            }
+        }
+    }
+
     private static Int128 Image(ValueFunction function, Int128 value)
     {
         Assert.True(function.TryMap(function.Literal(value), out FilterLiteral image));
