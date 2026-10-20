@@ -78,6 +78,7 @@ internal static class SliceSortMicro
                     await sorter.AppendAsync(batch, static (_, _) => ValueTask.CompletedTask, default);
                 }
 
+                await sorter.DrainAsync();
                 best = Math.Min(best, Stopwatch.GetElapsedTime(begin).TotalMilliseconds);
             }
 
@@ -91,11 +92,13 @@ internal static class SliceSortMicro
                         batch,
                         (sorted, _) =>
                         {
-                            checksum = Fold<TRecord>(checksum, sorted, fields);
+                            checksum = Fold<TRecord>(checksum, sorted.Batch, fields);
                             return ValueTask.CompletedTask;
                         },
                         default);
                 }
+
+                await sorter.DrainAsync();
             }
 
             Console.WriteLine($"slice of {Rows} rows, {order.Length} synopsis columns: best {best:F1} ms, {best * 1e6 / Rows:F1} ns/row, checksum {checksum:x16}");

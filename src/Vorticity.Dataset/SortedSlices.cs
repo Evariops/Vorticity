@@ -37,6 +37,11 @@ namespace Vorticity.Dataset;
 /// chosen its paths, after the table was made, when its shapes repeat twice on average in the slice. The
 /// order is then the object's for every slice, and <see cref="Table"/> records it.
 /// </para>
+/// <para>
+/// A slice is written on another thread while the next one's rows come in and sort, each in a buffer of its own:
+/// two slices are held at most, and a slice's write starts once the one before it is written, so the writes
+/// keep the slices' order. <see cref="DrainAsync"/> waits for the last one.
+/// </para>
 /// </remarks>
 internal sealed class SortedSlices : IDisposable
 {
@@ -44,8 +49,9 @@ internal sealed class SortedSlices : IDisposable
     private readonly int _instant;
     private readonly DType _schema;
     private readonly IReadOnlyDictionary<int, Types.Variants.VariantShapes>? _shapes;
-    private readonly ScanContext _context = new ScanContext([]);
-    private readonly List<int> _parts = [];
+    private readonly Buffer[] _buffers = [new Buffer(), new Buffer()];
+    private int _filling;
+    private Task? _writing;
     private List<int>? _order;
     private int _slice;
     private long _held;
@@ -71,15 +77,6 @@ internal sealed class SortedSlices : IDisposable
         ? new SliceTable(_table.Unit, _table.Slices, order, _table.Paths)
         : _table;
 
-    /// <summary>
-    /// The column of each of the table's paths over the slice being written, in the order its rows are sorted
-    /// in, in its batch's arena: those the order places and the numeric ones the synopsis sums, -1 for another;
-    /// valid while the slice is written.
-    /// </summary>
-    internal IReadOnlyList<int> PathColumns => _pathColumns;
-
-    private readonly List<int> _pathColumns = [];
-
     // Which of the table's paths each slice reads, once the first slice settled the order; every one before.
     private bool[]? _wanted;
 
@@ -91,8 +88,11 @@ internal sealed class SortedSlices : IDisposable
 
     private readonly List<int> _counted = [];
 
-    /// <summary>Takes the next rows in time order, writing each slice they complete through <paramref name="write"/>.</summary>
-    internal async ValueTask AppendAsync(RecordBatch rows, Func<RecordBatch, CancellationToken, ValueTask> write, CancellationToken cancellationToken)
+    /// <summary>
+    /// Takes the next rows in time order, writing each slice they complete through <paramref name="write"/>, on another
+    /// thread while the rows after it come in; the last slice is written once <see cref="DrainAsync"/> completes.
+    /// </summary>
+    internal async ValueTask AppendAsync(RecordBatch rows, Func<SortedSlice, CancellationToken, ValueTask> write, CancellationToken cancellationToken)
     {
         int at = 0;
         while (at < rows.RowCount)
@@ -105,7 +105,8 @@ internal sealed class SortedSlices : IDisposable
             long wanted = _table.Slices[_slice].Rows - _held;
             int take = (int)Math.Min(wanted, rows.RowCount - at);
             RecordBatch part = at == 0 && take == rows.RowCount ? rows : rows.Window(at, take);
-            _parts.Add(_context.Canonical.CopyFrom(part.Arena, part.RootIndex));
+            Buffer buffer = _buffers[_filling];
+            buffer.Parts.Add(buffer.Context.Canonical.CopyFrom(part.Arena, part.RootIndex));
             _held += take;
             at += take;
             if (_held == _table.Slices[_slice].Rows)
@@ -115,41 +116,84 @@ internal sealed class SortedSlices : IDisposable
         }
     }
 
-    /// <summary>Whether every slice of the table was written.</summary>
+    /// <summary>Whether every slice of the table was handed to its write; <see cref="DrainAsync"/> says when the last is written.</summary>
     internal bool Complete => _slice == _table.Slices.Count && _held == 0;
 
-    public void Dispose() => _context.Dispose();
-
-    /// <summary>Sorts the slice held and writes it, then lets its rows go.</summary>
-    private async ValueTask FlushAsync(Func<RecordBatch, CancellationToken, ValueTask> write, CancellationToken cancellationToken)
+    /// <summary>Waits for the slice being written, and throws what its write threw.</summary>
+    internal async ValueTask DrainAsync()
     {
-        CanonicalArena arena = _context.Canonical;
-        int rows = checked((int)_held);
-        int whole = _parts.Count == 1 ? _parts[0] : CanonicalConcat.Concat(_context.Decode, _schema, rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_parts));
-        int sorted = Sort(arena, whole, rows);
-        using (RecordBatch batch = new RecordBatch(arena, sorted, 0))
+        if (_writing is { } writing)
         {
-            await write(batch, cancellationToken).ConfigureAwait(false);
+            _writing = null;
+            await writing.ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Lets the buffers go, once the slice being written, if any, is done with them: a caller that gives the object up
+    /// rather than drains it has its reason already, so what that write threw is observed and dropped.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_writing is { } writing)
+        {
+            _writing = null;
+            ((IAsyncResult)writing).AsyncWaitHandle.WaitOne();
+            _ = writing.Exception;
         }
 
-        _parts.Clear();
+        foreach (Buffer buffer in _buffers)
+        {
+            buffer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Sorts the slice held and hands it to <paramref name="write"/> on another thread once the slice before it is
+    /// written; the rows after it go to the other buffer meanwhile.
+    /// </summary>
+    private async ValueTask FlushAsync(Func<SortedSlice, CancellationToken, ValueTask> write, CancellationToken cancellationToken)
+    {
+        Buffer buffer = _buffers[_filling];
+        CanonicalArena arena = buffer.Context.Canonical;
+        int rows = checked((int)_held);
+        int whole = buffer.Parts.Count == 1
+            ? buffer.Parts[0]
+            : CanonicalConcat.Concat(buffer.Context.Decode, _schema, rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(buffer.Parts));
+        int sorted = Sort(buffer, whole, rows);
+
+        // The slice before is written first, and its buffer, the one the next rows go to, let go.
+        await DrainAsync().ConfigureAwait(false);
+        _writing = Task.Run(async () =>
+        {
+            try
+            {
+                using RecordBatch batch = new RecordBatch(arena, sorted, 0);
+                await write(new SortedSlice(batch, buffer.Codes, buffer.PathColumns), cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                buffer.Clear();
+            }
+        }, CancellationToken.None);
         _held = 0;
         _slice++;
-        _context.ResetBatch();
+        _filling ^= 1;
     }
 
     /// <summary>
     /// The slice's rows sorted by its synopsis columns, rows of equal values in the order they came,
     /// which is the instant's: the rows arrive in time order.
     /// </summary>
-    private int Sort(CanonicalArena arena, int node, int rows)
+    private int Sort(Buffer buffer, int node, int rows)
     {
+        CanonicalArena arena = buffer.Context.Canonical;
         List<(int[] Codes, int Distinct)> columns;
-        _sortedCodes.Clear();
-        _pathColumns.Clear();
+        buffer.Codes.Clear();
+        buffer.PathColumns.Clear();
 
         // The paths' values, every path's on the first slice, then those the order and the synopsis read.
-        int[] paths = ReadPaths(arena, node);
+        int[] paths = ReadPaths(buffer, node);
         if (_order is null && (_shapes is not null || _table.Order.Count > 1 || _table.Paths.Count > 0))
         {
             // The first slice settles the object's order, and sorts by the codes it measured it with.
@@ -179,7 +223,7 @@ internal sealed class SortedSlices : IDisposable
         // Each path's values, in the order the rows are sorted in.
         foreach (int column in paths)
         {
-            _pathColumns.Add(column < 0 || identity ? column : CanonicalFilter.Apply(arena, column, permutation!));
+            buffer.PathColumns.Add(column < 0 || identity ? column : CanonicalFilter.Apply(arena, column, permutation!));
         }
 
         if (permutation is null)
@@ -205,19 +249,12 @@ internal sealed class SortedSlices : IDisposable
                 _gathered.AsSpan(0, rows).CopyTo(codes);
             }
 
-            _sortedCodes.Add(codes);
+            buffer.Codes.Add(codes);
         }
 
         return identity ? node : CanonicalFilter.Apply(arena, node, permutation);
     }
 
-    /// <summary>
-    /// The codes of each entry of <see cref="Order"/> over the slice being written, in the order its rows are
-    /// sorted in, values in their order and nulls last; valid while the slice is written.
-    /// </summary>
-    internal IReadOnlyList<int[]> SortedCodes => _sortedCodes;
-
-    private readonly List<int[]> _sortedCodes = [];
     private int[] _gathered = [];
 
     /// <summary>
@@ -233,8 +270,9 @@ internal sealed class SortedSlices : IDisposable
     /// of each variant column: every path before the order is settled, then those the order or the synopsis
     /// read, -1 for another.
     /// </summary>
-    private int[] ReadPaths(CanonicalArena arena, int node)
+    private int[] ReadPaths(Buffer buffer, int node)
     {
+        CanonicalArena arena = buffer.Context.Canonical;
         IReadOnlyList<SynopsisPath> paths = _table.Paths;
         int[] columns = new int[paths.Count];
         columns.AsSpan().Fill(-1);
@@ -261,7 +299,7 @@ internal sealed class SortedSlices : IDisposable
         foreach ((int field, List<int> places) in byField)
         {
             (string, Types.Variants.VariantClass)[] keys = [.. places.Select(p => (paths[p].Key, paths[p].Class))];
-            int[] built = Writing.VariantShredder.KeyColumns(arena, _context.Types, root.GetFieldIndex(field), keys);
+            int[] built = Writing.VariantShredder.KeyColumns(arena, buffer.Context.Types, root.GetFieldIndex(field), keys);
             for (int i = 0; i < places.Count; i++)
             {
                 columns[places[i]] = built[i];
@@ -347,4 +385,37 @@ internal sealed class SortedSlices : IDisposable
 
         return true;
     }
+
+    /// <summary>
+    /// A slice's rows as they come and sort, and what its write reads beside them: its parts copied in, then each
+    /// entry's codes and each path's column in the order the rows are sorted in.
+    /// </summary>
+    private sealed class Buffer : IDisposable
+    {
+        internal ScanContext Context { get; } = new ScanContext([]);
+
+        internal List<int> Parts { get; } = [];
+
+        internal List<int[]> Codes { get; } = [];
+
+        internal List<int> PathColumns { get; } = [];
+
+        /// <summary>Lets the slice's rows go, for the next slice's.</summary>
+        internal void Clear()
+        {
+            Parts.Clear();
+            Codes.Clear();
+            PathColumns.Clear();
+            Context.ResetBatch();
+        }
+
+        public void Dispose() => Context.Dispose();
+    }
 }
+
+/// <summary>
+/// A slice sorted, as its write reads it: its rows, each entry of the order's codes over them in the order they are
+/// sorted in, values in their order and nulls last, and the column of each of the table's paths in the rows' arena,
+/// those the order places and the numeric ones the synopsis sums, -1 for another; valid while the slice is written.
+/// </summary>
+internal readonly record struct SortedSlice(RecordBatch Batch, IReadOnlyList<int[]> Codes, IReadOnlyList<int> PathColumns);

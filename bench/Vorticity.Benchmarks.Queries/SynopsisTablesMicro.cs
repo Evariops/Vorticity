@@ -80,10 +80,10 @@ internal static class SynopsisTablesMicro
                 using SynopsisTables synopsis = new SynopsisTables(file.DType, TimeUnit.Microseconds, measures, new CountingSink(), slices: table.Slices);
                 int next = 0;
                 long counting = 0;
-                async ValueTask Count(RecordBatch sorted, System.Threading.CancellationToken token)
+                async ValueTask Count(SortedSlice sorted, System.Threading.CancellationToken token)
                 {
                     long begin = Stopwatch.GetTimestamp();
-                    await synopsis.AddSliceAsync(sorted, table.Slices[next].Start, sorter.Order, sorter.SortedCodes, cancellationToken: token);
+                    await synopsis.AddSliceAsync(sorted.Batch, table.Slices[next].Start, sorter.Order, sorted.Codes, cancellationToken: token);
                     counting += Stopwatch.GetTimestamp() - begin;
                     next++;
                 }
@@ -94,6 +94,7 @@ internal static class SynopsisTablesMicro
                     await sorter.AppendAsync(batch, Count, default);
                 }
 
+                await sorter.DrainAsync();
                 double totalMs = Stopwatch.GetElapsedTime(total).TotalMilliseconds;
                 long built = Stopwatch.GetTimestamp();
                 List<(SynopsisTableInfo Table, int Held)> result = await synopsis.FinishAsync();

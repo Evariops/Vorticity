@@ -75,12 +75,13 @@ public sealed partial class SynopsisTableTests
                     {
                         await slices.AppendAsync(batch, async (sorted, token) =>
                         {
-                            await tables.AddSliceAsync(sorted, table.Slices[next++].Start, slices.Order, slices.SortedCodes, cancellationToken: token);
-                            await writer.WriteBatchAsync(sorted, token);
+                            await tables.AddSliceAsync(sorted.Batch, table.Slices[next++].Start, slices.Order, sorted.Codes, cancellationToken: token);
+                            await writer.WriteBatchAsync(sorted.Batch, token);
                         }, Ct);
                     }
                 }
 
+                await slices.DrainAsync();
                 writer.DeclareSlices(nameof(Leveled.At), slices.Table);
                 writer.DeclareSynopsisTables(await tables.FinishAsync(Ct));
                 await writer.CompleteAsync(Ct);

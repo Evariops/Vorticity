@@ -1062,16 +1062,17 @@ internal static class DatasetCompactor
             return shapes;
         }
 
-        private async ValueTask WriteSortedAsync(RecordBatch sorted, CancellationToken cancellationToken)
+        /// <summary>A slice sorted, counted into the synopsis and written: on the sorter's thread for writes, one slice at a time.</summary>
+        private async ValueTask WriteSortedAsync(SortedSlice sorted, CancellationToken cancellationToken)
         {
             if (_synopsis is { } synopsis)
             {
                 await synopsis.AddSliceAsync(
-                    sorted, _table!.Slices[_slice].Start, _sorter!.Order, _sorter.SortedCodes, _sorter.PathColumns, _sorter.CountedPaths, cancellationToken).ConfigureAwait(false);
+                    sorted.Batch, _table!.Slices[_slice].Start, _sorter!.Order, sorted.Codes, sorted.PathColumns, _sorter.CountedPaths, cancellationToken).ConfigureAwait(false);
             }
 
             _slice++;
-            await _draft!.Writer.WriteBatchAsync(sorted, cancellationToken).ConfigureAwait(false);
+            await _draft!.Writer.WriteBatchAsync(sorted.Batch, cancellationToken).ConfigureAwait(false);
         }
 
         // The tables of the object's synopsis as its slices are sorted, and the next slice's index.
@@ -1087,6 +1088,12 @@ internal static class DatasetCompactor
             if (_draft is not { } draft)
             {
                 return;
+            }
+
+            // The slice being written goes out first: its write reads the draft, the sorter and the synopsis.
+            if (_sorter is { } writing)
+            {
+                await writing.DrainAsync().ConfigureAwait(false);
             }
 
             _draft = null;
@@ -1149,9 +1156,10 @@ internal static class DatasetCompactor
                 return;
             }
 
-            _draft = null;
+            // A slice being written reads the draft and the synopsis: its write ends, whatever it ends with, before they go.
             _sorter?.Dispose();
             _sorter = null;
+            _draft = null;
             _synopsis?.Dispose();
             _synopsis = null;
             await draft.Writer.DisposeAsync().ConfigureAwait(false);

@@ -97,8 +97,10 @@ public sealed partial class SortedSliceBytesTests
                     using SortedSlices slices = new SortedSlices(table, instant, schema);
                     foreach (RecordBatch batch in batches)
                     {
-                        await slices.AppendAsync(batch, (rows, token) => writer.WriteBatchAsync(rows, token), Ct);
+                        await slices.AppendAsync(batch, (rows, token) => writer.WriteBatchAsync(rows.Batch, token), Ct);
                     }
+
+                    await slices.DrainAsync();
                 }
                 else
                 {

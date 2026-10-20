@@ -120,8 +120,10 @@ internal static class SliceBytesMicro
                 using SortedSlices slices = new SortedSlices(table, instant, schema);
                 foreach (RecordBatch batch in batches)
                 {
-                    await slices.AppendAsync(batch, (rows, token) => writer.WriteBatchAsync(rows, token), default);
+                    await slices.AppendAsync(batch, (rows, token) => writer.WriteBatchAsync(rows.Batch, token), default);
                 }
+
+                await slices.DrainAsync();
             }
             else
             {
@@ -168,11 +170,12 @@ internal static class SliceBytesMicro
             {
                 await slices.AppendAsync(batch, async (rows, token) =>
                 {
-                    await tables.AddSliceAsync(rows, table.Slices[next++].Start, slices.Order, slices.SortedCodes, cancellationToken: token);
-                    await writer.WriteBatchAsync(rows, token);
+                    await tables.AddSliceAsync(rows.Batch, table.Slices[next++].Start, slices.Order, rows.Codes, cancellationToken: token);
+                    await writer.WriteBatchAsync(rows.Batch, token);
                 }, default);
             }
 
+            await slices.DrainAsync();
             writer.DeclareSlices(nameof(SliceRequest.At), slices.Table);
             writer.DeclareSynopsisTables(await tables.FinishAsync());
             report = await writer.CompleteAsync();
