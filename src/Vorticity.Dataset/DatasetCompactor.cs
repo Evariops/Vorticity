@@ -385,19 +385,19 @@ internal static class DatasetCompactor
     /// under another schema.
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
-        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken)
+        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken, bool wide = false)
     {
         VortexFile file = lease.File;
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            return LiveRowsAsync(file, file.ScanBuilder, entry, paths, cancellationToken);
+            return LiveRowsAsync(file, file.ScanBuilder, entry, paths, wide, cancellationToken);
         }
 
         // The clustering key keeps its columns under every schema, so a key-ordered read of an
         // earlier object names them as the dataset does.
         ObjectReadPlan read = columns.Read(null, FieldMask.All);
         return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(file, () => file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, paths, cancellationToken),
+            LiveRowsAsync(file, () => file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, paths, wide, cancellationToken),
             read.Shape,
             null,
             0,
@@ -406,16 +406,34 @@ internal static class DatasetCompactor
     }
 
     /// <summary>
+    /// The entries a key-ordered read of an input walks at once: an append holds its rows mostly in time order, some of
+    /// them a few seconds late, which a window of the file's zones reads ahead of itself split after split, once for
+    /// each window that holds a few of them. On 3 × 10⁷ requests at the design's rate, two in a hundred a few seconds
+    /// late and one in ten thousand up to an hour, a window of 2^18 entries reads them in 6.8 s instead of 13.6 s
+    /// (2.8 s without late rows); 2^20 reads the objects of sorted slices half again slower, its windows past their
+    /// slices.
+    /// </summary>
+    private const int KeyWindowRows = 1 << 18;
+
+    /// <summary>
+    /// The key-ordered scan of an input, in windows of <see cref="KeyWindowRows"/> when <paramref name="wide"/>: a job of a
+    /// dataset of periods, whose objects end at their periods rather than at a size, which batches of a window's rows
+    /// would overshoot.
+    /// </summary>
+    private static ScanBuilder Ordered(ScanBuilder scan, IReadOnlyList<string> paths, bool wide) =>
+        wide ? scan.InKeyOrder(paths).WithKeyWindow(KeyWindowRows) : scan.InKeyOrder(paths);
+
+    /// <summary>
     /// An input's rows through the scans <paramref name="scan"/> makes, in key order along
     /// <paramref name="paths"/> or in its own, without the rows it deleted: a compaction is also where
     /// a deletion vector ends, its outputs holding only the live rows.
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> LiveRowsAsync(
-        VortexFile file, Func<ScanBuilder> scan, ObjectEntry entry, IReadOnlyList<string>? paths, CancellationToken cancellationToken)
+        VortexFile file, Func<ScanBuilder> scan, ObjectEntry entry, IReadOnlyList<string>? paths, bool wide, CancellationToken cancellationToken)
     {
         if (!entry.HasDeletions)
         {
-            return (paths is null ? scan() : scan().InKeyOrder(paths)).ExecuteAsync();
+            return (paths is null ? scan() : Ordered(scan(), paths, wide)).ExecuteAsync();
         }
 
         if (paths is null)
@@ -424,7 +442,7 @@ internal static class DatasetCompactor
                 scan().WithCompaction(false).WithEncodings(false, false).ExecuteAsync(), entry.Deletions, compact: true, 0, cancellationToken);
         }
 
-        ScanBuilder ordered = scan().InKeyOrder(paths);
+        ScanBuilder ordered = Ordered(scan(), paths, wide);
         ScanBuilder? nulls = paths.Count == 1 && ColumnPath.MayBeNull(file.DType, paths[0])
             ? scan().Where(Vorticity.Expressions.Expr.IsNull(Vorticity.Expressions.Expr.Field(paths[0]))).WithEncodings(false, false)
             : null;
@@ -537,7 +555,7 @@ internal static class DatasetCompactor
             key.Paths,
             descending: false,
             rankedTies: false,
-            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken),
+            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken, wide: job.Cut is not null),
             opened: null,
             cancellationToken);
     }
