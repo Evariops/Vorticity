@@ -260,7 +260,7 @@ public sealed partial class SynopsisTableTests
                     SynopsisBucket.Hour => TimeSlicer.Floor(starts[row], slices.Unit, SliceWidth.Hour),
                     _ => 0,
                 };
-                units.Add(Unit(bucket, [.. info.Keys.Select(k => fields[row][k])], [.. measures.Select(m => fields[row][m])], kinds));
+                units.Add(Unit(bucket, [.. info.Keys.Select(k => fields[row][k])], [.. measures.Select(m => fields[row][m])], kinds, info.Kind == SynopsisTableKind.Sketches));
             }
 
             Assert.Equal(info.Kind == SynopsisTableKind.Values ? [info.Keys[0]] : keys[..info.Keys.Length], info.Keys);

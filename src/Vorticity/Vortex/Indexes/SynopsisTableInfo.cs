@@ -22,6 +22,12 @@ internal enum SynopsisTableKind : byte
 
     /// <summary>Per bucket, per value of one synopsis column.</summary>
     Values = 2,
+
+    /// <summary>
+    /// Per bucket coarser than a slice, per combination of the first synopsis columns, as <see cref="Coarse"/>, each
+    /// measure's distribution sketched besides its states, on the grid of <see cref="SynopsisTableInfo.SketchBits"/>.
+    /// </summary>
+    Sketches = 3,
 }
 
 /// <summary>The bucket a table's rows count over: a slice, an hour of data time, or the whole object.</summary>
@@ -36,7 +42,8 @@ internal enum SynopsisBucket : byte
 /// One table of an object's synopsis, as its index entry describes it: its kind, its bucket, the fields that
 /// key its rows, the measure fields whose states each row holds, and its rows. The rows themselves are an
 /// array payload of the entry's one run: a struct of the bucket's start, the keys, a count, then each
-/// measure's count of values, its exact sum in the words its state lays out, its least and its greatest.
+/// measure's count of values, its exact sum in the words its state lays out, its least and its greatest; a table
+/// of sketches then holds each measure's sketch (<see cref="Aggregating.QuantileSketch.Encode"/>).
 /// </summary>
 /// <param name="Kind">What the table holds.</param>
 /// <param name="Bucket">What its rows count over.</param>
@@ -46,6 +53,12 @@ internal enum SynopsisBucket : byte
 internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket Bucket, int[] Keys, int[] Measures, int Rows)
 {
     private const byte Version = 1;
+
+    /// <summary>
+    /// The mantissa bits of the grid of a table of sketches: 0.77 %, the grid a quantile within 1 %, the default, asks
+    /// for. A coarser grid is read off it exactly, its buckets the unions of this one's.
+    /// </summary>
+    internal const int SketchBits = 6;
 
     /// <summary>
     /// The entry's options: the kind, the bucket, the keys, the measures and the rows, behind a version byte; then,
@@ -95,8 +108,8 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// The struct of the table's rows over a file of <paramref name="schema"/>, whose synopsis paths are
     /// <paramref name="paths"/>, built in <paramref name="types"/>: the bucket, each key at its field's type
     /// or its path's class, the count, then per measure its count of values, its sum's words (two for an
-    /// integer, five for a float), its least and its greatest, all 64-bit. The writer builds its rows at
-    /// this type, and a reader decodes them at it.
+    /// integer, five for a float), its least and its greatest, all 64-bit; for a table of sketches, then each
+    /// measure's sketch, binary. The writer builds its rows at this type, and a reader decodes them at it.
     /// </summary>
     internal DType RowType(DType schema, IReadOnlyList<SynopsisPath> paths, DTypeArena types)
     {
@@ -144,6 +157,16 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             for (int i = 0; i < words.Length + 3; i++)
             {
                 fields.Add(longs);
+            }
+        }
+
+        if (Kind == SynopsisTableKind.Sketches)
+        {
+            DType sketch = types.Binary(Nullability.NonNullable);
+            foreach (int measure in Measures)
+            {
+                names.Add($"{NameOf(measure, schema, paths)}.sketch");
+                fields.Add(sketch);
             }
         }
 
@@ -205,7 +228,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 }
             }
 
-            return measures is not null && reader.End && kind <= (ulong)SynopsisTableKind.Values && bucket <= (ulong)SynopsisBucket.Object
+            return measures is not null && reader.End && kind <= (ulong)SynopsisTableKind.Sketches && bucket <= (ulong)SynopsisBucket.Object
                 ? new SynopsisTableInfo((SynopsisTableKind)kind, (SynopsisBucket)bucket, keys!, measures, rows)
                 : null;
         }
@@ -235,17 +258,17 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// <summary>
     /// Which of <paramref name="tables"/> the synopsis keeps, and why, with the numbers: a greedy choice in
     /// the manner of the classic selection of views. The questions are the grains the tables hold, a bucket
-    /// and keys each, weighed alike. Answering one costs its source's bytes at <paramref name="prices"/>'s
-    /// price of a byte, and its rows at the price of a row grouped: the columns it sums, whose bytes
-    /// <paramref name="columnBytes"/> gives, over the object's <paramref name="rows"/>, or the cheapest table
-    /// kept that answers it by merging its rows. Each round keeps the table that lowers the questions'
-    /// costs the most per byte it holds, as long as it lowers them and fits what is left of
-    /// <paramref name="budget"/>.
+    /// and keys each, and their distributions for a table of sketches, weighed alike. Answering one costs its
+    /// source's bytes at <paramref name="prices"/>'s price of a byte, and its rows at the price of a row
+    /// grouped: the columns it sums, whose bytes <paramref name="columnBytes"/> gives, over the object's
+    /// <paramref name="rows"/>, or the cheapest table kept that answers it by merging its rows. Each round
+    /// keeps the table that lowers the questions' costs the most per byte it holds, as long as it lowers them
+    /// and fits what is left of <paramref name="budget"/>.
     /// </summary>
     /// <remarks>
     /// A table answers a question when its bucket is as fine or finer, a slice's nesting in its hour and an
-    /// hour's in the object, its keys hold the question's, and its measures too. Of two tables that hold the
-    /// same rows, the one weighed second saves nothing, and is left out.
+    /// hour's in the object, its keys hold the question's, and its measures too, sketched when the question's
+    /// are. Of two tables that hold the same rows, the one weighed second saves nothing, and is left out.
     /// </remarks>
     internal static (bool[] Kept, string[] Verdicts) Choose(
         IReadOnlyList<(SynopsisTableInfo Table, long Bytes)> tables, Func<int, long> columnBytes, long rows, long budget, SynopsisPrices prices)
@@ -258,7 +281,9 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         for (int c = 0; c < count; c++)
         {
             SynopsisTableInfo table = tables[c].Table;
-            asks[c] = questions.FindIndex(q => q.Bucket == table.Bucket && q.Keys.Length == table.Keys.Length && Holds(q.Keys, table.Keys));
+            asks[c] = questions.FindIndex(q =>
+                q.Bucket == table.Bucket && (q.Kind == SynopsisTableKind.Sketches) == (table.Kind == SynopsisTableKind.Sketches)
+                && q.Keys.Length == table.Keys.Length && Holds(q.Keys, table.Keys));
             if (asks[c] < 0)
             {
                 asks[c] = questions.Count;
@@ -359,9 +384,13 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         return (saved, answered);
     }
 
-    /// <summary>Whether this table's rows give <paramref name="other"/>'s, merged: a bucket as fine or finer, and its keys and measures.</summary>
+    /// <summary>
+    /// Whether this table's rows give <paramref name="other"/>'s, merged: a bucket as fine or finer, its keys and measures,
+    /// and its sketches, which only a table of sketches holds.
+    /// </summary>
     private bool Answers(SynopsisTableInfo other) =>
-        Bucket <= other.Bucket && Holds(Keys, other.Keys) && Holds(Measures, other.Measures);
+        Bucket <= other.Bucket && (Kind == SynopsisTableKind.Sketches || other.Kind != SynopsisTableKind.Sketches)
+        && Holds(Keys, other.Keys) && Holds(Measures, other.Measures);
 
     private static bool Holds(int[] fields, int[] others)
     {

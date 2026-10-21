@@ -2649,7 +2649,17 @@ internal sealed class AggregationPartition
             return new StateInput { Rows = rows };
         }
 
-        bool floats = arena.GetNode(root).DType.IndexOfField(StateRequest.SumWord(column, "m0")) >= 0;
+        CanonicalNode batch = arena.GetNode(root);
+        bool floats = batch.DType.IndexOfField(StateRequest.SumWord(column, "m0")) >= 0;
+
+        // A table of sketches holds each measure's besides its states, a binary column of them.
+        int sketch = batch.DType.IndexOfField(StateRequest.SketchOf(column));
+        CanonicalNode sketches = sketch < 0 ? default : arena.GetNode(EncodedForms.Canonical(arena, batch.GetFieldIndex(sketch)));
+        if (sketch >= 0 && sketches.Kind != CanonicalKind.VarBinView)
+        {
+            throw new InvalidOperationException($"The column '{StateRequest.SketchOf(column)}' of a batch of states is not binary.");
+        }
+
         return new StateInput
         {
             Rows = rows,
@@ -2662,6 +2672,8 @@ internal sealed class AggregationPartition
             Least = StateColumn(arena, root, StateRequest.LeastOf(column)),
             Greatest = StateColumn(arena, root, StateRequest.GreatestOf(column)),
             Floats = floats,
+            SketchViews = sketch < 0 ? default : sketches.Views.Span,
+            SketchData = sketch < 0 ? default : sketches.DataBuffers,
         };
     }
 

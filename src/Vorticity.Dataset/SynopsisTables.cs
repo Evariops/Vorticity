@@ -19,9 +19,10 @@ namespace Vorticity.Dataset;
 /// The tables of an object's synopsis, built from its slices as they are sorted: per slice and per depth of
 /// its synopsis columns, every combination of their values with its count and the states of every measure
 /// column, which are the run statistics; their merges per hour, and per object when it spans more than an
-/// hour, the coarse tables; and per synopsis column after the first, its value counts per hour, the first's
-/// being the coarse table of depth 1. Depth 0, a slice's rows whatever their keys, is kept when there are
-/// measures: without them its counts are the slice table's.
+/// hour, the coarse tables; per synopsis column after the first, its value counts per hour, the first's
+/// being the coarse table of depth 1; and down to a depth of few groups, the coarse tables again with a sketch
+/// of each measure's values, the tables of sketches. Depth 0, a slice's rows whatever their keys, is kept when
+/// there are measures: without them its counts are the slice table's.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -56,7 +57,7 @@ namespace Vorticity.Dataset;
 /// the shallower depths only, which cuts the runs of the hours that follow.
 /// </para>
 /// </remarks>
-internal sealed class SynopsisTables : IDisposable
+internal sealed partial class SynopsisTables : IDisposable
 {
     /// <summary>The rows a chunk of a table holds at most: what a reader decodes at once, and what a stage holds.</summary>
     internal const int ChunkRows = 1 << 16;
@@ -316,9 +317,9 @@ internal sealed class SynopsisTables : IDisposable
         _rowsCounted = _rowsWritten + rows;
 
         // Each depth's groups, numbered in the order of their first rows, down to the deepest a table still asks for: the
-        // tables of slices', or the hour's runs'. Past it, no group is counted, so a depth all of whose tables were given
-        // up costs nothing more.
-        int used = Math.Max(Math.Max(Deepest(_runs), _hourDepth), 0);
+        // tables of slices', the hour's runs', or its sketches'. Past it, no group is counted, so a depth all of whose
+        // tables were given up costs nothing more.
+        int used = Math.Max(Math.Max(Deepest(_runs), Math.Max(_hourDepth, _sketchDepth)), 0);
         int[] counts = new int[used + 1];
         int[][] firsts = new int[used + 1][];
         int[][] parents = new int[used + 1][];
@@ -376,6 +377,18 @@ internal sealed class SynopsisTables : IDisposable
 
         _sliceKeys.Build(arena, columns, _keyShapes, counts, firsts, parents, used);
         CountDistinct(counts, parents);
+
+        // The tables of sketches, which the first slice's groups settle, and the slice's values in the hour's sketches.
+        if (!_sketchesSettled)
+        {
+            _sketchesSettled = true;
+            SettleSketches(counts, used);
+        }
+
+        if (_sketchDepth >= 0)
+        {
+            AddSketches(arena, sorted.RootIndex, rows, counts, firsts, placed, states, leading);
+        }
 
         // The slice's runs, rows of the tables of slices.
         for (int d = _first; d <= used; d++)
@@ -669,6 +682,8 @@ internal sealed class SynopsisTables : IDisposable
             }
         }
 
+        await FinishSketchesAsync(cancellationToken).ConfigureAwait(false);
+
         // Every table with rows, and every one given up, which the choice still weighs as a grain asked.
         foreach (Candidate table in _candidates)
         {
@@ -808,11 +823,13 @@ internal sealed class SynopsisTables : IDisposable
 
     /// <summary>
     /// A table the object may keep, added to those the choice weighs: its measures every measure but its keys, whose
-    /// states would only repeat them, and the words of a record that hold the count and those measures' states.
+    /// states would only repeat them, and the words of a record that hold the count and those measures' states; a table
+    /// of sketches, a sketch of each of those measures.
     /// </summary>
     private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes)
     {
         List<int> measures = [];
+        List<int> sketched = [];
         List<int> words = [0];
         int at = 1;
         for (int m = 0; m < _measures.Length; m++)
@@ -821,6 +838,7 @@ internal sealed class SynopsisTables : IDisposable
             if (!Contains(keys, _measures[m]))
             {
                 measures.Add(_measures[m]);
+                sketched.Add(m);
                 for (int w = 0; w < width; w++)
                 {
                     words.Add(at + w);
@@ -831,18 +849,30 @@ internal sealed class SynopsisTables : IDisposable
         }
 
         int[] kept = [.. measures];
+        bool sketches = kind == SynopsisTableKind.Sketches;
         DType rowType = new SynopsisTableInfo(kind, bucket, keys, kept, 0).RowType(_schema, _paths, _types);
-        Candidate table = new Candidate(kind, bucket, keys, kept, shapes, rowType, new ChunkStage(shapes, [.. words]));
+        Candidate table = new Candidate(kind, bucket, keys, kept, shapes, rowType, new ChunkStage(shapes, [.. words], sketches ? kept.Length : 0))
+        {
+            Sketched = sketches ? [.. sketched] : [],
+        };
         _candidates.Add(table);
         return table;
     }
 
-    /// <summary>Starts counting the hour <paramref name="hour"/>, its runs at the deepest depth a coarser table still asks for.</summary>
+    /// <summary>
+    /// Starts counting the hour <paramref name="hour"/>, its runs at the deepest depth a coarser table still asks for, its
+    /// sketches at the deepest a table of sketches does.
+    /// </summary>
     private void OpenHour(long hour)
     {
         _hour = hour;
         _hourDepth = DeepestCoarse();
         _wholeDepth = Deepest(_whole);
+        _sketchDepth = Math.Min(_sketchDepth, DeepestSketched());
+        if (_hourSketches is { } sketches && sketches.Depth != _sketchDepth)
+        {
+            sketches.Clear(_sketchDepth);
+        }
     }
 
     /// <summary>
@@ -882,8 +912,10 @@ internal sealed class SynopsisTables : IDisposable
             _valueRuns[v].Clear();
         }
 
+        await CloseSketchesAsync(cancellationToken).ConfigureAwait(false);
         await FlushHourAsync(_hourly, cancellationToken).ConfigureAwait(false);
         await FlushHourAsync(_values, cancellationToken).ConfigureAwait(false);
+        await FlushHourAsync(_sketchedHours, cancellationToken).ConfigureAwait(false);
         _hourRuns.Clear();
         _hourScratch?.Dispose();
         _hourScratch = null;
@@ -1666,6 +1698,9 @@ internal sealed class SynopsisTables : IDisposable
 
         /// <summary>The measures it keeps states of: every measure but its keys.</summary>
         internal int[] Measures { get; } = measures;
+
+        /// <summary>For a table of sketches, the place of each of its measures among the object's, whose sketch each row holds; none otherwise.</summary>
+        internal int[] Sketched { get; init; } = [];
 
         internal KeyShape[] Shapes { get; } = shapes;
 

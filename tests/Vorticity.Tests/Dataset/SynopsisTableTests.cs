@@ -63,6 +63,9 @@ public sealed partial class SynopsisTableTests
                     // than the columns they sum and are left out; those of the first column are kept.
                     Assert.Contains(tables, t => t.Info.Kind == SynopsisTableKind.Runs && t.Info.Keys.Length == 1);
                     Assert.DoesNotContain(tables, t => t.Info.Kind == SynopsisTableKind.Runs && t.Info.Keys.Length == 2);
+
+                    // The hour's distributions, sketched at every depth: a sketch of each measure per group.
+                    Assert.Contains(tables, t => t.Info.Kind == SynopsisTableKind.Sketches && t.Info.Bucket == SynopsisBucket.Hour && t.Info.Keys.Length == 2);
                     sealedObjects++;
                 }
 
@@ -243,7 +246,7 @@ public sealed partial class SynopsisTableTests
                     SynopsisBucket.Hour => TimeSlicer.Floor(starts[row], slices.Unit, SliceWidth.Hour),
                     _ => 0,
                 };
-                units.Add(Unit(bucket, [.. info.Keys.Select(k => fields[row][k])], [.. measures.Select(m => fields[row][m])], kinds));
+                units.Add(Unit(bucket, [.. info.Keys.Select(k => fields[row][k])], [.. measures.Select(m => fields[row][m])], kinds, info.Kind == SynopsisTableKind.Sketches));
             }
 
             List<TableRow> expected = Merge(units, static row => row.Bucket, [.. Enumerable.Range(0, info.Keys.Length)], kinds);
@@ -348,10 +351,17 @@ public sealed partial class SynopsisTableTests
                     continue;
                 }
 
-                Assert.False(finer.Bucket == table.Bucket && finer.Keys.Length == table.Keys.Length, "two tables hold the same rows");
+                // A table of sketches holds the rows of the table of states of its grain, and its sketches besides, which
+                // only another table of sketches compares.
+                bool sketches = finer.Kind == SynopsisTableKind.Sketches && table.Kind == SynopsisTableKind.Sketches;
+                Assert.False(
+                    finer.Bucket == table.Bucket && finer.Keys.Length == table.Keys.Length && (finer.Kind == SynopsisTableKind.Sketches) == (table.Kind == SynopsisTableKind.Sketches),
+                    "two tables hold the same rows");
                 int[] positions = [.. table.Keys.Select(k => Array.IndexOf(finer.Keys, k))];
                 List<TableRow> widened = [.. finerRows.Select(row => Widened(row, finer, table, kinds))];
-                Assert.Equal(Show(Merge(widened, row => BucketOf(row.Bucket, table.Bucket), positions, kinds), kinds), Show(rows, kinds));
+                List<TableRow> merged = Merge(widened, row => BucketOf(row.Bucket, table.Bucket), positions, kinds);
+                sketches &= widened.All(row => row.Sketches is not null);
+                Assert.Equal(Show(sketches ? merged : Unsketched(merged), kinds), Show(sketches ? rows : Unsketched(rows), kinds));
             }
         }
 
@@ -365,14 +375,23 @@ public sealed partial class SynopsisTableTests
     private static TableRow Widened(TableRow row, SynopsisTableInfo finer, SynopsisTableInfo table, Kind[] kinds)
     {
         State[] states = new State[table.Measures.Length];
+        QuantileSketch[]? sketches = row.Sketches is null ? null : new QuantileSketch[table.Measures.Length];
         for (int m = 0; m < states.Length; m++)
         {
             int at = Array.IndexOf(finer.Measures, table.Measures[m]);
             if (at >= 0)
             {
                 states[m] = row.States[at];
+                if (sketches is not null)
+                {
+                    sketches[m] = row.Sketches![at];
+                }
+
                 continue;
             }
+
+            // A key widened to a measure has no sketch: only a table of states compares it.
+            sketches = null;
 
             // A key reads back as a number of the switch's common type, whatever its own: its measure's kind says which.
             object? key = row.Keys[Array.IndexOf(finer.Keys, table.Measures[m])];
@@ -385,7 +404,7 @@ public sealed partial class SynopsisTableTests
             };
         }
 
-        return row with { States = states };
+        return row with { States = states, Sketches = sketches };
 
         static State Signed(long number, long count) => new State(count, (Int128)number * count, default, number, number);
 
@@ -475,8 +494,21 @@ public sealed partial class SynopsisTableTests
             }
         }
 
+        // A table of sketches holds each measure's sketch after every measure's states.
+        QuantileSketch[]?[] sketches = new QuantileSketch[buckets.Length][];
+        for (int m = 0; m < kinds.Length && info.Kind == SynopsisTableKind.Sketches; m++)
+        {
+            int column = Next();
+            for (int row = 0; row < buckets.Length; row++)
+            {
+                sketches[row] ??= new QuantileSketch[kinds.Length];
+                sketches[row]![m] = new QuantileSketch(SynopsisTableInfo.SketchBits);
+                sketches[row]![m].MergeEncoded(ColumnData.Bytes(arena, column, row));
+            }
+        }
+
         Assert.Equal(columns.Length, at);
-        return [.. Enumerable.Range(0, buckets.Length).Select(row => new TableRow(buckets[row], keys[row], counts[row], states[row]))];
+        return [.. Enumerable.Range(0, buckets.Length).Select(row => new TableRow(buckets[row], keys[row], counts[row], states[row]) { Sketches = sketches[row] })];
     }
 
     private static object? KeyAt(CanonicalArena arena, int column, DType dtype, int row)
@@ -506,9 +538,21 @@ public sealed partial class SynopsisTableTests
         };
     }
 
-    /// <summary>A table's row for one data row: its bucket, its keys, a count of one, each measure's value as a state.</summary>
-    private static TableRow Unit(long bucket, object?[] keys, object?[] measures, Kind[] kinds)
+    /// <summary>
+    /// A table's row for one data row: its bucket, its keys, a count of one, each measure's value as a state, and with
+    /// <paramref name="sketched"/> as a sketch of the grid of a table of sketches, a null counted by neither.
+    /// </summary>
+    private static TableRow Unit(long bucket, object?[] keys, object?[] measures, Kind[] kinds, bool sketched = false)
     {
+        QuantileSketch[]? sketches = sketched ? [.. measures.Select(_ => new QuantileSketch(SynopsisTableInfo.SketchBits))] : null;
+        for (int m = 0; m < measures.Length && sketches is not null; m++)
+        {
+            if (measures[m] is { } value)
+            {
+                sketches[m].Add(Convert.ToDouble(value, CultureInfo.InvariantCulture));
+            }
+        }
+
         State[] states = new State[kinds.Length];
         for (int m = 0; m < kinds.Length; m++)
         {
@@ -534,7 +578,7 @@ public sealed partial class SynopsisTableTests
             }
         }
 
-        return new TableRow(bucket, keys, 1, states);
+        return new TableRow(bucket, keys, 1, states) { Sketches = sketches };
     }
 
     /// <summary>
@@ -551,7 +595,7 @@ public sealed partial class SynopsisTableTests
             string name = $"{at} {string.Join(", ", keys.Select(Show))}";
             if (!merged.TryGetValue(name, out TableRow? into))
             {
-                merged[name] = new TableRow(at, keys, row.Count, [.. row.States]);
+                merged[name] = new TableRow(at, keys, row.Count, [.. row.States]) { Sketches = Copied(row.Sketches) };
                 continue;
             }
 
@@ -559,6 +603,7 @@ public sealed partial class SynopsisTableTests
             for (int m = 0; m < kinds.Length; m++)
             {
                 states[m] = into.States[m].Merge(row.States[m], kinds[m]);
+                into.Sketches?[m].Merge(row.Sketches![m]);
             }
 
             merged[name] = into with { Count = into.Count + row.Count, States = states };
@@ -578,6 +623,24 @@ public sealed partial class SynopsisTableTests
         return sorted;
     }
 
+    /// <summary>Sketches of the same counts, which a merge may add to without touching the row's own.</summary>
+    private static QuantileSketch[]? Copied(QuantileSketch[]? sketches)
+    {
+        if (sketches is null)
+        {
+            return null;
+        }
+
+        QuantileSketch[] copies = new QuantileSketch[sketches.Length];
+        for (int m = 0; m < copies.Length; m++)
+        {
+            copies[m] = new QuantileSketch(sketches[m].Bits);
+            copies[m].Merge(sketches[m]);
+        }
+
+        return copies;
+    }
+
     /// <summary>Keys in their values' order, nulls last.</summary>
     private static int CompareKeys(object? left, object? right) => (left, right) switch
     {
@@ -592,7 +655,8 @@ public sealed partial class SynopsisTableTests
     };
 
     private static List<string> Show(List<TableRow> rows, Kind[] kinds) => [.. rows.Select(row =>
-        $"{row.Bucket} [{string.Join(", ", row.Keys.Select(Show))}] {row.Count}: {string.Join(" ", row.States.Select((s, m) => s.Show(kinds[m])))}")];
+        $"{row.Bucket} [{string.Join(", ", row.Keys.Select(Show))}] {row.Count}: {string.Join(" ", row.States.Select((s, m) => s.Show(kinds[m])))}"
+        + (row.Sketches is { } sketches ? $" | {string.Join(" | ", sketches.Select(Show))}" : string.Empty))];
 
     private static string Show(object? key) => key switch
     {
@@ -630,8 +694,18 @@ public sealed partial class SynopsisTableTests
         Float,
     }
 
-    /// <summary>A row of a synopsis table.</summary>
-    internal sealed record TableRow(long Bucket, object?[] Keys, long Count, State[] States);
+    /// <summary>A row of a synopsis table; for a table of sketches, each measure's sketch besides its states.</summary>
+    internal sealed record TableRow(long Bucket, object?[] Keys, long Count, State[] States)
+    {
+        internal QuantileSketch[]? Sketches { get; init; }
+    }
+
+    /// <summary>Rows without their sketches: what a table of states holds of a table of sketches.</summary>
+    private static List<TableRow> Unsketched(IEnumerable<TableRow> rows) => [.. rows.Select(row => row with { Sketches = null })];
+
+    /// <summary>A sketch's buckets and their counts, and the values it counts.</summary>
+    private static string Show(QuantileSketch sketch) =>
+        FormattableString.Invariant($"{sketch.Count}~{string.Join(",", sketch.Buckets().Select(b => $"{b.Lower:R}x{b.Count}"))}");
 
     /// <summary>A measure's states in a row: its values, its exact sum, its least and its greatest, a float's as its bits.</summary>
     internal readonly record struct State(long Values, Int128 Sum, WideIndexedSum Float, long Least, long Greatest)

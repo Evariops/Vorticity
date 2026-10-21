@@ -16,7 +16,7 @@ namespace Vorticity.Dataset;
 /// delete leaves of an object's synopsis, or the part a question excludes. Each row is charged to the table's
 /// row of its slice's bucket and its keys' values, and its count, its measures' counts and their exact sums
 /// come off. An extreme stands unless the row holds it, and a float sum unless the row's value sets its top
-/// bin: the table then cannot say, and the object is read as rows.
+/// bin: the table then cannot say, and the object is read as rows. So it is read for a table of sketches.
 /// </summary>
 internal static class SynopsisCorrection
 {
@@ -46,6 +46,12 @@ internal static class SynopsisCorrection
         IReadOnlyList<RecordBatch> removed, IReadOnlyList<TimeSlice> slices, TimeUnit unit, SynopsisPart folded,
         Func<string, (bool Sum, bool Least, bool Greatest)> reads)
     {
+        // A sketch is no word a row's value comes off: a distribution under a delete reads the rows.
+        if (table.Kind == SynopsisTableKind.Sketches)
+        {
+            return false;
+        }
+
         int keys = table.Keys.Length;
         foreach (int key in table.Keys)
         {

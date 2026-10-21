@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
 
@@ -154,6 +155,15 @@ internal sealed class QuantileSketch
         return grown;
     }
 
+    /// <summary>Forgets every value, its arrays kept for the next ones: a sketch that counts an hour after another.</summary>
+    internal void Clear()
+    {
+        Count = 0;
+        Zeros = 0;
+        _positive.Clear();
+        _negative.Clear();
+    }
+
     /// <summary>Adds <paramref name="other"/>'s counts, a sketch of the same grid.</summary>
     /// <exception cref="ArgumentException">The grids differ.</exception>
     internal void Merge(QuantileSketch other)
@@ -222,6 +232,110 @@ internal sealed class QuantileSketch
                 word(count);
             }
         }
+    }
+
+    /// <summary>
+    /// The sketch as a table of sketches holds it, in varints: its grid's bits, its zeros, then each store's buckets, the
+    /// negative's then the positive's, as their count and each one's index, the gap from the one before, and its count.
+    /// A bucket's gap takes a byte where its neighbours hold values, and a count of fewer than 128 another.
+    /// </summary>
+    internal void Encode(IBufferWriter<byte> into)
+    {
+        Span<byte> head = into.GetSpan(3 * MaxVarint);
+        int at = Varint(head, (ulong)Bits);
+        at += Varint(head[at..], (ulong)Zeros);
+        into.Advance(at);
+        _negative.Encode(into);
+        _positive.Encode(into);
+    }
+
+    /// <summary>
+    /// Adds the counts of a sketch <see cref="Encode"/> wrote to this one's: its buckets mapped onto this grid, which is
+    /// as fine or coarser, a bucket of <c>k</c> bits the bucket of <c>k - s</c> bits its index shifted by <c>s</c> names,
+    /// so that the counts are those this grid gives the same values.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The bytes do not hold a sketch, or one of a coarser grid.</exception>
+    internal void MergeEncoded(ReadOnlySpan<byte> bytes)
+    {
+        int at = 0;
+        int bits = checked((int)ReadVarint(bytes, ref at));
+        if (bits < Bits || bits > MaxBits)
+        {
+            throw new VortexFormatException($"A sketch of {bits} mantissa bits merges into one of {Bits}: a grid merges into itself or a coarser one.");
+        }
+
+        int shift = bits - Bits;
+        long zeros = checked((long)ReadVarint(bytes, ref at));
+        long count = zeros;
+        for (int side = 0; side < 2; side++)
+        {
+            ulong entries = ReadVarint(bytes, ref at);
+            if (entries > (ulong)bytes.Length)
+            {
+                throw new VortexFormatException($"A sketch's store says {entries} buckets in {bytes.Length} bytes.");
+            }
+
+            long index = 0;
+            for (ulong e = 0; e < entries; e++)
+            {
+                index = checked(index + (long)ReadVarint(bytes, ref at));
+                long held = checked((long)ReadVarint(bytes, ref at));
+                count = checked(count + held);
+                if (side == 0)
+                {
+                    _negative.Add(checked((int)(index >> shift)), held);
+                }
+                else
+                {
+                    _positive.Add(checked((int)(index >> shift)), held);
+                }
+            }
+        }
+
+        if (at != bytes.Length)
+        {
+            throw new VortexFormatException($"A sketch holds {bytes.Length - at} bytes past its buckets.");
+        }
+
+        Count += count;
+        Zeros += zeros;
+    }
+
+    /// <summary>The most bytes a varint of 64 bits takes.</summary>
+    private const int MaxVarint = 10;
+
+    private static int Varint(Span<byte> into, ulong value)
+    {
+        int at = 0;
+        while (value >= 0x80)
+        {
+            into[at++] = (byte)(value | 0x80);
+            value >>= 7;
+        }
+
+        into[at++] = (byte)value;
+        return at;
+    }
+
+    private static ulong ReadVarint(ReadOnlySpan<byte> bytes, ref int at)
+    {
+        ulong value = 0;
+        for (int shift = 0; shift < 64; shift += 7)
+        {
+            if (at >= bytes.Length)
+            {
+                throw new VortexFormatException("A sketch ends inside a varint.");
+            }
+
+            byte b = bytes[at++];
+            value |= (ulong)(b & 0x7F) << shift;
+            if (b < 0x80)
+            {
+                return value;
+            }
+        }
+
+        throw new VortexFormatException("A sketch holds a varint of more than 64 bits.");
     }
 
     /// <summary>A sketch read back from the words <see cref="Write"/> wrote.</summary>
@@ -352,6 +466,17 @@ internal sealed class QuantileSketch
             return grown;
         }
 
+        /// <summary>Forgets every count, a dense window kept as it is, zeroed.</summary>
+        internal void Clear()
+        {
+            if (_window is { } window)
+            {
+                Array.Clear(window);
+            }
+
+            _sparse = 0;
+        }
+
         /// <summary>Adds this store's counts into <paramref name="into"/>.</summary>
         internal readonly void AddTo(ref Store into)
         {
@@ -371,6 +496,41 @@ internal sealed class QuantileSketch
             for (int i = 0; i < _sparse; i++)
             {
                 into.Add(_keys[i], _counts[i]);
+            }
+        }
+
+        /// <summary>The buckets that hold values, as <see cref="QuantileSketch.Encode"/> writes them: their count, then each one's gap and count.</summary>
+        internal readonly void Encode(IBufferWriter<byte> into)
+        {
+            int entries = 0;
+            if (_window is { } window)
+            {
+                foreach (long count in window)
+                {
+                    entries += count != 0 ? 1 : 0;
+                }
+            }
+            else
+            {
+                entries = _sparse;
+            }
+
+            Span<byte> head = into.GetSpan(MaxVarint);
+            into.Advance(Varint(head, (ulong)entries));
+            int previous = 0;
+            for (int i = 0; i < (_window?.Length ?? _sparse); i++)
+            {
+                (int index, long count) = _window is { } dense ? (_low + i, dense[i]) : (_keys[i], _counts[i]);
+                if (count == 0)
+                {
+                    continue;
+                }
+
+                Span<byte> entry = into.GetSpan(2 * MaxVarint);
+                int at = Varint(entry, (ulong)(index - previous));
+                at += Varint(entry[at..], (ulong)count);
+                into.Advance(at);
+                previous = index;
             }
         }
 

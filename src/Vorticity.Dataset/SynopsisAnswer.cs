@@ -380,14 +380,18 @@ internal sealed record SynopsisAnswer(
         // The tables that hold the keys and the measures: the one of fewest rows answers the buckets the
         // window keeps whole; inside an object's bucket it cuts, the table of hours of fewest rows the hours
         // it keeps whole; inside the buckets it cuts, the runs of the slices of fewest rows the slices it keeps,
-        // and the slices cut are read as rows. Without a table of slices, a bucket cut is read as rows.
+        // and the slices cut are read as rows. Without a table of slices, a bucket cut is read as rows. A distribution
+        // is read from a table of sketches of a grid as fine as it asks, which no table of slices is; a question of none
+        // reads the tables of states alone, a table of sketches holding the same rows in more bytes.
+        bool sketched = request.SketchBits > 0;
         SynopsisTableInfo? coarsest = null;
         SynopsisTableInfo? hourly = null;
         SynopsisTableInfo? sliced = null;
         for (int t = 0; t < contents.Tables.Count; t++)
         {
             SynopsisTableInfo table = contents.Tables[t].Table;
-            if (Holds(table.Keys, keyed.Fields) && Holds(table.Measures, measured.Fields))
+            if ((table.Kind == SynopsisTableKind.Sketches) == sketched && request.SketchBits <= SynopsisTableInfo.SketchBits
+                && Holds(table.Keys, keyed.Fields) && Holds(table.Measures, measured.Fields))
             {
                 coarsest = coarsest is null || table.Rows < coarsest.Rows ? table : coarsest;
                 hourly = table.Bucket == SynopsisBucket.Hour && (hourly is null || table.Rows < hourly.Rows) ? table : hourly;

@@ -14,8 +14,9 @@ namespace Vorticity.Aggregating;
 /// </summary>
 /// <remarks>
 /// Asked only of a pass whose every aggregate a state answers whole: a count of rows, a sum, a least, a
-/// greatest or a mean of a number column or of a path of integers, or a distinct count of a column, exact or
-/// approximate, which the states are then keyed by too; none filtered, nor a key's top, nor a chosen row's
+/// greatest or a mean of a number column or of a path of integers, a distribution or a quantile of one, which a
+/// table of sketches answers, or a distinct count of a column, exact or approximate, which the states are then
+/// keyed by too; none filtered, nor a key's top, nor a chosen row's
 /// column, and whose every key is a column, a function of one, or a path of a variant a synopsis counts
 /// (<see cref="VariantFieldExpr.CountedClass"/>). A path's states carry its text as their name.
 /// </remarks>
@@ -79,6 +80,15 @@ internal sealed class StateRequest
     /// <summary>The column of the greatest value of <paramref name="column"/>.</summary>
     internal static string GreatestOf(string column) => column + ".max";
 
+    /// <summary>The column of the sketch of <paramref name="column"/>'s values (<see cref="QuantileSketch.Encode"/>), which a table of sketches holds.</summary>
+    internal static string SketchOf(string column) => column + ".sketch";
+
+    /// <summary>
+    /// The mantissa bits of the finest grid a distribution or a quantile asks for, 0 when none does: a row of states
+    /// answers them with a sketch of as fine a grid or finer.
+    /// </summary>
+    internal int SketchBits { get; private init; }
+
     /// <summary>
     /// The request of <paramref name="plan"/>, or null when a state cannot answer one of its aggregates or
     /// keys, or when <paramref name="settled"/> or <paramref name="top"/> answer part of it apart.
@@ -104,6 +114,7 @@ internal sealed class StateRequest
         string?[] inputs = new string?[plan.Aggregates.Length];
         FieldExpr?[] fields = new FieldExpr?[plan.Aggregates.Length];
         AggregateKind[] kinds = new AggregateKind[plan.Aggregates.Length];
+        int sketchBits = 0;
         for (int i = 0; i < inputs.Length; i++)
         {
             // An aggregate the statistics settled is folded by no batch, of rows or of states.
@@ -128,6 +139,15 @@ internal sealed class StateRequest
                     fields[i] = input.Field;
                     kinds[i] = aggregate.Kind;
                     break;
+                case AggregateKind.Distribution or AggregateKind.Quantile
+                    when aggregate.Input is { Kind: StorageKind.Primitive } input && Measurable(input.Field) && Numeric(input.PType)
+                        && Aggregators.SketchBits(aggregate.Identity) is > 0 and var bits:
+                    // A distribution merges the sketches of the rows of states, each of the values a row stands for.
+                    inputs[i] = NameOf(input.Field);
+                    fields[i] = input.Field;
+                    kinds[i] = aggregate.Kind;
+                    sketchBits = System.Math.Max(sketchBits, bits);
+                    break;
                 case AggregateKind.CountDistinct or AggregateKind.ApproximateCountDistinct
                     when aggregate.Input is { } distinct && Column(distinct.Field):
                     // A distinct count of a column the states may be keyed by: they come at its grain too, a row of states
@@ -144,7 +164,7 @@ internal sealed class StateRequest
             }
         }
 
-        return new StateRequest([.. keys], inputs, fields, kinds) { Grouped = plan.Keys.Length };
+        return new StateRequest([.. keys], inputs, fields, kinds) { Grouped = plan.Keys.Length, SketchBits = sketchBits };
     }
 
     /// <summary>

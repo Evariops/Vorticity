@@ -97,6 +97,46 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
         _bytes += grown;
     }
 
+    /// <summary>
+    /// A row of states merges its sketch, a table of sketches', into its group's: the counts of the values it stands for,
+    /// on a grid as fine as this one's or finer, so that the group's buckets are those its rows would have filled.
+    /// </summary>
+    internal override bool StepStates(in StateInput input, ReadOnlySpan<ulong> selection, ReadOnlySpan<int> groups)
+    {
+        if (input.SketchViews.IsEmpty && groups.Length > 0)
+        {
+            return false;
+        }
+
+        long grown = 0;
+        if (selection.IsEmpty)
+        {
+            for (int row = 0; row < groups.Length; row++)
+            {
+                grown += Merge(groups[row], input.Sketch(row));
+            }
+        }
+        else
+        {
+            RowCursor cursor = new RowCursor(selection, 0, groups.Length);
+            while (cursor.Next(out int row))
+            {
+                grown += Merge(groups[row], input.Sketch(row));
+            }
+        }
+
+        _bytes += grown;
+        return true;
+
+        long Merge(int group, ReadOnlySpan<byte> sketch)
+        {
+            QuantileSketch mine = Sketch(group);
+            long before = mine.Bytes;
+            mine.MergeEncoded(sketch);
+            return mine.Bytes - before;
+        }
+    }
+
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
         QuantileSketch?[] theirs = ((DistributionSlot<TValue, TResult>)other)._sketches;

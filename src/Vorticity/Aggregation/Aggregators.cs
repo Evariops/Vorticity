@@ -121,7 +121,31 @@ internal static class Aggregators
         int bits = QuantileSketch.BitsFor(relativeError);
         return new Sym<Distribution?>(new AggregateNode<Distribution?>(
             AggregateKind.Distribution, shape, Distributed<Distribution?>(shape, bits, static d => d), null,
-            parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"bits={bits}")));
+            parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{BitsParameter}{bits}")));
+    }
+
+    /// <summary>What names the grid's bits among a distribution's or a quantile's parameters.</summary>
+    private const string BitsParameter = "bits=";
+
+    /// <summary>The mantissa bits of the grid a distribution or a quantile sketches its values on, from its parameters; 0 for another aggregate.</summary>
+    internal static int SketchBits(AggregateIdentity identity)
+    {
+        if (identity.Kind is not (AggregateKind.Distribution or AggregateKind.Quantile) || identity.Parameters is not { } parameters)
+        {
+            return 0;
+        }
+
+        int at = parameters.IndexOf(BitsParameter, StringComparison.Ordinal);
+        if (at < 0)
+        {
+            return 0;
+        }
+
+        ReadOnlySpan<char> bits = parameters.AsSpan(at + BitsParameter.Length);
+        int end = bits.IndexOf(';');
+        return int.TryParse(end < 0 ? bits : bits[..end], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int value)
+            ? value
+            : 0;
     }
 
     /// <summary>The quantile at <paramref name="q"/> of a numeric column, within <paramref name="relativeError"/>.</summary>
@@ -135,7 +159,7 @@ internal static class Aggregators
         int bits = QuantileSketch.BitsFor(relativeError);
         return new Sym<double?>(new AggregateNode<double?>(
             AggregateKind.Quantile, shape, Distributed<double?>(shape, bits, d => d?.Quantile(q)), null,
-            parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"q={q:R};bits={bits}")));
+            parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"q={q:R};{BitsParameter}{bits}")));
     }
 
     private static Func<ScanSource?, AggregateSlot<T>> Distributed<T>(ColumnShape shape, int bits, Func<Distribution?, T> final) =>

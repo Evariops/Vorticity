@@ -841,20 +841,27 @@ internal sealed class RunMerger : IDisposable
 
 /// <summary>
 /// The rows of a chunk of a synopsis table as they come, in the order of their buckets and keys: each row's bucket,
-/// its keys and its states, held column by column in arrays of its own, reused from chunk to chunk, until the chunk
-/// is built into an arena and handed to the writer.
+/// its keys and its states, and for a table of sketches each measure's sketch, held column by column in arrays of its
+/// own, reused from chunk to chunk, until the chunk is built into an arena and handed to the writer.
 /// </summary>
 internal sealed class ChunkStage
 {
+    /// <summary>How a sketch lies in a row: bytes, as a key of bytes does.</summary>
+    private static readonly KeyShape Sketched = new KeyShape(KeyForm.Bytes, 0, default);
+
     private readonly KeyShape[] _shapes;
     private readonly int _words;
     private readonly KeyColumn[] _keys;
+    private readonly KeyColumn[] _sketches;
     private long[] _buckets = new long[64];
     private long[][] _states;
     private int _rows;
 
-    /// <summary>A stage of rows of keys of <paramref name="shapes"/> and the words <paramref name="words"/> names of each record's states.</summary>
-    internal ChunkStage(KeyShape[] shapes, int[] words)
+    /// <summary>
+    /// A stage of rows of keys of <paramref name="shapes"/> and the words <paramref name="words"/> names of each record's
+    /// states, then <paramref name="sketches"/> sketches.
+    /// </summary>
+    internal ChunkStage(KeyShape[] shapes, int[] words, int sketches = 0)
     {
         _shapes = shapes;
         _wordsKept = words;
@@ -863,6 +870,12 @@ internal sealed class ChunkStage
         for (int k = 0; k < shapes.Length; k++)
         {
             _keys[k] = new KeyColumn(shapes[k]);
+        }
+
+        _sketches = new KeyColumn[sketches];
+        for (int s = 0; s < sketches; s++)
+        {
+            _sketches[s] = new KeyColumn(Sketched);
         }
 
         _states = new long[_words][];
@@ -878,7 +891,7 @@ internal sealed class ChunkStage
     /// <summary>The rows held.</summary>
     internal int Rows => _rows;
 
-    /// <summary>The bytes the rows held take before they are encoded: their buckets, their states, and their keys' values.</summary>
+    /// <summary>The bytes the rows held take before they are encoded: their buckets, their states, their keys' values and their sketches.</summary>
     internal long RawBytes
     {
         get
@@ -887,6 +900,11 @@ internal sealed class ChunkStage
             foreach (KeyColumn key in _keys)
             {
                 bytes += key.ValueBytes;
+            }
+
+            foreach (KeyColumn sketch in _sketches)
+            {
+                bytes += sketch.ValueBytes;
             }
 
             return bytes;
@@ -927,11 +945,14 @@ internal sealed class ChunkStage
         _rows++;
     }
 
-    /// <summary>The rows held as a struct of <paramref name="rowType"/> in <paramref name="arena"/>: the bucket, the keys, the states.</summary>
+    /// <summary>Holds sketch <paramref name="sketch"/> of the last row appended: its bytes (<see cref="QuantileSketch.Encode"/>).</summary>
+    internal void Sketch(int sketch, ReadOnlySpan<byte> bytes) => _sketches[sketch].Add(_rows - 1, valid: true, bytes);
+
+    /// <summary>The rows held as a struct of <paramref name="rowType"/> in <paramref name="arena"/>: the bucket, the keys, the states, the sketches.</summary>
     internal int Build(CanonicalArena arena, DType rowType, DTypeArena types)
     {
         DType longs = types.Primitive(PType.I64, Nullability.NonNullable);
-        int[] fields = new int[1 + _keys.Length + _words];
+        int[] fields = new int[1 + _keys.Length + _words + _sketches.Length];
         fields[0] = Longs(arena, longs, _buckets.AsSpan(0, _rows));
         for (int k = 0; k < _keys.Length; k++)
         {
@@ -941,6 +962,12 @@ internal sealed class ChunkStage
         for (int w = 0; w < _words; w++)
         {
             fields[1 + _keys.Length + w] = Longs(arena, longs, _states[w].AsSpan(0, _rows));
+        }
+
+        for (int s = 0; s < _sketches.Length; s++)
+        {
+            int field = 1 + _keys.Length + _words + s;
+            fields[field] = _sketches[s].Build(arena, rowType.GetField(field), types, _rows);
         }
 
         return arena.AddStruct(rowType, _rows, Validity.NonNullable, fields);
@@ -953,6 +980,11 @@ internal sealed class ChunkStage
         foreach (KeyColumn key in _keys)
         {
             key.Clear();
+        }
+
+        foreach (KeyColumn sketch in _sketches)
+        {
+            sketch.Clear();
         }
     }
 
@@ -969,6 +1001,11 @@ internal sealed class ChunkStage
         for (int k = 0; k < _keys.Length; k++)
         {
             _keys[k] = new KeyColumn(_shapes[k]);
+        }
+
+        for (int s = 0; s < _sketches.Length; s++)
+        {
+            _sketches[s] = new KeyColumn(Sketched);
         }
     }
 

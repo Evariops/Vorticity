@@ -41,6 +41,9 @@ public sealed partial class SynopsisAnswerTests
         "distinct methods by service",
         "distinct statuses by method under a service",
         "distinct services in an aligned window",
+        "percentiles by service",
+        "a coarser quantile and a mean by method in an aligned window",
+        "a median per hour",
     ];
 
     [Theory]
@@ -442,8 +445,10 @@ public sealed partial class SynopsisAnswerTests
         Assert.Equal(off, on);
 
         // A question that reads an extreme may meet a marked row holding it in every object, which then reads
-        // its rows; the others answer from the tables corrected.
-        if (question is not ("every measure by service and method" or "an unaligned window" or "a window across hours" or "distinct services in an aligned window"))
+        // its rows, and a distribution reads the rows of every object a delete marked, a sketch not corrected;
+        // the others answer from the tables corrected.
+        if (question is not ("every measure by service and method" or "an unaligned window" or "a window across hours" or "distinct services in an aligned window"
+            or "percentiles by service" or "a coarser quantile and a mean by method in an aligned window" or "a median per hour"))
         {
             Assert.True(metrics.SynopsisRows > 0, "no state folded under the marks");
         }
@@ -631,6 +636,10 @@ public sealed partial class SynopsisAnswerTests
             "distinct methods by service" => scan.GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.ApproximateCountDistinct(r => r.Method), g.CountDistinct(r => r.Method))),
             "distinct statuses by method under a service" => scan.Where(r => r.Service == "api").GroupBy(r => r.Method).Select(g => (g.Key, g.CountDistinct(r => r.Status), g.Sum(r => r.Bytes))),
             "distinct services in an aligned window" => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.ApproximateCountDistinct(r => r.Service), g.Max(r => r.Bytes))),
+            "percentiles by service" => scan.GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Quantile(r => r.Duration, 0.99), g.Quantile(r => r.Bytes, 0.5))),
+            "a coarser quantile and a mean by method in an aligned window" => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method)
+                .Select(g => (g.Key, g.Quantile(r => r.Duration, 0.9, relativeError: 0.02), g.Average(r => r.Duration))),
+            "a median per hour" => scan.GroupBy(r => r.At.Truncate(CalendarUnit.Hour)).Select(g => (g.Key, g.Quantile(r => r.Bytes, 0.5))),
             _ => scan.GroupBy(r => (r.At.Truncate(CalendarUnit.Hour), r.Service)).Select(g => (g.Key.Item1, g.Key.Service, g.Count(), g.Sum(r => r.Bytes))),
         };
     }
