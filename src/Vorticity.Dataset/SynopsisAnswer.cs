@@ -585,9 +585,9 @@ internal sealed record SynopsisAnswer(
     }
 
     /// <summary>The value a component of a run's key holds, as a filter's literal; null for none, or a null.</summary>
-    private static FilterLiteral? Literal(byte[]? component, KeyShape shape)
+    private static FilterLiteral? Literal(ReadOnlySpan<byte> component, KeyShape shape)
     {
-        if (component is not { Length: > 0 })
+        if (component.IsEmpty)
         {
             return null;
         }
@@ -889,6 +889,22 @@ internal sealed record SynopsisAnswer(
 
     bool ISynopsisReads.Reads(SynopsisTableInfo table, TableChunk chunk) => Reads(table, chunk);
 
+    /// <summary>Whether a part of the answer reads <paramref name="table"/>: the chunks of no other are parsed.</summary>
+    internal bool ReadsTable(SynopsisTableInfo table)
+    {
+        for (int p = 0; p < Parts.Count; p++)
+        {
+            if (ReferenceEquals(Parts[p].Table, table))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool ISynopsisReads.ReadsTable(SynopsisTableInfo table) => ReadsTable(table);
+
     /// <summary>
     /// The rows the answer reads: those of the tables, the states it folds, every row of each chunk that holds a bucket a
     /// part folds, and those of the slices at its edges.
@@ -899,6 +915,11 @@ internal sealed record SynopsisAnswer(
         for (int t = 0; t < contents.Tables.Count; t++)
         {
             (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
+            if (!ReadsTable(table))
+            {
+                continue;
+            }
+
             for (int c = 0; c < chunks.Count; c++)
             {
                 rows += Reads(table, chunks[c]) ? chunks[c].Rows : 0;

@@ -615,6 +615,11 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         for (int t = 0; t < contents.Tables.Count; t++)
         {
             (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
+            if (reads?.ReadsTable(table) == false)
+            {
+                continue;
+            }
+
             for (int c = 0; c < chunks.Count; c++)
             {
                 count += reads?.Reads(table, chunks[c]) ?? true ? 1 : 0;
@@ -628,6 +633,11 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         for (int t = 0; t < contents.Tables.Count && at < count; t++)
         {
             (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
+            if (reads?.ReadsTable(table) == false)
+            {
+                continue;
+            }
+
             for (int c = 0; c < chunks.Count; c++)
             {
                 if (reads?.Reads(table, chunks[c]) ?? true)
@@ -872,6 +882,9 @@ internal interface ISynopsisReads
 {
     /// <summary>Whether <paramref name="chunk"/> of <paramref name="table"/> is read.</summary>
     bool Reads(SynopsisTableInfo table, TableChunk chunk);
+
+    /// <summary>Whether a chunk of <paramref name="table"/> may be read: the chunks of a table it is not are not looked at, nor parsed.</summary>
+    bool ReadsTable(SynopsisTableInfo table);
 
     /// <summary>The fields of <paramref name="table"/>'s rows decoded: <see cref="Layouts.FieldMask.All"/> for every one.</summary>
     Layouts.FieldMask Fields(SynopsisTableInfo table);

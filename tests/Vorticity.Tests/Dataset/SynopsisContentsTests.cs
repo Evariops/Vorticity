@@ -210,6 +210,10 @@ public sealed partial class SynopsisContentsTests
     /// <summary>A chunk without the bounds of its key's values, whose arrays compare by their references.</summary>
     private static TableChunk Unbounded(TableChunk chunk) => chunk with { Keys = null };
 
+    /// <summary>A chunk's bounds as bytes, null for none: the bounds a chunk holds are a view of its table's store.</summary>
+    private static (byte[]? Least, byte[]? Greatest) Bounds(TableChunk chunk) =>
+        chunk.Keys is { } keys ? (keys.Least.ToArray(), keys.Greatest.ToArray()) : (null, null);
+
     /// <summary>
     /// A table of contents reads back as it was written, a chunk of a table of values with the least and the greatest of
     /// its values, and an entry carries it through its bytes.
@@ -237,7 +241,7 @@ public sealed partial class SynopsisContentsTests
         Assert.Equal(contents.ChunkDirectories, back.ChunkDirectories);
         Assert.Equal((contents.PartStart, contents.PartEnd), (back.PartStart, back.PartEnd));
         Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(Unbounded), back.Tables.SelectMany(t => t.Chunks).Select(Unbounded));
-        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(c => (c.Keys?.Least, c.Keys?.Greatest)), back.Tables.SelectMany(t => t.Chunks).Select(c => (c.Keys?.Least, c.Keys?.Greatest)));
+        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(Bounds), back.Tables.SelectMany(t => t.Chunks).Select(Bounds));
         Assert.Equal(contents.Tables.Select(t => t.Table), back.Tables.Select(t => t.Table), Same);
         Assert.Equal(contents.Columns.Select(c => (c.Field, c.Chunks.Single())), back.Columns.Select(c => (c.Field, c.Chunks.Single())));
         Assert.Null(SynopsisContents.From([1, 2, 3]));
@@ -313,6 +317,8 @@ public sealed partial class SynopsisContentsTests
     private sealed class FieldsRead(Func<SynopsisTableInfo, int[]> fields) : ISynopsisReads
     {
         public bool Reads(SynopsisTableInfo table, TableChunk chunk) => true;
+
+        public bool ReadsTable(SynopsisTableInfo table) => true;
 
         public Vorticity.Layouts.FieldMask Fields(SynopsisTableInfo table) =>
             Vorticity.Layouts.FieldMask.Subset(new Vorticity.Layouts.FieldMaskNode(fields(table), null));
