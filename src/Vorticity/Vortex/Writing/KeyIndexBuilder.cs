@@ -130,6 +130,10 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The buckets read and sorted ahead of the one being fed, at most, each with buffers of its own.</summary>
     private const int BucketsAhead = 4;
 
+    // A view's bytes, and the most of a value's it holds inside it.
+    private const int ViewBytes = 16;
+    private const int InlineBytes = 12;
+
     private readonly List<RawRun> _chunkRuns = [];
 
     // Hashed postings: the pairs in buckets of their hashes' high bits (see HashedBuckets), made with the first pair; the
@@ -273,15 +277,32 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                 return;
 
             case CanonicalKind.VarBinView:
+            {
+                // The views and a lone data buffer read once for the rows, as LiteralReader.ViewAt reads a row's value,
+                // where a row's went through the node's records for both.
+                ReadOnlySpan<byte> views = node.Views.Span;
+                ReadOnlySpan<byte> lone = node.DataBufferCount == 1 ? node.GetDataBuffer(0).Span : default;
                 for (int row = start; row < start + count; row++)
                 {
                     if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
                     {
-                        Note(LiteralReader.ViewAt(node, row), first + row - start);
+                        ReadOnlySpan<byte> view = views.Slice(row * ViewBytes, ViewBytes);
+                        int size = BinaryPrimitives.ReadInt32LittleEndian(view);
+                        if (size <= InlineBytes)
+                        {
+                            Note(view.Slice(4, size), first + row - start);
+                            continue;
+                        }
+
+                        int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..]);
+                        int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..]);
+                        ReadOnlySpan<byte> data = buffer == 0 && node.DataBufferCount == 1 ? lone : node.GetDataBuffer(buffer).Span;
+                        Note(data.Slice(offset, size), first + row - start);
                     }
                 }
 
                 return;
+            }
 
             default:
                 Abandon($"a locating index does not key a {node.Kind} column");

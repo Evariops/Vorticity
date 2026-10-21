@@ -46,11 +46,17 @@ internal sealed class HashedBuckets : IDisposable
     private readonly List<long>[] _pages;
     private readonly List<(int Bucket, ulong[] Hashes, uint[] Blocks)> _full = [];
 
-    // The hashes of the open block, a slot each, live when its stamp is the block's.
-    private ulong[] _seen = new ulong[1 << 14];
-    private int[] _stamps = new int[1 << 14];
+    // The hashes of the open block, a slot each, live when its stamp is the block's: a slot's hash and stamp side by side,
+    // a probe a line of the caches, where two arrays took two.
+    private Seen[] _seen = new Seen[1 << 14];
     private int _stamp = 1;
     private int _seenCount;
+
+    private struct Seen
+    {
+        internal ulong Hash;
+        internal int Stamp;
+    }
 
     /// <param name="expectedPairs">The pairs the index is expected to hold, or 0 when unknown: a bucket for every <see cref="BucketPairs"/>.</param>
     /// <param name="bits">The bits of a hash the buckets are told apart by, past <paramref name="expectedPairs"/>'s, or -1 for those.</param>
@@ -102,11 +108,12 @@ internal sealed class HashedBuckets : IDisposable
     internal void Note(ulong hash, uint block)
     {
         // The table of the block's hashes: a hash's slot from its low bits, the bucket's are its high ones.
-        int mask = _seen.Length - 1;
+        Seen[] seen = _seen;
+        int mask = seen.Length - 1;
         int slot = (int)(hash & (ulong)mask);
-        while (_stamps[slot] == _stamp)
+        while (seen[slot].Stamp == _stamp)
         {
-            if (_seen[slot] == hash)
+            if (seen[slot].Hash == hash)
             {
                 return;
             }
@@ -114,9 +121,9 @@ internal sealed class HashedBuckets : IDisposable
             slot = (slot + 1) & mask;
         }
 
-        _stamps[slot] = _stamp;
-        _seen[slot] = hash;
-        if (++_seenCount * 2 > _seen.Length)
+        seen[slot].Stamp = _stamp;
+        seen[slot].Hash = hash;
+        if (++_seenCount * 2 > seen.Length)
         {
             GrowSeen();
         }
@@ -151,7 +158,7 @@ internal sealed class HashedBuckets : IDisposable
         _seenCount = 0;
         if (_stamp == int.MaxValue)
         {
-            Array.Clear(_stamps);
+            Array.Clear(_seen);
             _stamp = 1;
         }
     }
@@ -264,22 +271,19 @@ internal sealed class HashedBuckets : IDisposable
 
     private void GrowSeen()
     {
-        ulong[] seen = _seen;
-        int[] stamps = _stamps;
-        _seen = new ulong[seen.Length * 2];
-        _stamps = new int[seen.Length * 2];
+        Seen[] seen = _seen;
+        _seen = new Seen[seen.Length * 2];
         int mask = _seen.Length - 1;
         for (int i = 0; i < seen.Length; i++)
         {
-            if (stamps[i] == _stamp)
+            if (seen[i].Stamp == _stamp)
             {
-                int slot = (int)(seen[i] & (ulong)mask);
-                while (_stamps[slot] == _stamp)
+                int slot = (int)(seen[i].Hash & (ulong)mask);
+                while (_seen[slot].Stamp == _stamp)
                 {
                     slot = (slot + 1) & mask;
                 }
 
-                _stamps[slot] = _stamp;
                 _seen[slot] = seen[i];
             }
         }
