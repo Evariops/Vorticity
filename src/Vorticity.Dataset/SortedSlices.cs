@@ -40,20 +40,33 @@ namespace Vorticity.Dataset;
 /// order is then the object's for every slice, and <see cref="Table"/> records it.
 /// </para>
 /// <para>
-/// A slice is written on another thread while the next one's rows come in and sort, each in a buffer of its own:
-/// two slices are held at most, and a slice's write starts once the one before it is written, so the writes
-/// keep the slices' order. <see cref="DrainAsync"/> waits for the last one.
+/// The rows come in on the caller's thread, which only copies them into a slice's buffer: a slice full is joined, sorted
+/// and written on another thread, each slice in a buffer of its own, <see cref="InFlight"/> of them held at most, one
+/// filling and the others sorting or written. A slice's write starts once the one before it is written, so the writes
+/// keep the slices' order; its sort, as soon as its rows are in, beside the writes of the slices before it. The first
+/// slice is sorted on the caller's thread, as it settles the order the others are sorted in. <see cref="DrainAsync"/>
+/// waits for the last one.
 /// </para>
 /// </remarks>
 internal sealed class SortedSlices : IDisposable
 {
+    /// <summary>
+    /// The slices held at most: one whose rows come in, one sorting and one written, so that the thread that hands the
+    /// rows over waits only when the writes are the slowest of the three.
+    /// </summary>
+    internal const int InFlight = 3;
+
     private readonly SliceTable _table;
     private readonly int _instant;
     private readonly DType _schema;
     private readonly IReadOnlyDictionary<int, Types.Variants.VariantShapes>? _shapes;
-    private readonly Buffer[] _buffers = [new Buffer(), new Buffer()];
+    private readonly Buffer[] _buffers = [new Buffer(), new Buffer(), new Buffer()];
+
+    // Each buffer's slice being sorted or written, null when the buffer is free; and the last slice handed over, which
+    // completes once every slice before it is written.
+    private readonly Task?[] _flights = new Task?[InFlight];
+    private Task? _last;
     private int _filling;
-    private Task? _writing;
     private List<int>? _order;
     private int _slice;
     private long _held;
@@ -75,9 +88,9 @@ internal sealed class SortedSlices : IDisposable
     internal WriteTimings? Timings { get; init; }
 
     /// <summary>
-    /// The session's lanes a slice is written on, one a slice, and its columns coded and gathered on; null for writes on no
-    /// lane. <see cref="Hold"/>, when set, is the lane of the step that hands the rows over, given back while it waits for
-    /// the slice before to be written.
+    /// The session's lanes a slice is sorted and written on, one a slice, and its columns coded and gathered on; null for
+    /// sorts and writes on no lane. <see cref="Hold"/>, when set, is the lane of the step that hands the rows over, given
+    /// back while it waits for a buffer to be free.
     /// </summary>
     internal LaneBudget? Lanes { get; init; }
 
@@ -136,93 +149,166 @@ internal sealed class SortedSlices : IDisposable
     /// <summary>Whether every slice of the table was handed to its write; <see cref="DrainAsync"/> says when the last is written.</summary>
     internal bool Complete => _slice == _table.Slices.Count && _held == 0;
 
-    /// <summary>Waits for the slice being written, on no lane, and throws what its write threw.</summary>
+    /// <summary>
+    /// Waits for every slice handed over to be written, on no lane, and throws what the oldest that failed threw: every one,
+    /// since a slice that fails to sort ends before the slices before it are written.
+    /// </summary>
     internal async ValueTask DrainAsync()
     {
-        if (_writing is { } writing)
+        _last = null;
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
+        for (int i = 1; i <= InFlight; i++)
         {
-            _writing = null;
-            if (Hold is { } hold)
+            int b = (_filling + i) % InFlight;
+            if (_flights[b] is { } flight)
             {
-                await hold.WaitAsync(writing, CancellationToken.None).ConfigureAwait(false);
-            }
-            else
-            {
-                await writing.ConfigureAwait(false);
+                _flights[b] = null;
+                try
+                {
+                    await WaitAsync(flight).ConfigureAwait(false);
+                }
+                catch (Exception thrown)
+                {
+                    failure ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(thrown);
+                }
             }
         }
+
+        failure?.Throw();
     }
 
     /// <summary>
-    /// Lets the buffers go, once the slice being written, if any, is done with them: a caller that gives the object up
-    /// rather than drains it has its reason already, so what that write threw is observed and dropped.
+    /// Lets the buffers go, once every slice being sorted or written is done with them: a caller that gives the object up
+    /// rather than drains it has its reason already, so what those threw is observed and dropped.
     /// </summary>
     public void Dispose()
     {
-        if (_writing is { } writing)
+        _last = null;
+        for (int b = 0; b < _flights.Length; b++)
         {
-            _writing = null;
-            ((IAsyncResult)writing).AsyncWaitHandle.WaitOne();
-            _ = writing.Exception;
+            if (_flights[b] is { } flight)
+            {
+                _flights[b] = null;
+                ((IAsyncResult)flight).AsyncWaitHandle.WaitOne();
+                _ = flight.Exception;
+            }
         }
 
         foreach (Buffer buffer in _buffers)
         {
             buffer.Dispose();
         }
-
-        if (_fan is { } fan)
-        {
-            _fan = null;
-            WorkFan.Return(fan);
-        }
     }
 
     /// <summary>
-    /// Sorts the slice held and hands it to <paramref name="write"/> on another thread once the slice before it is
-    /// written; the rows after it go to the other buffer meanwhile.
+    /// Hands the slice held over to be sorted and written on another thread, written once the slice before it is, and
+    /// waits for the next buffer to be free: the rows after it go there meanwhile. The first slice is sorted here, as it
+    /// settles the order the others sort in.
     /// </summary>
     private async ValueTask FlushAsync(Func<SortedSlice, CancellationToken, ValueTask> write, CancellationToken cancellationToken)
     {
         Buffer buffer = _buffers[_filling];
-        CanonicalArena arena = buffer.Context.Canonical;
         int rows = checked((int)_held);
+        int sorted = -1;
+        if (_order is null)
+        {
+            sorted = JoinAndSort(buffer, rows);
+        }
+
+        Task previous = _last ?? Task.CompletedTask;
+        LaneBudget? lanes = Lanes;
+        Task flight = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    // A slice sorts on a lane of its own, beside the writes of the slices before it, then gives the lane
+                    // back while it waits for its turn: the writes keep the slices' order.
+                    int root = sorted;
+                    if (root < 0)
+                    {
+                        long sorting = lanes is null ? -1 : await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+                        try
+                        {
+                            root = JoinAndSort(buffer, rows);
+                        }
+                        finally
+                        {
+                            if (sorting >= 0)
+                            {
+                                lanes!.Exit(sorting);
+                            }
+                        }
+                    }
+
+                    // The slice before's flight, started on the pool, which no context of the caller's runs.
+#pragma warning disable VSTHRD003
+                    await previous.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+                    long entered = lanes is null ? -1 : await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        using RecordBatch batch = new RecordBatch(buffer.Context.Canonical, root, 0);
+                        await write(new SortedSlice(batch, buffer.Codes, buffer.PathColumns), cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        if (entered >= 0)
+                        {
+                            lanes!.Exit(entered);
+                        }
+                    }
+                }
+                finally
+                {
+                    buffer.Clear();
+                }
+            },
+            CancellationToken.None);
+        _flights[_filling] = flight;
+        _last = flight;
+        _held = 0;
+        _slice++;
+
+        // The next rows go to the next buffer, once the slice it held is written.
+        _filling = (_filling + 1) % InFlight;
+        if (_flights[_filling] is { } busy)
+        {
+            long waiting = Stopwatch.GetTimestamp();
+            _flights[_filling] = null;
+            await WaitAsync(busy).ConfigureAwait(false);
+            Timings?.AddWait(Stopwatch.GetTimestamp() - waiting);
+        }
+    }
+
+    /// <summary>Waits for <paramref name="flight"/>, giving the lane of the step that hands the rows over back meanwhile.</summary>
+    private async ValueTask WaitAsync(Task flight)
+    {
+        if (Hold is { } hold)
+        {
+            await hold.WaitAsync(flight, CancellationToken.None).ConfigureAwait(false);
+        }
+        else
+        {
+            // A slice's flight, started on the pool, which no context of the caller's runs.
+#pragma warning disable VSTHRD003
+            await flight.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+        }
+    }
+
+    /// <summary>The slice <paramref name="buffer"/> holds, its parts joined into one, then sorted: its root.</summary>
+    private int JoinAndSort(Buffer buffer, int rows)
+    {
         long begin = Stopwatch.GetTimestamp();
         int whole = buffer.Parts.Count == 1
             ? buffer.Parts[0]
             : CanonicalConcat.Concat(buffer.Context.Decode, _schema, rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(buffer.Parts));
         long joined = Stopwatch.GetTimestamp();
         int sorted = Sort(buffer, whole, rows);
-        long ordered = Stopwatch.GetTimestamp();
-
-        // The slice before is written first, and its buffer, the one the next rows go to, let go.
-        await DrainAsync().ConfigureAwait(false);
         Timings?.AddJoin(joined - begin);
-        Timings?.AddSort(ordered - joined);
-        Timings?.AddWait(Stopwatch.GetTimestamp() - ordered);
-        LaneBudget? lanes = Lanes;
-        _writing = Task.Run(async () =>
-        {
-            // A slice is written on a lane of its own, beside the step that sorts the next.
-            long entered = -1;
-            try
-            {
-                entered = lanes is null ? -1 : await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
-                using RecordBatch batch = new RecordBatch(arena, sorted, 0);
-                await write(new SortedSlice(batch, buffer.Codes, buffer.PathColumns), cancellationToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                buffer.Clear();
-                if (entered >= 0)
-                {
-                    lanes!.Exit(entered);
-                }
-            }
-        }, CancellationToken.None);
-        _held = 0;
-        _slice++;
-        _filling ^= 1;
+        Timings?.AddSort(Stopwatch.GetTimestamp() - joined);
+        return sorted;
     }
 
     /// <summary>
@@ -255,7 +341,7 @@ internal sealed class SortedSlices : IDisposable
             columns = Coded(buffer, arena, node, rows, paths, _order);
         }
 
-        int[]? permutation = columns.Count == 0 ? null : SliceSort.Permutation(columns, rows, _sortScratch);
+        int[]? permutation = columns.Count == 0 ? null : SliceSort.Permutation(columns, rows, buffer.SortScratch);
         bool identity = permutation is null || IsIdentity(permutation.AsSpan(0, rows));
 
         // Each path's values, in the order the rows are sorted in.
@@ -272,17 +358,17 @@ internal sealed class SortedSlices : IDisposable
         // Each entry's codes, in the order the rows are sorted in: what the slice's synopsis groups by, a column a lane.
         if (!identity)
         {
-            _gather.Columns = columns;
-            _gather.Permutation = permutation;
-            _gather.Rows = rows;
-            if (_gather.Scratch.Length < columns.Count)
+            buffer.Gather.Columns = columns;
+            buffer.Gather.Permutation = permutation;
+            buffer.Gather.Rows = rows;
+            if (buffer.Gather.Scratch.Length < columns.Count)
             {
-                Array.Resize(ref _gather.Scratch, columns.Count);
+                Array.Resize(ref buffer.Gather.Scratch, columns.Count);
             }
 
-            Fan.Run(_gather, columns.Count);
-            _gather.Columns = null;
-            _gather.Permutation = null;
+            buffer.Fan(Lanes).Run(buffer.Gather, columns.Count);
+            buffer.Gather.Columns = null;
+            buffer.Gather.Permutation = null;
         }
 
         foreach ((int[] codes, int _) in columns)
@@ -301,9 +387,9 @@ internal sealed class SortedSlices : IDisposable
     {
         (int[] Codes, int Distinct)[] coded = new (int[] Codes, int Distinct)[order.Count];
         int[] columns = new int[order.Count];
-        if (_columnScratch.Length < order.Count)
+        if (buffer.ColumnScratch.Length < order.Count)
         {
-            Array.Resize(ref _columnScratch, order.Count);
+            Array.Resize(ref buffer.ColumnScratch, order.Count);
         }
         int fields = 0;
         for (int k = 0; k < order.Count; k++)
@@ -323,19 +409,19 @@ internal sealed class SortedSlices : IDisposable
                 if (columns[k] >= 0)
                 {
                     into[k] = buffer.CodeArray(k, rows);
-                    _columnScratch[k] ??= new SliceSortScratch();
+                    buffer.ColumnScratch[k] ??= new SliceSortScratch();
                 }
             }
 
-            _codes.Arena = arena;
-            _codes.Columns = columns;
-            _codes.Rows = rows;
-            _codes.Results = coded;
-            _codes.Into = into;
-            _codes.Scratch = _columnScratch;
-            Fan.Run(_codes, order.Count);
-            _codes.Arena = null;
-            _codes.Results = null;
+            buffer.CodesWork.Arena = arena;
+            buffer.CodesWork.Columns = columns;
+            buffer.CodesWork.Rows = rows;
+            buffer.CodesWork.Results = coded;
+            buffer.CodesWork.Into = into;
+            buffer.CodesWork.Scratch = buffer.ColumnScratch;
+            buffer.Fan(Lanes).Run(buffer.CodesWork, order.Count);
+            buffer.CodesWork.Arena = null;
+            buffer.CodesWork.Results = null;
         }
 
         for (int k = 0; k < order.Count; k++)
@@ -351,17 +437,6 @@ internal sealed class SortedSlices : IDisposable
 
         return [.. coded];
     }
-
-    /// <summary>The lanes of the session's the columns of a slice are coded and gathered on, the calling thread's included.</summary>
-    private WorkFan Fan => _fan ??= WorkFan.Rent(Lanes?.Lanes ?? 1, Lanes);
-
-    private WorkFan? _fan;
-
-    // The arrays a slice's sort works in, kept from slice to slice: each order place's, and the permutation's.
-    private SliceSortScratch[] _columnScratch = [];
-    private readonly SliceSortScratch _sortScratch = new SliceSortScratch();
-    private readonly ColumnCodes _codes = new ColumnCodes();
-    private readonly CodesGather _gather = new CodesGather();
 
     /// <summary>The codes of a slice's columns, an item a column, laid in the arena before: an item reads it alone.</summary>
     private sealed class ColumnCodes : IFanWork
@@ -582,6 +657,21 @@ internal sealed class SortedSlices : IDisposable
 
         internal List<int> PathColumns { get; } = [];
 
+        // What the buffer's slice sorts in, its own since two slices may sort at once, kept from one of its slices to the
+        // next: each order place's scratch, the permutation's, the codes' and their gather's work items.
+        internal SliceSortScratch[] ColumnScratch = [];
+
+        internal SliceSortScratch SortScratch { get; } = new SliceSortScratch();
+
+        internal ColumnCodes CodesWork { get; } = new ColumnCodes();
+
+        internal CodesGather Gather { get; } = new CodesGather();
+
+        private WorkFan? _fan;
+
+        /// <summary>The lanes of <paramref name="lanes"/> the buffer's columns are coded and gathered on, the sorting thread's included.</summary>
+        internal WorkFan Fan(LaneBudget? lanes) => _fan ??= WorkFan.Rent(lanes?.Lanes ?? 1, lanes);
+
         /// <summary>Lets the slice's rows go, for the next slice's.</summary>
         internal void Clear()
         {
@@ -591,7 +681,15 @@ internal sealed class SortedSlices : IDisposable
             Context.ResetBatch();
         }
 
-        public void Dispose() => Context.Dispose();
+        public void Dispose()
+        {
+            Context.Dispose();
+            if (_fan is { } fan)
+            {
+                _fan = null;
+                WorkFan.Return(fan);
+            }
+        }
     }
 }
 
