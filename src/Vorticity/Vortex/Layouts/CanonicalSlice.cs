@@ -355,8 +355,10 @@ internal static class CanonicalSlice
                 buffers[i] = node.GetDataBuffer(i);
             }
 
+            // A window of views zero past their bytes is one too, which the kernels that read views whole rely on.
             return destination.AddVarBinView(
-                dtype, length, validity, node.Views.Slice(start * ViewWidth, length * ViewWidth), buffers);
+                dtype, length, validity, node.Views.Slice(start * ViewWidth, length * ViewWidth), buffers,
+                padded: node.Arena.RecordRef(node.Index).PaddedViews);
         }
         finally
         {
