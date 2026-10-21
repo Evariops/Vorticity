@@ -378,9 +378,11 @@ internal sealed record SynopsisAnswer(
         }
 
         // The tables that hold the keys and the measures: the one of fewest rows answers the buckets the
-        // window keeps whole, the runs of the slices of fewest rows the slices inside the buckets it cuts,
+        // window keeps whole; inside an object's bucket it cuts, the table of hours of fewest rows the hours
+        // it keeps whole; inside the buckets it cuts, the runs of the slices of fewest rows the slices it keeps,
         // and the slices cut are read as rows. Without a table of slices, a bucket cut is read as rows.
         SynopsisTableInfo? coarsest = null;
+        SynopsisTableInfo? hourly = null;
         SynopsisTableInfo? sliced = null;
         for (int t = 0; t < contents.Tables.Count; t++)
         {
@@ -388,6 +390,7 @@ internal sealed record SynopsisAnswer(
             if (Holds(table.Keys, keyed.Fields) && Holds(table.Measures, measured.Fields))
             {
                 coarsest = coarsest is null || table.Rows < coarsest.Rows ? table : coarsest;
+                hourly = table.Bucket == SynopsisBucket.Hour && (hourly is null || table.Rows < hourly.Rows) ? table : hourly;
                 sliced = table.Bucket == SynopsisBucket.Slice && (sliced is null || table.Rows < sliced.Rows) ? table : sliced;
             }
         }
@@ -400,6 +403,7 @@ internal sealed record SynopsisAnswer(
         IReadOnlyList<TimeSlice> slices = contents.Slices.Slices;
         TimeUnit unit = contents.Slices.Unit;
         SynopsisPart whole = new SynopsisPart(coarsest);
+        SynopsisPart? hours = hourly is null || ReferenceEquals(hourly, coarsest) || coarsest.Bucket != SynopsisBucket.Object ? null : new SynopsisPart(hourly);
         SynopsisPart? runs = sliced is null || ReferenceEquals(sliced, coarsest) ? null : new SynopsisPart(sliced);
         List<TimeSlice>? edges = null;
         Window window = new Window(
@@ -413,42 +417,68 @@ internal sealed record SynopsisAnswer(
                 case BucketFate.Kept:
                     whole.Fold(bucket, window.Carried(bucket, Math.Max(start, window.Least)), first, last);
                     break;
-                case BucketFate.Edge:
-                    for (int e = first; e <= last; e++)
+                case BucketFate.Edge when hours is not null:
+                    // An object the window or a key of time cuts: its hours kept whole from the hours' table, a day by
+                    // the hour where its slices were read a minute at a time; the slices of the hours it cuts below.
+                    for (int h = first; h <= last;)
                     {
-                        BucketFate fate = coarsest.Bucket == SynopsisBucket.Slice ? BucketFate.Edge : window.FateOf(slices[e].Start, slices[e].End);
-                        if (fate == BucketFate.Kept && runs is not null)
+                        (long hour, long hourStart, long hourEnd, int hourFirst, int hourLast) = BucketAt(SynopsisBucket.Hour, slices, unit, h);
+                        h = hourLast + 1;
+                        switch (window.FateOf(hourStart, hourEnd))
                         {
-                            runs.Fold(slices[e].Start, window.Carried(slices[e].Start, Math.Max(slices[e].Start, window.Least)), e, e);
-                        }
-                        else if (fate != BucketFate.Out)
-                        {
-                            (edges ??= []).Add(slices[e]);
+                            case BucketFate.Kept:
+                                hours.Fold(hour, window.Carried(hour, Math.Max(hourStart, window.Least)), hourFirst, hourLast);
+                                break;
+                            case BucketFate.Edge:
+                                Cut(hourFirst, hourLast, SynopsisBucket.Hour);
+                                break;
+                            default:
+                                break;
                         }
                     }
 
+                    break;
+                case BucketFate.Edge:
+                    Cut(first, last, coarsest.Bucket);
                     break;
                 default:
                     break;
             }
         }
 
+        // The slices first to last of a bucket of a table of buckets the window or a key of time cuts: the runs of those
+        // it keeps whole, the rows of those it cuts; every one cut, the bucket a slice.
+        void Cut(int first, int last, SynopsisBucket kind)
+        {
+            for (int e = first; e <= last; e++)
+            {
+                BucketFate fate = kind == SynopsisBucket.Slice ? BucketFate.Edge : window.FateOf(slices[e].Start, slices[e].End);
+                if (fate == BucketFate.Kept && runs is not null)
+                {
+                    runs.Fold(slices[e].Start, window.Carried(slices[e].Start, Math.Max(slices[e].Start, window.Least)), e, e);
+                }
+                else if (fate != BucketFate.Out)
+                {
+                    (edges ??= []).Add(slices[e]);
+                }
+            }
+        }
+
         // An object whose every row the edges hold is read as rows, with no table.
-        int count = (whole.KeptCount > 0 ? 1 : 0) + (runs is { KeptCount: > 0 } ? 1 : 0);
+        int count = (whole.KeptCount > 0 ? 1 : 0) + (hours is { KeptCount: > 0 } ? 1 : 0) + (runs is { KeptCount: > 0 } ? 1 : 0);
         if (count == 0 && edges is not null)
         {
             return null;
         }
 
         SynopsisPart[] parts = count == 0 ? [] : new SynopsisPart[count];
-        if (whole.KeptCount > 0)
+        int placed = 0;
+        foreach (SynopsisPart? part in (ReadOnlySpan<SynopsisPart?>)[whole, hours, runs])
         {
-            parts[0] = whole;
-        }
-
-        if (runs is { KeptCount: > 0 })
-        {
-            parts[count - 1] = runs;
+            if (part is { KeptCount: > 0 })
+            {
+                parts[placed++] = part;
+            }
         }
 
         return new SynopsisAnswer(
