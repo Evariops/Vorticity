@@ -80,6 +80,12 @@ internal sealed partial class SynopsisTables : IDisposable
     private const int RunFlushBytes = 1 << 20;
 
     /// <summary>
+    /// The most values a number the order places or the tables count takes in the first slice for its counts to stand for
+    /// its states: a code, a status, a severity. Past them it is a measure too, of the tables it is no key of.
+    /// </summary>
+    private const int FewValues = 64;
+
+    /// <summary>
     /// How many times the budget a coarser table's projected rows must take for it to be given up before its rows are
     /// all counted: a projection fitted to the growth so far overshoots where a key's values come in a burst and then
     /// repeat, while a table of keys almost unique to each row, the waste worth cutting, takes many times the budget.
@@ -298,7 +304,7 @@ internal sealed partial class SynopsisTables : IDisposable
 
         if (!_settled)
         {
-            Settle(keys, keyCodes, rows, counted);
+            Settle(sorted.Arena, keys, keyCodes, rows, counted);
         }
 
         int depth = _keys.Length;
@@ -698,40 +704,48 @@ internal sealed partial class SynopsisTables : IDisposable
     }
 
     /// <summary>
-    /// Settles what the first slice says of every other: the keys, the measures with the numeric paths read, the counted
-    /// paths, and the tables the object may keep, in the order the choice weighs them.
+    /// Settles what the first slice, its columns in <paramref name="arena"/>, says of every other: the keys, the measures
+    /// with the numeric paths read, the counted paths, and the tables the object may keep, in the order the choice weighs
+    /// them.
     /// </summary>
-    private void Settle(List<int> keys, List<int[]> keyCodes, int rows, IReadOnlyList<int>? counted)
+    private void Settle(CanonicalArena arena, List<int> keys, List<int[]> keyCodes, int rows, IReadOnlyList<int>? counted)
     {
         _settled = true;
 
-        // A number the order places is a key, and a measure too of the tables it is no key of when its values repeat less
-        // than twice in the slice, which only a slice too small to judge its columns leaves in the order (SortedSlices),
-        // where a status code repeats and is a key alone.
+        // A number the order places or the tables count is a key, and a measure too of the tables it is no key of, unless
+        // its values are few in the slice: a code, a status or a severity takes no more than FewValues, whose counts say
+        // all its states would, where a duration or a size takes more, its values repeating a few times over a large
+        // object. In a slice too small to judge its columns, which only such a slice leaves in the order (SortedSlices),
+        // a number whose values repeat less than twice is a measure too.
         bool Measured(int entry)
         {
             int k = keys.IndexOf(entry);
-            if (k < 0)
+            int distinct = 0;
+            if (k >= 0)
+            {
+                foreach (int code in keyCodes[k].AsSpan(0, rows))
+                {
+                    distinct = Math.Max(distinct, code + 1);
+                }
+            }
+            else if (Contains(_counted, entry))
+            {
+                distinct = SliceSort.CodesOfColumn(arena, _pathColumns[SynopsisPath.Place(entry)], rows).Distinct;
+            }
+            else
             {
                 return true;
             }
 
-            int distinct = 0;
-            foreach (int code in keyCodes[k].AsSpan(0, rows))
-            {
-                distinct = Math.Max(distinct, code + 1);
-            }
-
-            return distinct * 2L > rows;
+            return distinct > FewValues || distinct * 2L > rows;
         }
 
-        // The numeric paths whose values are not counted are measures, summed as the numbers of the schema are.
+        // The numeric paths are measures, summed as the numbers of the schema are.
         _counted = [.. counted ?? []];
         List<int> measures = [.. _measures.Where(Measured)];
         for (int p = 0; p < _paths.Count; p++)
         {
             if (_paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double
-                && !Contains(_counted, SynopsisPath.Entry(p))
                 && p < _pathColumns.Count && _pathColumns[p] >= 0
                 && Measured(SynopsisPath.Entry(p)))
             {
