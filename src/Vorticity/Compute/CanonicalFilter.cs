@@ -199,10 +199,12 @@ internal static class CanonicalFilter
         // The views are gathered; the heap they point into is shared as it is.
         VortexBuffer views = Gather(arena, node.Views.Span, indices, ViewSize, mask);
 
+        // The views move as they lay: padded where the node's were.
+        bool padded = arena.RecordRef(node.Index).PaddedViews;
         int buffers = node.DataBufferCount;
         if (buffers == 0)
         {
-            return arena.AddVarBinView(node.DType, count, validity, views, default);
+            return arena.AddVarBinView(node.DType, count, validity, views, default, padded);
         }
 
         VortexBuffer[] rented = ArrayPool<VortexBuffer>.Shared.Rent(buffers);
@@ -214,7 +216,7 @@ internal static class CanonicalFilter
             }
 
             return arena.AddVarBinView(
-                node.DType, count, validity, views, rented.AsSpan(0, buffers));
+                node.DType, count, validity, views, rented.AsSpan(0, buffers), padded);
         }
         finally
         {

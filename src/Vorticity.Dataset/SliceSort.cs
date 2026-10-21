@@ -259,7 +259,14 @@ internal static class SliceSort
         int[] table = SliceSortScratch.AtLeast(ref scratch.Table, 1 << bits);
         table.AsSpan(0, 1 << bits).Clear();
         int mask = (1 << bits) - 1;
-        for (int row = 0; row < rows; row++)
+        bool views = kind == CanonicalKind.VarBinView && record.PaddedViews && valid.IsEmpty;
+        if (views)
+        {
+            distinct = DistinctViews(node, MemoryMarshal.Cast<byte, Int128>(record.BufferA.Span)[..rows], codes, scratch);
+            firsts = scratch.Firsts;
+        }
+
+        for (int row = 0; row < rows && !views; row++)
         {
             if (!valid.IsEmpty && ((valid[row >> 6] >> (row & 63)) & 1) == 0)
             {
@@ -352,6 +359,84 @@ internal static class SliceSort
         for (int row = 0; row < rows; row++)
         {
             codes[row] = codes[row] < 0 ? distinct : rank[codes[row]];
+        }
+
+        return distinct;
+    }
+
+    /// <summary>
+    /// The distinct values of a column of padded views and no null, numbered in the order of the rows they first appear at,
+    /// each row's number into <paramref name="codes"/>: their count, their first rows in the scratch's firsts. A view of twelve
+    /// bytes or fewer is its value, its length and its bytes and the zeros past them, and keys the table whole, where a
+    /// value read out of its view and hashed took a call and a hash a row and a call and a comparison of bytes a probe; one
+    /// past twelve bytes is told apart by its length and prefix, then by its bytes.
+    /// </summary>
+    private static int DistinctViews(CanonicalNode node, ReadOnlySpan<Int128> views, int[] codes, SliceSortScratch scratch)
+    {
+        int[] firsts = scratch.Firsts;
+        ulong[] hashes = scratch.Keys;
+        Int128[] keys = SliceSortScratch.AtLeast(ref scratch.Views, firsts.Length);
+        int distinct = 0;
+        int bits = 8;
+        int[] table = SliceSortScratch.AtLeast(ref scratch.Table, 1 << bits);
+        table.AsSpan(0, 1 << bits).Clear();
+        int mask = (1 << bits) - 1;
+        for (int row = 0; row < views.Length; row++)
+        {
+            Int128 view = views[row];
+            uint size = (uint)(ulong)view;
+            ulong hash = size <= 12
+                ? Mix((ulong)view ^ Mix((ulong)(view >> 64)))
+                : XxHash3.HashToUInt64(LiteralReader.ViewAt(node, row));
+            for (int slot = (int)(Mix(hash) >> (64 - bits)); ; slot = (slot + 1) & mask)
+            {
+                int entry = table[slot];
+                if (entry == 0)
+                {
+                    if (distinct == firsts.Length)
+                    {
+                        Array.Resize(ref scratch.Firsts, distinct * 2);
+                        Array.Resize(ref scratch.Keys, distinct * 2);
+                        Array.Resize(ref scratch.Views, distinct * 2);
+                        firsts = scratch.Firsts;
+                        hashes = scratch.Keys;
+                        keys = scratch.Views;
+                    }
+
+                    firsts[distinct] = row;
+                    hashes[distinct] = hash;
+                    keys[distinct] = view;
+                    table[slot] = ++distinct;
+                    codes[row] = distinct - 1;
+                    break;
+                }
+
+                Int128 other = keys[entry - 1];
+                if (hashes[entry - 1] == hash && (other == view || (size > 12 && (ulong)other == (ulong)view
+                    && LiteralReader.ViewAt(node, row).SequenceEqual(LiteralReader.ViewAt(node, firsts[entry - 1])))))
+                {
+                    codes[row] = entry - 1;
+                    break;
+                }
+            }
+
+            if (distinct * 2 > mask + 1)
+            {
+                bits++;
+                table = SliceSortScratch.AtLeast(ref scratch.Table, 1 << bits);
+                table.AsSpan(0, 1 << bits).Clear();
+                mask = (1 << bits) - 1;
+                for (int i = 0; i < distinct; i++)
+                {
+                    int slot = (int)(Mix(hashes[i]) >> (64 - bits));
+                    while (table[slot] != 0)
+                    {
+                        slot = (slot + 1) & mask;
+                    }
+
+                    table[slot] = i + 1;
+                }
+            }
         }
 
         return distinct;
@@ -624,6 +709,9 @@ internal sealed class SliceSortScratch
     // and shift in a word, and the words' bits, 0 when the codes were sorted a column at a time.
     internal ulong[] SortedKeys = [];
     internal ulong[] SpareKeys = [];
+
+    // The views of a column of padded views' distinct values (SliceSort.DistinctViews), by their numbers.
+    internal Int128[] Views = [];
     internal int[] Widths = [];
     internal int[] Shifts = [];
     internal int PackedBits;
