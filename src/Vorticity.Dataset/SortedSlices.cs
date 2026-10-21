@@ -325,6 +325,7 @@ internal sealed class SortedSlices : IDisposable
     {
         CanonicalArena arena = buffer.Context.Canonical;
         List<(int[] Codes, int Distinct)> columns;
+        bool coded = false;
         buffer.Codes.Clear();
         buffer.PathColumns.Clear();
 
@@ -345,6 +346,7 @@ internal sealed class SortedSlices : IDisposable
         {
             _order ??= [.. _table.Order];
             columns = Coded(buffer, arena, node, rows, paths, _order);
+            coded = true;
         }
 
         int[]? permutation = columns.Count == 0 ? null : SliceSort.Permutation(columns, rows, buffer.SortScratch);
@@ -384,7 +386,30 @@ internal sealed class SortedSlices : IDisposable
             buffer.Codes.Add(codes);
         }
 
-        return identity ? node : buffer.Columns.Gather(arena, node, permutation!, rows, buffer.Fan(Lanes));
+        return identity
+            ? node
+            : buffer.Columns.Gather(arena, node, permutation!, rows, buffer.Fan(Lanes), coded ? Keyed(buffer, arena, node, columns) : null);
+    }
+
+    /// <summary>
+    /// The fields of the struct <paramref name="node"/> the order sorts by, each with its codes in the sorted order and the
+    /// scratch of its place it was coded in, which holds its values by rank: what their gather takes their rows from.
+    /// </summary>
+    private SliceGather.Keyed[] Keyed(Buffer buffer, CanonicalArena arena, int node, List<(int[] Codes, int Distinct)> columns)
+    {
+        int fields = arena.GetNode(node).FieldCount;
+        SliceGather.Keyed[] keyed = buffer.KeyedFields(fields);
+        for (int k = 0; k < _order!.Count; k++)
+        {
+            // A field Coded coded in its place's scratch.
+            int entry = _order[k];
+            if (entry >= 0 && !SynopsisPath.Names(entry) && entry < fields)
+            {
+                keyed[entry] = new SliceGather.Keyed(columns[k].Codes, columns[k].Distinct, buffer.ColumnScratch[k]);
+            }
+        }
+
+        return keyed;
     }
 
     /// <summary>
@@ -687,6 +712,20 @@ internal sealed class SortedSlices : IDisposable
         internal CodesGather Gather { get; } = new CodesGather();
 
         internal SliceGather Columns { get; } = new SliceGather();
+
+        private SliceGather.Keyed[] _keyed = [];
+
+        /// <summary>An array of at least <paramref name="fields"/> fields, none of them keyed yet, for the slice's gather.</summary>
+        internal SliceGather.Keyed[] KeyedFields(int fields)
+        {
+            if (_keyed.Length < fields)
+            {
+                _keyed = new SliceGather.Keyed[fields];
+            }
+
+            Array.Clear(_keyed);
+            return _keyed;
+        }
 
         private WorkFan? _fan;
 

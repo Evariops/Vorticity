@@ -19,11 +19,15 @@ namespace Vorticity.Dataset;
 /// primitive's values and an extension's storage move as they lie; a column of strings' views, and, where its strings lie
 /// past their views, their bytes too, in the slice's order, so that every reader of the sorted column reads them in order,
 /// where the views gathered alone left them at random. A column of another form, or with nulls, is gathered after, on the
-/// sorting thread, as <see cref="CanonicalFilter"/> gathers it.
+/// sorting thread, as <see cref="CanonicalFilter"/> gathers it. A column the slice is sorted by, whose codes name its values
+/// exactly, a number's but a float's, whose zeros and NaNs code alike, and padded views', takes each row's value from its
+/// code in the sorted order instead, out of a table of its few values by rank: a read in order and one in the caches a
+/// row, where the permutation reads anywhere in the column.
 /// </summary>
 /// <remarks>
 /// The eleven columns of the design's requests took 0.3 s a slice of three million rows one after the other, the bytes of
-/// its request ids 0.08 s of it; on lanes of their own, the slice takes its longest column.
+/// its request ids 0.08 s of it; on lanes of their own, the slice takes its longest column. Under five periods loaded at
+/// once, the views of its six names gathered through the permutation took 9 % of the processors, and its status 1 %.
 /// </remarks>
 internal sealed class SliceGather : IFanWork
 {
@@ -37,6 +41,15 @@ internal sealed class SliceGather : IFanWork
     private int _count;
     private int[] _permutation = [];
     private int _rows;
+
+    // Each field's values by rank, kept from one slice to the next.
+    private byte[][] _tables = [];
+
+    /// <summary>
+    /// A column the slice is sorted by: each row's code in the sorted order, its values' count, and the scratch its codes
+    /// were counted in, whose first row of each value by rank holds the value.
+    /// </summary>
+    internal readonly record struct Keyed(int[] Codes, int Distinct, SliceSortScratch Scratch);
 
     /// <summary>What a column's gather moves, and what its node is made of after.</summary>
     private struct Item
@@ -54,13 +67,18 @@ internal sealed class SliceGather : IFanWork
         internal PType PType;
         internal Validity Validity;
         internal bool Padded;
+
+        // A column the slice is sorted by: its codes in the sorted order, and its values by rank.
+        internal int[]? Codes;
+        internal byte[] Table;
     }
 
     /// <summary>
     /// The struct <paramref name="node"/> of <paramref name="arena"/> gathered through the first <paramref name="rows"/> of
-    /// <paramref name="permutation"/>, its columns on the lanes of <paramref name="fan"/>.
+    /// <paramref name="permutation"/>, its columns on the lanes of <paramref name="fan"/>, those of the fields
+    /// <paramref name="keyed"/> holds codes for through their codes.
     /// </summary>
-    internal int Gather(CanonicalArena arena, int node, int[] permutation, int rows, WorkFan fan)
+    internal int Gather(CanonicalArena arena, int node, int[] permutation, int rows, WorkFan fan, Keyed[]? keyed = null)
     {
         CanonicalNode root = arena.GetNode(node);
         if (root.Kind != CanonicalKind.Struct || !Whole(root.Validity))
@@ -74,7 +92,7 @@ internal sealed class SliceGather : IFanWork
         for (int f = 0; f < fields; f++)
         {
             gathered[f] = -1;
-            Plan(arena, arena.GetNode(node).GetFieldIndex(f), f, rows);
+            Plan(arena, arena.GetNode(node).GetFieldIndex(f), f, rows, keyed is not null && f < keyed.Length ? keyed[f] : default);
         }
 
         _permutation = permutation;
@@ -113,27 +131,31 @@ internal sealed class SliceGather : IFanWork
     public void Run(WorkFan fan, int index)
     {
         ref Item item = ref _items[index];
-        ReadOnlySpan<int> permutation = _permutation.AsSpan(0, _rows);
+
+        // Each row's source: its row in the column through the permutation, or its value's rank in the table.
+        bool keyed = item.Codes is not null;
+        ReadOnlySpan<int> order = item.Codes is { } codes ? codes.AsSpan(0, _rows) : _permutation.AsSpan(0, _rows);
+        ReadOnlySpan<byte> values = keyed ? item.Table : item.Source.Span;
+        bool ahead = !keyed && Sse.IsSupported;
         Span<byte> into = Writable(item.Into);
         if (!item.Views || item.Heap.IsEmpty)
         {
             switch (item.Width)
             {
                 case 2:
-                    Gather(permutation, MemoryMarshal.Cast<byte, ushort>(item.Source.Span), MemoryMarshal.Cast<byte, ushort>(into));
+                    Gather(order, MemoryMarshal.Cast<byte, ushort>(values), MemoryMarshal.Cast<byte, ushort>(into), ahead);
                     break;
                 case 4:
-                    Gather(permutation, MemoryMarshal.Cast<byte, uint>(item.Source.Span), MemoryMarshal.Cast<byte, uint>(into));
+                    Gather(order, MemoryMarshal.Cast<byte, uint>(values), MemoryMarshal.Cast<byte, uint>(into), ahead);
                     break;
                 case 8:
-                    Gather(permutation, MemoryMarshal.Cast<byte, ulong>(item.Source.Span), MemoryMarshal.Cast<byte, ulong>(into));
+                    Gather(order, MemoryMarshal.Cast<byte, ulong>(values), MemoryMarshal.Cast<byte, ulong>(into), ahead);
                     break;
                 case 16:
-                    Gather(permutation, MemoryMarshal.Cast<byte, Int128>(item.Source.Span), MemoryMarshal.Cast<byte, Int128>(into));
+                    Gather(order, MemoryMarshal.Cast<byte, Int128>(values), MemoryMarshal.Cast<byte, Int128>(into), ahead);
                     break;
                 default:
-                    RowKernels.Gather(
-                        MemoryMarshal.AsBytes(permutation), PType.I32, item.Source.Span, item.Width, item.Source.Length / item.Width, into, _rows);
+                    RowKernels.Gather(MemoryMarshal.AsBytes(order), PType.I32, values, item.Width, values.Length / item.Width, into, _rows);
                     break;
             }
 
@@ -141,25 +163,25 @@ internal sealed class SliceGather : IFanWork
         }
 
         // A view's string past its twelve bytes goes to the heap, in the order of the rows, and the view names it there.
-        ReadOnlySpan<Int128> views = MemoryMarshal.Cast<byte, Int128>(item.Source.Span);
+        ReadOnlySpan<Int128> views = MemoryMarshal.Cast<byte, Int128>(values);
         Span<Int128> target = MemoryMarshal.Cast<byte, Int128>(into);
         Span<byte> heap = Writable(item.Room);
         VortexBuffer[] data = item.Data;
         int at = 0;
-        for (int i = 0; i < permutation.Length; i++)
+        for (int i = 0; i < order.Length; i++)
         {
             // The view of the row a stride ahead, and the bytes of the row half a stride ahead, whose view is in by now.
-            if (Sse.IsSupported && i + Ahead < permutation.Length)
+            if (ahead && i + Ahead < order.Length)
             {
-                Prefetch(views, permutation[i + Ahead]);
-                Int128 coming = views[permutation[i + (Ahead / 2)]];
+                Prefetch(views, order[i + Ahead]);
+                Int128 coming = views[order[i + (Ahead / 2)]];
                 if ((uint)(ulong)coming > MaxInline)
                 {
                     PrefetchBytes(data, coming);
                 }
             }
 
-            Int128 view = views[permutation[i]];
+            Int128 view = views[order[i]];
             uint size = (uint)(ulong)view;
             if (size <= MaxInline)
             {
@@ -192,8 +214,11 @@ internal sealed class SliceGather : IFanWork
         }
     }
 
-    /// <summary>Lays out the gather of <paramref name="column"/>, field <paramref name="field"/>, when its form is one the lanes move.</summary>
-    private void Plan(CanonicalArena arena, int column, int field, int rows)
+    /// <summary>
+    /// Lays out the gather of <paramref name="column"/>, field <paramref name="field"/>, when its form is one the lanes move:
+    /// through its codes <paramref name="key"/>, when it is a column the slice is sorted by whose codes name its values.
+    /// </summary>
+    private void Plan(CanonicalArena arena, int column, int field, int rows, Keyed key)
     {
         CanonicalNode node = arena.GetNode(column);
         DType dtype = node.DType;
@@ -212,7 +237,7 @@ internal sealed class SliceGather : IFanWork
             return;
         }
 
-        Item item = new Item { Field = field, DType = dtype, Extension = extension, Validity = values.Validity, Data = [] };
+        Item item = new Item { Field = field, DType = dtype, Extension = extension, Validity = values.Validity, Data = [], Table = [] };
         if (values.Kind == CanonicalKind.Primitive)
         {
             ref readonly CanonicalRecord record = ref arena.RecordRef(source);
@@ -220,6 +245,11 @@ internal sealed class SliceGather : IFanWork
             item.Width = record.PType.ByteWidth();
             item.Source = record.BufferA;
             item.Into = rows == 0 ? VortexBuffer.Empty : arena.AllocateUninitialized(rows * item.Width, Math.Max(item.Width, 1), out _);
+            if (key.Codes is not null && !record.PType.IsFloat() && item.Width is 1 or 2 or 4 or 8)
+            {
+                item.Codes = key.Codes;
+                item.Table = Table(field, key, item.Source.Span, item.Width);
+            }
         }
         else if (values.Kind == CanonicalKind.VarBinView)
         {
@@ -229,6 +259,13 @@ internal sealed class SliceGather : IFanWork
             item.Source = record.BufferA;
             item.Padded = record.PaddedViews;
             item.Into = rows == 0 ? VortexBuffer.Empty : arena.AllocateUninitialized(rows * ViewSize, ViewSize, out _);
+
+            // Padded views of equal values are equal, past their bytes too; a long value's view the bytes it names.
+            if (key.Codes is not null && record.PaddedViews)
+            {
+                item.Codes = key.Codes;
+                item.Table = Table(field, key, item.Source.Span, ViewSize);
+            }
             long bytes = 0;
             for (int b = 0; b < values.DataBufferCount; b++)
             {
@@ -265,6 +302,29 @@ internal sealed class SliceGather : IFanWork
         _items[_count++] = item;
     }
 
+    /// <summary>
+    /// The values of field <paramref name="field"/>, rows of <paramref name="width"/> bytes of <paramref name="source"/>, by
+    /// the rank <paramref name="key"/>'s codes give them: the row of each rank's value is the first that holds it.
+    /// </summary>
+    private byte[] Table(int field, in Keyed key, ReadOnlySpan<byte> source, int width)
+    {
+        if (_tables.Length <= field)
+        {
+            Array.Resize(ref _tables, field + 1);
+        }
+
+        int bytes = key.Distinct * width;
+        byte[] table = _tables[field] is { } kept && kept.Length >= bytes ? kept : _tables[field] = new byte[Math.Max(bytes, 256)];
+        int[] firsts = key.Scratch.Firsts;
+        int[] byValue = key.Scratch.ByValue;
+        for (int rank = 0; rank < key.Distinct; rank++)
+        {
+            source.Slice(firsts[byValue[rank]] * width, width).CopyTo(table.AsSpan(rank * width));
+        }
+
+        return table;
+    }
+
     /// <summary>The node of a column gathered.</summary>
     private static int Add(CanonicalArena arena, in Item item, int rows)
     {
@@ -281,25 +341,25 @@ internal sealed class SliceGather : IFanWork
     private const int Ahead = 32;
 
     /// <summary>
-    /// <paramref name="target"/>'s rows, those of <paramref name="source"/> <paramref name="permutation"/> names, each
-    /// source <see cref="Ahead"/> rows ahead fetched into the caches as the row before it moves.
+    /// <paramref name="target"/>'s rows, those of <paramref name="source"/> <paramref name="from"/> names; when
+    /// <paramref name="ahead"/>, each source <see cref="Ahead"/> rows ahead fetched into the caches as the row before it moves.
     /// </summary>
-    private static void Gather<T>(ReadOnlySpan<int> permutation, ReadOnlySpan<T> source, Span<T> target)
+    private static void Gather<T>(ReadOnlySpan<int> from, ReadOnlySpan<T> source, Span<T> target, bool ahead)
         where T : unmanaged
     {
         int i = 0;
-        if (Sse.IsSupported)
+        if (ahead)
         {
-            for (; i + Ahead < permutation.Length; i++)
+            for (; i + Ahead < from.Length; i++)
             {
-                Prefetch(source, permutation[i + Ahead]);
-                target[i] = source[permutation[i]];
+                Prefetch(source, from[i + Ahead]);
+                target[i] = source[from[i]];
             }
         }
 
-        for (; i < permutation.Length; i++)
+        for (; i < from.Length; i++)
         {
-            target[i] = source[permutation[i]];
+            target[i] = source[from[i]];
         }
     }
 
