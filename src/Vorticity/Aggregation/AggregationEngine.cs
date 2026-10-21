@@ -2626,7 +2626,9 @@ internal sealed class AggregationPartition
                 continue;
             }
 
-            StateInput input = StatesOf(arena, root, _plan.Aggregates[i].Input is { } measured ? StateRequest.NameOf(measured.Field) : null, stood);
+            StateInput input = StatesOf(
+                arena, root, _plan.Aggregates[i].Input is { } measured ? StateRequest.NameOf(measured.Field) : null, stood,
+                sketched: _plan.Aggregates[i].Kind is AggregateKind.Distribution or AggregateKind.Quantile);
             if (!Slots[i].StepStates(in input, selection, groups))
             {
                 throw new InvalidOperationException($"A batch of states reached the aggregate {_plan.Aggregates[i].Kind}, which folds none.");
@@ -2641,8 +2643,11 @@ internal sealed class AggregationPartition
         }
     }
 
-    /// <summary>The states of <paramref name="column"/>'s aggregate in a batch of states; the rows alone for a count of rows.</summary>
-    private static StateInput StatesOf(CanonicalArena arena, int root, string? column, ReadOnlySpan<long> rows)
+    /// <summary>
+    /// The states of <paramref name="column"/>'s aggregate in a batch of states, and with <paramref name="sketched"/>, a
+    /// distribution's, its sketches; the rows alone for a count of rows.
+    /// </summary>
+    private static StateInput StatesOf(CanonicalArena arena, int root, string? column, ReadOnlySpan<long> rows, bool sketched)
     {
         if (column is null)
         {
@@ -2652,8 +2657,9 @@ internal sealed class AggregationPartition
         CanonicalNode batch = arena.GetNode(root);
         bool floats = batch.DType.IndexOfField(StateRequest.SumWord(column, "m0")) >= 0;
 
-        // A table of sketches holds each measure's besides its states, a binary column of them.
-        int sketch = batch.DType.IndexOfField(StateRequest.SketchOf(column));
+        // A table of sketches holds each measure's besides its states, a binary column of them, which a distribution alone
+        // looks for: its name is made for the batch.
+        int sketch = sketched ? batch.DType.IndexOfField(StateRequest.SketchOf(column)) : -1;
         CanonicalNode sketches = sketch < 0 ? default : arena.GetNode(EncodedForms.Canonical(arena, batch.GetFieldIndex(sketch)));
         if (sketch >= 0 && sketches.Kind != CanonicalKind.VarBinView)
         {
