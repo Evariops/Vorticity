@@ -376,7 +376,70 @@ internal sealed class SortedSlices : IDisposable
             buffer.Codes.Add(codes);
         }
 
-        return identity ? node : CanonicalFilter.Apply(arena, node, permutation!.AsSpan(0, rows));
+        return identity ? node : Compacted(arena, CanonicalFilter.Apply(arena, node, permutation!.AsSpan(0, rows)));
+    }
+
+    /// <summary>
+    /// The sorted slice <paramref name="node"/>, each of its top-level columns whose strings lie past their views copied
+    /// compact: the gather moves the views alone, and the bytes they name stay in the order the rows came in, which every
+    /// reader of the column then read at random, its statistics, its bounds, its compression and its index, each a cache
+    /// miss a value, some 60 ns for the design's request ids. Copied here once, on the slice's own lane, the bytes lie in
+    /// the order the column is read in.
+    /// </summary>
+    private static int Compacted(CanonicalArena arena, int node)
+    {
+        if (arena.GetNode(node).Kind != CanonicalKind.Struct)
+        {
+            return node;
+        }
+
+        int count = arena.GetNode(node).FieldCount;
+        int[]? fields = null;
+        for (int f = 0; f < count; f++)
+        {
+            int column = arena.GetNode(node).GetFieldIndex(f);
+            if (Buffered(arena, column))
+            {
+                if (fields is null)
+                {
+                    fields = new int[count];
+                    for (int g = 0; g < count; g++)
+                    {
+                        fields[g] = arena.GetNode(node).GetFieldIndex(g);
+                    }
+                }
+
+                fields[f] = arena.CopyFrom(arena, column);
+            }
+        }
+
+        if (fields is null)
+        {
+            return node;
+        }
+
+        CanonicalNode root = arena.GetNode(node);
+        return arena.AddStruct(root.DType, root.Length, root.Validity, fields);
+    }
+
+    /// <summary>Whether <paramref name="column"/> is a column of strings some of which lie past their views, in its data buffers.</summary>
+    private static bool Buffered(CanonicalArena arena, int column)
+    {
+        CanonicalNode node = arena.GetNode(column);
+        if (node.Kind != CanonicalKind.VarBinView)
+        {
+            return false;
+        }
+
+        for (int b = 0; b < node.DataBufferCount; b++)
+        {
+            if (node.GetDataBuffer(b).Length > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
