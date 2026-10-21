@@ -2,9 +2,10 @@
 // place of the rows they stand for, and the rows of the slices a window cuts read beside them.
 //
 // WHAT IS HELD: every question gives the bits its rows give, with the synopses on and off: counts, exact
-// integer and float sums, extremes and means, grouped by synopsis columns, under a filter on them, over a
-// window aligned on the hours and one that cuts slices, and by the instant's hour; the sealed hours answer
-// from their tables, and the hours still open from their rows.
+// integer and float sums, extremes and means, distinct counts of a synopsis column exact and approximate,
+// grouped by synopsis columns, under a filter on them, over a window aligned on the hours and one that cuts
+// slices, and by the instant's hour; the sealed hours answer from their tables, and the hours still open
+// from their rows.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -37,6 +38,9 @@ public sealed partial class SynopsisAnswerTests
         "a cut hour without runs",
         "by the hour",
         "a window on slices",
+        "distinct methods by service",
+        "distinct statuses by method under a service",
+        "distinct services in an aligned window",
     ];
 
     [Theory]
@@ -439,10 +443,30 @@ public sealed partial class SynopsisAnswerTests
 
         // A question that reads an extreme may meet a marked row holding it in every object, which then reads
         // its rows; the others answer from the tables corrected.
-        if (question is not ("every measure by service and method" or "an unaligned window" or "a window across hours"))
+        if (question is not ("every measure by service and method" or "an unaligned window" or "a window across hours" or "distinct services in an aligned window"))
         {
             Assert.True(metrics.SynopsisRows > 0, "no state folded under the marks");
         }
+    }
+
+    /// <summary>
+    /// A delete that takes a method out of every row: the rows of states of each service and that method come down to
+    /// no row, and a distinct count of the methods by service, from the tables corrected, counts one method fewer, as
+    /// the rows left do.
+    /// </summary>
+    [Fact]
+    public async Task AValueADeleteTookOutOfEveryRowLeavesTheDistinctCounts()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store, marking: true);
+        (List<string> before, _) = await AskAsync(dataset, "distinct methods by service", synopses: true);
+        RowChangeResult deleted = await dataset.DeleteAsync(VortexExpr.Parse("Method = 'PUT'"), Ct);
+        Assert.True(deleted.ObjectsMarked > 0);
+        (List<string> on, ScanMetrics metrics) = await AskAsync(dataset, "distinct methods by service", synopses: true);
+        (List<string> off, _) = await AskAsync(dataset, "distinct methods by service", synopses: false);
+        Assert.Equal(off, on);
+        Assert.NotEqual(before, on);
+        Assert.True(metrics.SynopsisRows > 0, "no state folded under the marks");
     }
 
     /// <summary>
@@ -604,6 +628,9 @@ public sealed partial class SynopsisAnswerTests
             "either of two keys" => scan.Where(r => r.Service == "api" || r.Method == "PUT").GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
             "a measure's bound" => scan.Where(r => r.Bytes > 1L << 39).GroupBy(r => r.Service).Select(g => (g.Key, g.Count())),
             "a window on slices" => scan.Where(r => r.At >= sliced && r.At < Noon.AddMinutes(100)).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
+            "distinct methods by service" => scan.GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.ApproximateCountDistinct(r => r.Method), g.CountDistinct(r => r.Method))),
+            "distinct statuses by method under a service" => scan.Where(r => r.Service == "api").GroupBy(r => r.Method).Select(g => (g.Key, g.CountDistinct(r => r.Status), g.Sum(r => r.Bytes))),
+            "distinct services in an aligned window" => scan.Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.ApproximateCountDistinct(r => r.Service), g.Max(r => r.Bytes))),
             _ => scan.GroupBy(r => (r.At.Truncate(CalendarUnit.Hour), r.Service)).Select(g => (g.Key.Item1, g.Key.Service, g.Count(), g.Sum(r => r.Bytes))),
         };
     }

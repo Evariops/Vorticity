@@ -14,9 +14,10 @@ namespace Vorticity.Aggregating;
 /// </summary>
 /// <remarks>
 /// Asked only of a pass whose every aggregate a state answers whole: a count of rows, a sum, a least, a
-/// greatest or a mean of a number column or of a path of integers, none filtered, nor a key's top, nor a
-/// chosen row's column, and whose every key is a column, a function of one, or a path of a variant a synopsis
-/// counts (<see cref="VariantFieldExpr.CountedClass"/>). A path's states carry its text as their name.
+/// greatest or a mean of a number column or of a path of integers, or a distinct count of a column, exact or
+/// approximate, which the states are then keyed by too; none filtered, nor a key's top, nor a chosen row's
+/// column, and whose every key is a column, a function of one, or a path of a variant a synopsis counts
+/// (<see cref="VariantFieldExpr.CountedClass"/>). A path's states carry its text as their name.
 /// </remarks>
 internal sealed class StateRequest
 {
@@ -89,15 +90,15 @@ internal sealed class StateRequest
             return null;
         }
 
-        FieldExpr[] keys = new FieldExpr[plan.Keys.Length];
-        for (int k = 0; k < keys.Length; k++)
+        List<FieldExpr> keys = new List<FieldExpr>(plan.Keys.Length);
+        for (int k = 0; k < plan.Keys.Length; k++)
         {
             if (!Keyable(plan.Keys[k].Field))
             {
                 return null;
             }
 
-            keys[k] = plan.Keys[k].Field;
+            keys.Add(plan.Keys[k].Field);
         }
 
         string?[] inputs = new string?[plan.Aggregates.Length];
@@ -127,13 +128,33 @@ internal sealed class StateRequest
                     fields[i] = input.Field;
                     kinds[i] = aggregate.Kind;
                     break;
+                case AggregateKind.CountDistinct or AggregateKind.ApproximateCountDistinct
+                    when aggregate.Input is { } distinct && Column(distinct.Field):
+                    // A distinct count of a column the states may be keyed by: they come at its grain too, a row of states
+                    // for each of its values in a group, and the count folds those values, the rows' own.
+                    if (!keys.Exists(key => key.GetType() == typeof(FieldExpr) && string.Equals(key.Path, distinct.Field.Path, System.StringComparison.Ordinal)))
+                    {
+                        keys.Add(distinct.Field);
+                    }
+
+                    kinds[i] = aggregate.Kind;
+                    break;
                 default:
                     return null;
             }
         }
 
-        return new StateRequest(keys, inputs, fields, kinds);
+        return new StateRequest([.. keys], inputs, fields, kinds) { Grouped = plan.Keys.Length };
     }
+
+    /// <summary>
+    /// How many of <see cref="Keys"/> are the plan's own, which group its rows; past them, the columns its distinct counts
+    /// fold, which a batch of states is keyed by too.
+    /// </summary>
+    internal int Grouped { get; private init; }
+
+    /// <summary>Whether an aggregate of <paramref name="kind"/> folds a column of a batch of states, the values it is keyed by, rather than states.</summary>
+    internal static bool FoldsValues(AggregateKind kind) => kind is AggregateKind.CountDistinct or AggregateKind.ApproximateCountDistinct;
 
     /// <summary>A key a batch of states carries: a top-level column, functions of one, or a path a synopsis counts.</summary>
     private static bool Keyable(FieldExpr field) => field switch

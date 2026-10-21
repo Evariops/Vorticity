@@ -2600,10 +2600,29 @@ internal sealed class AggregationPartition
         }
 
         ReadOnlySpan<long> stood = StateColumn(arena, root, StateRequest.RowsColumn);
+        long number = 0;
         for (int i = 0; i < Slots.Length; i++)
         {
             if (_inputs[i] == Settled)
             {
+                continue;
+            }
+
+            if (StateRequest.FoldsValues(_plan.Aggregates[i].Kind))
+            {
+                // A distinct count folds the column the states are keyed by, a value a row of states: the values the
+                // rows hold, each met once or more, which a distinct count does not tell apart.
+                int column = _inputs[i];
+                int node = FilterEvaluator.Resolve(arena, root, _columns[column].Field, rows);
+                while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+                {
+                    node = arena.GetNode(node).StorageIndex;
+                }
+
+                _nodes[column] = node;
+                _startRow = batch.StartRow;
+                number = number == 0 ? ++_batch : number;
+                Slots[i].StepRows(Input(number, arena, i, rows, selection), groups);
                 continue;
             }
 
