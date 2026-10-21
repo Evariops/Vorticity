@@ -1,5 +1,7 @@
 using System;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -27,6 +29,9 @@ internal sealed class SliceGather : IFanWork
     private const int ViewSize = 16;
     private const int MaxInline = 12;
 
+    /// <summary>The bytes past a heap's last a block's copy may write over.</summary>
+    private const int Slack = 16;
+
     private Item[] _items = new Item[16];
     private int _count;
     private int[] _permutation = [];
@@ -41,6 +46,7 @@ internal sealed class SliceGather : IFanWork
         internal VortexBuffer Source;
         internal VortexBuffer Into;
         internal VortexBuffer Heap;
+        internal VortexBuffer Room;
         internal VortexBuffer[] Data;
         internal DType DType;
         internal DType? Extension;
@@ -118,7 +124,7 @@ internal sealed class SliceGather : IFanWork
         // A view's string past its twelve bytes goes to the heap, in the order of the rows, and the view names it there.
         ReadOnlySpan<Int128> views = MemoryMarshal.Cast<byte, Int128>(item.Source.Span);
         Span<Int128> target = MemoryMarshal.Cast<byte, Int128>(into);
-        Span<byte> heap = Writable(item.Heap);
+        Span<byte> heap = Writable(item.Room);
         VortexBuffer[] data = item.Data;
         int at = 0;
         for (int i = 0; i < permutation.Length; i++)
@@ -134,7 +140,23 @@ internal sealed class SliceGather : IFanWork
             ReadOnlySpan<byte> raw = MemoryMarshal.AsBytes(new ReadOnlySpan<Int128>(in view));
             int buffer = BinaryPrimitives.ReadInt32LittleEndian(raw[8..]);
             int offset = BinaryPrimitives.ReadInt32LittleEndian(raw[12..]);
-            data[buffer].Span.Slice(offset, (int)size).CopyTo(heap[at..]);
+            // A value whose block of sixteen bytes lies in its buffer moves a block at a time, the heap's slack past its last;
+            // one near its buffer's end takes the exact copy, which checks its bounds.
+            ReadOnlySpan<byte> from = data[buffer].Span;
+            int blocks = ((int)size + 15) & ~15;
+            if ((uint)offset + (uint)blocks <= (uint)from.Length)
+            {
+                ref byte source = ref Unsafe.Add(ref MemoryMarshal.GetReference(from), offset);
+                ref byte destination = ref Unsafe.Add(ref MemoryMarshal.GetReference(heap), at);
+                for (int b = 0; b < blocks; b += 16)
+                {
+                    Vector128.LoadUnsafe(ref source, (nuint)b).StoreUnsafe(ref destination, (nuint)b);
+                }
+            }
+            else
+            {
+                from.Slice(offset, (int)size).CopyTo(heap[at..]);
+            }
             target[i] = ((Int128)(ulong)at << 96) | ((Int128)(ulong)(uint)(ulong)(view >> 32) << 32) | size;
             at += (int)size;
         }
@@ -193,7 +215,11 @@ internal sealed class SliceGather : IFanWork
                     item.Data[b] = values.GetDataBuffer(b);
                 }
 
-                item.Heap = bytes == 0 ? VortexBuffer.Empty : arena.AllocateUninitialized(checked((int)bytes), 1, out _);
+                if (bytes > 0)
+                {
+                    item.Room = arena.AllocateUninitialized(checked((int)bytes + Slack), 1, out _);
+                    item.Heap = item.Room.Slice(0, (int)bytes);
+                }
             }
         }
         else

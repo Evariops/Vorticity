@@ -84,21 +84,18 @@ internal sealed class RequestColumns
             durations[i] = draw.DurationNs;
             weights[i] = draw.Weight;
 
-            // "req-" and the id's twelve hexadecimal digits, in the data buffer; the view holds the length, the first four
-            // bytes, the buffer and the offset.
+            // "req-" and the id's twelve hexadecimal digits, in the data buffer, two digits a byte of the id; the view holds
+            // the length, the first four bytes, the buffer and the offset. Words written whole, where a copy of four bytes
+            // and a digit at a time took a call each.
             Span<byte> text = ids.Slice(i * IdBytes, IdBytes);
-            "req-"u8.CopyTo(text);
-            for (int digit = 15; digit >= 4; digit--)
+            BinaryPrimitives.WriteUInt32LittleEndian(text, IdPrefix);
+            for (int pair = 7; pair >= 2; pair--)
             {
-                text[digit] = Hex[(int)(id & 0xF)];
-                id >>= 4;
+                BinaryPrimitives.WriteUInt16LittleEndian(text[(pair * 2)..], HexPairs[(int)(id & 0xFF)]);
+                id >>= 8;
             }
 
-            Span<byte> view = idViewBytes.Slice(i * ViewSize, ViewSize);
-            BinaryPrimitives.WriteInt32LittleEndian(view, IdBytes);
-            "req-"u8.CopyTo(view[4..]);
-            BinaryPrimitives.WriteInt32LittleEndian(view[8..], 0);
-            BinaryPrimitives.WriteInt32LittleEndian(view[12..], i * IdBytes);
+            MemoryMarshal.Write(idViewBytes[(i * ViewSize)..], new Int128((ulong)(uint)(i * IdBytes) << 32, ((ulong)IdPrefix << 32) | IdBytes));
         }
 
         DType instant = _row.GetField(0);
@@ -119,7 +116,11 @@ internal sealed class RequestColumns
         return arena.AddStruct(_row, count, Validity.NonNullable, fields);
     }
 
-    private static ReadOnlySpan<byte> Hex => "0123456789abcdef"u8;
+    /// <summary>"req-", the first four bytes of every id, as a word.</summary>
+    private static readonly uint IdPrefix = BinaryPrimitives.ReadUInt32LittleEndian("req-"u8);
+
+    /// <summary>The two lowercase hexadecimal digits of each byte, the high one first, as a word.</summary>
+    private static readonly ushort[] HexPairs = [.. Enumerable.Range(0, 256).Select(b => (ushort)("0123456789abcdef"[b >> 4] | ("0123456789abcdef"[b & 0xF] << 8)))];
 
     private int Strings(CanonicalArena arena, int field, int count, VortexBuffer views, ReadOnlySpan<VortexBuffer> data) =>
         arena.AddVarBinView(_row.GetField(field), count, Validity.NonNullable, views, data, padded: true);
