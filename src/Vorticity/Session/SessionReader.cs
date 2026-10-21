@@ -32,6 +32,9 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
 
     internal ISegmentReader Inner => _inner;
 
+    /// <summary>Whether a read costs no round trip: the reader's under the session's, which a scan reads ahead or along by.</summary>
+    bool ISegmentReader.CostsNoRoundTrip => _inner.CostsNoRoundTrip;
+
     internal static ISegmentReader Wrap(ISegmentReader inner, VortexSession session) =>
         inner is MemorySegmentSource or MemoryMappedSegmentSource or SessionReader
             ? inner

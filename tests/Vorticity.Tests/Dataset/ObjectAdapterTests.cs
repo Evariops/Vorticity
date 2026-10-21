@@ -17,6 +17,7 @@ using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Dataset;
+using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
@@ -90,6 +91,236 @@ public sealed class ObjectAdapterTests
         Assert.InRange(store.CountOf(ObjectOperation.Read), 1, 24);
         Assert.Equal(0, store.CountOf(ObjectOperation.Put));
         Assert.True(store.BytesRead > 0);
+    }
+
+    /// <summary>
+    /// A projection of a column whose chunks take a few dozen bytes each, 200 chunks of 1 024 rows between those of a
+    /// column of noise: each split asked for its own few bytes, a request a split, where a batch now reads along the
+    /// small segments of the splits ahead, a request for some 32 of them; at four lanes as at one, and every value read.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task AScanReadsTheSmallSegmentsOfTheSplitsAheadAlong(int degree)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        const int Chunks = 200;
+        const int ChunkRows = 1_024;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await WriteSmallAsync(inner, Key, Chunks, ChunkRows);
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+        store.Reset();
+
+        long rows = 0;
+        long sum = 0;
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("flag").WithDegreeOfParallelism(degree).ExecuteAsync().WithCancellation(ct))
+        {
+            ReadOnlySpan<long> flags = batch.Column(0).AsPrimitive<long>().Values;
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                sum += flags[row];
+            }
+
+            rows += batch.RowCount;
+        }
+
+        Assert.Equal(Chunks * ChunkRows, rows);
+        Assert.Equal((long)Chunks * (Chunks - 1) / 2 * ChunkRows, sum);
+        Assert.InRange(store.CountOf(ObjectOperation.Read), 1, Chunks / 10);
+    }
+
+    /// <summary>
+    /// The same flags under a filter that keeps the first 60 chunks and the last 60: the walk ahead skips the dead ones
+    /// as the scan does, and widens the splits the zone maps prove whole as the scan widens them, so each segment read
+    /// along waits for the batch that asks for it; split by split under a cap of one chunk a batch, at four lanes as at
+    /// one.
+    /// </summary>
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(4, true)]
+    [InlineData(1, false)]
+    [InlineData(4, false)]
+    public async Task AFilteredScanReadsAlongTheSplitsItWidensOrSkips(int degree, bool widened)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        const int Chunks = 200;
+        const int ChunkRows = 1_024;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await WriteSmallAsync(inner, Key, Chunks, ChunkRows);
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+        store.Reset();
+
+        VortexExpr kept = Expr.Or(
+            Expr.Lt(Expr.Field("flag"), Expr.Literal(FilterLiteral.From(60L))),
+            Expr.Ge(Expr.Field("flag"), Expr.Literal(FilterLiteral.From(140L))));
+        ScanBuilder scan = file.ScanBuilder().Where(kept).Project("flag").WithDegreeOfParallelism(degree);
+        if (!widened)
+        {
+            scan = scan.WithMaxBatchRows(ChunkRows);
+        }
+
+        long rows = 0;
+        long sum = 0;
+        await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(ct))
+        {
+            ReadOnlySpan<long> flags = batch.Column(0).AsPrimitive<long>().Values;
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                sum += flags[row];
+            }
+
+            rows += batch.RowCount;
+        }
+
+        Assert.Equal(120 * ChunkRows, rows);
+        Assert.Equal(((59L * 60 / 2) + ((140L + 199) * 60 / 2)) * ChunkRows, sum);
+        Assert.InRange(store.CountOf(ObjectOperation.Read), 1, Chunks / 10);
+    }
+
+    /// <summary>
+    /// The flags read with the noise beside them, 8 KiB a chunk: each split reads a large segment of its own, which its
+    /// flag joins in one request, so nothing is read along, and no batch waits on another's read before it makes its own.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task ASplitThatReadsALargeSegmentOfItsOwnReadsItsSmallOnesWithIt(int degree)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        const int Chunks = 200;
+        const int ChunkRows = 1_024;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await WriteSmallAsync(inner, Key, Chunks, ChunkRows);
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+        store.Reset();
+
+        long rows = 0;
+        double noise = 0;
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("flag", "noise").WithDegreeOfParallelism(degree).ExecuteAsync().WithCancellation(ct))
+        {
+            ReadOnlySpan<double> values = batch.Column(1).AsPrimitive<double>().Values;
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                noise += values[row];
+            }
+
+            rows += batch.RowCount;
+        }
+
+        // A request a split at most, the last few chunks lying in the tail the open read; and the bytes of the columns,
+        // where flags read along with a batch's own read made it a run over the noise of the splits ahead, 4.3 MB for 1.6.
+        Assert.Equal(Chunks * ChunkRows, rows);
+        Assert.InRange(noise, 0.4 * rows, 0.6 * rows);
+        Assert.InRange(store.CountOf(ObjectOperation.Read), Chunks - 8, Chunks);
+        Assert.True(store.BytesRead < Chunks * ChunkRows * sizeof(double) * 5L / 4, $"{store.BytesRead} bytes read");
+    }
+
+    /// <summary>
+    /// The flags and the noise in chunks of 4 096 rows, read in splits of 1 024: the first split of a chunk reads its noise
+    /// and its flag, and the three after it share both. The flag the first reads is not read along for the others, which
+    /// would read the noise between the flags twice and keep the first split's batch waiting on the walk's read before
+    /// it made its own.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task ASmallSegmentThatASplitWhichReadsAsksForIsNotReadAlong(int degree)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        const int Chunks = 50;
+        const int ChunkRows = 4_096;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await WriteSmallAsync(inner, Key, Chunks, ChunkRows);
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+        store.Reset();
+
+        long rows = 0;
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("flag", "noise").WithMaxBatchRows(1_024)
+            .WithDegreeOfParallelism(degree).ExecuteAsync().WithCancellation(ct))
+        {
+            rows += batch.RowCount;
+        }
+
+        Assert.Equal(Chunks * ChunkRows, rows);
+        Assert.InRange(store.CountOf(ObjectOperation.Read), 1, Chunks);
+        Assert.True(store.BytesRead < Chunks * ChunkRows * sizeof(double) * 5L / 4, $"{store.BytesRead} bytes read");
+    }
+
+    /// <summary>
+    /// The same flags between chunks of noise of 128 KiB: a segment ahead lies past what a read bridges, so each split
+    /// reads its own few bytes, as before, rather than the noise between them.
+    /// </summary>
+    [Fact]
+    public async Task AScanReadsNoSegmentAheadPastWhatAReadBridges()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        const int Chunks = 40;
+        const int ChunkRows = 16_384;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await WriteSmallAsync(inner, Key, Chunks, ChunkRows);
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+        store.Reset();
+
+        long rows = 0;
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("flag").ExecuteAsync().WithCancellation(ct))
+        {
+            rows += batch.RowCount;
+        }
+
+        Assert.Equal(Chunks * ChunkRows, rows);
+        Assert.True(store.BytesRead < Chunks * 4_096, $"{store.BytesRead} bytes read for {Chunks} chunks of a flag");
+    }
+
+    /// <summary>A flag of one value a chunk, its number, and a column of noise beside it, in chunks of <paramref name="chunkRows"/>.</summary>
+    private static async Task WriteSmallAsync(IObjectStore store, string key, int chunks, int chunkRows)
+    {
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
+        DType schema = types.Struct(["flag", "noise"], [i64, f64], Nullability.NonNullable);
+        Random draw = new Random(0x5A11);
+        await using ObjectSegmentSink sink = new ObjectSegmentSink(store, key);
+        await using (VortexFileWriter writer = VortexFileWriter.Create(
+            sink, schema, new VortexWriteOptions { BlockRows = chunkRows, ChunkTargetBytes = chunkRows * sizeof(double) }))
+        {
+            for (int chunk = 0; chunk < chunks; chunk++)
+            {
+                CanonicalArena arena = new CanonicalArena();
+                VortexBuffer flags = arena.Allocate(chunkRows * sizeof(long), sizeof(long), out Span<byte> flagBytes);
+                VortexBuffer noise = arena.Allocate(chunkRows * sizeof(double), sizeof(double), out Span<byte> noiseBytes);
+                MemoryMarshal.Cast<byte, long>(flagBytes).Fill(chunk);
+                Span<double> noiseValues = MemoryMarshal.Cast<byte, double>(noiseBytes);
+                for (int row = 0; row < chunkRows; row++)
+                {
+                    noiseValues[row] = draw.NextDouble();
+                }
+
+                int flagNode = arena.AddPrimitive(i64, chunkRows, Validity.NonNullable, PType.I64, flags);
+                int noiseNode = arena.AddPrimitive(f64, chunkRows, Validity.NonNullable, PType.F64, noise);
+                int root = arena.AddStruct(schema, chunkRows, Validity.NonNullable, [flagNode, noiseNode]);
+                using RecordBatch batch = new RecordBatch(arena, root, (long)chunk * chunkRows);
+                await writer.WriteAsync(batch, default);
+            }
+
+            await writer.CompleteAsync(default);
+        }
+
+        Assert.Equal(PutOutcome.Created, await sink.CommitAsync(default));
     }
 
     [Theory]

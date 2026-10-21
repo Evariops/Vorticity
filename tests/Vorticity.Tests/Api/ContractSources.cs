@@ -113,6 +113,11 @@ internal sealed class SamplingSource : ISegmentSource, ISegmentReader
 
     public ValueTask DisposeAsync() => ((ISegmentReader)_inner).DisposeAsync();
 
+    // A mapping read through the sampler costs no round trip, as the mapping does: a scan then reads each batch's segments
+    // as it builds the batch, where over a store it reads those of the splits ahead along, and the reads the sampler
+    // counts are the batches'.
+    bool ISegmentReader.CostsNoRoundTrip => true;
+
     private void Note()
     {
         int index = _count;

@@ -534,6 +534,83 @@ internal sealed class ScanContext : IDisposable
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
     /// <summary>
+    /// The small segments of the splits ahead the batch reads along with its own, which a scan over a source whose read is
+    /// a round trip gives the batch; made at the first, and held with the context across the scans it serves.
+    /// </summary>
+    internal AlongSegments? Along { get; set; }
+
+    /// <summary>
+    /// The segments of the splits ahead a batch reads along with its own, and the batch that asks for each; and, for a
+    /// context a scan rents to plan them in rather than to run a batch on, the scan's walk over those splits.
+    /// </summary>
+    /// <remarks>
+    /// The arrays are the process's pool's, taken at the first segment and given back once the segments are claimed or
+    /// forgotten: a context the scan draws from a pool other scans churn need not have read along before for its batch
+    /// to read along without allocating.
+    /// </remarks>
+    internal sealed class AlongSegments
+    {
+        private Serialization.Schemas.SegmentSpec[]? _specs;
+        private long[]? _batches;
+        private int _count;
+
+        /// <summary>
+        /// The walk of a scan that rented the context to register the segments ahead in; made at the first, and kept with
+        /// the context for the next scan that does. One field of the context for both, as a context the pool does not hold,
+        /// such as the one that decodes zone maps, is allocated with every field it has.
+        /// </summary>
+        internal Scanning.AlongWalk? Walk { get; set; }
+
+        internal ReadOnlySpan<Serialization.Schemas.SegmentSpec> Specs => _specs.AsSpan(0, _count);
+
+        /// <summary>The batch that asks for each of <see cref="Specs"/>.</summary>
+        internal ReadOnlySpan<long> Batches => _batches.AsSpan(0, _count);
+
+        /// <summary>Adds a segment for the batch to read along, for batch <paramref name="batch"/>.</summary>
+        internal void Add(in Serialization.Schemas.SegmentSpec spec, long batch)
+        {
+            if (_specs is null || _batches is null || _count == Math.Min(_specs.Length, _batches.Length))
+            {
+                Grow();
+            }
+
+            _specs![_count] = spec;
+            _batches![_count] = batch;
+            _count++;
+        }
+
+        /// <summary>Forgets the segments, claimed or none for the next batch, and gives the arrays back.</summary>
+        internal void Clear()
+        {
+            _count = 0;
+            if (_specs is { } specs)
+            {
+                _specs = null;
+                System.Buffers.ArrayPool<Serialization.Schemas.SegmentSpec>.Shared.Return(specs);
+            }
+
+            if (_batches is { } batches)
+            {
+                _batches = null;
+                System.Buffers.ArrayPool<long>.Shared.Return(batches);
+            }
+        }
+
+        /// <summary>Takes arrays twice as long, or the first, and moves the segments into them.</summary>
+        private void Grow()
+        {
+            int length = _count == 0 ? 16 : _count * 2;
+            Serialization.Schemas.SegmentSpec[] specs = System.Buffers.ArrayPool<Serialization.Schemas.SegmentSpec>.Shared.Rent(length);
+            long[] batches = System.Buffers.ArrayPool<long>.Shared.Rent(length);
+            Specs.CopyTo(specs);
+            Batches.CopyTo(batches);
+            int count = _count;
+            Clear();
+            (_specs, _batches, _count) = (specs, batches, count);
+        }
+    }
+
+    /// <summary>
     /// Replaces the selection and returns what was there, for a reader that re-bases it per child.
     /// </summary>
     /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>
@@ -1607,6 +1684,7 @@ internal sealed class ScanContext : IDisposable
         _building = null;
         _child = null;
         VariantKeys = null;
+        Along?.Clear();
         if (_memory is { } memory)
         {
             memory.Checks = default;
