@@ -77,7 +77,8 @@ internal static class ZonePruningPlan
     /// <param name="indexes">Whether the file's index directory takes part.</param>
     /// <param name="scope">
     /// The blocks the scan's rows reach, over blocks of the natural batch size, when they are not
-    /// the whole file: a step counts only the blocks it pruned among them.
+    /// the whole file: a step counts only the blocks it pruned among them, and the mask leaves the
+    /// others dead, which no structure asks about.
     /// </param>
     internal static async ValueTask<PruningPlan> PlanAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
@@ -130,7 +131,15 @@ internal static class ZonePruningPlan
             return default;
         }
 
+        // The blocks the scan's rows do not reach are dead before any structure runs, which asks only
+        // live blocks: a lane's piece of a day of 4.32 G rows asked a filter on a text column of every
+        // block of the file, 527 k comparisons a lane where its rows reach a few hundred blocks.
         BlockMask live = new BlockMask(tree.Root.RowCount, blockRows);
+        if (scope is not null && scope.BlockRows == blockRows && scope.BlockCount == live.BlockCount)
+        {
+            live.Keep(scope.Words);
+        }
+
         int before = Counted(live, scope);
         if (zones is not null)
         {
