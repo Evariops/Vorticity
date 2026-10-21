@@ -98,6 +98,9 @@ internal static class SynopsisOrder
         int canonical = EncodedForms.Canonical(arena, node);
         ref readonly CanonicalRecord record = ref arena.RecordRef(canonical);
         int rows = record.Length;
+
+        // The column's validity read once, where a row's went through the arena's records.
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, canonical);
         if (record.Kind == CanonicalKind.Primitive)
         {
             int width = record.PType.ByteWidth();
@@ -106,7 +109,7 @@ internal static class SynopsisOrder
             Span<byte> scratch = stackalloc byte[sizeof(double)];
             for (int row = 0; row < rows; row++)
             {
-                if (!ArenaWords.IsValid(arena, canonical, row))
+                if (!valid.IsEmpty && ((valid[row >> 6] >> (row & 63)) & 1) == 0)
                 {
                     continue;
                 }
@@ -124,7 +127,7 @@ internal static class SynopsisOrder
             ReadOnlySpan<ulong> bits = ArenaWords.Bits(arena, canonical);
             for (int row = 0; row < rows; row++)
             {
-                if (ArenaWords.IsValid(arena, canonical, row))
+                if (valid.IsEmpty || ((valid[row >> 6] >> (row & 63)) & 1) != 0)
                 {
                     sketch.Add(CardinalitySlot.Hash(((bits[row >> 6] >> (row & 63)) & 1) != 0 ? [1] : [0]));
                 }
@@ -133,9 +136,37 @@ internal static class SynopsisOrder
             return;
         }
 
+        if (record.Kind == CanonicalKind.VarBinView)
+        {
+            // A row whose view is the valid row's before it holds that row's value, whose hash the sketch holds already:
+            // a sketch is the same whether a hash is added once or twice, and names drawn a row at a time often repeat.
+            ReadOnlySpan<Int128> views = MemoryMarshal.Cast<byte, Int128>(record.BufferA.Span)[..rows];
+            ViewValues strings = new ViewValues(arena.GetNode(canonical));
+            bool any = false;
+            Int128 before = default;
+            for (int row = 0; row < rows; row++)
+            {
+                if (!valid.IsEmpty && ((valid[row >> 6] >> (row & 63)) & 1) == 0)
+                {
+                    continue;
+                }
+
+                Int128 view = views[row];
+                if (any && view == before)
+                {
+                    continue;
+                }
+
+                (any, before) = (true, view);
+                sketch.Add(CardinalitySlot.Hash(strings.At(row)));
+            }
+
+            return;
+        }
+
         for (int row = 0; row < rows; row++)
         {
-            if (ArenaWords.IsValid(arena, canonical, row))
+            if (valid.IsEmpty || ((valid[row >> 6] >> (row & 63)) & 1) != 0)
             {
                 sketch.Add(CardinalitySlot.Hash(ColumnData.Bytes(arena, canonical, row)));
             }
