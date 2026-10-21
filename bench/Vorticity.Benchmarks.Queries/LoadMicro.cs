@@ -19,9 +19,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// them at once, each minute a part drawn by a generator of its own, into a store of its own under <c>--store</c> each
 /// round (<see cref="DesignBuild.LoadAsync"/> loads days of hours so); with <c>--period-hours</c> H past 1, the periods are
 /// days of H hours of <c>--minutes</c> minutes each, a day's object and its hours' boundaries at a smaller size. Each round
-/// says its rows and bytes a second, the processor time it took, the bytes it allocated, its collections and the most
-/// memory it held, and each period how long its plan, its write and its finish took; <c>--disk</c> first measures what
-/// the store's disk takes in a second.
+/// says its rows and bytes a second, the processor time it took, the bytes it allocated, its collections and how long
+/// they paused the threads, the most memory it held, and each period how long its plan, its write and its finish took;
+/// <c>--disk</c> first measures what the store's disk takes in a second.
 /// </summary>
 internal static class LoadMicro
 {
@@ -81,6 +81,7 @@ internal static class LoadMicro
             TimeSpan cpu = self.TotalProcessorTime;
             long allocated = GC.GetTotalAllocatedBytes(precise: true);
             int[] collections = [GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2)];
+            TimeSpan paused = GC.GetTotalPauseDuration();
             TimeSpan held = session.WriteLanes.Held;
             IReadOnlyList<LoadedPeriod> loaded;
             WriteTimings timings = new WriteTimings();
@@ -101,7 +102,7 @@ internal static class LoadMicro
             times.Add(seconds);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"round {round + 1}: {seconds:F2} s, {loaded.Sum(p => p.Rows) / seconds / 1e6:F2} M rows/s, {bytes / seconds / 1e6:F0} MB/s ({bytes / 1e9:F2} GB), cpu {used:F1} s ({used / seconds:F1} cores), lanes {occupied:P0} of {writeDegree}, {(GC.GetTotalAllocatedBytes(precise: true) - allocated) / 1e9:F2} GB allocated, gc {GC.CollectionCount(0) - collections[0]}/{GC.CollectionCount(1) - collections[1]}/{GC.CollectionCount(2) - collections[2]}, peak private {peak / 1e9:F2} GB"));
+                $"round {round + 1}: {seconds:F2} s, {loaded.Sum(p => p.Rows) / seconds / 1e6:F2} M rows/s, {bytes / seconds / 1e6:F0} MB/s ({bytes / 1e9:F2} GB), cpu {used:F1} s ({used / seconds:F1} cores), lanes {occupied:P0} of {writeDegree}, {(GC.GetTotalAllocatedBytes(precise: true) - allocated) / 1e9:F2} GB allocated, gc {GC.CollectionCount(0) - collections[0]}/{GC.CollectionCount(1) - collections[1]}/{GC.CollectionCount(2) - collections[2]} pausing {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s, peak private {peak / 1e9:F2} GB"));
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"  stages, summed over the periods: feed {timings.Feed.TotalSeconds:F2} s, copy {timings.Copy.TotalSeconds:F2} s, join {timings.Join.TotalSeconds:F2} s, sort {timings.Sort.TotalSeconds:F2} s, wait {timings.Wait.TotalSeconds:F2} s | synopsis {timings.Synopsis.TotalSeconds:F2} s, write {timings.Write.TotalSeconds:F2} s, lag {timings.Lag.TotalSeconds:F2} s | drain {timings.Drain.TotalSeconds:F2} s, tables {timings.Tables.TotalSeconds:F2} s, close {timings.Close.TotalSeconds:F2} s"));
