@@ -123,6 +123,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The zstd level of the columns zstd takes, as <see cref="VortexWriteOptions.ZstdLevel"/> sets it; 0 for the default.</summary>
     private int _zstdLevel;
 
+    /// <summary>Each top-level column's zstd level, as <see cref="VortexWriteOptions.ZstdLevels"/> sets it, 0 for the file's; null for none set.</summary>
+    private int[]? _zstdLevels;
+
+    /// <summary>The zstd level of column <paramref name="field"/>'s frames: its own, or 0 for the file's.</summary>
+    private int ZstdLevelOf(int field) => _zstdLevels is { } levels && field < levels.Length ? levels[field] : 0;
+
     bool IChunkLedger.SizeFirst => _sizeFirst;
 
     /// <summary>
@@ -1074,6 +1080,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             built.Lanes = writer._lanes > 1 ? writer._budget : null;
         }
 
+        foreach (KeyValuePair<string, int> level in options.ZstdLevels)
+        {
+            (writer._zstdLevels ??= new int[writer._fieldCount])[schema.IndexOfField(level.Key)] = level.Value;
+        }
+
         // The entries rather than Keys, whose enumerator is an allocated iterator.
         foreach (KeyValuePair<string, int> target in options.ColumnChunkTargetBytes)
         {
@@ -1176,6 +1187,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (target.Value <= 0)
             {
                 throw new ArgumentOutOfRangeException(nameof(options), target.Value, $"The chunk target of '{target.Key}' must be positive.");
+            }
+        }
+
+        foreach (KeyValuePair<string, int> level in options.ZstdLevels)
+        {
+            if (!tabular || schema.IndexOfField(level.Key) < 0)
+            {
+                throw new ArgumentException($"The zstd level '{level.Key}' names no top-level column of the schema {schema}.", nameof(options));
+            }
+
+            if (level.Value < ManagedCompressions.Zstd.ZstdCompressor.MinLevel || level.Value > ManagedCompressions.Zstd.ZstdCompressor.MaxLevel)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options), level.Value, $"The zstd level of '{level.Key}' is out of zstd's range.");
             }
         }
 
@@ -2247,7 +2271,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             stats = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
         }
 
-        ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(Blobs, arena, node, _arrayEncodings, _compress, stats);
+        ArrayBlobWriter.Workspace blobs = Blobs;
+        ArrayBlobWriter.BlobLease blob;
+        blobs.ColumnLevel = ZstdLevelOf(field);
+        try
+        {
+            blob = ArrayBlobWriter.Write(blobs, arena, node, _arrayEncodings, _compress, stats);
+        }
+        finally
+        {
+            blobs.ColumnLevel = 0;
+        }
+
         await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken, bounds).ConfigureAwait(false);
     }
 

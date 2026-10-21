@@ -3003,6 +3003,7 @@ internal static class ArrayBlobWriter
         private BufferSpec[] _specs = [];
         private ProtoWriter _metadata;
         private ZstdCompressor? _zstd;
+        private ZstdCompressor? _columnZstd;
         private Workspace? _measure;
         private EncodingDictionary? _measureEncodings;
 
@@ -3041,6 +3042,43 @@ internal static class ArrayBlobWriter
 
         /// <summary>The zstd level the workspace's trials and frames compress at; 0 for the default.</summary>
         internal int ZstdLevel { get; init; }
+
+        /// <summary>
+        /// The zstd level of the column being written, which its writer's options set for it, for every frame of its chunk
+        /// and the trials that price them; 0 for <see cref="ZstdLevel"/>. Set by the writer around a column's write.
+        /// </summary>
+        internal int ColumnLevel { get; set; }
+
+        /// <summary>The level the column being written compresses its zstd frames at.</summary>
+        internal int Level => ColumnLevel != 0 ? ColumnLevel : ZstdLevel;
+
+        /// <summary>
+        /// The compressor the column being written compresses in, at <see cref="Level"/>: the workspace's own at its level,
+        /// another at another, kept for the next column at that level and given back with the workspace's.
+        /// </summary>
+        internal ZstdCompressor ZstdOfColumn
+        {
+            get
+            {
+                int level = Level == 0 ? ZstdCompressor.DefaultLevel : Level;
+                if (level == (ZstdLevel == 0 ? ZstdCompressor.DefaultLevel : ZstdLevel))
+                {
+                    return Zstd;
+                }
+
+                if (_columnZstd is { } kept)
+                {
+                    if (kept.Level == level)
+                    {
+                        return kept;
+                    }
+
+                    ZstdEncoders.Return(kept);
+                }
+
+                return _columnZstd = ZstdEncoders.Rent(level);
+            }
+        }
 
         /// <summary>
         /// The rows a zstd frame holds the values of, the writer's block; 0 for one frame a column.
@@ -3108,6 +3146,7 @@ internal static class ArrayBlobWriter
         {
             // Never size first: what it measures is the plan every other profile writes.
             _measure ??= new Workspace { FrameRows = FrameRows, Fan = Fan, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel };
+            _measure.ColumnLevel = ColumnLevel;
             if (_measureEncodings is null || _measureEncodings.Target != target)
             {
                 _measureEncodings = new EncodingDictionary(ComponentKind.Array, target);
@@ -3142,6 +3181,12 @@ internal static class ArrayBlobWriter
             {
                 _zstd = null;
                 ZstdEncoders.Return(zstd);
+            }
+
+            if (_columnZstd is { } column)
+            {
+                _columnZstd = null;
+                ZstdEncoders.Return(column);
             }
 
             _measure?.ReturnCompressors();

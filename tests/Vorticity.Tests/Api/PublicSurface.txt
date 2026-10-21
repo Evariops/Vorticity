@@ -2726,6 +2726,7 @@ Vorticity:     property CompressionProfile Compression { get; init; }
 Vorticity:     property ImmutableDictionary<string, EncodingHint> Hints { get; init; }
 Vorticity:     property ImmutableDictionary<string, ReadOnlyMemory<byte>> Metadata { get; init; }
 Vorticity:     property ImmutableDictionary<string, int> ColumnChunkTargetBytes { get; init; }
+Vorticity:     property ImmutableDictionary<string, int> ZstdLevels { get; init; }
 Vorticity:     property IndexPolicy Indexes { get; init; }
 Vorticity:     property Nullable<Guid> Identity { get; init; }
 Vorticity:     property VortexEdition TargetEdition { get; init; }

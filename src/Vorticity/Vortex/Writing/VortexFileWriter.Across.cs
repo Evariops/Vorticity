@@ -591,11 +591,13 @@ public sealed partial class VortexFileWriter
                     }
                 }
 
+                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(field);
                 _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, stats);
                 KeepFresh(field, lane.Encodings);
             }
             finally
             {
+                lane.Blobs.ColumnLevel = 0;
                 lane.Give();
             }
 

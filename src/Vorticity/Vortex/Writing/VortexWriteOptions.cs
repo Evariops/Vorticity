@@ -30,6 +30,7 @@ public sealed record VortexWriteOptions
     private readonly IndexPolicy _indexes = IndexPolicy.None;
     private readonly ImmutableDictionary<string, EncodingHint> _hints = ImmutableDictionary<string, EncodingHint>.Empty.WithComparers(StringComparer.Ordinal);
     private readonly ImmutableDictionary<string, int> _columnChunkTargets = ImmutableDictionary<string, int>.Empty.WithComparers(StringComparer.Ordinal);
+    private readonly ImmutableDictionary<string, int> _zstdLevels = ImmutableDictionary<string, int>.Empty.WithComparers(StringComparer.Ordinal);
     private readonly ImmutableDictionary<string, ReadOnlyMemory<byte>> _metadata = ImmutableDictionary<string, ReadOnlyMemory<byte>>.Empty.WithComparers(StringComparer.Ordinal);
     private bool _oneChunkPerWrite;
     private bool _noByteTarget;
@@ -113,6 +114,21 @@ public sealed record VortexWriteOptions
             ArgumentOutOfRangeException.ThrowIfGreaterThan(value, ManagedCompressions.Zstd.ZstdCompressor.MaxLevel);
             _zstdLevel = value;
         }
+    }
+
+    /// <summary>
+    /// The zstd level of a column's zstd frames, by top-level column name, for a column whose values a level other than
+    /// <see cref="ZstdLevel"/> serves better: random identifiers, whose matches of five bytes cost more than they save,
+    /// take level 1 smaller and faster than 3. The level holds for every zstd frame of the column's chunks, those of the
+    /// children its encodings make included, and their trials are priced at it; 0 is <see cref="ZstdLevel"/>.
+    /// </summary>
+    /// <remarks>
+    /// A name that is no top-level column, or a level out of zstd's range, throws at <c>CreateWriter</c>.
+    /// </remarks>
+    public ImmutableDictionary<string, int> ZstdLevels
+    {
+        get => _zstdLevels;
+        init => _zstdLevels = value ?? throw new ArgumentNullException(nameof(value));
     }
 
     /// <summary>
