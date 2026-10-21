@@ -949,6 +949,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             built.Spared = options.BudgetSpares;
             built.EarlyChoiceFloor = options.SynopsisEarlyChoiceBytes;
             built.ExpectedRows = options.RowBound;
+            built.Streamer = writer.StreamPayloadsAsync;
         }
 
         // The entries rather than Keys, whose enumerator is an allocated iterator.
@@ -1865,6 +1866,28 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         while (indexes.TryTakePayload(Blobs, _arrayEncodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload))
+        {
+            using (blob)
+            {
+                long before = _sink.Position;
+                long aligned = await PadAsync(cancellationToken).ConfigureAwait(false);
+                await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
+                IndexSegment segment = IndexSegment.Of(
+                    aligned, blob.Memory.Span, (byte)VortexLimits.MaxAlignmentExponent);
+                indexes.Placed(payload!, segment, _sink.Position - before, _sink.Position);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Writes the payloads <paramref name="builder"/> has queued, now, past the data: what a builder the budget never gives
+    /// up, a required one or one the caller spared, hands over as it makes them, so that a run as large as its file's
+    /// identifiers never waits whole in memory for the flush after the data.
+    /// </summary>
+    private async ValueTask StreamPayloadsAsync(IndexBuilder builder, CancellationToken cancellationToken)
+    {
+        IndexWriter indexes = _indexes!;
+        while (indexes.TryTakePayloadOf(builder, Blobs, _arrayEncodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload))
         {
             using (blob)
             {

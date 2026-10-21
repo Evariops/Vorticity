@@ -112,6 +112,9 @@ internal sealed class HashedRunSink : IRunSink
     /// <summary>Never due: its segments are cut in memory.</summary>
     public ValueTask FlushAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
 
+    /// <summary>The payloads of the segments cut so far, two a segment, in the order they were cut.</summary>
+    internal IReadOnlyList<PendingPayload> CutPayloads => _payloads;
+
     /// <summary>Cuts the last segment and returns the run.</summary>
     /// <exception cref="InvalidOperationException">The merge gave other pairs than the run was declared with, whose cut would then mislead a probe.</exception>
     internal KeyRun Finish()

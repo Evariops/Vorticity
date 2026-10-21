@@ -59,6 +59,25 @@ internal sealed class PendingLedger
         }
     }
 
+    /// <summary>
+    /// The next payload <paramref name="builder"/> queued, whatever its rank: what a builder that writes its payloads as it
+    /// makes them takes; its entry in the heap is dropped when it reaches the top, as an emptied builder's is.
+    /// </summary>
+    internal bool TryTakeFrom(IndexBuilder builder, out PendingPayload? payload)
+    {
+        lock (_gate)
+        {
+            if (builder.Pending.TryDequeue(out payload))
+            {
+                _payloads--;
+                return true;
+            }
+
+            payload = null;
+            return false;
+        }
+    }
+
     /// <summary>The next payload: the first of the lowest-ranked builder that holds one.</summary>
     internal bool TryTake(out PendingPayload? payload)
     {

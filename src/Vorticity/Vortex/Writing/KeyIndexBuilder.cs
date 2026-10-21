@@ -117,6 +117,13 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The rows the file is bounded by, 0 when unknown: what hashed postings size their buckets by; set by the index writer.</summary>
     internal long ExpectedRows { get; set; }
 
+    /// <summary>
+    /// The writer's means of writing this builder's queued payloads now, for a builder the budget never gives up: hashed
+    /// postings hand over each bucket's segments as they are cut, so their runs never wait whole in memory; null to queue
+    /// every payload for the flush after the data.
+    /// </summary>
+    internal Func<IndexBuilder, CancellationToken, ValueTask>? Stream { get; set; }
+
     private readonly List<RawRun> _chunkRuns = [];
 
     // Hashed postings: the pairs in buckets of their hashes' high bits (see HashedBuckets), made with the first pair; the
@@ -489,20 +496,30 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         HashedRunSink? last = tail ? new HashedRunSink(_segmentEntries, _lastChunkBlock, _lastChunkBlocks, tailPairs) : null;
         uint split = tail ? (uint)_lastChunkBlock : uint.MaxValue;
         BucketBuffers buffers = new BucketBuffers();
+        int mainSent = 0;
+        int lastSent = 0;
         for (int bucket = 0; bucket < buckets.Buckets; bucket++)
         {
             int count = await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
             Feed(buffers, count, split, main, last);
+
+            // The segments the bucket closed go out at once, where the writer can take them.
+            if (Stream is { } stream)
+            {
+                mainSent = Send(main, mainSent);
+                lastSent = Send(last, lastSent);
+                await stream(this, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         if (main is not null)
         {
-            Emit(main.Finish());
+            Emit(main.Finish(), mainSent);
         }
 
         if (last is not null)
         {
-            Emit(last.Finish());
+            Emit(last.Finish(), lastSent);
         }
 
         buckets.Dispose();
@@ -562,13 +579,30 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         return closed <= 0 ? 0 : _pairsAtBlockClose[Math.Min(closed, _pairsAtBlockClose.Count) - 1];
     }
 
-    private void Emit(KeyRun run)
+    private void Emit(KeyRun run, int sent = 0)
     {
         Runs.Add(run);
-        foreach (PendingPayload payload in run.Payloads)
+        for (int i = sent; i < run.Payloads.Count; i++)
         {
-            Enqueue(payload);
+            Enqueue(run.Payloads[i]);
         }
+    }
+
+    /// <summary>Queues the payloads <paramref name="sink"/> cut past the first <paramref name="sent"/>, and says how many it has cut.</summary>
+    private int Send(HashedRunSink? sink, int sent)
+    {
+        if (sink is null)
+        {
+            return sent;
+        }
+
+        IReadOnlyList<PendingPayload> cut = sink.CutPayloads;
+        for (int i = sent; i < cut.Count; i++)
+        {
+            Enqueue(cut[i]);
+        }
+
+        return cut.Count;
     }
 
     /// <summary>

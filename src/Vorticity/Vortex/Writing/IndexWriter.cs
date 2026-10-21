@@ -1234,6 +1234,52 @@ internal sealed class IndexWriter : IDisposable
             return false;
         }
 
+        blob = Lay(payload!, blobs, encodings);
+        return true;
+    }
+
+    /// <summary>
+    /// <see cref="TryTakePayload"/> for the payloads <paramref name="builder"/> queued alone: what a builder the budget
+    /// never gives up writes as it makes them, its payloads past the end of the data, ahead of the others'.
+    /// </summary>
+    internal bool TryTakePayloadOf(
+        IndexBuilder builder, ArrayBlobWriter.Workspace blobs, EncodingDictionary encodings, out ArrayBlobWriter.BlobLease blob,
+        out PendingPayload? payload)
+    {
+        if (!_ledger.TryTakeFrom(builder, out payload))
+        {
+            blob = default;
+            return false;
+        }
+
+        blob = Lay(payload!, blobs, encodings);
+        return true;
+    }
+
+    /// <summary>
+    /// The writer's means of writing a builder's payloads now, which a builder the budget never gives up, a required one
+    /// or one the caller spared, is given: hashed postings write theirs as each bucket's segments are cut.
+    /// </summary>
+    internal Func<IndexBuilder, CancellationToken, ValueTask>? Streamer
+    {
+        set
+        {
+            for (int slot = 0; slot < _builders.Length; slot++)
+            {
+                bool kept = slot < _columns.Length && (_columns[slot].Required || Spared?.Contains(_paths[slot]) == true);
+                foreach (IndexBuilder builder in _builders[slot])
+                {
+                    if (builder is KeyIndexBuilder key)
+                    {
+                        key.Stream = kept ? value : null;
+                    }
+                }
+            }
+        }
+    }
+
+    private ArrayBlobWriter.BlobLease Lay(PendingPayload payload, ArrayBlobWriter.Workspace blobs, EncodingDictionary encodings)
+    {
         if (_payloads is null)
         {
             _payloads = new ScanContext([]);
@@ -1241,10 +1287,9 @@ internal sealed class IndexWriter : IDisposable
         }
 
         CanonicalArena arena = _payloads.Canonical;
-        int node = payload!.Build(arena, _payloadTypes!);
+        int node = payload.Build(arena, _payloadTypes!);
         payload.DType = DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
-        blob = ArrayBlobWriter.Write(blobs, arena, node, encodings, payload.Compress);
-        return true;
+        return ArrayBlobWriter.Write(blobs, arena, node, encodings, payload.Compress);
     }
 
     /// <summary>Every byte the payloads took in the file, their alignment padding included.</summary>
