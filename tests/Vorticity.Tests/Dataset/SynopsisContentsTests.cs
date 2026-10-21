@@ -65,6 +65,9 @@ public sealed partial class SynopsisContentsTests
         Assert.Equal(2, periods.Count);
         SynopsisContents[] contents = [.. periods.Select(p => SynopsisContents.From(p.Synopsis.Span)!)];
         Assert.All(contents, c => Assert.NotEmpty(c.Tables));
+
+        // No chunk of a synopsis column, which no reader asks an entry for: they were most of a large object's entry.
+        Assert.All(contents, c => Assert.Empty(c.Columns));
         long partBytes = contents.Sum(c => c.PartEnd - c.PartStart);
 
         // Cold, every object at once: one round trip, a request an object, nothing past the parts. A latency

@@ -177,31 +177,28 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// The table of contents of a sliced file: its slices' table and chunk directories, its synopsis part's
-    /// tables and columns, its variant columns' path directories.
+    /// tables, its variant columns' path directories.
     /// </summary>
+    /// <remarks>
+    /// The synopsis columns' chunks are left out: no reader of an entry asks for them, a reader of the columns
+    /// reads their chunk directories, and in the entry of a day of the design's requests they took 4.73 of its
+    /// 4.87 MB, a chunk span a column and some 98 000 rows. Ten such days held 48.7 MB of entries, which the
+    /// handle's 32 MiB of tree pages could not keep: a question over them read eight pages again, 39 MB.
+    /// </remarks>
     private SynopsisContents Contents(SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories)
     {
         List<(SynopsisTableInfo, IReadOnlyList<TableChunk>)> tables = [];
-        List<(int, ChunkSpan[])> columns = [];
         if (_synopsisPart is { } part)
         {
             foreach ((SynopsisTableInfo info, IReadOnlyList<TableChunk> held, IReadOnlyList<byte[]> _) in part.Tables)
             {
                 tables.Add((info, held));
             }
-
-            for (int field = 0; field < _fieldCount; field++)
-            {
-                if (_synopsis?[field] == true)
-                {
-                    columns.Add((field, chunks.Columns[field]));
-                }
-            }
         }
 
         return new SynopsisContents(
             Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories,
-            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, columns, pathDirectories);
+            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, [], pathDirectories);
     }
 
     /// <summary>

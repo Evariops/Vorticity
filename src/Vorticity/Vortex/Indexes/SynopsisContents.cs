@@ -11,7 +11,7 @@ namespace Vorticity.Indexes;
 /// The table of contents of a sliced file's synopsis, which a dataset's entry carries so that a reader of
 /// the synopsis or of a few slices needs no open of the file, not even its index directory: the encodings
 /// its array blobs name, its slice table and the region of each column's chunk directory, the synopsis
-/// part's extent, each synopsis table with its region, and the chunks of each synopsis column.
+/// part's extent, and each synopsis table with its region.
 /// </summary>
 /// <remarks>
 /// A table's rows decode at the struct <see cref="SynopsisTableInfo.RowType"/> rebuilds from the file's
@@ -26,7 +26,10 @@ namespace Vorticity.Indexes;
 /// <param name="PartStart">Where the synopsis part starts in the file.</param>
 /// <param name="PartEnd">Where it ends.</param>
 /// <param name="Tables">Each synopsis table, and its chunks: their regions, the buckets they count over and their rows.</param>
-/// <param name="Columns">Each synopsis column, and its chunks.</param>
+/// <param name="Columns">
+/// Each synopsis column, and its chunks: what the entries of earlier writers carry, which no reader asks for; a writer
+/// leaves them out, as they made most of a large object's entry.
+/// </param>
 /// <param name="PathDirectories">
 /// Each variant column's path directory, and its region: what a question on a path the tables do not name
 /// reads first, before that path's regions.
