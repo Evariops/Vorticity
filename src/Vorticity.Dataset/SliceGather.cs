@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -116,8 +117,26 @@ internal sealed class SliceGather : IFanWork
         Span<byte> into = Writable(item.Into);
         if (!item.Views || item.Heap.IsEmpty)
         {
-            RowKernels.Gather(
-                MemoryMarshal.AsBytes(permutation), PType.I32, item.Source.Span, item.Width, item.Source.Length / item.Width, into, _rows);
+            switch (item.Width)
+            {
+                case 2:
+                    Gather(permutation, MemoryMarshal.Cast<byte, ushort>(item.Source.Span), MemoryMarshal.Cast<byte, ushort>(into));
+                    break;
+                case 4:
+                    Gather(permutation, MemoryMarshal.Cast<byte, uint>(item.Source.Span), MemoryMarshal.Cast<byte, uint>(into));
+                    break;
+                case 8:
+                    Gather(permutation, MemoryMarshal.Cast<byte, ulong>(item.Source.Span), MemoryMarshal.Cast<byte, ulong>(into));
+                    break;
+                case 16:
+                    Gather(permutation, MemoryMarshal.Cast<byte, Int128>(item.Source.Span), MemoryMarshal.Cast<byte, Int128>(into));
+                    break;
+                default:
+                    RowKernels.Gather(
+                        MemoryMarshal.AsBytes(permutation), PType.I32, item.Source.Span, item.Width, item.Source.Length / item.Width, into, _rows);
+                    break;
+            }
+
             return;
         }
 
@@ -129,6 +148,17 @@ internal sealed class SliceGather : IFanWork
         int at = 0;
         for (int i = 0; i < permutation.Length; i++)
         {
+            // The view of the row a stride ahead, and the bytes of the row half a stride ahead, whose view is in by now.
+            if (Sse.IsSupported && i + Ahead < permutation.Length)
+            {
+                Prefetch(views, permutation[i + Ahead]);
+                Int128 coming = views[permutation[i + (Ahead / 2)]];
+                if ((uint)(ulong)coming > MaxInline)
+                {
+                    PrefetchBytes(data, coming);
+                }
+            }
+
             Int128 view = views[permutation[i]];
             uint size = (uint)(ulong)view;
             if (size <= MaxInline)
@@ -242,6 +272,57 @@ internal sealed class SliceGather : IFanWork
             ? arena.AddPrimitive(item.DType, rows, item.Validity, item.PType, item.Into)
             : arena.AddVarBinView(item.DType, rows, item.Validity, item.Into, item.Heap.IsEmpty ? [] : [item.Heap], item.Padded);
         return item.Extension is { } extension ? arena.AddExtension(extension, rows, added) : added;
+    }
+
+    /// <summary>
+    /// The rows a gather reads ahead of the one it moves: the source of each row lies anywhere in the column, a miss of every
+    /// cache, and the processor keeps more misses in flight told of them early.
+    /// </summary>
+    private const int Ahead = 32;
+
+    /// <summary>
+    /// <paramref name="target"/>'s rows, those of <paramref name="source"/> <paramref name="permutation"/> names, each
+    /// source <see cref="Ahead"/> rows ahead fetched into the caches as the row before it moves.
+    /// </summary>
+    private static void Gather<T>(ReadOnlySpan<int> permutation, ReadOnlySpan<T> source, Span<T> target)
+        where T : unmanaged
+    {
+        int i = 0;
+        if (Sse.IsSupported)
+        {
+            for (; i + Ahead < permutation.Length; i++)
+            {
+                Prefetch(source, permutation[i + Ahead]);
+                target[i] = source[permutation[i]];
+            }
+        }
+
+        for (; i < permutation.Length; i++)
+        {
+            target[i] = source[permutation[i]];
+        }
+    }
+
+    /// <summary>Fetches row <paramref name="row"/> of <paramref name="source"/> into the caches, if it lies in it.</summary>
+    private static unsafe void Prefetch<T>(ReadOnlySpan<T> source, int row)
+        where T : unmanaged
+    {
+        if ((uint)row < (uint)source.Length)
+        {
+            Sse.Prefetch0(Unsafe.AsPointer(ref Unsafe.Add(ref MemoryMarshal.GetReference(source), row)));
+        }
+    }
+
+    /// <summary>Fetches the bytes <paramref name="view"/> names past it into the caches, if its buffer holds them.</summary>
+    private static unsafe void PrefetchBytes(VortexBuffer[] data, Int128 view)
+    {
+        ulong high = (ulong)(view >> 64);
+        uint buffer = (uint)high;
+        uint offset = (uint)(high >> 32);
+        if (buffer < (uint)data.Length && offset < (uint)data[buffer].Length)
+        {
+            Sse.Prefetch0(Unsafe.AsPointer(ref Unsafe.Add(ref MemoryMarshal.GetReference(data[buffer].Span), (int)offset)));
+        }
     }
 
     /// <summary>The bytes the first <paramref name="rows"/> views name past their own.</summary>
