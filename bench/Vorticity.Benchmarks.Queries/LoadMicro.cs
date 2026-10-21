@@ -104,7 +104,7 @@ internal static class LoadMicro
                 $"round {round + 1}: {seconds:F2} s, {loaded.Sum(p => p.Rows) / seconds / 1e6:F2} M rows/s, {bytes / seconds / 1e6:F0} MB/s ({bytes / 1e9:F2} GB), cpu {used:F1} s ({used / seconds:F1} cores), lanes {occupied:P0} of {writeDegree}, {(GC.GetTotalAllocatedBytes(precise: true) - allocated) / 1e9:F2} GB allocated, gc {GC.CollectionCount(0) - collections[0]}/{GC.CollectionCount(1) - collections[1]}/{GC.CollectionCount(2) - collections[2]}, peak private {peak / 1e9:F2} GB"));
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"  stages, summed over the periods: feed {timings.Feed.TotalSeconds:F2} s, copy {timings.Copy.TotalSeconds:F2} s, join {timings.Join.TotalSeconds:F2} s, sort {timings.Sort.TotalSeconds:F2} s, wait {timings.Wait.TotalSeconds:F2} s | synopsis {timings.Synopsis.TotalSeconds:F2} s, write {timings.Write.TotalSeconds:F2} s"));
+                $"  stages, summed over the periods: feed {timings.Feed.TotalSeconds:F2} s, copy {timings.Copy.TotalSeconds:F2} s, join {timings.Join.TotalSeconds:F2} s, sort {timings.Sort.TotalSeconds:F2} s, wait {timings.Wait.TotalSeconds:F2} s | synopsis {timings.Synopsis.TotalSeconds:F2} s, write {timings.Write.TotalSeconds:F2} s | drain {timings.Drain.TotalSeconds:F2} s, tables {timings.Tables.TotalSeconds:F2} s, close {timings.Close.TotalSeconds:F2} s"));
             foreach (LoadedPeriod period in loaded)
             {
                 Console.WriteLine(string.Create(

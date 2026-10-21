@@ -1456,7 +1456,9 @@ internal static class DatasetCompactor
             // The slice being written goes out first: its write reads the draft, the sorter and the synopsis.
             if (_sorter is { } writing)
             {
+                long draining = Stopwatch.GetTimestamp();
                 await writing.DrainAsync().ConfigureAwait(false);
+                Timings?.AddDrain(Stopwatch.GetTimestamp() - draining);
             }
 
             _draft = null;
@@ -1483,12 +1485,16 @@ internal static class DatasetCompactor
                 _synopsis = null;
                 try
                 {
+                    long finishing = Stopwatch.GetTimestamp();
                     if (synopsis is not null)
                     {
                         draft.Writer.DeclareSynopsisTables(await synopsis.FinishAsync(cancellationToken).ConfigureAwait(false));
                     }
 
+                    long closing = Stopwatch.GetTimestamp();
+                    Timings?.AddTables(closing - finishing);
                     await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+                    Timings?.AddClose(Stopwatch.GetTimestamp() - closing);
                 }
                 finally
                 {
