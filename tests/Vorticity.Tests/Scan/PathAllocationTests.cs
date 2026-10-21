@@ -399,7 +399,9 @@ public sealed class PathAllocationTests
         ("scan, vortex.zstd", "encodings/zstd", 2_880, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
-        ("scan, vortex.map", "encodings/map", 3_656, FullScan),
+        // The walk of the reads along is behind a reference of the enumerator, 8 bytes, as on every
+        // axis that scans.
+        ("scan, vortex.map", "encodings/map", 3_664, FullScan),
         ("scan, vortex.variant", "encodings/variant", 3_304, FullScan),
     ];
 
