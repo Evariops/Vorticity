@@ -23,6 +23,20 @@ namespace Vorticity.Benchmarks.Queries;
 /// </summary>
 internal static class DesignBuild
 {
+    /// <summary>
+    /// How the design's objects are written: the index policy under <paramref name="budget"/>, the runs moved to disk in
+    /// <paramref name="scratch"/>, and the request ids' zstd frames at level 1. A day of 3 h x 10 min wrote them in
+    /// 343 MB at level 1, 361 at 2, 389 at 3 and 353 at 5, compressed in 1.28, 1.63, 1.91 and 4.22 s: matches of five
+    /// bytes cost random identifiers more than they save. The names keep the default, 3: level 1 made them larger, 9
+    /// took twice as long for a few hundred kilobytes.
+    /// </summary>
+    internal static VortexWriteOptions WriteOptions(int budget, string scratch) => new VortexWriteOptions
+    {
+        Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget),
+        ScratchDirectory = scratch,
+        ZstdLevels = System.Collections.Immutable.ImmutableDictionary<string, int>.Empty.Add(nameof(GeneratedRequest.RequestId), 1),
+    };
+
     internal static async Task<(long Rows, string Needle)> FillAsync(
         IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes, string scratch)
     {
@@ -35,7 +49,7 @@ internal static class DesignBuild
             ClusteringKey = [nameof(GeneratedRequest.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
-            Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
+            Write = WriteOptions(budget, scratch),
         });
 
         await using (dataset)
@@ -115,7 +129,7 @@ internal static class DesignBuild
             ClusteringKey = [nameof(GeneratedRequest.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
-            Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
+            Write = WriteOptions(budget, scratch),
         });
 
         await using (dataset)

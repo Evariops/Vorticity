@@ -58,7 +58,7 @@ internal static class LoadMicro
                 ClusteringKey = [nameof(GeneratedRequest.At)],
                 Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = periodHours > 1 ? SliceWidth.Day : SliceWidth.Hour },
                 Identifiers = [nameof(GeneratedRequest.RequestId)],
-                Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
+                Write = DesignBuild.WriteOptions(budget, scratch),
             });
 
             DType row = dataset.Snapshot.Schema.DType;
