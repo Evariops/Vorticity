@@ -53,15 +53,19 @@ internal sealed class HashedBuckets : IDisposable
     private int _seenCount;
 
     /// <param name="expectedPairs">The pairs the index is expected to hold, or 0 when unknown: a bucket for every <see cref="BucketPairs"/>.</param>
-    internal HashedBuckets(long expectedPairs)
+    /// <param name="bits">The bits of a hash the buckets are told apart by, past <paramref name="expectedPairs"/>'s, or -1 for those.</param>
+    internal HashedBuckets(long expectedPairs, int bits = -1)
     {
-        int bits = 0;
-        while (bits < MostBits && (expectedPairs >> bits) > BucketPairs)
+        if (bits < 0)
         {
-            bits++;
+            bits = 0;
+            while (bits < MostBits && (expectedPairs >> bits) > BucketPairs)
+            {
+                bits++;
+            }
         }
 
-        _bits = bits;
+        _bits = Math.Min(bits, MostBits);
         int buckets = 1 << bits;
         _hashes = new ulong[buckets][];
         _blocks = new uint[buckets][];

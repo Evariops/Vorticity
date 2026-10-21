@@ -422,18 +422,34 @@ public sealed class HashedPostingsTests
     private static async Task<VortexFile> OpenAsync(byte[] bytes) =>
         await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
 
-    private static async Task<(byte[] Bytes, WriteReport Report)> WriteAsync(int rows)
+    private static async Task<(byte[] Bytes, WriteReport Report)> WriteAsync(int rows, VortexWriteOptions? options = null, VortexSession? session = null)
     {
         Decoders.EnsureRegistered();
         using MemoryStream stream = new MemoryStream();
         WriteReport report;
-        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), Schema, Options()))
+        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), Schema, options ?? Options(), session))
         {
             await FeedAsync(writer, 0, rows);
             report = await writer.CompleteAsync();
         }
 
         return (stream.ToArray(), report);
+    }
+
+    /// <summary>
+    /// The rows' pairs cut into sixteen buckets, the buckets sorted ahead on four lanes of a session's, write the file one
+    /// bucket sorted on the writer's thread writes, byte for byte, the identity pinned: the same pairs, in the same segments,
+    /// of every column.
+    /// </summary>
+    [Fact]
+    public async Task BucketsSortedAheadOnLanesWriteTheFileOneBucketWrites()
+    {
+        Guid identity = new Guid("6f0b7c1e-2d43-4b8a-9e15-0c7d3a5b9f21");
+        (byte[] one, _) = await WriteAsync(Rows, Options() with { Identity = identity });
+        await using VortexSession session = VortexSession.Create(static options => options.MaxDegreeOfParallelism = 4);
+        (byte[] many, _) = await WriteAsync(Rows, Options() with { HashedBucketBits = 4, Identity = identity }, session);
+        Assert.Equal(one.Length, many.Length);
+        Assert.True(one.AsSpan().SequenceEqual(many), "the files differ");
     }
 
     /// <summary>Rows <c>[start, end)</c>, a block at a time.</summary>

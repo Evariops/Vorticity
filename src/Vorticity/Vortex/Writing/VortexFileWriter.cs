@@ -949,7 +949,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             built.Spared = options.BudgetSpares;
             built.EarlyChoiceFloor = options.SynopsisEarlyChoiceBytes;
             built.ExpectedRows = options.RowBound;
+            built.BucketBits = options.HashedBucketBits;
             built.Streamer = writer.StreamPayloadsAsync;
+            built.Lanes = writer._lanes > 1 ? writer._budget : null;
         }
 
         // The entries rather than Keys, whose enumerator is an allocated iterator.

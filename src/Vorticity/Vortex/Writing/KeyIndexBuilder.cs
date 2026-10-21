@@ -124,6 +124,12 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// </summary>
     internal Func<IndexBuilder, CancellationToken, ValueTask>? Stream { get; set; }
 
+    /// <summary>The session's lanes hashed postings read and sort their buckets ahead on, a bucket a lane; null to sort them one at a time.</summary>
+    internal LaneBudget? Lanes { get; set; }
+
+    /// <summary>The buckets read and sorted ahead of the one being fed, at most, each with buffers of its own.</summary>
+    private const int BucketsAhead = 4;
+
     private readonly List<RawRun> _chunkRuns = [];
 
     // Hashed postings: the pairs in buckets of their hashes' high bits (see HashedBuckets), made with the first pair; the
@@ -136,7 +142,10 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private int _lastChunkBlock;
     private int _lastChunkBlocks;
 
-    private HashedBuckets Buckets => _buckets ??= new HashedBuckets(ExpectedRows);
+    private HashedBuckets Buckets => _buckets ??= new HashedBuckets(ExpectedRows, BucketBits);
+
+    /// <summary>The bits of a hash the buckets are told apart by, -1 for as many as <see cref="ExpectedRows"/> calls for; set by the index writer.</summary>
+    internal int BucketBits { get; set; } = -1;
 
     /// <summary>
     /// Runs read from the file an append continues, merged in front of the chunk runs because the
@@ -495,13 +504,29 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             : null;
         HashedRunSink? last = tail ? new HashedRunSink(_segmentEntries, _lastChunkBlock, _lastChunkBlocks, tailPairs) : null;
         uint split = tail ? (uint)_lastChunkBlock : uint.MaxValue;
-        BucketBuffers buffers = new BucketBuffers();
         int mainSent = 0;
         int lastSent = 0;
+
+        // The buckets after the one being fed are read back and sorted meanwhile, a bucket a lane of the session's, and fed
+        // in their order. A sealed scratch is read a bucket at a time: its frames are opened by one cipher.
+        int ahead = Lanes is { } lanes && !scratch.SealsFile ? Math.Clamp(lanes.Lanes, 1, BucketsAhead) : 1;
+        BucketBuffers[] buffers = new BucketBuffers[ahead];
+        Task<int>[] sorting = new Task<int>[ahead];
+        for (int slot = 0; slot < ahead && slot < buckets.Buckets; slot++)
+        {
+            buffers[slot] = new BucketBuffers();
+            sorting[slot] = SortAheadAsync(buckets, slot, scratch, buffers[slot], ahead > 1, cancellationToken);
+        }
+
         for (int bucket = 0; bucket < buckets.Buckets; bucket++)
         {
-            int count = await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
-            Feed(buffers, count, split, main, last);
+            int slot = bucket % ahead;
+            int count = await sorting[slot].ConfigureAwait(false);
+            Feed(buffers[slot], count, split, main, last);
+            if (bucket + ahead < buckets.Buckets)
+            {
+                sorting[slot] = SortAheadAsync(buckets, bucket + ahead, scratch, buffers[slot], ahead > 1, cancellationToken);
+            }
 
             // The segments the bucket closed go out at once, where the writer can take them.
             if (Stream is { } stream)
@@ -526,6 +551,35 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _buckets = null;
         _chunks = 0;
         _pairsAtBlockClose.Clear();
+    }
+
+    /// <summary>
+    /// Bucket <paramref name="bucket"/> read back and sorted into <paramref name="buffers"/>, on a lane of the session's of
+    /// its own when <paramref name="aside"/>, on the caller's thread otherwise.
+    /// </summary>
+    private Task<int> SortAheadAsync(
+        HashedBuckets buckets, int bucket, RunScratch scratch, BucketBuffers buffers, bool aside, CancellationToken cancellationToken)
+    {
+        if (!aside)
+        {
+            return buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).AsTask();
+        }
+
+        LaneBudget lanes = Lanes!;
+        return Task.Run(
+            async () =>
+            {
+                long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    return await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    lanes.Exit(entered);
+                }
+            },
+            cancellationToken);
     }
 
     /// <summary>

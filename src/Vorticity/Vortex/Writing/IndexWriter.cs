@@ -994,6 +994,42 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    /// <summary>The bits hashed postings tell their buckets apart by, -1 for as many as the expected rows call for (VortexWriteOptions.HashedBucketBits).</summary>
+    internal int BucketBits
+    {
+        set
+        {
+            foreach (List<IndexBuilder> builders in _builders)
+            {
+                foreach (IndexBuilder builder in builders)
+                {
+                    if (builder is KeyIndexBuilder key)
+                    {
+                        key.BucketBits = value;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>The session's lanes the writer computes on, which a hashed postings builder sorts its buckets ahead on; null for none.</summary>
+    internal LaneBudget? Lanes
+    {
+        set
+        {
+            foreach (List<IndexBuilder> builders in _builders)
+            {
+                foreach (IndexBuilder builder in builders)
+                {
+                    if (builder is KeyIndexBuilder key)
+                    {
+                        key.Lanes = value;
+                    }
+                }
+            }
+        }
+    }
+
     /// <summary>Seals the open block of column <paramref name="field"/>'s builders, past the first block of the file.</summary>
     internal void CloseBlock(int field)
     {

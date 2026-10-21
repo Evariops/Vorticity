@@ -286,6 +286,12 @@ public sealed record VortexWriteOptions
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
 
+    /// <summary>
+    /// The bits of a hash hashed postings tell their buckets apart by, or -1 for as many as <see cref="RowBound"/> calls for:
+    /// set by tests, to cut a few rows' pairs into many buckets without the chunks a bound sizes.
+    /// </summary>
+    internal int HashedBucketBits { get; init; } = -1;
+
     /// <summary>The row span above which a sorted run writes its rows at 64 bits.</summary>
     internal long WideRowsAbove { get; init; } = uint.MaxValue;
 
