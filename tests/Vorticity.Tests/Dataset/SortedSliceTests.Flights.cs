@@ -61,6 +61,73 @@ public sealed partial class SortedSliceTests
     }
 
     /// <summary>
+    /// A slice whose rows come in batches that its ends cut holds the rows it was handed, its columns filled as they came:
+    /// names within their views and past them, a count that is now and then null, copied a batch at a time and joined, an
+    /// instant and a size; each slice its own rows, sorted by name, ties in the order they came.
+    /// </summary>
+    [Fact]
+    public async Task ASliceFilledBatchByBatchHoldsTheRowsItWasHanded()
+    {
+        const int Slices = 5;
+        const int SliceRows = 333;
+        Random random = new Random(3);
+        Filled[] filled = [.. Enumerable.Range(0, Slices * SliceRows).Select(i => new Filled(
+            Noon.AddSeconds(i),
+            random.Next(3) == 0 ? $"a-name-past-a-view-{random.Next(50)}" : $"n-{random.Next(20)}",
+            random.Next(4) == 0 ? null : random.Next(100),
+            random.NextInt64(1_000_000)))];
+        byte[] file;
+        using (MemoryStream stream = new MemoryStream())
+        {
+            await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), VortexTypes.ToDType(Filled.Schema, new DTypeArena()), new VortexWriteOptions()))
+            {
+                await writer.WriteAsync<Filled>(filled, Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            file = stream.ToArray();
+        }
+
+        await using VortexFile open = await VortexFile.OpenAsync(new MemorySegmentSource(file), VortexOpenOptions.Default, Ct);
+        DType schema = open.DType;
+        long micros = Noon.ToUnixTimeMilliseconds() * 1000;
+        SliceTable table = new SliceTable(
+            TimeUnit.Microseconds,
+            [.. Enumerable.Range(0, Slices).Select(s => new TimeSlice(micros + (s * SliceRows * 1_000_000L), micros + ((s + 1) * SliceRows * 1_000_000L), (long)s * SliceRows, SliceRows))],
+            [schema.IndexOfField(nameof(Filled.Name))]);
+        List<Filled[]> written = [];
+        using (SortedSlices slices = new SortedSlices(table, schema.IndexOfField(nameof(Filled.At)), schema))
+        {
+            await foreach (RecordBatch batch in open.Scan<Filled>().With(new ScanOptions { BatchRows = 70 }).ToBatchesAsync(Ct))
+            {
+                using (batch)
+                {
+                    await slices.AppendAsync(batch, (slice, token) =>
+                    {
+                        Filled[] rows = new Filled[slice.Batch.RowCount];
+                        Filled.ReadRows(slice.Batch.As<Filled>(), rows);
+                        written.Add(rows);
+                        return ValueTask.CompletedTask;
+                    }, Ct);
+                }
+            }
+
+            await slices.DrainAsync();
+        }
+
+        Assert.Equal(Slices, written.Count);
+        for (int s = 0; s < Slices; s++)
+        {
+            Filled[] expected = [.. filled.Skip(s * SliceRows).Take(SliceRows).Select((row, i) => (row, i))
+                .OrderBy(p => p.row.Name, StringComparer.Ordinal).ThenBy(p => p.i).Select(p => p.row)];
+            Assert.Equal(expected, written[s]);
+        }
+    }
+
+    [VortexRecord]
+    public partial record struct Filled(DateTimeOffset At, string Name, int? Count, long Size);
+
+    /// <summary>
     /// The slices of <paramref name="table"/> over the rows of <paramref name="file"/>, each write 5 ms long, the write of
     /// slice <paramref name="failAt"/> throwing: the slices written, in the order they were.
     /// </summary>

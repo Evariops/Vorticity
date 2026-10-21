@@ -7,9 +7,9 @@ namespace Vorticity.Dataset;
 /// <summary>
 /// Where the slices of the objects a load writes spend their time, summed over every object that adds to it, so that which
 /// stage of the pipeline holds the others is a number: the rows drawn by the caller, then on the thread that hands them
-/// over, the rows copied into a slice and the wait for a buffer to be free; on the thread that sorts a slice, its parts
-/// joined into one and sorted; on the thread that writes a slice, its synopsis counted, beside its columns and indexes
-/// written when a lane is free, and the wait for the count once they are; once an object's rows are all handed over, its
+/// over, the rows copied into a slice and the wait for a buffer to be free; on the thread that sorts a slice, its columns
+/// made one, the batches of a column copied apart joined, and sorted; on the thread that writes a slice, its synopsis
+/// counted, beside its columns and indexes written when a lane is free, and the wait for the count once they are; once an object's rows are all handed over, its
 /// last slice written, its synopsis finished and its writer completed. The object is a sink the caller owns, as
 /// <see cref="Scanning.ScanCounters"/> is; the additions are interlocked, one a slice or a batch.
 /// </summary>
@@ -34,7 +34,7 @@ internal sealed class WriteTimings
     /// <summary>The rows copied into the slices that hold them.</summary>
     internal TimeSpan Copy => Of(ref _copy);
 
-    /// <summary>The parts of each slice joined into one.</summary>
+    /// <summary>Each slice's columns made one struct, those whose batches were copied apart joined.</summary>
     internal TimeSpan Join => Of(ref _join);
 
     /// <summary>Each slice sorted: its codes, its permutation, its rows and codes in its order.</summary>

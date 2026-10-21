@@ -40,9 +40,9 @@ namespace Vorticity.Dataset;
 /// order is then the object's for every slice, and <see cref="Table"/> records it.
 /// </para>
 /// <para>
-/// The rows come in on the caller's thread, which only copies them into a slice's buffer: a slice full is joined, sorted
-/// and written on another thread, each slice in a buffer of its own, <see cref="InFlight"/> of them held at most, one
-/// filling and the others sorting or written. A slice's write starts once the one before it is written, so the writes
+/// The rows come in on the caller's thread, which only copies them into a slice's buffer, its columns laid out for all of
+/// its rows (<see cref="SliceFill"/>): a slice full is sorted and written on another thread, each slice in a buffer of its
+/// own, <see cref="InFlight"/> of them held at most, one filling and the others sorting or written. A slice's write starts once the one before it is written, so the writes
 /// keep the slices' order; its sort, as soon as its rows are in, beside the writes of the slices before it. The first
 /// slice is sorted on the caller's thread, as it settles the order the others are sorted in. <see cref="DrainAsync"/>
 /// waits for the last one.
@@ -135,7 +135,12 @@ internal sealed class SortedSlices : IDisposable
             RecordBatch part = at == 0 && take == rows.RowCount ? rows : rows.Window(at, take);
             Buffer buffer = _buffers[_filling];
             long begin = Stopwatch.GetTimestamp();
-            buffer.Parts.Add(buffer.Context.Canonical.CopyFrom(part.Arena, part.RootIndex));
+            if (_held == 0)
+            {
+                buffer.Fill.Begin(buffer.Context.Canonical, _schema, checked((int)_table.Slices[_slice].Rows));
+            }
+
+            buffer.Fill.Append(buffer.Context.Canonical, part.Arena, part.RootIndex, take);
             Timings?.AddCopy(Stopwatch.GetTimestamp() - begin);
             _held += take;
             at += take;
@@ -297,13 +302,14 @@ internal sealed class SortedSlices : IDisposable
         }
     }
 
-    /// <summary>The slice <paramref name="buffer"/> holds, its parts joined into one, then sorted: its root.</summary>
+    /// <summary>
+    /// The slice <paramref name="buffer"/> holds, its columns made one struct, those whose batches were copied apart joined,
+    /// then sorted: its root.
+    /// </summary>
     private int JoinAndSort(Buffer buffer, int rows)
     {
         long begin = Stopwatch.GetTimestamp();
-        int whole = buffer.Parts.Count == 1
-            ? buffer.Parts[0]
-            : CanonicalConcat.Concat(buffer.Context.Decode, _schema, rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(buffer.Parts));
+        int whole = buffer.Fill.Finish(buffer.Context);
         long joined = Stopwatch.GetTimestamp();
         int sorted = Sort(buffer, whole, rows);
         Timings?.AddJoin(joined - begin);
@@ -644,7 +650,8 @@ internal sealed class SortedSlices : IDisposable
     {
         internal ScanContext Context { get; } = new ScanContext([]);
 
-        internal List<int> Parts { get; } = [];
+        /// <summary>What the slice's rows are copied into as they come, its columns laid out for all of them.</summary>
+        internal SliceFill Fill { get; } = new SliceFill();
 
         internal List<int[]> Codes { get; } = [];
 
@@ -689,7 +696,7 @@ internal sealed class SortedSlices : IDisposable
         /// <summary>Lets the slice's rows go, for the next slice's.</summary>
         internal void Clear()
         {
-            Parts.Clear();
+            Fill.Clear();
             Codes.Clear();
             PathColumns.Clear();
             Context.ResetBatch();
