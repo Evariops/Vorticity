@@ -138,9 +138,9 @@ internal sealed class SynopsisTables : IDisposable
     private long[] _valueSum = [];
     private Growth?[] _valueGrowth = [];
 
-    // The hash of each group's keys at each depth of the slice counted, and the bytes of one key being hashed.
+    // The hash of each group's keys at each depth of the slice counted, and the keys themselves, each encoded once.
     private ulong[][] _prefixHashes = [];
-    private readonly RunBuffer _component = new RunBuffer();
+    private readonly SliceKeys _sliceKeys = new SliceKeys();
 
     // The rows of the slices counted, the one being counted's among them; of those handed to the writer since; of the
     // hours merged, and of the hour's. Once the last slice is counted, the tables are finished, and none is given up.
@@ -332,7 +332,9 @@ internal sealed class SynopsisTables : IDisposable
 
         // Each depth's groups in the order of their keys' values, which their numbering is down to the shapes, and
         // the first row of each in that order.
+        // The group at each place, where a depth's groups are not numbered in the order of their keys.
         int[][] keyed = new int[used + 1][];
+        int[]?[] placed = new int[used + 1][];
         for (int d = 0; d <= used; d++)
         {
             keyed[d] = firsts[d];
@@ -341,14 +343,16 @@ internal sealed class SynopsisTables : IDisposable
                 int[] places = Places(firsts[d], keyCodes, d);
                 states[d] = states[d].Merge(places, counts[d], RentStates(counts[d]));
                 keyed[d] = new int[counts[d]];
+                placed[d] = new int[counts[d]];
                 for (int g = 0; g < counts[d]; g++)
                 {
                     keyed[d][places[g]] = firsts[d][g];
+                    placed[d]![places[g]] = g;
                 }
             }
         }
 
-        // The key columns as their values lie, a column's encodings decoded.
+        // The key columns as their values lie, a column's encodings decoded, and each depth's groups' keys.
         CanonicalNode node = arena.GetNode(sorted.RootIndex);
         int[] columns = new int[depth];
         for (int k = 0; k < depth; k++)
@@ -356,7 +360,8 @@ internal sealed class SynopsisTables : IDisposable
             columns[k] = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, ColumnOf(node, _keys[k])));
         }
 
-        CountDistinct(arena, columns, counts, firsts);
+        _sliceKeys.Build(arena, columns, _keyShapes, counts, firsts, _groups, used);
+        CountDistinct(counts, firsts);
 
         // The slice's runs, rows of the tables of slices.
         for (int d = _first; d <= used; d++)
@@ -365,9 +370,8 @@ internal sealed class SynopsisTables : IDisposable
             {
                 for (int p = 0; p < counts[d]; p++)
                 {
-                    EncodeKey(arena, columns, keyed[d][p], d);
                     states[d].Words(p, _state);
-                    if (Hold(table, start, _key.Span, _state))
+                    if (Hold(table, start, _sliceKeys.Of(d, placed[d]?[p] ?? p), _state))
                     {
                         await FlushAsync(table, cancellationToken).ConfigureAwait(false);
                     }
@@ -382,8 +386,7 @@ internal sealed class SynopsisTables : IDisposable
             _run.Clear();
             for (int p = 0; p < counts[at]; p++)
             {
-                EncodeKey(arena, columns, keyed[at][p], at);
-                _run.Bytes(_key.Span);
+                _run.Bytes(_sliceKeys.Of(at, placed[at]?[p] ?? p));
                 states[at].Words(p, _state);
                 _run.Words(_state);
             }
@@ -458,9 +461,9 @@ internal sealed class SynopsisTables : IDisposable
 
     /// <summary>
     /// Adds each group of the slice to the distinct groups of its depth, the hour's and the object's, down to the deepest
-    /// depth a coarser table still counts: a group's hash its parent's mixed with its own key's.
+    /// depth a coarser table still counts: a group's hash its parent's mixed with its own key's, the slice's keys built.
     /// </summary>
-    private void CountDistinct(CanonicalArena arena, int[] columns, int[] counts, int[][] firsts)
+    private void CountDistinct(int[] counts, int[][] firsts)
     {
         int deepest = 0;
         for (int d = 1; d < _hourGrowth.Length; d++)
@@ -487,10 +490,7 @@ internal sealed class SynopsisTables : IDisposable
             int[] first = firsts[d];
             for (int g = 0; g < counts[d]; g++)
             {
-                int row = first[g];
-                _component.Clear();
-                KeyCodec.Append(_component, arena, columns[d - 1], row, _keyShapes[d - 1]);
-                hashes[g] = Mix(parents[parentOf[row]], CardinalitySlot.Hash(_component.Span));
+                hashes[g] = Mix(parents[parentOf[first[g]]], CardinalitySlot.Hash(_sliceKeys.Component(d, g)));
             }
 
             Add(Counts(_hourly[d], _hourGrowth[d]), hashes, counts[d]);
@@ -940,11 +940,10 @@ internal sealed class SynopsisTables : IDisposable
                     start.Bytes(merger.Key[..KeyCodec.Prefix(_keyShapes, d, merger.Key)]);
                 }
 
-                for (int d = _first; d <= depth; d++)
-                {
-                    StateWords.Merge(groups[d], merger.Words, _kinds);
-                }
-
+                // A record's states go to its deepest group, and a group's to its parent's as it ends: a merge a record,
+                // where one into every depth took seven of them for the design's keys. The sums are exact, so the states
+                // are those of every record merged into every depth.
+                StateWords.Merge(groups[depth], merger.Words, _kinds);
                 _key.Clear();
                 _key.Bytes(merger.Key);
                 any = true;
@@ -988,6 +987,11 @@ internal sealed class SynopsisTables : IDisposable
                 {
                     await FlushRunAsync().ConfigureAwait(false);
                 }
+            }
+
+            if (d > _first)
+            {
+                StateWords.Merge(groups[d - 1], groups[d], _kinds);
             }
 
             StateWords.Clear(groups[d], _kinds);
@@ -1205,16 +1209,6 @@ internal sealed class SynopsisTables : IDisposable
         return -1;
     }
 
-    /// <summary>The first <paramref name="depth"/> keys of row <paramref name="row"/> into <see cref="_key"/>, encoded as a run's records hold them.</summary>
-    private void EncodeKey(CanonicalArena arena, int[] columns, int row, int depth)
-    {
-        _key.Clear();
-        for (int k = 0; k < depth; k++)
-        {
-            KeyCodec.Append(_key, arena, columns[k], row, _keyShapes[k]);
-        }
-    }
-
     /// <summary>The run of records <see cref="_run"/> holds, appended to <paramref name="store"/>, its keys of <paramref name="components"/> components.</summary>
     private async ValueTask<RunSpan> AppendAsync(RunScratch store, int components, CancellationToken cancellationToken)
     {
@@ -1237,7 +1231,7 @@ internal sealed class SynopsisTables : IDisposable
         _wholeScratch?.Dispose();
         _run.Dispose();
         _key.Dispose();
-        _component.Dispose();
+        _sliceKeys.Dispose();
         foreach (RunBuffer? start in _starts)
         {
             start?.Dispose();

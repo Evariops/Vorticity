@@ -114,9 +114,25 @@ internal static class KeyCodec
     /// </summary>
     internal static int Compare(ReadOnlySpan<KeyShape> shapes, int components, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, out int differs)
     {
+        // A component whose bytes the two keys share is the same component in both, its encoding delimiting itself, and so
+        // equal: the components the keys' common prefix holds whole are stepped over by their lengths alone, and only the
+        // one the first byte that differs lies in is read as values. A merge's keys mostly share all but their last.
+        int common = left.CommonPrefixLength(right);
         int l = 0;
-        int r = 0;
-        for (int k = 0; k < components; k++)
+        int k = 0;
+        for (; k < components; k++)
+        {
+            int end = Skip(left, l, shapes[k]);
+            if (end > common)
+            {
+                break;
+            }
+
+            l = end;
+        }
+
+        int r = l;
+        for (; k < components; k++)
         {
             l = Read(left, l, shapes[k], out bool leftValid, out ReadOnlySpan<byte> leftValue);
             r = Read(right, r, shapes[k], out bool rightValid, out ReadOnlySpan<byte> rightValue);
@@ -130,6 +146,28 @@ internal static class KeyCodec
 
         differs = components;
         return 0;
+    }
+
+    /// <summary>Where the component at <paramref name="at"/> of <paramref name="key"/> ends, its value not read.</summary>
+    private static int Skip(ReadOnlySpan<byte> key, int at, KeyShape shape)
+    {
+        if (key[at++] == 0)
+        {
+            return at;
+        }
+
+        return shape.Form switch
+        {
+            KeyForm.Bool => at + 1,
+            KeyForm.Bytes => SkipBytes(key, at),
+            _ => at + shape.Width,
+        };
+
+        static int SkipBytes(ReadOnlySpan<byte> key, int at)
+        {
+            uint length = ReadVarint(key, ref at);
+            return at + (int)length;
+        }
     }
 
     /// <summary>The bytes the first <paramref name="components"/> components of <paramref name="key"/> take.</summary>
@@ -360,6 +398,99 @@ internal sealed class RunBuffer : IDisposable
     public void Dispose()
     {
         ArrayPool<byte>.Shared.Return(_bytes);
+        _bytes = [];
+    }
+}
+
+/// <summary>
+/// The keys of a slice's groups at each depth, each encoded once, in the order of the groups' first rows: a group's key is
+/// its parent's, then its first row's value of the depth's column, so that a depth costs a component a group, where the key
+/// of a group read again from its row cost every component before it, seven for the design's deepest groups. The keys
+/// are those <see cref="KeyCodec.Append"/> gives a row component by component, and stay until the next slice's.
+/// </summary>
+internal sealed class SliceKeys : IDisposable
+{
+    private RunBuffer[] _bytes = [];
+
+    // Each depth's groups' keys: where each ends in the depth's bytes, and where its own component starts in it.
+    private int[][] _ends = [];
+    private int[][] _components = [];
+
+    /// <summary>
+    /// The keys of the groups of depths 0 to <paramref name="deepest"/>: <paramref name="counts"/> groups at each, the first
+    /// row of each in <paramref name="firsts"/>, each row's group at each depth in <paramref name="groups"/>, the depth's
+    /// values in <paramref name="columns"/> of <paramref name="arena"/>, of <paramref name="shapes"/>.
+    /// </summary>
+    internal void Build(CanonicalArena arena, int[] columns, KeyShape[] shapes, int[] counts, int[][] firsts, int[][] groups, int deepest)
+    {
+        Grow(deepest, counts);
+        _bytes[0].Clear();
+        _ends[0][0] = 0;
+        _components[0][0] = 0;
+        for (int d = 1; d <= deepest; d++)
+        {
+            RunBuffer into = _bytes[d];
+            into.Clear();
+            ReadOnlySpan<byte> parents = _bytes[d - 1].Span;
+            int[] parentEnds = _ends[d - 1];
+            int[] ends = _ends[d];
+            int[] components = _components[d];
+            int[] first = firsts[d];
+            int[] parentOf = groups[d - 1];
+            for (int g = 0; g < counts[d]; g++)
+            {
+                int row = first[g];
+                int parent = parentOf[row];
+                int from = parent == 0 ? 0 : parentEnds[parent - 1];
+                into.Bytes(parents[from..parentEnds[parent]]);
+                components[g] = into.Length;
+                KeyCodec.Append(into, arena, columns[d - 1], row, shapes[d - 1]);
+                ends[g] = into.Length;
+            }
+        }
+    }
+
+    /// <summary>The key of group <paramref name="group"/> of depth <paramref name="depth"/>: its components down to the depth.</summary>
+    internal ReadOnlySpan<byte> Of(int depth, int group) =>
+        _bytes[depth].Span[(group == 0 ? 0 : _ends[depth][group - 1]).._ends[depth][group]];
+
+    /// <summary>The last component of group <paramref name="group"/>'s key at depth <paramref name="depth"/>, past 0: its own column's value.</summary>
+    internal ReadOnlySpan<byte> Component(int depth, int group) =>
+        _bytes[depth].Span[_components[depth][group].._ends[depth][group]];
+
+    private void Grow(int deepest, int[] counts)
+    {
+        if (_bytes.Length <= deepest)
+        {
+            int had = _bytes.Length;
+            Array.Resize(ref _bytes, deepest + 1);
+            Array.Resize(ref _ends, deepest + 1);
+            Array.Resize(ref _components, deepest + 1);
+            for (int d = had; d <= deepest; d++)
+            {
+                _bytes[d] = new RunBuffer();
+                _ends[d] = [];
+                _components[d] = [];
+            }
+        }
+
+        for (int d = 0; d <= deepest; d++)
+        {
+            if (_ends[d].Length < counts[d])
+            {
+                _ends[d] = new int[Math.Max(counts[d], _ends[d].Length * 2)];
+                _components[d] = new int[_ends[d].Length];
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        foreach (RunBuffer bytes in _bytes)
+        {
+            bytes.Dispose();
+        }
+
         _bytes = [];
     }
 }
