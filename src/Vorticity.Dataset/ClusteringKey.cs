@@ -135,6 +135,26 @@ internal sealed class ClusteringKey
     public static ClusteringKey? Declared(IReadOnlyList<string>? paths, DType schema, bool acceptsNullable = false, int partitionColumns = 0)
     {
         ClusteringKey? key = For(paths, schema, partitionColumns);
+        for (int i = 0; key is not null && i < key.PartitionColumns; i++)
+        {
+            // Each object holds one value of a partition column, which its entry names and every job keeps apart: a null
+            // names none, and a NaN equals no value, its own included.
+            DType values = key._dtypes[i];
+            while (values.Kind == DTypeKind.Extension)
+            {
+                values = values.StorageType;
+            }
+
+            if (key._dtypes[i].IsNullable || (values.Kind == DTypeKind.Primitive && values.PType.IsFloat()))
+            {
+                throw new ArgumentException(
+                    $"The partition column '{key._paths[i]}' {(key._dtypes[i].IsNullable ? "may hold a null" : "holds floats, whose NaN equals no value")}, " +
+                    "where every row names the partition it belongs to. Declare partition columns on non-nullable columns of " +
+                    "integers, text or other exact values.",
+                    nameof(paths));
+            }
+        }
+
         if (key is { MayHoldNull: true } && (key.IsComposite || !acceptsNullable))
         {
             throw new ArgumentException(

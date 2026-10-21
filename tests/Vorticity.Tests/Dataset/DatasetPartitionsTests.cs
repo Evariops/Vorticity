@@ -336,6 +336,32 @@ public sealed partial class DatasetPartitionsTests
         return (dataset, rewrites);
     }
 
+    /// <summary>
+    /// A partition column names the one value of an object, which a null or a NaN cannot do: a dataset refuses a partition
+    /// column that admits nulls, whatever it accepts of its key, and one of floats.
+    /// </summary>
+    [Fact]
+    public async Task APartitionColumnThatCannotNameItsValueIsRefused()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        ArgumentException nullable = await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(store, Unsure.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Unsure.Retention), nameof(Unsure.At)],
+            PartitionColumns = 1,
+            AcceptsNullableKey = true,
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+        }, Ct));
+        Assert.Contains(nameof(Unsure.Retention), nullable.Message, StringComparison.Ordinal);
+
+        ArgumentException floats = await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(store, Floating.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Floating.Ratio), nameof(Floating.At)],
+            PartitionColumns = 1,
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+        }, Ct));
+        Assert.Contains(nameof(Floating.Ratio), floats.Message, StringComparison.Ordinal);
+    }
+
     private static DatasetOptions Options(bool partitions) => new DatasetOptions
     {
         ClusteringKey = partitions ? [nameof(Logged.Retention), nameof(Logged.At)] : [nameof(Logged.At)],
@@ -422,4 +448,10 @@ public sealed partial class DatasetPartitionsTests
 
     [VortexRecord]
     public partial record struct Logged(string Retention, DateTimeOffset At, string Service, long Bytes);
+
+    [VortexRecord]
+    public partial record struct Unsure(string? Retention, DateTimeOffset At, long Bytes);
+
+    [VortexRecord]
+    public partial record struct Floating(double Ratio, DateTimeOffset At, long Bytes);
 }

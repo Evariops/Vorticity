@@ -88,7 +88,13 @@ internal sealed class PartitionedAppend : IAsyncDisposable
                 VortexExpr? filter = null;
                 for (int i = 0; i < nodes.Length; i++)
                 {
-                    LiteralReader.TryRead(batch.Arena, nodes[i], first, out values[i]);
+                    // A dataset refuses partition columns that may hold a null or a NaN, the values no equality routes.
+                    if (!LiteralReader.TryRead(batch.Arena, nodes[i], first, out values[i]))
+                    {
+                        throw new InvalidOperationException(
+                            $"Row {batch.StartRow + first} holds no value of the partition column '{_key.PartitionPaths[i]}' an equality can route.");
+                    }
+
                     ComparisonExpr equal = Expr.Eq(Expr.Field(_key.PartitionPaths[i]), Expr.Literal(values[i]));
                     filter = filter is null ? equal : Expr.And(filter, equal);
                 }
@@ -109,13 +115,12 @@ internal sealed class PartitionedAppend : IAsyncDisposable
                     }
                 }
 
-                // A value whose row the evaluation does not hold to itself, which a well-formed key cannot do,
-                // would route nothing and loop: the first row goes alone.
+                // Every value of a partition column equals itself, so the first row is always among those taken; one that did
+                // not would route nothing, and route each of its rows alone at a pass over the batch each.
                 if (count == 0)
                 {
-                    taken[first >> 6] |= 1UL << (first & 63);
-                    left[first >> 6] &= ~(1UL << (first & 63));
-                    count = 1;
+                    throw new InvalidOperationException(
+                        $"Row {batch.StartRow + first}'s partition value equals no row, its own included: no object can hold it.");
                 }
 
                 remaining -= count;
