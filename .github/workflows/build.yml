@@ -227,12 +227,15 @@ jobs:
           done
 
       # The filters are words, their wildcards xunit's own: the shell expands no file name. Every
-      # step below writes an xunit report of each test's time, which the last one keeps.
+      # step below writes an xunit report of each test's time, which the last one keeps. The tests'
+      # temporary files go to the runner's disk: Ubuntu 26.04 mounts /tmp in memory, where a spill
+      # refuses to write the runs that are to give its memory back.
       - name: Test
         if: ${{ !matrix.scalar-pass && !matrix.runs-alone }}
         env:
           PROJECTS: ${{ matrix.projects }}
           FILTERS: ${{ matrix.filters }}
+          TMPDIR: ${{ runner.temp }}
         run: |
           set -f
           status=0
@@ -246,10 +249,14 @@ jobs:
 
       - name: Test the classes that run alone
         if: ${{ matrix.runs-alone }}
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: bash tests/runs-alone.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports"
 
       - name: Test the scalar fallbacks
         if: ${{ matrix.scalar-pass }}
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: bash tests/scalar-pass.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports"
 
       # Where the time goes, test by test, kept a fortnight: what the next split of the runners is
