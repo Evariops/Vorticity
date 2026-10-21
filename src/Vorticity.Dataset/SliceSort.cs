@@ -32,18 +32,26 @@ namespace Vorticity.Dataset;
 internal static class SliceSort
 {
     /// <summary>The permutation of <paramref name="rows"/> rows sorted by <paramref name="columns"/>' codes, the first the most significant, ties in time order.</summary>
-    internal static int[] Permutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows)
+    internal static int[] Permutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows) =>
+        Permutation(columns, rows, new SliceSortScratch());
+
+    /// <summary>
+    /// <see cref="Permutation(IReadOnlyList{ValueTuple{int[], int}}, int)"/> in the arrays of <paramref name="scratch"/>,
+    /// which a sorter keeps from one slice to the next: the permutation is valid over its first <paramref name="rows"/>
+    /// entries until the next sort through the same scratch.
+    /// </summary>
+    internal static int[] Permutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows, SliceSortScratch scratch)
     {
-        int[] permutation = new int[rows];
+        int[] permutation = SliceSortScratch.AtLeast(ref scratch.Permutation, rows);
         for (int i = 0; i < rows; i++)
         {
             permutation[i] = i;
         }
 
-        int[] scratch = new int[rows];
+        int[] spare = SliceSortScratch.AtLeast(ref scratch.Spare, rows);
         for (int k = columns.Count - 1; k >= 0; k--)
         {
-            CountingSort(permutation, scratch, columns[k].Codes, columns[k].Distinct + 1);
+            CountingSort(permutation, spare, columns[k].Codes, columns[k].Distinct + 1, rows, scratch);
         }
 
         return permutation;
@@ -215,6 +223,16 @@ internal static class SliceSort
     private static (int[] Codes, int Distinct) Codes(CanonicalArena arena, int column, int rows)
     {
         int[] codes = new int[rows];
+        return (codes, Codes(arena, column, rows, codes, new SliceSortScratch()));
+    }
+
+    /// <summary>
+    /// Each of <paramref name="rows"/> rows' code into <paramref name="codes"/>, in the order of the values, nulls last, the
+    /// work done in the arrays of <paramref name="scratch"/>, which a sorter keeps a column from one slice to the next: how
+    /// many distinct values there are. Nothing is allocated once the arrays have grown to a slice's size.
+    /// </summary>
+    internal static int Codes(CanonicalArena arena, int column, int rows, int[] codes, SliceSortScratch scratch)
+    {
         CanonicalNode node = arena.GetNode(column);
         ref readonly CanonicalRecord record = ref arena.RecordRef(column);
         CanonicalKind kind = record.Kind;
@@ -227,11 +245,14 @@ internal static class SliceSort
         // The distinct values, each by the first row holding it and its key, found through a table that
         // doubles past half full: its size follows the distinct values, not the rows. A number's key is
         // its bits, so equal keys are equal values; text's is a hash, so equal keys are compared.
-        List<int> firsts = [];
-        List<ulong> keys = [];
+        int[] firsts = scratch.Firsts;
+        ulong[] keys = scratch.Keys;
+        int distinct = 0;
         bool hashed = kind is not (CanonicalKind.Primitive or CanonicalKind.Bool);
         int bits = 8;
-        int[] table = new int[1 << bits];
+        int[] table = SliceSortScratch.AtLeast(ref scratch.Table, 1 << bits);
+        table.AsSpan(0, 1 << bits).Clear();
+        int mask = (1 << bits) - 1;
         for (int row = 0; row < rows; row++)
         {
             if (!valid.IsEmpty && ((valid[row >> 6] >> (row & 63)) & 1) == 0)
@@ -247,16 +268,23 @@ internal static class SliceSort
                 CanonicalKind.Bool => (bools[row >> 6] >> (row & 63)) & 1,
                 _ => XxHash3.HashToUInt64(bytes),
             };
-            int mask = table.Length - 1;
             for (int slot = (int)(Mix(key) >> (64 - bits)); ; slot = (slot + 1) & mask)
             {
                 int entry = table[slot];
                 if (entry == 0)
                 {
-                    firsts.Add(row);
-                    keys.Add(key);
-                    table[slot] = firsts.Count;
-                    codes[row] = firsts.Count - 1;
+                    if (distinct == firsts.Length)
+                    {
+                        Array.Resize(ref scratch.Firsts, distinct * 2);
+                        Array.Resize(ref scratch.Keys, distinct * 2);
+                        firsts = scratch.Firsts;
+                        keys = scratch.Keys;
+                    }
+
+                    firsts[distinct] = row;
+                    keys[distinct] = key;
+                    table[slot] = ++distinct;
+                    codes[row] = distinct - 1;
                     break;
                 }
 
@@ -267,17 +295,18 @@ internal static class SliceSort
                 }
             }
 
-            if (firsts.Count * 2 > table.Length)
+            if (distinct * 2 > mask + 1)
             {
                 bits++;
-                table = new int[1 << bits];
-                int grown = table.Length - 1;
-                for (int i = 0; i < keys.Count; i++)
+                table = SliceSortScratch.AtLeast(ref scratch.Table, 1 << bits);
+                table.AsSpan(0, 1 << bits).Clear();
+                mask = (1 << bits) - 1;
+                for (int i = 0; i < distinct; i++)
                 {
                     int slot = (int)(Mix(keys[i]) >> (64 - bits));
                     while (table[slot] != 0)
                     {
-                        slot = (slot + 1) & grown;
+                        slot = (slot + 1) & mask;
                     }
 
                     table[slot] = i + 1;
@@ -286,8 +315,7 @@ internal static class SliceSort
         }
 
         // The distinct values sorted, and each code turned into its value's rank; a null last.
-        int distinct = firsts.Count;
-        int[] byValue = new int[distinct];
+        int[] byValue = SliceSortScratch.AtLeast(ref scratch.ByValue, distinct);
         for (int i = 0; i < distinct; i++)
         {
             byValue[i] = i;
@@ -295,22 +323,21 @@ internal static class SliceSort
 
         if (hashed)
         {
-            int[] rowsOf = [.. firsts];
-            Array.Sort(byValue, (left, right) => Compare(arena, column, rowsOf[left], rowsOf[right]));
+            Array.Sort(byValue, 0, distinct, scratch.ComparerOver(arena, column, firsts));
         }
         else
         {
             // A number's keys sort as unsigned numbers in its values' order, without a comparison called per pair.
-            ulong[] ordered = new ulong[distinct];
+            ulong[] ordered = SliceSortScratch.AtLeast(ref scratch.Ordered, distinct);
             for (int i = 0; i < distinct; i++)
             {
                 ordered[i] = Ordered(kind, ptype, keys[i]);
             }
 
-            Array.Sort(ordered, byValue);
+            Array.Sort(ordered, byValue, 0, distinct);
         }
 
-        int[] rank = new int[distinct];
+        int[] rank = SliceSortScratch.AtLeast(ref scratch.Rank, distinct);
         for (int i = 0; i < distinct; i++)
         {
             rank[byValue[i]] = i;
@@ -321,14 +348,18 @@ internal static class SliceSort
             codes[row] = codes[row] < 0 ? distinct : rank[codes[row]];
         }
 
-        return (codes, distinct);
+        return distinct;
     }
 
-    /// <summary>Sorts <paramref name="permutation"/> by <paramref name="codes"/> of its rows, stably, through <paramref name="scratch"/>.</summary>
-    private static void CountingSort(int[] permutation, int[] scratch, int[] codes, int buckets)
+    /// <summary>
+    /// Sorts the first <paramref name="rows"/> entries of <paramref name="permutation"/> by <paramref name="codes"/> of
+    /// their rows, stably, through <paramref name="spare"/>, the buckets' starts in <paramref name="scratch"/>'s.
+    /// </summary>
+    private static void CountingSort(int[] permutation, int[] spare, int[] codes, int buckets, int rows, SliceSortScratch scratch)
     {
-        int[] starts = new int[buckets + 1];
-        foreach (int code in codes)
+        Span<int> starts = SliceSortScratch.AtLeast(ref scratch.Starts, buckets + 1).AsSpan(0, buckets + 1);
+        starts.Clear();
+        foreach (int code in codes.AsSpan(0, rows))
         {
             starts[code + 1]++;
         }
@@ -338,12 +369,12 @@ internal static class SliceSort
             starts[b + 1] += starts[b];
         }
 
-        foreach (int row in permutation)
+        foreach (int row in permutation.AsSpan(0, rows))
         {
-            scratch[starts[codes[row]]++] = row;
+            spare[starts[codes[row]]++] = row;
         }
 
-        scratch.AsSpan().CopyTo(permutation);
+        spare.AsSpan(0, rows).CopyTo(permutation);
     }
 
     /// <summary>A number's bits as a key: a float's zeros and NaNs each one key.</summary>
@@ -446,4 +477,46 @@ internal static class SliceSort
 
     private static bool Bit(CanonicalArena arena, int column, int row) =>
         ((ArenaWords.Bits(arena, column)[row >> 6] >> (row & 63)) & 1) != 0;
+}
+
+/// <summary>
+/// The arrays a column's codes and a slice's permutation are worked out in, which a sorter keeps from one slice to the
+/// next, a column's on the lane that codes it: the table of the distinct values, their first rows and keys, their order
+/// and their ranks, and the permutation's arrays. A sort through it allocates nothing once its arrays have grown to a
+/// slice's size; it serves one sort at a time.
+/// </summary>
+internal sealed class SliceSortScratch
+{
+    internal int[] Table = [];
+    internal int[] Firsts = new int[256];
+    internal ulong[] Keys = new ulong[256];
+    internal int[] ByValue = [];
+    internal ulong[] Ordered = [];
+    internal int[] Rank = [];
+    internal int[] Permutation = [];
+    internal int[] Spare = [];
+    internal int[] Starts = [];
+    private readonly FirstRows _comparer = new FirstRows();
+
+    /// <summary><paramref name="array"/>, grown to hold <paramref name="length"/> when it is shorter.</summary>
+    internal static T[] AtLeast<T>(ref T[] array, int length) =>
+        array.Length >= length ? array : array = new T[Math.Max(length, array.Length * 2)];
+
+    /// <summary>The order of distinct values by the rows <paramref name="firsts"/> finds them at, as <see cref="SliceSort.Compare"/> orders rows.</summary>
+    internal IComparer<int> ComparerOver(CanonicalArena arena, int column, int[] firsts)
+    {
+        _comparer.Arena = arena;
+        _comparer.Column = column;
+        _comparer.Firsts = firsts;
+        return _comparer;
+    }
+
+    private sealed class FirstRows : IComparer<int>
+    {
+        internal CanonicalArena? Arena;
+        internal int Column;
+        internal int[] Firsts = [];
+
+        public int Compare(int left, int right) => SliceSort.Compare(Arena!, Column, Firsts[left], Firsts[right]);
+    }
 }

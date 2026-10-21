@@ -327,7 +327,7 @@ internal sealed class SynopsisTables : IDisposable
                 parent[g] = _groups[d][firsts[d + 1][g]];
             }
 
-            states[d] = states[d + 1].Merge(parent, counts[d]);
+            states[d] = states[d + 1].Merge(parent, counts[d], RentStates(counts[d]));
         }
 
         // Each depth's groups in the order of their keys' values, which their numbering is down to the shapes, and
@@ -339,7 +339,7 @@ internal sealed class SynopsisTables : IDisposable
             if (d > leading)
             {
                 int[] places = Places(firsts[d], keyCodes, d);
-                states[d] = states[d].Merge(places, counts[d]);
+                states[d] = states[d].Merge(places, counts[d], RentStates(counts[d]));
                 keyed[d] = new int[counts[d]];
                 for (int g = 0; g < counts[d]; g++)
                 {
@@ -419,7 +419,7 @@ internal sealed class SynopsisTables : IDisposable
                     first[groupOf[p]] = first[groupOf[p]] < 0 ? at[p] : first[groupOf[p]];
                 }
 
-                await EmitValuesAsync(k, start, arena, columns[k], _keyShapes[k], states[used].Merge(groupOf, distinct), first, distinct, cancellationToken)
+                await EmitValuesAsync(k, start, arena, columns[k], _keyShapes[k], states[used].Merge(groupOf, distinct, RentStates(distinct)), first, distinct, cancellationToken)
                     .ConfigureAwait(false);
                 continue;
             }
@@ -450,6 +450,10 @@ internal sealed class SynopsisTables : IDisposable
         Note(_values, _valueGrowth, _hourRowsSeen);
         Prune();
         _rowsWritten += rows;
+
+        // Every state the slice counted in goes back for the next slice's.
+        _spareStates.AddRange(_rentedStates);
+        _rentedStates.Clear();
     }
 
     /// <summary>
@@ -1339,10 +1343,40 @@ internal sealed class SynopsisTables : IDisposable
         return places;
     }
 
+    /// <summary>
+    /// States of <paramref name="groups"/> groups of no row, kept from a slice before when there are some, which go back once
+    /// the slice is counted: a slice's states allocate nothing once they have grown to its groups.
+    /// </summary>
+    private Accumulators RentStates(int groups)
+    {
+        Accumulators? states = null;
+        while (_spareStates.Count > 0 && states is null)
+        {
+            Accumulators spare = _spareStates[^1];
+            _spareStates.RemoveAt(_spareStates.Count - 1);
+            states = ReferenceEquals(spare.Kinds, _kinds) ? spare : null;
+        }
+
+        if (states is null)
+        {
+            states = new Accumulators(_kinds, groups);
+        }
+        else
+        {
+            states.Reset(groups);
+        }
+
+        _rentedStates.Add(states);
+        return states;
+    }
+
+    private readonly List<Accumulators> _spareStates = [];
+    private readonly List<Accumulators> _rentedStates = [];
+
     /// <summary>Folds every row's measures into its group's states.</summary>
     private Accumulators Fold(CanonicalArena arena, int root, int rows, int[] groups, int count)
     {
-        Accumulators states = new Accumulators(_kinds, count);
+        Accumulators states = RentStates(count);
         ReadOnlySpan<int> groupOf = groups.AsSpan(0, rows);
         foreach (int group in groupOf)
         {
@@ -1503,37 +1537,70 @@ internal sealed class SynopsisTables : IDisposable
         private readonly WideIndexedSum[][] _floats;
         private readonly long[][] _least;
         private readonly long[][] _greatest;
+        private int _groups;
 
         internal Accumulators(MeasureKind[] kinds, int groups)
         {
             _kinds = kinds;
-            Count = new long[groups];
             _values = new long[kinds.Length][];
             _integers = new Int128[kinds.Length][];
             _floats = new WideIndexedSum[kinds.Length][];
             _least = new long[kinds.Length][];
             _greatest = new long[kinds.Length][];
-            for (int m = 0; m < kinds.Length; m++)
+            Reset(groups);
+        }
+
+        /// <summary>The measures' kinds the states are of.</summary>
+        internal MeasureKind[] Kinds => _kinds;
+
+        internal int Groups => _groups;
+
+        /// <summary>Each group's rows, valid over the first <see cref="Groups"/>.</summary>
+        internal long[] Count { get; private set; } = [];
+
+        /// <summary>
+        /// The states of <paramref name="groups"/> groups of no row, in the arrays kept from the last use, grown when they hold
+        /// fewer: what a synopsis reuses slice after slice, so that a slice's states allocate nothing once they have grown.
+        /// </summary>
+        internal void Reset(int groups)
+        {
+            if (Count.Length < groups)
             {
-                _values[m] = new long[groups];
-                _least[m] = new long[groups];
-                _greatest[m] = new long[groups];
-                if (kinds[m] == MeasureKind.Float)
+                int capacity = Math.Max(groups, Count.Length * 2);
+                Count = new long[capacity];
+                for (int m = 0; m < _kinds.Length; m++)
                 {
-                    _floats[m] = new WideIndexedSum[groups];
-                    _least[m].AsSpan().Fill(NoFloat);
-                    _greatest[m].AsSpan().Fill(NoFloat);
+                    _values[m] = new long[capacity];
+                    _least[m] = new long[capacity];
+                    _greatest[m] = new long[capacity];
+                    if (_kinds[m] == MeasureKind.Float)
+                    {
+                        _floats[m] = new WideIndexedSum[capacity];
+                    }
+                    else
+                    {
+                        _integers[m] = new Int128[capacity];
+                    }
+                }
+            }
+
+            _groups = groups;
+            Count.AsSpan(0, groups).Clear();
+            for (int m = 0; m < _kinds.Length; m++)
+            {
+                _values[m].AsSpan(0, groups).Clear();
+                if (_kinds[m] == MeasureKind.Float)
+                {
+                    _floats[m].AsSpan(0, groups).Clear();
+                    _least[m].AsSpan(0, groups).Fill(NoFloat);
+                    _greatest[m].AsSpan(0, groups).Fill(NoFloat);
                 }
                 else
                 {
-                    _integers[m] = new Int128[groups];
+                    _integers[m].AsSpan(0, groups).Clear();
                 }
             }
         }
-
-        internal int Groups => Count.Length;
-
-        internal long[] Count { get; }
 
         /// <summary>Group <paramref name="group"/>'s states as the words of a record (<see cref="StateWords"/>).</summary>
         internal void Words(int group, Span<long> words)
@@ -1563,10 +1630,13 @@ internal sealed class SynopsisTables : IDisposable
             }
         }
 
-        /// <summary>The states merged into <paramref name="count"/> groups, each group's into group <paramref name="groupOf"/> of it.</summary>
-        internal Accumulators Merge(ReadOnlySpan<int> groupOf, int count)
+        /// <summary>
+        /// The states merged into the <paramref name="merged"/> states of <paramref name="count"/> groups, which it resets, each
+        /// group's into group <paramref name="groupOf"/> of it.
+        /// </summary>
+        internal Accumulators Merge(ReadOnlySpan<int> groupOf, int count, Accumulators merged)
         {
-            Accumulators merged = new Accumulators(_kinds, count);
+            merged.Reset(count);
             for (int g = 0; g < groupOf.Length; g++)
             {
                 merged.Count[groupOf[g]] += Count[g];

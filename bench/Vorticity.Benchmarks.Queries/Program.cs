@@ -102,7 +102,8 @@ if (Text(args, "--micro") == "load")
         Option(args, "--rounds", 3),
         Option(args, "--budget", 100),
         Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
-        args.Contains("--disk"));
+        args.Contains("--disk"),
+        Option(args, "--period-hours", 1));
 }
 
 // --micro seal: what the compaction of a period costs at the design's scale, job by job and pass by pass (SealBench.cs).

@@ -17,13 +17,15 @@ namespace Vorticity.Benchmarks.Queries;
 /// <c>--micro load</c>: the write path of a load of sealed periods at the time-window design's density, a few seconds a
 /// round. <c>--periods</c> hours of <c>--minutes</c> minutes of requests each, at <c>--rate</c> a second, <c>--parallel</c> of
 /// them at once, each minute a part drawn by a generator of its own, into a store of its own under <c>--store</c> each
-/// round (<see cref="DesignBuild.LoadAsync"/> loads days of hours so). Each round says its rows and bytes a second, the
-/// processor time it took, the bytes it allocated, its collections and the most memory it held, and each period how long
-/// its plan, its write and its finish took; <c>--disk</c> first measures what the store's disk takes in a second.
+/// round (<see cref="DesignBuild.LoadAsync"/> loads days of hours so); with <c>--period-hours</c> H past 1, the periods are
+/// days of H hours of <c>--minutes</c> minutes each, a day's object and its hours' boundaries at a smaller size. Each round
+/// says its rows and bytes a second, the processor time it took, the bytes it allocated, its collections and the most
+/// memory it held, and each period how long its plan, its write and its finish took; <c>--disk</c> first measures what
+/// the store's disk takes in a second.
 /// </summary>
 internal static class LoadMicro
 {
-    internal static async Task<int> Run(string root, int periods, int parallel, int minutes, double rate, int rounds, int budget, int writeDegree, bool disk)
+    internal static async Task<int> Run(string root, int periods, int parallel, int minutes, double rate, int rounds, int budget, int writeDegree, bool disk, int periodHours = 1)
     {
         Directory.CreateDirectory(root);
         if (disk)
@@ -34,10 +36,10 @@ internal static class LoadMicro
 
         long perHour = (long)(rate * 3_600);
         long perMinute = perHour / 60;
-        long rows = periods * minutes * perMinute;
+        long rows = periods * periodHours * minutes * perMinute;
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"load: {periods} periods of {minutes} min at {rate:N0} rows a second, {rows / 1e6:F1} M rows a round, {parallel} at once, write degree {writeDegree}, store {root}"));
+            $"load: {periods} periods of {periodHours} h of {minutes} min at {rate:N0} rows a second, {rows / 1e6:F1} M rows a round, {parallel} at once, write degree {writeDegree}, store {root}"));
         List<double> times = [];
         for (int round = 0; round < rounds; round++)
         {
@@ -54,7 +56,7 @@ internal static class LoadMicro
             {
                 Session = session,
                 ClusteringKey = [nameof(GeneratedRequest.At)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = periodHours > 1 ? SliceWidth.Day : SliceWidth.Hour },
                 Identifiers = [nameof(GeneratedRequest.RequestId)],
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
             });
@@ -64,11 +66,12 @@ internal static class LoadMicro
             PeriodRows[] loads = new PeriodRows[periods];
             for (int p = 0; p < periods; p++)
             {
-                int hour = p;
+                // A period is an hour, or a day whose first hours hold the rows; a part is a minute of one of them.
+                int first = periodHours > 1 ? p * 24 : p;
                 loads[p] = new PeriodRows(
-                    TimeSlicer.InstantOf(QuestionBench.Start.AddHours(hour), unit),
-                    [.. Enumerable.Range(0, minutes).Select(m => (Func<CancellationToken, IAsyncEnumerable<RecordBatch>>)(token =>
-                        DesignBuild.RowsAsync(row, unit, hour, m * perMinute, perMinute, perHour, 1_000 + (hour * 60) + m, token)))]);
+                    TimeSlicer.InstantOf(QuestionBench.Start.AddHours(first), unit),
+                    [.. Enumerable.Range(0, periodHours * minutes).Select(at => (Func<CancellationToken, IAsyncEnumerable<RecordBatch>>)(token =>
+                        DesignBuild.RowsAsync(row, unit, first + (at / minutes), at % minutes * perMinute, perMinute, perHour, 1_000 + ((first + (at / minutes)) * 60) + (at % minutes), token)))]);
             }
 
             GC.Collect();

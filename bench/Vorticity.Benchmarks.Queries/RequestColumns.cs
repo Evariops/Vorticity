@@ -21,14 +21,16 @@ internal sealed class RequestColumns
     private const int ViewSize = 16;
     private const int IdBytes = 16;
 
+    // Every name's view, made once: the names are the generator's, the same for every generator.
+    private static readonly Int128[] ServiceViews = Views(RequestGenerator.ServiceNames);
+    private static readonly Int128[][] EndpointViews = [.. RequestGenerator.EndpointNames.Select(Views)];
+    private static readonly Int128[] MethodViews = Views(RequestGenerator.MethodNames);
+    private static readonly Int128[] RegionViews = Views(RequestGenerator.RegionNames);
+    private static readonly Int128[][] VersionViews = [.. RequestGenerator.VersionNames.Select(Views)];
+    private static readonly Int128[][] HostViews = [.. RequestGenerator.HostNames.Select(Views)];
+
     private readonly RequestGenerator _generator;
     private readonly DType _row;
-    private readonly Int128[] _services;
-    private readonly Int128[][] _endpoints;
-    private readonly Int128[] _methods;
-    private readonly Int128[] _regions;
-    private readonly Int128[][] _versions;
-    private readonly Int128[][] _hosts;
 
     /// <param name="generator">The draws, which a generator of the same seed repeats.</param>
     /// <param name="row">The row type of the dataset the batches are for: <see cref="GeneratedRequest"/>'s columns, in its order.</param>
@@ -36,12 +38,6 @@ internal sealed class RequestColumns
     {
         _generator = generator;
         _row = row;
-        _services = Views(generator.ServiceNames);
-        _endpoints = [.. generator.EndpointNames.Select(Views)];
-        _methods = Views(RequestGenerator.MethodNames);
-        _regions = Views(RequestGenerator.RegionNames);
-        _versions = [.. generator.VersionNames.Select(Views)];
-        _hosts = [.. generator.HostNames.Select(Views)];
     }
 
     /// <summary>
@@ -78,13 +74,13 @@ internal sealed class RequestColumns
         {
             RequestDraw draw = _generator.Draw(out long id);
             at[i] = origin + (long)((first + i) * step);
-            services[i] = _services[draw.Service];
-            endpoints[i] = _endpoints[draw.Service][draw.Endpoint];
-            methods[i] = _methods[draw.Method];
+            services[i] = ServiceViews[draw.Service];
+            endpoints[i] = EndpointViews[draw.Service][draw.Endpoint];
+            methods[i] = MethodViews[draw.Method];
             statuses[i] = draw.Status;
-            regions[i] = _regions[draw.Region];
-            versions[i] = _versions[draw.Service][draw.Version];
-            hosts[i] = _hosts[draw.Service][draw.Host];
+            regions[i] = RegionViews[draw.Region];
+            versions[i] = VersionViews[draw.Service][draw.Version];
+            hosts[i] = HostViews[draw.Service][draw.Host];
             durations[i] = draw.DurationNs;
             weights[i] = draw.Weight;
 

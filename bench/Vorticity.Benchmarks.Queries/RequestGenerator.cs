@@ -38,14 +38,16 @@ internal sealed class RequestGenerator
     private static readonly string[] Methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE"];
     private static readonly double[] MethodWeights = [0.75, 0.15, 0.04, 0.03, 0.02, 0.007, 0.0025, 0.0005];
 
+    // The weights and the names depend on the constants alone: made once, every generator draws through them.
+    private static readonly double[] ServiceWeights = Cumulative(Zipf(Services, 0.8));
+    private static readonly double[] EndpointWeights = Cumulative(Zipf(EndpointsPerService, 2.0));
+    private static readonly int[] VersionCounts = [.. Enumerable.Range(0, Services).Select(_ => 2)];
+    private static readonly string[] ServiceNameTable = [.. Enumerable.Range(0, Services).Select(s => $"service-{s:D3}")];
+    private static readonly string[][] EndpointNameTable = [.. Enumerable.Range(0, Services).Select(s => Enumerable.Range(0, EndpointsPerService).Select(e => $"/s{s}/e{e}").ToArray())];
+    private static readonly string[][] VersionNameTable = [.. Enumerable.Range(0, Services).Select(s => Enumerable.Range(0, VersionCounts[s]).Select(v => $"{s}.{v}.0").ToArray())];
+    private static readonly string[][] HostNameTable = [.. Enumerable.Range(0, Services).Select(s => Enumerable.Range(0, HostsPerService).Select(h => $"host-{s:D3}-{h:D2}").ToArray())];
+
     private readonly Random _random;
-    private readonly double[] _serviceWeights;
-    private readonly double[] _endpointWeights;
-    private readonly int[] _versions;
-    private readonly string[] _serviceNames;
-    private readonly string[][] _endpointNames;
-    private readonly string[][] _versionNames;
-    private readonly string[][] _hostNames;
     private long _next;
 
     /// <param name="seed">The seed: the same seed draws the same rows.</param>
@@ -54,13 +56,6 @@ internal sealed class RequestGenerator
     {
         _next = firstId;
         _random = new Random(seed);
-        _serviceWeights = Cumulative(Zipf(Services, 0.8));
-        _endpointWeights = Cumulative(Zipf(EndpointsPerService, 2.0));
-        _versions = [.. Enumerable.Range(0, Services).Select(_ => 2)];
-        _serviceNames = [.. Enumerable.Range(0, Services).Select(s => $"service-{s:D3}")];
-        _endpointNames = [.. Enumerable.Range(0, Services).Select(s => Enumerable.Range(0, EndpointsPerService).Select(e => $"/s{s}/e{e}").ToArray())];
-        _versionNames = [.. Enumerable.Range(0, Services).Select(s => Enumerable.Range(0, _versions[s]).Select(v => $"{s}.{v}.0").ToArray())];
-        _hostNames = [.. Enumerable.Range(0, Services).Select(s => Enumerable.Range(0, HostsPerService).Select(h => $"host-{s:D3}-{h:D2}").ToArray())];
     }
 
     /// <summary>One request at <paramref name="at"/>, its other columns drawn.</summary>
@@ -68,8 +63,8 @@ internal sealed class RequestGenerator
     {
         RequestDraw draw = Draw(out long id);
         return new GeneratedRequest(
-            at, _serviceNames[draw.Service], _endpointNames[draw.Service][draw.Endpoint], Methods[draw.Method], draw.Status, Regions[draw.Region],
-            _versionNames[draw.Service][draw.Version], _hostNames[draw.Service][draw.Host], $"req-{id:x12}", draw.DurationNs, draw.Weight);
+            at, ServiceNameTable[draw.Service], EndpointNameTable[draw.Service][draw.Endpoint], Methods[draw.Method], draw.Status, Regions[draw.Region],
+            VersionNameTable[draw.Service][draw.Version], HostNameTable[draw.Service][draw.Host], $"req-{id:x12}", draw.DurationNs, draw.Weight);
     }
 
     /// <summary>
@@ -79,7 +74,7 @@ internal sealed class RequestGenerator
     internal RequestDraw Draw(out long id)
     {
         // A service runs in its home region, which serves nearly all its requests.
-        int service = Lower(_serviceWeights, _random.NextDouble());
+        int service = Lower(ServiceWeights, _random.NextDouble());
         int home = HomeOf(service);
         // Four services in five only read: their writes are reads. One in ten takes health checks and probes.
         int method = Pick(MethodWeights);
@@ -96,10 +91,10 @@ internal sealed class RequestGenerator
 
         // An endpoint answers one method: the service's endpoints are shared out among them, the reads taking most.
         (int first, int count) = EndpointsOf(method);
-        int endpoint = first + Math.Min(Lower(_endpointWeights, _random.NextDouble()) % count, count - 1);
+        int endpoint = first + Math.Min(Lower(EndpointWeights, _random.NextDouble()) % count, count - 1);
 
         // The current version takes most of the rows, the others the rest.
-        int version = _random.NextDouble() < 0.97 ? 0 : 1 + _random.Next(_versions[service] - 1);
+        int version = _random.NextDouble() < 0.97 ? 0 : 1 + _random.Next(VersionCounts[service] - 1);
         int host = _random.Next(HostsPerService);
         id = _next++;
         double duration = Math.Exp(15 + (_random.NextDouble() * 3));
@@ -107,16 +102,16 @@ internal sealed class RequestGenerator
     }
 
     /// <summary>The services' names, by index.</summary>
-    internal IReadOnlyList<string> ServiceNames => _serviceNames;
+    internal static IReadOnlyList<string> ServiceNames => ServiceNameTable;
 
     /// <summary>Each service's endpoints' names, by service then endpoint.</summary>
-    internal IReadOnlyList<string[]> EndpointNames => _endpointNames;
+    internal static IReadOnlyList<string[]> EndpointNames => EndpointNameTable;
 
     /// <summary>Each service's versions' names, by service then version.</summary>
-    internal IReadOnlyList<string[]> VersionNames => _versionNames;
+    internal static IReadOnlyList<string[]> VersionNames => VersionNameTable;
 
     /// <summary>Each service's hosts' names, by service then host.</summary>
-    internal IReadOnlyList<string[]> HostNames => _hostNames;
+    internal static IReadOnlyList<string[]> HostNames => HostNameTable;
 
     /// <summary>The methods' names, by index.</summary>
     internal static IReadOnlyList<string> MethodNames => Methods;

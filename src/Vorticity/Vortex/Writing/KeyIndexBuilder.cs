@@ -512,9 +512,12 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         int ahead = Lanes is { } lanes && !scratch.SealsFile ? Math.Clamp(lanes.Lanes, 1, BucketsAhead) : 1;
         BucketBuffers[] buffers = new BucketBuffers[ahead];
         Task<int>[] sorting = new Task<int>[ahead];
+        int largest = buckets.Largest;
         for (int slot = 0; slot < ahead && slot < buckets.Buckets; slot++)
         {
+            // Made once for the largest bucket, so that no bucket's sort grows them.
             buffers[slot] = new BucketBuffers();
+            buffers[slot].Reserve(largest);
             sorting[slot] = SortAheadAsync(buckets, slot, scratch, buffers[slot], ahead > 1, cancellationToken);
         }
 

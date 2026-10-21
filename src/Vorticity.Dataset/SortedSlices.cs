@@ -252,16 +252,16 @@ internal sealed class SortedSlices : IDisposable
         else
         {
             _order ??= [.. _table.Order];
-            columns = Coded(arena, node, rows, paths, _order);
+            columns = Coded(buffer, arena, node, rows, paths, _order);
         }
 
-        int[]? permutation = columns.Count == 0 ? null : SliceSort.Permutation(columns, rows);
-        bool identity = permutation is null || IsIdentity(permutation);
+        int[]? permutation = columns.Count == 0 ? null : SliceSort.Permutation(columns, rows, _sortScratch);
+        bool identity = permutation is null || IsIdentity(permutation.AsSpan(0, rows));
 
         // Each path's values, in the order the rows are sorted in.
         foreach (int column in paths)
         {
-            buffer.PathColumns.Add(column < 0 || identity ? column : CanonicalFilter.Apply(arena, column, permutation!));
+            buffer.PathColumns.Add(column < 0 || identity ? column : CanonicalFilter.Apply(arena, column, permutation!.AsSpan(0, rows)));
         }
 
         if (permutation is null)
@@ -290,17 +290,21 @@ internal sealed class SortedSlices : IDisposable
             buffer.Codes.Add(codes);
         }
 
-        return identity ? node : CanonicalFilter.Apply(arena, node, permutation!);
+        return identity ? node : CanonicalFilter.Apply(arena, node, permutation!.AsSpan(0, rows));
     }
 
     /// <summary>
     /// Each entry of <paramref name="order"/>'s codes over the slice: the columns a lane each, every one laid in the arena
     /// first, the shapes and the paths after them on this thread.
     /// </summary>
-    private List<(int[] Codes, int Distinct)> Coded(CanonicalArena arena, int node, int rows, int[] paths, IReadOnlyList<int> order)
+    private List<(int[] Codes, int Distinct)> Coded(Buffer buffer, CanonicalArena arena, int node, int rows, int[] paths, IReadOnlyList<int> order)
     {
         (int[] Codes, int Distinct)[] coded = new (int[] Codes, int Distinct)[order.Count];
         int[] columns = new int[order.Count];
+        if (_columnScratch.Length < order.Count)
+        {
+            Array.Resize(ref _columnScratch, order.Count);
+        }
         int fields = 0;
         for (int k = 0; k < order.Count; k++)
         {
@@ -311,10 +315,24 @@ internal sealed class SortedSlices : IDisposable
 
         if (fields > 0)
         {
+            // A column's codes go to the buffer's array of its place, worked out in the scratch of its place: a slice
+            // allocates nothing for them once the arrays have grown to its size.
+            int[][] into = new int[order.Count][];
+            for (int k = 0; k < order.Count; k++)
+            {
+                if (columns[k] >= 0)
+                {
+                    into[k] = buffer.CodeArray(k, rows);
+                    _columnScratch[k] ??= new SliceSortScratch();
+                }
+            }
+
             _codes.Arena = arena;
             _codes.Columns = columns;
             _codes.Rows = rows;
             _codes.Results = coded;
+            _codes.Into = into;
+            _codes.Scratch = _columnScratch;
             Fan.Run(_codes, order.Count);
             _codes.Arena = null;
             _codes.Results = null;
@@ -338,6 +356,10 @@ internal sealed class SortedSlices : IDisposable
     private WorkFan Fan => _fan ??= WorkFan.Rent(Lanes?.Lanes ?? 1, Lanes);
 
     private WorkFan? _fan;
+
+    // The arrays a slice's sort works in, kept from slice to slice: each order place's, and the permutation's.
+    private SliceSortScratch[] _columnScratch = [];
+    private readonly SliceSortScratch _sortScratch = new SliceSortScratch();
     private readonly ColumnCodes _codes = new ColumnCodes();
     private readonly CodesGather _gather = new CodesGather();
 
@@ -348,12 +370,15 @@ internal sealed class SortedSlices : IDisposable
         internal int[] Columns = [];
         internal int Rows;
         internal (int[] Codes, int Distinct)[]? Results;
+        internal int[][] Into = [];
+        internal SliceSortScratch[] Scratch = [];
 
         public void Run(WorkFan fan, int item)
         {
             if (Columns[item] >= 0)
             {
-                Results![item] = SliceSort.CodesOfCanonical(Arena!, Columns[item], Rows);
+                int[] codes = Into[item];
+                Results![item] = (codes, SliceSort.Codes(Arena!, Columns[item], Rows, codes, Scratch[item]));
             }
         }
     }
@@ -535,6 +560,25 @@ internal sealed class SortedSlices : IDisposable
         internal List<int> Parts { get; } = [];
 
         internal List<int[]> Codes { get; } = [];
+
+        /// <summary>The arrays the codes of each order place are kept in, from one slice of the buffer to the next.</summary>
+        private readonly List<int[]> _codeArrays = [];
+
+        /// <summary>The array of place <paramref name="place"/>'s codes, of at least <paramref name="rows"/> rows.</summary>
+        internal int[] CodeArray(int place, int rows)
+        {
+            while (_codeArrays.Count <= place)
+            {
+                _codeArrays.Add([]);
+            }
+
+            if (_codeArrays[place].Length < rows)
+            {
+                _codeArrays[place] = new int[rows];
+            }
+
+            return _codeArrays[place];
+        }
 
         internal List<int> PathColumns { get; } = [];
 

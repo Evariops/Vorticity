@@ -83,6 +83,21 @@ internal sealed class HashedBuckets : IDisposable
     /// <summary>The pairs noted, each (hash, block) once.</summary>
     internal long Pairs { get; private set; }
 
+    /// <summary>The pairs of the largest bucket: what the buffers of a bucket's sort are made for once.</summary>
+    internal int Largest
+    {
+        get
+        {
+            long largest = 0;
+            for (int b = 0; b < _pages.Length; b++)
+            {
+                largest = Math.Max(largest, ((long)_pages[b].Count * PagePairs) + _fill[b]);
+            }
+
+            return checked((int)largest);
+        }
+    }
+
     /// <summary>Notes <paramref name="hash"/> in <paramref name="block"/>, the open block, once.</summary>
     internal void Note(ulong hash, uint block)
     {
