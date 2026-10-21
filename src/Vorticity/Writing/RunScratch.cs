@@ -15,10 +15,17 @@ namespace Vorticity.Writing;
 /// members serve it while it is in memory; its file is read and written asynchronously.
 /// </summary>
 /// <remarks>
+/// <para>
+/// Its file is written a page at a time: the page being filled stays in memory, a read of it served from
+/// there, and goes to the file once full, so that a store appended a few kilobytes at a time, a bucket's
+/// page of postings or a chunk held for the synopsis part, costs a write a megabyte rather than one an append.
+/// </para>
+/// <para>
 /// A store whose session seals its files seals its file too: frames of 64 KiB under AES-256-GCM,
 /// a key drawn for the file and held in memory only, so that after a crash the file is unreadable,
 /// which is what scratch should be. Each frame is written once, when it is full, under a nonce made of
 /// its index; the frame being filled stays in memory, and a read of it is served from there.
+/// </para>
 /// </remarks>
 internal sealed class RunScratch : IDisposable
 {
@@ -39,6 +46,18 @@ internal sealed class RunScratch : IDisposable
     private SafeFileHandle? _file;
     private long _length;
     private long _admitted;
+
+    /// <summary>
+    /// A plain store's page being filled once it is on disk, the bytes from <see cref="_flushed"/> on: written to the file
+    /// once full, and served from here to a read meanwhile.
+    /// </summary>
+    private byte[]? _tail;
+
+    /// <summary>The bytes of a plain store's file written, whole pages: its tail starts there.</summary>
+    private long _flushed;
+
+    /// <summary>Held while the writer moves to the next page, and while a reader copies out of the one being filled.</summary>
+    private readonly Lock _gate = new Lock();
 
     /// <summary>
     /// Whether runs held outside the store may stay in memory, charged against the same budget as
@@ -70,7 +89,7 @@ internal sealed class RunScratch : IDisposable
     /// <summary>Whether the store's file, once it has one, is sealed.</summary>
     internal bool SealsFile => _sealFile;
 
-    /// <summary>The store's file once it is on disk, for a test that reads what lies there.</summary>
+    /// <summary>The store's file once it is on disk, for a test that reads what lies there: its whole pages, or its frames.</summary>
     internal SafeFileHandle? FileHandle => _file;
 
     internal long Length => _length;
@@ -122,10 +141,24 @@ internal sealed class RunScratch : IDisposable
     /// Appends the bytes and returns where they start: in memory while they fit, completing at
     /// once, and in the file past that, the store moving there first.
     /// </summary>
-    internal ValueTask<long> AppendAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken) =>
-        bytes.IsEmpty || Fits(bytes.Length)
-            ? new ValueTask<long>(Append(bytes.Span))
-            : AppendToFileAsync(bytes, cancellationToken);
+    internal ValueTask<long> AppendAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
+    {
+        if (bytes.IsEmpty || Fits(bytes.Length))
+        {
+            return new ValueTask<long>(Append(bytes.Span));
+        }
+
+        // Bytes that leave a plain file's page short of full go in it at once: only a page filled goes to the file.
+        if (_tail is { } tail && _length - _flushed + bytes.Length < PageBytes)
+        {
+            long offset = _length;
+            bytes.Span.CopyTo(tail.AsSpan((int)(_length - _flushed)));
+            _length += bytes.Length;
+            return new ValueTask<long>(offset);
+        }
+
+        return AppendToFileAsync(bytes, cancellationToken);
+    }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<long> AppendToFileAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
@@ -135,13 +168,31 @@ internal sealed class RunScratch : IDisposable
         if (_frames is { } frames)
         {
             await frames.AppendAsync(_file!, bytes, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            await RandomAccess.WriteAsync(_file!, bytes, offset, cancellationToken).ConfigureAwait(false);
+            _length += bytes.Length;
+            return offset;
         }
 
-        _length += bytes.Length;
+        byte[] tail = _tail!;
+        while (!bytes.IsEmpty)
+        {
+            int at = (int)(_length - _flushed);
+            int take = Math.Min(PageBytes - at, bytes.Length);
+            bytes.Span[..take].CopyTo(tail.AsSpan(at));
+            bytes = bytes[take..];
+            _length += take;
+            if (at + take == PageBytes)
+            {
+                await RandomAccess.WriteAsync(_file!, tail.AsMemory(0, PageBytes), _flushed, cancellationToken).ConfigureAwait(false);
+
+                // The page is on disk before a reader is sent there, and refilled only once no reader can still be
+                // copying it out.
+                lock (_gate)
+                {
+                    _flushed += PageBytes;
+                }
+            }
+        }
+
         return offset;
     }
 
@@ -180,9 +231,28 @@ internal sealed class RunScratch : IDisposable
         }
 
         CheckRange(offset, destination.Length);
-        return _frames is { } frames
-            ? frames.ReadAsync(_file!, offset, destination, cancellationToken)
-            : ReadFileAsync(offset, destination, cancellationToken);
+        if (_frames is { } frames)
+        {
+            return frames.ReadAsync(_file!, offset, destination, cancellationToken);
+        }
+
+        // What lies past the pages written is copied out of the page being filled under the gate the writer moves to the
+        // next page under, so that the bytes copied are that page's and not the next one's; the pages written are read after.
+        long flushed;
+        lock (_gate)
+        {
+            flushed = _flushed;
+            long from = Math.Max(offset, flushed);
+            long end = offset + destination.Length;
+            if (end > from)
+            {
+                _tail!.AsSpan((int)(from - flushed), (int)(end - from)).CopyTo(destination.Span[(int)(from - offset)..]);
+            }
+        }
+
+        return offset < flushed
+            ? ReadFileAsync(offset, destination[..(int)Math.Min(destination.Length, flushed - offset)], cancellationToken)
+            : ValueTask.CompletedTask;
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
@@ -242,6 +312,9 @@ internal sealed class RunScratch : IDisposable
 
         FileStream stream = new FileStream(path, options);
         SafeFileHandle file = stream.SafeFileHandle;
+
+        // A plain store's last page, when it is not full, stays in memory as the page being filled.
+        int whole = _sealFile ? _pages.Count : (int)(_length / PageBytes);
         try
         {
             if (!OperatingSystem.IsWindows())
@@ -253,7 +326,7 @@ internal sealed class RunScratch : IDisposable
             try
             {
                 long position = 0;
-                for (int i = 0; i < _pages.Count; i++)
+                for (int i = 0; i < whole; i++)
                 {
                     int length = (int)Math.Min(PageBytes, _length - position);
                     if (frames is not null)
@@ -285,9 +358,18 @@ internal sealed class RunScratch : IDisposable
         // The pages go only once the file holds them: a spill that fails leaves the store in memory.
         _stream = stream;
         _file = file;
+        if (!_sealFile)
+        {
+            _flushed = (long)whole * PageBytes;
+            _tail = whole < _pages.Count ? _pages[whole] : ArrayPool<byte>.Shared.Rent(PageBytes);
+        }
+
         foreach (byte[] page in _pages)
         {
-            ArrayPool<byte>.Shared.Return(page);
+            if (!ReferenceEquals(page, _tail))
+            {
+                ArrayPool<byte>.Shared.Return(page);
+            }
         }
 
         _pages.Clear();
@@ -300,6 +382,12 @@ internal sealed class RunScratch : IDisposable
         _file = null;
         _frames?.Dispose();
         _frames = null;
+        if (_tail is { } tail)
+        {
+            _tail = null;
+            ArrayPool<byte>.Shared.Return(tail);
+        }
+
         foreach (byte[] page in _pages)
         {
             ArrayPool<byte>.Shared.Return(page, clearArray: _sealFile);
