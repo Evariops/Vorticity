@@ -65,6 +65,13 @@ internal sealed partial class SynopsisTables : IDisposable
     internal const int ChunkRows = 1 << 16;
 
     /// <summary>
+    /// The rows a chunk of a table of a column's values per slice holds at most: an hour's rows of a value, one a slice, lie
+    /// in one chunk, which a question of a few values reads alone, at a quarter of the bytes a chunk of
+    /// <see cref="ChunkRows"/> took for the same rows.
+    /// </summary>
+    internal const int BoundedChunkRows = 1 << 14;
+
+    /// <summary>
     /// The rows of a table's first chunk, at most: enough for the bytes a row takes once encoded to say what the rest will
     /// take, few enough for a table that grows fast to say it early.
     /// </summary>
@@ -1170,7 +1177,9 @@ internal sealed partial class SynopsisTables : IDisposable
         }
 
         table.Stage.Append(bucket, key, words);
-        return table.Stage.Rows >= (table.Held < 0 ? Math.Max(_chunking.Rows / (ChunkRows / ProbeRows), 1) : _chunking.Rows);
+        int full = table.Held < 0 ? Math.Max(_chunking.Rows / (ChunkRows / ProbeRows), 1)
+            : table.Stage.Bounded ? Math.Min(_chunking.Rows, BoundedChunkRows) : _chunking.Rows;
+        return table.Stage.Rows >= full;
     }
 
     /// <summary>

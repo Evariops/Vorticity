@@ -954,6 +954,9 @@ internal sealed class ChunkStage
 
     internal ReadOnlySpan<byte> GreatestKey => _greatest.Span;
 
+    /// <summary>Whether the stage bounds its rows' first key: a chunk of a table of values in their order.</summary>
+    internal bool Bounded => _bounded;
+
     /// <summary>Holds a row: its bucket, its key's components, encoded as a run's records hold them, and its states.</summary>
     internal void Append(long bucket, ReadOnlySpan<byte> key, ReadOnlySpan<long> words)
     {

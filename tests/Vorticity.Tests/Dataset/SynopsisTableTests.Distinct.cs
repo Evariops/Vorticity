@@ -80,15 +80,41 @@ public sealed partial class SynopsisTableTests
         }
     }
 
-    /// <summary>The wide rows written with their synopsis, every table kept, into <paramref name="scratch"/>.</summary>
-    private static async Task<string> WideAsync(string scratch)
+    /// <summary>
+    /// The wide rows of 4 000 hosts: the hosts' values per slice, some 23 800 rows, lie in chunks of 16 384 rows at most,
+    /// a quarter of another table's, so that a question of one host reads the rows of its hour in one of them.
+    /// </summary>
+    [Fact]
+    public async Task AChunkOfATableOfValuesPerSliceHoldsAQuarterOfAnotherTablesRows()
+    {
+        string scratch = Path.Combine(Path.GetTempPath(), $"vortex-bounded-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        try
+        {
+            string path = await WideAsync(scratch, hosts: 4_000);
+            await using VortexFile file = await VortexFile.OpenAsync(path, cancellationToken: Ct);
+            int host = file.DType.IndexOfField(nameof(Wide.Host));
+            List<(SynopsisTableInfo Info, List<TableRow> Rows)> chunks = [.. (await TablesAsync(file))
+                .Where(t => t.Info is { Kind: SynopsisTableKind.Values, Bucket: SynopsisBucket.Slice } && t.Info.Keys.SequenceEqual([host]))];
+            Assert.True(chunks.Count >= 2, $"{chunks.Count} chunks of the hosts' values per slice");
+            Assert.All(chunks, chunk => Assert.InRange(chunk.Rows.Count, 1, SynopsisTables.BoundedChunkRows));
+            Assert.True(chunks.Sum(chunk => chunk.Rows.Count) > SynopsisTables.BoundedChunkRows, "the table fits one chunk");
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    /// <summary>The wide rows, of <paramref name="hosts"/> hosts, written with their synopsis, every table kept, into <paramref name="scratch"/>.</summary>
+    private static async Task<string> WideAsync(string scratch, int hosts = 2_000)
     {
         Random random = new Random(29);
         Wide[] rows = new Wide[WideRows];
         long step = TimeSpan.FromHours(2).Ticks / WideRows;
         for (int i = 0; i < rows.Length; i++)
         {
-            rows[i] = new Wide(Noon.AddTicks(i * step), $"region-{random.Next(4)}", $"host-{random.Next(2_000)}", random.NextInt64(1_000_000));
+            rows[i] = new Wide(Noon.AddTicks(i * step), $"region-{random.Next(4)}", $"host-{random.Next(hosts)}", random.NextInt64(1_000_000));
         }
 
         string plain = Path.Combine(scratch, $"{Guid.NewGuid():N}.vortex");
