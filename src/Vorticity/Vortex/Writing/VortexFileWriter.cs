@@ -662,6 +662,60 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
+    /// Declares the file's synopsis columns (<see cref="VortexWriteOptions.SynopsisColumns"/>) before its first row: a
+    /// caller that settles them from its first rows, as a load in one pass does from its first slice, names them once
+    /// that slice is sorted, before it is written.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The writer took a row already, or builds no index, so it writes no directory to name them in.</exception>
+    /// <exception cref="ArgumentException">A column is no top-level column of the file.</exception>
+    internal void DeclareSynopsisColumns(IReadOnlyList<string> columns)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+        if (_indexes is null || _acceptedRows > 0)
+        {
+            throw new InvalidOperationException("A file's synopsis columns are named before its first row, in its index directory, which a writer that builds no index does not write.");
+        }
+
+        MarkSynopsis(columns, nameof(columns));
+    }
+
+    /// <summary>
+    /// Declares the most rows the file will hold (<see cref="VortexWriteOptions.RowBound"/>) before its first row: a caller
+    /// that learns it from its first rows, as a load in one pass does from the pace of its first slice, sizes the file's
+    /// chunks and its hashed postings' buckets by it.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The writer took a row already.</exception>
+    internal void DeclareRowBound(long rowBound)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(rowBound);
+        if (_acceptedRows > 0)
+        {
+            throw new InvalidOperationException("A file's row bound sizes its chunks from its first row on: it is declared before it.");
+        }
+
+        _leastChunkBlocks = LeastChunkBlocks(rowBound, _schema, _rowBlock);
+        if (_indexes is { } built)
+        {
+            built.ExpectedRows = rowBound;
+        }
+    }
+
+    /// <summary>Marks <paramref name="columns"/>, the argument <paramref name="parameter"/> names, as the synopsis part's.</summary>
+    private void MarkSynopsis(IReadOnlyList<string> columns, string parameter)
+    {
+        foreach (string column in columns)
+        {
+            int field = _isTabular ? _schema.IndexOfField(column) : -1;
+            if (field < 0)
+            {
+                throw new ArgumentException($"'{column}' is no top-level column of the file, and only those lie in the synopsis part.", parameter);
+            }
+
+            (_synopsis ??= new bool[_fieldCount])[field] = true;
+        }
+    }
+
+    /// <summary>
     /// Declares the tables of the file's synopsis, each by what it holds and the table its chunks were held under
     /// (<see cref="ISynopsisChunkSink"/>): written in the synopsis part after its columns, those the choice keeps,
     /// each chunk an array payload of its index entry.
@@ -1093,16 +1147,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The synopsis part's chunks wait where the indexes' runs do, its tables' with its columns'.
         writer._synopsisSpool = (options.ScratchMemoryBytes, options.ScratchDirectory, options.SealScratch);
-        foreach (string column in options.SynopsisColumns ?? [])
-        {
-            int field = writer._isTabular ? schema.IndexOfField(column) : -1;
-            if (field < 0)
-            {
-                throw new ArgumentException($"'{column}' is no top-level column of the file, and only those lie in the synopsis part.", nameof(options));
-            }
-
-            (writer._synopsis ??= new bool[writer._fieldCount])[field] = true;
-        }
+        writer.MarkSynopsis(options.SynopsisColumns ?? [], nameof(options));
 
         foreach (KeyValuePair<string, VariantDirectory> column in options.VariantDirectories ?? ImmutableDictionary<string, VariantDirectory>.Empty)
         {

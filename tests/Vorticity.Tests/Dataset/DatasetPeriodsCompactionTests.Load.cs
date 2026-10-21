@@ -1,5 +1,5 @@
-// A load of periods: each period's rows written straight into its sealed object, several at once,
-// each committed beside the others, and a period whose rows change between its two reads refused.
+// A load of periods: each period's rows written straight into its sealed object in one pass, several at
+// once, each committed beside the others, its slices cut as its rows come as a seal's count cuts them.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -20,13 +20,14 @@ namespace Vorticity.Tests.Dataset;
 public sealed partial class DatasetPeriodsCompactionTests
 {
     /// <summary>
-    /// Each period a load is given becomes one object of the periods level, the object a seal of its rows writes: the
-    /// same time slices, the same order inside them, the same synopsis tables and indexes, its slices read without its
-    /// footer, whether its rows come whole or in parts planned at once, two of which share a second. The periods are
-    /// written at once and committed one by one, nothing in the other levels, and the dataset reads every row in key order.
+    /// Each period a load is given becomes one object of the periods level, its rows read once, whether they come whole or
+    /// in parts, two of which share a second: an hour of fewer rows than an order is judged from is one slice, read without
+    /// its footer, sorted in the order a seal of its rows gives, judged on every row as its count judges them, with its
+    /// synopsis tables. The periods are written at once and committed one by one, nothing in the other levels, and the
+    /// dataset reads every row in key order.
     /// </summary>
     [Fact]
-    public async Task ALoadWritesEachPeriodAsTheObjectASealWrites()
+    public async Task ALoadWritesEachPeriodInOnePass()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         DatasetOptions options = Options(SliceWidth.Hour);
@@ -35,6 +36,7 @@ public sealed partial class DatasetPeriodsCompactionTests
         List<DateTimeOffset> appended = [];
         List<Request[]> hours = [];
         List<PeriodRows> periods = [];
+        int reads = 0;
         for (int hour = 0; hour < 3; hour++)
         {
             // A request every minute, and then some within the last one, which slices it unevenly; the first hour has two
@@ -52,7 +54,11 @@ public sealed partial class DatasetPeriodsCompactionTests
             for (int part = 0; part + 1 < cuts.Length; part++)
             {
                 byte[] file = await FileOfAsync(requests[cuts[part]..cuts[part + 1]]);
-                parts.Add(token => RowsAsync(file, token));
+                parts.Add(token =>
+                {
+                    Interlocked.Increment(ref reads);
+                    return RowsAsync(file, token);
+                });
             }
 
             hours.Add(requests);
@@ -61,6 +67,7 @@ public sealed partial class DatasetPeriodsCompactionTests
         }
 
         IReadOnlyList<LoadedPeriod> loaded = await DatasetCompactor.LoadPeriodsAsync(dataset, periods, degree: 3, cancellationToken: Ct);
+        Assert.Equal(periods.Sum(period => period.Parts.Count), reads);
         Assert.Equal(hours.Select(requests => (long)requests.Length), loaded.Select(period => period.Rows));
         Assert.Equal(periods.Select(period => period.Period), loaded.Select(period => period.Period));
         Assert.Equal(3, loaded.Select(period => period.Version).Distinct().Count());
@@ -80,14 +87,14 @@ public sealed partial class DatasetPeriodsCompactionTests
             await using ObjectLease lease = await dataset.RentAsync(entry, Ct);
             SliceTable slices = (await SliceTable.ReadAsync(lease.File, Ct))!;
             Assert.Equal(expected, slices.Rows);
-            Assert.True(slices.Slices.Count > 1, "an hour of a request a minute is cut into slices");
+            Assert.Single(slices.Slices);
             SliceReader reader = (await SliceReader.OpenAsync(lease.File, lease.File.FileLength, lease.File.DType, null, Ct))!;
-            using RecordBatch rows = await reader.ReadSliceAsync(slices.Slices.Count - 1, [0], Ct);
-            Assert.Equal(slices.Slices[^1].Rows, rows.RowCount);
+            using RecordBatch rows = await reader.ReadSliceAsync(0, [0], Ct);
+            Assert.Equal(expected, rows.RowCount);
         }
 
         // The same rows appended and sealed once a row past the horizon closes their hours: the first hour's object
-        // holds the slices, the order and the indexes the load wrote from its three parts.
+        // is sorted in the order the load's first slice settled from its three parts.
         await using MemoryObjectStore reference = new MemoryObjectStore();
         await using VortexDataset sealer = await VortexDataset.CreateAsync(reference, Request.Schema, options, Ct);
         foreach (Request[] requests in hours.Append(RequestsOf([Noon.AddHours(4).AddMinutes(1)], appended.Count)))
@@ -100,33 +107,74 @@ public sealed partial class DatasetPeriodsCompactionTests
         Assert.True((await DrainAsync(sealer, new CompactionOptions { LevelZeroCeiling = 1, Fanout = 100 })).GetValueOrDefault(CompactionTrigger.Seal) > 0);
         (SliceTable Slices, string[] Indexes) sealedHour = await ShapeAsync(sealer, await FirstAsync(sealer, PeriodLevels.Periods));
         (SliceTable Slices, string[] Indexes) loadedHour = await ShapeAsync(dataset, await FirstAsync(dataset, PeriodLevels.Periods));
+        Assert.NotEmpty(loadedHour.Slices.Order);
+        Assert.Equal(sealedHour.Slices.Order, loadedHour.Slices.Order);
+
+        // Its synopsis column, the status it is sorted by, lies in its synopsis part, as the seal's does; a slice of a few
+        // rows keeps no table, which reading them costs less than.
+        Assert.NotEmpty(SynopsisColumnsOf(loadedHour.Indexes));
+        Assert.Equal(SynopsisColumnsOf(sealedHour.Indexes), SynopsisColumnsOf(loadedHour.Indexes));
+
+        // A period the dataset holds rows of, one that starts no period, rows of another period, parts out of order, and
+        // a part whose rows go back in time, are refused, and leave the dataset as it was.
+        ulong version = dataset.Version;
+        byte[] half = await FileOfAsync(RequestsOf([.. Enumerable.Range(0, 30).Select(i => Noon.AddHours(5).AddMinutes(i))], appended.Count));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [periods[1]], degree: 1, cancellationToken: Ct));
+        PeriodRows unaligned = new PeriodRows(TimeSlicer.InstantOf(Noon.AddHours(5).AddMinutes(1), TimeUnit.Microseconds), [token => RowsAsync(half, token)]);
+        await Assert.ThrowsAsync<ArgumentException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [unaligned], degree: 1, cancellationToken: Ct));
+        PeriodRows elsewhere = new PeriodRows(TimeSlicer.InstantOf(Noon.AddHours(6), TimeUnit.Microseconds), [token => RowsAsync(half, token)]);
+        await Assert.ThrowsAsync<ArgumentException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [elsewhere], degree: 1, cancellationToken: Ct));
+        byte[] late = await FileOfAsync(RequestsOf([Noon.AddHours(5).AddMinutes(40)], appended.Count));
+        PeriodRows backwards = new PeriodRows(TimeSlicer.InstantOf(Noon.AddHours(5), TimeUnit.Microseconds), [token => RowsAsync(late, token), token => RowsAsync(half, token)]);
+        await Assert.ThrowsAsync<ArgumentException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [backwards], degree: 1, cancellationToken: Ct));
+        byte[] shuffled = await FileOfAsync(RequestsOf([.. Enumerable.Range(0, 30).Select(i => Noon.AddHours(5).AddMinutes(i == 20 ? 3 : i))], appended.Count));
+        PeriodRows falling = new PeriodRows(TimeSlicer.InstantOf(Noon.AddHours(5), TimeUnit.Microseconds), [token => RowsAsync(shuffled, token)]);
+        await Assert.ThrowsAsync<ArgumentException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [falling], degree: 1, cancellationToken: Ct));
+        Assert.Equal(version, dataset.Version);
+        Assert.Equal(3, (await CountsAsync(dataset)).Sum());
+    }
+
+    /// <summary>
+    /// A period of requests at a steady pace, past the rows an order is judged from in its first unit, is cut as its rows
+    /// come into the slices a seal's count of them cuts, sorted in the same order, with the same synopsis tables and
+    /// indexes, given the rows it holds, read once a few thousand at a time.
+    /// </summary>
+    [Fact]
+    public async Task ALoadCutsTheSlicesASealCountsAsItsRowsCome()
+    {
+        // Three minutes of 1 200 requests a second, in slices of 40 000: a minute holds 72 000, past the 65 536 an order
+        // is judged from, and under twice the target, which an hour is past.
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = Options(SliceWidth.Hour);
+        options = options with { Periods = options.Periods! with { SliceTargetRows = 40_000 } };
+        List<DateTimeOffset> instants = [.. Enumerable.Range(0, 3 * 60 * 1_200).Select(i => Noon.AddTicks(i * (TimeSpan.TicksPerSecond / 1_200)))];
+        Request[] requests = RequestsOf(instants, 0);
+        byte[] file = await FileOfAsync(requests);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, options, Ct);
+        PeriodRows hour = new PeriodRows(TimeSlicer.InstantOf(Noon, TimeUnit.Microseconds), [token => RowsAsync(file, token, batchRows: 4_096)])
+        {
+            ExpectedRows = requests.Length,
+        };
+        IReadOnlyList<LoadedPeriod> loaded = await DatasetCompactor.LoadPeriodsAsync(dataset, [hour], degree: 1, cancellationToken: Ct);
+        Assert.Equal(requests.Length, loaded[0].Rows);
+
+        await using MemoryObjectStore reference = new MemoryObjectStore();
+        await using VortexDataset sealer = await VortexDataset.CreateAsync(reference, Request.Schema, options, Ct);
+        foreach (Request[] rows in new[] { requests, RequestsOf([Noon.AddHours(2).AddMinutes(1)], requests.Length) })
+        {
+            await using ObjectDraft draft = sealer.StartObject();
+            await draft.Writer.WriteAsync<Request>(rows, Ct);
+            await sealer.AppendAsync(draft, Ct);
+        }
+
+        Assert.True((await DrainAsync(sealer, new CompactionOptions { LevelZeroCeiling = 1, Fanout = 100 })).GetValueOrDefault(CompactionTrigger.Seal) > 0);
+        (SliceTable Slices, string[] Indexes) sealedHour = await ShapeAsync(sealer, await FirstAsync(sealer, PeriodLevels.Periods));
+        (SliceTable Slices, string[] Indexes) loadedHour = await ShapeAsync(dataset, await FirstAsync(dataset, PeriodLevels.Periods));
+        Assert.Equal(3, loadedHour.Slices.Slices.Count);
         Assert.Equal(sealedHour.Slices.Slices, loadedHour.Slices.Slices);
         Assert.Equal(sealedHour.Slices.Order, loadedHour.Slices.Order);
         Assert.Equal(sealedHour.Indexes, loadedHour.Indexes);
         Assert.Contains(loadedHour.Indexes, index => index.StartsWith(IndexKinds.SynopsisTable, StringComparison.Ordinal));
-
-        // A period whose second read differs from its first is refused and leaves the dataset as it was.
-        ulong version = dataset.Version;
-        int reads = 0;
-        byte[] shrinking = await FileOfAsync(RequestsOf([.. Enumerable.Range(0, 30).Select(i => Noon.AddHours(5).AddMinutes(i))], appended.Count));
-        byte[] shrunk = await FileOfAsync(RequestsOf([.. Enumerable.Range(0, 29).Select(i => Noon.AddHours(5).AddMinutes(i))], appended.Count));
-        PeriodRows changing = new PeriodRows(
-            TimeSlicer.InstantOf(Noon.AddHours(5), TimeUnit.Microseconds), [token => RowsAsync(++reads == 1 ? shrinking : shrunk, token)]);
-        await Assert.ThrowsAsync<DatasetIntegrityException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [changing], degree: 1, cancellationToken: Ct));
-        Assert.Equal(2, reads);
-
-        // A period the dataset holds rows of, one that starts no period, rows of another period, and parts out of order,
-        // are refused, and leave it as it was too.
-        await Assert.ThrowsAsync<InvalidOperationException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [periods[1]], degree: 1, cancellationToken: Ct));
-        PeriodRows unaligned = new PeriodRows(TimeSlicer.InstantOf(Noon.AddHours(5).AddMinutes(1), TimeUnit.Microseconds), [token => RowsAsync(shrinking, token)]);
-        await Assert.ThrowsAsync<ArgumentException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [unaligned], degree: 1, cancellationToken: Ct));
-        PeriodRows elsewhere = new PeriodRows(TimeSlicer.InstantOf(Noon.AddHours(6), TimeUnit.Microseconds), [token => RowsAsync(shrinking, token)]);
-        await Assert.ThrowsAsync<ArgumentException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [elsewhere], degree: 1, cancellationToken: Ct));
-        byte[] late = await FileOfAsync(RequestsOf([Noon.AddHours(5).AddMinutes(40)], appended.Count));
-        PeriodRows backwards = new PeriodRows(TimeSlicer.InstantOf(Noon.AddHours(5), TimeUnit.Microseconds), [token => RowsAsync(late, token), token => RowsAsync(shrinking, token)]);
-        await Assert.ThrowsAsync<ArgumentException>(() => DatasetCompactor.LoadPeriodsAsync(dataset, [backwards], degree: 1, cancellationToken: Ct));
-        Assert.Equal(version, dataset.Version);
-        Assert.Equal(3, (await CountsAsync(dataset)).Sum());
     }
 
     /// <summary>
@@ -214,6 +262,10 @@ public sealed partial class DatasetPeriodsCompactionTests
     private static Request[] RequestsOf(List<DateTimeOffset> instants, int first) =>
         [.. instants.Select((at, i) => new Request(at, $"r-{first + i}", 200 + (i % 3 * 100), at.ToUnixTimeSeconds() * 7_919L % 1_000_003))];
 
+    /// <summary>The synopsis columns entries of an object's indexes, as <see cref="ShapeAsync"/> gives them, by their kind and column.</summary>
+    private static string[] SynopsisColumnsOf(string[] indexes) =>
+        [.. indexes.Where(index => index.StartsWith(IndexKinds.SynopsisColumns, StringComparison.Ordinal)).Select(index => index[..index.LastIndexOf(' ')])];
+
     /// <summary>An object's slice table, and each of its indexes as its kind, its column and its options.</summary>
     private static async Task<(SliceTable Slices, string[] Indexes)> ShapeAsync(VortexDataset dataset, TreeEntry period)
     {
@@ -236,11 +288,11 @@ public sealed partial class DatasetPeriodsCompactionTests
         return stream.ToArray();
     }
 
-    /// <summary>The rows of <paramref name="file"/> in its order, a few at a time, as a load reads a period.</summary>
-    private static async IAsyncEnumerable<RecordBatch> RowsAsync(byte[] file, [EnumeratorCancellation] CancellationToken cancellationToken)
+    /// <summary>The rows of <paramref name="file"/> in its order, <paramref name="batchRows"/> at a time, as a load reads a period.</summary>
+    private static async IAsyncEnumerable<RecordBatch> RowsAsync(byte[] file, [EnumeratorCancellation] CancellationToken cancellationToken, int batchRows = 16)
     {
         await using VortexFile open = await VortexFile.OpenAsync(new MemorySegmentSource(file), VortexOpenOptions.Default);
-        await foreach (RecordBatch batch in open.Scan<Request>().With(new ScanOptions { BatchRows = 16 }).ToBatchesAsync(cancellationToken))
+        await foreach (RecordBatch batch in open.Scan<Request>().With(new ScanOptions { BatchRows = batchRows }).ToBatchesAsync(cancellationToken))
         {
             yield return batch;
         }

@@ -32,6 +32,9 @@ internal sealed class SliceFill
     private int _filled;
     private bool _whole;
 
+    // Whether the slice's rows were known when it began; otherwise _rows is what its columns are laid out for, which grows.
+    private bool _exact;
+
     // The batches copied whole, for a row type that admits nulls.
     private readonly List<int> _parts = [];
 
@@ -63,11 +66,16 @@ internal sealed class SliceFill
         }
     }
 
-    /// <summary>Lays a slice of <paramref name="rows"/> rows of <paramref name="schema"/> out in <paramref name="arena"/>.</summary>
-    internal void Begin(CanonicalArena arena, DType schema, int rows)
+    /// <summary>
+    /// Lays a slice of <paramref name="rows"/> rows of <paramref name="schema"/> out in <paramref name="arena"/>; when the slice's
+    /// rows are not known, not <paramref name="exact"/>, <paramref name="rows"/> is what its columns are laid out for first,
+    /// laid out again twice as large when its rows outgrow them, and the slice holds the rows it was handed.
+    /// </summary>
+    internal void Begin(CanonicalArena arena, DType schema, int rows, bool exact = true)
     {
         _schema = schema;
         _rows = rows;
+        _exact = exact;
         _filled = 0;
         _whole = schema.Kind != DTypeKind.Struct || schema.IsNullable;
         _parts.Clear();
@@ -129,7 +137,12 @@ internal sealed class SliceFill
     {
         if (_filled + count > _rows)
         {
-            throw new InvalidOperationException($"A slice of {_rows} rows was handed {_filled + count}.");
+            if (_exact)
+            {
+                throw new InvalidOperationException($"A slice of {_rows} rows was handed {_filled + count}.");
+            }
+
+            Grow(arena, Math.Max(checked(_rows * 2), _filled + count));
         }
 
         if (_whole)
@@ -166,7 +179,21 @@ internal sealed class SliceFill
     {
         if (_filled != _rows)
         {
-            throw new InvalidOperationException($"A slice of {_rows} rows was handed {_filled}.");
+            if (_exact)
+            {
+                throw new InvalidOperationException($"A slice of {_rows} rows was handed {_filled}.");
+            }
+
+            // The columns laid out for more rows than came hold the rows that did.
+            foreach (Column column in _columns.AsSpan(0, _whole ? 0 : _schema.FieldCount))
+            {
+                if (column.Form is Form.Values or Form.Views)
+                {
+                    column.Into = column.Into.Slice(0, _filled * column.Width);
+                }
+            }
+
+            _rows = _filled;
         }
 
         CanonicalArena arena = context.Canonical;
@@ -192,6 +219,23 @@ internal sealed class SliceFill
         }
 
         return arena.AddStruct(_schema, _rows, Validity.NonNullable, fields);
+    }
+
+    /// <summary>Lays the columns out again for <paramref name="rows"/> rows, the rows they hold copied over: a slice whose rows outgrew them.</summary>
+    private void Grow(CanonicalArena arena, int rows)
+    {
+        for (int f = 0; !_whole && f < _schema.FieldCount; f++)
+        {
+            Column column = _columns[f];
+            if (column.Form is Form.Values or Form.Views)
+            {
+                VortexBuffer grown = arena.AllocateUninitialized(checked(rows * column.Width), Math.Max(column.Width, 1), out Span<byte> into);
+                column.Into.Span[..(_filled * column.Width)].CopyTo(into);
+                column.Into = grown;
+            }
+        }
+
+        _rows = rows;
     }
 
     /// <summary>Forgets the slice, for the next one: its buffers go with its arena.</summary>

@@ -16,9 +16,10 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// The rows of one object, arriving in time order, written slice by slice, each slice sorted by the
-/// object's synopsis columns, then by its instant, as its slice table says. A slice's rows are gathered,
-/// their keys encoded in the order the table names, the slice's rows sorted by those keys alone, and
-/// every column gathered once through the permutation.
+/// object's synopsis columns, then by its instant, as its slice table says, or as a stream cuts its slices
+/// as the rows come (<see cref="SliceStream"/>). A slice's rows are gathered, their keys encoded in the
+/// order the table names, the slice's rows sorted by those keys alone, and every column gathered once
+/// through the permutation.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -41,11 +42,13 @@ namespace Vorticity.Dataset;
 /// </para>
 /// <para>
 /// The rows come in on the caller's thread, which only copies them into a slice's buffer, its columns laid out for all of
-/// its rows (<see cref="SliceFill"/>): a slice full is sorted and written on another thread, each slice in a buffer of its
-/// own, <see cref="InFlight"/> of them held at most, one filling and the other sorting or written. A slice's write starts once the one before it is written, so the writes
-/// keep the slices' order; its sort, as soon as its rows are in, beside the writes of the slices before it. The first
-/// slice is sorted on the caller's thread, as it settles the order the others are sorted in. <see cref="DrainAsync"/>
-/// waits for the last one.
+/// its rows (<see cref="SliceFill"/>), or, for a stream's, for those the slice before held and the most the rows rose from
+/// one slice to the next, grown past them when a slice holds more: a slice
+/// full is sorted and written on another thread, each slice in a buffer of its own, <see cref="InFlight"/> of them held at
+/// most, one filling and the other sorting or written. A slice's write starts once the one before it is written, so the
+/// writes keep the slices' order; its sort, as soon as its rows are in, beside the writes of the slices before it. The
+/// first slice is sorted on the caller's thread, as it settles the order the others are sorted in. A stream's last slice
+/// ends with the rows (<see cref="EndAsync"/>); <see cref="DrainAsync"/> waits for the last one to be written.
 /// </para>
 /// </remarks>
 internal sealed class SortedSlices : IDisposable
@@ -59,11 +62,25 @@ internal sealed class SortedSlices : IDisposable
     /// </summary>
     internal const int InFlight = 2;
 
-    private readonly SliceTable _table;
+    private readonly TimeUnit _unit;
+    private readonly IReadOnlyList<int> _planned;
+    private readonly IReadOnlyList<SynopsisPath> _paths;
     private readonly int _instant;
+    private readonly string _instantPath;
     private readonly DType _schema;
     private readonly IReadOnlyDictionary<int, Types.Variants.VariantShapes>? _shapes;
-    private readonly Buffer[] _buffers = [new Buffer(), new Buffer(), new Buffer()];
+    private readonly Buffer[] _buffers = [.. Enumerable.Range(0, InFlight).Select(_ => new Buffer())];
+
+    // The slices the table lists, or the stream that cuts them as the rows come; the rows a slice of the stream is laid
+    // out for, those of the slice before it and the most they rose from one slice to the next; and the write of its
+    // slices, which its last one goes to once the rows end.
+    private readonly IReadOnlyList<TimeSlice>? _slices;
+    private readonly SliceStream? _stream;
+    private readonly long _target;
+    private int _room;
+    private long _before = -1;
+    private long _rise;
+    private Func<SortedSlice, CancellationToken, ValueTask>? _write;
 
     // Each buffer's slice being sorted or written, null when the buffer is free; and the last slice handed over, which
     // completes once every slice before it is written.
@@ -80,11 +97,36 @@ internal sealed class SortedSlices : IDisposable
     /// placed in the order by its first slice.
     /// </summary>
     internal SortedSlices(SliceTable table, int instant, DType schema, IReadOnlyDictionary<int, Types.Variants.VariantShapes>? shapes = null)
+        : this(table.Unit, table.Order, table.Paths, instant, schema)
     {
-        _table = table;
-        _instant = instant;
-        _schema = schema;
+        _slices = table.Slices;
         _shapes = shapes is { Count: > 0 } ? shapes : null;
+    }
+
+    /// <summary>
+    /// A writer of the slices <paramref name="stream"/> cuts as the rows come, of a schema with no variant column, sorted
+    /// in an order the first slice settles from the columns <paramref name="order"/> names: the stream's first slice is
+    /// laid out for <paramref name="rows"/> rows, those its pace holds, each after it for those of the slice before and
+    /// the most the rows rose from one slice to the next, twice <paramref name="target"/> at most, a burst's bound. A
+    /// stream at a steady pace lays its slices out for what they hold, give or take its noise; a margin of an eighth held
+    /// 2.3 GB more than the rows at the start of five periods loaded at once, and 0.35 GB after, its room unwritten.
+    /// </summary>
+    internal SortedSlices(SliceStream stream, IReadOnlyList<int> order, int instant, DType schema, double rows, long target)
+        : this(stream.Unit, order, [], instant, schema)
+    {
+        _stream = stream;
+        _target = target;
+        _room = Room(rows);
+    }
+
+    private SortedSlices(TimeUnit unit, IReadOnlyList<int> planned, IReadOnlyList<SynopsisPath> paths, int instant, DType schema)
+    {
+        _unit = unit;
+        _planned = planned;
+        _paths = paths;
+        _instant = instant;
+        _instantPath = schema.GetFieldName(instant);
+        _schema = schema;
     }
 
     /// <summary>Where the stages of its slices take their time is added; null for no count.</summary>
@@ -100,13 +142,14 @@ internal sealed class SortedSlices : IDisposable
     /// <inheritdoc cref="Lanes"/>
     internal LaneHold? Hold { get; init; }
 
-    /// <summary>The order the slices are sorted in: the table's until the first slice settles it.</summary>
-    internal IReadOnlyList<int> Order => _order ?? (IReadOnlyList<int>)_table.Order;
+    /// <summary>The order the slices are sorted in: the table's, or the columns the stream's was given, until the first slice settles it.</summary>
+    internal IReadOnlyList<int> Order => _order ?? _planned;
 
-    /// <summary>The slices, sorted in the order the first slice settled: the table's, the shapes and paths placed in it.</summary>
-    internal SliceTable Table => _order is { } order && !order.SequenceEqual(_table.Order)
-        ? new SliceTable(_table.Unit, _table.Slices, order, _table.Paths)
-        : _table;
+    /// <summary>
+    /// The slices, the table's or those the stream cut, sorted in the order the first slice settled: the shapes and paths
+    /// placed in it. The stream's once its last slice is handed over (<see cref="EndAsync"/>).
+    /// </summary>
+    internal SliceTable Table => new SliceTable(_unit, _stream?.Slices ?? _slices!, Order, _paths);
 
     // Which of the table's paths each slice reads, once the first slice settled the order; every one before.
     private bool[]? _wanted;
@@ -125,37 +168,73 @@ internal sealed class SortedSlices : IDisposable
     /// </summary>
     internal async ValueTask AppendAsync(RecordBatch rows, Func<SortedSlice, CancellationToken, ValueTask> write, CancellationToken cancellationToken)
     {
+        _write = write;
         int at = 0;
         while (at < rows.RowCount)
         {
-            if (_slice >= _table.Slices.Count)
-            {
-                throw new InvalidOperationException("Rows came past the last slice of the object's slice table.");
-            }
-
-            long wanted = _table.Slices[_slice].Rows - _held;
-            int take = (int)Math.Min(wanted, rows.RowCount - at);
-            RecordBatch part = at == 0 && take == rows.RowCount ? rows : rows.Window(at, take);
-            Buffer buffer = _buffers[_filling];
-            long begin = Stopwatch.GetTimestamp();
-            if (_held == 0)
-            {
-                buffer.Fill.Begin(buffer.Context.Canonical, _schema, checked((int)_table.Slices[_slice].Rows));
-            }
-
-            buffer.Fill.Append(buffer.Context.Canonical, part.Arena, part.RootIndex, take);
-            Timings?.AddCopy(Stopwatch.GetTimestamp() - begin);
-            _held += take;
-            at += take;
-            if (_held == _table.Slices[_slice].Rows)
+            (at, bool full) = Fill(rows, at);
+            if (full)
             {
                 await FlushAsync(write, cancellationToken).ConfigureAwait(false);
             }
         }
     }
 
-    /// <summary>Whether every slice of the table was handed to its write; <see cref="DrainAsync"/> says when the last is written.</summary>
-    internal bool Complete => _slice == _table.Slices.Count && _held == 0;
+    /// <summary>
+    /// Copies the rows of <paramref name="rows"/> from <paramref name="at"/> that the slice being filled takes into its
+    /// buffer: the row after them, and whether the slice is whole, the table's rows of it held, or the stream's ended.
+    /// </summary>
+    private (int At, bool Full) Fill(RecordBatch rows, int at)
+    {
+        int take;
+        bool full;
+        if (_stream is { } stream)
+        {
+            (take, full) = stream.Take(ColumnPath.Instants(rows, _instantPath)[at..], _held);
+        }
+        else
+        {
+            if (_slice >= _slices!.Count)
+            {
+                throw new InvalidOperationException("Rows came past the last slice of the object's slice table.");
+            }
+
+            take = (int)Math.Min(_slices[_slice].Rows - _held, rows.RowCount - at);
+            full = _held + take == _slices[_slice].Rows;
+        }
+
+        if (take > 0)
+        {
+            RecordBatch part = at == 0 && take == rows.RowCount ? rows : rows.Window(at, take);
+            Buffer buffer = _buffers[_filling];
+            long begin = Stopwatch.GetTimestamp();
+            if (_held == 0)
+            {
+                // A slice of the stream is laid out for the rows it is expected to hold, and grows past them.
+                buffer.Fill.Begin(buffer.Context.Canonical, _schema, _stream is null ? checked((int)_slices![_slice].Rows) : _room, exact: _stream is null);
+            }
+
+            buffer.Fill.Append(buffer.Context.Canonical, part.Arena, part.RootIndex, take);
+            Timings?.AddCopy(Stopwatch.GetTimestamp() - begin);
+            _held += take;
+        }
+
+        return (at + take, full);
+    }
+
+    /// <summary>
+    /// Hands the slice the stream holds over to its write, its last: the rows ended. Nothing for slices of a table, whose
+    /// last is handed over with its last row.
+    /// </summary>
+    internal ValueTask EndAsync(CancellationToken cancellationToken) =>
+        _stream is not null && _held > 0 ? FlushAsync(_write!, cancellationToken) : ValueTask.CompletedTask;
+
+    /// <summary>Whether every slice was handed to its write, each of the table's; <see cref="DrainAsync"/> says when the last is written.</summary>
+    internal bool Complete => _held == 0 && (_stream is not null || _slice == _slices!.Count);
+
+    /// <summary>The rows a slice of the stream is laid out for, the rows <paramref name="rows"/> it is expected to hold, a burst's bound at most.</summary>
+    private int Room(double rows) =>
+        (int)Math.Clamp(Math.Min(rows, 2.0 * _target), 1, int.MaxValue);
 
     /// <summary>
     /// Waits for every slice handed over to be written, on no lane, and throws what the oldest that failed threw: every one,
@@ -217,6 +296,19 @@ internal sealed class SortedSlices : IDisposable
     {
         Buffer buffer = _buffers[_filling];
         int rows = checked((int)_held);
+        long start;
+        if (_stream is { } stream)
+        {
+            start = stream.Close(rows).Start;
+            _rise = _before < 0 ? 0 : Math.Max(_rise, rows - _before);
+            _before = rows;
+            _room = Room(rows + _rise);
+        }
+        else
+        {
+            start = _slices![_slice].Start;
+        }
+
         int sorted = -1;
         if (_order is null)
         {
@@ -257,7 +349,7 @@ internal sealed class SortedSlices : IDisposable
                     try
                     {
                         using RecordBatch batch = new RecordBatch(buffer.Context.Canonical, root, 0);
-                        await write(new SortedSlice(batch, buffer.Codes, buffer.PathColumns, buffer.Packed), cancellationToken).ConfigureAwait(false);
+                        await write(new SortedSlice(batch, buffer.Codes, buffer.PathColumns, start, buffer.Packed), cancellationToken).ConfigureAwait(false);
                     }
                     finally
                     {
@@ -334,20 +426,20 @@ internal sealed class SortedSlices : IDisposable
 
         // The paths' values, every path's on the first slice, then those the order and the synopsis read.
         int[] paths = ReadPaths(buffer, node);
-        if (_order is null && (_shapes is not null || _table.Order.Count > 0 || _table.Paths.Count > 0))
+        if (_order is null && (_shapes is not null || _planned.Count > 0 || _paths.Count > 0))
         {
             // The first slice settles the object's order, and sorts by the codes it measured it with.
             (_order, columns) = Place(arena, node, rows, paths);
-            _wanted = new bool[_table.Paths.Count];
+            _wanted = new bool[_paths.Count];
             for (int p = 0; p < _wanted.Length; p++)
             {
                 _wanted[p] = _order.Contains(SynopsisPath.Entry(p)) || _counted.Contains(SynopsisPath.Entry(p))
-                    || _table.Paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double;
+                    || _paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double;
             }
         }
         else
         {
-            _order ??= [.. _table.Order];
+            _order ??= [.. _planned];
             columns = Coded(buffer, arena, node, rows, paths, _order);
             coded = true;
         }
@@ -552,7 +644,7 @@ internal sealed class SortedSlices : IDisposable
     private int[] ReadPaths(Buffer buffer, int node)
     {
         CanonicalArena arena = buffer.Context.Canonical;
-        IReadOnlyList<SynopsisPath> paths = _table.Paths;
+        IReadOnlyList<SynopsisPath> paths = _paths;
         int[] columns = new int[paths.Count];
         columns.AsSpan().Fill(-1);
         if (paths.Count == 0)
@@ -597,17 +689,34 @@ internal sealed class SortedSlices : IDisposable
     {
         // A column the object's rows repeat stays out of the order when a slice large enough to judge it does not repeat
         // its values twice on average: it forms no runs where the rows are sorted, whatever it does over the object, and
-        // is a measure, as a duration is; a smaller slice leaves the object's count to decide.
+        // is a measure, as a duration is; a smaller slice leaves the object's count to decide, which slices the stream
+        // cuts have none of.
         List<int> entries = [];
         List<(int[] Codes, int Distinct)> candidates = [];
-        foreach (int entry in _table.Order)
+        bool judged = rows >= JudgedRows || _stream is not null;
+        foreach (int entry in _planned)
         {
+            // A column a sketch of its values shows far past the bound is left out uncoded.
+            if (judged && entry >= 0 && !SynopsisPath.Names(entry) && !SynopsisOrder.MayRepeat(arena, node, _schema, entry, rows))
+            {
+                continue;
+            }
+
             (int[] Codes, int Distinct) codes = SliceSort.CodesOf(arena, node, entry, rows, _shapes);
-            if (rows < JudgedRows || codes.Distinct * 2L <= rows)
+            if (!judged || codes.Distinct * 2L <= rows)
             {
                 entries.Add(entry);
                 candidates.Add(codes);
             }
+        }
+
+        if (_stream is not null)
+        {
+            // No pass counted the object's columns before its rows came: they are given to the greedy order fewest values
+            // first in the first slice, the schema's order breaking ties, as the object's counts give them.
+            int[] fewest = [.. Enumerable.Range(0, entries.Count).OrderBy(k => candidates[k].Distinct).ThenBy(k => k)];
+            entries = [.. fewest.Select(k => entries[k])];
+            candidates = [.. fewest.Select(k => candidates[k])];
         }
 
         List<int> fields = [.. _shapes?.Keys ?? []];
@@ -637,7 +746,7 @@ internal sealed class SortedSlices : IDisposable
 
             if (values.Distinct > 0 && values.Distinct * 2L <= held)
             {
-                if (_table.Paths[p].Residual)
+                if (_paths[p].Residual)
                 {
                     _counted.Add(SynopsisPath.Entry(p));
                     continue;
@@ -765,11 +874,11 @@ internal sealed class SortedSlices : IDisposable
 
 /// <summary>
 /// A slice sorted, as its write reads it: its rows, each entry of the order's codes over them in the order they are
-/// sorted in, values in their order and nulls last, and the column of each of the table's paths in the rows' arena,
-/// those the order places and the numeric ones the synopsis sums, -1 for another, and, where the entries' codes pack
-/// into a word, the words the rows were sorted by; valid while the slice is written.
+/// sorted in, values in their order and nulls last, the column of each of the table's paths in the rows' arena, those
+/// the order places and the numeric ones the synopsis sums, -1 for another, its start, and, where the entries' codes
+/// pack into a word, the words the rows were sorted by; valid while the slice is written.
 /// </summary>
-internal readonly record struct SortedSlice(RecordBatch Batch, IReadOnlyList<int[]> Codes, IReadOnlyList<int> PathColumns, PackedKeys? Packed = null);
+internal readonly record struct SortedSlice(RecordBatch Batch, IReadOnlyList<int[]> Codes, IReadOnlyList<int> PathColumns, long Start, PackedKeys? Packed = null);
 
 /// <summary>
 /// A sorted slice's codes packed a word a row, in the rows' sorted order, the order's first entry in the highest bits:

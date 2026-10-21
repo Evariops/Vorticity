@@ -192,6 +192,30 @@ internal static class TimeSlicer
         return Count(at.AddMonths(1), unit);
     }
 
+    /// <summary>
+    /// The width rows at a pace of <paramref name="perSecond"/> a second are cut at: the coarsest whose units hold at most
+    /// twice <paramref name="targetRows"/> of them, which is the width <see cref="WidthFor(ReadOnlySpan{long}, TimeUnit, long)"/>
+    /// gives rows at a steady pace, whose units all hold what the median does; a second when even a second holds more.
+    /// </summary>
+    internal static SliceWidth WidthAt(double perSecond, long targetRows)
+    {
+        for (SliceWidth width = SliceWidth.Month; width > SliceWidth.Second; width--)
+        {
+            if (perSecond * Seconds(width) <= BurstFactor * targetRows)
+            {
+                return width;
+            }
+        }
+
+        return SliceWidth.Second;
+    }
+
+    /// <summary>The rows a unit of <paramref name="width"/> holds at a pace of <paramref name="perSecond"/> a second.</summary>
+    internal static double RowsAt(double perSecond, SliceWidth width) => perSecond * Seconds(width);
+
+    /// <summary>The seconds between two instants counted in <paramref name="unit"/>.</summary>
+    internal static double SecondsBetween(long from, long to, TimeUnit unit) => (to - from) / UnitsPerSecond(unit);
+
     /// <summary>A width in seconds; a month as thirty days, which only an estimate of a slice count reads.</summary>
     private static double Seconds(SliceWidth width) => width switch
     {

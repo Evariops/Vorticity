@@ -139,15 +139,20 @@ internal static class DesignBuild
             long perHour = (long)(rate * 3_600);
             CheckColumns(row, unit, perHour);
 
-            // A day's hours are its parts, each drawn by its own generator: planned at once, written one after the other.
+            // A day's hours are its parts, each drawn by its own generator, written one after the other: the rows it holds
+            // are known.
             int days = (hours + 23) / 24;
             PeriodRows[] periods = new PeriodRows[days];
             for (int day = 0; day < days; day++)
             {
                 int first = day * 24;
+                int held = Math.Min(24, hours - first);
                 periods[day] = new PeriodRows(
                     TimeSlicer.InstantOf(QuestionBench.Start.AddHours(first), unit),
-                    [.. Enumerable.Range(first, Math.Min(24, hours - first)).Select(hour => (Func<CancellationToken, IAsyncEnumerable<RecordBatch>>)(token => RowsAsync(row, unit, hour, 0, perHour, perHour, 1_000 + hour, token)))]);
+                    [.. Enumerable.Range(first, held).Select(hour => (Func<CancellationToken, IAsyncEnumerable<RecordBatch>>)(token => RowsAsync(row, unit, hour, 0, perHour, perHour, 1_000 + hour, token)))])
+                {
+                    ExpectedRows = held * perHour,
+                };
             }
 
             long begin = Stopwatch.GetTimestamp();

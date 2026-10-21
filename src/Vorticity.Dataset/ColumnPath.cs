@@ -1,6 +1,9 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Text;
+using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.RowEncoding;
 using Vorticity.Types;
 
 namespace Vorticity.Dataset;
@@ -75,5 +78,21 @@ internal static class ColumnPath
         }
 
         return node;
+    }
+
+    /// <summary>
+    /// The instants of a run, its column <paramref name="path"/> as stored, read where they lie: a window's
+    /// values may start anywhere in a buffer, which a read of longs does not mind.
+    /// </summary>
+    internal static ReadOnlySpan<long> Instants(RecordBatch run, string path)
+    {
+        CanonicalArena arena = run.Arena;
+        int node = RowEncoder.Storage(arena, NodeOf(run, path));
+        if (arena.RecordRef(node).Kind != CanonicalKind.Primitive)
+        {
+            node = EncodedForms.Canonical(arena, node);
+        }
+
+        return MemoryMarshal.Cast<byte, long>(arena.RecordRef(node).BufferA.Span)[..run.RowCount];
     }
 }

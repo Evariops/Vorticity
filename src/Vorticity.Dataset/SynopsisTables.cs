@@ -89,8 +89,8 @@ internal sealed class SynopsisTables : IDisposable
     private readonly IReadOnlyList<SynopsisPath> _paths;
     private readonly TimeUnit _unit;
     private readonly ISynopsisChunkSink _sink;
-    private readonly bool _spansHours;
-    private readonly long _objectRows;
+    private bool _spansHours;
+    private long _objectRows;
     private readonly (int Rows, long HourBytes) _chunking;
     private readonly Dictionary<long, long> _hourRows = [];
     private readonly ScanContext _context = new ScanContext([]);
@@ -169,9 +169,11 @@ internal sealed class SynopsisTables : IDisposable
     /// measures <paramref name="measures"/>, its synopsis paths <paramref name="paths"/>, its chunks handed to
     /// <paramref name="sink"/>: the first slice adds to the measures the numeric paths the order does not place.
     /// Its slices <paramref name="slices"/>, known before a row is written, say whether it spans hours, which its
-    /// tables of the object then sum up, and its rows and each hour's, which weigh what its tables may take; without
-    /// them, it is taken to span hours, and no table is given up before the end. A test sets <paramref name="chunking"/>,
-    /// the rows of a chunk and the bytes past which an hour's rows are chunks of their own, to cut tables of a few rows.
+    /// tables of the object then sum up, and its rows and each hour's, which weigh what its tables may take; an object
+    /// whose slices are cut as its rows come says their extent instead (<see cref="Extend"/>), its hours' rows unknown.
+    /// Without either, it is taken to span hours, and no table is given up before the end. A test sets
+    /// <paramref name="chunking"/>, the rows of a chunk and the bytes past which an hour's rows are chunks of their own,
+    /// to cut tables of a few rows.
     /// </summary>
     internal SynopsisTables(
         DType schema, TimeUnit unit, int[] measures, ISynopsisChunkSink sink, IReadOnlyList<SynopsisPath>? paths = null,
@@ -196,9 +198,27 @@ internal sealed class SynopsisTables : IDisposable
         _spansHours |= _hourRows.Count > 1;
     }
 
+    /// <summary>
+    /// Says what the slices of an object cut as its rows come say of it, before its first slice is counted: the rows it is
+    /// expected to hold, 0 when unknown, which weigh its tables before the end, whether they may span hours, and whether
+    /// its hours hold several slices.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A slice was counted already, or the tables were given the object's slices.</exception>
+    internal void Extend(SliceExtent extent)
+    {
+        if (_settled || _hourRows.Count > 0)
+        {
+            throw new InvalidOperationException("An object's extent is said before its first slice is counted, by an object whose slices were not given.");
+        }
+
+        _spansHours = extent.SpansHours;
+        _cutsHours = extent.CutsHours;
+        _objectRows = extent.Rows;
+    }
+
     // Whether an hour of the object holds several slices: otherwise a slice is its hour, and a table of its slices'
     // value counts holds the rows of its hour's.
-    private readonly bool _cutsHours;
+    private bool _cutsHours;
 
     /// <summary>The measures <paramref name="measures"/>, fields or paths, and how each one's states are kept.</summary>
     private (int[] Measures, MeasureKind[] Kinds) KindsOf(int[] measures)

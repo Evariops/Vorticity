@@ -81,6 +81,20 @@ internal static class SynopsisOrder
         return order;
     }
 
+    /// <summary>
+    /// Whether the values of field <paramref name="field"/> of the struct <paramref name="node"/>, <paramref name="rows"/> of
+    /// them, may repeat twice on average: a sketch of their distinct values says it of a column far from the bound, a value
+    /// a row as a duration or a weight holds, without its codes and the table of its values, whose coding holds some 200 MB
+    /// for three million rows. The bound takes in the sketch's error, six of its standard errors of 0.81 %: a column it
+    /// leaves out repeats less than twice in all likelihood, one it lets in is coded and judged on its count.
+    /// </summary>
+    internal static bool MayRepeat(CanonicalArena arena, int node, DType schema, int field, int rows)
+    {
+        CardinalitySketch sketch = new CardinalitySketch();
+        CountColumn(arena, RowEncoder.Storage(arena, arena.GetNode(node).GetFieldIndex(field)), schema.GetField(field), sketch);
+        return sketch.Estimate() * 2 <= rows * (1 + (6 * 0.0081));
+    }
+
     /// <summary>Counts the distinct values of the columns <paramref name="fields"/> of <paramref name="batch"/> into <paramref name="sketches"/>, one each.</summary>
     internal static void Count(RecordBatch batch, ReadOnlySpan<int> fields, CardinalitySketch[] sketches)
     {

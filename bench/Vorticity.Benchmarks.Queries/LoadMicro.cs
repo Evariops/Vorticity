@@ -20,8 +20,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// round (<see cref="DesignBuild.LoadAsync"/> loads days of hours so); with <c>--period-hours</c> H past 1, the periods are
 /// days of H hours of <c>--minutes</c> minutes each, a day's object and its hours' boundaries at a smaller size. Each round
 /// says its rows and bytes a second, the processor time it took, the bytes it allocated, its collections and how long
-/// they paused the threads, the most memory it held, and each period how long its plan, its write and its finish took;
-/// <c>--disk</c> first measures what the store's disk takes in a second.
+/// they paused the threads, the most memory it held, and each period how long its plan, the first pass of a schema with a
+/// variant column, its write and its finish took; <c>--disk</c> first measures what the store's disk takes in a second.
 /// </summary>
 internal static class LoadMicro
 {
@@ -71,7 +71,10 @@ internal static class LoadMicro
                 loads[p] = new PeriodRows(
                     TimeSlicer.InstantOf(QuestionBench.Start.AddHours(first), unit),
                     [.. Enumerable.Range(0, periodHours * minutes).Select(at => (Func<CancellationToken, IAsyncEnumerable<RecordBatch>>)(token =>
-                        DesignBuild.RowsAsync(row, unit, first + (at / minutes), at % minutes * perMinute, perMinute, perHour, 1_000 + ((first + (at / minutes)) * 60) + (at % minutes), token)))]);
+                        DesignBuild.RowsAsync(row, unit, first + (at / minutes), at % minutes * perMinute, perMinute, perHour, 1_000 + ((first + (at / minutes)) * 60) + (at % minutes), token)))])
+                {
+                    ExpectedRows = periodHours * minutes * perMinute,
+                };
             }
 
             GC.Collect();
