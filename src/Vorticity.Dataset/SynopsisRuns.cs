@@ -520,9 +520,8 @@ internal sealed class RunCursor : IDisposable
     private int _keyEnd;
     private int _wordsAt;
 
-    internal RunCursor(RunScratch scratch, RunSpan run, KeyShape[] shapes, int components, int words, int order = 0)
+    internal RunCursor(RunScratch scratch, RunSpan run, KeyShape[] shapes, int components, int words)
     {
-        Order = order;
         _scratch = scratch;
         _shapes = shapes;
         _components = Math.Min(components, run.Components);
@@ -531,9 +530,6 @@ internal sealed class RunCursor : IDisposable
         _next = run.At;
         _end = run.At + run.Length;
     }
-
-    /// <summary>The run's place among those a merge reads, which breaks its ties: the earliest run's record first.</summary>
-    internal int Order { get; }
 
     /// <summary>The current record's key, cut to the components read.</summary>
     internal ReadOnlySpan<byte> Key => _buffer.AsSpan(_record, _keyEnd - _record);
@@ -674,38 +670,46 @@ internal sealed class RunCursor : IDisposable
 /// <summary>
 /// The records of several runs, each in the order of its keys, merged into one stream in that order: the records
 /// of equal keys merged into one, their states together, under the key of the earliest run's, as the first row of a
-/// group gives the slice's. A heap of the runs' cursors, by their current key, then by their run's place.
+/// group gives the slice's. A tree of losers over the runs' cursors, by their current key, then by their run's place:
+/// a record costs a comparison a level of the tree, where a heap's took two to take its least and more to put the
+/// next one back.
 /// </summary>
 internal sealed class RunMerger : IDisposable
 {
     private readonly KeyShape[] _shapes;
     private readonly int _components;
     private readonly MeasureKind[] _kinds;
-    private readonly List<RunCursor> _heap = [];
     private readonly RunBuffer _key = new RunBuffer();
     private readonly long[] _words;
 
-    private RunMerger(KeyShape[] shapes, int components, MeasureKind[] kinds, int words)
+    // Each run's cursor by its place, null once the run is read; and the tree: the place of the run whose record is
+    // least at its root, 0, and at each node past it the place of the run that lost there.
+    private readonly RunCursor?[] _cursors;
+    private readonly int[] _tree;
+
+    private RunMerger(KeyShape[] shapes, int components, MeasureKind[] kinds, int words, int runs)
     {
         _shapes = shapes;
         _components = components;
         _kinds = kinds;
         _words = new long[words];
+        _cursors = new RunCursor?[runs];
+        _tree = new int[Math.Max(runs, 1)];
     }
 
     /// <summary>A merge of <paramref name="runs"/> of <paramref name="scratch"/>, their keys cut to <paramref name="components"/>.</summary>
     internal static async ValueTask<RunMerger> OpenAsync(
         RunScratch scratch, IReadOnlyList<RunSpan> runs, KeyShape[] shapes, int components, MeasureKind[] kinds, CancellationToken cancellationToken)
     {
-        RunMerger merger = new RunMerger(shapes, components, kinds, StateWords.Count(kinds));
+        RunMerger merger = new RunMerger(shapes, components, kinds, StateWords.Count(kinds), runs.Count);
         try
         {
             for (int r = 0; r < runs.Count; r++)
             {
-                RunCursor cursor = new RunCursor(scratch, runs[r], shapes, components, merger._words.Length, r);
+                RunCursor cursor = new RunCursor(scratch, runs[r], shapes, components, merger._words.Length);
                 if (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    merger.Push(cursor);
+                    merger._cursors[r] = cursor;
                 }
                 else
                 {
@@ -713,6 +717,7 @@ internal sealed class RunMerger : IDisposable
                 }
             }
 
+            merger.Build();
             return merger;
         }
         catch
@@ -731,97 +736,105 @@ internal sealed class RunMerger : IDisposable
     /// <summary>Moves to the next group of the merged stream; false past the last.</summary>
     internal async ValueTask<bool> MoveNextAsync(CancellationToken cancellationToken)
     {
-        if (_heap.Count == 0)
+        if (_cursors.Length == 0 || _cursors[_tree[0]] is not { } first)
         {
             return false;
         }
 
-        RunCursor first = Pop();
         _key.Clear();
         _key.Bytes(first.Key);
         first.Words.CopyTo(_words);
-        await AdvanceAsync(first, cancellationToken).ConfigureAwait(false);
-        while (_heap.Count > 0 && KeyCodec.Compare(_shapes, _components, _heap[0].Key, _key.Span, out _) == 0)
+        await AdvanceAsync(_tree[0], cancellationToken).ConfigureAwait(false);
+        while (_cursors[_tree[0]] is { } same && KeyCodec.Compare(_shapes, _components, same.Key, _key.Span, out _) == 0)
         {
-            RunCursor same = Pop();
             StateWords.Merge(_words, same.Words, _kinds);
-            await AdvanceAsync(same, cancellationToken).ConfigureAwait(false);
+            await AdvanceAsync(_tree[0], cancellationToken).ConfigureAwait(false);
         }
 
         return true;
     }
 
-    private async ValueTask AdvanceAsync(RunCursor cursor, CancellationToken cancellationToken)
+    /// <summary>Moves run <paramref name="place"/>'s cursor past its record, and plays its next one up the tree.</summary>
+    private async ValueTask AdvanceAsync(int place, CancellationToken cancellationToken)
     {
-        if (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
-        {
-            Push(cursor);
-        }
-        else
+        RunCursor cursor = _cursors[place]!;
+        if (!await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
         {
             cursor.Dispose();
+            _cursors[place] = null;
         }
+
+        Replay(place);
     }
 
-    private int CompareAt(int left, int right)
+    /// <summary>The tree played from every run's first record: a node keeps the first to reach it until the second does.</summary>
+    private void Build()
     {
-        int compared = KeyCodec.Compare(_shapes, _components, _heap[left].Key, _heap[right].Key, out _);
-        return compared != 0 ? compared : _heap[left].Order.CompareTo(_heap[right].Order);
-    }
-
-    private void Push(RunCursor cursor)
-    {
-        _heap.Add(cursor);
-        int at = _heap.Count - 1;
-        while (at > 0)
+        Array.Fill(_tree, -1);
+        for (int place = _cursors.Length - 1; place >= 0; place--)
         {
-            int parent = (at - 1) >> 1;
-            if (CompareAt(at, parent) >= 0)
+            int winner = place;
+            int node = (place + _cursors.Length) >> 1;
+            for (; node > 0; node >>= 1)
             {
-                break;
+                if (_tree[node] < 0)
+                {
+                    _tree[node] = winner;
+                    break;
+                }
+
+                if (Less(_tree[node], winner))
+                {
+                    (_tree[node], winner) = (winner, _tree[node]);
+                }
             }
 
-            (_heap[at], _heap[parent]) = (_heap[parent], _heap[at]);
-            at = parent;
+            if (node == 0)
+            {
+                _tree[0] = winner;
+            }
         }
     }
 
-    private RunCursor Pop()
+    /// <summary>Plays run <paramref name="place"/>'s record from its leaf to the root against the losers on the way.</summary>
+    private void Replay(int place)
     {
-        RunCursor top = _heap[0];
-        int last = _heap.Count - 1;
-        _heap[0] = _heap[last];
-        _heap.RemoveAt(last);
-        int at = 0;
-        while (true)
+        int winner = place;
+        for (int node = (place + _cursors.Length) >> 1; node > 0; node >>= 1)
         {
-            int left = (2 * at) + 1;
-            if (left >= _heap.Count)
+            int loser = _tree[node];
+            if (Less(loser, winner))
             {
-                break;
+                _tree[node] = winner;
+                winner = loser;
             }
-
-            int smaller = left + 1 < _heap.Count && CompareAt(left + 1, left) < 0 ? left + 1 : left;
-            if (CompareAt(smaller, at) >= 0)
-            {
-                break;
-            }
-
-            (_heap[at], _heap[smaller]) = (_heap[smaller], _heap[at]);
-            at = smaller;
         }
 
-        return top;
+        _tree[0] = winner;
+    }
+
+    /// <summary>Whether run <paramref name="left"/>'s record comes before run <paramref name="right"/>'s: a run read comes last.</summary>
+    private bool Less(int left, int right)
+    {
+        RunCursor? a = _cursors[left];
+        RunCursor? b = _cursors[right];
+        if (a is null || b is null)
+        {
+            return a is not null || (b is null && left < right);
+        }
+
+        int compared = KeyCodec.Compare(_shapes, _components, a.Key, b.Key, out _);
+        return compared != 0 ? compared < 0 : left < right;
     }
 
     public void Dispose()
     {
-        foreach (RunCursor cursor in _heap)
+        for (int r = 0; r < _cursors.Length; r++)
         {
-            cursor.Dispose();
+            _cursors[r]?.Dispose();
+            _cursors[r] = null;
         }
 
-        _heap.Clear();
         _key.Dispose();
     }
 }
