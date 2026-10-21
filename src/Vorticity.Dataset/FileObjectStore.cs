@@ -30,6 +30,12 @@ public sealed class FileObjectStore : IObjectStore
 
     private const int BsdWouldBlock = 35;
 
+    /// <summary>The bytes a write of an object's content takes when its pieces come smaller: a megabyte.</summary>
+    private const int GatheredBytes = 1 << 20;
+
+    /// <summary>The bytes from which a piece of an object's content is written as it lies rather than gathered.</summary>
+    private const int WrittenAsItLies = 64 << 10;
+
     /// <summary>The last <see cref="Stamp"/> given, in ticks.</summary>
     private static long s_lastStamp;
 
@@ -214,32 +220,81 @@ public sealed class FileObjectStore : IObjectStore
                     RandomAccess.SetLength(handle, length);
                 }
 
+                // A piece of the content of some size goes to the file as it lies; smaller ones, which a pipe of small
+                // segments hands over, are gathered into one write, so that an object costs a write a megabyte, where a
+                // pipe of 4 KiB segments cost one every 4 KiB, half a million for an object of 2 GB.
+                byte[]? gathered = null;
+                int held = 0;
                 long written = 0;
-                while (true)
+                try
                 {
-                    ReadResult result = await content.ReadAsync(cancellationToken).ConfigureAwait(false);
-                    ReadOnlySequence<byte> buffer = result.Buffer;
-                    if (length >= 0 && written + buffer.Length > length)
+                    while (true)
                     {
-                        throw new ObjectStoreException(
-                            $"'{key}' was announced as {length} bytes and its content runs past them.");
+                        ReadResult result = await content.ReadAsync(cancellationToken).ConfigureAwait(false);
+                        ReadOnlySequence<byte> buffer = result.Buffer;
+                        if (length >= 0 && written + held + buffer.Length > length)
+                        {
+                            throw new ObjectStoreException(
+                                $"'{key}' was announced as {length} bytes and its content runs past them.");
+                        }
+
+                        foreach (ReadOnlyMemory<byte> segment in buffer)
+                        {
+                            if (segment.Length >= WrittenAsItLies)
+                            {
+                                if (held > 0)
+                                {
+                                    await RandomAccess.WriteAsync(handle, gathered.AsMemory(0, held), written, cancellationToken).ConfigureAwait(false);
+                                    written += held;
+                                    held = 0;
+                                }
+
+                                await RandomAccess.WriteAsync(handle, segment, written, cancellationToken).ConfigureAwait(false);
+                                written += segment.Length;
+                                continue;
+                            }
+
+                            gathered ??= ArrayPool<byte>.Shared.Rent(GatheredBytes);
+                            ReadOnlyMemory<byte> rest = segment;
+                            while (!rest.IsEmpty)
+                            {
+                                int take = Math.Min(GatheredBytes - held, rest.Length);
+                                rest.Span[..take].CopyTo(gathered.AsSpan(held));
+                                rest = rest[take..];
+                                held += take;
+                                if (held == GatheredBytes)
+                                {
+                                    await RandomAccess.WriteAsync(handle, gathered.AsMemory(0, held), written, cancellationToken).ConfigureAwait(false);
+                                    written += held;
+                                    held = 0;
+                                }
+                            }
+                        }
+
+                        content.AdvanceTo(buffer.End);
+                        if (result.IsCanceled)
+                        {
+                            throw new OperationCanceledException($"The content of '{key}' was cancelled after {written + held} bytes.");
+                        }
+
+                        if (result.IsCompleted)
+                        {
+                            break;
+                        }
                     }
 
-                    foreach (ReadOnlyMemory<byte> segment in buffer)
+                    if (held > 0)
                     {
-                        await RandomAccess.WriteAsync(handle, segment, written, cancellationToken).ConfigureAwait(false);
-                        written += segment.Length;
+                        await RandomAccess.WriteAsync(handle, gathered.AsMemory(0, held), written, cancellationToken).ConfigureAwait(false);
+                        written += held;
+                        held = 0;
                     }
-
-                    content.AdvanceTo(buffer.End);
-                    if (result.IsCanceled)
+                }
+                finally
+                {
+                    if (gathered is not null)
                     {
-                        throw new OperationCanceledException($"The content of '{key}' was cancelled after {written} bytes.");
-                    }
-
-                    if (result.IsCompleted)
-                    {
-                        break;
+                        ArrayPool<byte>.Shared.Return(gathered);
                     }
                 }
 

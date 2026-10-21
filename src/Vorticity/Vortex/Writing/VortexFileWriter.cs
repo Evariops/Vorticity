@@ -309,11 +309,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// The chunks of the synopsis columns, held in a scratch store until the end of the data, then
     /// written together before the index regions: the synopsis part, one contiguous range of bytes.
     /// </summary>
+    /// <remarks>
+    /// A column's chunk is held where it lies in the part, aligned as a segment is from the part's start, with its checksum:
+    /// the columns' share of the part is then the store's bytes as they are, copied a page at a time, where a copy of every
+    /// chunk read back alone took a read, a pad and a write each, 22 000 for a day's 90 million rows. The tables' chunks,
+    /// which the choice keeps or drops once the rows are all in, wait in a store of their own; the two share the memory
+    /// a scratch store is given.
+    /// </remarks>
     private sealed class SynopsisPart((long Memory, string? Directory, bool Seal) spool) : IDisposable
     {
-        private readonly RunScratch _held = new RunScratch(spool.Memory, spool.Directory, spool.Seal);
-        // Each chunk held: its column, its place among the column's chunks, where it waits and its bytes.
-        private readonly List<(int Field, int Chunk, long At, int Length)> _chunks = [];
+        private readonly RunScratch _columns = new RunScratch(spool.Memory / 2, spool.Directory, spool.Seal);
+        private readonly RunScratch _held = new RunScratch(spool.Memory / 2, spool.Directory, spool.Seal);
+        // Each column's chunk held: its column, its place among the column's chunks, where it lies from the part's start,
+        // its bytes and their checksum.
+        private readonly List<(int Field, int Chunk, long At, int Length, ulong Checksum)> _chunks = [];
         private readonly List<(int Field, IndexSegment Region)> _regions = [];
 
         // The tables as their chunks arrive, encoded and held in the scratch store with the columns' chunks; the tables
@@ -386,8 +395,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// <summary>Holds chunk <paramref name="chunk"/> of column <paramref name="field"/>, whose segment is recorded when the part is written.</summary>
         internal async ValueTask HoldAsync(int field, int chunk, ReadOnlyMemory<byte> blob, CancellationToken cancellationToken)
         {
-            long at = await _held.AppendAsync(blob, cancellationToken).ConfigureAwait(false);
-            _chunks.Add((field, chunk, at, blob.Length));
+            long at = (_columns.Length + VortexLimits.MaxAlignment - 1) & ~((long)VortexLimits.MaxAlignment - 1);
+            if (at > _columns.Length)
+            {
+                await _columns.AppendAsync(Padding.AsMemory(0, (int)(at - _columns.Length)), cancellationToken).ConfigureAwait(false);
+            }
+
+            await _columns.AppendAsync(blob, cancellationToken).ConfigureAwait(false);
+            _chunks.Add((field, chunk, at, blob.Length, System.IO.Hashing.XxHash3.HashToUInt64(blob.Span)));
             ColumnBytes += blob.Length;
         }
 
@@ -397,35 +412,36 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// </summary>
         internal async ValueTask WriteAsync(VortexFileWriter writer, CancellationToken cancellationToken)
         {
-            int longest = 0;
-            foreach ((int _, int _, long _, int length) in _chunks)
+            Start = (writer._sink.Position + VortexLimits.MaxAlignment - 1) & ~((long)VortexLimits.MaxAlignment - 1);
+            if (_chunks.Count > 0)
             {
-                longest = Math.Max(longest, length);
-            }
-
-            byte[] buffer = ArrayPool<byte>.Shared.Rent(Math.Max(longest, 1));
-            try
-            {
-                Start = (writer._sink.Position + VortexLimits.MaxAlignment - 1) & ~((long)VortexLimits.MaxAlignment - 1);
-                foreach ((int field, int chunk, long at, int length) in _chunks)
+                // The part starts aligned, so each chunk lies at its place in the store past the start.
+                await writer.PadAsync(cancellationToken).ConfigureAwait(false);
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(RunScratch.PageBytes);
+                try
                 {
-                    Memory<byte> bytes = buffer.AsMemory(0, length);
-                    await _held.ReadAsync(at, bytes, cancellationToken).ConfigureAwait(false);
-                    long aligned = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
-                    await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
-                    writer._columnSegments[field].At(chunk) = writer.AddSegment(
-                        new SegmentSpec((ulong)aligned, (uint)length, (byte)VortexLimits.MaxAlignmentExponent, 0, 0));
-                    _regions.Add((field, IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent)));
+                    for (long at = 0; at < _columns.Length; at += RunScratch.PageBytes)
+                    {
+                        Memory<byte> bytes = buffer.AsMemory(0, (int)Math.Min(RunScratch.PageBytes, _columns.Length - at));
+                        await _columns.ReadAsync(at, bytes, cancellationToken).ConfigureAwait(false);
+                        await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
                 }
 
-                await WriteTablesAsync(writer, cancellationToken).ConfigureAwait(false);
+                foreach ((int field, int chunk, long at, int length, ulong checksum) in _chunks)
+                {
+                    writer._columnSegments[field].At(chunk) = writer.AddSegment(
+                        new SegmentSpec((ulong)(Start + at), (uint)length, (byte)VortexLimits.MaxAlignmentExponent, 0, 0));
+                    _regions.Add((field, new IndexSegment((ulong)(Start + at), (uint)length, (byte)VortexLimits.MaxAlignmentExponent, checksum)));
+                }
+            }
 
-                End = writer._sink.Position;
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(buffer);
-            }
+            await WriteTablesAsync(writer, cancellationToken).ConfigureAwait(false);
+            End = writer._sink.Position;
         }
 
         /// <summary>
@@ -494,6 +510,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         public void Dispose()
         {
+            _columns.Dispose();
             _held.Dispose();
             _tableBlobs?.Dispose();
         }

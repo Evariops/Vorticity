@@ -71,6 +71,9 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     private Pipe? _pipe;
     private Task<(PutOutcome Outcome, long StoredLength)>? _put;
 
+    /// <summary>The bytes written into the pipe since its last flush, which its completion hands on.</summary>
+    private long _unsent;
+
     /// <summary>Appended to as the bytes go by, rather than computed from the buffer.</summary>
     private readonly System.IO.Hashing.XxHash128 _hash = new System.IO.Hashing.XxHash128();
 
@@ -207,7 +210,8 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     {
         if (_pipe is null)
         {
-            _pipe = new Pipe(new PipeOptions(pool: _pool, pauseWriterThreshold: PipeBytes, resumeWriterThreshold: PipeBytes / 2, useSynchronizationContext: false));
+            _pipe = new Pipe(new PipeOptions(
+                pool: _pool, pauseWriterThreshold: PipeBytes, resumeWriterThreshold: PipeBytes / 2, minimumSegmentSize: ChunkBytes, useSynchronizationContext: false));
             _put = PutStreamedAsync(_pipe.Reader);
             for (int chunk = 0; chunk < _chunks.Count; chunk++)
             {
@@ -228,10 +232,23 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         await SendAsync(data, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Writes to the pipe and waits while it is full; a put that stopped reading says why.</summary>
+    /// <summary>
+    /// Writes to the pipe, its segments a chunk each, and hands what it holds on once a chunk is there: the put then
+    /// takes the object a megabyte at a time and wakes once a megabyte, where a flush at every write of the writer, a
+    /// padding or a segment, woke it for each and sent them in 4 KiB segments, a write each to a file. It waits while
+    /// the pipe is full; a put that stopped reading says why.
+    /// </summary>
     private async ValueTask SendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
-        FlushResult flushed = await _pipe!.Writer.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+        _pipe!.Writer.Write(data.Span);
+        _unsent += data.Length;
+        if (_unsent < ChunkBytes)
+        {
+            return;
+        }
+
+        _unsent = 0;
+        FlushResult flushed = await _pipe.Writer.FlushAsync(cancellationToken).ConfigureAwait(false);
         if (flushed.IsCompleted)
         {
             // The put stopped reading, which only its failure does: its failure is the write's.
