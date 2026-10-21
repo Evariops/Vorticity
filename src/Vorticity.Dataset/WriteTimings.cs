@@ -8,9 +8,10 @@ namespace Vorticity.Dataset;
 /// Where the slices of the objects a load writes spend their time, summed over every object that adds to it, so that which
 /// stage of the pipeline holds the others is a number: the rows drawn by the caller, then on the thread that hands them
 /// over, the rows copied into a slice, the slice's parts joined into one, sorted, and the wait for the slice before it to
-/// be written; on the thread that writes a slice, its synopsis counted, and its columns and indexes written; once an
-/// object's rows are all handed over, its last slice written, its synopsis finished and its writer completed. The object is
-/// a sink the caller owns, as <see cref="Scanning.ScanCounters"/> is; the additions are interlocked, one a slice or a batch.
+/// be written; on the thread that writes a slice, its synopsis counted, beside its columns and indexes written when a lane
+/// is free, and the wait for the count once they are; once an object's rows are all handed over, its last slice written,
+/// its synopsis finished and its writer completed. The object is a sink the caller owns, as
+/// <see cref="Scanning.ScanCounters"/> is; the additions are interlocked, one a slice or a batch.
 /// </summary>
 internal sealed class WriteTimings
 {
@@ -21,6 +22,8 @@ internal sealed class WriteTimings
     private long _wait;
     private long _synopsis;
     private long _write;
+    private long _lag;
+    private long _beside;
     private long _drain;
     private long _tables;
     private long _close;
@@ -46,6 +49,12 @@ internal sealed class WriteTimings
     /// <summary>Each slice's columns and indexes written.</summary>
     internal TimeSpan Write => Of(ref _write);
 
+    /// <summary>The thread that writes a slice waiting, once its columns are written, for its synopsis counted beside them.</summary>
+    internal TimeSpan Lag => Of(ref _lag);
+
+    /// <summary>The slices whose synopsis was counted beside their write, on a lane of its own.</summary>
+    internal long Beside => Interlocked.Read(ref _beside);
+
     /// <summary>The last slice of each object written, once its rows are all handed over.</summary>
     internal TimeSpan Drain => Of(ref _drain);
 
@@ -68,6 +77,10 @@ internal sealed class WriteTimings
     internal void AddSynopsis(long ticks) => Interlocked.Add(ref _synopsis, ticks);
 
     internal void AddWrite(long ticks) => Interlocked.Add(ref _write, ticks);
+
+    internal void AddLag(long ticks) => Interlocked.Add(ref _lag, ticks);
+
+    internal void AddBeside() => Interlocked.Increment(ref _beside);
 
     internal void AddDrain(long ticks) => Interlocked.Add(ref _drain, ticks);
 

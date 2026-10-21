@@ -90,11 +90,44 @@ public sealed partial class SynopsisTableTests
     }
 
     /// <summary>
+    /// The tables a synopsis counted beside its slices' writes gives up as they grow are those it gives up counted before
+    /// them, for the same reasons: a slice's count weighs them against the data written before the slice, whichever runs
+    /// first. The file is the same, byte for byte.
+    /// </summary>
+    [Fact]
+    public async Task TablesGivenUpBesideTheWritesAreThoseGivenUpBeforeThem()
+    {
+        string scratch = Path.Combine(Path.GetTempPath(), $"vortex-beside-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratch);
+        try
+        {
+            (string before, WriteReport beforeReport) = await SpreadAsync(scratch, budgetPerMille: 100, earlyChoiceBytes: 32 << 10);
+            WriteTimings timings = new WriteTimings();
+            (string beside, WriteReport besideReport) = await SpreadAsync(scratch, budgetPerMille: 100, earlyChoiceBytes: 32 << 10, timings: timings, beside: true);
+            Assert.True(timings.Beside > 0, "a slice was counted beside its write");
+
+            static List<(string?, IndexOutcome, string?, long)> Verdicts(WriteReport report) =>
+                [.. report.Indexes.Where(r => r.Kind == IndexKinds.SynopsisTable).Select(r => (r.Column, r.Outcome, r.Reason, r.Bytes))];
+            Assert.Contains(Verdicts(beforeReport), t => t.Item3?.StartsWith("given up as", StringComparison.Ordinal) == true);
+            Assert.Equal(Verdicts(beforeReport), Verdicts(besideReport));
+            byte[] beforeBytes = await System.IO.File.ReadAllBytesAsync(before, Ct);
+            byte[] besideBytes = await System.IO.File.ReadAllBytesAsync(beside, Ct);
+            Assert.True(beforeBytes.AsSpan().SequenceEqual(besideBytes), "the files differ");
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// The spread rows written in sorted slices with their synopsis, every run of the tables on disk, under the budget
-    /// <paramref name="budgetPerMille"/> and early verdicts from <paramref name="earlyChoiceBytes"/> of data.
+    /// <paramref name="budgetPerMille"/> and early verdicts from <paramref name="earlyChoiceBytes"/> of data, each slice counted
+    /// before its write, or beside it on lanes of their own, which <paramref name="timings"/> counts. The file's identity is
+    /// the same every time.
     /// </summary>
     private static async Task<(string Path, WriteReport Report)> SpreadAsync(
-        string scratch, int budgetPerMille, long earlyChoiceBytes, (int Rows, long HourBytes)? chunking = null)
+        string scratch, int budgetPerMille, long earlyChoiceBytes, (int Rows, long HourBytes)? chunking = null, WriteTimings? timings = null, bool beside = false)
     {
         Random random = new Random(11);
         Spread[] rows = new Spread[SpreadRows];
@@ -131,6 +164,7 @@ public sealed partial class SynopsisTableTests
             ScratchMemoryBytes = 0,
             ScratchDirectory = scratch,
             ChunkTargetBytes = 16 << 10,
+            Identity = new Guid("5b5b5b5b-5b5b-45b5-85b5-5b5b5b5b5b5b"),
         };
 
         WriteReport report;
@@ -139,16 +173,13 @@ public sealed partial class SynopsisTableTests
             using SortedSlices slices = new SortedSlices(table, instant, schema);
             using SynopsisTables tables = new SynopsisTables(
                 schema, table.Unit, SynopsisTables.Measures(schema, instant), writer, slices: table.Slices, chunking: chunking);
+            SliceWriter writes = new SliceWriter(writer, tables, beside ? new LaneBudget(8) : null, timings);
             int next = 0;
             await foreach (RecordBatch batch in file.Scan<Spread>().ToBatchesAsync(Ct))
             {
                 using (batch)
                 {
-                    await slices.AppendAsync(batch, async (sorted, token) =>
-                    {
-                        await tables.AddSliceAsync(sorted.Batch, table.Slices[next++].Start, slices.Order, sorted.Codes, cancellationToken: token);
-                        await writer.WriteBatchAsync(sorted.Batch, token);
-                    }, Ct);
+                    await slices.AppendAsync(batch, (sorted, token) => writes.WriteAsync(sorted, table.Slices[next++].Start, slices.Order, slices.CountedPaths, token), Ct);
                 }
             }
 

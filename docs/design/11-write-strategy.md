@@ -471,6 +471,15 @@ synopsis columns, which it encodes as runs, and the job counts the synopsis tabl
 while the slice is still in memory. An object written so is 4 % smaller than the same rows in time
 order, and 10 % smaller than a leveled object with its sorted run.
 
+The count runs beside the slice's write, on a lane of the session's of its own when one is free, through
+records of an arena of its own over the slice's buffers, since the write cuts its chunks as nodes of the
+slice's arena. Its tables are weighed against the data written before the slice, held while the write
+goes out, and their chunks encoded against a dictionary of encodings of their own, which starts as the
+file's and is renumbered onto it when the synopsis part is written: the object's bytes are those of a
+count before the write. On a day of three hours of ten minutes (90 M rows), the chain that writes the
+slices went from 19.0 s, the counts then the writes, to 12.9 s, the writes and their waits for the
+counts beside them.
+
 Nothing of the tables outlives a slice in memory but a chunk of each and what a merge reads, whatever
 the object's rows: an hour of requests at 5 × 10⁴ a second holds 1.8 × 10⁸ rows, a day 4.3 × 10⁹. A
 slice's groups at every depth are in the order of their keys already, so its runs go out at once as rows

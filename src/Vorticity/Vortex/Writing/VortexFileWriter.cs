@@ -325,15 +325,49 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         private readonly List<(int Field, int Chunk, long At, int Length, ulong Checksum)> _chunks = [];
         private readonly List<(int Field, IndexSegment Region)> _regions = [];
 
-        // The tables as their chunks arrive, encoded and held in the scratch store with the columns' chunks; the tables
-        // declared once the rows are all in, each by what it holds and its place among those held; then, once written,
-        // each with its chunks' regions and their dtypes.
+        // The tables as their chunks arrive, encoded and held in a scratch store of their own; the tables declared once the
+        // rows are all in, each by what it holds and its place among those held; then, once written, each with its chunks'
+        // regions and their dtypes.
         private readonly List<HeldTable> _heldTables = [];
         private IReadOnlyList<(SynopsisTableInfo Table, int Held)> _declared = [];
         private readonly List<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> _tables = [];
 
         // What encodes the tables' chunks: the writer's own may be encoding its data's chunks on its fan at the time.
         private ArrayBlobWriter.Workspace? _tableBlobs;
+
+        // The encodings of the tables' chunks once they are counted beside the data's writes: the file's ids as they were
+        // then, `_seeded` of them, and the ids the tables met after, renumbered onto the file's when the part is written,
+        // so that the file's ids come in the order its data met them whoever ran first; null while the tables encode
+        // against the file's dictionary, counted between the writes.
+        private EncodingDictionary? _tableEncodings;
+        private int _seeded;
+
+        /// <summary>
+        /// Gives the tables' chunks a dictionary of their own, the file's ids first, once the file holds one: index 0, which a
+        /// blob does not write, is then the file's own. Whether the tables encode apart from the data's writes.
+        /// </summary>
+        internal bool OwnEncodings(EncodingDictionary file)
+        {
+            if (_tableEncodings is null)
+            {
+                if (file.Count == 0)
+                {
+                    return false;
+                }
+
+                string[] ids = new string[file.Count];
+                for (int i = 0; i < ids.Length; i++)
+                {
+                    ids[i] = file.Ids[i];
+                }
+
+                _tableEncodings = new EncodingDictionary(ComponentKind.Array, file.Target);
+                _tableEncodings.Reset(ids);
+                _seeded = ids.Length;
+            }
+
+            return true;
+        }
 
         /// <summary>Each chunk of the part as written: its column, and its region with its checksum.</summary>
         internal IReadOnlyList<(int Field, IndexSegment Region)> Regions => _regions;
@@ -354,10 +388,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             HeldTable held = _heldTables[table];
             _tableBlobs ??= new ArrayBlobWriter.Workspace { FrameRows = writer._rowBlock, SizeFirst = writer._sizeFirst, ZstdLevel = writer._zstdLevel };
-            using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(_tableBlobs, arena, node, writer._arrayEncodings, writer._compress);
+            EncodingDictionary? own = _tableEncodings;
+            using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(_tableBlobs, arena, node, own ?? writer._arrayEncodings, writer._compress);
             held.DType ??= Types.Serialization.DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
             long at = await _held.AppendAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
-            held.Chunks.Add((at, blob.Length, firstBucket, lastBucket, arena.GetNode(node).Length));
+            held.Chunks.Add((at, blob.Length, firstBucket, lastBucket, arena.GetNode(node).Length, own is not null));
             held.Bytes += blob.Length;
             return blob.Length;
         }
@@ -368,10 +403,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// <summary>The tables to write after the columns, each by what it holds and its place among those held.</summary>
         internal void Declare(IReadOnlyList<(SynopsisTableInfo Table, int Held)> tables) => _declared = tables;
 
-        /// <summary>A table held as its chunks come: where each waits, its bytes, its buckets and its rows, and its rows' dtype.</summary>
+        /// <summary>
+        /// A table held as its chunks come: where each waits, its bytes, its buckets and its rows, and whether it was encoded
+        /// against the tables' own dictionary; and its rows' dtype.
+        /// </summary>
         private sealed class HeldTable
         {
-            internal List<(long At, int Length, long First, long Last, int Rows)> Chunks { get; } = [];
+            internal List<(long At, int Length, long First, long Last, int Rows, bool Own)> Chunks { get; } = [];
 
             internal byte[]? DType { get; set; }
 
@@ -458,11 +496,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 // A table given up still asks its grain's question, at bytes no budget holds.
                 HeldTable chunks = _heldTables[held];
                 sizes.Add((table, chunks.Dropped is not null ? long.MaxValue : chunks.Bytes + (chunks.DType?.Length ?? 0)));
-                foreach ((long _, int length, long _, long _, int _) in chunks.Chunks)
+                foreach ((long _, int length, long _, long _, int _, bool _) in chunks.Chunks)
                 {
                     longest = Math.Max(longest, length);
                 }
             }
+
+            // The file's index of each id the tables met apart from the data, interned in the order the tables met them.
+            ushort[]? map = null;
+            bool renumbers = false;
 
             IndexWriter indexes = writer._indexes!;
             long dataBytes = writer._sink.Position - indexes.FileBytes;
@@ -489,9 +531,27 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     byte[][] dtypes = new byte[chunks.Length][];
                     for (int c = 0; c < chunks.Length; c++)
                     {
-                        (long at, int length, long first, long last, int rows) = held.Chunks[c];
+                        (long at, int length, long first, long last, int rows, bool own) = held.Chunks[c];
                         Memory<byte> bytes = buffer.AsMemory(0, length);
                         await _held.ReadAsync(at, bytes, cancellationToken).ConfigureAwait(false);
+                        if (own)
+                        {
+                            if (map is null)
+                            {
+                                map = new ushort[_tableEncodings!.Count];
+                                for (int id = 0; id < map.Length; id++)
+                                {
+                                    map[id] = id < _seeded ? (ushort)id : writer._arrayEncodings.Intern(_tableEncodings.Ids[id]);
+                                    renumbers |= map[id] != id;
+                                }
+                            }
+
+                            if (renumbers)
+                            {
+                                ArrayBlobWriter.Renumber(bytes.Span, map);
+                            }
+                        }
+
                         long aligned = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
                         await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
                         TableBytes += length;
@@ -612,8 +672,49 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             throw new InvalidOperationException("A file's synopsis tables ride in its index directory, which a writer that builds no index does not write.");
         }
 
-        return _synopsisPart ??= new SynopsisPart(_synopsisSpool);
+        return HeldPart();
     }
+
+    /// <summary>The synopsis part, made once by whichever needs it first: a table's chunk counted beside a write may.</summary>
+    private SynopsisPart HeldPart()
+    {
+        if (Volatile.Read(ref _synopsisPart) is { } part)
+        {
+            return part;
+        }
+
+        SynopsisPart made = new SynopsisPart(_synopsisSpool);
+        if (Interlocked.CompareExchange(ref _synopsisPart, made, null) is { } first)
+        {
+            made.Dispose();
+            return first;
+        }
+
+        return made;
+    }
+
+    /// <summary>
+    /// Holds what the synopsis's tables are weighed against, <see cref="ISynopsisChunkSink.BudgetSoFar"/> and
+    /// <see cref="ISynopsisChunkSink.RowsSoFar"/>, at what the data written so far says, until
+    /// <see cref="ReleaseSynopsisBudget"/>; and once the file holds an encoding, has the tables' chunks encoded against a
+    /// dictionary of their own, renumbered onto the file's when the part is written. A synopsis counted beside the next
+    /// batch's write then weighs and encodes its tables as it would counted before it, whenever the write's chunks go out.
+    /// </summary>
+    /// <returns>Whether the synopsis may be counted beside the next write: nothing its tables' chunks touch, the write does.</returns>
+    internal bool HoldSynopsisBudget()
+    {
+        _heldBudget = BudgetNow();
+        _heldRows = _rowCount;
+        _budgetHeld = true;
+        return _indexes is not null && HeldPart().OwnEncodings(_arrayEncodings);
+    }
+
+    /// <summary>Lets the synopsis's tables be weighed against the data as it is written again.</summary>
+    internal void ReleaseSynopsisBudget() => _budgetHeld = false;
+
+    private bool _budgetHeld;
+    private long _heldBudget;
+    private long _heldRows;
 
     int ISynopsisChunkSink.OpenTable() => Part().OpenTable();
 
@@ -622,12 +723,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     void ISynopsisChunkSink.DropTable(int table, string verdict) => Part().DropTable(table, verdict);
 
+    long ISynopsisChunkSink.BudgetSoFar => _budgetHeld ? _heldBudget : BudgetNow();
+
+    long ISynopsisChunkSink.RowsSoFar => _budgetHeld ? _heldRows : _rowCount;
+
     // The data so far: what the file holds but its indexes, and the synopsis columns' chunks it holds aside.
-    long ISynopsisChunkSink.BudgetSoFar => _indexes is { } indexes
+    private long BudgetNow() => _indexes is { } indexes
         ? indexes.SynopsisBudgetSoFar(_sink.Position - indexes.FileBytes + (_synopsisPart?.ColumnBytes ?? 0))
         : long.MaxValue;
-
-    long ISynopsisChunkSink.RowsSoFar => _rowCount;
 
     (long Memory, string? Directory, bool Seal) ISynopsisChunkSink.Scratch => _synopsisSpool;
 
@@ -2252,7 +2355,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // is placed when the part is written.
             if (_synopsis?[field] == true)
             {
-                SynopsisPart part = _synopsisPart ??= new SynopsisPart(_synopsisSpool);
+                SynopsisPart part = HeldPart();
                 await part.HoldAsync(field, _columnSegments[field].Count, blob.Memory, cancellationToken).ConfigureAwait(false);
                 _columnSegments[field].Add(-1);
                 _indexes?.AddColumnBytes(field, blob.Length);

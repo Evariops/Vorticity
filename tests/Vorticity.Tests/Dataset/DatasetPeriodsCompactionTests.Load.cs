@@ -130,6 +130,84 @@ public sealed partial class DatasetPeriodsCompactionTests
     }
 
     /// <summary>
+    /// A load whose session has lanes to spare counts each slice's synopsis beside the slice's write, and writes the object
+    /// a load of one lane writes, which counts each slice before it: its tables weighed against the same data, and their
+    /// encodings the file's in the order its data met them, over a day whose hours merge while the next slices are written.
+    /// The two objects differ by their identity alone.
+    /// </summary>
+    [Fact]
+    public async Task ASynopsisCountedBesideTheWritesGivesTheBytesOfOneCountedBeforeThem()
+    {
+        // Three hours of ten requests a second, from noon, in slices of 10 000: the writer has given the file its first
+        // encodings within a few slices, and an hour is merged every five.
+        List<DateTimeOffset> instants = [.. Enumerable.Range(0, 3 * 36_000).Select(i => Noon.AddMilliseconds(i * 100))];
+        byte[] file = await FileOfAsync(RequestsOf(instants, 0));
+        byte[][] objects = new byte[2][];
+        for (int run = 0; run < objects.Length; run++)
+        {
+            int lanes = run == 0 ? 1 : 8;
+            await using VortexSession session = VortexSession.Create(o => o.MaxDegreeOfParallelism = lanes);
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            DatasetOptions options = Options(SliceWidth.Day);
+            options = options with { Session = session, Periods = options.Periods! with { SliceTargetRows = 10_000 } };
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, options, Ct);
+            PeriodRows day = new PeriodRows(TimeSlicer.InstantOf(new DateTimeOffset(Noon.Date, TimeSpan.Zero), TimeUnit.Microseconds), [token => RowsAsync(file, token)]);
+            WriteTimings timings = new WriteTimings();
+            await DatasetCompactor.LoadPeriodsAsync(dataset, [day], degree: 1, timings, Ct);
+
+            // One lane is the slice's write's, and its synopsis is counted before it. Eight leave lanes free, once the first
+            // slices' writes have given the file an encoding.
+            if (lanes == 1)
+            {
+                Assert.Equal(0, timings.Beside);
+            }
+            else
+            {
+                Assert.True(timings.Beside > 0, "a slice's synopsis was counted beside its write");
+            }
+
+            ObjectEntry entry = ObjectEntry.FromBytes((await FirstAsync(dataset, PeriodLevels.Periods)).Value.Span);
+            byte[] bytes = new byte[entry.Bytes];
+            await store.ReadAsync(entry.Key, 0, bytes, null, Ct);
+
+            // Every table read back counts the object's rows over its chunks: they decode, renumbered onto the file's encodings.
+            await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
+            {
+                using SynopsisTableSet set = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
+                Dictionary<string, long> counted = [];
+                foreach ((SynopsisTableInfo info, TableChunk _, int node) in set.Tables)
+                {
+                    string table = $"{info.Kind} {info.Bucket} [{string.Join(", ", info.Keys)}]";
+                    foreach (long count in ColumnData.Values<long>(set.Arena, set.Arena.GetNode(node).GetFieldIndex(1 + info.Keys.Length)))
+                    {
+                        counted[table] = counted.GetValueOrDefault(table) + count;
+                    }
+                }
+
+                Assert.NotEmpty(counted);
+                Assert.All(counted, table => Assert.Equal(instants.Count, table.Value));
+            }
+
+            // The identity, the bytes of the guid the uid was read from, masked wherever the file holds it.
+            byte[] identity = new byte[16];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(identity, (ulong)(entry.Uid >> 64));
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(identity.AsSpan(8), (ulong)entry.Uid);
+            int masked = 0;
+            for (int at = bytes.AsSpan().IndexOf(identity); at >= 0; at = bytes.AsSpan().IndexOf(identity))
+            {
+                bytes.AsSpan(at, identity.Length).Clear();
+                masked++;
+            }
+
+            Assert.True(masked > 0, "the file holds its identity");
+            objects[run] = bytes;
+        }
+
+        Assert.Equal(objects[0].Length, objects[1].Length);
+        Assert.True(objects[0].AsSpan().SequenceEqual(objects[1]), "the object of a synopsis counted beside the writes is the one counted before them");
+    }
+
+    /// <summary>
     /// The requests at <paramref name="instants"/>, their ids counted from <paramref name="first"/>, three statuses taking
     /// turns, which a synopsis table counts, and a size drawn from the instant, which it sums.
     /// </summary>

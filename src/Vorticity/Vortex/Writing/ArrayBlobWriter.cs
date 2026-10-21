@@ -1980,9 +1980,11 @@ internal static class ArrayBlobWriter
     /// written against the file's dictionary from the start. A node two parents name is rewritten
     /// once.
     /// </remarks>
-    internal static void Renumber(in BlobLease blob, ReadOnlySpan<ushort> map)
+    internal static void Renumber(in BlobLease blob, ReadOnlySpan<ushort> map) => Renumber(blob.Bytes, map);
+
+    /// <summary><see cref="Renumber(in BlobLease, ReadOnlySpan{ushort})"/> over a blob's bytes read back from where they waited.</summary>
+    internal static void Renumber(Span<byte> bytes, ReadOnlySpan<ushort> map)
     {
-        Span<byte> bytes = blob.Bytes;
         int flatLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes[^sizeof(uint)..]);
         Span<byte> flat = bytes.Slice(bytes.Length - sizeof(uint) - flatLength, flatLength);
         int budget = VortexLimits.MaxFlatBufferTables;

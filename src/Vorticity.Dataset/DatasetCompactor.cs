@@ -1371,10 +1371,12 @@ internal static class DatasetCompactor
                         Hold = Hold,
                     };
 
-                    // The synopsis's tables, counted from each slice as it is sorted, their chunks held by the writer.
+                    // The synopsis's tables, counted from each slice as it is sorted, beside its write on a lane of their own,
+                    // their chunks held by the writer.
                     _synopsis = new SynopsisTables(
                         _schema.DType, _table.Unit, SynopsisTables.Measures(_schema.DType, instant), _draft.Writer, _table.Paths, _table.Slices,
                         _dataset.Options.SynopsisChunking);
+                    _slices = new SliceWriter(_draft.Writer, _synopsis, _dataset.Session.WriteLanes, Timings);
                     _slice = 0;
                 }
             }
@@ -1421,22 +1423,15 @@ internal static class DatasetCompactor
             return shapes;
         }
 
-        /// <summary>A slice sorted, counted into the synopsis and written: on the sorter's thread for writes, one slice at a time.</summary>
-        private async ValueTask WriteSortedAsync(SortedSlice sorted, CancellationToken cancellationToken)
-        {
-            long begin = Stopwatch.GetTimestamp();
-            if (_synopsis is { } synopsis)
-            {
-                await synopsis.AddSliceAsync(
-                    sorted.Batch, _table!.Slices[_slice].Start, _sorter!.Order, sorted.Codes, sorted.PathColumns, _sorter.CountedPaths, cancellationToken).ConfigureAwait(false);
-            }
+        /// <summary>
+        /// A slice sorted, counted into the synopsis and written, one slice at a time, on the sorter's thread for writes: the
+        /// synopsis beside the write when a lane is free (<see cref="SliceWriter"/>).
+        /// </summary>
+        private ValueTask WriteSortedAsync(SortedSlice sorted, CancellationToken cancellationToken) =>
+            _slices!.WriteAsync(sorted, _table!.Slices[_slice++].Start, _sorter!.Order, _sorter.CountedPaths, cancellationToken);
 
-            long counted = Stopwatch.GetTimestamp();
-            _slice++;
-            await _draft!.Writer.WriteBatchAsync(sorted.Batch, cancellationToken).ConfigureAwait(false);
-            Timings?.AddSynopsis(counted - begin);
-            Timings?.AddWrite(Stopwatch.GetTimestamp() - counted);
-        }
+        // What counts and writes the object's slices, its synopsis beside its writes.
+        private SliceWriter? _slices;
 
         // The tables of the object's synopsis as its slices are sorted, and the next slice's index.
         private SynopsisTables? _synopsis;
@@ -1483,6 +1478,7 @@ internal static class DatasetCompactor
 
                 SynopsisTables? synopsis = _synopsis;
                 _synopsis = null;
+                _slices = null;
                 try
                 {
                     long finishing = Stopwatch.GetTimestamp();
@@ -1531,6 +1527,7 @@ internal static class DatasetCompactor
             _draft = null;
             _synopsis?.Dispose();
             _synopsis = null;
+            _slices = null;
             await draft.Writer.DisposeAsync().ConfigureAwait(false);
             draft.Sink.Discard();
         }
