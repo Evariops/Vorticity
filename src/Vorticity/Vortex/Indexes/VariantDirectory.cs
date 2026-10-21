@@ -335,18 +335,18 @@ internal sealed class VariantDirectory
         switch (predicate)
         {
             case ComparisonExpr { Field: VariantFieldExpr path } comparison:
-                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> entries) is not { } absent
-                    || MayMatch(path.Read, entries, comparison.Op, comparison.Value, absent, slice);
+                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> entries, out bool partial) is not { } absent
+                    || MayMatch(path.Read, entries, comparison.Op, comparison.Value, absent, slice, partial);
             case InExpr { Field: VariantFieldExpr path } membership:
             {
-                if (EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> members) is not { } lacking)
+                if (EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> members, out bool trimmed) is not { } lacking)
                 {
                     return true;
                 }
 
                 foreach (FilterLiteral literal in membership.Literals)
                 {
-                    if (MayMatch(path.Read, members, ComparisonOp.Equal, literal, lacking, slice))
+                    if (MayMatch(path.Read, members, ComparisonOp.Equal, literal, lacking, slice, trimmed))
                     {
                         return true;
                     }
@@ -356,11 +356,11 @@ internal sealed class VariantDirectory
             }
 
             case NullCheckExpr { Field: VariantFieldExpr path, IsNull: false }:
-                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> held) is not { } none
-                    || (!none && Holds(path.Read, held, slice));
+                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> held, out bool cut) is not { } none
+                    || (!none && Holds(path.Read, held, slice, cut));
             case StringMatchExpr { Field: VariantFieldExpr path }:
-                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> texts) is not { } empty
-                    || (!empty && Holds(path.Read, texts, slice));
+                return EntriesOf(path, directories, slice, out ReadOnlySpan<PathEntry> texts, out bool clipped) is not { } empty
+                    || (!empty && Holds(path.Read, texts, slice, clipped));
             default:
                 return true;
         }
@@ -372,13 +372,16 @@ internal sealed class VariantDirectory
     /// or slice <paramref name="slice"/> of it, holds no value at the path at all.
     /// </summary>
     private static bool? EntriesOf(
-        VariantFieldExpr path, IReadOnlyDictionary<string, VariantDirectory> directories, int slice, out ReadOnlySpan<PathEntry> entries)
+        VariantFieldExpr path, IReadOnlyDictionary<string, VariantDirectory> directories, int slice, out ReadOnlySpan<PathEntry> entries, out bool partial)
     {
         entries = default;
+        partial = false;
         if (!directories.TryGetValue(path.Column.Path, out VariantDirectory? directory))
         {
             return null;
         }
+
+        partial = directory.Partial;
 
         string[] keys = new string[path.Steps.Length];
         for (int i = 0; i < keys.Length; i++)
@@ -405,15 +408,25 @@ internal sealed class VariantDirectory
             }
         }
 
-        return true;
+        // A partial directory left some of the path's classes out, whose rows may lie in the slice: it says nothing of their
+        // absence there.
+        return directory.Partial ? null : true;
     }
 
-    /// <summary>Whether the path holds a value <paramref name="read"/> takes: of its class, or any value for a conversion or a presence.</summary>
-    private static bool Holds(VariantRead read, ReadOnlySpan<PathEntry> entries, int slice) =>
-        ClassOf(read) is not { } @class || Find(entries, @class, slice) is not null;
+    /// <summary>
+    /// Whether the path holds a value <paramref name="read"/> takes: of its class, or any value for a conversion or a presence.
+    /// A <paramref name="partial"/> directory may have left the class out, so it holds one as far as it can tell.
+    /// </summary>
+    private static bool Holds(VariantRead read, ReadOnlySpan<PathEntry> entries, int slice, bool partial) =>
+        ClassOf(read) is not { } @class || Find(entries, @class, slice) is not null || partial;
 
-    /// <summary>Whether a value at the path may compare to <paramref name="value"/> by <paramref name="op"/> when read by <paramref name="read"/>.</summary>
-    private static bool MayMatch(VariantRead read, ReadOnlySpan<PathEntry> entries, ComparisonOp op, FilterLiteral value, bool absent, int slice)
+    /// <summary>
+    /// Whether a value at the path may compare to <paramref name="value"/> by <paramref name="op"/> when read by <paramref name="read"/>.
+    /// An entry a directory holds is whole, its bounds those of every value of its class; a <paramref name="partial"/> directory
+    /// may have left the class's entry out, which then refutes nothing.
+    /// </summary>
+    private static bool MayMatch(
+        VariantRead read, ReadOnlySpan<PathEntry> entries, ComparisonOp op, FilterLiteral value, bool absent, int slice, bool partial)
     {
         if (read == VariantRead.Has)
         {
@@ -433,7 +446,7 @@ internal sealed class VariantDirectory
             return true;
         }
 
-        return Find(entries, @class, slice) is { } entry && Within(entry, op, value);
+        return Find(entries, @class, slice) is { } entry ? Within(entry, op, value) : partial;
     }
 
     /// <summary>The class a read of one class takes, or null for a conversion or a presence.</summary>

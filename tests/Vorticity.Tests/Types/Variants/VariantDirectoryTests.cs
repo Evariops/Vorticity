@@ -181,7 +181,12 @@ public sealed class VariantDirectoryTests
         Assert.InRange(trimmed.Entries.Count, 2, whole.Entries.Count - 1);
         Dictionary<string, VariantDirectory> partial = new() { ["Attributes"] = VariantDirectory.From(trimmed.ToBytes())! };
         Assert.True(VariantDirectory.MayMatch(Has("never"), partial));
-        Assert.False(VariantDirectory.MayMatch(Path(VariantRead.AsInt64, ComparisonOp.Equal, FilterLiteral.From(1L), "route"), partial));
+
+        // A class the trimmed directory holds no entry of may be one it left out: it refutes nothing, where the whole
+        // directory, which holds every class, does.
+        VortexExpr integers = Path(VariantRead.AsInt64, ComparisonOp.Equal, FilterLiteral.From(1L), "route");
+        Assert.True(VariantDirectory.MayMatch(integers, partial));
+        Assert.False(VariantDirectory.MayMatch(integers, complete));
         Assert.Same(whole, whole.Within(bytes));
     }
 
@@ -239,6 +244,112 @@ public sealed class VariantDirectoryTests
         Assert.All(Enumerable.Range(-1, 5), s => Assert.Equal(
             VariantDirectory.MayMatch(Has("early"), everything, s), VariantDirectory.MayMatch(Has("early"), early, s)));
         AssertSameEntries(everything["Attributes"].Of(["early"]).ToArray(), early["Attributes"].Of(["early"]).ToArray());
+    }
+
+    /// <summary>
+    /// A path that keeps its integers' entry but whose rare texts a directory over its budget leaves out: a question on its
+    /// texts may match, over the object and over the slice they lie in, while the classes and bounds a whole directory
+    /// holds still refute what they refute.
+    /// </summary>
+    [Fact]
+    public void ATrimmedDirectoryRefutesNoClassItLeftOut()
+    {
+        PathCensus census = new PathCensus(stringBoundBytes: 8);
+        for (int i = 0; i < 3_000; i++)
+        {
+            Variant code = i == 2_999 ? Variant.From("x") : Variant.From((long)(i % 7));
+            Variant row = Variant.Object(("code", code), ($"k{i % 600}", Variant.From(1L)), ($"u{i}", Variant.From(true)));
+            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+        }
+
+        TimeSlice[] slices = [.. Enumerable.Range(0, 4).Select(s => new TimeSlice(s * 750_000L, (s + 1) * 750_000L, s * 750L, 750))];
+        VariantDirectory whole = VariantDirectory.From(census, null, slices);
+        VariantDirectory trimmed = VariantDirectory.From(whole.Within(whole.ToBytes().Length / 8).ToBytes())!;
+        Assert.True(trimmed.Partial);
+        Assert.Single(trimmed.Of(["code"]).ToArray(), entry => entry.Class == PathClass.Integer);
+        Assert.DoesNotContain(trimmed.Of(["code"]).ToArray(), entry => entry.Class == PathClass.String);
+
+        Dictionary<string, VariantDirectory> complete = new() { ["Attributes"] = whole };
+        Dictionary<string, VariantDirectory> partial = new() { ["Attributes"] = trimmed };
+        VortexExpr text = Path(VariantRead.AsString, ComparisonOp.Equal, FilterLiteral.From("x"), "code");
+        VortexExpr present = VariantFilterExpr.Of(new NullCheckExpr(new VariantFieldExpr(new FieldExpr("Attributes"), [VariantStep.Of("code")], VariantRead.AsString), isNull: false));
+        foreach (int slice in new[] { -1, 3 })
+        {
+            Assert.True(VariantDirectory.MayMatch(text, complete, slice));
+            Assert.True(VariantDirectory.MayMatch(text, partial, slice));
+            Assert.True(VariantDirectory.MayMatch(present, partial, slice));
+        }
+
+        // The whole directory refutes by class and by bounds; the trimmed one by the bounds of the entries it keeps.
+        Assert.False(VariantDirectory.MayMatch(Path(VariantRead.AsBool, ComparisonOp.Equal, FilterLiteral.From(true), "code"), complete));
+        Assert.False(VariantDirectory.MayMatch(Path(VariantRead.AsString, ComparisonOp.Equal, FilterLiteral.From("zzz"), "code"), complete));
+        Assert.False(VariantDirectory.MayMatch(Path(VariantRead.AsInt64, ComparisonOp.Equal, FilterLiteral.From(9L), "code"), partial));
+    }
+
+    /// <summary>
+    /// Random rows of mixed classes over five slices, their directory trimmed to random budgets: every value a row holds may
+    /// match, over the object and over the row's slice, whatever the directory left out.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void NoTrimmingRefutesAValueARowHolds(int seed)
+    {
+        Random random = new Random(seed);
+        const int Rows = 600;
+        PathCensus census = new PathCensus();
+        List<(int Row, string Key, VariantRead Read, FilterLiteral Value)> held = [];
+        for (int i = 0; i < Rows; i++)
+        {
+            List<(string, Variant)> fields = [];
+            foreach (string key in new[] { "a", "b", "c", $"r{random.Next(200)}", $"u{i}" })
+            {
+                if (random.Next(4) == 0)
+                {
+                    continue;
+                }
+
+                (Variant value, VariantRead read, FilterLiteral literal) = random.Next(4) switch
+                {
+                    0 => Long(random.Next(-50, 50)),
+                    1 => Text($"v{random.Next(30)}"),
+                    2 => (Variant.From(random.Next(2) == 0), VariantRead.AsBool, FilterLiteral.From(false)),
+                    _ => Real(random.Next(-100, 100) / 4.0),
+                };
+                literal = read == VariantRead.AsBool ? FilterLiteral.From(value.AsBool()!.Value) : literal;
+                fields.Add((key, value));
+                held.Add((i, key, read, literal));
+            }
+
+            Variant row = Variant.Object([.. fields]);
+            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+        }
+
+        TimeSlice[] slices = [.. Enumerable.Range(0, 5).Select(s => new TimeSlice(s * 120_000L, (s + 1) * 120_000L, s * 120L, 120))];
+        VariantDirectory whole = VariantDirectory.From(census, null, slices);
+        int bytes = whole.ToBytes().Length;
+        foreach (double share in new[] { 1.0, 0.5, 0.2, 0.05, 0.0 })
+        {
+            Dictionary<string, VariantDirectory> directories = new()
+            {
+                ["Attributes"] = VariantDirectory.From(whole.Within((long)(bytes * share)).ToBytes())!,
+            };
+            foreach ((int row, string key, VariantRead read, FilterLiteral value) in held)
+            {
+                VortexExpr equal = Path(read, ComparisonOp.Equal, value, key);
+                Assert.True(VariantDirectory.MayMatch(equal, directories), $"row {row}, {key} at {share}");
+                Assert.True(VariantDirectory.MayMatch(equal, directories, row / 120), $"row {row}, {key} at {share}, its slice");
+            }
+        }
+
+        static (Variant, VariantRead, FilterLiteral) Long(long value) => (Variant.From(value), VariantRead.AsInt64, FilterLiteral.From(value));
+
+        static (Variant, VariantRead, FilterLiteral) Text(string value) => (Variant.From(value), VariantRead.AsString, FilterLiteral.From(value));
+
+        static (Variant, VariantRead, FilterLiteral) Real(double value) => (Variant.From(value), VariantRead.AsDouble, FilterLiteral.From(value));
     }
 
     private static byte[][][] Utf8(string[][] paths) => [.. paths.Select(path => path.Select(Encoding.UTF8.GetBytes).ToArray())];
