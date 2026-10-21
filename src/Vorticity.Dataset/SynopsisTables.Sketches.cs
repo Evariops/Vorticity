@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -58,11 +59,18 @@ internal sealed partial class SynopsisTables
     // Each group of the slice counted's place among the hour's groups, by its number.
     private int[] _sketchPlaces = [];
 
+    // The keys whose distinct sketches the groups of sketches keep, by place: the columns and numbers the hour's merge
+    // carries past the depth sketched, up to the deepest coarse depth when the tables settled; none before then.
+    private bool[] _distinctKeys = [];
+    private bool[] _lostKeys = [];
+    private bool[] _mergedKeys = [];
+    private int _distinctDepth = -1;
+
     /// <summary>
-    /// Settles the tables of sketches on the first slice, its groups counted at each depth down to <paramref name="used"/>
-    /// in <paramref name="counts"/>: none without a measure.
+    /// Settles the tables of sketches on the first slice, of <paramref name="rows"/> rows, its groups counted at each depth
+    /// down to <paramref name="used"/> in <paramref name="counts"/>: none without a measure.
     /// </summary>
-    private void SettleSketches(int[] counts, int used)
+    private void SettleSketches(int[] counts, int used, int rows)
     {
         int deepest = -1;
         for (int d = 0; d <= used && d <= _keys.Length && _measures.Length > 0 && counts[d] <= SketchedGroups; d++)
@@ -73,6 +81,21 @@ internal sealed partial class SynopsisTables
         if (deepest < 0)
         {
             return;
+        }
+
+        // The keys an approximate distinct count may merge the sketches of: a column of the schema, of no path, numbers
+        // and bytes hashed as the count hashes their values. The groups' own keys give theirs to the tables above them;
+        // a deeper key the hour's merge carries, but not one that makes the first slice's groups more than half its rows,
+        // whose coarse tables, as large as the rows, are given up as they grow, the merge then carrying it no more. Such
+        // a key of the groups is lost when they give it up, as it is in every writer of the same rows.
+        _distinctDepth = Math.Max(DeepestCoarse(), deepest);
+        _distinctKeys = new bool[_keys.Length];
+        _lostKeys = new bool[_keys.Length];
+        _mergedKeys = new bool[_keys.Length];
+        for (int k = 0; k < _distinctDepth; k++)
+        {
+            _mergedKeys[k] = k + 1 <= used && counts[k + 1] * 2L <= rows;
+            _distinctKeys[k] = !SynopsisPath.Names(_keys[k]) && _keyShapes[k].Form != KeyForm.Bool && (k < deepest || _mergedKeys[k]);
         }
 
         _sketchedHours = new Candidate?[deepest + 1];
@@ -88,8 +111,122 @@ internal sealed partial class SynopsisTables
         }
 
         _sketchDepth = deepest;
-        _hourSketches = new SketchGroups(_kinds, _words, deepest, _keyShapes);
-        _wholeSketches = _spansHours ? new SketchGroups(_kinds, _words, deepest, _keyShapes) : null;
+        _hourSketches = new SketchGroups(_kinds, _words, deepest, _keyShapes, _distinctKeys);
+        _wholeSketches = _spansHours ? new SketchGroups(_kinds, _words, deepest, _keyShapes, _distinctKeys) : null;
+    }
+
+    /// <summary>The places of the keys from <paramref name="depth"/> on whose distinct sketches a table of sketches of that depth holds.</summary>
+    private int[] DistinctPositions(int depth)
+    {
+        List<int> places = [];
+        for (int k = depth; k < _distinctKeys.Length; k++)
+        {
+            if (_distinctKeys[k])
+            {
+                places.Add(k);
+            }
+        }
+
+        return [.. places];
+    }
+
+    /// <summary>
+    /// The hour's groups of sketches for its merge to feed their distinct sketches, null when it feeds none. A key the merge
+    /// no longer carries, an early drop having given up the deepest coarse tables, is lost from this hour on: its sketches
+    /// miss the hours after, and its tables say so, for no question to read them, their states and their other sketches
+    /// kept.
+    /// </summary>
+    private SketchGroups? DistinctFed()
+    {
+        if (_hourSketches is not { Count: > 0 } hour || _hourRuns.Count == 0)
+        {
+            return null;
+        }
+
+        bool feeds = false;
+        for (int k = hour.Depth; k < _distinctKeys.Length; k++)
+        {
+            if (_distinctKeys[k] && !_lostKeys[k])
+            {
+                _lostKeys[k] = k >= _hourDepth;
+                feeds |= !_lostKeys[k];
+            }
+        }
+
+        return feeds ? hour : null;
+    }
+
+    /// <summary>The keys of <paramref name="table"/>'s distinct sketches the hour's merge stopped feeding.</summary>
+    private int[] LostOf(Candidate table) => [.. table.DistinctAt.Where(at => _lostKeys[at]).Select(at => _keys[at])];
+
+    /// <summary>
+    /// Feeds the merge's record of key <paramref name="key"/> to the distinct sketches of its group among
+    /// <paramref name="groups"/>, the keys from <paramref name="differs"/> on, where it differs from the record before's;
+    /// <paramref name="group"/> the record before's group, found again where the prefix of the groups changes. Returns the
+    /// record's group, -1 for one no slice placed.
+    /// </summary>
+    private int Feed(SketchGroups groups, ReadOnlySpan<byte> key, int differs, int group)
+    {
+        int depth = groups.Depth;
+        int at = KeyCodec.Prefix(_keyShapes, depth, key);
+        if (group < 0 || differs < depth)
+        {
+            group = groups.Find(key[..at]);
+            differs = depth;
+        }
+
+        if (group < 0)
+        {
+            return -1;
+        }
+
+        for (int k = depth; k < _distinctKeys.Length && at < key.Length; k++)
+        {
+            at = KeyCodec.Read(key, at, _keyShapes[k], out bool valid, out ReadOnlySpan<byte> value);
+            if (k >= differs && valid && _distinctKeys[k] && !_lostKeys[k])
+            {
+                groups.Distinct(group, k)!.Add(DistinctHash(value, _keyShapes[k]));
+            }
+        }
+
+        return group;
+    }
+
+    /// <summary>
+    /// The hash an approximate distinct count takes of a key's value, its bytes as the key holds them, which are the column's:
+    /// a number's in its width, little-endian, and a float's zeros and NaNs each taken as one value first
+    /// (<see cref="CardinalitySlot.Hash"/>).
+    /// </summary>
+    private static ulong DistinctHash(ReadOnlySpan<byte> value, KeyShape shape)
+    {
+        if (shape.Form != KeyForm.Float)
+        {
+            return CardinalitySlot.Hash(value);
+        }
+
+        switch (value.Length)
+        {
+            case sizeof(double):
+            {
+                double d = BitConverter.ToDouble(value);
+                d = double.IsNaN(d) ? double.NaN : d == 0 ? 0 : d;
+                return CardinalitySlot.Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<double>(ref d)));
+            }
+
+            case sizeof(float):
+            {
+                float f = BitConverter.ToSingle(value);
+                f = float.IsNaN(f) ? float.NaN : f == 0 ? 0 : f;
+                return CardinalitySlot.Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<float>(ref f)));
+            }
+
+            default:
+            {
+                Half h = BitConverter.ToHalf(value);
+                h = Half.IsNaN(h) ? Half.NaN : h == Half.Zero ? Half.Zero : h;
+                return CardinalitySlot.Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<Half>(ref h)));
+            }
+        }
     }
 
     /// <summary>The deepest depth of a table of sketches of the hour or of the object still kept; -1 for none.</summary>
@@ -185,6 +322,11 @@ internal sealed partial class SynopsisTables
         }
 
         _sketchDepth = Math.Min(_sketchDepth, DeepestSketched());
+        for (int k = Math.Max(_sketchDepth, 0); k < _lostKeys.Length; k++)
+        {
+            _lostKeys[k] |= _distinctKeys[k] && !_mergedKeys[k];
+        }
+
         _hourSketches?.Coarsen(_sketchDepth);
         _wholeSketches?.Coarsen(Math.Min(_wholeSketches.Depth, Deepest(_sketchedWhole)));
     }
@@ -306,11 +448,13 @@ internal sealed partial class SynopsisTables
         int[] order = groups.Sorted();
         long[][] words = new long[depth][];
         QuantileSketch[][] sketches = new QuantileSketch[depth][];
+        CardinalitySketch?[][] distincts = new CardinalitySketch?[depth][];
         for (int d = 0; d < depth; d++)
         {
             words[d] = new long[_words];
             StateWords.Clear(words[d], _kinds);
             sketches[d] = Fresh();
+            distincts[d] = groups.Fresh(d);
         }
 
         byte[]? last = null;
@@ -331,7 +475,8 @@ internal sealed partial class SynopsisTables
                 }
             }
 
-            if (depth < tables.Length && tables[depth] is { Dead: false } table && HoldSketched(table, bucket, key, groups.Words(group), groups.Sketches(group)))
+            if (depth < tables.Length && tables[depth] is { Dead: false } table
+                && HoldSketched(table, bucket, key, groups.Words(group), groups.Sketches(group), groups.Distincts(group)))
             {
                 await FlushAsync(table, cancellationToken).ConfigureAwait(false);
             }
@@ -340,6 +485,7 @@ internal sealed partial class SynopsisTables
             {
                 StateWords.Merge(words[depth - 1], groups.Words(group), _kinds);
                 Merge(sketches[depth - 1], groups.Sketches(group));
+                groups.Fold(distincts[depth - 1], groups.Distincts(group), key, depth, depth - 1);
             }
 
             last = key;
@@ -354,7 +500,8 @@ internal sealed partial class SynopsisTables
         async ValueTask EmitAsync(int d, byte[] key)
         {
             int prefix = KeyCodec.Prefix(_keyShapes, d, key);
-            if (d < tables.Length && tables[d] is { Dead: false } table && HoldSketched(table, bucket, key.AsSpan(0, prefix), words[d], sketches[d]))
+            if (d < tables.Length && tables[d] is { Dead: false } table
+                && HoldSketched(table, bucket, key.AsSpan(0, prefix), words[d], sketches[d], distincts[d]))
             {
                 await FlushAsync(table, cancellationToken).ConfigureAwait(false);
             }
@@ -363,10 +510,15 @@ internal sealed partial class SynopsisTables
             {
                 StateWords.Merge(words[d - 1], words[d], _kinds);
                 Merge(sketches[d - 1], sketches[d]);
+                groups.Fold(distincts[d - 1], distincts[d], key, d, d - 1);
             }
 
             StateWords.Clear(words[d], _kinds);
             sketches[d] = Fresh();
+            foreach (CardinalitySketch? distinct in distincts[d])
+            {
+                distinct?.Clear();
+            }
         }
     }
 
@@ -390,8 +542,12 @@ internal sealed partial class SynopsisTables
         }
     }
 
-    /// <summary>Holds a row of a table of sketches, its states and its measures' sketches encoded; whether its stage is full, for the caller to flush.</summary>
-    private bool HoldSketched(Candidate table, long bucket, ReadOnlySpan<byte> key, ReadOnlySpan<long> words, QuantileSketch[] sketches)
+    /// <summary>
+    /// Holds a row of a table of sketches, its states, its measures' sketches and its deeper keys' distinct sketches,
+    /// <paramref name="distinct"/> by the place of their key, encoded; whether its stage is full, for the caller to flush.
+    /// </summary>
+    private bool HoldSketched(
+        Candidate table, long bucket, ReadOnlySpan<byte> key, ReadOnlySpan<long> words, QuantileSketch[] sketches, CardinalitySketch?[] distinct)
     {
         if (table.Dead)
         {
@@ -406,20 +562,30 @@ internal sealed partial class SynopsisTables
             table.Stage.Sketch(s, _sketchBytes.WrittenSpan);
         }
 
+        for (int j = 0; j < table.DistinctAt.Length; j++)
+        {
+            _sketchBytes.ResetWrittenCount();
+            distinct[table.DistinctAt[j]]!.Encode(_sketchBytes);
+            table.Stage.Sketch(table.Sketched.Length + j, _sketchBytes.WrittenSpan);
+        }
+
         return full;
     }
 
     /// <summary>
-    /// The groups of an hour or of the object at a depth sketched: each one's key, its states, and a sketch of each
-    /// measure's values, found by the key's bytes, a float's zeros and NaNs written alike first, as a merge compares them.
+    /// The groups of an hour or of the object at a depth sketched: each one's key, its states, a sketch of each measure's
+    /// values, and the distinct sketch of each key deeper than theirs <c>keeps</c> names, found by the key's bytes, a
+    /// float's zeros and NaNs written alike first, as a merge compares them.
     /// </summary>
-    private sealed class SketchGroups(MeasureKind[] kinds, int words, int depth, KeyShape[] shapes)
+    private sealed class SketchGroups(MeasureKind[] kinds, int words, int depth, KeyShape[] shapes, bool[] keeps)
     {
         private Dictionary<byte[], int> _at = new Dictionary<byte[], int>(KeyBytes.Instance);
         private List<byte[]> _keys = [];
         private List<QuantileSketch[]> _sketches = [];
+        private List<CardinalitySketch?[]> _distinct = [];
         private long[] _words = [];
         private byte[] _normal = new byte[64];
+        private readonly bool[] _keeps = keeps;
 
         /// <summary>The depth of the groups: how many of the keys they hold.</summary>
         internal int Depth { get; private set; } = depth;
@@ -429,15 +595,14 @@ internal sealed partial class SynopsisTables
         /// <summary>The group of the key <paramref name="key"/>, of <see cref="Depth"/> components: a new one of no row when it has none.</summary>
         internal int Of(ReadOnlySpan<byte> key)
         {
-            key = Normal(key);
-            Dictionary<byte[], int>.AlternateLookup<ReadOnlySpan<byte>> lookup = _at.GetAlternateLookup<ReadOnlySpan<byte>>();
-            if (lookup.TryGetValue(key, out int group))
+            int group = Find(key);
+            if (group >= 0)
             {
                 return group;
             }
 
             group = _keys.Count;
-            byte[] held = key.ToArray();
+            byte[] held = Normal(key).ToArray();
             _at[held] = group;
             _keys.Add(held);
             QuantileSketch[] sketches = new QuantileSketch[kinds.Length];
@@ -447,6 +612,7 @@ internal sealed partial class SynopsisTables
             }
 
             _sketches.Add(sketches);
+            _distinct.Add(Fresh(Depth));
             if (_words.Length < (group + 1) * words)
             {
                 Array.Resize(ref _words, Math.Max((group + 1) * words, _words.Length * 2));
@@ -456,6 +622,13 @@ internal sealed partial class SynopsisTables
             return group;
         }
 
+        /// <summary>The group of the key <paramref name="key"/>, of <see cref="Depth"/> components; -1 when there is none.</summary>
+        internal int Find(ReadOnlySpan<byte> key)
+        {
+            Dictionary<byte[], int>.AlternateLookup<ReadOnlySpan<byte>> lookup = _at.GetAlternateLookup<ReadOnlySpan<byte>>();
+            return lookup.TryGetValue(Normal(key), out int group) ? group : -1;
+        }
+
         internal byte[] Key(int group) => _keys[group];
 
         internal Span<long> Words(int group) => _words.AsSpan(group * words, words);
@@ -463,6 +636,52 @@ internal sealed partial class SynopsisTables
         internal QuantileSketch[] Sketches(int group) => _sketches[group];
 
         internal QuantileSketch Sketch(int group, int measure) => _sketches[group][measure];
+
+        /// <summary>The distinct sketches of group <paramref name="group"/>, by the place of their key, null for a key it keeps none of.</summary>
+        internal CardinalitySketch?[] Distincts(int group) => _distinct[group];
+
+        /// <summary>The distinct sketch of key <paramref name="key"/> of group <paramref name="group"/>, null when it keeps none.</summary>
+        internal CardinalitySketch? Distinct(int group, int key) => _distinct[group] is { Length: > 0 } distinct ? distinct[key] : null;
+
+        /// <summary>A distinct sketch of no value for each key from <paramref name="depth"/> on the groups keep, by place.</summary>
+        internal CardinalitySketch?[] Fresh(int depth)
+        {
+            CardinalitySketch?[]? sketches = null;
+            for (int k = depth; k < _keeps.Length; k++)
+            {
+                if (_keeps[k])
+                {
+                    (sketches ??= new CardinalitySketch?[_keeps.Length])[k] = new CardinalitySketch();
+                }
+            }
+
+            return sketches ?? [];
+        }
+
+        /// <summary>
+        /// Merges the distinct sketches of a group of key <paramref name="key"/>, of <paramref name="from"/> components, into
+        /// <paramref name="into"/>, a group's of fewer: its sketches, and the values of its keys deeper than the group's.
+        /// </summary>
+        internal void Fold(CardinalitySketch?[] into, CardinalitySketch?[] from, ReadOnlySpan<byte> key, int components, int intoDepth)
+        {
+            int at = KeyCodec.Prefix(shapes, intoDepth, key);
+            for (int k = intoDepth; k < components; k++)
+            {
+                at = KeyCodec.Read(key, at, shapes[k], out bool valid, out ReadOnlySpan<byte> value);
+                if (valid && into.Length > 0 && into[k] is { } sketch)
+                {
+                    sketch.Add(DistinctHash(value, shapes[k]));
+                }
+            }
+
+            for (int k = components; k < from.Length; k++)
+            {
+                if (from[k] is { } theirs && into.Length > 0 && into[k] is { } mine)
+                {
+                    mine.Merge(theirs);
+                }
+            }
+        }
 
         /// <summary>The groups in the order of their keys.</summary>
         internal int[] Sorted()
@@ -491,6 +710,7 @@ internal sealed partial class SynopsisTables
                 int into = Of(key.AsSpan(0, KeyCodec.Prefix(shapes, Depth, key)));
                 StateWords.Merge(Words(into), other.Words(g), kinds);
                 Merge(_sketches[into], other._sketches[g]);
+                Fold(_distinct[into], other._distinct[g], key, other.Depth, Depth);
             }
         }
 
@@ -511,10 +731,14 @@ internal sealed partial class SynopsisTables
                 return;
             }
 
-            SketchGroups deeper = new SketchGroups(kinds, words, Depth, shapes) { _at = _at, _keys = _keys, _sketches = _sketches, _words = _words };
+            SketchGroups deeper = new SketchGroups(kinds, words, Depth, shapes, _keeps)
+            {
+                _at = _at, _keys = _keys, _sketches = _sketches, _distinct = _distinct, _words = _words,
+            };
             _at = new Dictionary<byte[], int>(KeyBytes.Instance);
             _keys = [];
             _sketches = [];
+            _distinct = [];
             _words = [];
             Depth = depth;
             MergeFrom(deeper);
@@ -526,6 +750,7 @@ internal sealed partial class SynopsisTables
             _at.Clear();
             _keys.Clear();
             _sketches.Clear();
+            _distinct.Clear();
             Depth = depth;
         }
 
@@ -549,6 +774,7 @@ internal sealed partial class SynopsisTables
                 {
                     _keys[kept] = _keys[g];
                     _sketches[kept] = _sketches[g];
+                    _distinct[kept] = _distinct[g];
                     _at[_keys[kept]] = kept;
                 }
 
@@ -558,11 +784,17 @@ internal sealed partial class SynopsisTables
                     sketch.Clear();
                 }
 
+                foreach (CardinalitySketch? sketch in _distinct[kept])
+                {
+                    sketch?.Clear();
+                }
+
                 kept++;
             }
 
             _keys.RemoveRange(kept, _keys.Count - kept);
             _sketches.RemoveRange(kept, _sketches.Count - kept);
+            _distinct.RemoveRange(kept, _distinct.Count - kept);
         }
 
         /// <summary>Whether group <paramref name="group"/> holds rows: one the groups were reset since holds none.</summary>

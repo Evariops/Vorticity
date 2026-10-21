@@ -43,7 +43,8 @@ internal enum SynopsisBucket : byte
 /// key its rows, the measure fields whose states each row holds, and its rows. The rows themselves are an
 /// array payload of the entry's one run: a struct of the bucket's start, the keys, a count, then each
 /// measure's count of values, its exact sum in the words its state lays out, its least and its greatest; a table
-/// of sketches then holds each measure's sketch (<see cref="Aggregating.QuantileSketch.Encode"/>).
+/// of sketches then holds each measure's sketch (<see cref="Aggregating.QuantileSketch.Encode"/>), and the distinct
+/// sketch of each key it names deeper than its own (<see cref="Aggregating.CardinalitySketch.Encode"/>).
 /// </summary>
 /// <param name="Kind">What the table holds.</param>
 /// <param name="Bucket">What its rows count over.</param>
@@ -54,6 +55,25 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
 {
     private const byte Version = 1;
 
+    /// <summary>The version of the options of a table that holds distinct sketches, which say their keys after the measures.</summary>
+    private const byte DistinctVersion = 2;
+
+    /// <summary>
+    /// The keys deeper than its own a table of sketches holds the distinct sketch of in each row
+    /// (<see cref="Aggregating.CardinalitySketch.Encode"/>), which an approximate distinct count of one merges; none for
+    /// another table, and for one written before them.
+    /// </summary>
+    internal int[] Distinct { get; init; } = [];
+
+    /// <summary>
+    /// The keys of <see cref="Distinct"/> whose sketches miss rows, the merge that fed them having stopped carrying them
+    /// past an hour: their columns are written, and no question reads them.
+    /// </summary>
+    internal int[] Lost { get; init; } = [];
+
+    /// <summary>Whether the table holds the whole distinct sketch of key <paramref name="key"/>.</summary>
+    internal bool HoldsDistinct(int key) => Array.IndexOf(Distinct, key) >= 0 && Array.IndexOf(Lost, key) < 0;
+
     /// <summary>
     /// The mantissa bits of the grid of a table of sketches: 0.77 %, the grid a quantile within 1 %, the default, asks
     /// for. A coarser grid is read off it exactly, its buckets the unions of this one's.
@@ -61,15 +81,16 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     internal const int SketchBits = 6;
 
     /// <summary>
-    /// The entry's options: the kind, the bucket, the keys, the measures and the rows, behind a version byte; then,
-    /// for a table in chunks, each chunk's first and last bucket and its rows, in the order of its run's payloads.
+    /// The entry's options: the kind, the bucket, the keys, the measures, the keys of its distinct sketches and of those
+    /// lost when it holds any, and the rows, behind a version byte, the second when it does; then, for a table in chunks,
+    /// each chunk's first and last bucket and its rows, in the order of its run's payloads.
     /// </summary>
     internal byte[] OptionBytes(IReadOnlyList<TableChunk>? chunks = null)
     {
         ProtoWriter writer = new ProtoWriter();
         try
         {
-            writer.WriteVarint(Version);
+            writer.WriteVarint(Distinct.Length > 0 ? DistinctVersion : Version);
             writer.WriteVarint((byte)Kind);
             writer.WriteVarint((byte)Bucket);
             writer.WriteVarint((ulong)Keys.Length);
@@ -82,6 +103,21 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             foreach (int measure in Measures)
             {
                 writer.WriteVarint((ulong)measure);
+            }
+
+            if (Distinct.Length > 0)
+            {
+                writer.WriteVarint((ulong)Distinct.Length);
+                foreach (int key in Distinct)
+                {
+                    writer.WriteVarint((ulong)key);
+                }
+
+                writer.WriteVarint((ulong)Lost.Length);
+                foreach (int key in Lost)
+                {
+                    writer.WriteVarint((ulong)key);
+                }
             }
 
             writer.WriteVarint((ulong)Rows);
@@ -109,7 +145,8 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// <paramref name="paths"/>, built in <paramref name="types"/>: the bucket, each key at its field's type
     /// or its path's class, the count, then per measure its count of values, its sum's words (two for an
     /// integer, five for a float), its least and its greatest, all 64-bit; for a table of sketches, then each
-    /// measure's sketch, binary. The writer builds its rows at this type, and a reader decodes them at it.
+    /// measure's sketch and each of its <see cref="Distinct"/> keys' distinct sketch, binary. The writer builds its rows at
+    /// this type, and a reader decodes them at it.
     /// </summary>
     internal DType RowType(DType schema, IReadOnlyList<SynopsisPath> paths, DTypeArena types)
     {
@@ -168,6 +205,12 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 names.Add($"{NameOf(measure, schema, paths)}.sketch");
                 fields.Add(sketch);
             }
+
+            foreach (int key in Distinct)
+            {
+                names.Add($"{NameOf(key, schema, paths)}.distinct");
+                fields.Add(sketch);
+            }
         }
 
         return types.Struct([.. names], [.. fields], Nullability.NonNullable);
@@ -201,7 +244,8 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         try
         {
             ProtoReader reader = new ProtoReader(bytes);
-            if (reader.ReadVarint() != Version)
+            ulong version = reader.ReadVarint();
+            if (version is not (Version or DistinctVersion))
             {
                 return null;
             }
@@ -210,6 +254,8 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             ulong bucket = reader.ReadVarint();
             int[]? keys = Fields(ref reader, bytes.Length);
             int[]? measures = keys is null ? null : Fields(ref reader, bytes.Length);
+            int[]? distinct = version == DistinctVersion && measures is not null ? Fields(ref reader, bytes.Length) : [];
+            int[]? lost = version == DistinctVersion && distinct is not null ? Fields(ref reader, bytes.Length) : [];
             int rows = checked((int)reader.ReadVarint());
             if (measures is not null && !reader.End)
             {
@@ -228,8 +274,10 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 }
             }
 
-            return measures is not null && reader.End && kind <= (ulong)SynopsisTableKind.Sketches && bucket <= (ulong)SynopsisBucket.Object
-                ? new SynopsisTableInfo((SynopsisTableKind)kind, (SynopsisBucket)bucket, keys!, measures, rows)
+            return measures is not null && distinct is not null && lost is not null && reader.End && kind <= (ulong)SynopsisTableKind.Sketches
+                && bucket <= (ulong)SynopsisBucket.Object && (distinct.Length == 0 || kind == (ulong)SynopsisTableKind.Sketches)
+                && Array.TrueForAll(lost, key => Array.IndexOf(distinct, key) >= 0)
+                ? new SynopsisTableInfo((SynopsisTableKind)kind, (SynopsisBucket)bucket, keys!, measures, rows) { Distinct = distinct, Lost = lost }
                 : null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)

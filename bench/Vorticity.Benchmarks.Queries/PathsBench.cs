@@ -301,7 +301,9 @@ internal static class PathsBench
             {
                 string keys = string.Join(", ", table.Keys.Select(field => Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths)));
                 string measures = string.Join(", ", table.Measures.Select(field => Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths)));
-                Console.WriteLine($"    tables {held.Entry.Key}: {table.Kind} by {table.Bucket} on ({keys}) of [{measures}], {table.Rows:N0} rows in {chunks.Count} chunks");
+                string distinct = table.Distinct.Length == 0 ? string.Empty : $", distinct ({string.Join(", ", table.Distinct.Select(field =>
+                    Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths) + (table.HoldsDistinct(field) ? string.Empty : " lost")))})";
+                Console.WriteLine($"    tables {held.Entry.Key}: {table.Kind} by {table.Bucket} on ({keys}) of [{measures}]{distinct}, {table.Rows:N0} rows in {chunks.Count} chunks");
             }
         }
     }

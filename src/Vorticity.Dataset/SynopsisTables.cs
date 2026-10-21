@@ -396,7 +396,7 @@ internal sealed partial class SynopsisTables : IDisposable
         if (!_sketchesSettled)
         {
             _sketchesSettled = true;
-            SettleSketches(counts, used);
+            SettleSketches(counts, used, rows);
         }
 
         if (_sketchDepth >= 0)
@@ -693,7 +693,11 @@ internal sealed partial class SynopsisTables : IDisposable
             await FlushAsync(table, cancellationToken).ConfigureAwait(false);
             if (table.Held >= 0)
             {
-                tables.Add((new SynopsisTableInfo(table.Kind, table.Bucket, table.Keys, table.Measures, checked((int)table.Rows)), table.Held));
+                tables.Add((new SynopsisTableInfo(table.Kind, table.Bucket, table.Keys, table.Measures, checked((int)table.Rows))
+                {
+                    Distinct = table.Distinct,
+                    Lost = LostOf(table),
+                }, table.Held));
             }
         }
 
@@ -865,10 +869,18 @@ internal sealed partial class SynopsisTables : IDisposable
 
         int[] kept = [.. measures];
         bool sketches = kind == SynopsisTableKind.Sketches;
-        DType rowType = new SynopsisTableInfo(kind, bucket, keys, kept, 0).RowType(_schema, _paths, _types);
-        Candidate table = new Candidate(kind, bucket, keys, kept, shapes, rowType, new ChunkStage(shapes, [.. words], sketches ? kept.Length : 0, bounded))
+
+        // A table of sketches holds, besides its measures', the distinct sketch of each key deeper than its own the hour's
+        // merge carries, a column or a number, of which an approximate distinct count merges the sketches.
+        int[] distinctAt = sketches ? DistinctPositions(keys.Length) : [];
+        int[] distinct = [.. distinctAt.Select(at => _keys[at])];
+        DType rowType = new SynopsisTableInfo(kind, bucket, keys, kept, 0) { Distinct = distinct }.RowType(_schema, _paths, _types);
+        ChunkStage stage = new ChunkStage(shapes, [.. words], sketches ? kept.Length + distinct.Length : 0, bounded);
+        Candidate table = new Candidate(kind, bucket, keys, kept, shapes, rowType, stage)
         {
             Sketched = sketches ? [.. sketched] : [],
+            Distinct = distinct,
+            DistinctAt = distinctAt,
         };
         _candidates.Add(table);
         return table;
@@ -899,9 +911,10 @@ internal sealed partial class SynopsisTables : IDisposable
         await FlushHourAsync(_runs, cancellationToken).ConfigureAwait(false);
         _hourDepth = Math.Min(_hourDepth, DeepestCoarse());
         _wholeDepth = Math.Min(_wholeDepth, Deepest(_whole));
+        SketchGroups? feeds = DistinctFed();
         if (_hourDepth >= 0 && _hourRuns.Count > 0)
         {
-            long[] groups = await MergeAsync(_hourScratch!, _hourRuns, _hourDepth, _hourly, _hour, wholeRuns: _wholeDepth >= 0, cancellationToken).ConfigureAwait(false);
+            long[] groups = await MergeAsync(_hourScratch!, _hourRuns, _hourDepth, _hourly, _hour, wholeRuns: _wholeDepth >= 0, cancellationToken, feeds).ConfigureAwait(false);
             for (int d = 0; d < groups.Length; d++)
             {
                 _hourSum[d] += groups[d];
@@ -1005,8 +1018,14 @@ internal sealed partial class SynopsisTables : IDisposable
     /// the keys changes. With <paramref name="wholeRuns"/>, the groups at the object's depth go on as a run of its store.
     /// </summary>
     /// <returns>The groups of each depth, whether its table is kept or not.</returns>
+    /// <remarks>
+    /// The hour's merge feeds <paramref name="feeds"/>, its groups of sketches: each record's keys deeper than theirs to
+    /// the distinct sketches of its group, where they may differ from the record before's, a record a distinct combination
+    /// of the keys, where a slice's rows held each combination many times.
+    /// </remarks>
     private async ValueTask<long[]> MergeAsync(
-        RunScratch scratch, List<RunSpan> runs, int depth, Candidate?[] into, long bucket, bool wholeRuns, CancellationToken cancellationToken)
+        RunScratch scratch, List<RunSpan> runs, int depth, Candidate?[] into, long bucket, bool wholeRuns, CancellationToken cancellationToken,
+        SketchGroups? feeds = null)
     {
         long[] emitted = new long[depth + 1];
         long[][] groups = new long[depth + 1][];
@@ -1025,6 +1044,7 @@ internal sealed partial class SynopsisTables : IDisposable
             Array.Resize(ref _starts, depth + 1);
         }
 
+        int fed = -1;
         using (RunMerger merger = await RunMerger.OpenAsync(scratch, runs, _keyShapes, depth, _kinds, cancellationToken).ConfigureAwait(false))
         {
             while (await merger.MoveNextAsync(cancellationToken).ConfigureAwait(false))
@@ -1032,15 +1052,21 @@ internal sealed partial class SynopsisTables : IDisposable
                 // The groups the key leaves end, and those it enters start with it: a group's key is its first's, as a
                 // slice's group's is its first row's.
                 int from = _first;
+                int differs = 0;
                 if (any)
                 {
-                    KeyCodec.Compare(_keyShapes, depth, _key.Span, merger.Key, out int differs);
+                    KeyCodec.Compare(_keyShapes, depth, _key.Span, merger.Key, out differs);
                     for (int d = depth; d >= Math.Max(_first, differs + 1); d--)
                     {
                         await EmitAsync(d).ConfigureAwait(false);
                     }
 
                     from = Math.Max(_first, differs + 1);
+                }
+
+                if (feeds is not null)
+                {
+                    fed = Feed(feeds, merger.Key, any ? differs : 0, fed);
                 }
 
                 for (int d = from; d <= depth; d++)
@@ -1769,6 +1795,12 @@ internal sealed partial class SynopsisTables : IDisposable
 
         /// <summary>For a table of sketches, the place of each of its measures among the object's, whose sketch each row holds; none otherwise.</summary>
         internal int[] Sketched { get; init; } = [];
+
+        /// <summary>For a table of sketches, the keys deeper than its own whose distinct sketch each row holds; none otherwise.</summary>
+        internal int[] Distinct { get; init; } = [];
+
+        /// <summary>The places of <see cref="Distinct"/> among the object's keys.</summary>
+        internal int[] DistinctAt { get; init; } = [];
 
         internal KeyShape[] Shapes { get; } = shapes;
 

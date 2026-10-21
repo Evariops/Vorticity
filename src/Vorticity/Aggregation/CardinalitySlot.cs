@@ -42,6 +42,45 @@ internal abstract class CardinalitySlot : AggregateSlot<long>
         _bytes += sketch.Bytes - before;
     }
 
+    /// <summary>
+    /// A row of states merges the sketch of the values it stands for, a table of sketches', into its group's: the union
+    /// of their hashes or each register's maximum, so that the group's sketch is the one its rows would have made.
+    /// </summary>
+    internal override bool StepStates(in StateInput input, ReadOnlySpan<ulong> selection, ReadOnlySpan<int> groups)
+    {
+        if (input.SketchViews.IsEmpty && groups.Length > 0)
+        {
+            return false;
+        }
+
+        if (selection.IsEmpty)
+        {
+            for (int row = 0; row < groups.Length; row++)
+            {
+                Merge(groups[row], input.Sketch(row));
+            }
+        }
+        else
+        {
+            RowCursor cursor = new RowCursor(selection, 0, groups.Length);
+            while (cursor.Next(out int row))
+            {
+                Merge(groups[row], input.Sketch(row));
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Merges an encoded sketch into a group's, counting what it grows by.</summary>
+    private void Merge(int group, ReadOnlySpan<byte> encoded)
+    {
+        CardinalitySketch sketch = _sketches[group] ??= new CardinalitySketch();
+        long before = sketch.Bytes;
+        sketch.MergeEncoded(encoded);
+        _bytes += sketch.Bytes - before;
+    }
+
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
         CardinalitySketch?[] theirs = ((CardinalitySlot)other)._sketches;

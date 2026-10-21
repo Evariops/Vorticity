@@ -1,6 +1,9 @@
 using System;
+using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
+using Vorticity.Serialization;
 
 namespace Vorticity.Aggregating;
 
@@ -230,6 +233,197 @@ internal sealed class CardinalitySketch
         }
 
         return sketch;
+    }
+
+    /// <summary>
+    /// The sketch as a table of sketches holds it, the same bytes for the same content whichever form held it: a byte of
+    /// its form, then its hashes ascending, 8 bytes each, behind their count; or its set registers ascending by index,
+    /// each the gap from the one before and its rank in a byte, behind their count, two bytes a register where they lie
+    /// close; or, past half of them set, every register's rank, a byte each.
+    /// </summary>
+    internal void Encode(IBufferWriter<byte> into)
+    {
+        if (_hashes is { } hashes)
+        {
+            Span<byte> exact = into.GetSpan(1 + Varint.MaxLength64 + (_exact * sizeof(ulong)));
+            exact[0] = ExactForm;
+            int at = 1 + Varint.Write(exact[1..], (ulong)_exact);
+            for (int i = 0; i < _exact; i++, at += sizeof(ulong))
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(exact[at..], hashes[i]);
+            }
+
+            into.Advance(at);
+            return;
+        }
+
+        int set = _dense is { } counted ? Registers - counted.AsSpan().Count((byte)0) : _set;
+        if (set > Registers / 2)
+        {
+            Span<byte> all = into.GetSpan(1 + Registers);
+            all[0] = DenseForm;
+            Ranks(all.Slice(1, Registers));
+            into.Advance(1 + Registers);
+            return;
+        }
+
+        // The set registers in the order of their indexes, through a rented array of every rank.
+        byte[] rented = ArrayPool<byte>.Shared.Rent(Registers);
+        try
+        {
+            Span<byte> ranks = rented.AsSpan(0, Registers);
+            Ranks(ranks);
+            Span<byte> sparse = into.GetSpan(1 + Varint.MaxLength64 + (set * (Varint.MaxLength32 + 1)));
+            sparse[0] = SparseForm;
+            int at = 1 + Varint.Write(sparse[1..], (ulong)set);
+            int previous = 0;
+            for (int index = 0; index < Registers; index++)
+            {
+                if (ranks[index] != 0)
+                {
+                    at += Varint.Write(sparse[at..], (ulong)(index - previous));
+                    sparse[at++] = ranks[index];
+                    previous = index;
+                }
+            }
+
+            into.Advance(at);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Merges the sketch <see cref="Encode"/> wrote, as <see cref="Merge"/> merges a sketch: the union of their hashes,
+    /// or each register's maximum, so that the sketch holds what adding the values of both would have made it hold.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The bytes do not hold a sketch.</exception>
+    internal void MergeEncoded(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty)
+        {
+            throw new VortexFormatException("A distinct sketch of no bytes.");
+        }
+
+        int at = 1;
+        switch (bytes[0])
+        {
+            case ExactForm:
+            {
+                ulong count = Varint.Read64<Errors>(bytes, ref at);
+                if (count > ExactLimit || (ulong)(bytes.Length - at) != count * sizeof(ulong))
+                {
+                    throw new VortexFormatException($"A distinct sketch says {count} hashes in {bytes.Length - at} bytes.");
+                }
+
+                for (; at < bytes.Length; at += sizeof(ulong))
+                {
+                    Add(BinaryPrimitives.ReadUInt64LittleEndian(bytes[at..]));
+                }
+
+                return;
+            }
+
+            case SparseForm:
+            {
+                ulong count = Varint.Read64<Errors>(bytes, ref at);
+                if (count > Registers)
+                {
+                    throw new VortexFormatException($"A distinct sketch says {count} registers set of {Registers}.");
+                }
+
+                Registered();
+                long index = 0;
+                for (ulong e = 0; e < count; e++)
+                {
+                    index += (long)Varint.Read64<Errors>(bytes, ref at);
+                    if (index >= Registers || at >= bytes.Length || bytes[at] is 0 or > MaxRank)
+                    {
+                        throw new VortexFormatException($"A distinct sketch's register {index} is out of the sketch or of its ranks.");
+                    }
+
+                    Raise((int)index, bytes[at++]);
+                }
+
+                if (at != bytes.Length)
+                {
+                    throw new VortexFormatException($"A distinct sketch holds {bytes.Length - at} bytes past its registers.");
+                }
+
+                return;
+            }
+
+            case DenseForm:
+            {
+                if (bytes.Length != 1 + Registers)
+                {
+                    throw new VortexFormatException($"A dense distinct sketch of {bytes.Length - 1} bytes, not {Registers}.");
+                }
+
+                Registered();
+                for (int index = 0; index < Registers; index++)
+                {
+                    byte rank = bytes[1 + index];
+                    if (rank > MaxRank)
+                    {
+                        throw new VortexFormatException($"A distinct sketch's register {index} has rank {rank}, past {MaxRank}.");
+                    }
+
+                    if (rank != 0)
+                    {
+                        Raise(index, rank);
+                    }
+                }
+
+                return;
+            }
+
+            default:
+                throw new VortexFormatException($"A distinct sketch of form {bytes[0]}.");
+        }
+    }
+
+    /// <summary>Takes the sketch back to no value, its array of hashes kept for the next.</summary>
+    internal void Clear()
+    {
+        _hashes ??= [];
+        _exact = 0;
+        _table = null;
+        _set = 0;
+        _dense = null;
+    }
+
+    /// <summary>Every register's rank into <paramref name="ranks"/>, of <see cref="Registers"/> bytes, the empty ones zero.</summary>
+    private void Ranks(Span<byte> ranks)
+    {
+        if (_dense is { } dense)
+        {
+            dense.CopyTo(ranks);
+            return;
+        }
+
+        ranks.Clear();
+        foreach (int entry in _table!)
+        {
+            if (entry != 0)
+            {
+                ranks[(entry >> 8) - 1] = (byte)entry;
+            }
+        }
+    }
+
+    private const byte ExactForm = 0;
+    private const byte SparseForm = 1;
+    private const byte DenseForm = 2;
+
+    /// <summary>A varint of an encoded sketch cut short or overlong.</summary>
+    private readonly struct Errors : IVarintErrors
+    {
+        public static ulong Truncated(int position) => throw new VortexFormatException($"A distinct sketch ends inside a varint at {position}.");
+
+        public static ulong Malformed(int position, byte value) => throw new VortexFormatException($"A distinct sketch holds a varint too wide at {position}.");
     }
 
     /// <summary>Adds a register entry read back, <c>(index &lt;&lt; 8) | rank</c>, after <see cref="BeginRegisters"/>.</summary>

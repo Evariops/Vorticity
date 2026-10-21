@@ -333,6 +333,13 @@ public sealed partial class SynopsisPathTests
         List<string> rows = [.. Enumerable.Repeat(string.Empty, count)];
         for (int field = 0; field < table.DType.FieldCount; field++)
         {
+            // A declared column's distinct sketches, which no path's tables hold: an approximate distinct count reads
+            // those of columns alone.
+            if (table.DType.GetFieldName(field).EndsWith(".distinct", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             int column = arena.GetNode(node).GetFieldIndex(field);
             DType dtype = table.DType.GetField(field);
             for (int row = 0; row < count; row++)

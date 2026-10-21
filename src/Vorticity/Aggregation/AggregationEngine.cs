@@ -783,6 +783,9 @@ internal sealed class AggregationPartition
     private readonly int _keyCount;
     private readonly int[] _nodes;
 
+    // The column of distinct sketches of each distinct count's column a batch of states may hold, named at the first.
+    private string?[]? _distinctColumns;
+
     // The filter of each aggregate, or -1, and the selection of each filter over the batch.
     private readonly int[] _filterOf;
     private readonly FilterMasks? _masks;
@@ -2610,9 +2613,23 @@ internal sealed class AggregationPartition
 
             if (StateRequest.FoldsValues(_plan.Aggregates[i].Kind))
             {
+                // A table of sketches holds the sketch of the column's values in each row, in place of the column, which
+                // an approximate count merges.
+                int column = _inputs[i];
+                _distinctColumns ??= new string?[Slots.Length];
+                string sketches = _distinctColumns[i] ??= StateRequest.DistinctOf(StateRequest.NameOf(_columns[column].Field));
+                if (Sketched(arena, root, sketches, stood, out StateInput distinct))
+                {
+                    if (_plan.Aggregates[i].Kind != AggregateKind.ApproximateCountDistinct || !Slots[i].StepStates(in distinct, selection, groups))
+                    {
+                        throw new InvalidOperationException($"A batch of distinct sketches reached the aggregate {_plan.Aggregates[i].Kind}, which folds none.");
+                    }
+
+                    continue;
+                }
+
                 // A distinct count folds the column the states are keyed by, a value a row of states: the values the
                 // rows hold, each met once or more, which a distinct count does not tell apart.
-                int column = _inputs[i];
                 int node = FilterEvaluator.Resolve(arena, root, _columns[column].Field, rows);
                 while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
                 {
@@ -2659,13 +2676,8 @@ internal sealed class AggregationPartition
 
         // A table of sketches holds each measure's besides its states, a binary column of them, which a distribution alone
         // looks for: its name is made for the batch.
-        int sketch = sketched ? batch.DType.IndexOfField(StateRequest.SketchOf(column)) : -1;
-        CanonicalNode sketches = sketch < 0 ? default : arena.GetNode(EncodedForms.Canonical(arena, batch.GetFieldIndex(sketch)));
-        if (sketch >= 0 && sketches.Kind != CanonicalKind.VarBinView)
-        {
-            throw new InvalidOperationException($"The column '{StateRequest.SketchOf(column)}' of a batch of states is not binary.");
-        }
-
+        StateInput sketches = default;
+        bool sketch = sketched && Sketched(arena, root, StateRequest.SketchOf(column), rows, out sketches);
         return new StateInput
         {
             Rows = rows,
@@ -2678,9 +2690,33 @@ internal sealed class AggregationPartition
             Least = StateColumn(arena, root, StateRequest.LeastOf(column)),
             Greatest = StateColumn(arena, root, StateRequest.GreatestOf(column)),
             Floats = floats,
-            SketchViews = sketch < 0 ? default : sketches.Views.Span,
-            SketchData = sketch < 0 ? default : sketches.DataBuffers,
+            SketchViews = sketch ? sketches.SketchViews : default,
+            SketchData = sketch ? sketches.SketchData : default,
         };
+    }
+
+    /// <summary>
+    /// The sketches of the binary column <paramref name="name"/> of a batch of states, beside the rows each row of states
+    /// stands for, when the batch holds the column.
+    /// </summary>
+    private static bool Sketched(CanonicalArena arena, int root, string name, ReadOnlySpan<long> rows, out StateInput sketches)
+    {
+        CanonicalNode batch = arena.GetNode(root);
+        int field = batch.DType.IndexOfField(name);
+        if (field < 0)
+        {
+            sketches = default;
+            return false;
+        }
+
+        CanonicalNode column = arena.GetNode(EncodedForms.Canonical(arena, batch.GetFieldIndex(field)));
+        if (column.Kind != CanonicalKind.VarBinView)
+        {
+            throw new InvalidOperationException($"The column '{name}' of a batch of states is not binary.");
+        }
+
+        sketches = new StateInput { Rows = rows, SketchViews = column.Views.Span, SketchData = column.DataBuffers };
+        return true;
     }
 
     /// <summary>The 64-bit integers of the field <paramref name="name"/> of a batch of states.</summary>

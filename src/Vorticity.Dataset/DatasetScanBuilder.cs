@@ -558,7 +558,7 @@ internal sealed class DatasetScanBuilder
             ? (summary.Min.SignedValue, summary.Max.SignedValue)
             : null;
         return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
-            && SynopsisAnswer.Of(QuestionOf(request, key.InstantPath), contents, schema, instants, PartitionFilter.ValuesOf(held.Entry, key), within) is { } answer
+            && SynopsisAnswer.Of(QuestionOf(request, key.InstantPath), contents, schema, instants, PartitionFilter.ValuesOf(held.Entry, key), within, held.Entry.HasDeletions) is { } answer
             ? (answer, contents, key.InstantPath)
             : default;
     }

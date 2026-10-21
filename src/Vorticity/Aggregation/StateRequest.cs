@@ -84,6 +84,12 @@ internal sealed class StateRequest
     internal static string SketchOf(string column) => column + ".sketch";
 
     /// <summary>
+    /// The column of the distinct sketch of <paramref name="column"/>'s values (<see cref="CardinalitySketch.Encode"/>),
+    /// which a table of sketches holds for each key deeper than its own.
+    /// </summary>
+    internal static string DistinctOf(string column) => column + ".distinct";
+
+    /// <summary>
     /// The mantissa bits of the finest grid a distribution or a quantile asks for, 0 when none does: a row of states
     /// answers them with a sketch of as fine a grid or finer.
     /// </summary>
@@ -114,6 +120,7 @@ internal sealed class StateRequest
         string?[] inputs = new string?[plan.Aggregates.Length];
         FieldExpr?[] fields = new FieldExpr?[plan.Aggregates.Length];
         AggregateKind[] kinds = new AggregateKind[plan.Aggregates.Length];
+        List<bool>? approximate = null;
         int sketchBits = 0;
         for (int i = 0; i < inputs.Length; i++)
         {
@@ -151,10 +158,18 @@ internal sealed class StateRequest
                 case AggregateKind.CountDistinct or AggregateKind.ApproximateCountDistinct
                     when aggregate.Input is { } distinct && Column(distinct.Field):
                     // A distinct count of a column the states may be keyed by: they come at its grain too, a row of states
-                    // for each of its values in a group, and the count folds those values, the rows' own.
-                    if (!keys.Exists(key => key.GetType() == typeof(FieldExpr) && string.Equals(key.Path, distinct.Field.Path, System.StringComparison.Ordinal)))
+                    // for each of its values in a group, and the count folds those values, the rows' own. A column only
+                    // approximate counts fold may come instead as the sketch of its values a table of sketches holds.
+                    bool approximately = aggregate.Kind == AggregateKind.ApproximateCountDistinct;
+                    int at = keys.FindIndex(key => key.GetType() == typeof(FieldExpr) && string.Equals(key.Path, distinct.Field.Path, System.StringComparison.Ordinal));
+                    if (at < 0)
                     {
                         keys.Add(distinct.Field);
+                        (approximate ??= []).Add(approximately);
+                    }
+                    else if (at >= plan.Keys.Length)
+                    {
+                        approximate![at - plan.Keys.Length] &= approximately;
                     }
 
                     kinds[i] = aggregate.Kind;
@@ -164,7 +179,14 @@ internal sealed class StateRequest
             }
         }
 
-        return new StateRequest([.. keys], inputs, fields, kinds) { Grouped = plan.Keys.Length, SketchBits = sketchBits };
+        // A question of no distinct count makes neither the list nor the names.
+        string?[] sketches = approximate is null ? [] : new string?[approximate.Count];
+        for (int k = 0; k < sketches.Length; k++)
+        {
+            sketches[k] = approximate![k] ? DistinctOf(NameOf(keys[plan.Keys.Length + k])) : null;
+        }
+
+        return new StateRequest([.. keys], inputs, fields, kinds) { Grouped = plan.Keys.Length, SketchBits = sketchBits, Distincts = sketches };
     }
 
     /// <summary>
@@ -172,6 +194,16 @@ internal sealed class StateRequest
     /// fold, which a batch of states is keyed by too.
     /// </summary>
     internal int Grouped { get; private init; }
+
+    /// <summary>For each key past <see cref="Grouped"/>, the column of its distinct sketches when only approximate distinct counts fold it.</summary>
+    private string?[] Distincts { get; init; } = [];
+
+    /// <summary>
+    /// The column of the distinct sketches of key <paramref name="key"/> of <see cref="Keys"/> (<see cref="DistinctOf"/>),
+    /// which a table of sketches holds for it in place of the key, when only approximate distinct counts fold it, which
+    /// merge a sketch as they would have added its values; null otherwise.
+    /// </summary>
+    internal string? DistinctColumn(int key) => key >= Grouped ? Distincts[key - Grouped] : null;
 
     /// <summary>Whether an aggregate of <paramref name="kind"/> folds a column of a batch of states, the values it is keyed by, rather than states.</summary>
     internal static bool FoldsValues(AggregateKind kind) => kind is AggregateKind.CountDistinct or AggregateKind.ApproximateCountDistinct;

@@ -256,9 +256,10 @@ internal sealed record SynopsisAnswer(
     /// The instants of a part of the object's slices, the first's start to the last's end, inclusive, when a lane answers
     /// that part alone (<see cref="Cuts"/>): the window ends where the part does. Null for the whole object.
     /// </param>
+    /// <param name="marked">Whether a delete marked rows of the object, which come out of the tables' states, and of no sketch.</param>
     internal static SynopsisAnswer? Of(
         SynopsisQuestion question, SynopsisContents contents, DType schema, (long Least, long Greatest)? held = null,
-        IReadOnlyDictionary<string, FilterLiteral>? partition = null, (long Low, long High)? within = null)
+        IReadOnlyDictionary<string, FilterLiteral>? partition = null, (long Low, long High)? within = null, bool marked = false)
     {
         string instant = question.Instant;
         StateRequest request = question.Request;
@@ -276,6 +277,10 @@ internal sealed record SynopsisAnswer(
         ulong joined = 0;
         List<(VortexExpr, VortexExpr)>? excluded = null;
         FieldSet keyed = new FieldSet(stackalloc int[MaxFields]);
+
+        // The keys a table of sketches may hold the distinct sketches of in their place: the columns only approximate
+        // distinct counts fold, which no filter reads.
+        FieldSet sketchable = new FieldSet(stackalloc int[MaxFields]);
         Dictionary<string, string>? renames = null;
         for (int c = 0; c < conjuncts.Length; c++)
         {
@@ -363,6 +368,12 @@ internal sealed record SynopsisAnswer(
             }
 
             int field = schema.IndexOfField(column.Path);
+            if (field >= 0 && request.DistinctColumn(k) is not null && key.GetType() == typeof(FieldExpr) && !keyed.Fields.Contains(field)
+                && !sketchable.Add(field))
+            {
+                return null;
+            }
+
             if (field < 0 || !keyed.Add(field))
             {
                 return null;
@@ -396,14 +407,19 @@ internal sealed record SynopsisAnswer(
         // is read from a table of sketches of a grid as fine as it asks, which no table of slices is; a question of none
         // reads the tables of states alone, a table of sketches holding the same rows in more bytes.
         bool sketched = request.SketchBits > 0;
+
+        // A distinct count merges a table's distinct sketches where no row comes out of the table: a sketch is corrected
+        // neither for a delete's rows nor for those a question leaves out, where the states keyed by the column are.
+        bool merges = !marked && excluded is null;
         SynopsisTableInfo? coarsest = null;
         SynopsisTableInfo? hourly = null;
         SynopsisTableInfo? sliced = null;
         for (int t = 0; t < contents.Tables.Count; t++)
         {
             SynopsisTableInfo table = contents.Tables[t].Table;
-            if ((table.Kind == SynopsisTableKind.Sketches) == sketched && request.SketchBits <= SynopsisTableInfo.SketchBits
-                && Holds(table.Keys, keyed.Fields) && Holds(table.Measures, measured.Fields))
+            bool sketches = table.Kind == SynopsisTableKind.Sketches;
+            if (request.SketchBits <= SynopsisTableInfo.SketchBits && Holds(table.Measures, measured.Fields)
+                && (Holds(table.Keys, keyed.Fields) ? sketches == sketched : sketches && merges && SketchesDistinct(table, keyed.Fields, sketchable.Fields)))
             {
                 coarsest = coarsest is null || table.Rows < coarsest.Rows ? table : coarsest;
                 hourly = table.Bucket == SynopsisBucket.Hour && (hourly is null || table.Rows < hourly.Rows) ? table : hourly;
@@ -1092,6 +1108,10 @@ internal sealed record SynopsisAnswer(
             }
 
             read.Add(column.Path);
+            if (Request.DistinctColumn(k) is { } distinct)
+            {
+                read.Add(distinct);
+            }
         }
 
         KeyFilter?.CollectFields(read);
@@ -1627,6 +1647,23 @@ internal sealed record SynopsisAnswer(
         foreach (int field in need)
         {
             if (Array.IndexOf(have, field) < 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether table of sketches <paramref name="table"/> holds every key of <paramref name="keyed"/> it does not key as
+    /// the distinct sketches of a key of <paramref name="sketchable"/>, which only approximate distinct counts fold.
+    /// </summary>
+    private static bool SketchesDistinct(SynopsisTableInfo table, ReadOnlySpan<int> keyed, ReadOnlySpan<int> sketchable)
+    {
+        foreach (int field in keyed)
+        {
+            if (Array.IndexOf(table.Keys, field) < 0 && (!sketchable.Contains(field) || !table.HoldsDistinct(field)))
             {
                 return false;
             }
