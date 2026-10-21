@@ -49,7 +49,7 @@ internal sealed class SliceWriter(VortexFileWriter writer, SynopsisTables? synop
             if (!beside || lanes is null || !lanes.TryEnter(out entered))
             {
                 long begin = Stopwatch.GetTimestamp();
-                await synopsis.AddSliceAsync(sorted.Batch, start, order, sorted.Codes, sorted.PathColumns, counted, cancellationToken).ConfigureAwait(false);
+                await synopsis.AddSliceAsync(sorted.Batch, start, order, sorted.Codes, sorted.PathColumns, counted, sorted.Packed, cancellationToken).ConfigureAwait(false);
                 long counting = Stopwatch.GetTimestamp();
                 await writer.WriteBatchAsync(sorted.Batch, cancellationToken).ConfigureAwait(false);
                 timings?.AddSynopsis(counting - begin);
@@ -87,7 +87,7 @@ internal sealed class SliceWriter(VortexFileWriter writer, SynopsisTables? synop
                 {
                     long begin = Stopwatch.GetTimestamp();
                     using RecordBatch rows = new RecordBatch(view, root, 0);
-                    await tables.AddSliceAsync(rows, start, order, sorted.Codes, paths, counted, cancellationToken).ConfigureAwait(false);
+                    await tables.AddSliceAsync(rows, start, order, sorted.Codes, paths, counted, sorted.Packed, cancellationToken).ConfigureAwait(false);
                     timings?.AddSynopsis(Stopwatch.GetTimestamp() - begin);
                 }
                 finally

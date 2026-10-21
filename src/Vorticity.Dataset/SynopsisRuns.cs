@@ -418,10 +418,10 @@ internal sealed class SliceKeys : IDisposable
 
     /// <summary>
     /// The keys of the groups of depths 0 to <paramref name="deepest"/>: <paramref name="counts"/> groups at each, the first
-    /// row of each in <paramref name="firsts"/>, each row's group at each depth in <paramref name="groups"/>, the depth's
-    /// values in <paramref name="columns"/> of <paramref name="arena"/>, of <paramref name="shapes"/>.
+    /// row of each in <paramref name="firsts"/>, each group's parent at the depth above in <paramref name="parents"/>, the
+    /// depth's values in <paramref name="columns"/> of <paramref name="arena"/>, of <paramref name="shapes"/>.
     /// </summary>
-    internal void Build(CanonicalArena arena, int[] columns, KeyShape[] shapes, int[] counts, int[][] firsts, int[][] groups, int deepest)
+    internal void Build(CanonicalArena arena, int[] columns, KeyShape[] shapes, int[] counts, int[][] firsts, int[][] parents, int deepest)
     {
         Grow(deepest, counts);
         _bytes[0].Clear();
@@ -431,18 +431,18 @@ internal sealed class SliceKeys : IDisposable
         {
             RunBuffer into = _bytes[d];
             into.Clear();
-            ReadOnlySpan<byte> parents = _bytes[d - 1].Span;
+            ReadOnlySpan<byte> above = _bytes[d - 1].Span;
             int[] parentEnds = _ends[d - 1];
             int[] ends = _ends[d];
             int[] components = _components[d];
             int[] first = firsts[d];
-            int[] parentOf = groups[d - 1];
+            int[] parentOf = parents[d];
             for (int g = 0; g < counts[d]; g++)
             {
                 int row = first[g];
-                int parent = parentOf[row];
+                int parent = parentOf[g];
                 int from = parent == 0 ? 0 : parentEnds[parent - 1];
-                into.Bytes(parents[from..parentEnds[parent]]);
+                into.Bytes(above[from..parentEnds[parent]]);
                 components[g] = into.Length;
                 KeyCodec.Append(into, arena, columns[d - 1], row, shapes[d - 1]);
                 ends[g] = into.Length;

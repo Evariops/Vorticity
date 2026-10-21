@@ -254,7 +254,7 @@ internal sealed class SortedSlices : IDisposable
                     try
                     {
                         using RecordBatch batch = new RecordBatch(buffer.Context.Canonical, root, 0);
-                        await write(new SortedSlice(batch, buffer.Codes, buffer.PathColumns), cancellationToken).ConfigureAwait(false);
+                        await write(new SortedSlice(batch, buffer.Codes, buffer.PathColumns, buffer.Packed), cancellationToken).ConfigureAwait(false);
                     }
                     finally
                     {
@@ -350,6 +350,9 @@ internal sealed class SortedSlices : IDisposable
         }
 
         int[]? permutation = columns.Count == 0 ? null : SliceSort.Permutation(columns, rows, buffer.SortScratch);
+        buffer.Packed = permutation is not null && buffer.SortScratch.PackedBits > 0
+            ? new PackedKeys(buffer.SortScratch.SortedKeys, buffer.SortScratch.Shifts, buffer.SortScratch.Widths)
+            : null;
         bool identity = permutation is null || IsIdentity(permutation.AsSpan(0, rows));
 
         // Each path's values, in the order the rows are sorted in.
@@ -701,6 +704,9 @@ internal sealed class SortedSlices : IDisposable
 
         internal List<int> PathColumns { get; } = [];
 
+        /// <summary>The words the slice was sorted by, when its entries' codes packed into one.</summary>
+        internal PackedKeys? Packed;
+
         // What the buffer's slice sorts in, its own since two slices may sort at once, kept from one of its slices to the
         // next: each order place's scratch, the permutation's, the codes' and their gather's work items.
         internal SliceSortScratch[] ColumnScratch = [];
@@ -738,6 +744,7 @@ internal sealed class SortedSlices : IDisposable
             Fill.Clear();
             Codes.Clear();
             PathColumns.Clear();
+            Packed = null;
             Context.ResetBatch();
         }
 
@@ -756,6 +763,13 @@ internal sealed class SortedSlices : IDisposable
 /// <summary>
 /// A slice sorted, as its write reads it: its rows, each entry of the order's codes over them in the order they are
 /// sorted in, values in their order and nulls last, and the column of each of the table's paths in the rows' arena,
-/// those the order places and the numeric ones the synopsis sums, -1 for another; valid while the slice is written.
+/// those the order places and the numeric ones the synopsis sums, -1 for another, and, where the entries' codes pack
+/// into a word, the words the rows were sorted by; valid while the slice is written.
 /// </summary>
-internal readonly record struct SortedSlice(RecordBatch Batch, IReadOnlyList<int[]> Codes, IReadOnlyList<int> PathColumns);
+internal readonly record struct SortedSlice(RecordBatch Batch, IReadOnlyList<int[]> Codes, IReadOnlyList<int> PathColumns, PackedKeys? Packed = null);
+
+/// <summary>
+/// A sorted slice's codes packed a word a row, in the rows' sorted order, the order's first entry in the highest bits:
+/// entry <c>k</c>'s code is the <c>Widths[k]</c> bits of <c>Words[row]</c> from bit <c>Shifts[k]</c>.
+/// </summary>
+internal sealed record PackedKeys(ulong[] Words, int[] Shifts, int[] Widths);

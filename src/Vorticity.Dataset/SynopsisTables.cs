@@ -244,11 +244,12 @@ internal sealed class SynopsisTables : IDisposable
     /// the entries <paramref name="order"/> names, whose codes in the sorted order <paramref name="codes"/>
     /// holds, the columns of its paths in <paramref name="paths"/>, the paths left in the residual whose
     /// values it counts <paramref name="counted"/>: its runs go out as rows of the tables of slices, and its
-    /// groups and values to the runs the hour's merge reads. Slices come in time order.
+    /// groups and values to the runs the hour's merge reads. Slices come in time order. Where the entries' codes packed
+    /// into the words <paramref name="packed"/> the rows were sorted by, its groups are read off them.
     /// </summary>
     internal async ValueTask AddSliceAsync(
         RecordBatch sorted, long start, IReadOnlyList<int> order, IReadOnlyList<int[]> codes, IReadOnlyList<int>? paths = null,
-        IReadOnlyList<int>? counted = null, CancellationToken cancellationToken = default)
+        IReadOnlyList<int>? counted = null, PackedKeys? packed = null, CancellationToken cancellationToken = default)
     {
         _pathColumns = paths ?? [];
         int rows = sorted.RowCount;
@@ -298,36 +299,29 @@ internal sealed class SynopsisTables : IDisposable
         // tables of slices', or the hour's runs'. Past it, no group is counted, so a depth all of whose tables were given
         // up costs nothing more.
         int used = Math.Max(Math.Max(Deepest(_runs), _hourDepth), 0);
-        Grow(used, rows);
         int[] counts = new int[used + 1];
-        _groups[0].AsSpan(0, rows).Clear();
-        counts[0] = 1;
-        for (int d = 1; d <= used; d++)
-        {
-            counts[d] = d <= leading
-                ? Runs(keyCodes[d - 1], _groups[d - 1], _groups[d], rows)
-                : Pairs(keyCodes[d - 1], _groups[d - 1], _groups[d], rows, _pairs);
-        }
-
         int[][] firsts = new int[used + 1][];
-        for (int d = 0; d <= used; d++)
+        int[][] parents = new int[used + 1][];
+        bool runs = used <= leading;
+        if (packed is not null && runs)
         {
-            firsts[d] = Firsts(_groups[d], counts[d], rows);
+            Boundaries(packed, rows, used, counts, firsts, parents);
+        }
+        else
+        {
+            Grouped(keyCodes, leading, rows, used, counts, firsts, parents);
         }
 
-        // The measures folded into the deepest groups, then merged up a depth at a time.
+        // The measures folded into the deepest groups, a run of the rows each down to the shapes, then merged up a depth
+        // at a time.
         CanonicalArena arena = sorted.Arena;
         Accumulators[] states = new Accumulators[used + 1];
-        states[used] = Fold(arena, sorted.RootIndex, rows, _groups[used], counts[used]);
+        states[used] = runs
+            ? FoldRuns(arena, sorted.RootIndex, rows, firsts[used], counts[used])
+            : Fold(arena, sorted.RootIndex, rows, _groups[used], counts[used]);
         for (int d = used - 1; d >= 0; d--)
         {
-            int[] parent = new int[counts[d + 1]];
-            for (int g = 0; g < parent.Length; g++)
-            {
-                parent[g] = _groups[d][firsts[d + 1][g]];
-            }
-
-            states[d] = states[d + 1].Merge(parent, counts[d], RentStates(counts[d]));
+            states[d] = states[d + 1].Merge(parents[d + 1].AsSpan(0, counts[d + 1]), counts[d], RentStates(counts[d]));
         }
 
         // Each depth's groups in the order of their keys' values, which their numbering is down to the shapes, and
@@ -360,8 +354,8 @@ internal sealed class SynopsisTables : IDisposable
             columns[k] = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, ColumnOf(node, _keys[k])));
         }
 
-        _sliceKeys.Build(arena, columns, _keyShapes, counts, firsts, _groups, used);
-        CountDistinct(counts, firsts);
+        _sliceKeys.Build(arena, columns, _keyShapes, counts, firsts, parents, used);
+        CountDistinct(counts, parents);
 
         // The slice's runs, rows of the tables of slices.
         for (int d = _first; d <= used; d++)
@@ -461,9 +455,10 @@ internal sealed class SynopsisTables : IDisposable
 
     /// <summary>
     /// Adds each group of the slice to the distinct groups of its depth, the hour's and the object's, down to the deepest
-    /// depth a coarser table still counts: a group's hash its parent's mixed with its own key's, the slice's keys built.
+    /// depth a coarser table still counts: a group's hash its parent's mixed with its own key's, the slice's keys built,
+    /// each group's parent at the depth above in <paramref name="parentsOf"/>.
     /// </summary>
-    private void CountDistinct(int[] counts, int[][] firsts)
+    private void CountDistinct(int[] counts, int[][] parentsOf)
     {
         int deepest = 0;
         for (int d = 1; d < _hourGrowth.Length; d++)
@@ -486,11 +481,10 @@ internal sealed class SynopsisTables : IDisposable
         for (int d = 1; d <= deepest; d++)
         {
             ulong[] hashes = Hashes(d, counts[d]);
-            int[] parentOf = _groups[d - 1];
-            int[] first = firsts[d];
+            int[] parentOf = parentsOf[d];
             for (int g = 0; g < counts[d]; g++)
             {
-                hashes[g] = Mix(parents[parentOf[first[g]]], CardinalitySlot.Hash(_sliceKeys.Component(d, g)));
+                hashes[g] = Mix(parents[parentOf[g]], CardinalitySlot.Hash(_sliceKeys.Component(d, g)));
             }
 
             Add(Counts(_hourly[d], _hourGrowth[d]), hashes, counts[d]);
@@ -1257,6 +1251,133 @@ internal sealed class SynopsisTables : IDisposable
         }
     }
 
+    /// <summary>
+    /// Each depth's groups down to <paramref name="used"/>, numbered in the order of their first rows, from the keys' codes
+    /// <paramref name="keyCodes"/> in the sorted order: a pass a depth, the groups of the first <paramref name="leading"/>
+    /// depths runs of the rows, those past them pairs of a group and a code anywhere in the slice. Their counts, their
+    /// first rows and each one's parent at the depth above go to <paramref name="counts"/>, <paramref name="firsts"/> and
+    /// <paramref name="parents"/>, and each row's group at each depth to the groups' arrays.
+    /// </summary>
+    private void Grouped(List<int[]> keyCodes, int leading, int rows, int used, int[] counts, int[][] firsts, int[][] parents)
+    {
+        Grow(used, rows);
+        _groups[0].AsSpan(0, rows).Clear();
+        counts[0] = 1;
+        for (int d = 1; d <= used; d++)
+        {
+            counts[d] = d <= leading
+                ? Runs(keyCodes[d - 1], _groups[d - 1], _groups[d], rows)
+                : Pairs(keyCodes[d - 1], _groups[d - 1], _groups[d], rows, _pairs);
+        }
+
+        for (int d = 0; d <= used; d++)
+        {
+            firsts[d] = Firsts(_groups[d], counts[d], rows);
+            if (d > 0)
+            {
+                int[] parent = new int[counts[d]];
+                for (int g = 0; g < parent.Length; g++)
+                {
+                    parent[g] = _groups[d - 1][firsts[d][g]];
+                }
+
+                parents[d] = parent;
+            }
+        }
+
+    }
+
+    /// <summary>
+    /// <see cref="Grouped"/> read off the words <paramref name="packed"/> the rows were sorted by, the first keys' codes in
+    /// their highest bits, where every depth counted is a run of the rows: a row starts a group of every depth from the
+    /// first whose key's bits differ from the row before's. One pass over the words, where the codes took a pass a depth and
+    /// the first rows another; each group's parent is the last group of the depth above to start at or before it.
+    /// </summary>
+    private void Boundaries(PackedKeys packed, int rows, int used, int[] counts, int[][] firsts, int[][] parents)
+    {
+        // The depth a change of each bit starts groups at: a key's bits its own depth's.
+        Span<byte> depthOf = stackalloc byte[64];
+        depthOf.Clear();
+        for (int k = 0; k < used; k++)
+        {
+            for (int bit = packed.Shifts[k]; bit < packed.Shifts[k] + packed.Widths[k]; bit++)
+            {
+                depthOf[bit] = (byte)(k + 1);
+            }
+        }
+
+        ulong mask = used == 0 ? 0 : ulong.MaxValue << packed.Shifts[used - 1];
+        if (_bounds.Length <= used)
+        {
+            int had = _bounds.Length;
+            Array.Resize(ref _bounds, used + 1);
+            Array.Resize(ref _parentsOf, used + 1);
+            for (int d = had; d <= used; d++)
+            {
+                _bounds[d] = new int[256];
+                _parentsOf[d] = new int[256];
+            }
+        }
+
+        for (int d = 0; d <= used; d++)
+        {
+            _bounds[d][0] = 0;
+            counts[d] = 1;
+        }
+
+        ulong[] words = packed.Words;
+        for (int row = 1; row < rows; row++)
+        {
+            ulong changed = (words[row] ^ words[row - 1]) & mask;
+            if (changed != 0)
+            {
+                for (int d = depthOf[63 - BitOperations.LeadingZeroCount(changed)]; d <= used; d++)
+                {
+                    if (counts[d] == _bounds[d].Length)
+                    {
+                        Array.Resize(ref _bounds[d], _bounds[d].Length * 2);
+                    }
+
+                    _bounds[d][counts[d]++] = row;
+                }
+            }
+        }
+
+        for (int d = 0; d <= used; d++)
+        {
+            firsts[d] = _bounds[d];
+            if (d == 0)
+            {
+                continue;
+            }
+
+            if (_parentsOf[d].Length < counts[d])
+            {
+                _parentsOf[d] = new int[Math.Max(counts[d], _parentsOf[d].Length * 2)];
+            }
+
+            int[] parent = _parentsOf[d];
+            int[] above = _bounds[d - 1];
+            int at = 0;
+            for (int g = 0; g < counts[d]; g++)
+            {
+                while (at + 1 < counts[d - 1] && above[at + 1] <= _bounds[d][g])
+                {
+                    at++;
+                }
+
+                parent[g] = at;
+            }
+
+            parents[d] = parent;
+        }
+
+    }
+
+    // What Boundaries reads the groups into, kept from one slice to the next: each depth's first rows and parents.
+    private int[][] _bounds = [];
+    private int[][] _parentsOf = [];
+
     /// <summary>Refines the groups of rows sorted by their keys: a group starts where the <paramref name="parent"/> group or the <paramref name="column"/> code changes.</summary>
     private static int Runs(int[] column, int[] parent, int[] groups, int rows)
     {
@@ -1383,6 +1504,31 @@ internal sealed class SynopsisTables : IDisposable
             int column = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, ColumnOf(node, _measures[m])));
             ref readonly CanonicalRecord record = ref arena.RecordRef(column);
             states.Fold(m, record.PType, record.BufferA.Span, ArenaWords.Validity(arena, column), groupOf);
+        }
+
+        return states;
+    }
+
+    /// <summary>
+    /// <see cref="Fold"/> of <paramref name="count"/> groups that are runs of the rows, each starting at its row of
+    /// <paramref name="starts"/>: a run's states summed in registers and stored once, where a row's went to memory and
+    /// back, the same values added in the same order.
+    /// </summary>
+    private Accumulators FoldRuns(CanonicalArena arena, int root, int rows, int[] starts, int count)
+    {
+        Accumulators states = RentStates(count);
+        ReadOnlySpan<int> runs = starts.AsSpan(0, count);
+        for (int g = 0; g < count; g++)
+        {
+            states.Count[g] = (g + 1 < count ? runs[g + 1] : rows) - runs[g];
+        }
+
+        CanonicalNode node = arena.GetNode(root);
+        for (int m = 0; m < _measures.Length; m++)
+        {
+            int column = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, ColumnOf(node, _measures[m])));
+            ref readonly CanonicalRecord record = ref arena.RecordRef(column);
+            states.FoldRuns(m, record.PType, record.BufferA.Span, ArenaWords.Validity(arena, column), runs, rows);
         }
 
         return states;
@@ -1723,6 +1869,172 @@ internal sealed class SynopsisTables : IDisposable
                 default:
                     Float(m, MemoryMarshal.Cast<byte, double>(values), valid, groups);
                     break;
+            }
+        }
+
+        /// <summary>
+        /// <see cref="Fold"/> of groups that are runs of the rows, group <c>g</c>'s from row <paramref name="starts"/>[g] to the
+        /// next group's start, the last's to <paramref name="rows"/>.
+        /// </summary>
+        internal void FoldRuns(int m, PType ptype, ReadOnlySpan<byte> values, ReadOnlySpan<ulong> valid, ReadOnlySpan<int> starts, int rows)
+        {
+            switch (ptype)
+            {
+                case PType.I8:
+                    SignedRuns(m, MemoryMarshal.Cast<byte, sbyte>(values), valid, starts, rows);
+                    break;
+                case PType.I16:
+                    SignedRuns(m, MemoryMarshal.Cast<byte, short>(values), valid, starts, rows);
+                    break;
+                case PType.I32:
+                    SignedRuns(m, MemoryMarshal.Cast<byte, int>(values), valid, starts, rows);
+                    break;
+                case PType.I64:
+                    SignedRuns(m, MemoryMarshal.Cast<byte, long>(values), valid, starts, rows);
+                    break;
+                case PType.U8:
+                    UnsignedRuns(m, values, valid, starts, rows);
+                    break;
+                case PType.U16:
+                    UnsignedRuns(m, MemoryMarshal.Cast<byte, ushort>(values), valid, starts, rows);
+                    break;
+                case PType.U32:
+                    UnsignedRuns(m, MemoryMarshal.Cast<byte, uint>(values), valid, starts, rows);
+                    break;
+                case PType.U64:
+                    UnsignedRuns(m, MemoryMarshal.Cast<byte, ulong>(values), valid, starts, rows);
+                    break;
+                case PType.F32:
+                    FloatRuns(m, MemoryMarshal.Cast<byte, float>(values), valid, starts, rows);
+                    break;
+                default:
+                    FloatRuns(m, MemoryMarshal.Cast<byte, double>(values), valid, starts, rows);
+                    break;
+            }
+        }
+
+        private void SignedRuns<T>(int m, ReadOnlySpan<T> values, ReadOnlySpan<ulong> valid, ReadOnlySpan<int> starts, int rows)
+            where T : unmanaged, IBinaryInteger<T>
+        {
+            long[] count = _values[m];
+            Int128[] sums = _integers[m];
+            long[] least = _least[m];
+            long[] greatest = _greatest[m];
+            for (int g = 0; g < starts.Length; g++)
+            {
+                int end = g + 1 < starts.Length ? starts[g + 1] : rows;
+                long held = 0;
+                long low = long.MaxValue;
+                long high = long.MinValue;
+                Int128 sum = 0;
+                for (int row = starts[g]; row < end; row++)
+                {
+                    if (!valid.IsEmpty && ((valid[row >> 6] >> (row & 63)) & 1) == 0)
+                    {
+                        continue;
+                    }
+
+                    long value = long.CreateTruncating(values[row]);
+                    low = Math.Min(low, value);
+                    high = Math.Max(high, value);
+                    sum += value;
+                    held++;
+                }
+
+                // A run of no value keeps the states it had, as a row's fold leaves them.
+                if (held > 0)
+                {
+                    count[g] += held;
+                    least[g] = low;
+                    greatest[g] = high;
+                    sums[g] += sum;
+                }
+            }
+        }
+
+        private void UnsignedRuns<T>(int m, ReadOnlySpan<T> values, ReadOnlySpan<ulong> valid, ReadOnlySpan<int> starts, int rows)
+            where T : unmanaged, IBinaryInteger<T>
+        {
+            long[] count = _values[m];
+            Int128[] sums = _integers[m];
+            long[] least = _least[m];
+            long[] greatest = _greatest[m];
+            for (int g = 0; g < starts.Length; g++)
+            {
+                int end = g + 1 < starts.Length ? starts[g + 1] : rows;
+                long held = 0;
+                ulong low = ulong.MaxValue;
+                ulong high = ulong.MinValue;
+                Int128 sum = 0;
+                for (int row = starts[g]; row < end; row++)
+                {
+                    if (!valid.IsEmpty && ((valid[row >> 6] >> (row & 63)) & 1) == 0)
+                    {
+                        continue;
+                    }
+
+                    ulong value = ulong.CreateTruncating(values[row]);
+                    low = Math.Min(low, value);
+                    high = Math.Max(high, value);
+                    sum += value;
+                    held++;
+                }
+
+                if (held > 0)
+                {
+                    count[g] += held;
+                    least[g] = (long)low;
+                    greatest[g] = (long)high;
+                    sums[g] += sum;
+                }
+            }
+        }
+
+        private void FloatRuns<T>(int m, ReadOnlySpan<T> values, ReadOnlySpan<ulong> valid, ReadOnlySpan<int> starts, int rows)
+            where T : unmanaged, IFloatingPointIeee754<T>
+        {
+            long[] count = _values[m];
+            WideIndexedSum[] sums = _floats[m];
+            long[] least = _least[m];
+            long[] greatest = _greatest[m];
+            for (int g = 0; g < starts.Length; g++)
+            {
+                int end = g + 1 < starts.Length ? starts[g + 1] : rows;
+                ref WideIndexedSum sum = ref sums[g];
+                long held = 0;
+                long lowBits = least[g];
+                long highBits = greatest[g];
+                double low = BitConverter.Int64BitsToDouble(lowBits);
+                double high = BitConverter.Int64BitsToDouble(highBits);
+                for (int row = starts[g]; row < end; row++)
+                {
+                    if (!valid.IsEmpty && ((valid[row >> 6] >> (row & 63)) & 1) == 0)
+                    {
+                        continue;
+                    }
+
+                    double value = double.CreateTruncating(values[row]);
+                    held++;
+                    sum.Add(value);
+                    if (double.IsNaN(value))
+                    {
+                        continue;
+                    }
+
+                    if (double.IsNaN(low) || value < low)
+                    {
+                        (low, lowBits) = (value, BitConverter.DoubleToInt64Bits(value));
+                    }
+
+                    if (double.IsNaN(high) || value > high)
+                    {
+                        (high, highBits) = (value, BitConverter.DoubleToInt64Bits(value));
+                    }
+                }
+
+                count[g] += held;
+                least[g] = lowBits;
+                greatest[g] = highBits;
             }
         }
 
