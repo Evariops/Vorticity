@@ -42,7 +42,7 @@ namespace Vorticity.Dataset;
 /// <para>
 /// The rows come in on the caller's thread, which only copies them into a slice's buffer, its columns laid out for all of
 /// its rows (<see cref="SliceFill"/>): a slice full is sorted and written on another thread, each slice in a buffer of its
-/// own, <see cref="InFlight"/> of them held at most, one filling and the others sorting or written. A slice's write starts once the one before it is written, so the writes
+/// own, <see cref="InFlight"/> of them held at most, one filling and the other sorting or written. A slice's write starts once the one before it is written, so the writes
 /// keep the slices' order; its sort, as soon as its rows are in, beside the writes of the slices before it. The first
 /// slice is sorted on the caller's thread, as it settles the order the others are sorted in. <see cref="DrainAsync"/>
 /// waits for the last one.
@@ -51,10 +51,13 @@ namespace Vorticity.Dataset;
 internal sealed class SortedSlices : IDisposable
 {
     /// <summary>
-    /// The slices held at most: one whose rows come in, one sorting and one written, so that the thread that hands the
-    /// rows over waits only when the writes are the slowest of the three.
+    /// The slices held at most: one whose rows come in, and one sorting, then written. A third, filling while the two
+    /// others sort and write, held a period's load a slice ahead of its writes, which only a lone period whose writes
+    /// hold it gains from: five periods loaded at once, their lanes all taken, held 18.3 GB and took 485-495 s of the
+    /// processors with three, 13.3 GB and 455-460 s with two, in the same 25.2-25.5 s; a lone day took 17.1-17.2 s with
+    /// three and 17.7-18.0 s with two.
     /// </summary>
-    internal const int InFlight = 3;
+    internal const int InFlight = 2;
 
     private readonly SliceTable _table;
     private readonly int _instant;
