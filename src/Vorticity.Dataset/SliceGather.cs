@@ -244,12 +244,13 @@ internal sealed class SliceGather : IFanWork
             item.PType = record.PType;
             item.Width = record.PType.ByteWidth();
             item.Source = record.BufferA;
-            item.Into = rows == 0 ? VortexBuffer.Empty : arena.AllocateUninitialized(rows * item.Width, Math.Max(item.Width, 1), out _);
             if (key.Codes is not null && !record.PType.IsFloat() && item.Width is 1 or 2 or 4 or 8)
             {
                 item.Codes = key.Codes;
                 item.Table = Table(field, key, item.Source.Span, item.Width);
             }
+
+            item.Into = Into(arena, in item, rows);
         }
         else if (values.Kind == CanonicalKind.VarBinView)
         {
@@ -258,7 +259,6 @@ internal sealed class SliceGather : IFanWork
             item.Width = ViewSize;
             item.Source = record.BufferA;
             item.Padded = record.PaddedViews;
-            item.Into = rows == 0 ? VortexBuffer.Empty : arena.AllocateUninitialized(rows * ViewSize, ViewSize, out _);
 
             // Padded views of equal values are equal, past their bytes too; a long value's view the bytes it names.
             if (key.Codes is not null && record.PaddedViews)
@@ -266,6 +266,8 @@ internal sealed class SliceGather : IFanWork
                 item.Codes = key.Codes;
                 item.Table = Table(field, key, item.Source.Span, ViewSize);
             }
+
+            item.Into = Into(arena, in item, rows);
             long bytes = 0;
             for (int b = 0; b < values.DataBufferCount; b++)
             {
@@ -301,6 +303,16 @@ internal sealed class SliceGather : IFanWork
 
         _items[_count++] = item;
     }
+
+    /// <summary>
+    /// Where the gather of <paramref name="item"/> puts its <paramref name="rows"/> rows: a buffer of their own, or, for a
+    /// column whose values come from its table, its own buffer, which nothing reads once its codes are counted, its table
+    /// made and the bytes its views name counted: the slice holds the column once, where it held it unsorted and sorted.
+    /// </summary>
+    private static VortexBuffer Into(CanonicalArena arena, in Item item, int rows) =>
+        rows == 0 ? VortexBuffer.Empty
+        : item.Codes is not null ? item.Source.Slice(0, rows * item.Width)
+        : arena.AllocateUninitialized(rows * item.Width, Math.Max(item.Width, 1), out _);
 
     /// <summary>
     /// The values of field <paramref name="field"/>, rows of <paramref name="width"/> bytes of <paramref name="source"/>, by
