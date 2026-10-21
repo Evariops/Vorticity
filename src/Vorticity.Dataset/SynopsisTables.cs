@@ -673,8 +673,8 @@ internal sealed class SynopsisTables : IDisposable
         _settled = true;
 
         // A number the order places is a key, and a measure too of the tables it is no key of when its values repeat less
-        // than twice in the slice, as a duration's do, which the object's rows admitted into the order but which forms no
-        // runs, where a status code repeats and is a key alone.
+        // than twice in the slice, which only a slice too small to judge its columns leaves in the order (SortedSlices),
+        // where a status code repeats and is a key alone.
         bool Measured(int entry)
         {
             int k = keys.IndexOf(entry);
@@ -684,7 +684,7 @@ internal sealed class SynopsisTables : IDisposable
             }
 
             int distinct = 0;
-            foreach (int code in keyCodes[k])
+            foreach (int code in keyCodes[k].AsSpan(0, rows))
             {
                 distinct = Math.Max(distinct, code + 1);
             }

@@ -238,7 +238,7 @@ internal sealed class SortedSlices : IDisposable
 
         // The paths' values, every path's on the first slice, then those the order and the synopsis read.
         int[] paths = ReadPaths(buffer, node);
-        if (_order is null && (_shapes is not null || _table.Order.Count > 1 || _table.Paths.Count > 0))
+        if (_order is null && (_shapes is not null || _table.Order.Count > 0 || _table.Paths.Count > 0))
         {
             // The first slice settles the object's order, and sorts by the codes it measured it with.
             (_order, columns) = Place(arena, node, rows, paths);
@@ -389,6 +389,13 @@ internal sealed class SortedSlices : IDisposable
     private const int OrderSampleRows = 16_384;
 
     /// <summary>
+    /// The rows from which the first slice judges whether a column of the table's order repeats where the rows are sorted:
+    /// eight blocks. A slice of a few rows, which only a small object's slices or a test's are, says too little of a
+    /// column's repeats, where a slice of the design, a minute of three million rows, says it of a duration exactly.
+    /// </summary>
+    internal const int JudgedRows = 1 << 16;
+
+    /// <summary>
     /// The column of each of the table's paths over the slice's rows <paramref name="node"/>, read in one pass
     /// of each variant column: every path before the order is settled, then those the order or the synopsis
     /// read, -1 for another.
@@ -439,11 +446,19 @@ internal sealed class SortedSlices : IDisposable
     /// </summary>
     private (List<int> Order, List<(int[] Codes, int Distinct)> Columns) Place(CanonicalArena arena, int node, int rows, int[] paths)
     {
-        List<int> entries = [.. _table.Order];
+        // A column the object's rows repeat stays out of the order when a slice large enough to judge it does not repeat
+        // its values twice on average: it forms no runs where the rows are sorted, whatever it does over the object, and
+        // is a measure, as a duration is; a smaller slice leaves the object's count to decide.
+        List<int> entries = [];
         List<(int[] Codes, int Distinct)> candidates = [];
-        foreach (int entry in entries)
+        foreach (int entry in _table.Order)
         {
-            candidates.Add(SliceSort.CodesOf(arena, node, entry, rows, _shapes));
+            (int[] Codes, int Distinct) codes = SliceSort.CodesOf(arena, node, entry, rows, _shapes);
+            if (rows < JudgedRows || codes.Distinct * 2L <= rows)
+            {
+                entries.Add(entry);
+                candidates.Add(codes);
+            }
         }
 
         List<int> fields = [.. _shapes?.Keys ?? []];

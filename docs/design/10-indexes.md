@@ -336,8 +336,8 @@ the file's encodings, checksummed with XXH3-64. A table's rows are a struct: the
 the values of its keys, a count of rows, then for each measure column the count of its values, its
 exact sum in the words of its persisted state (two for an integer's 128 bits, five for a float's indexed
 sum), and its least and greatest widened to 64 bits. Its measures are the object's but its own keys, so
-that a number the order places last and that seldom repeats, a duration, keeps its states in the tables
-before it, and tables of one object may name different ones. The entry sits on the root, takes no column, and
+that a number that seldom repeats in a slice, a duration, which leaves the order when a large first slice shows it,
+keeps its states in every table, and tables of one object may name different ones. The entry sits on the root, takes no column, and
 holds in its options what the table is (run statistics per slice, a coarse table per hour or per object,
 or one column's value counts per hour or per slice), its key fields, its measure fields and its row count, then, for
 a table of more than one chunk, each chunk's first and last bucket and its rows. Its run's payloads name
