@@ -41,6 +41,9 @@ internal sealed class RequestGenerator
     // The weights and the names depend on the constants alone: made once, every generator draws through them.
     private static readonly double[] ServiceWeights = Cumulative(Zipf(Services, 0.8));
     private static readonly double[] EndpointWeights = Cumulative(Zipf(EndpointsPerService, 2.0));
+    private static readonly int[] ServiceGuide = Guide(ServiceWeights);
+    private static readonly int[] EndpointGuide = Guide(EndpointWeights);
+    private static readonly int[] Homes = [.. Enumerable.Range(0, Services).Select(HomeOf)];
     private static readonly int[] VersionCounts = [.. Enumerable.Range(0, Services).Select(_ => 2)];
     private static readonly string[] ServiceNameTable = [.. Enumerable.Range(0, Services).Select(s => $"service-{s:D3}")];
     private static readonly string[][] EndpointNameTable = [.. Enumerable.Range(0, Services).Select(s => Enumerable.Range(0, EndpointsPerService).Select(e => $"/s{s}/e{e}").ToArray())];
@@ -74,8 +77,8 @@ internal sealed class RequestGenerator
     internal RequestDraw Draw(out long id)
     {
         // A service runs in its home region, which serves nearly all its requests.
-        int service = Lower(ServiceWeights, _random.NextDouble());
-        int home = HomeOf(service);
+        int service = Lower(ServiceWeights, ServiceGuide, _random.NextDouble());
+        int home = Homes[service];
         // Four services in five only read: their writes are reads. One in ten takes health checks and probes.
         int method = Pick(MethodWeights);
         method = (service % 5 < 4 && method is >= 1 and <= 4) || (service % 10 != 0 && method >= 5) ? 0 : method;
@@ -91,7 +94,7 @@ internal sealed class RequestGenerator
 
         // An endpoint answers one method: the service's endpoints are shared out among them, the reads taking most.
         (int first, int count) = EndpointsOf(method);
-        int endpoint = first + Math.Min(Lower(EndpointWeights, _random.NextDouble()) % count, count - 1);
+        int endpoint = first + Math.Min(Lower(EndpointWeights, EndpointGuide, _random.NextDouble()) % count, count - 1);
 
         // The current version takes most of the rows, the others the rest.
         int version = _random.NextDouble() < 0.97 ? 0 : 1 + _random.Next(VersionCounts[service] - 1);
@@ -289,11 +292,38 @@ internal sealed class RequestGenerator
         return sums;
     }
 
-    /// <summary>The first index whose cumulative weight reaches <paramref name="draw"/>.</summary>
-    private static int Lower(double[] cumulative, double draw)
+    /// <summary>The cells a guide cuts [0, 1) into.</summary>
+    private const int GuideCells = 1 << 10;
+
+    /// <summary>
+    /// For each cell of [0, 1), the first index whose cumulative weight reaches the cell's start: where a draw in the cell
+    /// starts looking, a step or two from its index, where a binary search took ten, a tenth of a load's time.
+    /// </summary>
+    private static int[] Guide(double[] cumulative)
     {
-        int index = Array.BinarySearch(cumulative, draw);
-        return Math.Min(index >= 0 ? index : ~index, cumulative.Length - 1);
+        int[] guide = new int[GuideCells];
+        for (int cell = 0; cell < guide.Length; cell++)
+        {
+            int index = Array.BinarySearch(cumulative, cell / (double)GuideCells);
+            guide[cell] = Math.Min(index >= 0 ? index : ~index, cumulative.Length - 1);
+        }
+
+        return guide;
+    }
+
+    /// <summary>
+    /// The first index whose cumulative weight reaches <paramref name="draw"/>, the last past them all: from the index the
+    /// guide gives the draw's cell, which no draw of the cell is before, as a binary search finds it.
+    /// </summary>
+    private static int Lower(double[] cumulative, int[] guide, double draw)
+    {
+        int index = guide[(int)(draw * GuideCells)];
+        while (index < cumulative.Length - 1 && cumulative[index] < draw)
+        {
+            index++;
+        }
+
+        return index;
     }
 }
 
