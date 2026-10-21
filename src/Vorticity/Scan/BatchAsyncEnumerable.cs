@@ -1492,14 +1492,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         else
         {
-            // The projection reads the selection in the root's row space, which is the file's.
-            int origin = (int)split.Start;
-            for (int i = 0; i < count; i++)
-            {
-                kept[i] += origin;
-            }
-
-            ScanContext.SavedSelection saved = context.ExchangeSelection(kept, count);
+            // The projection reads the selection in the root's row space, which is the file's, or the split's from its
+            // first row past 2^31.
+            long origin = SplitExecution.FileSpace(kept, count, split);
+            ScanContext.SavedSelection saved = context.ExchangeSelection(kept, count, origin);
             try
             {
                 root = SplitExecution.Execute(context, _tree, in _keep, split, null);

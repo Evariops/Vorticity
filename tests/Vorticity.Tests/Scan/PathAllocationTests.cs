@@ -350,7 +350,10 @@ public sealed class PathAllocationTests
         //
         // Each filter parses the columns it reads, not the five: 20 856 bytes less, and 20 864 with
         // pruning off.
-        ("selective filter, pruning on", File, 34_416, PrunedFilter),
+        //
+        // A context's selection carries the row its entries count from, past 2^31 a split's first
+        // (ScanContext.SelectionBase): 8 bytes for the context the pruning reads the zone map through.
+        ("selective filter, pruning on", File, 34_424, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and

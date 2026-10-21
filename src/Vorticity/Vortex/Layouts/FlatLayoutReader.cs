@@ -93,6 +93,13 @@ internal sealed class FlatLayoutReader : LayoutReader
         ArgumentNullException.ThrowIfNull(context);
         CheckRange(in node, rows);
 
+        // A flat node holds an int's rows, so its selection names them itself: only a chunked node, the one a split past
+        // 2^31 reads, re-bases a selection counted from its split.
+        if (context.HasSelection && context.SelectionBase != 0)
+        {
+            throw new InvalidOperationException($"A flat node of {NodeLength(in node)} rows was given a selection counted from row {context.SelectionBase}.");
+        }
+
         int total = NodeLength(in node);
         int length = BatchLength(rows);
 

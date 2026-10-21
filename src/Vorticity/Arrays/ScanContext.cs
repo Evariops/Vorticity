@@ -405,6 +405,16 @@ internal sealed class ScanContext : IDisposable
     /// <summary>Whether a selection is in force for this batch.</summary>
     internal bool HasSelection => _selection is not null;
 
+    /// <summary>
+    /// The row of the selection's sibling space its entries count from: 0, an entry naming its row itself, but at the root
+    /// of a split whose rows lie past 2^31, the rows of a file of billions, whose entries count from the split's first
+    /// row, an int short of naming them. Only a reader that re-bases the selection per child reads it, which is the one
+    /// a node of so many rows is (<c>vortex.chunked</c>).
+    /// </summary>
+    internal long SelectionBase => _selectionBase;
+
+    private long _selectionBase;
+
     /// <summary>How many rows the selection names, without writing out a selection set as a range.</summary>
     internal int SelectionCount => _selectionCount;
 
@@ -528,13 +538,15 @@ internal sealed class ScanContext : IDisposable
     /// </summary>
     /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>
     /// <param name="count">How many entries of <paramref name="rows"/> are live.</param>
+    /// <param name="selectionBase">The row its entries count from (<see cref="SelectionBase"/>).</param>
     /// <returns>The previous selection, to be restored by the caller with <see cref="RestoreSelection"/>.</returns>
-    internal SavedSelection ExchangeSelection(int[]? rows, int count)
+    internal SavedSelection ExchangeSelection(int[]? rows, int count, long selectionBase = 0)
     {
-        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart);
+        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart, _selectionBase);
         _selection = rows;
         _selectionCount = rows is null ? 0 : count;
         _selectionStart = -1;
+        _selectionBase = rows is null ? 0 : selectionBase;
         return previous;
     }
 
@@ -548,10 +560,11 @@ internal sealed class ScanContext : IDisposable
     /// <returns>The previous selection, to be restored by the caller with <see cref="RestoreSelection"/>.</returns>
     internal SavedSelection ExchangeSelectionRange(int[] buffer, int start, int count)
     {
-        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart);
+        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart, _selectionBase);
         _selection = buffer;
         _selectionCount = count;
         _selectionStart = start;
+        _selectionBase = 0;
         return previous;
     }
 
@@ -562,16 +575,21 @@ internal sealed class ScanContext : IDisposable
         _selection = saved.Buffer;
         _selectionCount = saved.Count;
         _selectionStart = saved.Start;
+        _selectionBase = saved.Base;
     }
 
-    /// <summary>A selection an exchange displaced: its buffer, its count, and its first row while it is a range not yet written out.</summary>
+    /// <summary>
+    /// A selection an exchange displaced: its buffer, its count, its first row while it is a range not yet written out,
+    /// and the row its entries count from.
+    /// </summary>
     internal readonly struct SavedSelection
     {
-        internal SavedSelection(int[]? buffer, int count, int start)
+        internal SavedSelection(int[]? buffer, int count, int start, long selectionBase)
         {
             Buffer = buffer;
             Count = count;
             Start = start;
+            Base = selectionBase;
         }
 
         internal int[]? Buffer { get; }
@@ -579,6 +597,8 @@ internal sealed class ScanContext : IDisposable
         internal int Count { get; }
 
         internal int Start { get; }
+
+        internal long Base { get; }
     }
 
     /// <summary>The pushed comparison, held behind one reference rather than in three fields.</summary>

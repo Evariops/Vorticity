@@ -146,6 +146,7 @@ internal sealed class ListLayoutReader : LayoutReader
         }
 
         ReadOnlySpan<int> wanted = context.HasSelection ? context.Selection : default;
+        long counted = context.SelectionBase;
         int length = context.HasSelection ? wanted.Length : span;
 
         Validity validity = Validity.NonNullable;
@@ -171,12 +172,12 @@ internal sealed class ListLayoutReader : LayoutReader
         VortexBuffer sizesOut = context.Canonical.Allocate(bytes, width, out Span<byte> sizes);
         ReadOnlySpan<byte> boundaries = offsets.Values.Span;
 
-        // The selection is in the node's row space and the offsets window starts at the batch's
-        // first row, so a wanted row is read at its distance from that row.
+        // The selection is in the node's row space, its entries counted from its base, and the offsets
+        // window starts at the batch's first row, so a wanted row is read at its distance from that row.
         long elementCount = NodeLength(in elementsLayout);
         for (int i = 0; i < length; i++)
         {
-            int row = wanted.IsEmpty ? i : wanted[i] - (int)rows.Start;
+            int row = wanted.IsEmpty ? i : checked((int)(counted + wanted[i] - rows.Start));
             if ((uint)row >= (uint)span)
             {
                 LayoutsThrow.Format($"A {Id} layout was asked for row {row} of {span}.");

@@ -202,11 +202,14 @@ internal sealed class ChunkedLayoutReader : LayoutReader
     private static int ExecuteChunkSelected(
         in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context, ref int taken, long start, long end)
     {
-        ReadOnlySpan<int> run = NextRun(context.Selection, ref taken, start, end);
+        // The selection's entries count from its base, the split's first row past 2^31, 0 otherwise: the chunk's bounds
+        // move by it into their space, and the run into the chunk's own.
+        long origin = context.SelectionBase;
+        ReadOnlySpan<int> run = NextRun(context.Selection, ref taken, start - origin, end - origin);
         int[] rebased = ArrayPool<int>.Shared.Rent(Math.Max(run.Length, 1));
         try
         {
-            Shift(run, start, rebased);
+            Shift(run, start - origin, rebased);
             ScanContext.SavedSelection saved = context.ExchangeSelection(rebased, run.Length);
             try
             {
@@ -259,8 +262,8 @@ internal sealed class ChunkedLayoutReader : LayoutReader
             return;
         }
 
-        // A row is an int at or past the chunk's first, so that first is an int too.
-        int origin = (int)start;
+        // A row is an int at or past the chunk's first, so that first, which may lie before the selection's base, is one too.
+        int origin = checked((int)start);
         Span<int> slots = into[..rows.Length];
         int i = 0;
         if (Vector128.IsHardwareAccelerated && rows.Length >= Vector128<int>.Count)
