@@ -42,6 +42,12 @@ internal static class SliceSort
     /// </summary>
     internal static int[] Permutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows, SliceSortScratch scratch)
     {
+        scratch.PackedBits = 0;
+        if (Packs(columns, scratch) is > 0 and <= 64)
+        {
+            return PackedPermutation(columns, rows, scratch);
+        }
+
         int[] permutation = SliceSortScratch.AtLeast(ref scratch.Permutation, rows);
         for (int i = 0; i < rows; i++)
         {
@@ -352,6 +358,123 @@ internal static class SliceSort
     }
 
     /// <summary>
+    /// The bits the columns' codes take together, the first column's highest, each its own codes' with nulls': past 64, the
+    /// codes do not pack into a word. The shift and the width of each column go to <paramref name="scratch"/>.
+    /// </summary>
+    private static int Packs(IReadOnlyList<(int[] Codes, int Distinct)> columns, SliceSortScratch scratch)
+    {
+        int bits = 0;
+        int[] widths = SliceSortScratch.AtLeast(ref scratch.Widths, columns.Count);
+        for (int k = 0; k < columns.Count; k++)
+        {
+            widths[k] = BitOperations.Log2((uint)Math.Max(columns[k].Distinct, 1)) + 1;
+            bits += widths[k];
+        }
+
+        int[] shifts = SliceSortScratch.AtLeast(ref scratch.Shifts, columns.Count);
+        int below = bits;
+        for (int k = 0; k < columns.Count; k++)
+        {
+            below -= widths[k];
+            shifts[k] = below;
+        }
+
+        return bits;
+    }
+
+    /// <summary>
+    /// The permutation of rows whose codes pack into a word: each row's codes packed, the first column's highest, and the
+    /// words sorted with their rows by a stable radix sort eleven bits a pass, which orders the rows as the counting sorts
+    /// of the columns one after the other did, ties in the order the rows came. Where those read each column's codes at
+    /// random, a pass a column, and the codes were then gathered in the rows' order at random again, the sorted words hold
+    /// them in that order: <see cref="SliceSortScratch.SortedKeys"/>, for <see cref="Unpack"/>.
+    /// </summary>
+    private static int[] PackedPermutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows, SliceSortScratch scratch)
+    {
+        const int Digit = 11;
+        const int Radix = 1 << Digit;
+        int bits = 0;
+        for (int k = 0; k < columns.Count; k++)
+        {
+            bits += scratch.Widths[k];
+        }
+
+        ulong[] keys = SliceSortScratch.AtLeast(ref scratch.SortedKeys, rows);
+        ulong[] otherKeys = SliceSortScratch.AtLeast(ref scratch.SpareKeys, rows);
+        int[] permutation = SliceSortScratch.AtLeast(ref scratch.Permutation, rows);
+        int[] other = SliceSortScratch.AtLeast(ref scratch.Spare, rows);
+        int count = columns.Count;
+        int[] widths = scratch.Widths;
+        int[][] codes = new int[count][];
+        for (int k = 0; k < count; k++)
+        {
+            codes[k] = columns[k].Codes;
+        }
+
+        for (int i = 0; i < rows; i++)
+        {
+            ulong key = 0;
+            for (int k = 0; k < count; k++)
+            {
+                key = (key << widths[k]) | (uint)codes[k][i];
+            }
+
+            keys[i] = key;
+            permutation[i] = i;
+        }
+
+        Span<int> starts = SliceSortScratch.AtLeast(ref scratch.Starts, Radix + 1).AsSpan(0, Radix + 1);
+        for (int shift = 0; shift < bits; shift += Digit)
+        {
+            starts.Clear();
+            for (int i = 0; i < rows; i++)
+            {
+                starts[(int)((keys[i] >> shift) & (Radix - 1)) + 1]++;
+            }
+
+            // A digit every row holds alike moves nothing.
+            if (rows == 0 || starts[(int)((keys[0] >> shift) & (Radix - 1)) + 1] == rows)
+            {
+                continue;
+            }
+
+            for (int d = 0; d < Radix; d++)
+            {
+                starts[d + 1] += starts[d];
+            }
+
+            for (int i = 0; i < rows; i++)
+            {
+                int at = starts[(int)((keys[i] >> shift) & (Radix - 1))]++;
+                otherKeys[at] = keys[i];
+                other[at] = permutation[i];
+            }
+
+            (keys, otherKeys) = (otherKeys, keys);
+            (permutation, other) = (other, permutation);
+        }
+
+        (scratch.SortedKeys, scratch.SpareKeys, scratch.Permutation, scratch.Spare) = (keys, otherKeys, permutation, other);
+        scratch.PackedBits = bits;
+        return permutation;
+    }
+
+    /// <summary>
+    /// Column <paramref name="k"/>'s codes in the rows' sorted order, out of the words <see cref="PackedPermutation"/>
+    /// sorted, into <paramref name="codes"/>.
+    /// </summary>
+    internal static void Unpack(SliceSortScratch scratch, int k, int[] codes, int rows)
+    {
+        ulong[] keys = scratch.SortedKeys;
+        int shift = scratch.Shifts[k];
+        ulong mask = (1UL << scratch.Widths[k]) - 1;
+        for (int i = 0; i < rows; i++)
+        {
+            codes[i] = (int)((keys[i] >> shift) & mask);
+        }
+    }
+
+    /// <summary>
     /// Sorts the first <paramref name="rows"/> entries of <paramref name="permutation"/> by <paramref name="codes"/> of
     /// their rows, stably, through <paramref name="spare"/>, the buckets' starts in <paramref name="scratch"/>'s.
     /// </summary>
@@ -496,6 +619,14 @@ internal sealed class SliceSortScratch
     internal int[] Permutation = [];
     internal int[] Spare = [];
     internal int[] Starts = [];
+
+    // A permutation of packed codes (SliceSort.PackedPermutation): the words sorted and their spares, each column's width
+    // and shift in a word, and the words' bits, 0 when the codes were sorted a column at a time.
+    internal ulong[] SortedKeys = [];
+    internal ulong[] SpareKeys = [];
+    internal int[] Widths = [];
+    internal int[] Shifts = [];
+    internal int PackedBits;
     private readonly FirstRows _comparer = new FirstRows();
 
     /// <summary><paramref name="array"/>, grown to hold <paramref name="length"/> when it is shorter.</summary>

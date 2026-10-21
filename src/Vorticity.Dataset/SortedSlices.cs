@@ -361,6 +361,7 @@ internal sealed class SortedSlices : IDisposable
             buffer.Gather.Columns = columns;
             buffer.Gather.Permutation = permutation;
             buffer.Gather.Rows = rows;
+            buffer.Gather.Packed = buffer.SortScratch.PackedBits > 0 ? buffer.SortScratch : null;
             if (buffer.Gather.Scratch.Length < columns.Count)
             {
                 Array.Resize(ref buffer.Gather.Scratch, columns.Count);
@@ -369,6 +370,7 @@ internal sealed class SortedSlices : IDisposable
             buffer.Fan(Lanes).Run(buffer.Gather, columns.Count);
             buffer.Gather.Columns = null;
             buffer.Gather.Permutation = null;
+            buffer.Gather.Packed = null;
         }
 
         foreach ((int[] codes, int _) in columns)
@@ -458,17 +460,27 @@ internal sealed class SortedSlices : IDisposable
         }
     }
 
-    /// <summary>Each column's codes gathered into the rows' sorted order, an item a column, through a scratch of its own.</summary>
+    /// <summary>
+    /// Each column's codes in the rows' sorted order, an item a column: unpacked from the words the sort sorted, when the
+    /// codes packed into them, and gathered through a scratch of its own otherwise.
+    /// </summary>
     private sealed class CodesGather : IFanWork
     {
         internal List<(int[] Codes, int Distinct)>? Columns;
         internal int[]? Permutation;
         internal int Rows;
         internal int[][] Scratch = [];
+        internal SliceSortScratch? Packed;
 
         public void Run(WorkFan fan, int item)
         {
             int[] codes = Columns![item].Codes;
+            if (Packed is { } packed)
+            {
+                SliceSort.Unpack(packed, item, codes, Rows);
+                return;
+            }
+
             int[] permutation = Permutation!;
             int[] gathered = Scratch[item] is { } kept && kept.Length >= Rows ? kept : Scratch[item] = new int[Rows];
             for (int i = 0; i < Rows; i++)
