@@ -106,6 +106,13 @@ if (Text(args, "--micro") == "load")
         Option(args, "--period-hours", 1));
 }
 
+// --micro entries: each object's entry in the tree of the dataset at --store, and what its table of contents holds.
+if (Text(args, "--micro") == "entries")
+{
+    await PathsBench.EntriesAsync(Text(args, "--store") ?? throw new ArgumentException("--micro entries reads the dataset at --store."));
+    return 0;
+}
+
 // --micro seal: what the compaction of a period costs at the design's scale, job by job and pass by pass (SealBench.cs).
 if (Text(args, "--micro") == "seal")
 {
@@ -250,6 +257,7 @@ if (Text(args, "--micro") == "paths")
         WriteDegree = Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
         Rebuild = args.Contains("--rebuild"),
         BuildOnly = args.Contains("--build-only"),
+        Entries = args.Contains("--entries"),
         Verify = args.Contains("--verify"),
         Explain = args.Contains("--explain"),
         Tsv = Text(args, "--tsv"),

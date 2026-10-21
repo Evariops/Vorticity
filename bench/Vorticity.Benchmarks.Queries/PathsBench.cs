@@ -30,7 +30,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// </para>
 /// <para>
 /// Each line says what the store saw (requests, dependent round trips, bytes), what the answer read (states, rows),
-/// its time and processor time, and the bytes the process allocated, every thread counted. Cold is a session and a
+/// its time and processor time, the bytes the process allocated, every thread counted, and the most private bytes and
+/// working set it held above what it held as the ask began (<see cref="MemoryPeaks"/>). Cold is a session and a
 /// handle opened for the question with an empty cache, its open not counted; warm is the median of <c>--rounds</c>
 /// asks by the same handle (<c>--rows-rounds</c> for the rows). With <c>--verify</c> each question's answer from
 /// the synopses is held to the one from its rows, digest against digest. <c>--tsv</c> appends every line to a
@@ -82,6 +83,9 @@ internal static class PathsBench
 
         /// <summary>Whether each question's plan is printed once warm: what each object reads, a table, its edges or its rows, and why.</summary>
         internal bool Explain { get; init; }
+
+        /// <summary>Whether the bench only prints each object's entry and its table of contents, in bytes (<c>--entries</c>).</summary>
+        internal bool Entries { get; init; }
 
         internal bool Design { get; init; }
 
@@ -144,13 +148,20 @@ internal static class PathsBench
             return 0;
         }
 
+        if (settings.Entries)
+        {
+            await EntriesAsync(requests.Directory);
+            await EntriesAsync(logs.Directory);
+            return 0;
+        }
+
         string label = settings.Label ?? Commit();
         Console.WriteLine(
             $"store {settings.Store}: {requests.Rows:N0} requests over {settings.Hours} h, {logs.Rows:N0} log records over {settings.LogHours} h; " +
             $"{settings.Latency} ms a request, {(settings.LinkBitsPerSecond > 0 ? $"a link of {settings.LinkBitsPerSecond / 1e9:0.##} Gb/s" : "no limit on the link")}{(settings.BytesPerSecond > 0 ? $", {settings.BytesPerSecond / 1e6:0} MB/s a read" : string.Empty)}; " +
-            $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows); {label}");
+            $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows); processor time from cycles at {ProcessCpu.GigaHertz:F2} GHz; {label}");
         Console.WriteLine(
-            $"{"question",-62} {"path",-8} {"",-4} {"dop",3} {"ms",9} {"cpu ms",9} {"alloc MB",9} {"req",6} {"steps",6} {"MB",8} {"states",9} {"rows",11} {"groups",7}");
+            $"{"question",-62} {"path",-8} {"",-4} {"dop",3} {"ms",9} {"cpu ms",9} {"alloc MB",9} {"priv MB",8} {"ws MB",8} {"req",6} {"steps",6} {"MB",8} {"states",9} {"rows",11} {"groups",7}");
 
         if (settings.Explain)
         {
@@ -242,6 +253,34 @@ internal static class PathsBench
         }
 
         return failed ? 1 : 0;
+    }
+
+    /// <summary>
+    /// <c>--entries</c>, <c>--micro entries</c>: each object's entry in the tree of the dataset at
+    /// <paramref name="directory"/>, which a walk reads for every object it plans and the handle's page cache keeps, and
+    /// what the table of contents of its synopsis holds: its slices, its tables' chunks, its synopsis columns' chunks, its
+    /// schema.
+    /// </summary>
+    internal static async Task EntriesAsync(string directory)
+    {
+        await using FileObjectStore files = new FileObjectStore(directory);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(files, new DatasetOptions());
+        long total = 0;
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
+        {
+            Vorticity.Dataset.ObjectEntry entry = held.Entry;
+            long bytes = entry.ToBytes().Length;
+            total += bytes;
+            string parts = entry.Contents is not { } contents ? "no table of contents" : string.Create(
+                CultureInfo.InvariantCulture,
+                $"contents {entry.Synopsis.Length / 1e6:F2} MB: {contents.Slices.Slices.Count} slices in {contents.Slices.ToBytes().Length / 1e3:F1} KB, " +
+                $"{contents.Tables.Count} tables of {contents.Tables.Sum(table => table.Chunks.Count)} chunks, " +
+                $"{contents.Columns.Count} synopsis columns of {contents.Columns.Sum(column => column.Chunks.Length)} chunks in " +
+                $"{contents.Columns.Sum(column => (long)new Vorticity.Indexes.SliceChunks([], [column.Chunks]).ColumnBytes(0).Length) / 1e6:F2} MB, schema {contents.Schema.Length} B");
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {entry.Key}: {entry.Rows:N0} rows, entry {bytes / 1e6:F2} MB, {parts}"));
+        }
+
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {total / 1e6:F2} MB of entries"));
     }
 
     /// <summary>The synopsis tables each object of the store holds, as its entry's table of contents names them.</summary>
@@ -459,8 +498,9 @@ internal static class PathsBench
     {
         store.Reset();
         Asking asking = question.Ask(dataset, options);
+        MemoryPeaks.Window memory = MemoryPeaks.Open();
         long allocated = GC.GetTotalAllocatedBytes(precise: true);
-        TimeSpan cpu = Environment.CpuUsage.TotalTime;
+        double cpu = ProcessCpu.Milliseconds();
         long begin = Stopwatch.GetTimestamp();
         long groups = 0;
         ResultDigest digest = default;
@@ -484,12 +524,13 @@ internal static class PathsBench
         }
 
         double milliseconds = (Stopwatch.GetTimestamp() - begin - digesting) * 1000.0 / Stopwatch.Frequency;
-        double cpuMilliseconds = (Environment.CpuUsage.TotalTime - cpu).TotalMilliseconds;
+        double cpuMilliseconds = ProcessCpu.Milliseconds() - cpu;
         long bytes = GC.GetTotalAllocatedBytes(precise: true) - allocated;
+        MemoryPeaks.Close(memory);
         ScanMetrics metrics = asking.Metrics();
         return new Measured(
             store.Requests, store.DependentSteps, store.BytesRead, metrics.SynopsisRows, metrics.Rows, milliseconds, cpuMilliseconds, bytes, groups,
-            digests ? digest.ToString() : "-");
+            digests ? digest.ToString() : "-", memory.Private, memory.Working);
     }
 
     private static void Print(Settings settings, string label, Question question, string path, string temperature, int degree, Measured m)
@@ -497,18 +538,22 @@ internal static class PathsBench
         string name = temperature == "cold" ? question.Name : string.Empty;
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"{name,-62} {path,-8} {temperature,-4} {degree,3} {m.Milliseconds,9:F1} {m.CpuMilliseconds,9:F1} {m.Allocated / 1e6,9:F2} {m.Requests,6} {m.Steps,6} {m.Bytes / 1e6,8:F2} {m.States,9} {m.Rows,11} {m.Groups,7}"));
+            $"{name,-62} {path,-8} {temperature,-4} {degree,3} {m.Milliseconds,9:F1} {m.CpuMilliseconds,9:F1} {m.Allocated / 1e6,9:F2} {m.PeakPrivate / 1e6,8:F1} {m.PeakWorking / 1e6,8:F1} {m.Requests,6} {m.Steps,6} {m.Bytes / 1e6,8:F2} {m.States,9} {m.Rows,11} {m.Groups,7}"));
         if (settings.Tsv is { } tsv)
         {
             System.IO.File.AppendAllText(tsv, string.Create(
                 CultureInfo.InvariantCulture,
-                $"{label}\t{question.Set}\t{question.Name}\t{path}\t{temperature}\t{degree}\t{m.Milliseconds:F3}\t{m.CpuMilliseconds:F3}\t{m.Allocated}\t{m.Requests}\t{m.Steps}\t{m.Bytes}\t{m.States}\t{m.Rows}\t{m.Groups}\t{m.Digest}\n"));
+                $"{label}\t{question.Set}\t{question.Name}\t{path}\t{temperature}\t{degree}\t{m.Milliseconds:F3}\t{m.CpuMilliseconds:F3}\t{m.Allocated}\t{m.Requests}\t{m.Steps}\t{m.Bytes}\t{m.States}\t{m.Rows}\t{m.Groups}\t{m.Digest}\t{m.PeakPrivate}\t{m.PeakWorking}\n"));
         }
     }
 
-    /// <summary>What one asking cost, and the digest of what it answered.</summary>
+    /// <summary>
+    /// What one asking cost, the digest of what it answered, and the most private bytes and working set the process held
+    /// above what it held when the asking began (<see cref="MemoryPeaks"/>).
+    /// </summary>
     private readonly record struct Measured(
-        long Requests, long Steps, long Bytes, long States, long Rows, double Milliseconds, double CpuMilliseconds, long Allocated, long Groups, string? Digest);
+        long Requests, long Steps, long Bytes, long States, long Rows, double Milliseconds, double CpuMilliseconds, long Allocated, long Groups, string? Digest,
+        long PeakPrivate = 0, long PeakWorking = 0);
 
     /// <summary>A dataset written under the store: its directory, its rows, and a request id in its middle.</summary>
     private sealed record Built(string Directory, long Rows, string Needle);

@@ -61,6 +61,16 @@ internal static class PreciseDelay
         return done.Task;
     }
 
+    /// <summary>A high-resolution timer of its own, for a thread that waits on it once armed (<see cref="Arm"/>); null off Windows.</summary>
+    internal static WaitHandle? NewTimer() => OperatingSystem.IsWindows() ? TimerHandle.Create() : null;
+
+    /// <summary>Arms <paramref name="timer"/>, one <see cref="NewTimer"/> made, to fire once <paramref name="due"/> has passed.</summary>
+    internal static bool Arm(WaitHandle timer, TimeSpan due)
+    {
+        long relative = -Math.Max(1, due.Ticks);
+        return SetWaitableTimerEx(timer.SafeWaitHandle, ref relative, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 0);
+    }
+
     /// <summary>A task that completes once the clock passes <paramref name="timestamp"/>, a <see cref="Stopwatch"/> timestamp.</summary>
     internal static Task Until(long timestamp)
     {
