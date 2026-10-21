@@ -353,7 +353,11 @@ public sealed class PathAllocationTests
         //
         // A context's selection carries the row its entries count from, past 2^31 a split's first
         // (ScanContext.SelectionBase): 8 bytes for the context the pruning reads the zone map through.
-        ("selective filter, pruning on", File, 34_424, PrunedFilter),
+        //
+        // A zone map's decoding is claimed on the file, for the scans that miss the map together, a
+        // question's lanes, to await it rather than each read it again (VortexFile.ClaimZones): 48
+        // bytes, the claim's.
+        ("selective filter, pruning on", File, 34_472, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and

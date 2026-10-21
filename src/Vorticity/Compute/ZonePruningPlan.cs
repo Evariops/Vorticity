@@ -600,7 +600,7 @@ internal static class ZonePruningPlan
         }
 
         ZoneColumn[] columns = new ZoneColumn[1];
-        (int segments, long bytes) = await DecodeAsync(file, [new Candidate(field, node, map)], columns, metrics, cancellationToken).ConfigureAwait(false);
+        (int segments, long bytes) = await SettleAsync(file, [new Candidate(field, node, map)], columns, metrics, cancellationToken).ConfigureAwait(false);
         Scanning.ScanCounters.Note(metrics, segments, bytes);
         return columns[0];
     }
@@ -652,39 +652,87 @@ internal static class ZonePruningPlan
             return (null, 0, 0);
         }
 
-        // A zone map a scan of this file has decoded is the file's, and is not read again.
+        // A zone map a scan of this file has decoded, or decodes now, is the file's, and is not read again.
         ZoneColumn[] columns = new ZoneColumn[candidates.Count];
-        int missing = 0;
-        for (int i = 0; i < candidates.Count; i++)
-        {
-            if (file.DecodedZones(candidates[i].Node.Index) is { } decoded)
-            {
-                columns[i] = decoded;
-            }
-            else
-            {
-                missing++;
-            }
-        }
-
-        int segments = 0;
-        long bytes = 0;
-        if (missing > 0)
-        {
-            (segments, bytes) = await DecodeAsync(file, candidates, columns, metrics, cancellationToken).ConfigureAwait(false);
-        }
-
+        (int segments, long bytes) = await SettleAsync(file, candidates, columns, metrics, cancellationToken).ConfigureAwait(false);
         ZonePruner pruner = new ZonePruner(filter, columns);
         return (pruner.IsUseful ? pruner : null, segments, bytes);
     }
 
     /// <summary>
-    /// Reads and decodes the zone maps of the candidates <paramref name="columns"/> lacks, fills
-    /// them in and keeps them on the file; returns the segments and bytes asked for.
+    /// Fills in the zone maps of the candidates <paramref name="columns"/> lacks: a map the file keeps
+    /// is taken, one another scan decodes now awaited, and the others decoded here, in one read, and
+    /// kept on the file. Returns the segments and bytes this scan asked for.
     /// </summary>
-    private static async ValueTask<(int Segments, long Bytes)> DecodeAsync(
+    private static async ValueTask<(int Segments, long Bytes)> SettleAsync(
         VortexFile file, List<Candidate> candidates, ZoneColumn[] columns, Scanning.ScanCounters? metrics,
         CancellationToken cancellationToken)
+    {
+        int segments = 0;
+        long bytes = 0;
+        while (true)
+        {
+            Claims claims = default;
+            Task<ZoneColumn?>? other = null;
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (columns[i] is not null)
+                {
+                    continue;
+                }
+
+                if (file.ClaimZones(candidates[i].Node.Index, out Task<ZoneColumn?>? flight, out bool claimed) is { } kept)
+                {
+                    columns[i] = kept;
+                }
+                else if (claimed)
+                {
+                    claims.Add(i, candidates.Count);
+                }
+                else
+                {
+                    other ??= flight;
+                }
+            }
+
+            if (!claims.IsEmpty)
+            {
+                try
+                {
+                    (int read, long asked) = await DecodeAsync(file, candidates, columns, claims, metrics, cancellationToken).ConfigureAwait(false);
+                    segments += read;
+                    bytes += asked;
+                }
+                finally
+                {
+                    // Landed, or given back to the scans awaiting it when the decoding failed.
+                    for (int i = 0; i < candidates.Count; i++)
+                    {
+                        if (claims.Has(i))
+                        {
+                            file.LandZones(candidates[i].Node.Index, columns[i]);
+                        }
+                    }
+                }
+            }
+
+            if (other is null)
+            {
+                return (segments, bytes);
+            }
+
+            // Then a look again: the map is kept, or its decoding failed and this scan claims it.
+            await other.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Reads and decodes the zone maps of the candidates this scan <paramref name="claims"/>, and fills
+    /// them in; returns the segments and bytes asked for.
+    /// </summary>
+    private static async ValueTask<(int Segments, long Bytes)> DecodeAsync(
+        VortexFile file, List<Candidate> candidates, ZoneColumn[] columns, Claims claims,
+        Scanning.ScanCounters? metrics, CancellationToken cancellationToken)
     {
         // Sized for metadata rather than for a batch, and that choice is most of what pruning
         // costs: this context reads one zone map per filtered column -- a struct of a few
@@ -700,7 +748,7 @@ internal static class ZonePruningPlan
         // five columns to one round trip rather than five.
         for (int i = 0; i < candidates.Count; i++)
         {
-            if (columns[i] is not null)
+            if (!claims.Has(i))
             {
                 continue;
             }
@@ -719,7 +767,7 @@ internal static class ZonePruningPlan
 
         for (int i = 0; i < candidates.Count; i++)
         {
-            if (columns[i] is not null)
+            if (!claims.Has(i))
             {
                 continue;
             }
@@ -731,7 +779,6 @@ internal static class ZonePruningPlan
                 .Execute(in zones, new RowRange(0, zones.RowCount), in all, context);
 
             columns[i] = Extract(context, root, candidate, candidate.Node.RowCount);
-            file.KeepZones(candidate.Node.Index, columns[i]);
         }
 
         return (segments, bytes);
@@ -1056,5 +1103,30 @@ internal static class ZonePruningPlan
         internal LayoutNode Node { get; }
 
         internal ZoneMap Map { get; }
+    }
+
+    /// <summary>The candidates whose decoding a scan claimed: a word of the first 64, a flag each past them.</summary>
+    private struct Claims
+    {
+        private ulong _first;
+        private bool[]? _more;
+
+        internal readonly bool IsEmpty => _first == 0 && _more is null;
+
+        /// <summary>Claims candidate <paramref name="candidate"/> of <paramref name="count"/>.</summary>
+        internal void Add(int candidate, int count)
+        {
+            if (candidate < 64)
+            {
+                _first |= 1UL << candidate;
+            }
+            else
+            {
+                (_more ??= new bool[count - 64])[candidate - 64] = true;
+            }
+        }
+
+        internal readonly bool Has(int candidate) =>
+            candidate < 64 ? (_first & (1UL << candidate)) != 0 : _more is { } more && more[candidate - 64];
     }
 }
