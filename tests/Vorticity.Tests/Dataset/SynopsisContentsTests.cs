@@ -207,7 +207,13 @@ public sealed partial class SynopsisContentsTests
         return held;
     }
 
-    /// <summary>A table of contents reads back as it was written, and an entry carries it through its bytes.</summary>
+    /// <summary>A chunk without the bounds of its key's values, whose arrays compare by their references.</summary>
+    private static TableChunk Unbounded(TableChunk chunk) => chunk with { Keys = null };
+
+    /// <summary>
+    /// A table of contents reads back as it was written, a chunk of a table of values with the least and the greatest of
+    /// its values, and an entry carries it through its bytes.
+    /// </summary>
     [Fact]
     public void TheContentsAndTheEntryRoundTrip()
     {
@@ -219,7 +225,10 @@ public sealed partial class SynopsisContentsTests
             [new IndexSegment(100, 20, 0, 7), new IndexSegment(120, 30, 0, 8)],
             4_096,
             8_192,
-            [(new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4), [new TableChunk(new IndexSegment(4_096, 512, 6, 9), 0, 3_600_000_000, 3), new TableChunk(new IndexSegment(4_608, 128, 6, 10), 3_600_000_000, 3_600_000_000, 1)])],
+            [
+                (new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4), [new TableChunk(new IndexSegment(4_096, 512, 6, 9), 0, 3_600_000_000, 3), new TableChunk(new IndexSegment(4_608, 128, 6, 10), 3_600_000_000, 3_600_000_000, 1)]),
+                (new SynopsisTableInfo(SynopsisTableKind.Values, SynopsisBucket.Slice, [1], [3], 2), [new TableChunk(new IndexSegment(4_736, 64, 6, 11), 0, 60_000_000, 2) { Keys = new ValueBounds([1, 1, (byte)'a'], [1, 2, (byte)'e', (byte)'u']) }]),
+            ],
             [(1, [new ChunkSpan(4_608, 300, 6, 0, 15)])]);
         SynopsisContents back = SynopsisContents.From(contents.ToBytes())!;
         Assert.Equal(contents.Schema, back.Schema);
@@ -227,7 +236,8 @@ public sealed partial class SynopsisContentsTests
         Assert.Equal(contents.Slices.Slices, back.Slices.Slices);
         Assert.Equal(contents.ChunkDirectories, back.ChunkDirectories);
         Assert.Equal((contents.PartStart, contents.PartEnd), (back.PartStart, back.PartEnd));
-        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks), back.Tables.SelectMany(t => t.Chunks));
+        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(Unbounded), back.Tables.SelectMany(t => t.Chunks).Select(Unbounded));
+        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(c => (c.Keys?.Least, c.Keys?.Greatest)), back.Tables.SelectMany(t => t.Chunks).Select(c => (c.Keys?.Least, c.Keys?.Greatest)));
         Assert.Equal(contents.Tables.Select(t => t.Table), back.Tables.Select(t => t.Table), Same);
         Assert.Equal(contents.Columns.Select(c => (c.Field, c.Chunks.Single())), back.Columns.Select(c => (c.Field, c.Chunks.Single())));
         Assert.Null(SynopsisContents.From([1, 2, 3]));

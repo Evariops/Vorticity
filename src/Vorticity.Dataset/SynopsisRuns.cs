@@ -733,6 +733,28 @@ internal sealed class RunMerger : IDisposable
     /// <summary>The current group's states.</summary>
     internal ReadOnlySpan<long> Words => _words;
 
+    /// <summary>The place among the runs merged of the run the current record came from (<see cref="MoveNextRecordAsync"/>).</summary>
+    internal int Run { get; private set; }
+
+    /// <summary>
+    /// Moves to the next record of the merged stream, each apart however equal its key to the one before, those of equal
+    /// keys in the order of their runs: its key, its states and its run; false past the last.
+    /// </summary>
+    internal async ValueTask<bool> MoveNextRecordAsync(CancellationToken cancellationToken)
+    {
+        if (_cursors.Length == 0 || _cursors[_tree[0]] is not { } first)
+        {
+            return false;
+        }
+
+        _key.Clear();
+        _key.Bytes(first.Key);
+        first.Words.CopyTo(_words);
+        Run = _tree[0];
+        await AdvanceAsync(_tree[0], cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
     /// <summary>Moves to the next group of the merged stream; false past the last.</summary>
     internal async ValueTask<bool> MoveNextAsync(CancellationToken cancellationToken)
     {
@@ -853,17 +875,22 @@ internal sealed class ChunkStage
     private readonly int _words;
     private readonly KeyColumn[] _keys;
     private readonly KeyColumn[] _sketches;
+    private readonly bool _bounded;
+    private readonly HeldKey _least = new HeldKey();
+    private readonly HeldKey _greatest = new HeldKey();
     private long[] _buckets = new long[64];
     private long[][] _states;
     private int _rows;
 
     /// <summary>
     /// A stage of rows of keys of <paramref name="shapes"/> and the words <paramref name="words"/> names of each record's
-    /// states, then <paramref name="sketches"/> sketches.
+    /// states, then <paramref name="sketches"/> sketches; with <paramref name="bounded"/>, one that bounds its first key's
+    /// values, a chunk of a table of values in their order.
     /// </summary>
-    internal ChunkStage(KeyShape[] shapes, int[] words, int sketches = 0)
+    internal ChunkStage(KeyShape[] shapes, int[] words, int sketches = 0, bool bounded = false)
     {
         _shapes = shapes;
+        _bounded = bounded;
         _wordsKept = words;
         _words = words.Length;
         _keys = new KeyColumn[shapes.Length];
@@ -911,10 +938,21 @@ internal sealed class ChunkStage
         }
     }
 
-    /// <summary>The bucket of the first row held, and of the last.</summary>
-    internal long FirstBucket => _buckets[0];
+    /// <summary>
+    /// The least bucket of a row held, and the greatest: the first's and the last's for rows in the order of their buckets,
+    /// those of a chunk whose rows lie in the order of their values within an hour otherwise.
+    /// </summary>
+    internal long FirstBucket { get; private set; } = long.MaxValue;
 
-    internal long LastBucket => _buckets[_rows - 1];
+    internal long LastBucket { get; private set; } = long.MinValue;
+
+    /// <summary>
+    /// For a stage that bounds its rows' keys, the least and the greatest value of the first key its rows hold, encoded as
+    /// a run's records hold a component; empty while they hold none but nulls.
+    /// </summary>
+    internal ReadOnlySpan<byte> LeastKey => _least.Span;
+
+    internal ReadOnlySpan<byte> GreatestKey => _greatest.Span;
 
     /// <summary>Holds a row: its bucket, its key's components, encoded as a run's records hold them, and its states.</summary>
     internal void Append(long bucket, ReadOnlySpan<byte> key, ReadOnlySpan<long> words)
@@ -930,11 +968,18 @@ internal sealed class ChunkStage
         }
 
         _buckets[_rows] = bucket;
+        FirstBucket = Math.Min(FirstBucket, bucket);
+        LastBucket = Math.Max(LastBucket, bucket);
         int at = 0;
         for (int k = 0; k < _keys.Length; k++)
         {
+            int from = at;
             at = KeyCodec.Read(key, at, _shapes[k], out bool valid, out ReadOnlySpan<byte> value);
             _keys[k].Add(_rows, valid, value);
+            if (k == 0 && valid && _bounded)
+            {
+                Bound(key[from..at]);
+            }
         }
 
         for (int w = 0; w < _words; w++)
@@ -943,6 +988,20 @@ internal sealed class ChunkStage
         }
 
         _rows++;
+    }
+
+    /// <summary>Widens the bounds of the first key to <paramref name="component"/>, a value of it.</summary>
+    private void Bound(ReadOnlySpan<byte> component)
+    {
+        if (_least.Span.IsEmpty || KeyCodec.Compare(_shapes, 1, component, _least.Span, out _) < 0)
+        {
+            _least.Set(component);
+        }
+
+        if (_greatest.Span.IsEmpty || KeyCodec.Compare(_shapes, 1, component, _greatest.Span, out _) > 0)
+        {
+            _greatest.Set(component);
+        }
     }
 
     /// <summary>Holds sketch <paramref name="sketch"/> of the last row appended: its bytes (<see cref="QuantileSketch.Encode"/>).</summary>
@@ -977,6 +1036,7 @@ internal sealed class ChunkStage
     internal void Clear()
     {
         _rows = 0;
+        Unbound();
         foreach (KeyColumn key in _keys)
         {
             key.Clear();
@@ -992,6 +1052,7 @@ internal sealed class ChunkStage
     internal void Release()
     {
         _rows = 0;
+        Unbound();
         _buckets = new long[64];
         for (int w = 0; w < _words; w++)
         {
@@ -1006,6 +1067,35 @@ internal sealed class ChunkStage
         for (int s = 0; s < _sketches.Length; s++)
         {
             _sketches[s] = new KeyColumn(Sketched);
+        }
+    }
+
+    /// <summary>Forgets the bounds of the rows held: their buckets and their first key's values.</summary>
+    private void Unbound()
+    {
+        FirstBucket = long.MaxValue;
+        LastBucket = long.MinValue;
+        _least.Set(default);
+        _greatest.Set(default);
+    }
+
+    /// <summary>A key's bytes, held in an array of its own that grows as the keys do.</summary>
+    private sealed class HeldKey
+    {
+        private byte[] _bytes = [];
+        private int _length;
+
+        internal ReadOnlySpan<byte> Span => _bytes.AsSpan(0, _length);
+
+        internal void Set(ReadOnlySpan<byte> bytes)
+        {
+            if (bytes.Length > _bytes.Length)
+            {
+                _bytes = new byte[Math.Max(bytes.Length, 16)];
+            }
+
+            bytes.CopyTo(_bytes);
+            _length = bytes.Length;
         }
     }
 

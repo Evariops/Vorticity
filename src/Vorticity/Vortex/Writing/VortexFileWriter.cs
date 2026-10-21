@@ -385,9 +385,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             return _heldTables.Count - 1;
         }
 
-        /// <summary>Encodes the rows <paramref name="node"/> holds as a chunk of held table <paramref name="table"/>, and holds it; its bytes.</summary>
+        /// <summary>
+        /// Encodes the rows <paramref name="node"/> holds as a chunk of held table <paramref name="table"/>, its buckets
+        /// <paramref name="buckets"/> and its key's values <paramref name="keys"/>, and holds it; its bytes.
+        /// </summary>
         internal async ValueTask<long> SpoolTableChunkAsync(
-            VortexFileWriter writer, int table, CanonicalArena arena, int node, long firstBucket, long lastBucket, CancellationToken cancellationToken)
+            VortexFileWriter writer, int table, CanonicalArena arena, int node, (long First, long Last) buckets, (byte[]? Least, byte[]? Greatest) keys,
+            CancellationToken cancellationToken)
         {
             HeldTable held = _heldTables[table];
             _tableBlobs ??= new ArrayBlobWriter.Workspace { FrameRows = writer._rowBlock, SizeFirst = writer._sizeFirst, ZstdLevel = writer._zstdLevel };
@@ -395,7 +399,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(_tableBlobs, arena, node, own ?? writer._arrayEncodings, writer._compress);
             held.DType ??= Types.Serialization.DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
             long at = await _held.AppendAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
-            held.Chunks.Add((at, blob.Length, firstBucket, lastBucket, arena.GetNode(node).Length, own is not null));
+            held.Chunks.Add((at, blob.Length, buckets.First, buckets.Last, arena.GetNode(node).Length, own is not null, keys.Least, keys.Greatest));
             held.Bytes += blob.Length;
             return blob.Length;
         }
@@ -412,7 +416,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// </summary>
         private sealed class HeldTable
         {
-            internal List<(long At, int Length, long First, long Last, int Rows, bool Own)> Chunks { get; } = [];
+            internal List<(long At, int Length, long First, long Last, int Rows, bool Own, byte[]? LeastKey, byte[]? GreatestKey)> Chunks { get; } = [];
 
             internal byte[]? DType { get; set; }
 
@@ -499,7 +503,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 // A table given up still asks its grain's question, at bytes no budget holds.
                 HeldTable chunks = _heldTables[held];
                 sizes.Add((table, chunks.Dropped is not null ? long.MaxValue : chunks.Bytes + (chunks.DType?.Length ?? 0)));
-                foreach ((long _, int length, long _, long _, int _, bool _) in chunks.Chunks)
+                foreach ((long _, int length, long _, long _, int _, bool _, byte[]? _, byte[]? _) in chunks.Chunks)
                 {
                     longest = Math.Max(longest, length);
                 }
@@ -534,7 +538,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     byte[][] dtypes = new byte[chunks.Length][];
                     for (int c = 0; c < chunks.Length; c++)
                     {
-                        (long at, int length, long first, long last, int rows, bool own) = held.Chunks[c];
+                        (long at, int length, long first, long last, int rows, bool own, byte[]? least, byte[]? greatest) = held.Chunks[c];
                         Memory<byte> bytes = buffer.AsMemory(0, length);
                         await _held.ReadAsync(at, bytes, cancellationToken).ConfigureAwait(false);
                         if (own)
@@ -558,7 +562,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                         long aligned = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
                         await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
                         TableBytes += length;
-                        chunks[c] = new TableChunk(IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent), first, last, rows);
+                        chunks[c] = new TableChunk(IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent), first, last, rows)
+                        {
+                            Keys = least is null || greatest is null ? null : new ValueBounds(least, greatest),
+                        };
                         dtypes[c] = held.DType!;
                     }
 
@@ -775,8 +782,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     int ISynopsisChunkSink.OpenTable() => Part().OpenTable();
 
-    ValueTask<long> ISynopsisChunkSink.SpoolChunkAsync(int table, CanonicalArena arena, int node, long firstBucket, long lastBucket, CancellationToken cancellationToken) =>
-        Part().SpoolTableChunkAsync(this, table, arena, node, firstBucket, lastBucket, cancellationToken);
+    ValueTask<long> ISynopsisChunkSink.SpoolChunkAsync(
+        int table, CanonicalArena arena, int node, long firstBucket, long lastBucket, byte[]? leastKey, byte[]? greatestKey, CancellationToken cancellationToken) =>
+        Part().SpoolTableChunkAsync(this, table, arena, node, (firstBucket, lastBucket), (leastKey, greatestKey), cancellationToken);
 
     void ISynopsisChunkSink.DropTable(int table, string verdict) => Part().DropTable(table, verdict);
 

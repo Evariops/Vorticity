@@ -265,7 +265,7 @@ public sealed partial class SynopsisTableTests
 
             Assert.Equal(info.Kind == SynopsisTableKind.Values ? [info.Keys[0]] : keys[..info.Keys.Length], info.Keys);
             List<TableRow> expected = Merge(units, static row => row.Bucket, [.. Enumerable.Range(0, info.Keys.Length)], kinds);
-            Assert.Equal(Show(expected, kinds), Show(rows, kinds));
+            Assert.Equal(Show(Stored(expected, info, slices.Unit), kinds), Show(rows, kinds));
         }
 
         return tables;

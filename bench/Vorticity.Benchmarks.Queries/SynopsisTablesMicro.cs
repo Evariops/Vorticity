@@ -163,7 +163,9 @@ internal static class SynopsisTablesMicro
 
         public int OpenTable() => _tables++;
 
-        public ValueTask<long> SpoolChunkAsync(int table, Vorticity.Arrays.CanonicalArena arena, int node, long firstBucket, long lastBucket, System.Threading.CancellationToken cancellationToken) =>
+        public ValueTask<long> SpoolChunkAsync(
+            int table, Vorticity.Arrays.CanonicalArena arena, int node, long firstBucket, long lastBucket, byte[]? leastKey, byte[]? greatestKey,
+            System.Threading.CancellationToken cancellationToken) =>
             new ValueTask<long>(arena.GetNode(node).Length * 8L);
 
         public void DropTable(int table, string verdict)

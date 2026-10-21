@@ -30,7 +30,9 @@ namespace Vorticity.Dataset;
 /// count of its values, their exact sum (an <see cref="Int128"/> for integers, a <see cref="WideIndexedSum"/>
 /// for floats, in the words <see cref="PersistedStates"/> lays out), and their least and greatest, widened to
 /// 64 bits, a float's NaN aside as the engine's Min and Max take it. Rows are in the order of their bucket,
-/// then of their keys' values, so that the same rows give the same tables, whoever writes them.
+/// then of their keys' values, so that the same rows give the same tables, whoever writes them; those of a column's
+/// values per slice in the order of their hour, then of their value, then of their slice, each chunk saying the least
+/// and the greatest value it holds, so that a question of a few values reads the chunks that hold them.
 /// </para>
 /// <para>
 /// A slice is grouped by the codes its sort gave each row, in the sorted order. Down to the first variant's
@@ -44,7 +46,7 @@ namespace Vorticity.Dataset;
 /// and the values of each column, in the order of their keys, go to a scratch store as runs of records, memory
 /// up to its budget and the disk past it. At the end of each hour, a merge of those runs gives every depth of
 /// the hour's coarse tables in one pass, a group of a depth ending where its prefix of the keys does, and the
-/// value counts likewise; the hour's deepest groups go on to the object's store, whose merge at the end gives
+/// value counts likewise, of the hour and of each slice; the hour's deepest groups go on to the object's store, whose merge at the end gives
 /// the object's tables. Every table goes to the writer a chunk at a time (<see cref="ISynopsisChunkSink"/>),
 /// <see cref="ChunkRows"/> rows at most, so that no array holds more than a chunk, whatever the object's rows;
 /// an hour's rows are chunks of their own when they weigh enough for a question of the hour to read them alone.
@@ -164,6 +166,12 @@ internal sealed partial class SynopsisTables : IDisposable
     private RunScratch? _hourScratch;
     private readonly List<RunSpan> _hourRuns = [];
     private List<RunSpan>[] _valueRuns = [];
+
+    // The start of the slice each of the hour's runs of values came from, by counted column: the bucket of its records in
+    // the slices' tables of values; and the key and the states of the value the hour's merge holds.
+    private List<long>[] _valueStarts = [];
+    private readonly RunBuffer _held = new RunBuffer();
+    private long[] _heldWords = [];
     private long _hours;
 
     // The object's hours at the depth of its own tables, and the store they wait in.
@@ -612,13 +620,12 @@ internal sealed partial class SynopsisTables : IDisposable
     /// <summary>
     /// The value counts of the slice starting at <paramref name="start"/> for counted column <paramref name="slot"/>, the
     /// states of its <paramref name="kept"/> first values in their order and the row that holds each, -1 for a value the
-    /// slice does not hold: rows of the slices' table, and a run of the hour's.
+    /// slice does not hold: a run of the hour's, which its end merges into the rows of the hour's table and of the slices'.
     /// </summary>
     private async ValueTask EmitValuesAsync(
         int slot, long start, CanonicalArena arena, int column, KeyShape shape, Accumulators states, int[] first, int kept,
         CancellationToken cancellationToken)
     {
-        bool hourly = _values[slot] is { Dead: false };
         Growth? growth = Counts(_values[slot], _valueGrowth[slot]);
         _run.Clear();
         for (int g = 0; g < kept; g++)
@@ -631,23 +638,13 @@ internal sealed partial class SynopsisTables : IDisposable
             _key.Clear();
             KeyCodec.Append(_key, arena, column, first[g], shape);
             states.Words(g, _state);
-            if (hourly)
-            {
-                growth?.Sketch.Add(CardinalitySlot.Hash(_key.Span));
-                _run.Bytes(_key.Span);
-                _run.Words(_state);
-            }
-
-            if (_sliceValues[slot] is { Dead: false } slices && Hold(slices, start, _key.Span, _state))
-            {
-                await FlushAsync(slices, cancellationToken).ConfigureAwait(false);
-            }
+            growth?.Sketch.Add(CardinalitySlot.Hash(_key.Span));
+            _run.Bytes(_key.Span);
+            _run.Words(_state);
         }
 
-        if (hourly)
-        {
-            _valueRuns[slot].Add(await AppendAsync(HourStore(), 1, cancellationToken).ConfigureAwait(false));
-        }
+        _valueRuns[slot].Add(await AppendAsync(HourStore(), 1, cancellationToken).ConfigureAwait(false));
+        _valueStarts[slot].Add(start);
     }
 
     /// <summary>
@@ -771,10 +768,14 @@ internal sealed partial class SynopsisTables : IDisposable
         _values = new Candidate?[depth + _counted.Length];
         _sliceValues = new Candidate?[depth + _counted.Length];
         _valueRuns = new List<RunSpan>[depth + _counted.Length];
+        _valueStarts = new List<long>[_valueRuns.Length];
         for (int v = 0; v < _valueRuns.Length; v++)
         {
             _valueRuns[v] = [];
+            _valueStarts[v] = [];
         }
+
+        _heldWords = new long[_words];
 
         _hourSum = new long[depth + 1];
         _valueSum = new long[depth + _counted.Length];
@@ -806,7 +807,7 @@ internal sealed partial class SynopsisTables : IDisposable
         {
             if (_values[v] is { } hour)
             {
-                _sliceValues[v] = Add(SynopsisTableKind.Values, SynopsisBucket.Slice, hour.Keys, hour.Shapes);
+                _sliceValues[v] = Add(SynopsisTableKind.Values, SynopsisBucket.Slice, hour.Keys, hour.Shapes, bounded: true);
             }
         }
 
@@ -840,7 +841,7 @@ internal sealed partial class SynopsisTables : IDisposable
     /// states would only repeat them, and the words of a record that hold the count and those measures' states; a table
     /// of sketches, a sketch of each of those measures.
     /// </summary>
-    private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes)
+    private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes, bool bounded = false)
     {
         List<int> measures = [];
         List<int> sketched = [];
@@ -865,7 +866,7 @@ internal sealed partial class SynopsisTables : IDisposable
         int[] kept = [.. measures];
         bool sketches = kind == SynopsisTableKind.Sketches;
         DType rowType = new SynopsisTableInfo(kind, bucket, keys, kept, 0).RowType(_schema, _paths, _types);
-        Candidate table = new Candidate(kind, bucket, keys, kept, shapes, rowType, new ChunkStage(shapes, [.. words], sketches ? kept.Length : 0))
+        Candidate table = new Candidate(kind, bucket, keys, kept, shapes, rowType, new ChunkStage(shapes, [.. words], sketches ? kept.Length : 0, bounded))
         {
             Sketched = sketches ? [.. sketched] : [],
         };
@@ -896,7 +897,6 @@ internal sealed partial class SynopsisTables : IDisposable
     private async ValueTask CloseHourAsync(CancellationToken cancellationToken)
     {
         await FlushHourAsync(_runs, cancellationToken).ConfigureAwait(false);
-        await FlushHourAsync(_sliceValues, cancellationToken).ConfigureAwait(false);
         _hourDepth = Math.Min(_hourDepth, DeepestCoarse());
         _wholeDepth = Math.Min(_wholeDepth, Deepest(_whole));
         if (_hourDepth >= 0 && _hourRuns.Count > 0)
@@ -910,21 +910,16 @@ internal sealed partial class SynopsisTables : IDisposable
 
         for (int v = 0; v < _values.Length; v++)
         {
-            if (_values[v] is { Dead: false } table && _valueRuns[v].Count > 0)
+            if (_valueRuns[v].Count > 0 && (_values[v] ?? _sliceValues[v]) is { } counted && CountsValues(v))
             {
-                using RunMerger merger = await RunMerger.OpenAsync(_hourScratch!, _valueRuns[v], table.Shapes, 1, _kinds, cancellationToken).ConfigureAwait(false);
-                while (await merger.MoveNextAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    _valueSum[v]++;
-                    if (Hold(table, _hour, merger.Key, merger.Words))
-                    {
-                        await FlushAsync(table, cancellationToken).ConfigureAwait(false);
-                    }
-                }
+                await MergeValuesAsync(v, counted.Shapes, cancellationToken).ConfigureAwait(false);
             }
 
             _valueRuns[v].Clear();
+            _valueStarts[v].Clear();
         }
+
+        await FlushHourAsync(_sliceValues, cancellationToken).ConfigureAwait(false);
 
         await CloseSketchesAsync(cancellationToken).ConfigureAwait(false);
         await FlushHourAsync(_hourly, cancellationToken).ConfigureAwait(false);
@@ -947,6 +942,61 @@ internal sealed partial class SynopsisTables : IDisposable
         }
 
         Prune();
+    }
+
+    /// <summary>
+    /// Merges the hour's runs of values of counted column <paramref name="slot"/>, keys of <paramref name="shapes"/>, a
+    /// record at a time: the slices' table takes each, a row of its slice, so that its rows lie in the order of their
+    /// hour, then of their values, then of their slices, and a question of a few values reads the chunks that hold them;
+    /// the hour's table takes each value once, the states of its records merged.
+    /// </summary>
+    private async ValueTask MergeValuesAsync(int slot, KeyShape[] shapes, CancellationToken cancellationToken)
+    {
+        using RunMerger merger = await RunMerger.OpenAsync(_hourScratch!, _valueRuns[slot], shapes, 1, _kinds, cancellationToken).ConfigureAwait(false);
+        bool any = false;
+        while (await merger.MoveNextRecordAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (_sliceValues[slot] is { Dead: false } slices && Hold(slices, _valueStarts[slot][merger.Run], merger.Key, merger.Words))
+            {
+                await FlushAsync(slices, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (_values[slot] is not { Dead: false })
+            {
+                continue;
+            }
+
+            if (any && KeyCodec.Compare(shapes, 1, _held.Span, merger.Key, out _) == 0)
+            {
+                StateWords.Merge(_heldWords, merger.Words, _kinds);
+                continue;
+            }
+
+            if (any)
+            {
+                await HoldValueAsync().ConfigureAwait(false);
+            }
+
+            _held.Clear();
+            _held.Bytes(merger.Key);
+            merger.Words.CopyTo(_heldWords);
+            any = true;
+        }
+
+        if (any && _values[slot] is { Dead: false })
+        {
+            await HoldValueAsync().ConfigureAwait(false);
+        }
+
+        // The value held, a row of the hour's table.
+        async ValueTask HoldValueAsync()
+        {
+            _valueSum[slot]++;
+            if (_values[slot] is { } hour && Hold(hour, _hour, _held.Span, _heldWords))
+            {
+                await FlushAsync(hour, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>
@@ -1119,7 +1169,10 @@ internal sealed partial class SynopsisTables : IDisposable
                 table.Held = _sink.OpenTable();
             }
 
-            long bytes = await _sink.SpoolChunkAsync(table.Held, arena, node, table.Stage.FirstBucket, table.Stage.LastBucket, cancellationToken).ConfigureAwait(false);
+            byte[]? least = table.Stage.LeastKey.IsEmpty ? null : table.Stage.LeastKey.ToArray();
+            byte[]? greatest = table.Stage.GreatestKey.IsEmpty ? null : table.Stage.GreatestKey.ToArray();
+            long bytes = await _sink.SpoolChunkAsync(table.Held, arena, node, table.Stage.FirstBucket, table.Stage.LastBucket, least, greatest, cancellationToken)
+                .ConfigureAwait(false);
             table.Rows += rows;
             table.Bytes += bytes;
         }
@@ -1291,6 +1344,7 @@ internal sealed partial class SynopsisTables : IDisposable
         _wholeScratch?.Dispose();
         _run.Dispose();
         _key.Dispose();
+        _held.Dispose();
         _sliceKeys.Dispose();
         foreach (RunBuffer? start in _starts)
         {

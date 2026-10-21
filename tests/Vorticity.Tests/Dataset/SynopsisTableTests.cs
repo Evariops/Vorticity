@@ -250,7 +250,7 @@ public sealed partial class SynopsisTableTests
             }
 
             List<TableRow> expected = Merge(units, static row => row.Bucket, [.. Enumerable.Range(0, info.Keys.Length)], kinds);
-            Assert.Equal(Show(expected, kinds), Show(rows, kinds));
+            Assert.Equal(Show(Stored(expected, info, slices.Unit), kinds), Show(rows, kinds));
         }
 
         Assert.Equal(tables.Count, await CoarseTablesAreTheMergeOfTheirRunsAsync(file, slices));
@@ -343,7 +343,7 @@ public sealed partial class SynopsisTableTests
             }
 
             // Its rows in the order of their bucket then their keys, each combination once.
-            Assert.Equal(Show(Merge(rows, static row => row.Bucket, [.. Enumerable.Range(0, table.Keys.Length)], kinds), kinds), Show(rows, kinds));
+            Assert.Equal(Show(Stored(Merge(rows, static row => row.Bucket, [.. Enumerable.Range(0, table.Keys.Length)], kinds), table, slices.Unit), kinds), Show(rows, kinds));
             foreach ((SynopsisTableInfo finer, List<TableRow> finerRows) in tables)
             {
                 if (ReferenceEquals(finer, table) || finer.Bucket > table.Bucket || !table.Keys.All(finer.Keys.Contains))
@@ -361,6 +361,7 @@ public sealed partial class SynopsisTableTests
                 List<TableRow> widened = [.. finerRows.Select(row => Widened(row, finer, table, kinds))];
                 List<TableRow> merged = Merge(widened, row => BucketOf(row.Bucket, table.Bucket), positions, kinds);
                 sketches &= widened.All(row => row.Sketches is not null);
+                merged = Stored(merged, table, slices.Unit);
                 Assert.Equal(Show(sketches ? merged : Unsketched(merged), kinds), Show(sketches ? rows : Unsketched(rows), kinds));
             }
         }
@@ -639,6 +640,28 @@ public sealed partial class SynopsisTableTests
         }
 
         return copies;
+    }
+
+    /// <summary>
+    /// Rows in the order of their bucket then of their keys, as <paramref name="table"/> holds them: those of a table of a
+    /// column's values per slice in the order of their hour, then of their value, then of their slice, its instants in
+    /// <paramref name="unit"/>.
+    /// </summary>
+    private static List<TableRow> Stored(List<TableRow> rows, SynopsisTableInfo table, TimeUnit unit)
+    {
+        if (table is not { Kind: SynopsisTableKind.Values, Bucket: SynopsisBucket.Slice })
+        {
+            return rows;
+        }
+
+        List<TableRow> stored = [.. rows];
+        stored.Sort((left, right) =>
+        {
+            int compared = TimeSlicer.Floor(left.Bucket, unit, SliceWidth.Hour).CompareTo(TimeSlicer.Floor(right.Bucket, unit, SliceWidth.Hour));
+            compared = compared != 0 ? compared : CompareKeys(left.Keys[0], right.Keys[0]);
+            return compared != 0 ? compared : left.Bucket.CompareTo(right.Bucket);
+        });
+        return stored;
     }
 
     /// <summary>Keys in their values' order, nulls last.</summary>

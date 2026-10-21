@@ -73,6 +73,8 @@ internal sealed record SynopsisContents(
     private const int TagChunkFirst = 2;
     private const int TagChunkLast = 3;
     private const int TagChunkRows = 4;
+    private const int TagChunkLeastKey = 5;
+    private const int TagChunkGreatestKey = 6;
     private const int TagColumnField = 1;
     private const int TagColumnChunks = 2;
 
@@ -250,6 +252,11 @@ internal sealed record SynopsisContents(
                     writer.WriteUInt64Always(TagChunkFirst, unchecked((ulong)chunk.FirstBucket));
                     writer.WriteUInt64Always(TagChunkLast, unchecked((ulong)chunk.LastBucket));
                     writer.WriteUInt64Always(TagChunkRows, (ulong)chunk.Rows);
+                    if (chunk.Keys is { } keys)
+                    {
+                        writer.WriteBytes(TagChunkLeastKey, keys.Least);
+                        writer.WriteBytes(TagChunkGreatestKey, keys.Greatest);
+                    }
                 }
             }
 
@@ -429,10 +436,18 @@ internal sealed record SynopsisContents(
         long first = long.MinValue;
         long last = long.MaxValue;
         int rows = -1;
+        byte[]? least = null;
+        byte[]? greatest = null;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field, wire)
             {
+                case (TagChunkLeastKey, ProtoWireType.LengthDelimited):
+                    least = reader.ReadLengthDelimited().ToArray();
+                    break;
+                case (TagChunkGreatestKey, ProtoWireType.LengthDelimited):
+                    greatest = reader.ReadLengthDelimited().ToArray();
+                    break;
                 case (TagChunkRegion, ProtoWireType.LengthDelimited):
                     region = IndexDirectory.ReadSegment(reader.ReadMessage());
                     break;
@@ -451,7 +466,10 @@ internal sealed record SynopsisContents(
             }
         }
 
-        return region is { } at && rows >= 0 && first <= last ? new TableChunk(at, first, last, rows) : null;
+        // A chunk that says one bound and not the other says neither.
+        return region is { } at && rows >= 0 && first <= last
+            ? new TableChunk(at, first, last, rows) { Keys = least is null || greatest is null ? null : new ValueBounds(least, greatest) }
+            : null;
     }
 
     private static (int, IndexSegment)? Directory(ProtoReader reader)
@@ -565,16 +583,32 @@ internal sealed record SynopsisContents(
 }
 
 /// <summary>
-/// A chunk of a synopsis table: the region that holds its rows, the first and the last bucket they count over,
-/// and how many there are. A table's rows lie in the order of their buckets, so its chunks follow each other in
-/// time, and a question reads only the chunks of the buckets it folds.
+/// A chunk of a synopsis table: the region that holds its rows, the least and the greatest bucket they count over,
+/// and how many there are. A table's rows lie in the order of their buckets, or of their hours and then their values
+/// for a table of a column's values per slice, so its chunks follow each other in time, and a question reads only the
+/// chunks of the buckets it folds; a chunk of a table of values says the least and the greatest value it holds too,
+/// so that a question of some values reads only the chunks that may hold them.
 /// </summary>
 /// <param name="Region">Where the chunk's rows lie, with their checksum.</param>
-/// <param name="FirstBucket">The bucket of its first row: a slice's start, an hour's, or 0 for the object.</param>
-/// <param name="LastBucket">The bucket of its last row.</param>
+/// <param name="FirstBucket">The least bucket of its rows: a slice's start, an hour's, or 0 for the object.</param>
+/// <param name="LastBucket">The greatest bucket of its rows.</param>
 /// <param name="Rows">Its rows.</param>
 internal readonly record struct TableChunk(IndexSegment Region, long FirstBucket, long LastBucket, int Rows)
 {
+    /// <summary>
+    /// For a chunk of a table of values, the least and the greatest value of its key its rows hold; null when the chunk
+    /// does not say. One reference, where two took a chunk's copies past the bytes a warm question allocates.
+    /// </summary>
+    internal ValueBounds? Keys { get; init; }
+
     /// <summary>Whether the chunk may hold a row of a bucket from <paramref name="first"/> to <paramref name="last"/>.</summary>
     internal bool Overlaps(long first, long last) => FirstBucket <= last && LastBucket >= first;
 }
+
+/// <summary>
+/// The least and the greatest value of a table's key a chunk holds, a null aside, each encoded as a run's records hold
+/// a component: a byte that says it holds one, then its bytes.
+/// </summary>
+/// <param name="Least">The least value.</param>
+/// <param name="Greatest">The greatest value.</param>
+internal sealed record ValueBounds(byte[] Least, byte[] Greatest);

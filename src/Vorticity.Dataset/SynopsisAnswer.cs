@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
@@ -42,6 +43,12 @@ internal sealed class SynopsisPart(SynopsisTableInfo table)
     /// Null while every bucket carries its own.
     /// </summary>
     internal Dictionary<long, long>? Instants { get; private set; }
+
+    /// <summary>
+    /// The chunks of the table whose values of its key the filter on the keys rules out, by the offsets of their regions,
+    /// which the part folds no bucket of; null for none.
+    /// </summary>
+    internal HashSet<ulong>? Pruned { get; set; }
 
     /// <summary>The fields of the table's rows read: every one, or those the answer reads of them (<see cref="SynopsisAnswer.Project"/>).</summary>
     internal Layouts.FieldMask Fields { get; set; }
@@ -129,6 +136,11 @@ internal sealed class SynopsisPart(SynopsisTableInfo table)
     /// <summary>Whether <paramref name="chunk"/> holds a bucket the part folds.</summary>
     internal bool Folds(TableChunk chunk)
     {
+        if (Pruned is { } pruned && pruned.Contains(chunk.Region.Offset))
+        {
+            return false;
+        }
+
         // The first run that ends at or after the chunk's first bucket.
         int low = 0;
         int high = _runCount;
@@ -485,12 +497,109 @@ internal sealed record SynopsisAnswer(
             }
         }
 
+        // A table of a column's values says the least and the greatest value each chunk holds: the chunks the filter on the
+        // keys rules out are not read.
+        VortexExpr? keyFilter = onKeyCount == 0 ? null : question.KeyFilter(joined, onKeys[..onKeyCount]);
+        for (int p = 0; p < parts.Length && keyFilter is not null && renames is null; p++)
+        {
+            parts[p].Pruned = Pruned(contents, schema, parts[p].Table, keyFilter);
+        }
+
         return new SynopsisAnswer(
-            parts, (IReadOnlyList<TimeSlice>?)edges ?? [], onKeyCount == 0 ? null : question.KeyFilter(joined, onKeys[..onKeyCount]), request,
+            parts, (IReadOnlyList<TimeSlice>?)edges ?? [], keyFilter, request,
             (IReadOnlyList<(VortexExpr, VortexExpr)>?)excluded ?? [])
         {
             Constants = (IReadOnlyList<(string, FilterLiteral)>?)constants ?? [],
             Renames = renames,
+        };
+    }
+
+    /// <summary>
+    /// The chunks of <paramref name="table"/> whose values of its key <paramref name="filter"/> rules out, by the offsets of
+    /// their regions: a table of one column's values, whose chunks say the least and the greatest they hold, each chunk a
+    /// zone of the zone pruner; null for none. A float's key, whose NaNs the bounds leave out, prunes nothing.
+    /// </summary>
+    private static HashSet<ulong>? Pruned(SynopsisContents contents, DType schema, SynopsisTableInfo table, VortexExpr filter)
+    {
+        if (table.Kind != SynopsisTableKind.Values || table.Keys is not [int key] || SynopsisPath.Names(key))
+        {
+            return null;
+        }
+
+        IReadOnlyList<TableChunk>? chunks = null;
+        for (int t = 0; t < contents.Tables.Count && chunks is null; t++)
+        {
+            chunks = ReferenceEquals(contents.Tables[t].Table, table) ? contents.Tables[t].Chunks : null;
+        }
+
+        DType dtype = schema.GetField(key);
+        KeyShape shape = KeyShape.Of(dtype);
+        if (chunks is not { Count: > 1 } || dtype.Kind == DTypeKind.Extension || shape.Form == KeyForm.Float)
+        {
+            return null;
+        }
+
+        ZoneBounds[] zones = new ZoneBounds[chunks.Count];
+        bool bounded = false;
+        for (int c = 0; c < chunks.Count; c++)
+        {
+            if (chunks[c].Keys is { } keys && Literal(keys.Least, shape) is { } least && Literal(keys.Greatest, shape) is { } greatest)
+            {
+                zones[c] = ZoneBounds.Create(least, true, greatest, true, exact: true, 0, hasNullCount: false);
+                bounded = true;
+            }
+        }
+
+        if (!bounded)
+        {
+            return null;
+        }
+
+        ZonePruner pruner = new ZonePruner(filter, [new ZoneColumn(Expr.Field(schema.GetFieldName(key)), 1, chunks.Count, zones)]);
+        HashSet<ulong>? pruned = null;
+        for (int c = 0; c < chunks.Count; c++)
+        {
+            if (!pruner.MayMatch(new RowRange(c, c + 1)))
+            {
+                (pruned ??= []).Add(chunks[c].Region.Offset);
+            }
+        }
+
+        return pruned;
+    }
+
+    /// <summary>The value a component of a run's key holds, as a filter's literal; null for none, or a null.</summary>
+    private static FilterLiteral? Literal(byte[]? component, KeyShape shape)
+    {
+        if (component is not { Length: > 0 })
+        {
+            return null;
+        }
+
+        KeyCodec.Read(component, 0, shape, out bool valid, out ReadOnlySpan<byte> value);
+        if (!valid)
+        {
+            return null;
+        }
+
+        return shape.Form switch
+        {
+            KeyForm.Bytes => FilterLiteral.From(value),
+            KeyForm.Bool => FilterLiteral.From(value[0] != 0),
+            KeyForm.Unsigned => FilterLiteral.From(value.Length switch
+            {
+                1 => value[0],
+                2 => BinaryPrimitives.ReadUInt16LittleEndian(value),
+                4 => BinaryPrimitives.ReadUInt32LittleEndian(value),
+                _ => BinaryPrimitives.ReadUInt64LittleEndian(value),
+            }),
+            _ => FilterLiteral.From(value.Length switch
+            {
+                1 => (sbyte)value[0],
+                2 => BinaryPrimitives.ReadInt16LittleEndian(value),
+                4 => BinaryPrimitives.ReadInt32LittleEndian(value),
+                _ => BinaryPrimitives.ReadInt64LittleEndian(value),
+            }),
         };
     }
 
