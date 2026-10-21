@@ -422,18 +422,44 @@ public sealed class HashedPostingsTests
     private static async Task<VortexFile> OpenAsync(byte[] bytes) =>
         await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
 
-    private static async Task<(byte[] Bytes, WriteReport Report)> WriteAsync(int rows, VortexWriteOptions? options = null, VortexSession? session = null)
+    private static async Task<(byte[] Bytes, WriteReport Report)> WriteAsync(
+        int rows, VortexWriteOptions? options = null, VortexSession? session = null, Func<int, long?>? nullable = null)
     {
         Decoders.EnsureRegistered();
         using MemoryStream stream = new MemoryStream();
         WriteReport report;
         await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), Schema, options ?? Options(), session))
         {
-            await FeedAsync(writer, 0, rows);
+            await FeedAsync(writer, 0, rows, nullable ?? N);
             report = await writer.CompleteAsync();
         }
 
         return (stream.ToArray(), report);
+    }
+
+    /// <summary>
+    /// A column no row holds a value of writes an index of no pair, on one lane and with its buckets sorted ahead on four: the
+    /// file completes, an equality on the column finds no block, and every filter on it counts what the rows count.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AColumnWithNoValueWritesAnIndexOfNoPair(bool lanes)
+    {
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes ? 4 : 1);
+        (byte[] bytes, WriteReport report) = await WriteAsync(
+            Rows, Options() with { HashedBucketBits = lanes ? 4 : -1 }, session, static _ => null);
+        await using VortexFile file = await OpenAsync(bytes);
+        IndexWriteReport written = report.Index("n", IndexKinds.PostingsHashed)!;
+        Assert.NotNull(written);
+
+        VortexExpr equal = Equal("n", FilterLiteral.From(5L));
+        ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync(Ct);
+        Assert.Equal(0, plan.LiveBlocks);
+        Assert.Equal(0, await CountRowsAsync(file, equal, indexes: true));
+        Assert.Equal(0, await CountRowsAsync(file, Expr.In(Expr.Field("n"), [FilterLiteral.From(5L), FilterLiteral.From(7L)]), indexes: true));
+        Assert.Equal(Rows, await CountRowsAsync(file, Expr.IsNull(Expr.Field("n")), indexes: true));
+        Assert.Equal(0, await CountRowsAsync(file, Expr.Ne(Expr.Field("n"), Expr.Literal(FilterLiteral.From(5L))), indexes: true));
     }
 
     /// <summary>
@@ -452,8 +478,8 @@ public sealed class HashedPostingsTests
         Assert.True(one.AsSpan().SequenceEqual(many), "the files differ");
     }
 
-    /// <summary>Rows <c>[start, end)</c>, a block at a time.</summary>
-    private static async Task FeedAsync(VortexFileWriter writer, int start, int end)
+    /// <summary>Rows <c>[start, end)</c>, a block at a time, the nullable column's values <paramref name="nullable"/> gives, <see cref="N"/>'s by default.</summary>
+    private static async Task FeedAsync(VortexFileWriter writer, int start, int end, Func<int, long?>? nullable = null)
     {
         for (int from = start; from < end; from += Block)
         {
@@ -463,7 +489,7 @@ public sealed class HashedPostingsTests
             {
                 int root = arena.AddStruct(
                     Schema, count, Validity.NonNullable,
-                    [Longs(arena, 0, from, count, K), Strings(arena, from, count), Doubles(arena, from, count), Nullable(arena, from, count)]);
+                    [Longs(arena, 0, from, count, K), Strings(arena, from, count), Doubles(arena, from, count), Nullable(arena, from, count, nullable ?? N)]);
                 using RecordBatch batch = new RecordBatch(arena, root, from);
                 await writer.WriteAsync(batch);
             }
@@ -498,7 +524,7 @@ public sealed class HashedPostingsTests
         return arena.AddPrimitive(Schema.GetField(2), count, Validity.NonNullable, PType.F64, buffer);
     }
 
-    private static int Nullable(CanonicalArena arena, int start, int count)
+    private static int Nullable(CanonicalArena arena, int start, int count, Func<int, long?> nullable)
     {
         VortexBuffer buffer = arena.Allocate(count * 8, 8, out Span<byte> bytes);
         Span<long> values = MemoryMarshal.Cast<byte, long>(bytes);
@@ -506,7 +532,7 @@ public sealed class HashedPostingsTests
         raw.Clear();
         for (int i = 0; i < count; i++)
         {
-            if (N(start + i) is { } n)
+            if (nullable(start + i) is { } n)
             {
                 values[i] = n;
                 raw[i >> 3] |= (byte)(1 << (i & 7));

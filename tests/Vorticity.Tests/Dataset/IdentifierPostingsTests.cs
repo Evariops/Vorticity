@@ -385,6 +385,54 @@ public sealed partial class IdentifierPostingsTests
         return found;
     }
 
+    /// <summary>
+    /// A declared identifier that admits nulls, as a trace id untraced records lack: appends whose every row lacks it are
+    /// written, and so are the jobs that merge them with traced rows. Before and after compaction, the rows of one trace
+    /// come back, and a count that leaves the trace out is the rows', from the synopses and from the rows alike.
+    /// </summary>
+    [Fact]
+    public async Task AnAppendWhoseIdentifierIsNullInEveryRowIsWritten()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Logged.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Logged.At)],
+            Identifiers = [nameof(Logged.TraceId)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+        }, Ct);
+        List<Logged> appended = [];
+        for (int part = 0; part < 6; part++)
+        {
+            // Every other append untraced, every row of it.
+            Logged[] rows = [.. Enumerable.Range(0, 400).Select(i => new Logged(
+                Noon.AddSeconds((part * 400 + i) * 1.25), 200 + (i % 5), part % 2 == 0 ? null : $"t{part}-{i / 10:D3}"))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Logged>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+            appended.AddRange(rows);
+        }
+
+        const string Trace = "t3-007";
+        await AssertTraceAsync();
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        await AssertTraceAsync();
+
+        async Task AssertTraceAsync()
+        {
+            List<Logged> found = await dataset.Scan<Logged>().Where(r => r.TraceId == Trace).ToRecordsAsync(Ct).ToListAsync(Ct);
+            Assert.Equal(appended.Where(r => r.TraceId == Trace).OrderBy(r => r.At), found.OrderBy(r => r.At));
+            long left = appended.Count(r => r.TraceId != Trace);
+            foreach (bool synopses in new[] { true, false })
+            {
+                Assert.Equal(left, await dataset.Scan<Logged>().With(new ScanOptions { UseSynopses = synopses })
+                    .Where(r => r.TraceId != Trace || r.TraceId == null).CountAsync(Ct));
+            }
+        }
+    }
+
     /// <summary>The objects of <paramref name="level"/>, each checked to carry hashed postings on the request id; how many.</summary>
     private static async Task<int> WithPostingsAsync(VortexDataset dataset, int level)
     {
@@ -403,6 +451,9 @@ public sealed partial class IdentifierPostingsTests
 
     [VortexRecord]
     public partial record struct Request(DateTimeOffset At, string RequestId, long Status);
+
+    [VortexRecord]
+    public partial record struct Logged(DateTimeOffset At, long Status, string? TraceId);
 
     [VortexRecord]
     public partial record struct Visit(DateTimeOffset At, Variant Attributes);

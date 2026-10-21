@@ -72,7 +72,7 @@ internal sealed class HashedBuckets : IDisposable
         }
 
         _bits = Math.Min(bits, MostBits);
-        int buckets = 1 << bits;
+        int buckets = 1 << _bits;
         _hashes = new ulong[buckets][];
         _blocks = new uint[buckets][];
         _fill = new int[buckets];
@@ -245,7 +245,7 @@ internal sealed class HashedBuckets : IDisposable
                 starts[(int)((hashes[i] >> shift) & (Radix - 1)) + 1]++;
             }
 
-            if (starts[(int)((hashes[0] >> shift) & (Radix - 1)) + 1] == count)
+            if (count <= 1 || starts[(int)((hashes[0] >> shift) & (Radix - 1)) + 1] == count)
             {
                 continue;
             }
