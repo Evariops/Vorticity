@@ -192,15 +192,34 @@ internal sealed class DatasetScanSource : ScanSource
         long total = 0;
         long totalStates = 0;
         IAsyncEnumerable<PositionedObject> walked = answering?.ObjectsAsync(cancellationToken) ?? _version.WalkAsync(pruner, from, to, null, cancellationToken);
+        long low = long.MinValue;
+        long high = long.MaxValue;
+        bool windowed = spec.Filter is { } bounded && _dataset.Key is { } instant && DatasetScanBuilder.Bound(bounded, instant.InstantPath, ref low, ref high);
         await foreach (PositionedObject held in walked.ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
+            if (end <= start)
+            {
+                continue;
+            }
+
+            bool light = false;
+            Indexes.SynopsisContents? contents = null;
+            SynopsisAnswer? answer = answering?.AnswerOf(held, out light, out contents);
+
+            // An object read as rows reads the slices its window reaches alone, as its scan does (DatasetScanBuilder.Of):
+            // those are the rows its lanes share, where a day's object cut at its every row left the last 15 minutes,
+            // 45 M rows, to two of its 128 pieces, every other piece reading nothing.
+            if (windowed && answer is null && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } sliced
+                && DatasetScanBuilder.WindowRows(sliced.Slices.Slices, low, high) is { } window)
+            {
+                start = System.Math.Max(start, held.FirstRow + window.Start);
+                end = System.Math.Min(end, held.FirstRow + window.End);
+            }
+
             if (end > start)
             {
-                bool light = false;
-                Indexes.SynopsisContents? contents = null;
-                SynopsisAnswer? answer = answering?.AnswerOf(held, out light, out contents);
                 long states = answer is not null && Cuttable(answer, held) ? answer.Weight(contents!) : 0;
                 objects.Add((held, new RowRange(start, end), answer is not null, light, states, answer));
                 total += answer is not null ? 0 : end - start;

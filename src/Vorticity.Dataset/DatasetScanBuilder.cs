@@ -2552,7 +2552,7 @@ internal sealed class DatasetScanBuilder
     /// that compare <paramref name="instant"/> itself, as an answer reads its window (<see cref="SynopsisAnswer.Bound"/>);
     /// whether one did. A walk of the conjunctions, which allocates nothing.
     /// </summary>
-    private static bool Bound(VortexExpr filter, string instant, ref long low, ref long high)
+    internal static bool Bound(VortexExpr filter, string instant, ref long low, ref long high)
     {
         if (filter is LogicalExpr { IsAnd: true } both)
         {
@@ -2568,7 +2568,7 @@ internal sealed class DatasetScanBuilder
     /// inclusive, reaches, from the first's first row to the last's last, empty when it reaches none; null when the object
     /// has no slice.
     /// </summary>
-    private static RowRange? WindowRows(IReadOnlyList<Indexes.TimeSlice> slices, long low, long high)
+    internal static RowRange? WindowRows(IReadOnlyList<Indexes.TimeSlice> slices, long low, long high)
     {
         if (slices.Count == 0)
         {
