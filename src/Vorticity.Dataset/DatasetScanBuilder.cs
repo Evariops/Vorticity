@@ -1898,18 +1898,12 @@ internal sealed class DatasetScanBuilder
             FilterEvaluator.Evaluate(filter, batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
             int words = Math.Max((rows + 63) >> 6, 1);
             Buffers.VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
-            bytes.Clear();
             Span<ulong> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
-            int selected = 0;
-            for (int r = 0; r < rows; r++)
-            {
-                if (states[r] == Trilean.True)
-                {
-                    kept[r >> 6] |= 1UL << (r & 63);
-                    selected++;
-                }
-            }
 
+            // The states compared 64 at a time, each word of the selection written whole, and counted by its popcount; the
+            // one word of a batch of no row, which no compare writes, cleared.
+            kept[^1] = 0;
+            int selected = Trilean.ToWords(states.AsSpan(0, rows), Trilean.True, equal: true, kept);
             batch.Select(selection, selected);
         }
         finally
