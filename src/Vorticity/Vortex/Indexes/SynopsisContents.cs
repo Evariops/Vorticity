@@ -46,10 +46,24 @@ internal sealed record SynopsisContents(
     /// </summary>
     internal IndexSegment? DirectoryRegion { get; init; }
 
+    /// <summary>
+    /// The entries of the index directory of the indexes that locate a column's values (<see cref="IndexKinds.Locates"/>),
+    /// each the region of its message within the directory, with its checksum: what a lookup by a value reads of the
+    /// directory, those on its columns alone, where the whole directory of a day's object held every chunk of its synopsis
+    /// tables. Null when the contents name none, and a lookup reads the whole directory.
+    /// </summary>
+    internal IReadOnlyList<LocatingEntry>? Locating { get; init; }
+
     private const int TagIndexDirectory = 11;
     private const int TagPathDirectory = 10;
     private const int TagDirectoryField = 1;
     private const int TagDirectoryRegion = 2;
+
+    // An entry of a locating index: the column of the root it lies on, its kind, the region of its message.
+    private const int TagLocating = 12;
+    private const int TagLocatingColumn = 1;
+    private const int TagLocatingKind = 2;
+    private const int TagLocatingRegion = 3;
 
     private const int Version = 1;
     private const int TagVersion = 1;
@@ -160,6 +174,12 @@ internal sealed record SynopsisContents(
             if (contents.DirectoryRegion is { } directory)
             {
                 Declare(directory);
+            }
+
+            // The entries of the locating indexes, which a lookup reads in place of the whole directory.
+            foreach (LocatingEntry located in contents.Locating ?? [])
+            {
+                Declare(located.Region);
             }
 
             // A table's list of chunks apart from the entry is a region the cache keeps, as its chunks are.
@@ -468,6 +488,14 @@ internal sealed record SynopsisContents(
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
             }
 
+            foreach (LocatingEntry located in Locating ?? [])
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagLocating);
+                writer.WriteUInt32Always(TagLocatingColumn, located.Column);
+                writer.WriteStringAlways(TagLocatingKind, located.Kind);
+                IndexDirectory.WriteSegment(ref writer, TagLocatingRegion, located.Region);
+            }
+
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -572,6 +600,7 @@ internal sealed record SynopsisContents(
             List<(SynopsisTableInfo, IReadOnlyList<TableChunk>)> tables = [];
             List<(int, IndexSegment)> pathDirectories = [];
             IndexSegment? indexDirectory = null;
+            List<LocatingEntry>? locating = null;
             byte[]? schema = null;
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
             {
@@ -618,16 +647,28 @@ internal sealed record SynopsisContents(
 
                         pathDirectories.Add(directory);
                         break;
+                    case (TagLocating, ProtoWireType.LengthDelimited):
+                        if (Located(reader.ReadMessage()) is not { } located)
+                        {
+                            return null;
+                        }
+
+                        (locating ??= []).Add(located);
+                        break;
                     default:
                         reader.SkipField(wire);
                         break;
                 }
             }
 
+            // The entries of a directory lie within it.
             return version == Version && slices is not null && schema is not null && end >= start
+                && (locating is null || (indexDirectory is { } named && locating.TrueForAll(l => l.Region.Offset >= named.Offset
+                    && l.Region.Offset + l.Region.Length <= named.Offset + named.Length)))
                 ? new SynopsisContents(schema, encodings, slices, directories, start, end, tables, pathDirectories)
                 {
                     DirectoryRegion = indexDirectory,
+                    Locating = locating,
                 }
                 : null;
         }
@@ -1042,7 +1083,43 @@ internal sealed record SynopsisContents(
         return field is { } at && region is { } segment ? (at, segment) : null;
     }
 
+    /// <summary>The entry of a locating index the message names: null when it names no column, kind or region with a checksum.</summary>
+    private static LocatingEntry? Located(ProtoReader reader)
+    {
+        uint? column = null;
+        string? kind = null;
+        IndexSegment? region = null;
+        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
+        {
+            switch (tag, wire)
+            {
+                case (TagLocatingColumn, ProtoWireType.Varint):
+                    column = reader.ReadVarint32();
+                    break;
+                case (TagLocatingKind, ProtoWireType.LengthDelimited):
+                    kind = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case (TagLocatingRegion, ProtoWireType.LengthDelimited):
+                    region = IndexDirectory.ReadSegment(reader.ReadMessage());
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return column is { } on && kind is not null && region is { Checksum: not null } segment ? new LocatingEntry(on, kind, segment) : null;
+    }
 }
+
+/// <summary>
+/// An entry of a file's index directory that locates a column's values (<see cref="IndexKinds.Locates"/>), as its table of
+/// contents names it (<see cref="SynopsisContents.Locating"/>).
+/// </summary>
+/// <param name="Column">The field of the root the index lies on, the first of its path; <see cref="IndexDirectory.RootColumn"/> for the root.</param>
+/// <param name="Kind">The index's kind.</param>
+/// <param name="Region">Where the entry's message lies in the file, with its checksum.</param>
+internal readonly record struct LocatingEntry(uint Column, string Kind, IndexSegment Region);
 
 /// <summary>
 /// A chunk of a synopsis table: the region that holds its rows, the least and the greatest bucket they count over,

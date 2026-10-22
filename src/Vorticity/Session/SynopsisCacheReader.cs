@@ -52,7 +52,8 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
 
     /// <summary>
     /// The regions of an object the cache may keep: those its table of contents declares with a checksum, its
-    /// tables, its chunk directories, its path directories and its index directory.
+    /// tables, its chunk directories, its path directories, its index directory and the entries of its locating
+    /// indexes in it.
     /// </summary>
     internal static List<IndexSegment> Declared(SynopsisContents contents)
     {
@@ -100,6 +101,11 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
         if (contents.DirectoryRegion is { } directory)
         {
             Declare(directory);
+        }
+
+        foreach (LocatingEntry located in contents.Locating ?? [])
+        {
+            Declare(located.Region);
         }
 
         return regions;

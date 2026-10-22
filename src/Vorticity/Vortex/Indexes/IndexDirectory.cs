@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO.Hashing;
 using System.Text;
 using Vorticity.IO;
@@ -236,7 +237,17 @@ internal sealed record IndexDirectory(
 
     /// <summary>Serializes the directory: the version byte, then the message.</summary>
     /// <returns>The segment's bytes.</returns>
-    public byte[] ToBytes()
+    public byte[] ToBytes() => ToBytes(null);
+
+    /// <summary>
+    /// <see cref="ToBytes()"/>, noting in <paramref name="located"/>, when it is given, where the message of each entry of a
+    /// locating index lies in the bytes (<see cref="IndexKinds.Locates"/>): what a table of contents names, so that a lookup
+    /// reads the entries on its columns alone (<see cref="TryParseEntry"/>), where the whole directory of a day's object held
+    /// every chunk of its synopsis tables.
+    /// </summary>
+    /// <param name="located">Where each such entry's message lies: its start in the bytes, and its length.</param>
+    /// <returns>The segment's bytes, the same with or without <paramref name="located"/>.</returns>
+    internal byte[] ToBytes(List<(IndexEntry Entry, int Start, int Length)>? located)
     {
         ProtoWriter writer = new ProtoWriter();
         try
@@ -252,6 +263,16 @@ internal sealed record IndexDirectory(
 
             foreach (IndexEntry entry in Entries)
             {
+                // A locating index's entry written whole first, its place then known: no message is open, so none of the
+                // bytes written moves after.
+                if (located is not null && IndexKinds.Locates(entry.Kind))
+                {
+                    byte[] message = EntryBytes(entry);
+                    writer.WriteBytesAlways(DirEntries, message);
+                    located.Add((entry, writer.WrittenSpan.Length - message.Length, message.Length));
+                    continue;
+                }
+
                 using ProtoWriter.MessageScope scope = writer.BeginMessage(DirEntries);
                 WriteEntry(ref writer, entry);
             }
@@ -399,6 +420,21 @@ internal sealed record IndexDirectory(
         if (value != fallback)
         {
             writer.WriteUInt32Always(field, (uint)value);
+        }
+    }
+
+    /// <summary>The message of <paramref name="entry"/> alone, as a directory holds it.</summary>
+    private static byte[] EntryBytes(IndexEntry entry)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            WriteEntry(ref writer, entry);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
         }
     }
 
@@ -656,6 +692,29 @@ internal sealed record IndexDirectory(
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The entry the message <paramref name="bytes"/> holds, as a directory read whole keeps it (<see cref="ToBytes(List{ValueTuple{IndexEntry, int, int}}?)"/>):
+    /// false when it does not parse, is of a kind this library does not know, or has runs that are not sound before
+    /// <paramref name="dataEnd"/>, which costs the entry alone, never the file.
+    /// </summary>
+    internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, ulong dataEnd, [NotNullWhen(true)] out IndexEntry? entry)
+    {
+        try
+        {
+            if (TryReadEntry(new ProtoReader(bytes), null, out IndexEntry? read) && read is not null && RunsAreSound(read, dataEnd))
+            {
+                entry = read;
+                return true;
+            }
+        }
+        catch (VortexFormatException)
+        {
+        }
+
+        entry = null;
+        return false;
     }
 
     private static bool TryReadEntry(ProtoReader reader, Func<uint, bool>? columns, out IndexEntry? entry)

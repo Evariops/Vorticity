@@ -202,6 +202,31 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
+    /// The entries of the locating indexes as the table of contents names them: each on the field of the root its path
+    /// starts with, the root's own for none, at its region in the file, the directory written at <paramref name="offset"/>
+    /// with the bytes <paramref name="directory"/>, where <paramref name="located"/> says each lies; null for none.
+    /// </summary>
+    private static LocatingEntry[]? Locating(List<(IndexEntry Entry, int Start, int Length)> located, byte[] directory, long offset)
+    {
+        if (located.Count == 0)
+        {
+            return null;
+        }
+
+        LocatingEntry[] entries = new LocatingEntry[located.Count];
+        for (int i = 0; i < entries.Length; i++)
+        {
+            (IndexEntry entry, int start, int length) = located[i];
+            entries[i] = new LocatingEntry(
+                entry.ColumnPath.Count > 0 ? entry.ColumnPath[0] : IndexDirectory.RootColumn,
+                entry.Kind,
+                IndexSegment.Of(offset + start, directory.AsSpan(start, length), 0));
+        }
+
+        return entries;
+    }
+
+    /// <summary>
     /// (Column chunk, field) pairs whose bit-packing was priced from the ingested width histograms
     /// rather than from a walk of the chunk, the columns' children included. The width counterpart
     /// of <see cref="ChunksFromTable"/>.
@@ -2796,16 +2821,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // The index directory, last before the footer: one postscript metadata entry, the only
         // carrier a strict reference reader tolerates without being told about it.
         long directoryOffset = _sink.Position;
-        byte[]? directory = _indexes?.Directory(_rowCount);
+        List<(IndexEntry Entry, int Start, int Length)>? located = _contents is null ? null : [];
+        byte[]? directory = _indexes?.Directory(_rowCount, located: located);
         if (directory is not null)
         {
             await _sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
         }
 
-        // A sliced file's table of contents names the directory too, now that it is written.
+        // A sliced file's table of contents names the directory too, now that it is written, and the entry of each index
+        // that locates a column's values in it, which a lookup reads alone.
         if (_contents is { } contents)
         {
-            SynopsisContents = (directory is null ? contents : contents with { DirectoryRegion = IndexSegment.Of(directoryOffset, directory, 0) }).ToBytes();
+            SynopsisContents = (directory is null ? contents : contents with
+            {
+                DirectoryRegion = IndexSegment.Of(directoryOffset, directory, 0),
+                Locating = Locating(located!, directory, directoryOffset),
+            }).ToBytes();
         }
 
         long dtypeOffset = _sink.Position;

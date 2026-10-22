@@ -115,6 +115,15 @@ internal static class IndexKinds
             _ => true,
         };
 
+    /// <summary>
+    /// Whether the kind locates the blocks that hold a column's values, which a lookup of rows by a value reads with no open
+    /// of the file (<c>KeyIndexPruner</c>): sorted runs, postings of blocks, hashed postings, postings of trigrams, and the
+    /// dictionary probe where none of them answers.
+    /// </summary>
+    /// <param name="kind">The name.</param>
+    /// <returns>Whether a lookup reads it.</returns>
+    internal static bool Locates(string kind) => kind is SortedRuns or PostingsBlocks or PostingsHashed or PostingsNgram3 or DictProbe;
+
     /// <summary>The kind a policy of <paramref name="policy"/> builds, or null for a policy that names none.</summary>
     /// <param name="policy">The policy's kind.</param>
     /// <returns>The kind's name in the directory.</returns>

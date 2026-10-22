@@ -2429,10 +2429,21 @@ public sealed class VortexDataset : IAsyncDisposable
 
             using Indexes.SliceReader slices = opened;
 
-            // The first round trip: the index directory, beside every column's chunk directory.
+            // The directory's entries on the columns the filter reads alone: its runs' segments were a list each, every
+            // index of the object parsed at every lookup, three fifths of what a question that leaves an identifier out
+            // allocated. Read alone, those of the locating indexes, when the contents name them apart: the whole directory
+            // of a day's object, every chunk of its synopsis tables in it, was 11.5 MB a lookup read for a few runs.
             DType schema = contents.SchemaType;
-            ValueTask<Buffers.SegmentOwner> read = reader.ReadAsync(
-                new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken);
+            Func<uint, bool>? indexed = ColumnsOf(filter, schema);
+            List<Indexes.IndexSegment>? named = Named(contents, indexed);
+            if (named is { Count: 0 })
+            {
+                return null;
+            }
+
+            // The first round trip: those entries, or the directory, beside every column's chunk directory.
+            Task<Indexes.IndexDirectory?> read = named is null ? WholeAsync() : EntriesAsync(named);
+
             // The chunk directories of the columns the rows are read for: each read and parsed for every column, at every
             // lookup, was a fifth of what a question that leaves an identifier out allocated.
             Task<long>[] chunks = new Task<long>[columns?.Length ?? schema.FieldCount];
@@ -2441,15 +2452,10 @@ public sealed class VortexDataset : IAsyncDisposable
                 chunks[c] = slices.ColumnBytesAsync(columns?[c] ?? c, cancellationToken).AsTask();
             }
 
-            // The directory's entries on the columns the filter reads alone: its runs' segments were a list each, every
-            // index of the object parsed at every lookup, three fifths of what a question that leaves an identifier out
-            // allocated.
             Indexes.IndexDirectory? directory;
-            Func<uint, bool>? indexed = ColumnsOf(filter, schema);
-            Buffers.SegmentOwner owner;
             try
             {
-                owner = await read.ConfigureAwait(false);
+                directory = await read.ConfigureAwait(false);
             }
             catch
             {
@@ -2458,14 +2464,10 @@ public sealed class VortexDataset : IAsyncDisposable
                 throw;
             }
 
-            using (Buffers.SegmentOwner bytes = owner)
+            await Task.WhenAll(chunks).ConfigureAwait(false);
+            if (directory is null)
             {
-                await Task.WhenAll(chunks).ConfigureAwait(false);
-                if (!region.Holds(bytes.Buffer.Span)
-                    || !Indexes.IndexDirectory.TryParse(bytes.Buffer.Span, Indexes.IndexDirectory.UnknownRows, region.Offset, indexed, out directory, out _))
-                {
-                    return null;
-                }
+                return null;
             }
 
             // The second: the runs' segments that may hold a value the filter asks.
@@ -2514,7 +2516,67 @@ public sealed class VortexDataset : IAsyncDisposable
             }
 
             return [.. await slices.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
+
+            // The whole directory, its entries on the filter's columns kept.
+            async Task<Indexes.IndexDirectory?> WholeAsync()
+            {
+                using Buffers.SegmentOwner bytes = await reader.ReadAsync(
+                    new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken).ConfigureAwait(false);
+                return region.Holds(bytes.Buffer.Span)
+                    && Indexes.IndexDirectory.TryParse(bytes.Buffer.Span, Indexes.IndexDirectory.UnknownRows, region.Offset, indexed, out Indexes.IndexDirectory? whole, out _)
+                    ? whole
+                    : null;
+            }
+
+            // The entries alone, a directory of them over the object's rows: each checked against its own checksum, one that
+            // fails costing itself, as in a directory read whole.
+            async Task<Indexes.IndexDirectory?> EntriesAsync(List<Indexes.IndexSegment> regions)
+            {
+                using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
+                int[] slots = new int[regions.Count];
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    slots[i] = requests.Add(new Serialization.Schemas.SegmentSpec(regions[i].Offset, regions[i].Length, regions[i].AlignmentExponent, 0, 0));
+                }
+
+                await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                List<Indexes.IndexEntry> kept = new List<Indexes.IndexEntry>(regions.Count);
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
+                    if (regions[i].Holds(bytes) && Indexes.IndexDirectory.TryParseEntry(bytes, region.Offset, out Indexes.IndexEntry? index))
+                    {
+                        kept.Add(index);
+                    }
+                }
+
+                return new Indexes.IndexDirectory((ulong)entry.PhysicalRows, 0, Indexes.WritePolicy.None, kept);
+            }
         }
+    }
+
+    /// <summary>
+    /// The regions of the entries of the locating indexes on the columns <paramref name="indexed"/> keeps, every one when it
+    /// is null, that <paramref name="contents"/> name (<see cref="Indexes.SynopsisContents.Locating"/>); null when they name
+    /// none, and a lookup reads the whole directory.
+    /// </summary>
+    private static List<Indexes.IndexSegment>? Named(Indexes.SynopsisContents contents, Func<uint, bool>? indexed)
+    {
+        if (contents.Locating is not { Count: > 0 } locating)
+        {
+            return null;
+        }
+
+        List<Indexes.IndexSegment> regions = [];
+        for (int i = 0; i < locating.Count; i++)
+        {
+            if (indexed is null || indexed(locating[i].Column))
+            {
+                regions.Add(locating[i].Region);
+            }
+        }
+
+        return regions;
     }
 
     /// <summary>

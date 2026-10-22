@@ -2078,9 +2078,10 @@ internal sealed class IndexWriter : IDisposable
     /// still written when the policy was the caller's own, since it carries that policy and an
     /// append reads it to index its new blocks the same way; under the default policy it would say
     /// nothing an append would not assume from its absence.
-    /// A fragment passes what binds it to the indexed file, along with the payloads' encoding table.
+    /// A fragment passes what binds it to the indexed file, along with the payloads' encoding table. Where the entry of
+    /// each locating index lies in the bytes goes to <paramref name="located"/> when it is given.
     /// </summary>
-    internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null)
+    internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null, List<(IndexEntry Entry, int Start, int Length)>? located = null)
     {
         // A file's time slices and its variant paths ride in the directory whatever the policy asks.
         if (!Enabled && _preserved is not { Count: > 0 }
@@ -2107,7 +2108,7 @@ internal sealed class IndexWriter : IDisposable
                 FileToken = fragment?.Token,
                 FileHash = fragment?.Hash,
                 ArrayEncodings = fragment?.Encodings,
-            }.ToBytes();
+            }.ToBytes(located);
     }
 
     /// <summary>What became of every index the policy asked for.</summary>
