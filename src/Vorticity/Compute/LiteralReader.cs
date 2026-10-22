@@ -94,6 +94,50 @@ internal static class LiteralReader
     }
 
     /// <summary>
+    /// Reads row <paramref name="row"/> of a column of byte strings as its bytes where they lie, with
+    /// no copy: what a caller that only compares or hashes the value reads, where
+    /// <see cref="TryRead"/> copies it into a literal.
+    /// </summary>
+    /// <param name="arena">The arena the node lives in.</param>
+    /// <param name="nodeIndex">The column.</param>
+    /// <param name="row">The row.</param>
+    /// <param name="bytes">The value's bytes, when the row holds one.</param>
+    /// <returns><see langword="false"/> for a null row or a column of another type.</returns>
+    internal static bool TryReadBytes(CanonicalArena arena, int nodeIndex, int row, out ReadOnlySpan<byte> bytes)
+    {
+        bytes = default;
+        int index = ComparisonKernels.Unwrap(arena, nodeIndex);
+        CanonicalNode node = arena.GetNode(index);
+        if ((uint)row >= (uint)node.Length || !ValidityMask.From(arena, node.Validity).IsValid(row))
+        {
+            return false;
+        }
+
+        switch (node.Kind)
+        {
+            case CanonicalKind.VarBinView:
+                bytes = ViewAt(node, row);
+                return true;
+
+            case CanonicalKind.Constant when node.DType.Kind is DTypeKind.Utf8 or DTypeKind.Binary:
+                bytes = node.ConstantElement;
+                return true;
+
+            case CanonicalKind.Dictionary:
+                return TryReadBytes(
+                    arena, node.EncodedValuesIndex,
+                    (int)BinaryPrimitives.ReadUInt32LittleEndian(node.Codes.Span[(row * sizeof(uint))..]),
+                    out bytes);
+
+            case CanonicalKind.RunEnd:
+                return TryReadBytes(arena, node.EncodedValuesIndex, RunOf(node.RunEnds.Span, row), out bytes);
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
     /// Reads row <paramref name="row"/> of a decimal column as the literal a decimal filter
     /// carries: the unscaled value, a signed integer when it fits one, sixteen or thirty-two
     /// little-endian bytes otherwise.
