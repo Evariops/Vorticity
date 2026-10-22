@@ -231,7 +231,7 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
                 continue;
             }
 
-            QuantileSketch sketch = ReadSketch(ref reader, _bits);
+            QuantileSketch sketch = QuantileSketch.Read(_bits, ref reader);
             _sketches[group] = sketch;
             _bytes += sketch.Bytes;
         }
@@ -241,24 +241,4 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
         _final(group < _groups && _sketches[group] is { Count: > 0 } sketch ? new Distribution(sketch) : null);
 
     private QuantileSketch Sketch(int group) => _sketches[group] ??= new QuantileSketch(_bits);
-
-    /// <summary>A sketch read from a spill, its words in the order <see cref="QuantileSketch.Write"/> wrote them.</summary>
-    private static QuantileSketch ReadSketch(ref SpillReader reader, int bits)
-    {
-        long count = reader.Read<long>();
-        long zeros = reader.Read<long>();
-        QuantileSketch sketch = new QuantileSketch(bits);
-        for (int side = 0; side < 2; side++)
-        {
-            long entries = reader.Read<long>();
-            for (long e = 0; e < entries; e++)
-            {
-                int index = checked((int)reader.Read<long>());
-                sketch.AddBucket(negative: side == 0, index, reader.Read<long>());
-            }
-        }
-
-        sketch.SetTotals(count, zeros);
-        return sketch;
-    }
 }

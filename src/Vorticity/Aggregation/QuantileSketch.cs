@@ -350,24 +350,32 @@ internal sealed class QuantileSketch
         throw new VortexFormatException("A sketch holds a varint of more than 64 bits.");
     }
 
-    /// <summary>A sketch read back from the words <see cref="Write"/> wrote.</summary>
-    internal static QuantileSketch Read(int bits, Func<long> word)
+    /// <summary>A sketch read back from the words <see cref="Write"/> wrote, a spill's or a test's.</summary>
+    internal static QuantileSketch Read<TWords>(int bits, ref TWords words)
+        where TWords : IWordSource, allows ref struct
     {
         QuantileSketch sketch = new QuantileSketch(bits);
-        long count = word();
-        long zeros = word();
+        long count = words.NextWord();
+        long zeros = words.NextWord();
         for (int side = 0; side < 2; side++)
         {
-            long entries = word();
+            long entries = words.NextWord();
             for (long e = 0; e < entries; e++)
             {
-                int index = checked((int)word());
-                sketch.AddBucket(negative: side == 0, index, word());
+                int index = checked((int)words.NextWord());
+                sketch.AddBucket(negative: side == 0, index, words.NextWord());
             }
         }
 
         sketch.SetTotals(count, zeros);
         return sketch;
+    }
+
+    /// <summary>A sketch read back from the words <paramref name="word"/> hands out one at a time.</summary>
+    internal static QuantileSketch Read(int bits, Func<long> word)
+    {
+        WordsOf words = new WordsOf(word);
+        return Read(bits, ref words);
     }
 
     /// <summary>Adds a bucket's count as read back, its values already counted by <see cref="SetTotals"/>.</summary>

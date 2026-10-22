@@ -210,17 +210,18 @@ internal sealed class CardinalitySketch
         }
     }
 
-    /// <summary>A sketch read back from <see cref="Write"/>'s words.</summary>
-    internal static CardinalitySketch Read(Func<long> word)
+    /// <summary>A sketch read back from <see cref="Write"/>'s words, a spill's or a test's.</summary>
+    internal static CardinalitySketch Read<TWords>(ref TWords words)
+        where TWords : IWordSource, allows ref struct
     {
         CardinalitySketch sketch = new CardinalitySketch();
-        long form = word();
-        long entries = word();
+        long form = words.NextWord();
+        long entries = words.NextWord();
         if (form == 0)
         {
             for (long i = 0; i < entries; i++)
             {
-                sketch.Add(unchecked((ulong)word()));
+                sketch.Add(unchecked((ulong)words.NextWord()));
             }
 
             return sketch;
@@ -229,10 +230,17 @@ internal sealed class CardinalitySketch
         sketch.Registered();
         for (long i = 0; i < entries; i++)
         {
-            sketch.RaiseEntry(word());
+            sketch.RaiseEntry(words.NextWord());
         }
 
         return sketch;
+    }
+
+    /// <summary>A sketch read back from the words <paramref name="word"/> hands out one at a time.</summary>
+    internal static CardinalitySketch Read(Func<long> word)
+    {
+        WordsOf words = new WordsOf(word);
+        return Read(ref words);
     }
 
     /// <summary>
@@ -426,13 +434,10 @@ internal sealed class CardinalitySketch
         public static ulong Malformed(int position, byte value) => throw new VortexFormatException($"A distinct sketch holds a varint too wide at {position}.");
     }
 
-    /// <summary>Adds a register entry read back, <c>(index &lt;&lt; 8) | rank</c>, after <see cref="BeginRegisters"/>.</summary>
+    /// <summary>Adds a register entry read back, <c>(index &lt;&lt; 8) | rank</c>, after <see cref="Registered"/>.</summary>
     internal void RaiseEntry(long entry) => Raise(checked((int)(entry >> 8)), (byte)entry);
 
-    /// <summary>Turns a sketch read back into registers, before its entries.</summary>
-    internal void BeginRegisters() => Registered();
-
-    /// <summary>Moves the exact hashes into registers, once.</summary>
+    /// <summary>Moves the exact hashes into registers, once: a sketch read back in registers, before its entries.</summary>
     private void Registered()
     {
         if (_hashes is not { } hashes)

@@ -157,25 +157,7 @@ internal abstract class CardinalitySlot : AggregateSlot<long>
                 continue;
             }
 
-            CardinalitySketch sketch = new CardinalitySketch();
-            long form = reader.Read<long>();
-            long entries = reader.Read<long>();
-            if (form == 0)
-            {
-                for (long i = 0; i < entries; i++)
-                {
-                    sketch.Add(unchecked((ulong)reader.Read<long>()));
-                }
-            }
-            else
-            {
-                sketch.BeginRegisters();
-                for (long i = 0; i < entries; i++)
-                {
-                    sketch.RaiseEntry(reader.Read<long>());
-                }
-            }
-
+            CardinalitySketch sketch = CardinalitySketch.Read(ref reader);
             _sketches[group] = sketch;
             _bytes += sketch.Bytes;
         }
