@@ -78,11 +78,11 @@ internal sealed class RunScratch : IDisposable
     /// <summary>Gives back bytes <see cref="AdmitAsync"/> granted.</summary>
     internal void Release(long bytes) => _admitted = Math.Max(0, _admitted - bytes);
 
-    /// <summary>A null directory spills to the system's temporary directory; <paramref name="sealFile"/> seals the file it spills to.</summary>
+    /// <summary>A null directory spills to the default scratch directory (<see cref="ScratchDirectories"/>); <paramref name="sealFile"/> seals the file it spills to.</summary>
     internal RunScratch(long memoryBudget, string? directory, bool sealFile = false)
     {
         _memoryBudget = Math.Max(memoryBudget, 0);
-        _directory = directory ?? Path.GetTempPath();
+        _directory = ScratchDirectories.Of(directory);
         _sealFile = sealFile;
     }
 

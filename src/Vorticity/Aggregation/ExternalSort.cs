@@ -283,7 +283,7 @@ internal sealed class ExternalSort : IAsyncDisposable
     {
         if (_directory is null)
         {
-            string directory = _session.Options.ScratchDirectory ?? Path.GetTempPath();
+            string directory = ScratchDirectories.Of(_session.Options.ScratchDirectory);
             if (GroupCore.InMemory(directory))
             {
                 throw new VortexMemoryException(

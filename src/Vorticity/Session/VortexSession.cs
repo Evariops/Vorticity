@@ -200,11 +200,13 @@ public sealed class VortexSessionOptions
 
     /// <summary>
     /// Where a group by its memory budget cannot hold writes the groups it spills: a local directory,
-    /// never an object store. Null, the default, is the system's temporary directory.
+    /// never an object store. Null, the default, is the system's temporary directory, or, when that lies
+    /// on a file system in memory as <c>/tmp</c> does on recent Linux, the user's cache's on a disk:
+    /// <c>$XDG_CACHE_HOME/vorticity</c>, or <c>~/.cache/vorticity</c>.
     /// </summary>
     /// <remarks>
-    /// A directory on a file system in memory (<c>tmpfs</c>) is refused: spilling there would take the
-    /// memory it gives back. The process's spills together take at most 90 % of the directory's free
+    /// A directory named on a file system in memory (<c>tmpfs</c>) is refused: spilling there would take
+    /// the memory it gives back. The process's spills together take at most 90 % of the directory's free
     /// space; past it, the query fails with a <see cref="VortexMemoryException"/>. A spill's file has
     /// no name once open, outside Windows, which deletes it on close: none is left behind.
     /// </remarks>
