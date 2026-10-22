@@ -217,6 +217,12 @@ if (Text(args, "--micro") == "lifecycle")
         Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0));
 }
 
+// --micro logs: the client's log records of a day, their sources, their keys and the keys of more than one type (LogGeneratorV2.cs).
+if (Text(args, "--micro") == "logs")
+{
+    return LogGeneratorV2.Run(Option(args, "--seed", 37), Option(args, "--rows", 10_000_000));
+}
+
 // --micro spans: the client's spans of a day, and the values each column holds against its figure (SpanGeneratorV2.cs).
 if (Text(args, "--micro") == "spans")
 {
