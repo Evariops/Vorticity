@@ -271,13 +271,16 @@ internal sealed class DatasetScanSource : ScanSource
         }
 
         // The objects to cut are opened side by side to read where their chunks end; the scan finds
-        // them open after. Each cut gives its object back, whatever another one's open did.
+        // them open after. Each cut gives its object back, whatever another one's open did. A lookup of an identifier
+        // cuts none: it reads an object's rows by the identifier's index with no open of it, where a cut opens it, and
+        // each piece would look the whole object up again.
         long share = System.Math.Max(_dataset.Options.LeastPieceRows, total / (degree * 4L));
+        bool lookingUp = spec.States is null && spec.Options.UseIndexes && DatasetScanBuilder.LookupOf(spec.Filter, _version.Header.Identifiers) is not null;
         Task<RowRange[]>?[] cuts = new Task<RowRange[]>?[objects.Count];
         List<Task> cutting = [];
         for (int o = 0; o < objects.Count; o++)
         {
-            if (objects[o].Rows.Length >= 2 * share && !objects[o].Answered)
+            if (objects[o].Rows.Length >= 2 * share && !objects[o].Answered && !(lookingUp && DatasetScanBuilder.LooksUp(objects[o].Held.Entry, _dataset.Options)))
             {
                 cuts[o] = CutAsync(objects[o].Held, objects[o].Rows, share, spec.Projection, cancellationToken);
                 cutting.Add(cuts[o]!);

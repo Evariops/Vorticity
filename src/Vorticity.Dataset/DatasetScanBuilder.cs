@@ -32,6 +32,9 @@ internal sealed class DatasetScanCounters
     /// <summary>Objects the scan went to read. <see cref="CacheHits"/> of them cost no open.</summary>
     public long ObjectsOpened { get; internal set; }
 
+    /// <summary>Objects whose rows an identifier's index found, read with no open of the object.</summary>
+    public long ObjectsLookedUp { get; internal set; }
+
     /// <summary>Child pages a node's summaries refuted, each a whole subtree never read.</summary>
     public long SubtreesSkipped { get; internal set; }
 
@@ -75,6 +78,10 @@ internal sealed class DatasetScanBuilder
     private bool _keepEncodings;
     private bool _sinkDecodes;
     private bool _positionsUnread;
+
+    // The filter's lookup of an identifier, worked out the first time an object asks (Lookup).
+    private VortexExpr? _lookup;
+    private bool _lookupKnown;
 
     internal DatasetScanBuilder(VortexDataset dataset, DatasetSnapshot version)
     {
@@ -475,10 +482,206 @@ internal sealed class DatasetScanBuilder
     {
         IAsyncEnumerable<RecordBatch> batches = _states is { } request && Answer(held, request) is ({ } answer, { } contents, string instant)
             ? AnsweredAsync(held, answer, contents, instant, open, cancellationToken)
+            : LookupFor(held) is { } lookup ? LookedUpAsync(held, lookup, open, cancellationToken)
             : RowsAsync(held, open, cancellationToken);
         await foreach (RecordBatch batch in batches.ConfigureAwait(false))
         {
             yield return batch;
+        }
+    }
+
+    /// <summary>
+    /// The conjunct of <paramref name="filter"/> that looks one value of a declared identifier up, or a few,
+    /// <c>id == v</c> or <c>id IN (…)</c> on a column of its own, never null: what the identifier's index answers object
+    /// by object with no open of the object (<see cref="VortexDataset.LookupAsync"/>). Null for any other filter.
+    /// </summary>
+    internal static VortexExpr? LookupOf(VortexExpr? filter, IReadOnlyList<string> identifiers)
+    {
+        if (filter is null || identifiers.Count == 0)
+        {
+            return null;
+        }
+
+        List<VortexExpr> conjuncts = [];
+        GroupPredicates.Conjuncts(filter, conjuncts);
+        foreach (VortexExpr conjunct in conjuncts)
+        {
+            FieldExpr? field = conjunct switch
+            {
+                ComparisonExpr { Op: ComparisonOp.Equal } equal when equal.Value.Kind != FilterLiteralKind.Null => equal.Field,
+                InExpr inList when inList.Values.Count > 0 && !HoldsNull(inList.Literals) => inList.Field,
+                _ => null,
+            };
+            if (field is not null && field.GetType() == typeof(FieldExpr))
+            {
+                foreach (string identifier in identifiers)
+                {
+                    if (string.Equals(identifier, field.Path, StringComparison.Ordinal))
+                    {
+                        return conjunct;
+                    }
+                }
+            }
+        }
+
+        return null;
+
+        static bool HoldsNull(FilterLiteral[] values)
+        {
+            foreach (FilterLiteral value in values)
+            {
+                if (value.Kind == FilterLiteralKind.Null)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The filter's lookup of an identifier (<see cref="LookupOf"/>), for a scan of rows that reads them in the tree's order
+    /// with its indexes; null otherwise.
+    /// </summary>
+    private VortexExpr? Lookup
+    {
+        get
+        {
+            if (!_lookupKnown)
+            {
+                _lookup = _indexes && _states is null && _orderPaths is null && _take is null && LookupColumns(out _)
+                    ? LookupOf(_filter, _version.Header.Identifiers)
+                    : null;
+                _lookupKnown = true;
+            }
+
+            return _lookup;
+        }
+    }
+
+    /// <summary>
+    /// The columns a lookup reads its rows for: the projected ones, whole, which the filter's must be among; null in
+    /// <paramref name="columns"/> for every one. False when the projection keeps part of a column, or leaves out a column
+    /// the filter reads.
+    /// </summary>
+    private bool LookupColumns(out int[]? columns)
+    {
+        columns = null;
+        if (_mask is not { IsAll: false } mask)
+        {
+            return true;
+        }
+
+        DType schema = _version.Schema.DType;
+        int count = mask.SelectedCount(schema.FieldCount);
+        int[] fields = new int[count];
+        for (int i = 0; i < count; i++)
+        {
+            if (!mask.SelectedMask(i).IsAll)
+            {
+                return false;
+            }
+
+            fields[i] = mask.SelectedField(i);
+        }
+
+        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
+        _filter?.CollectFields(named);
+        foreach (string path in named)
+        {
+            int field = schema.IndexOfField(path);
+            if (field < 0 || Array.IndexOf(fields, field) < 0)
+            {
+                return false;
+            }
+        }
+
+        columns = fields;
+        return true;
+    }
+
+    /// <summary>
+    /// Whether an object's rows are found by its identifier's index rather than its open, when a scan looks a value up: one
+    /// with no row marked, whose footer an open would read is large (<see cref="DatasetOptions.LookupFooterBytes"/>), and
+    /// whose entry carries a table of contents that names its index directory.
+    /// </summary>
+    internal static bool LooksUp(ObjectEntry entry, DatasetOptions options) =>
+        !entry.HasDeletions && entry.FooterBytes >= options.LookupFooterBytes && entry.Contents is { DirectoryRegion: not null };
+
+    /// <summary>
+    /// The filter's lookup when <paramref name="held"/> takes it: an object the scan covers whole, with no row marked, of the
+    /// version's own columns, whose footer an open would read is large (<see cref="DatasetOptions.LookupFooterBytes"/>), and
+    /// whose entry carries a table of contents that names its index directory; null otherwise.
+    /// </summary>
+    private VortexExpr? LookupFor(in PositionedObject held)
+    {
+        if (Lookup is not { } lookup || Covered(held) != held.Entry.Rows || !LooksUp(held.Entry, _dataset.Options)
+            || held.Entry.Contents is not { } contents)
+        {
+            return null;
+        }
+
+        try
+        {
+            return _version.Schema.ColumnsOf(contents.SchemaType, held.Entry.Key) is null ? lookup : null;
+        }
+        catch (VortexFormatException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// One object's rows by its identifier's index (<see cref="VortexDataset.LookupAsync"/>), with no open of it: the rows of
+    /// the blocks the index leaves, the scan's filter kept, as the dataset's. The object's rows as any other's when its index
+    /// cannot say.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> LookedUpAsync(
+        PositionedObject held, VortexExpr lookup, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        LookupColumns(out int[]? columns);
+        List<RecordBatch>? found = await _dataset.LookupAsync(held.Entry, lookup, columns, cancellationToken).ConfigureAwait(false);
+        if (found is null)
+        {
+            await foreach (RecordBatch batch in RowsAsync(held, open, cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
+        if (_metrics is { } metrics)
+        {
+            metrics.ObjectsLookedUp++;
+        }
+
+        RecordBatch? view = null;
+        int next = 0;
+        try
+        {
+            for (; next < found.Count; next++)
+            {
+                RecordBatch batch = found[next];
+                if (_filter is { } filter)
+                {
+                    SelectBy(batch, filter);
+                }
+
+                if (batch.SelectedRows > 0)
+                {
+                    yield return InDataset(batch, held.FirstRow, ref view);
+                }
+            }
+        }
+        finally
+        {
+            view?.Dispose();
+            foreach (RecordBatch batch in found)
+            {
+                batch.Dispose();
+            }
         }
     }
 

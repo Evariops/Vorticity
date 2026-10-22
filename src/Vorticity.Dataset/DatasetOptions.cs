@@ -58,6 +58,13 @@ public sealed record DatasetOptions
     internal long StreamedObjectBytes { get; init; } = ObjectSegmentSink.DefaultStreamedFromBytes;
 
     /// <summary>
+    /// The bytes of an object's footer from which a scan for an identifier's value finds the object's rows by its index
+    /// rather than open it: a mebibyte, unless a test asks for less. A lookup reads a few kilobytes a column, each column
+    /// asked for apart, where an open reads the footer whole: under a mebibyte the open asks the store for less.
+    /// </summary>
+    internal long LookupFooterBytes { get; init; } = 1 << 20;
+
+    /// <summary>
     /// The bytes a rewrite announces to the store for each byte it reads, as the bound of an object it
     /// streams: <see cref="ObjectBound.OutPerIn"/>, unless a test asks for less to run past it.
     /// </summary>
