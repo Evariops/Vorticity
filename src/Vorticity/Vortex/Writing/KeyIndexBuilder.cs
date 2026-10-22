@@ -532,33 +532,50 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         // in their order. A sealed scratch is read a bucket at a time: its frames are opened by one cipher.
         int ahead = Lanes is { } lanes && !scratch.SealsFile ? Math.Clamp(lanes.Lanes, 1, BucketsAhead) : 1;
         BucketBuffers[] buffers = new BucketBuffers[ahead];
-        Task<int>[] sorting = new Task<int>[ahead];
+        Task<int>?[] sorting = new Task<int>?[ahead];
         int largest = buckets.Largest;
-        for (int slot = 0; slot < ahead && slot < buckets.Buckets; slot++)
+        try
         {
-            // Made once for the largest bucket, so that no bucket's sort grows them.
-            buffers[slot] = new BucketBuffers();
-            buffers[slot].Reserve(largest);
-            sorting[slot] = SortAheadAsync(buckets, slot, scratch, buffers[slot], ahead > 1, cancellationToken);
+            for (int slot = 0; slot < ahead && slot < buckets.Buckets; slot++)
+            {
+                // Made once for the largest bucket, so that no bucket's sort grows them.
+                buffers[slot] = new BucketBuffers();
+                buffers[slot].Reserve(largest);
+                sorting[slot] = SortAheadAsync(buckets, slot, scratch, buffers[slot], ahead > 1, cancellationToken);
+            }
+
+            for (int bucket = 0; bucket < buckets.Buckets; bucket++)
+            {
+                int slot = bucket % ahead;
+                int count = await sorting[slot]!.ConfigureAwait(false);
+                Feed(buffers[slot], count, split, main, last);
+                if (bucket + ahead < buckets.Buckets)
+                {
+                    sorting[slot] = SortAheadAsync(buckets, bucket + ahead, scratch, buffers[slot], ahead > 1, cancellationToken);
+                }
+
+                // The segments the bucket closed go out at once, where the writer can take them.
+                if (Stream is { } stream)
+                {
+                    mainSent = Send(main, mainSent);
+                    lastSent = Send(last, lastSent);
+                    await stream(this, cancellationToken).ConfigureAwait(false);
+                }
+            }
         }
-
-        for (int bucket = 0; bucket < buckets.Buckets; bucket++)
+        catch
         {
-            int slot = bucket % ahead;
-            int count = await sorting[slot].ConfigureAwait(false);
-            Feed(buffers[slot], count, split, main, last);
-            if (bucket + ahead < buckets.Buckets)
+            // The buckets sorted ahead read the scratch the writer lets go once this fails: they end first, and what they
+            // threw is this failure's.
+            foreach (Task<int>? sort in sorting)
             {
-                sorting[slot] = SortAheadAsync(buckets, bucket + ahead, scratch, buffers[slot], ahead > 1, cancellationToken);
+                if (sort is not null)
+                {
+                    await ((Task)sort).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                }
             }
 
-            // The segments the bucket closed go out at once, where the writer can take them.
-            if (Stream is { } stream)
-            {
-                mainSent = Send(main, mainSent);
-                lastSent = Send(last, lastSent);
-                await stream(this, cancellationToken).ConfigureAwait(false);
-            }
+            throw;
         }
 
         if (main is not null)
