@@ -38,7 +38,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// file that <c>--compare</c> reads back.
 /// </para>
 /// </remarks>
-internal static class PathsBench
+internal static partial class PathsBench
 {
     /// <summary>What a run asks for.</summary>
     internal sealed record Settings
@@ -150,6 +150,15 @@ internal static class PathsBench
 
         /// <summary>How long each question is asked untimed before its warm rounds, its code compiled past the JIT's first tier.</summary>
         internal double WarmSeconds { get; init; } = 3;
+
+        /// <summary>How long <c>--qps</c> asks the questions for a count of clients; 0, the default, for no throughput.</summary>
+        internal double QpsSeconds { get; init; }
+
+        /// <summary>The counts of clients <c>--qps</c> asks the questions with at once (<c>--clients</c>).</summary>
+        internal int[] Clients { get; init; } = [1, Environment.ProcessorCount];
+
+        /// <summary>Whether <c>--qps</c> also gives each question's asks and latencies (<c>--qps-by-question</c>).</summary>
+        internal bool QpsByQuestion { get; init; }
 
         internal string? Tsv { get; init; }
 
@@ -265,6 +274,15 @@ internal static class PathsBench
         if (settings.Qp)
         {
             questions = QpQuestions(settings, requests.Needle, spans!.Needle, half);
+        }
+
+        if (settings.QpsSeconds > 0)
+        {
+            Question[] asked = [.. questions.Where(question =>
+                settings.Only is not { } only || only.Split('|').Any(word => question.Name.Contains(word, StringComparison.OrdinalIgnoreCase)))];
+            await ThroughputAsync(
+                settings, asked, question => question.Set switch { "logs" => logs, "spans" => spans!, "logs2" => logs2!, _ => requests }, label);
+            return 0;
         }
 
         bool failed = false;
