@@ -1572,51 +1572,62 @@ internal static class DatasetCompactor
                 Timings?.AddDrain(Stopwatch.GetTimestamp() - draining);
             }
 
+            // The object is this method's from here: whatever fails gives it up, its upload included when it streams, since
+            // nothing else holds the draft any more.
             _draft = null;
             _lastKeyLength = -1;
-            await using (draft.Writer.ConfigureAwait(false))
+            SynopsisTables? synopsis = _synopsis;
+            _synopsis = null;
+            _slices = null;
+            _stream = null;
+            WrittenObject? written;
+            try
             {
-                if (_sorter is { } sorter)
+                await using (draft.Writer.ConfigureAwait(false))
                 {
-                    // A first pass counted these rows: every slice is written, or the passes disagree.
-                    _sorter = null;
-                    bool complete = sorter.Complete;
-                    SliceTable table = sorter.Table;
-                    sorter.Dispose();
-                    if (!complete)
+                    try
                     {
-                        throw new DatasetIntegrityException(
-                            $"The object of level {_level} wrote {_rows} rows where its slices hold {table.Rows}: the two passes of the job read different rows.");
+                        if (_sorter is { } sorter)
+                        {
+                            // A first pass counted these rows: every slice is written, or the passes disagree.
+                            _sorter = null;
+                            bool complete = sorter.Complete;
+                            SliceTable table = sorter.Table;
+                            sorter.Dispose();
+                            if (!complete)
+                            {
+                                throw new DatasetIntegrityException(
+                                    $"The object of level {_level} wrote {_rows} rows where its slices hold {table.Rows}: the two passes of the job read different rows.");
+                            }
+
+                            draft.Writer.DeclareSlices(InstantPath!, table);
+                        }
+
+                        long finishing = Stopwatch.GetTimestamp();
+                        if (synopsis is not null)
+                        {
+                            draft.Writer.DeclareSynopsisTables(await synopsis.FinishAsync(cancellationToken).ConfigureAwait(false));
+                        }
+
+                        long closing = Stopwatch.GetTimestamp();
+                        Timings?.AddTables(closing - finishing);
+                        await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+                        Timings?.AddClose(Stopwatch.GetTimestamp() - closing);
                     }
-
-                    draft.Writer.DeclareSlices(InstantPath!, table);
-                }
-
-                SynopsisTables? synopsis = _synopsis;
-                _synopsis = null;
-                _slices = null;
-                _stream = null;
-                try
-                {
-                    long finishing = Stopwatch.GetTimestamp();
-                    if (synopsis is not null)
+                    finally
                     {
-                        draft.Writer.DeclareSynopsisTables(await synopsis.FinishAsync(cancellationToken).ConfigureAwait(false));
+                        synopsis?.Dispose();
                     }
+                }
 
-                    long closing = Stopwatch.GetTimestamp();
-                    Timings?.AddTables(closing - finishing);
-                    await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
-                    Timings?.AddClose(Stopwatch.GetTimestamp() - closing);
-                }
-                finally
-                {
-                    synopsis?.Dispose();
-                }
+                written = await _dataset.SealAsync(draft, _rows, _firstRow, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                draft.Sink.Discard();
+                throw;
             }
 
-            WrittenObject? written = await _dataset
-                .SealAsync(draft, _rows, _firstRow, cancellationToken).ConfigureAwait(false);
             if (written is { } output)
             {
                 _written.Add(output);

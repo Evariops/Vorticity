@@ -2608,19 +2608,28 @@ public sealed class VortexDataset : IAsyncDisposable
         ObjectSummaries summaries;
         byte[] prefix;
         bool streamed = draft.Sink.IsStreamed;
-        if (!streamed)
+        try
         {
-            SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true, _options.Session.Options.EnginePool);
-            (summaries, prefix) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            (summaries, prefix) = (ObjectSummaries.Empty, []);
-        }
+            if (!streamed)
+            {
+                SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true, _options.Session.Options.EnginePool);
+                (summaries, prefix) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                (summaries, prefix) = (ObjectSummaries.Empty, []);
+            }
 
-        if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
+            if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
+            {
+                throw new ObjectStoreException($"'{draft.Key}' was taken, which a fresh uid cannot be.");
+            }
+        }
+        catch
         {
-            throw new ObjectStoreException($"'{draft.Key}' was taken, which a fresh uid cannot be.");
+            // Not put: the chunks the sink holds go back to their pool, and an upload it streams is given up.
+            draft.Sink.Discard();
+            throw;
         }
 
         // What the store holds, sealed bytes included: what a head reports, and verification checks.
