@@ -54,9 +54,12 @@ public sealed partial class LevelZeroMemoTests
         Assert.Equal(6, memo.Shredded);
     }
 
-    /// <summary>A budget too small for a copy: each question shreds for itself and keeps nothing, and answers alike.</summary>
+    /// <summary>
+    /// A budget too small for a copy: the memory asked before one is made, as large as the object, is refused, so each
+    /// question parses the object as it lies, no copy made, and answers alike.
+    /// </summary>
     [Fact]
-    public async Task ACopyTheBudgetRefusesServesItsQuestionAlone()
+    public async Task ACopyTheBudgetRefusesIsNeverMade()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexSession session = VortexSession.Create(static options => options.MemoryBudget = new QueryMemoryBudget(1_024));
@@ -67,6 +70,45 @@ public sealed partial class LevelZeroMemoTests
         Assert.Equal(Routes(rows), await RoutesAsync(dataset));
         Assert.Equal(0, dataset.LevelZero.Held);
         Assert.Equal(6, dataset.LevelZero.Refused);
+        Assert.Equal(0, dataset.LevelZero.Shredded);
+    }
+
+    /// <summary>
+    /// Three objects of level 0, a question on the rows of the first and one on the rows of the last: while every read of
+    /// the first object is held, the question on the last shreds its own object and answers; the first answers once its
+    /// reads go on. Neither waits on the other.
+    /// </summary>
+    [Fact]
+    public async Task TwoQuestionsOnTwoObjectsOfLevelZeroWaitForNoOther()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        HoldingStore store = new HoldingStore(inner);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { ClusteringKey = [nameof(Doc.Id)] }, Ct);
+        List<Doc> rows = await AppendAsync(dataset);
+        await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, Ct))
+        {
+            if (held.Entry.Summaries.TryGet(nameof(Doc.Id), out Vorticity.Scanning.ColumnSummary summary) && summary.Min.SignedValue == 0)
+            {
+                store.Holding = held.Entry.Key;
+            }
+        }
+
+        Assert.NotNull(store.Holding);
+        Task<List<string?>> first = RoutesAsync(dataset, r => r.Id < 2_000);
+        try
+        {
+            await store.Reached.Task.WaitAsync(Ct);
+            Assert.Equal(Routes([.. rows.Where(r => r.Id >= 4_000)]), await RoutesAsync(dataset, r => r.Id >= 4_000).WaitAsync(TimeSpan.FromMinutes(1), Ct));
+            Assert.False(first.IsCompleted);
+        }
+        finally
+        {
+            // Let go whatever happened, so that the dataset closes behind the question held.
+            store.Release.TrySetResult();
+        }
+
+        Assert.Equal(Routes([.. rows.Where(r => r.Id < 2_000)]), await first);
+        Assert.Equal(2, dataset.LevelZero.Shredded);
     }
 
     private static async Task<List<Doc>> AppendAsync(VortexDataset dataset)
@@ -90,6 +132,43 @@ public sealed partial class LevelZeroMemoTests
 
     private static async Task<List<string?>> RoutesAsync(VortexDataset dataset) =>
         [.. (await dataset.Scan<Doc>().Select(r => r.Attributes["route"].AsString()).ToListAsync(Ct)).Order(StringComparer.Ordinal)];
+
+    private static async Task<List<string?>> RoutesAsync(VortexDataset dataset, Func<Probe<Doc>, Predicate> where) =>
+        [.. (await dataset.Scan<Doc>().Where(where).Select(r => r.Attributes["route"].AsString()).ToListAsync(Ct)).Order(StringComparer.Ordinal)];
+
+    /// <summary>A store that holds every read of one object until the test lets them go on.</summary>
+    private sealed class HoldingStore(Vorticity.IO.IObjectStore inner) : ForwardingStore(inner)
+    {
+        /// <summary>The key of the object whose reads are held; null holds none.</summary>
+        internal string? Holding { get; set; }
+
+        /// <summary>Set once a read of the object is held.</summary>
+        internal TaskCompletionSource Reached { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Set by the test to let the reads go on.</summary>
+        internal TaskCompletionSource Release { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async ValueTask<Vorticity.IO.ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            await HoldAsync(key, cancellationToken);
+            return await Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+        }
+
+        public override async ValueTask<Vorticity.IO.ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
+        {
+            await HoldAsync(key, cancellationToken);
+            return await Inner.ReadTailAsync(key, destination, cancellationToken);
+        }
+
+        private async Task HoldAsync(string key, CancellationToken cancellationToken)
+        {
+            if (key == Holding)
+            {
+                Reached.TrySetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+        }
+    }
 
     [VortexRecord]
     public partial record struct Doc(long Id, Variant Attributes);
