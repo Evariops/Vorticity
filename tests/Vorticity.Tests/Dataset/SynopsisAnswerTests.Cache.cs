@@ -173,6 +173,62 @@ public sealed partial class SynopsisAnswerTests
         }
     }
 
+    /// <summary>
+    /// A region let go whose file the system will not delete yet, as Windows refuses while another process holds the file
+    /// without sharing its deletion: the file stays on the disk, counted among the bytes held, so the cache lets other
+    /// regions go in its place, and goes at a later eviction once the system lets it.
+    /// </summary>
+    [Fact]
+    public void AFileTheSystemWillNotDeleteYetGoesAtALaterEviction()
+    {
+        string directory = CacheDirectory();
+        try
+        {
+            using SynopsisCache cache = new SynopsisCache(directory, 4 << 20);
+            UInt128 uid = 0x6e;
+            List<(IndexSegment Region, int Bytes)> admitted = [];
+            IndexSegment Admitted(int seed)
+            {
+                byte[] bytes = new byte[100_000 + seed];
+                new Random(seed).NextBytes(bytes);
+                IndexSegment region = IndexSegment.Of(seed * 1_048_576L, bytes, 6);
+                cache.Admit(uid, region, bytes);
+                admitted.Add((region, bytes.Length));
+                return region;
+            }
+
+            long Live() => admitted.Where(a => cache.Holds(uid, a.Region)).Sum(a => (long)a.Bytes);
+
+            IndexSegment first = Admitted(1);
+            string file = Directory.GetFiles(directory, SynopsisCache.NameOf(uid, first), SearchOption.AllDirectories).Single();
+            bool refused = true;
+            cache.DeleteFault = path => refused && string.Equals(Path.GetFullPath(path), Path.GetFullPath(file), StringComparison.OrdinalIgnoreCase);
+            for (int seed = 2; cache.Holds(uid, first); seed++)
+            {
+                Assert.True(seed < 64, "the first region was never let go");
+                Admitted(seed);
+            }
+
+            Assert.True(System.IO.File.Exists(file));
+            Assert.Equal(Live() + admitted[0].Bytes, cache.HeldBytes);
+
+            // The next region comes in within the capacity, others let go in the file's place.
+            Admitted(64);
+            Assert.True(System.IO.File.Exists(file));
+            Assert.Equal(Live() + admitted[0].Bytes, cache.HeldBytes);
+            Assert.True(cache.HeldBytes <= 4 << 20, $"{cache.HeldBytes} bytes held, past the capacity");
+
+            refused = false;
+            Admitted(65);
+            Assert.False(System.IO.File.Exists(file));
+            Assert.Equal(Live(), cache.HeldBytes);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     /// <summary>A region whose file is flipped at any byte, or cut short at any length, is dropped, and kept again once read.</summary>
     [Fact]
     public void ARegionFlippedOrTornAnywhereIsDropped()

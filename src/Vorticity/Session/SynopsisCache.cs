@@ -98,6 +98,10 @@ public sealed class SynopsisCache : IDisposable
     private long _failedWrites;
     private int _disposed;
 
+    // The entries let go whose file did not go, a reader mapping it on Windows: counted among the bytes held until it does,
+    // and tried again at each eviction. Under the gate.
+    private readonly List<Entry> _doomed = [];
+
     /// <summary>Opens the cache in <paramref name="directory"/>, created if it does not exist, and walks what it holds.</summary>
     /// <param name="directory">The directory, which this cache owns while it is open.</param>
     /// <param name="capacityBytes">The bytes of regions it keeps at most.</param>
@@ -170,18 +174,13 @@ public sealed class SynopsisCache : IDisposable
         owner = null!;
         // The region's name made on the stack and looked up as it lies: a string made for each read was one an object
         // a question read.
-        Span<char> name = stackalloc char[MaxNameLength];
-        if (!name.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}", out int written))
-        {
-            return false;
-        }
-
-        if (TryPending(name[..written], out owner))
+        ReadOnlySpan<char> name = NameOf(uid, region, stackalloc char[MaxNameLength]);
+        if (TryPending(name, out owner))
         {
             return true;
         }
 
-        if (Find(name[..written]) is not { } entry)
+        if (Find(name) is not { } entry)
         {
             return false;
         }
@@ -451,10 +450,7 @@ public sealed class SynopsisCache : IDisposable
             pending.Owner.Release();
         }
 
-        foreach (Entry victim in evicted)
-        {
-            TryDelete(PathOf(victim));
-        }
+        Delete(evicted);
     }
 
     /// <summary>A fault a test raises before a region's file is written, given its path; null for none.</summary>
@@ -768,10 +764,7 @@ public sealed class SynopsisCache : IDisposable
             Enter(entry, 0, evicted);
         }
 
-        foreach (Entry victim in evicted)
-        {
-            TryDelete(PathOf(victim));
-        }
+        Delete(evicted);
     }
 
     /// <summary>Writes the file of <paramref name="entry"/>, under a temporary name then renamed, so a reader never sees half of it; false when the disk refused it.</summary>
@@ -907,10 +900,18 @@ public sealed class SynopsisCache : IDisposable
     }
 
     /// <summary>The file name of a region of an object: its uid, its place, its length and its checksum.</summary>
-    internal static string NameOf(UInt128 uid, IndexSegment region) => string.Create(
-        CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}");
+    internal static string NameOf(UInt128 uid, IndexSegment region) => new string(NameOf(uid, region, stackalloc char[MaxNameLength]));
 
-    /// <summary>The characters of a region's name at most (<see cref="NameOf"/>): a uid's 32, two places' 16 each, a checksum's 16 and three dashes.</summary>
+    /// <summary>
+    /// <see cref="NameOf(UInt128, IndexSegment)"/> written into <paramref name="room"/>, of <see cref="MaxNameLength"/>
+    /// characters: the one place the name's form is spelt, which a lookup reads as it lies, with no string made.
+    /// </summary>
+    private static ReadOnlySpan<char> NameOf(UInt128 uid, IndexSegment region, Span<char> room) =>
+        room.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}", out int written)
+            ? room[..written]
+            : throw new InvalidOperationException($"A region's name takes more than the {MaxNameLength} characters made for it.");
+
+    /// <summary>The characters of a region's name at most (<see cref="NameOf(UInt128, IndexSegment)"/>): a uid's 32, two places' 16 each, a checksum's 16 and three dashes.</summary>
     private const int MaxNameLength = 32 + 16 + 16 + 16 + 3;
 
     /// <summary>The file name of a frame of a sealed object: its uid, the frame's place in the object and its length.</summary>
@@ -984,10 +985,7 @@ public sealed class SynopsisCache : IDisposable
             Evict(evicted);
         }
 
-        foreach (Entry victim in evicted)
-        {
-            TryDelete(PathOf(victim));
-        }
+        Delete(evicted);
     }
 
     /// <summary>Puts an entry at the head of the small queue, or of the main one, the newest place.</summary>
@@ -1022,16 +1020,11 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>Whether the cache holds the region of object <paramref name="uid"/>, without reading it: no hit counted, no string made.</summary>
     internal bool Holds(UInt128 uid, IndexSegment region)
     {
-        Span<char> name = stackalloc char[MaxNameLength];
-        if (!name.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}", out int written))
-        {
-            return false;
-        }
-
+        ReadOnlySpan<char> name = NameOf(uid, region, stackalloc char[MaxNameLength]);
         lock (_gate)
         {
-            return _entries.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name[..written])
-                || (_pending.Count > 0 && _pending.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name[..written]));
+            return _entries.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name)
+                || (_pending.Count > 0 && _pending.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name));
         }
     }
 
@@ -1120,20 +1113,104 @@ public sealed class SynopsisCache : IDisposable
             }
         }
 
-        TryDelete(PathOf(entry));
+        Delete([entry]);
     }
 
-    private static void TryDelete(string path)
+    /// <summary>
+    /// Deletes the files of the entries the cache let go, and tries again those an earlier deletion left. A file that does
+    /// not go, which a reader still maps on Windows, stays counted among the bytes held, so that the cache keeps its disk
+    /// within its capacity, and is tried again at the next eviction; one whose region the cache holds or writes again by
+    /// then is forgotten, its file the region's once more.
+    /// </summary>
+    private void Delete(List<Entry> evicted)
+    {
+        List<Entry>? again = null;
+        lock (_gate)
+        {
+            if (_doomed.Count > 0)
+            {
+                again = [];
+                foreach (Entry doomed in _doomed)
+                {
+                    if (_entries.ContainsKey(doomed.Name) || _pending.ContainsKey(doomed.Name))
+                    {
+                        Uncount(doomed);
+                    }
+                    else
+                    {
+                        again.Add(doomed);
+                    }
+                }
+
+                _doomed.Clear();
+            }
+        }
+
+        foreach (Entry victim in evicted)
+        {
+            if (!Deleted(victim))
+            {
+                lock (_gate)
+                {
+                    _doomed.Add(victim);
+                    _held += victim.Bytes;
+                    VortexTelemetry.SynopsisHolds(victim.Bytes);
+                }
+            }
+        }
+
+        foreach (Entry victim in again ?? [])
+        {
+            bool gone = Deleted(victim);
+            lock (_gate)
+            {
+                if (gone)
+                {
+                    Uncount(victim);
+                }
+                else
+                {
+                    _doomed.Add(victim);
+                }
+            }
+        }
+    }
+
+    /// <summary>Whether the file of an entry let go is deleted: false while the system refuses, or a test does (<see cref="DeleteFault"/>).</summary>
+    private bool Deleted(Entry victim)
+    {
+        string path = PathOf(victim);
+        return DeleteFault?.Invoke(path) != true && TryDelete(path);
+    }
+
+    /// <summary>
+    /// A test's refusal to delete a file the cache let go, given its path, as the system refuses while another process
+    /// holds the file without sharing its deletion: true refuses it. Null, the default, refuses none.
+    /// </summary>
+    internal Func<string, bool>? DeleteFault { get; set; }
+
+    /// <summary>Takes the bytes of a file that went, or became an entry's again, out of those held. Under the gate.</summary>
+    private void Uncount(Entry doomed)
+    {
+        _held -= doomed.Bytes;
+        VortexTelemetry.SynopsisHolds(-doomed.Bytes);
+    }
+
+    /// <summary>Deletes a file; false when it is still there, the system refusing.</summary>
+    private static bool TryDelete(string path)
     {
         try
         {
             System.IO.File.Delete(path);
+            return true;
         }
         catch (IOException)
         {
+            return false;
         }
         catch (UnauthorizedAccessException)
         {
+            return false;
         }
     }
 
