@@ -34,6 +34,13 @@ namespace Vorticity.Scanning;
 /// over an uncorrelated column a window of n entries can touch n splits -- and the metrics sink
 /// counts the windows and the splits they touched so a caller can tell which case it is in.
 /// </para>
+/// <para>
+/// A batch is the enumerator's, valid until the next <c>MoveNextAsync</c>, which disposes it and binds
+/// the next window into the same object. Over a source of time slices, a window's batch references the
+/// records of its slice, decoded whole for every window of it, which the decode of the next slice
+/// resets: the batch of a window never outlives it, so the next slice is decoded only once it is
+/// released.
+/// </para>
 /// </remarks>
 internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
 {
@@ -503,6 +510,8 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         /// </summary>
         private async ValueTask DecodeSliceAsync(int slice)
         {
+            // The batch of the window before references the slice before's records, which the reset below lets go.
+            System.Diagnostics.Debug.Assert(!_hasCurrent, "A slice is decoded while a window's batch still references the one before.");
             TimeSlice span = _sliced!.SliceAt(slice);
             ScanContext context = _sliceContext ??= new ScanContext(_scan.File) { Metrics = _scan.Metrics };
             context.ResetBatch();

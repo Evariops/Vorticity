@@ -528,13 +528,17 @@ internal sealed class FieldMaskBuilder
 /// </summary>
 internal static class FieldMasks
 {
-    /// <summary>The masks kept at most; one past them is built and not kept.</summary>
+    /// <summary>The masks kept at most; past them, a new one takes the place of the oldest.</summary>
     private const int Kept = 64;
 
     private static readonly object s_lock = new object();
 
     // Copied on write: a reader takes the array in hand and searches it without a lock.
     private static FieldMaskNode[] s_nodes = [];
+
+    // The place the next mask takes once every place is: the oldest's, so that a workload's masks take the places of those
+    // an earlier one asked for, where the first sixty-four asked kept theirs for the process. Under the lock.
+    private static int s_oldest;
 
     /// <summary>The mask of <paramref name="fields"/>, ascending and distinct, each wanted whole.</summary>
     internal static FieldMask Of(ReadOnlySpan<int> fields)
@@ -559,6 +563,13 @@ internal static class FieldMasks
             if (s_nodes.Length < Kept)
             {
                 s_nodes = [.. s_nodes, made];
+            }
+            else
+            {
+                FieldMaskNode[] next = [.. s_nodes];
+                next[s_oldest] = made;
+                s_oldest = (s_oldest + 1) % Kept;
+                s_nodes = next;
             }
         }
 

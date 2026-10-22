@@ -736,8 +736,9 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// <summary>
     /// The chunks of <paramref name="wanted"/>, read into <paramref name="requests"/>, each decoded into <paramref name="context"/>'s
     /// arena at its table's row type, only the fields <paramref name="reads"/> names of it; a chunk whose region does not hold
-    /// its checksum, or does not decode, is left out. The checksums of regions the synopsis cache served, which verified
-    /// them, are not reckoned again (<paramref name="verified"/>).
+    /// its checksum, or does not decode, is left out, and counted (<c>vortex.synopsis_tables.corrupt</c>): its object is read
+    /// as rows. The checksums of regions the synopsis cache served, which verified them, are not reckoned again
+    /// (<paramref name="verified"/>).
     /// </summary>
     private static SynopsisTableSet Decoded(
         ScanContext context, Wanted[] wanted, IO.SegmentRequestSet requests, ScanContexts? pool, ISynopsisReads? reads, bool verified)
@@ -750,6 +751,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             Buffers.VortexBuffer bytes = requests.GetBuffer(slot);
             if (!verified && !chunk.Region.Holds(bytes.Span))
             {
+                VortexTelemetry.SynopsisTableCorruption();
                 continue;
             }
 
@@ -782,6 +784,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             }
             catch (VortexFormatException)
             {
+                VortexTelemetry.SynopsisTableCorruption();
             }
             finally
             {
