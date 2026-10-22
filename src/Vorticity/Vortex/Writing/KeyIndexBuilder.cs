@@ -494,6 +494,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
         RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
         await buckets.SpillAsync(scratch, cancellationToken).ConfigureAwait(false);
+        await buckets.RefineAsync(scratch, cancellationToken).ConfigureAwait(false);
         bool tail = BlockRows > 0 && _row % BlockRows != 0;
         long tailPairs = tail ? buckets.Pairs - PairsBefore(_lastChunkBlock) : 0;
         int mainEnd = tail ? _lastChunkBlock : _lastChunkBlock + _lastChunkBlocks;
