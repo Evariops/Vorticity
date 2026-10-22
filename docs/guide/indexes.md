@@ -240,9 +240,23 @@ DatasetOptions options = new DatasetOptions
 Every object the dataset writes then carries hashed postings on the column, appends and compactions
 alike, exempt from the index budget as the clustering key's run is. A lookup of one id reads one segment
 of about 44 KiB per object, then only the blocks that hold it, and about one probe in a thousand keeps a
-block that does not. On ids of 32 hexadecimal digits the postings take under 3 bytes a row, where a
-sorted run took 19.5. No Bloom filter is tried on an identifier: its values are as many as its rows,
+block that does not. No Bloom filter is tried on an identifier: its values are as many as its rows,
 and a tree of filters loses its upper nodes past what one filter holds.
+
+The postings cost about 4 bytes a row when each row holds a value of its own, whatever their order: a
+pair of a fingerprint and a block per row, where a sorted run took 19.5. A value several neighbouring
+rows share costs less, a pair per block and value. Measured on a day's objects:
+
+| rows of a day | identifier | postings | a row | share of the object |
+|---|---|---|---|---|
+| 4.32 × 10⁹ requests, ids in the rows' order | `RequestId` | 18.0 GB | 4.17 bytes | 17.6 % |
+| the same, ids of 32 random hexadecimal digits | `RequestId` | 18.0 GB | 4.17 bytes | 11.1 % |
+| 432 × 10⁶ spans | `TraceId`, a dozen spans each | 1.07 GB | 2.48 bytes | 4.9 % |
+| 432 × 10⁶ spans | `SpanId` | 1.58 GB | 3.66 bytes | 7.2 % |
+
+Random ids leave the share lower only because the object itself compresses worse, by 58 %. Declare a
+column whose values questions look up one at a time, and no other: a column they filter or group by
+is answered by the synopses, and a key of a variant column they filter on is declared shredded, below.
 
 An identifier may also be a key of a variant column, read as a string or an integer, written as a filter
 writes it:
