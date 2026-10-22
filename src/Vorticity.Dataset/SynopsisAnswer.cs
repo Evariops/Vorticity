@@ -609,7 +609,7 @@ internal sealed record SynopsisAnswer(
         }
 
         DType dtype = schema.GetField(key);
-        KeyShape shape = KeyShape.Of(dtype);
+        SynopsisKeyShape shape = SynopsisKeyShape.Of(dtype);
         if (chunks is not { Count: > 1 } || dtype.Kind == DTypeKind.Extension || shape.Form == KeyForm.Float || !AnyBounded(chunks))
         {
             return null;
@@ -660,7 +660,7 @@ internal sealed record SynopsisAnswer(
     }
 
     /// <summary>The value a component of a run's key holds, as a filter's literal; null for none, or a null.</summary>
-    private static FilterLiteral? Literal(ReadOnlySpan<byte> component, KeyShape shape)
+    private static FilterLiteral? Literal(ReadOnlySpan<byte> component, SynopsisKeyShape shape)
     {
         if (component.IsEmpty)
         {

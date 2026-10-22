@@ -125,7 +125,7 @@ internal sealed partial class SynopsisTables : IDisposable
     private int[] _keys = [];
     private int _first;
     private bool _settled;
-    private KeyShape[] _keyShapes = [];
+    private SynopsisKeyShape[] _keyShapes = [];
 
     // The columns of the slice being counted's paths, in its batch's arena, -1 for a path not read.
     private IReadOnlyList<int> _pathColumns = [];
@@ -607,7 +607,7 @@ internal sealed partial class SynopsisTables : IDisposable
     /// rows of the slices' table and a run of the hour's.
     /// </summary>
     private async ValueTask ValuesAsync(
-        int slot, long start, CanonicalArena arena, int root, int rows, int column, KeyShape shape, int[] valueCodes, int distinct,
+        int slot, long start, CanonicalArena arena, int root, int rows, int column, SynopsisKeyShape shape, int[] valueCodes, int distinct,
         CancellationToken cancellationToken)
     {
         // A null codes after every value: a group of its own, which a path's counts leave out.
@@ -633,7 +633,7 @@ internal sealed partial class SynopsisTables : IDisposable
     /// slice does not hold: a run of the hour's, which its end merges into the rows of the hour's table and of the slices'.
     /// </summary>
     private async ValueTask EmitValuesAsync(
-        int slot, long start, CanonicalArena arena, int column, KeyShape shape, Accumulators states, int[] first, int kept,
+        int slot, long start, CanonicalArena arena, int column, SynopsisKeyShape shape, Accumulators states, int[] first, int kept,
         CancellationToken cancellationToken)
     {
         Growth? growth = Counts(_values[slot], _valueGrowth[slot]);
@@ -771,10 +771,10 @@ internal sealed partial class SynopsisTables : IDisposable
         _keys = [.. keys];
         int depth = _keys.Length;
         _first = _measures.Length > 0 ? 0 : 1;
-        _keyShapes = new KeyShape[depth];
+        _keyShapes = new SynopsisKeyShape[depth];
         for (int k = 0; k < depth; k++)
         {
-            _keyShapes[k] = KeyShape.Of(KeyType(_keys[k]));
+            _keyShapes[k] = SynopsisKeyShape.Of(KeyType(_keys[k]));
         }
 
         _runs = new Candidate?[depth + 1];
@@ -796,7 +796,7 @@ internal sealed partial class SynopsisTables : IDisposable
         _valueSum = new long[depth + _counted.Length];
         for (int c = 0; c < _counted.Length; c++)
         {
-            _values[depth + c] = Add(SynopsisTableKind.Values, SynopsisBucket.Hour, [_counted[c]], [KeyShape.Of(KeyType(_counted[c]))]);
+            _values[depth + c] = Add(SynopsisTableKind.Values, SynopsisBucket.Hour, [_counted[c]], [SynopsisKeyShape.Of(KeyType(_counted[c]))]);
         }
 
         for (int d = _first; d <= depth; d++)
@@ -860,7 +860,7 @@ internal sealed partial class SynopsisTables : IDisposable
     /// of sketches, a sketch of each of those measures, and with <paramref name="distinctBelow"/> the distinct sketches of
     /// the keys deeper than its own.
     /// </summary>
-    private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes, bool bounded = false, bool distinctBelow = true)
+    private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, SynopsisKeyShape[] shapes, bool bounded = false, bool distinctBelow = true)
     {
         List<int> measures = [];
         List<int> sketched = [];
@@ -980,9 +980,9 @@ internal sealed partial class SynopsisTables : IDisposable
     /// hour, then of their values, then of their slices, and a question of a few values reads the chunks that hold them;
     /// the hour's table takes each value once, the states of its records merged.
     /// </summary>
-    private async ValueTask MergeValuesAsync(int slot, KeyShape[] shapes, CancellationToken cancellationToken)
+    private async ValueTask MergeValuesAsync(int slot, SynopsisKeyShape[] shapes, CancellationToken cancellationToken)
     {
-        using RunMerger merger = await RunMerger.OpenAsync(_hourScratch!, _valueRuns[slot], shapes, 1, _kinds, cancellationToken).ConfigureAwait(false);
+        using SynopsisRunMerger merger = await SynopsisRunMerger.OpenAsync(_hourScratch!, _valueRuns[slot], shapes, 1, _kinds, cancellationToken).ConfigureAwait(false);
         bool any = false;
         while (await merger.MoveNextRecordAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -1062,7 +1062,7 @@ internal sealed partial class SynopsisTables : IDisposable
         }
 
         int fed = -1;
-        using (RunMerger merger = await RunMerger.OpenAsync(scratch, runs, _keyShapes, depth, _kinds, cancellationToken).ConfigureAwait(false))
+        using (SynopsisRunMerger merger = await SynopsisRunMerger.OpenAsync(scratch, runs, _keyShapes, depth, _kinds, cancellationToken).ConfigureAwait(false))
         {
             while (await merger.MoveNextAsync(cancellationToken).ConfigureAwait(false))
             {
@@ -1834,7 +1834,7 @@ internal sealed partial class SynopsisTables : IDisposable
     /// being filled, and what the writer holds of it so far.
     /// </summary>
     private sealed class Candidate(
-        SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, int[] measures, KeyShape[] shapes, DType rowType, ChunkStage stage)
+        SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, int[] measures, SynopsisKeyShape[] shapes, DType rowType, ChunkStage stage)
     {
         internal SynopsisTableKind Kind { get; } = kind;
 
@@ -1860,7 +1860,7 @@ internal sealed partial class SynopsisTables : IDisposable
         /// </summary>
         internal (DType Main, DType Distinct)? Apart { get; init; }
 
-        internal KeyShape[] Shapes { get; } = shapes;
+        internal SynopsisKeyShape[] Shapes { get; } = shapes;
 
         internal DType RowType { get; } = rowType;
 

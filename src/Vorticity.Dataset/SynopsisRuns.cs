@@ -33,10 +33,10 @@ internal enum MeasureKind : byte
 }
 
 /// <summary>A key's form, the width of a fixed one, and the primitive it is stored as.</summary>
-internal readonly record struct KeyShape(KeyForm Form, int Width, PType PType)
+internal readonly record struct SynopsisKeyShape(KeyForm Form, int Width, PType PType)
 {
     /// <summary>The shape of the values of <paramref name="dtype"/>, its storage's: a primitive of a width, a boolean, or bytes.</summary>
-    internal static KeyShape Of(DType dtype)
+    internal static SynopsisKeyShape Of(DType dtype)
     {
         while (dtype.Kind == DTypeKind.Extension)
         {
@@ -45,10 +45,10 @@ internal readonly record struct KeyShape(KeyForm Form, int Width, PType PType)
 
         return dtype.Kind switch
         {
-            DTypeKind.Primitive => new KeyShape(
+            DTypeKind.Primitive => new SynopsisKeyShape(
                 dtype.PType.IsFloat() ? KeyForm.Float : dtype.PType.IsUnsignedInteger() ? KeyForm.Unsigned : KeyForm.Signed, dtype.PType.ByteWidth(), dtype.PType),
-            DTypeKind.Bool => new KeyShape(KeyForm.Bool, 1, default),
-            _ => new KeyShape(KeyForm.Bytes, 0, default),
+            DTypeKind.Bool => new SynopsisKeyShape(KeyForm.Bool, 1, default),
+            _ => new SynopsisKeyShape(KeyForm.Bytes, 0, default),
         };
     }
 }
@@ -62,7 +62,7 @@ internal readonly record struct KeyShape(KeyForm Form, int Width, PType PType)
 internal static class KeyCodec
 {
     /// <summary>Appends the value of row <paramref name="row"/> of canonical column <paramref name="column"/>, of <paramref name="shape"/>.</summary>
-    internal static void Append(RunBuffer into, CanonicalArena arena, int column, int row, KeyShape shape)
+    internal static void Append(RunBuffer into, CanonicalArena arena, int column, int row, SynopsisKeyShape shape)
     {
         ref readonly CanonicalRecord record = ref arena.RecordRef(column);
         if (record.Kind == CanonicalKind.Null || !ArenaWords.IsValid(arena, column, row))
@@ -89,7 +89,7 @@ internal static class KeyCodec
     }
 
     /// <summary>Reads the component at <paramref name="at"/>: whether it holds a value, the value's bytes, and where the next starts.</summary>
-    internal static int Read(ReadOnlySpan<byte> key, int at, KeyShape shape, out bool valid, out ReadOnlySpan<byte> payload)
+    internal static int Read(ReadOnlySpan<byte> key, int at, SynopsisKeyShape shape, out bool valid, out ReadOnlySpan<byte> payload)
     {
         valid = key[at++] != 0;
         if (!valid)
@@ -112,7 +112,7 @@ internal static class KeyCodec
     /// How keys <paramref name="left"/> and <paramref name="right"/> compare over their first <paramref name="components"/>
     /// components, and the first component they differ at, <paramref name="components"/> when they agree.
     /// </summary>
-    internal static int Compare(ReadOnlySpan<KeyShape> shapes, int components, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, out int differs)
+    internal static int Compare(ReadOnlySpan<SynopsisKeyShape> shapes, int components, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, out int differs)
     {
         // A component whose bytes the two keys share is the same component in both, its encoding delimiting itself, and so
         // equal: the components the keys' common prefix holds whole are stepped over by their lengths alone, and only the
@@ -149,7 +149,7 @@ internal static class KeyCodec
     }
 
     /// <summary>Where the component at <paramref name="at"/> of <paramref name="key"/> ends, its value not read.</summary>
-    private static int Skip(ReadOnlySpan<byte> key, int at, KeyShape shape)
+    private static int Skip(ReadOnlySpan<byte> key, int at, SynopsisKeyShape shape)
     {
         if (key[at++] == 0)
         {
@@ -171,7 +171,7 @@ internal static class KeyCodec
     }
 
     /// <summary>The bytes the first <paramref name="components"/> components of <paramref name="key"/> take.</summary>
-    internal static int Prefix(ReadOnlySpan<KeyShape> shapes, int components, ReadOnlySpan<byte> key)
+    internal static int Prefix(ReadOnlySpan<SynopsisKeyShape> shapes, int components, ReadOnlySpan<byte> key)
     {
         int at = 0;
         for (int k = 0; k < components; k++)
@@ -182,7 +182,7 @@ internal static class KeyCodec
         return at;
     }
 
-    private static int Compare(KeyShape shape, bool leftValid, ReadOnlySpan<byte> left, bool rightValid, ReadOnlySpan<byte> right)
+    private static int Compare(SynopsisKeyShape shape, bool leftValid, ReadOnlySpan<byte> left, bool rightValid, ReadOnlySpan<byte> right)
     {
         if (!leftValid || !rightValid)
         {
@@ -421,7 +421,7 @@ internal sealed class SliceKeys : IDisposable
     /// row of each in <paramref name="firsts"/>, each group's parent at the depth above in <paramref name="parents"/>, the
     /// depth's values in <paramref name="columns"/> of <paramref name="arena"/>, of <paramref name="shapes"/>.
     /// </summary>
-    internal void Build(CanonicalArena arena, int[] columns, KeyShape[] shapes, int[] counts, int[][] firsts, int[][] parents, int deepest)
+    internal void Build(CanonicalArena arena, int[] columns, SynopsisKeyShape[] shapes, int[] counts, int[][] firsts, int[][] parents, int deepest)
     {
         Grow(deepest, counts);
         _bytes[0].Clear();
@@ -502,12 +502,12 @@ internal readonly record struct RunSpan(long At, long Length, int Components);
 /// Reads a run's records in order from its scratch store, a block at a time: each record's key, cut to the first
 /// <c>components</c> of the components it holds, and its states' words.
 /// </summary>
-internal sealed class RunCursor : IDisposable
+internal sealed class SynopsisRunCursor : IDisposable
 {
     private const int BlockBytes = 1 << 18;
 
     private readonly RunScratch _scratch;
-    private readonly KeyShape[] _shapes;
+    private readonly SynopsisKeyShape[] _shapes;
     private readonly int _components;
     private readonly int _stored;
     private readonly int _words;
@@ -520,7 +520,7 @@ internal sealed class RunCursor : IDisposable
     private int _keyEnd;
     private int _wordsAt;
 
-    internal RunCursor(RunScratch scratch, RunSpan run, KeyShape[] shapes, int components, int words)
+    internal SynopsisRunCursor(RunScratch scratch, RunSpan run, SynopsisKeyShape[] shapes, int components, int words)
     {
         _scratch = scratch;
         _shapes = shapes;
@@ -608,7 +608,7 @@ internal sealed class RunCursor : IDisposable
     }
 
     /// <summary>Whether <paramref name="held"/> holds the whole component at <paramref name="at"/>, and where the next starts.</summary>
-    private static bool Holds(ReadOnlySpan<byte> held, int at, KeyShape shape, out int next)
+    private static bool Holds(ReadOnlySpan<byte> held, int at, SynopsisKeyShape shape, out int next)
     {
         next = at;
         if (at >= held.Length)
@@ -674,9 +674,9 @@ internal sealed class RunCursor : IDisposable
 /// a record costs a comparison a level of the tree, where a heap's took two to take its least and more to put the
 /// next one back.
 /// </summary>
-internal sealed class RunMerger : IDisposable
+internal sealed class SynopsisRunMerger : IDisposable
 {
-    private readonly KeyShape[] _shapes;
+    private readonly SynopsisKeyShape[] _shapes;
     private readonly int _components;
     private readonly MeasureKind[] _kinds;
     private readonly RunBuffer _key = new RunBuffer();
@@ -684,29 +684,29 @@ internal sealed class RunMerger : IDisposable
 
     // Each run's cursor by its place, null once the run is read; and the tree: the place of the run whose record is
     // least at its root, 0, and at each node past it the place of the run that lost there.
-    private readonly RunCursor?[] _cursors;
+    private readonly SynopsisRunCursor?[] _cursors;
     private readonly int[] _tree;
 
-    private RunMerger(KeyShape[] shapes, int components, MeasureKind[] kinds, int words, int runs)
+    private SynopsisRunMerger(SynopsisKeyShape[] shapes, int components, MeasureKind[] kinds, int words, int runs)
     {
         _shapes = shapes;
         _components = components;
         _kinds = kinds;
         _words = new long[words];
-        _cursors = new RunCursor?[runs];
+        _cursors = new SynopsisRunCursor?[runs];
         _tree = new int[Math.Max(runs, 1)];
     }
 
     /// <summary>A merge of <paramref name="runs"/> of <paramref name="scratch"/>, their keys cut to <paramref name="components"/>.</summary>
-    internal static async ValueTask<RunMerger> OpenAsync(
-        RunScratch scratch, IReadOnlyList<RunSpan> runs, KeyShape[] shapes, int components, MeasureKind[] kinds, CancellationToken cancellationToken)
+    internal static async ValueTask<SynopsisRunMerger> OpenAsync(
+        RunScratch scratch, IReadOnlyList<RunSpan> runs, SynopsisKeyShape[] shapes, int components, MeasureKind[] kinds, CancellationToken cancellationToken)
     {
-        RunMerger merger = new RunMerger(shapes, components, kinds, StateWords.Count(kinds), runs.Count);
+        SynopsisRunMerger merger = new SynopsisRunMerger(shapes, components, kinds, StateWords.Count(kinds), runs.Count);
         try
         {
             for (int r = 0; r < runs.Count; r++)
             {
-                RunCursor cursor = new RunCursor(scratch, runs[r], shapes, components, merger._words.Length);
+                SynopsisRunCursor cursor = new SynopsisRunCursor(scratch, runs[r], shapes, components, merger._words.Length);
                 if (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
                 {
                     merger._cursors[r] = cursor;
@@ -779,7 +779,7 @@ internal sealed class RunMerger : IDisposable
     /// <summary>Moves run <paramref name="place"/>'s cursor past its record, and plays its next one up the tree.</summary>
     private async ValueTask AdvanceAsync(int place, CancellationToken cancellationToken)
     {
-        RunCursor cursor = _cursors[place]!;
+        SynopsisRunCursor cursor = _cursors[place]!;
         if (!await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
         {
             cursor.Dispose();
@@ -838,8 +838,8 @@ internal sealed class RunMerger : IDisposable
     /// <summary>Whether run <paramref name="left"/>'s record comes before run <paramref name="right"/>'s: a run read comes last.</summary>
     private bool Less(int left, int right)
     {
-        RunCursor? a = _cursors[left];
-        RunCursor? b = _cursors[right];
+        SynopsisRunCursor? a = _cursors[left];
+        SynopsisRunCursor? b = _cursors[right];
         if (a is null || b is null)
         {
             return a is not null || (b is null && left < right);
@@ -869,9 +869,9 @@ internal sealed class RunMerger : IDisposable
 internal sealed class ChunkStage
 {
     /// <summary>How a sketch lies in a row: bytes, as a key of bytes does.</summary>
-    private static readonly KeyShape Sketched = new KeyShape(KeyForm.Bytes, 0, default);
+    private static readonly SynopsisKeyShape Sketched = new SynopsisKeyShape(KeyForm.Bytes, 0, default);
 
-    private readonly KeyShape[] _shapes;
+    private readonly SynopsisKeyShape[] _shapes;
     private readonly int _words;
     private readonly KeyColumn[] _keys;
     private readonly KeyColumn[] _sketches;
@@ -887,7 +887,7 @@ internal sealed class ChunkStage
     /// states, then <paramref name="sketches"/> sketches; with <paramref name="bounded"/>, one that bounds its first key's
     /// values, a chunk of a table of values in their order.
     /// </summary>
-    internal ChunkStage(KeyShape[] shapes, int[] words, int sketches = 0, bool bounded = false)
+    internal ChunkStage(SynopsisKeyShape[] shapes, int[] words, int sketches = 0, bool bounded = false)
     {
         _shapes = shapes;
         _bounded = bounded;
@@ -1110,7 +1110,7 @@ internal sealed class ChunkStage
     }
 
     /// <summary>A key column as its rows come: their values, fixed or of bytes, and which hold one.</summary>
-    private sealed class KeyColumn(KeyShape shape)
+    private sealed class KeyColumn(SynopsisKeyShape shape)
     {
         private byte[] _values = new byte[64];
         private int _valueBytes;

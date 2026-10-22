@@ -47,11 +47,11 @@ internal sealed partial class SynopsisTables
     private int[] _groupingRows = [];
 
     /// <summary>One grouping: its keys' places in the order, in its own order, their shapes, its tables and what feeds them.</summary>
-    private sealed class Grouping(int[] positions, KeyShape[] shapes)
+    private sealed class Grouping(int[] positions, SynopsisKeyShape[] shapes)
     {
         internal int[] Positions { get; } = positions;
 
-        internal KeyShape[] Shapes { get; } = shapes;
+        internal SynopsisKeyShape[] Shapes { get; } = shapes;
 
         // Its tables of states, by hour and by object; none for a grouping of one column, whose values' counts the order keeps.
         internal Candidate? Hourly { get; init; }
@@ -111,7 +111,7 @@ internal sealed partial class SynopsisTables
 
             seen.Add(set);
             int[] keys = new int[positions.Length];
-            KeyShape[] shapes = new KeyShape[positions.Length];
+            SynopsisKeyShape[] shapes = new SynopsisKeyShape[positions.Length];
             for (int i = 0; i < positions.Length; i++)
             {
                 keys[i] = _keys[positions[i]];
@@ -404,7 +404,7 @@ internal sealed partial class SynopsisTables
                 long runStart = -1;
                 long runLength = 0;
                 _run.Clear();
-                using (RunMerger merger = await RunMerger.OpenAsync(
+                using (SynopsisRunMerger merger = await SynopsisRunMerger.OpenAsync(
                     _hourScratch!, grouping.HourRuns, grouping.Shapes, grouping.Positions.Length, _kinds, cancellationToken).ConfigureAwait(false))
                 {
                     while (await merger.MoveNextAsync(cancellationToken).ConfigureAwait(false))
@@ -510,7 +510,7 @@ internal sealed partial class SynopsisTables
 
             if (grouping.Whole is { Dead: false } whole && grouping.WholeRuns.Count > 0)
             {
-                using RunMerger merger = await RunMerger.OpenAsync(
+                using SynopsisRunMerger merger = await SynopsisRunMerger.OpenAsync(
                     _wholeScratch!, grouping.WholeRuns, grouping.Shapes, grouping.Positions.Length, _kinds, cancellationToken).ConfigureAwait(false);
                 while (await merger.MoveNextAsync(cancellationToken).ConfigureAwait(false))
                 {

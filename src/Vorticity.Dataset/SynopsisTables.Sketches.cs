@@ -207,7 +207,7 @@ internal sealed partial class SynopsisTables
     /// a number's in its width, little-endian, and a float's zeros and NaNs each taken as one value first
     /// (<see cref="CardinalitySlot.Hash"/>).
     /// </summary>
-    private static ulong DistinctHash(ReadOnlySpan<byte> value, KeyShape shape)
+    private static ulong DistinctHash(ReadOnlySpan<byte> value, SynopsisKeyShape shape)
     {
         if (shape.Form != KeyForm.Float)
         {
@@ -594,7 +594,7 @@ internal sealed partial class SynopsisTables
     /// values, and the distinct sketch of each key deeper than theirs <c>keeps</c> names, found by the key's bytes, a
     /// float's zeros and NaNs written alike first, as a merge compares them.
     /// </summary>
-    private sealed class SketchGroups(MeasureKind[] kinds, int words, int depth, KeyShape[] shapes, bool[] keeps)
+    private sealed class SketchGroups(MeasureKind[] kinds, int words, int depth, SynopsisKeyShape[] shapes, bool[] keeps)
     {
         private Dictionary<byte[], int> _at = new Dictionary<byte[], int>(KeyBytes.Instance);
         private List<byte[]> _keys = [];
