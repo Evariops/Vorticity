@@ -48,10 +48,22 @@ internal static partial class CompactionPolicy
             loaded = Held(partitions[p], 0) > Held(partitions[loaded], 0) ? p : loaded;
         }
 
+        // The calendar is the dataset's: a seal weighs it on every partition's objects of its period, and a change it asks
+        // for takes effect past the newest instant of any partition.
+        long? newest = null;
+        foreach (List<List<CompactionInput>> partition in partitions)
+        {
+            if (NewestHeld(partition, key.InstantPath) is { } held)
+            {
+                newest = Math.Max(newest ?? long.MinValue, held);
+            }
+        }
+
+        PeriodCalendar calendar = PeriodCalendar.Of(dataset.Header, PeriodOptions.InstantOf(key));
         for (int i = 0; i < partitions.Count; i++)
         {
             int p = i == 0 ? loaded : i <= loaded ? i - 1 : i;
-            if (ChoosePeriodsOf(dataset, partitions[p], settings, taken, exitDue && p == loaded) is { } job)
+            if (ChoosePeriodsOf(dataset, partitions[p], settings, taken, exitDue && p == loaded, newest, period => PeersOf(partitions, p, period, key.InstantPath, calendar)) is { } job)
             {
                 return job;
             }
@@ -59,6 +71,54 @@ internal static partial class CompactionPolicy
 
         return null;
     }
+
+    /// <summary>
+    /// The largest object the partitions but <paramref name="sealing"/> sealed of the period from <paramref name="period"/>, its
+    /// bytes and rows, (0, 0) for none; null while one of them still holds rows of the period below the level of periods.
+    /// </summary>
+    private static (long Bytes, long Rows)? PeersOf(
+        List<List<List<CompactionInput>>> partitions, int sealing, long period, string path, PeriodCalendar calendar)
+    {
+        long end = calendar.Next(period);
+        (long Bytes, long Rows) largest = (0, 0);
+        for (int p = 0; p < partitions.Count; p++)
+        {
+            if (p == sealing)
+            {
+                continue;
+            }
+
+            List<List<CompactionInput>> levels = partitions[p];
+            for (int level = 0; level < levels.Count; level++)
+            {
+                foreach (CompactionInput input in levels[level])
+                {
+                    if (!MayHold(input.Entry, path, period, end))
+                    {
+                        continue;
+                    }
+
+                    if (level != PeriodLevels.Periods)
+                    {
+                        return null;
+                    }
+
+                    if (input.Entry.Bytes > largest.Bytes)
+                    {
+                        largest = (input.Entry.Bytes, input.Entry.Rows);
+                    }
+                }
+            }
+        }
+
+        return largest;
+    }
+
+    /// <summary>Whether an object may hold rows of <c>[start, end)</c>: its instants meet it, or its summaries do not bound them.</summary>
+    private static bool MayHold(ObjectEntry entry, string path, long start, long end) =>
+        !entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax
+        || column.Min.Kind != FilterLiteralKind.Signed || column.Max.Kind != FilterLiteralKind.Signed
+        || (column.Min.SignedValue < end && column.Max.SignedValue >= start);
 
     /// <summary>
     /// The levels of each partition, in the order of the partitions' values: every object of one value of the
@@ -133,10 +193,18 @@ internal static partial class CompactionPolicy
 
     /// <summary>
     /// <see cref="ChoosePeriods"/> over the levels of one partition, or of the whole dataset without partition
-    /// columns; <paramref name="exitDue"/> says whether level 0's exit is due for these objects.
+    /// columns; <paramref name="exitDue"/> says whether level 0's exit is due for these objects. With partitions,
+    /// <paramref name="newestOfAll"/> is the newest instant of any and <paramref name="peers"/> what the others sealed of a
+    /// period (<see cref="PeriodCut.Peers"/>), which a seal weighs the dataset's calendar on.
     /// </summary>
     private static CompactionJob? ChoosePeriodsOf(
-        PlannedVersion dataset, List<List<CompactionInput>> levels, CompactionOptions settings, HashSet<int> taken, bool exitDue)
+        PlannedVersion dataset,
+        List<List<CompactionInput>> levels,
+        CompactionOptions settings,
+        HashSet<int> taken,
+        bool exitDue,
+        long? newestOfAll = null,
+        Func<long, (long Bytes, long Rows)?>? peers = null)
     {
         ClusteringKey key = dataset.Key!;
         TimeUnit unit = PeriodOptions.InstantOf(key);
@@ -174,7 +242,7 @@ internal static partial class CompactionPolicy
                 inputs[0].Level, PeriodLevels.Periods, CompactionStyle.Periods, CompactionTrigger.Seal, inputs, long.MaxValue, 0)
             {
                 Range = LevelRange.Of(PeriodLevels.Periods, inputs, key),
-                Cut = new PeriodCut(calendar, null, Exit: false, Slices: true) { Newest = after },
+                Cut = new PeriodCut(calendar, null, Exit: false, Slices: true) { Newest = newestOfAll ?? after, Peers = peers is null ? (0, 0) : peers(sealing) },
             };
         }
 

@@ -30,9 +30,12 @@ internal sealed class PeriodCalendar
         _unit = unit;
     }
 
+    /// <summary>The length of a dataset whose header names none.</summary>
+    internal const SliceWidth DefaultLength = SliceWidth.Day;
+
     /// <summary>The calendar a header records, over an instant counted in <paramref name="unit"/>: a day for a header that names no length.</summary>
     internal static PeriodCalendar Of(CommitHeader header, TimeUnit unit) =>
-        new PeriodCalendar(header.PeriodLength ?? SliceWidth.Day, header.PeriodChanges, unit);
+        new PeriodCalendar(header.PeriodLength ?? DefaultLength, header.PeriodChanges, unit);
 
     /// <summary>The changes the dataset made, in order.</summary>
     internal IReadOnlyList<PeriodChange> Changes => _changes;
@@ -64,18 +67,21 @@ internal sealed class PeriodCalendar
     internal long Next(long start) => TimeSlicer.Next(start, _unit, LengthAt(start));
 
     /// <summary>
-    /// The change to <paramref name="length"/> past <paramref name="newest"/>: from the first boundary of
-    /// the coarser of it and the length that cuts the newest instant; null when that is the length already.
+    /// The change to <paramref name="length"/> past <paramref name="newest"/> and past the last change the calendar holds:
+    /// from the first boundary there of the coarser of it and the length the last change leaves; null when that is the
+    /// length already. A change that waits for its boundary is so never asked for twice, and one that undoes it follows
+    /// it, the changes staying in the order of their boundaries, which <see cref="LengthAt"/> reads them in.
     /// </summary>
     internal PeriodChange? ChangeTo(SliceWidth length, long newest)
     {
-        SliceWidth current = LengthAt(newest);
-        if (current == length)
+        SliceWidth last = _changes.Count > 0 ? _changes[^1].Length : _first;
+        if (last == length)
         {
             return null;
         }
 
-        SliceWidth coarser = length > current ? length : current;
-        return new PeriodChange(TimeSlicer.Next(TimeSlicer.Floor(newest, _unit, coarser), _unit, coarser), length);
+        long after = _changes.Count > 0 ? Math.Max(newest, _changes[^1].From) : newest;
+        SliceWidth coarser = length > last ? length : last;
+        return new PeriodChange(TimeSlicer.Next(TimeSlicer.Floor(after, _unit, coarser), _unit, coarser), length);
     }
 }

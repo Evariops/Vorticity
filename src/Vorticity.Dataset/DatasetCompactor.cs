@@ -479,11 +479,12 @@ internal static class DatasetCompactor
             Range = job.Range,
         };
 
-        // A seal weighs the period it wrote, and asks in the same commit for the length that load
-        // calls for, from past the newest instant: the periods already written keep their bounds.
+        // A seal weighs the period it wrote, once every partition sealed it, and asks in the same commit for
+        // the length that load calls for, from past the newest instant: the periods already written keep
+        // their bounds.
         List<DatasetOperation> operations = [replacement];
-        if (job.Cut is { Slices: true, Newest: { } newest } sealing && outputs.Written.Count == 1
-            && Reweigh(dataset, sealing, outputs.Written[0], newest) is { } change)
+        if (job.Cut is { Slices: true, Newest: { } newest, Peers: { } peers } sealing && outputs.Written.Count == 1
+            && Reweigh(dataset, sealing, outputs.Written[0], peers, newest) is { } change)
         {
             operations.Add(change);
         }
@@ -1096,28 +1097,35 @@ internal static class DatasetCompactor
     internal sealed record StreamPlan(TimeUnit Unit, int[] Candidates, long Target, long ExpectedRows, double PeriodSeconds);
 
     /// <summary>
-    /// The change of period length the load of the period a seal wrote calls for, or null: its bytes
-    /// and rows over its span of data time, its columns, the object cap, the erasure delay. A row's
-    /// bytes of data bound its widest column's, which keeps the chunk constraint on the safe side; the
-    /// object's indexes and synopsis tables belong to no column, and would make a small period's rows
-    /// look wide.
+    /// The change of period length the load of the period a seal wrote calls for, or null: the bytes and
+    /// rows over its span of data time of the period's largest object, the one written or the largest
+    /// another partition sealed of it (<paramref name="peers"/>), every constraint bounding an object and
+    /// each partition sealing its own; the columns, the object cap, the erasure delay. A row's bytes of data
+    /// bound its widest column's, which keeps the chunk constraint on the safe side; the object's indexes and
+    /// synopsis tables belong to no column, and would make a small period's rows look wide, so the object
+    /// written counts its data alone, and another its whole bytes, which errs on the same side.
     /// </summary>
-    private static DatasetOperation.ChangePeriodLength? Reweigh(VortexDataset dataset, PeriodCut cut, WrittenObject written, long newest)
+    private static DatasetOperation.ChangePeriodLength? Reweigh(
+        VortexDataset dataset, PeriodCut cut, WrittenObject written, (long Bytes, long Rows) peers, long newest)
     {
         ObjectEntry period = written.Entry;
         if (dataset.Key is not { } key || !period.Summaries.TryGet(key.InstantPath, out ColumnSummary instant)
-            || !instant.HasMin || instant.Min.Kind != Vorticity.Expressions.FilterLiteralKind.Signed || period.Rows == 0)
+            || !instant.HasMin || instant.Min.Kind != Vorticity.Expressions.FilterLiteralKind.Signed || period.Rows == 0
+            || newest == long.MaxValue)
         {
             return null;
         }
 
+        (long bytes, long rows, long data) = peers.Bytes > period.Bytes && peers.Rows > 0
+            ? (peers.Bytes, peers.Rows, peers.Bytes)
+            : (period.Bytes, period.Rows, written.DataBytes > 0 ? written.DataBytes : period.Bytes);
         long start = cut.Calendar.Floor(instant.Min.SignedValue);
         double seconds = (cut.Calendar.Next(start) - start) / (double)TimeSlicer.Units(TimeSpan.FromSeconds(1), cut.Unit);
         PeriodLoad load = new PeriodLoad(
-            period.Bytes / seconds,
-            period.Rows / seconds,
+            bytes / seconds,
+            rows / seconds,
             LeafColumns(dataset.Snapshot.Schema.DType),
-            (double)(written.DataBytes > 0 ? written.DataBytes : period.Bytes) / period.Rows,
+            (double)data / rows,
             dataset.Options.MaxObjectBytes,
             dataset.Snapshot.Header.ErasureDelay);
         SliceWidth length = PeriodLengths.Choose(load);

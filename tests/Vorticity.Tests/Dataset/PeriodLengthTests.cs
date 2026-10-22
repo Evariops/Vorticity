@@ -1,6 +1,6 @@
-// The length of a period: the cheapest calendar unit that holds the store's cap, the footer's chunk,
-// the purge's delay and the retention's share; the calendar that records its changes, each from a
-// boundary of both units; and a seal that weighs its period and records the length its load calls for.
+// The length of a period: the cheapest calendar unit that holds the store's cap, the footer's chunk
+// and the purge's delay; the calendar that records its changes, each from a boundary of both units and
+// past the one before; and a seal that weighs its period and records the length its load calls for.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -70,6 +70,27 @@ public sealed partial class PeriodLengthTests
     }
 
     /// <summary>
+    /// A change that waits for its boundary is not asked for again, and one that undoes it follows it, from the end of the
+    /// first period it cuts: the changes stay in the order of their boundaries, which the calendar reads them in.
+    /// </summary>
+    [Fact]
+    public void AChangeWaitingForItsBoundaryIsAskedForOnce()
+    {
+        long Micros(DateTimeOffset at) => at.ToUnixTimeMilliseconds() * 1000;
+        DateTimeOffset noon = new DateTimeOffset(2026, 10, 18, 12, 0, 0, TimeSpan.Zero);
+        PeriodChange toDays = new PeriodCalendar(SliceWidth.Hour, [], TimeUnit.Microseconds).ChangeTo(SliceWidth.Day, Micros(noon))!.Value;
+        PeriodCalendar waiting = new PeriodCalendar(SliceWidth.Hour, [toDays], TimeUnit.Microseconds);
+        Assert.Null(waiting.ChangeTo(SliceWidth.Day, Micros(noon.AddHours(2))));
+
+        PeriodChange back = waiting.ChangeTo(SliceWidth.Hour, Micros(noon.AddHours(2)))!.Value;
+        Assert.Equal(Micros(new DateTimeOffset(2026, 10, 20, 0, 0, 0, TimeSpan.Zero)), back.From);
+        PeriodCalendar both = new PeriodCalendar(SliceWidth.Hour, [toDays, back], TimeUnit.Microseconds);
+        Assert.Equal(SliceWidth.Hour, both.LengthAt(Micros(noon.AddHours(2))));
+        Assert.Equal(SliceWidth.Day, both.LengthAt(Micros(noon.AddHours(18))));
+        Assert.Equal(SliceWidth.Hour, both.LengthAt(back.From));
+    }
+
+    /// <summary>
     /// A seal weighs the period it wrote and records, in the same commit, the length its load calls for:
     /// a light dataset of hours goes to months from the next month. A change worked out on a calendar
     /// another writer changed first is dropped.
@@ -107,6 +128,15 @@ public sealed partial class PeriodLengthTests
 
         CommitResult stale = await dataset.CommitAsync([new DatasetOperation.ChangePeriodLength(change with { Length = SliceWidth.Day }, 0)], Ct);
         Assert.Equal(OperationOutcome.Dropped, Assert.Single(stale.Outcomes));
+
+        // On the calendar it was worked out on, a change to the length the calendar ends on already is dropped, and so is
+        // one that does not follow the last change.
+        long december = new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero).ToUnixTimeMilliseconds() * 1000;
+        CommitResult again = await dataset.CommitAsync([new DatasetOperation.ChangePeriodLength(change with { From = december }, 1)], Ct);
+        Assert.Equal(OperationOutcome.Dropped, Assert.Single(again.Outcomes));
+        CommitResult earlier = await dataset.CommitAsync([new DatasetOperation.ChangePeriodLength(change with { Length = SliceWidth.Day }, 1)], Ct);
+        Assert.Equal(OperationOutcome.Dropped, Assert.Single(earlier.Outcomes));
+        Assert.Equal(change, Assert.Single(dataset.Snapshot.Header.PeriodChanges));
     }
 
     [VortexRecord]

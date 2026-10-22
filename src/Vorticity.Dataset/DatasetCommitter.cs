@@ -280,6 +280,7 @@ internal static class DatasetCommitter
             SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired)
             {
                 WritePolicy = template.WritePolicy,
+                PeriodLength = template.PeriodLength,
                 PeriodChanges = template.PeriodChanges,
             };
             (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes, Relocation repack) =
@@ -1104,7 +1105,12 @@ internal static class DatasetCommitter
 
                 case DatasetOperation.ChangePeriodLength change:
                 {
-                    if (schema.PeriodChanges.Count != change.After)
+                    // Dropped when worked out on a calendar another writer changed first, when it asks for the length the
+                    // calendar ends on already, or when it does not follow the calendar's last change: the changes stay few,
+                    // and in the order of their boundaries, which a calendar reads them in.
+                    IReadOnlyList<PeriodChange> held = schema.PeriodChanges;
+                    SliceWidth last = held.Count > 0 ? held[^1].Length : schema.PeriodLength ?? PeriodCalendar.DefaultLength;
+                    if (held.Count != change.After || change.Change.Length == last || (held.Count > 0 && change.Change.From <= held[^1].From))
                     {
                         outcomes.Add(OperationOutcome.Dropped);
                     }
@@ -1347,6 +1353,9 @@ internal static class DatasetCommitter
 
         /// <summary>The indexes every writer builds, as the header records them.</summary>
         internal ReadOnlyMemory<byte> WritePolicy { get; set; }
+
+        /// <summary>The first period length, as the header records it; null for the default.</summary>
+        internal SliceWidth? PeriodLength { get; init; }
 
         /// <summary>The changes of the period length, as the header records them.</summary>
         internal IReadOnlyList<PeriodChange> PeriodChanges { get; set; } = [];

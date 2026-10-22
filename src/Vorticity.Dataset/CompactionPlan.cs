@@ -135,10 +135,18 @@ internal sealed record PeriodCut(PeriodCalendar Calendar, long? FreshAfter, bool
     internal TimeUnit Unit => Calendar.Unit;
 
     /// <summary>
-    /// For a seal, the newest instant the dataset held when it was planned: a change of length the
-    /// period it writes asks for takes effect past it.
+    /// For a seal, the newest instant the dataset held when it was planned, in any partition: a change of
+    /// length the period it writes asks for takes effect past it.
     /// </summary>
     internal long? Newest { get; init; }
+
+    /// <summary>
+    /// For a seal, the largest object the dataset's other partitions sealed of the period, its bytes and
+    /// rows, (0, 0) for none or without partitions: the length is weighed on the largest object of the
+    /// period, every one of which it bounds. Null while another partition still holds rows of the period
+    /// below the level of periods, when the seal weighs nothing, the period not yet sealed whole.
+    /// </summary>
+    internal (long Bytes, long Rows)? Peers { get; init; }
 
     /// <summary>The lateness horizon, in the instant's unit: in level 0's exit, a row of a period it has closed comes later than it.</summary>
     internal long Horizon { get; init; }
