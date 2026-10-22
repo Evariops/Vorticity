@@ -59,12 +59,14 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// chunks and columns, an object 17.5 KB lighter: an open reads the last 64 KB from an offset aligned on 64 bytes,
     /// up to 63 bytes more or less with the file's length, and five paths read 72 more over their four objects. The
     /// requests then fell back the same day, and those bytes with them: an entry keeps the chunks of the tables whose
-    /// lists would take 512 bytes or less, as all of these hours' do.
+    /// lists would take 512 bytes or less, as all of these hours' do. An answer then grew by a field, the values of
+    /// identifiers it takes for absent, and the path at eight lanes, which makes one for each lane's part, rose from
+    /// 27,288 bytes to 27,376 alone, past its ceiling, set again 2 % above.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["synopses: count by service"] = new(4, 6640, 0, 0, 25152),
-        ["synopses: count by service, at eight lanes"] = new(4, 6640, 0, 0, 27328),
+        ["synopses: count by service, at eight lanes"] = new(4, 6640, 0, 0, 27968),
         ["synopses: count by service and hour"] = new(4, 6640, 0, 0, 29888),
         ["synopses: by minute, the last hour, under a predicate"] = new(3, 101020, 2, 35424, 61440),
         ["synopses: an unaligned window"] = new(7, 107200, 2, 66728, 81280),

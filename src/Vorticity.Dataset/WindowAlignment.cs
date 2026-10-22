@@ -175,14 +175,18 @@ internal static class WindowAlignment
 
     /// <summary>
     /// Whether the object answers <paramref name="request"/> from its tables, with no row at the window's end
-    /// that <paramref name="side"/> sets, the other end left open.
+    /// that <paramref name="side"/> sets, the other end left open: under the values of identifiers the filter leaves
+    /// out, or with them taken for absent, as its scan answers.
     /// </summary>
     private static bool Answers(
         SynopsisContents contents, DType schema, (long, long) held, string instant, StateRequest request, IReadOnlyList<string>? identifiers,
         List<VortexExpr> others, VortexExpr side)
     {
         VortexExpr filter = others.Count == 0 ? side : Expr.And(And(others)!, side);
-        return SynopsisAnswer.Of(contents, schema, instant, request, filter, held, identifiers) is { Edges.Count: 0, Parts.Count: > 0 };
+        SynopsisQuestion question = new SynopsisQuestion(request, filter, instant, identifiers);
+        return (SynopsisAnswer.Of(question, contents, schema, held)
+                ?? (question.MayExclude ? SynopsisAnswer.Of(question, contents, schema, held, assumeAbsent: true) : null))
+            is { Edges.Count: 0, Parts.Count: > 0 };
     }
 
     /// <summary>The object's schema from its table of contents, or null when it does not decode.</summary>

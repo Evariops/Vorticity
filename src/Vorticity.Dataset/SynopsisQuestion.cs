@@ -11,7 +11,7 @@ namespace Vorticity.Dataset;
 /// object: its filter's conjuncts and the columns each reads, its keys of time, and the filter on keys the last answer
 /// built, which the next takes when the same conjuncts make it. An object's answer then builds its parts, its buckets
 /// and its edges alone
-/// (<see cref="SynopsisAnswer.Of(SynopsisQuestion, Indexes.SynopsisContents, Types.DType, ValueTuple{long, long}?, IReadOnlyDictionary{string, FilterLiteral}?, ValueTuple{long, long}?, bool)"/>).
+/// (<see cref="SynopsisAnswer.Of(SynopsisQuestion, Indexes.SynopsisContents, Types.DType, ValueTuple{long, long}?, IReadOnlyDictionary{string, FilterLiteral}?, ValueTuple{long, long}?, bool, bool)"/>).
 /// </summary>
 internal sealed class SynopsisQuestion
 {
@@ -44,6 +44,7 @@ internal sealed class SynopsisQuestion
             Conjuncts[c].CollectFields(columns);
             Columns[c] = [.. columns];
             ReadsPaths[c] = HoldsPath(Conjuncts[c]);
+            MayExclude |= Columns[c] is [string column] && identifiers is not null && Names(identifiers, column);
         }
 
         List<FunctionFieldExpr> times = [];
@@ -75,6 +76,12 @@ internal sealed class SynopsisQuestion
 
     /// <summary>The dataset's identifiers, whose values a filter may leave out.</summary>
     internal IReadOnlyList<string>? Identifiers { get; }
+
+    /// <summary>
+    /// Whether a conjunct reads an identifier alone, and may leave one of its values out: what an answer that takes
+    /// those values for absent from an object is asked for (<see cref="SynopsisAnswer.Absent"/>).
+    /// </summary>
+    internal bool MayExclude { get; }
 
     /// <summary>The filter's conjuncts: its operands under its conjunctions.</summary>
     internal VortexExpr[] Conjuncts { get; }
@@ -124,4 +131,18 @@ internal sealed class SynopsisQuestion
         VariantFilterExpr => true,
         _ => false,
     };
+
+    /// <summary>Whether <paramref name="identifiers"/> names <paramref name="column"/>.</summary>
+    private static bool Names(IReadOnlyList<string> identifiers, string column)
+    {
+        foreach (string identifier in identifiers)
+        {
+            if (string.Equals(identifier, column, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }

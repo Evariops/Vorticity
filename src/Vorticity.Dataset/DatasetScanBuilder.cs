@@ -817,8 +817,18 @@ internal sealed class DatasetScanBuilder
             && summary is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
             ? (summary.Min.SignedValue, summary.Max.SignedValue)
             : null;
-        return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
-            && SynopsisAnswer.Of(QuestionOf(request, key.InstantPath), contents, schema, instants, PartitionFilter.ValuesOf(held.Entry, key), within, held.Entry.HasDeletions) is { } answer
+        if (_version.Schema.ColumnsOf(schema, held.Entry.Key) is not null)
+        {
+            return default;
+        }
+
+        // An answer that cannot take the values of identifiers the filter leaves out of its tables, a distinct count
+        // from sketches, takes them for absent instead: the identifier's index says so before the tables answer.
+        SynopsisQuestion question = QuestionOf(request, key.InstantPath);
+        IReadOnlyDictionary<string, FilterLiteral>? partition = PartitionFilter.ValuesOf(held.Entry, key);
+        return (SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions)
+                ?? (question.MayExclude ? SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, assumeAbsent: true) : null))
+            is { } answer
             ? (answer, contents, key.InstantPath)
             : default;
     }
@@ -910,7 +920,7 @@ internal sealed class DatasetScanBuilder
     internal SynopsisAnswer? AnswerOf(in PositionedObject held, out bool light, out SynopsisContents? contents)
     {
         (SynopsisAnswer? answer, contents, _) = _states is { } request && _orderPaths is null && _take is null ? Answer(held, request) : default;
-        light = answer is { Edges.Count: 0, Excluded.Count: 0 } && !held.Entry.HasDeletions;
+        light = answer is { Edges.Count: 0, Excluded.Count: 0, Absent.Count: 0 } && !held.Entry.HasDeletions;
         return answer;
     }
 
@@ -1284,7 +1294,7 @@ internal sealed class DatasetScanBuilder
     private bool TryAnswerNow(PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, out AnsweredObject? answered)
     {
         answered = null;
-        if (held.Entry.HasDeletions || answer.Edges.Count > 0 || answer.Excluded.Count > 0 || answer.Parts.Count == 0)
+        if (held.Entry.HasDeletions || answer.Edges.Count > 0 || answer.Excluded.Count > 0 || answer.Absent.Count > 0 || answer.Parts.Count == 0)
         {
             return false;
         }
@@ -1358,6 +1368,11 @@ internal sealed class DatasetScanBuilder
         Task<List<RecordBatch>>? excluded = answer.Excluded.Count > 0 && answer.Parts.Count > 0
             ? ExcludedAsync(held, answer.Excluded, ExcludedColumns(answer, schema), cancellationToken)
             : null;
+
+        // The values the answer takes for absent, looked up beside the tables: a row that holds one sends the object to its rows.
+        Task<List<RecordBatch>>? present = answer.Absent.Count > 0 && answer.Parts.Count > 0
+            ? ExcludedAsync(held, answer.Absent, LeftOutColumns(answer.Absent, [], schema), cancellationToken)
+            : null;
         List<RecordBatch> states = [];
         SynopsisTableSet? tables = null;
         bool exact = true;
@@ -1372,6 +1387,12 @@ internal sealed class DatasetScanBuilder
                 }
 
                 tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer, cancellationToken).ConfigureAwait(false);
+                if (present is not null)
+                {
+                    List<RecordBatch> found = await present.ConfigureAwait(false);
+                    exact = !ReferenceEquals(found, Unfound) && found.TrueForAll(static batch => batch.SelectedRows == 0);
+                }
+
                 List<RecordBatch>? removed = marked is null ? null : await marked.ConfigureAwait(false);
                 if (excluded is not null)
                 {
@@ -1392,14 +1413,14 @@ internal sealed class DatasetScanBuilder
         }
         catch
         {
-            await LetGoAsync(states, tables, marked, edges, excluded).ConfigureAwait(false);
+            await LetGoAsync(states, tables, marked, edges, excluded, present).ConfigureAwait(false);
             throw;
         }
 
-        // The rows taken out are spent once the states are corrected.
-        if (marked is not null || excluded is not null)
+        // The rows taken out are spent once the states are corrected, and the rows looked for once seen.
+        if (marked is not null || excluded is not null || present is not null)
         {
-            await LetGoAsync(NoRows, null, marked, excluded).ConfigureAwait(false);
+            await LetGoAsync(NoRows, null, marked, excluded, present).ConfigureAwait(false);
         }
 
         if (!exact)
@@ -1579,17 +1600,23 @@ internal sealed class DatasetScanBuilder
         return spans;
     }
 
-    /// <summary>The columns the answer's tables key and measure: what charges a row taken out to its table's row.</summary>
     /// <summary>
     /// The columns the rows an identifier's index finds are read for: the keys and the measures of the tables they come out
     /// of, and the columns of the filters that leave them out and keep the rest; null, every one, when a filter names a
     /// column that is none of the schema's. Every column's chunk directory was read and parsed for them, at every question.
     /// </summary>
-    private static int[]? ExcludedColumns(SynopsisAnswer answer, DType schema)
+    private static int[]? ExcludedColumns(SynopsisAnswer answer, DType schema) => LeftOutColumns(answer.Excluded, MeasuredColumns(answer), schema);
+
+    /// <summary>
+    /// The columns of <paramref name="measured"/> and those the filters of <paramref name="leftOut"/> read, which leave
+    /// values of identifiers out and keep the rest; null, every one, when a filter names a column that is none of the
+    /// schema's.
+    /// </summary>
+    private static int[]? LeftOutColumns(IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> leftOut, int[] measured, DType schema)
     {
-        SortedSet<int> fields = [.. MeasuredColumns(answer)];
+        SortedSet<int> fields = [.. measured];
         HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
-        foreach ((VortexExpr part, VortexExpr kept) in answer.Excluded)
+        foreach ((VortexExpr part, VortexExpr kept) in leftOut)
         {
             part.CollectFields(named);
             kept.CollectFields(named);
@@ -1609,6 +1636,7 @@ internal sealed class DatasetScanBuilder
         return [.. fields];
     }
 
+    /// <summary>The columns the answer's tables key and measure: what charges a row taken out to its table's row.</summary>
     private static int[] MeasuredColumns(SynopsisAnswer answer)
     {
         SortedSet<int> fields = [];
@@ -2038,6 +2066,12 @@ internal sealed class DatasetScanBuilder
         {
             into.Add(new StatesStep(
                 key, "excluded", "rows the filter leaves out by an identifier, found by its index and taken out of the tables", answer.Excluded.Count));
+        }
+
+        if (answer.Absent.Count > 0 && answer.Parts.Count > 0)
+        {
+            into.Add(new StatesStep(
+                key, "absent", "values the filter leaves out by an identifier, which its index must find in no row before the tables answer, or the object's rows", answer.Absent.Count));
         }
 
         DType schema = contents.SchemaType;

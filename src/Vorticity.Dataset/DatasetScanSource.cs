@@ -397,9 +397,11 @@ internal sealed class DatasetScanSource : ScanSource
 
     /// <summary>
     /// Whether the answer of <paramref name="held"/> may be cut into parts its lanes answer apart: one that takes no row of
-    /// a delete or of an identifier left out of its tables, which the object's rows and indexes find whole.
+    /// a delete or of an identifier left out of its tables, which the object's rows and indexes find whole, and takes no
+    /// value of one for absent, which its index looks for in the whole object.
     /// </summary>
-    private static bool Cuttable(SynopsisAnswer answer, in PositionedObject held) => answer.Excluded.Count == 0 && !held.Entry.HasDeletions;
+    private static bool Cuttable(SynopsisAnswer answer, in PositionedObject held) =>
+        answer.Excluded.Count == 0 && answer.Absent.Count == 0 && !held.Entry.HasDeletions;
 
     /// <summary>
     /// The rows from <paramref name="start"/> to <paramref name="end"/> of an object its synopsis answers, slices whole,

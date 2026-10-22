@@ -223,6 +223,14 @@ internal sealed record SynopsisAnswer(
     internal IReadOnlyDictionary<string, string>? Renames { get; init; }
 
     /// <summary>
+    /// The values of identifiers the filter leaves out that the answer takes for absent from the object, as
+    /// <see cref="Excluded"/> names them: its tables answer as if the filter did not name them, their sketches
+    /// among them, once the identifier's index finds no row that holds one; the object's rows answer otherwise.
+    /// Empty when the answer takes none for absent.
+    /// </summary>
+    internal IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> Absent { get; init; } = [];
+
+    /// <summary>
     /// The answer of the object of <paramref name="contents"/> to <paramref name="request"/> under
     /// <paramref name="filter"/>, or null when its rows are read whole: a part of the filter on the instant
     /// that is not a bound, or on a column no table keys, a key or a measure no table holds, or a window and
@@ -263,9 +271,14 @@ internal sealed record SynopsisAnswer(
     /// that part alone (<see cref="Cuts"/>): the window ends where the part does. Null for the whole object.
     /// </param>
     /// <param name="marked">Whether a delete marked rows of the object, which come out of the tables' states, and of no sketch.</param>
+    /// <param name="assumeAbsent">
+    /// Whether the values of identifiers the filter leaves out are taken for absent from the object (<see cref="Absent"/>)
+    /// rather than taken out of its tables (<see cref="Excluded"/>).
+    /// </param>
     internal static SynopsisAnswer? Of(
         SynopsisQuestion question, SynopsisContents contents, DType schema, (long Least, long Greatest)? held = null,
-        IReadOnlyDictionary<string, FilterLiteral>? partition = null, (long Low, long High)? within = null, bool marked = false)
+        IReadOnlyDictionary<string, FilterLiteral>? partition = null, (long Low, long High)? within = null, bool marked = false,
+        bool assumeAbsent = false)
     {
         string instant = question.Instant;
         StateRequest request = question.Request;
@@ -282,6 +295,7 @@ internal sealed record SynopsisAnswer(
         int onKeyCount = 0;
         ulong joined = 0;
         List<(VortexExpr, VortexExpr)>? excluded = null;
+        List<(VortexExpr, VortexExpr)>? assumed = null;
         FieldSet keyed = new FieldSet(stackalloc int[MaxFields]);
 
         // The keys a table of sketches may hold the distinct sketches of in their place: the columns only approximate
@@ -303,7 +317,15 @@ internal sealed record SynopsisAnswer(
 
             if (Exclusion(conjunct, question.Identifiers, schema) is { } part)
             {
-                (excluded ??= []).Add((part, conjunct));
+                if (assumeAbsent)
+                {
+                    (assumed ??= []).Add((part, conjunct));
+                }
+                else
+                {
+                    (excluded ??= []).Add((part, conjunct));
+                }
+
                 continue;
             }
 
@@ -528,6 +550,7 @@ internal sealed record SynopsisAnswer(
         {
             Constants = (IReadOnlyList<(string, FilterLiteral)>?)constants ?? [],
             Renames = renames,
+            Absent = (IReadOnlyList<(VortexExpr, VortexExpr)>?)assumed ?? [],
         };
         answer.Prune(contents);
         return answer;
