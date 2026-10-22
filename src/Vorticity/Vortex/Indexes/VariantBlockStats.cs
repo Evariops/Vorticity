@@ -3,8 +3,6 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using ManagedCompressions.Zstd;
-using Vorticity.Arrays;
 using Vorticity.File;
 using Vorticity.Serialization;
 using Vorticity.Serialization.Protobuf;
@@ -343,79 +341,22 @@ internal sealed class VariantBlockStats
     {
         byte[] plain = new byte[Varint.Size((ulong)count) + blocks.Length];
         blocks.CopyTo(plain.AsSpan(Varint.Write(plain, (ulong)count)));
-        byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(plain.Length)];
-        ZstdCompressor encoder = Writing.ZstdEncoders.Rent();
-        int written;
-        try
-        {
-            if (encoder.Compress(plain, frame, out _, out written) != System.Buffers.OperationStatus.Done)
-            {
-                throw new InvalidOperationException("A key's block statistics did not compress into the bound zstd gives them.");
-            }
-        }
-        finally
-        {
-            Writing.ZstdEncoders.Return(encoder);
-        }
-
-        ProtoWriter writer = new ProtoWriter();
-        try
-        {
-            writer.WriteVarint(Version);
-            writer.WriteVarint((ulong)plain.Length);
-            writer.WriteRawBytes(frame.AsSpan(0, written));
-            return writer.WrittenSpan.ToArray();
-        }
-        finally
-        {
-            writer.Dispose();
-        }
+        return ZstdRegion.Encode(Version, plain);
     }
 
     /// <summary>The blocks of a key of <paramref name="class"/> its region <paramref name="bytes"/> holds, or null when they do not decode.</summary>
     internal static (int Block, PathEntry Entry)[]? KeyFrom(ReadOnlySpan<byte> bytes, string key, PathClass @class)
     {
-        byte[] plain;
-        try
-        {
-            ProtoReader header = new ProtoReader(bytes);
-            if (header.ReadVarint() != Version)
-            {
-                return null;
-            }
-
-            // A body of more than zstd's most expansion of its frame is no frame's.
-            ulong length = header.ReadVarint();
-            ReadOnlySpan<byte> frame = bytes[(bytes.Length - header.Remaining)..];
-            if (length > (ulong)frame.Length * ZstdDecoders.MostExpansion || length > int.MaxValue)
-            {
-                return null;
-            }
-
-            plain = new byte[(int)length];
-            ZstdDecompressor decoder = ZstdDecoders.Rent();
-            try
-            {
-                if (decoder.Decompress(frame, plain, out _, out int produced) != System.Buffers.OperationStatus.Done || produced != plain.Length)
-                {
-                    return null;
-                }
-            }
-            finally
-            {
-                ZstdDecoders.Return(decoder);
-            }
-        }
-        catch (VortexFormatException)
+        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } plain)
         {
             return null;
         }
 
         try
         {
-            ProtoReader reader = new ProtoReader(plain);
+            ProtoReader reader = new ProtoReader(plain.AsSpan(0, length));
             ulong count = reader.ReadVarint();
-            if (count > (ulong)plain.Length)
+            if (count > (ulong)length)
             {
                 return null;
             }
@@ -440,6 +381,10 @@ internal sealed class VariantBlockStats
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)
         {
             return null;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(plain);
         }
     }
 
