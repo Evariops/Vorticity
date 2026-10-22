@@ -35,7 +35,7 @@ internal static class ChunkShapesMicro
     private static void Report(
         string name, int[] order, (int[] Codes, int Distinct)[] columns, int[] source, int[][] keysOf, int rows, int chunkRows, bool cutAtShapes)
     {
-        int[] permutation = SliceSort.Permutation([.. order.Select(k => columns[k])], rows);
+        int[] permutation = SliceSort.Permutation([.. order.Select(k => columns[k])], rows, new SliceSortScratch());
         long runs = SliceSort.Runs([.. order.Select(k => columns[k].Codes)], rows);
         int chunks = 0;
         long shredded = 0;

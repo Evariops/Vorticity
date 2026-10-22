@@ -752,7 +752,7 @@ internal static class VariantEncoding
         }
 
         // An integer past 64 bits is a decimal of scale 0 while 38 digits hold it.
-        ReadOnlySpan<byte> text = reader.HasValueSequence ? reader.ValueSequence.ToArray() : reader.ValueSpan;
+        ReadOnlySpan<byte> text = reader.ValueSpan;
         if (text.IndexOfAny(".eE"u8) < 0 && text.Length <= 39
             && Int128.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out Int128 wide)
             && Int128.Abs(wide) < DecimalLimit)

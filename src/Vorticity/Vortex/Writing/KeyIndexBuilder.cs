@@ -39,8 +39,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The bytes of a fixed-width value, which a hashed builder's own keys do not share.</summary>
     private readonly int _valueWidth;
 
-    /// <summary>For hashed postings, each chunk run's (value, block) pairs, which its segments are cut by.</summary>
-    private readonly List<long> _chunkPairs = [];
     private readonly ChunkKeys _spare = new ChunkKeys();
     private readonly List<int> _lastBlock = [];
     private ChunkKeys _table;
@@ -347,15 +345,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         NoteId(Intern(key), row);
     }
 
-    /// <summary>The id of a value's key: its bytes, or for hashed postings its hash's eight.</summary>
-    private int Intern(ReadOnlySpan<byte> key) => _hashed ? InternHash(key) : _table.Intern(key);
-
-    private int InternHash(ReadOnlySpan<byte> key)
-    {
-        Span<byte> hash = stackalloc byte[sizeof(ulong)];
-        BinaryPrimitives.WriteUInt64LittleEndian(hash, XxHash3.HashToUInt64(key));
-        return _table.Intern(hash);
-    }
+    /// <summary>The id of a value's key, its bytes: hashed postings place hashes in their buckets and intern none.</summary>
+    private int Intern(ReadOnlySpan<byte> key) => _table.Intern(key);
 
     private void NoteId(int id, long row)
     {
@@ -422,11 +413,6 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _table.Cut(end, chunk);
         try
         {
-            if (_hashed)
-            {
-                _chunkPairs.Add(chunk.Log.Count);
-            }
-
             RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
             _chunkRuns.Add(_rows
                 ? await SortedRawAsync(scratch, chunk, firstBlock, blocks, cancellationToken).ConfigureAwait(false)
@@ -473,33 +459,24 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
         RawRun? tail = null;
         List<RawRun> mains = [.. _chunkRuns];
-        long pairs = 0;
-        foreach (long chunkPairs in _chunkPairs)
-        {
-            pairs += chunkPairs;
-        }
-
-        long tailPairs = 0;
         if (BlockRows > 0 && _row % BlockRows != 0 && mains.Count > 0)
         {
             tail = mains[^1];
             mains.RemoveAt(mains.Count - 1);
-            tailPairs = _hashed ? _chunkPairs[^1] : 0;
         }
 
         if (mains.Count > 0 || Absorbed is { Count: > 0 })
         {
-            Emit(await MergeMainsAsync(scratch, mains, pairs - tailPairs, cancellationToken).ConfigureAwait(false));
+            Emit(await MergeMainsAsync(scratch, mains, cancellationToken).ConfigureAwait(false));
         }
 
         if (tail is not null)
         {
-            Emit(await FinalAsync([Open(scratch, tail, 0)], tail.FirstBlock, tail.BlockCount, tailPairs, cancellationToken).ConfigureAwait(false));
+            Emit(await FinalAsync([Open(scratch, tail, 0)], tail.FirstBlock, tail.BlockCount, cancellationToken).ConfigureAwait(false));
             tail.Release(scratch);
         }
 
         _chunkRuns.Clear();
-        _chunkPairs.Clear();
         Absorbed = null;
     }
 
@@ -704,7 +681,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// The absorbed runs and the chunk runs, merged in passes of at most
     /// <see cref="RunMerger.MaxFanIn"/> runs, then once into payloads.
     /// </summary>
-    private async ValueTask<KeyRun> MergeMainsAsync(RunScratch scratch, List<RawRun> mains, long pairs, CancellationToken cancellationToken)
+    private async ValueTask<KeyRun> MergeMainsAsync(RunScratch scratch, List<RawRun> mains, CancellationToken cancellationToken)
     {
         List<RawRun> absorbed = Absorbed ?? [];
         int firstBlock = int.MaxValue;
@@ -762,7 +739,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             all.Add(Open(scratch, run, all.Count));
         }
 
-        KeyRun merged = await FinalAsync(all, firstBlock, endBlock - firstBlock, pairs, cancellationToken).ConfigureAwait(false);
+        KeyRun merged = await FinalAsync(all, firstBlock, endBlock - firstBlock, cancellationToken).ConfigureAwait(false);
         foreach (RawRun run in level)
         {
             run.Release(scratch);
@@ -775,20 +752,10 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         new RunCursor(
             run.Held ? new HeldWindowSource(run) : new RawWindowSource(scratch, run), _layout, _rows, ordinal);
 
-    /// <summary>
-    /// The cursors merged once into the run's payloads; <paramref name="pairs"/>, for hashed postings,
-    /// counts the run's (value, block) pairs, which set how many bits of each hash it keeps.
-    /// </summary>
+    /// <summary>The cursors merged once into the run's payloads.</summary>
     private async ValueTask<KeyRun> FinalAsync(
-        List<RunCursor> cursors, int firstBlock, int blockCount, long pairs, CancellationToken cancellationToken)
+        List<RunCursor> cursors, int firstBlock, int blockCount, CancellationToken cancellationToken)
     {
-        if (_hashed)
-        {
-            HashedRunSink hashed = new HashedRunSink(_segmentEntries, firstBlock, blockCount, pairs);
-            await RunMerger.MergeAsync(cursors, _layout, _rows, hashed, cancellationToken).ConfigureAwait(false);
-            return hashed.Finish();
-        }
-
         PayloadRunSink sink = new PayloadRunSink(
             _layout, _utf8, _rows, _segmentEntries, firstBlock, blockCount, BlockRows, WideRowsAbove);
         await RunMerger.MergeAsync(cursors, _layout, _rows, sink, cancellationToken).ConfigureAwait(false);

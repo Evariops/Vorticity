@@ -272,7 +272,6 @@ internal sealed class SecondCounts(TimeUnit unit)
 {
     private SecondCount[] _seconds = new SecondCount[16];
     private int _count;
-    private long _first = long.MaxValue;
     private long _last = long.MinValue;
 
     // The end of the last second counted, so that an instant inside it costs a comparison.
@@ -284,54 +283,10 @@ internal sealed class SecondCounts(TimeUnit unit)
     /// <summary>The rows counted so far.</summary>
     internal long Rows { get; private set; }
 
-    /// <summary>
-    /// Counts the rows <paramref name="later"/> counted, every one of which follows those counted here: the counts of
-    /// rows split in parts, each counted on its own, as one count of them all would hold them, second for second.
-    /// </summary>
-    /// <exception cref="ArgumentException">A row of <paramref name="later"/> comes before the last one counted here.</exception>
-    internal void Append(SecondCounts later)
-    {
-        if (later._count == 0)
-        {
-            return;
-        }
-
-        if (later._first < _last)
-        {
-            throw new ArgumentException(
-                $"The rows from row {Rows} on come before row {Rows - 1} in time: slices cut rows sorted by their instant.", nameof(later));
-        }
-
-        ReadOnlySpan<SecondCount> seconds = later.Seconds;
-        if (_count > 0 && seconds[0].Start == _seconds[_count - 1].Start)
-        {
-            // Both hold rows of the second where one ends and the other starts.
-            _seconds[_count - 1] = _seconds[_count - 1] with { Rows = _seconds[_count - 1].Rows + seconds[0].Rows };
-            seconds = seconds[1..];
-        }
-
-        if (_count + seconds.Length > _seconds.Length)
-        {
-            Array.Resize(ref _seconds, Math.Max(_count + seconds.Length, _seconds.Length * 2));
-        }
-
-        seconds.CopyTo(_seconds.AsSpan(_count));
-        _count += seconds.Length;
-        _first = Math.Min(_first, later._first);
-        _last = later._last;
-        _end = later._end;
-        Rows += later.Rows;
-    }
-
     /// <summary>Counts <paramref name="instants"/>, which follow those counted before.</summary>
     /// <exception cref="ArgumentException">An instant comes before the one counted before it.</exception>
     internal void Add(ReadOnlySpan<long> instants)
     {
-        if (instants.Length > 0 && Rows == 0)
-        {
-            _first = instants[0];
-        }
-
         for (int i = 0; i < instants.Length; i++)
         {
             long instant = instants[i];

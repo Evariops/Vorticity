@@ -31,14 +31,11 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal static class SliceSort
 {
-    /// <summary>The permutation of <paramref name="rows"/> rows sorted by <paramref name="columns"/>' codes, the first the most significant, ties in time order.</summary>
-    internal static int[] Permutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows) =>
-        Permutation(columns, rows, new SliceSortScratch());
-
     /// <summary>
-    /// <see cref="Permutation(IReadOnlyList{ValueTuple{int[], int}}, int)"/> in the arrays of <paramref name="scratch"/>,
-    /// which a sorter keeps from one slice to the next: the permutation is valid over its first <paramref name="rows"/>
-    /// entries until the next sort through the same scratch.
+    /// The permutation of <paramref name="rows"/> rows sorted by <paramref name="columns"/>' codes, the first the most
+    /// significant, ties in time order, worked out in the arrays of <paramref name="scratch"/>, which a sorter keeps from one
+    /// slice to the next: the permutation is valid over its first <paramref name="rows"/> entries until the next sort through
+    /// the same scratch.
     /// </summary>
     internal static int[] Permutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows, SliceSortScratch scratch)
     {
@@ -181,9 +178,9 @@ internal static class SliceSort
         Codes(arena, EncodedForms.Canonical(arena, RowEncoder.Storage(arena, column)), rows);
 
     /// <summary>
-    /// The canonical node <see cref="CodesOfCanonical"/> codes for field <paramref name="entry"/> of the struct node
-    /// <paramref name="root"/>, its words of validity and bits built: what is laid in the arena before codes are
-    /// counted on several threads, which then only read it.
+    /// The canonical node of field <paramref name="entry"/> of the struct node <paramref name="root"/>, its words of
+    /// validity and bits built: what is laid in the arena before codes are counted on several threads, which then only
+    /// read it.
     /// </summary>
     internal static int CanonicalOf(CanonicalArena arena, int root, int entry)
     {
@@ -196,12 +193,6 @@ internal static class SliceSort
 
         return column;
     }
-
-    /// <summary>
-    /// <see cref="CodesOf"/> for the canonical column <paramref name="column"/> <see cref="CanonicalOf"/> made: it reads
-    /// the arena and writes nothing to it, so that the columns of a slice are coded on threads of their own.
-    /// </summary>
-    internal static (int[] Codes, int Distinct) CodesOfCanonical(CanonicalArena arena, int column, int rows) => Codes(arena, column, rows);
 
     /// <summary>
     /// How two rows of a column compare in a slice's order: by value, nulls last. The order

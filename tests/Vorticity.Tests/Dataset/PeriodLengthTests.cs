@@ -16,7 +16,7 @@ public sealed partial class PeriodLengthTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>The design's example: 5 × 10⁴ rows a second, 40 bytes a row over 20 columns, 8 in the widest.</summary>
-    private static readonly PeriodLoad Example = new PeriodLoad(2e6, 5e4, 20, 8, long.MaxValue, null, null);
+    private static readonly PeriodLoad Example = new PeriodLoad(2e6, 5e4, 20, 8, long.MaxValue, null);
 
     [Fact]
     public void TheExampleLandsOnADay()
@@ -40,9 +40,6 @@ public sealed partial class PeriodLengthTests
         // A purge of a day, 1 728 s at the rewrite rate, past half an erasure delay of half an hour.
         Assert.Equal(SliceWidth.Hour, PeriodLengths.Choose(Example with { ErasureDelay = TimeSpan.FromMinutes(30) }));
         Assert.Equal(SliceWidth.Day, PeriodLengths.Choose(Example with { ErasureDelay = TimeSpan.FromDays(30) }));
-
-        // A week's retention takes periods of a tenth of it at most.
-        Assert.Equal(SliceWidth.Hour, PeriodLengths.Choose(Example with { Retention = TimeSpan.FromDays(7) }));
 
         // Nothing holds: the finest unit.
         Assert.Equal(SliceWidth.Minute, PeriodLengths.Choose(Example with { MaxObjectBytes = 1 }));

@@ -1756,15 +1756,4 @@ internal sealed record SynopsisAnswer(
 
         yield return filter;
     }
-
-    private static VortexExpr And(List<VortexExpr> parts)
-    {
-        VortexExpr joined = parts[0];
-        for (int i = 1; i < parts.Count; i++)
-        {
-            joined = Expr.And(joined, parts[i]);
-        }
-
-        return joined;
-    }
 }

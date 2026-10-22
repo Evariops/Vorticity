@@ -67,8 +67,8 @@ public sealed record CompactionResult
 /// A period a load writes as its sealed object (<see cref="DatasetCompactor.LoadPeriodsAsync"/>): <paramref name="Period"/>, its
 /// start in the instant's units as the dataset's calendar floors its rows, and <paramref name="Parts"/>, which read its rows in
 /// the order of their instants, a part's after the rows of the part before. A load reads them once, one after the other, its
-/// slices cut as they come; a schema with a variant column reads them twice, its parts at once to plan the object, what each
-/// variant column shreds among it, then one after the other to write it, and each part reads the same rows every time.
+/// slices cut as they come; a schema with a variant column reads them twice, one after the other each time, first to plan the
+/// object and what each variant column shreds, then to write it, and each part reads the same rows every time.
 /// </summary>
 internal sealed record PeriodRows(long Period, IReadOnlyList<Func<CancellationToken, IAsyncEnumerable<RecordBatch>>> Parts)
 {
@@ -344,9 +344,8 @@ internal static class DatasetCompactor
     }
 
     /// <summary>
-    /// The first pass of a load's period: its parts counted at once, each by a planner of its own, and the counts merged in
-    /// the parts' order into the plan one count of every row would make; one part after the other when a variant column's
-    /// census, which follows its rows in their order, has to count them.
+    /// The first pass of a load's period, whose schema has a variant column: its parts counted one after the other, in
+    /// their order, on a lane of the session's, since a variant column's census follows its rows in their order.
     /// </summary>
     private static async ValueTask<PeriodPlanner> PlanAsync(
         VortexDataset dataset, DatasetSchema schema, ClusteringKey key, TimeUnit unit, PeriodRows period, CancellationToken cancellationToken)
@@ -354,59 +353,20 @@ internal static class DatasetCompactor
         const int Level = PeriodLevels.Periods;
         LaneBudget lanes = dataset.Session.WriteLanes;
         PeriodPlanner planner = new PeriodPlanner(dataset, schema, key, unit);
-        if (period.Parts.Count == 1 || !planner.Merges)
+        long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
-            try
+            foreach (Func<CancellationToken, IAsyncEnumerable<RecordBatch>> part in period.Parts)
             {
-                foreach (Func<CancellationToken, IAsyncEnumerable<RecordBatch>> part in period.Parts)
+                await foreach (RecordBatch batch in part(cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
-                    await foreach (RecordBatch batch in part(cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
-                    {
-                        planner.Add(Level, period.Period, batch);
-                    }
+                    planner.Add(Level, period.Period, batch);
                 }
             }
-            finally
-            {
-                lanes.Exit(entered);
-            }
-
-            return planner;
         }
-
-        // Each part is counted on a lane of the session's: as many at once as the lanes the other writes leave.
-        PeriodPlanner[] parts = new PeriodPlanner[period.Parts.Count];
-        Task[] counted = new Task[parts.Length];
-        for (int index = 0; index < parts.Length; index++)
+        finally
         {
-            int at = index;
-            counted[index] = Task.Run(
-                async () =>
-                {
-                    long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
-                    try
-                    {
-                        PeriodPlanner part = new PeriodPlanner(dataset, schema, key, unit);
-                        await foreach (RecordBatch batch in period.Parts[at](cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
-                        {
-                            part.Add(Level, period.Period, batch);
-                        }
-
-                        parts[at] = part;
-                    }
-                    finally
-                    {
-                        lanes.Exit(entered);
-                    }
-                },
-                cancellationToken);
-        }
-
-        await Task.WhenAll(counted).ConfigureAwait(false);
-        foreach (PeriodPlanner part in parts)
-        {
-            planner.Merge(part);
+            lanes.Exit(entered);
         }
 
         return planner;
@@ -950,41 +910,6 @@ internal static class DatasetCompactor
             }
         }
 
-        /// <summary>
-        /// Whether a planner's counts merge into another's (<see cref="Merge"/>): with no variant column, whose census
-        /// counts the slices that hold each path as the rows come.
-        /// </summary>
-        internal bool Merges => _variants.Length == 0;
-
-        /// <summary>
-        /// Counts what <paramref name="later"/> counted, of the same schema, every row of which follows the rows of the same
-        /// object counted here: the counts one planner of every row would hold, since a sketch merged holds the registers of
-        /// the values of both.
-        /// </summary>
-        /// <exception cref="InvalidOperationException">The schema has a variant column.</exception>
-        internal void Merge(PeriodPlanner later)
-        {
-            if (!Merges)
-            {
-                throw new InvalidOperationException("A planner of variant columns counts their paths in the order of the rows: it merges no other.");
-            }
-
-            foreach (((int level, long period), (SecondCounts seconds, CardinalitySketch[] sketches, PathCensus[] _)) in later._tallies)
-            {
-                if (!_tallies.TryGetValue((level, period), out var tally))
-                {
-                    _tallies[(level, period)] = later._tallies[(level, period)];
-                    continue;
-                }
-
-                tally.Seconds.Append(seconds);
-                for (int i = 0; i < sketches.Length; i++)
-                {
-                    tally.Sketches[i].Merge(sketches[i]);
-                }
-            }
-        }
-
         /// <summary>The rows counted for the object of <paramref name="level"/> and <paramref name="period"/>.</summary>
         internal long RowsOf(int level, long period) => _tallies.TryGetValue((level, period), out var tally) ? tally.Seconds.Rows : 0;
 
@@ -1194,8 +1119,7 @@ internal static class DatasetCompactor
             LeafColumns(dataset.Snapshot.Schema.DType),
             (double)(written.DataBytes > 0 ? written.DataBytes : period.Bytes) / period.Rows,
             dataset.Options.MaxObjectBytes,
-            dataset.Snapshot.Header.ErasureDelay,
-            Retention: null);
+            dataset.Snapshot.Header.ErasureDelay);
         SliceWidth length = PeriodLengths.Choose(load);
         DatasetTelemetry.PeriodWeighed(load.BytesPerSecond, length);
         return cut.Calendar.ChangeTo(length, newest) is { } change

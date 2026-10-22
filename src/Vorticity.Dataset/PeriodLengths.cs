@@ -5,7 +5,7 @@ namespace Vorticity.Dataset;
 /// <summary>
 /// What a dataset of periods takes in and keeps, as the length of its periods weighs it: its rate in
 /// bytes and rows of data time, its columns, the bytes a row of its widest column takes, the largest
-/// object its store takes, and the delays that rewrite or drop a period.
+/// object its store takes, and the delay past which a purge rewrites a period.
 /// </summary>
 /// <param name="BytesPerSecond">Bytes stored per second of the instant column.</param>
 /// <param name="RowsPerSecond">Rows per second of the instant column.</param>
@@ -13,21 +13,19 @@ namespace Vorticity.Dataset;
 /// <param name="WidestBytesPerRow">The bytes of a row in its widest column, or a bound on them.</param>
 /// <param name="MaxObjectBytes">The most bytes an object may take; <see cref="long.MaxValue"/> for no bound.</param>
 /// <param name="ErasureDelay">How long a deleted row may stay in the store, past which a purge rewrites its period; null for none.</param>
-/// <param name="Retention">How long a row is kept, past which a period expires whole; null for no expiry.</param>
 internal readonly record struct PeriodLoad(
     double BytesPerSecond,
     double RowsPerSecond,
     int Columns,
     double WidestBytesPerRow,
     long MaxObjectBytes,
-    TimeSpan? ErasureDelay,
-    TimeSpan? Retention);
+    TimeSpan? ErasureDelay);
 
 /// <summary>
-/// The length of a dataset's periods: among the calendar units that hold four constraints, the one
+/// The length of a dataset's periods: among the calendar units that hold three constraints, the one
 /// that costs a window least. The store takes the period's object, the footer stays under its cap at
-/// a chunk size that keeps selective reads in bounds, a purge of the period runs within half the
-/// erasure delay, and a period stays a small share of the retention, since expiry drops whole periods.
+/// a chunk size that keeps selective reads in bounds, and a purge of the period runs within half the
+/// erasure delay.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -39,7 +37,7 @@ internal readonly record struct PeriodLoad(
 /// <para>
 /// Every constant here is provisional, set from the design's example until the benches of appends in
 /// order and of questions over windows measure them: the widest chunk, the rewrite throughput, the
-/// share of the retention, the rate of questions, the price of an object touched, and the window.
+/// rate of questions, the price of an object touched, and the window.
 /// </para>
 /// </remarks>
 internal static class PeriodLengths
@@ -49,9 +47,6 @@ internal static class PeriodLengths
 
     /// <summary>The bytes a compaction rewrites per second: provisional.</summary>
     internal const double RewriteBytesPerSecond = 100e6;
-
-    /// <summary>The share of the retention a period may span: provisional.</summary>
-    internal const double RetentionShare = 0.1;
 
     /// <summary>The questions a dataset answers per second: provisional, until the telemetry reports it.</summary>
     internal const double QuestionsPerSecond = 1;
@@ -91,7 +86,7 @@ internal static class PeriodLengths
         return best;
     }
 
-    /// <summary>Whether a period of <paramref name="unit"/> holds the four constraints under <paramref name="load"/>.</summary>
+    /// <summary>Whether a period of <paramref name="unit"/> holds the three constraints under <paramref name="load"/>.</summary>
     internal static bool Holds(PeriodLoad load, SliceWidth unit)
     {
         double seconds = Seconds(unit);
@@ -109,12 +104,7 @@ internal static class PeriodLengths
             return false;
         }
 
-        if (load.ErasureDelay is { } delay && bytes / RewriteBytesPerSecond > delay.TotalSeconds / 2)
-        {
-            return false;
-        }
-
-        return load.Retention is not { } retention || seconds <= RetentionShare * retention.TotalSeconds;
+        return load.ErasureDelay is not { } delay || bytes / RewriteBytesPerSecond <= delay.TotalSeconds / 2;
     }
 
     /// <summary>

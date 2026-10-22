@@ -39,44 +39,6 @@ public sealed partial class TimeSliceTests
         Assert.Equal(SliceWidth.Second, TimeSlicer.WidthFor(second, TimeUnit.Microseconds, 100));
     }
 
-    /// <summary>
-    /// Rows counted in parts, each on its own, then appended in their order, hold the counts of the rows counted at once,
-    /// second for second, whether a part ends inside a second or on its end, or holds nothing; a part that starts before the
-    /// last row counted is refused.
-    /// </summary>
-    [Fact]
-    public void SecondsCountedInPartsAndAppendedAreTheSecondsCountedAtOnce()
-    {
-        // Rows a third of a second apart, then a gap, then rows of one second.
-        long[] instants = [.. Enumerable.Range(0, 30).Select(i => Noon + (i * Second / 3)), .. Enumerable.Range(0, 7).Select(i => Noon + (60 * Second) + i)];
-        SecondCounts whole = new SecondCounts(TimeUnit.Microseconds);
-        whole.Add(instants);
-        foreach (int[] cuts in new[] { new[] { 0, 37 }, [0, 1, 37], [0, 4, 4, 17, 30, 31, 37], [0, 3, 6, 9, 36, 37] })
-        {
-            SecondCounts appended = new SecondCounts(TimeUnit.Microseconds);
-            for (int part = 0; part + 1 < cuts.Length; part++)
-            {
-                SecondCounts counted = new SecondCounts(TimeUnit.Microseconds);
-                counted.Add(instants.AsSpan(cuts[part], cuts[part + 1] - cuts[part]));
-                appended.Append(counted);
-            }
-
-            Assert.Equal(whole.Rows, appended.Rows);
-            Assert.Equal(whole.Seconds.ToArray(), appended.Seconds.ToArray());
-
-            // The rows after them still count on from the last one.
-            appended.Add([Noon + (60 * Second) + 9, Noon + (61 * Second)]);
-            Assert.Equal(whole.Seconds.Length + 1, appended.Seconds.Length);
-            Assert.Equal(whole.Seconds[^1].Rows + 1, appended.Seconds[^2].Rows);
-        }
-
-        SecondCounts earlier = new SecondCounts(TimeUnit.Microseconds);
-        earlier.Add([Noon + Second]);
-        SecondCounts later = new SecondCounts(TimeUnit.Microseconds);
-        later.Add([Noon + (2 * Second)]);
-        Assert.Throws<ArgumentException>(() => later.Append(earlier));
-    }
-
     [Fact]
     public void MinutesALittlePastTheTargetStayMinutes()
     {
