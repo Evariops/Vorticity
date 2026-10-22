@@ -369,6 +369,16 @@ internal sealed class DatasetScanBuilder
             yield break;
         }
 
+        if (Lookup is { } lookup)
+        {
+            await foreach (RecordBatch batch in LookedUpAsync(lookup, cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
         IAsyncEnumerator<PositionedObject> walk = WalkAsync(cancellationToken).GetAsyncEnumerator(cancellationToken);
         await using (walk.ConfigureAwait(false))
         {
@@ -482,7 +492,6 @@ internal sealed class DatasetScanBuilder
     {
         IAsyncEnumerable<RecordBatch> batches = _states is { } request && Answer(held, request) is ({ } answer, { } contents, string instant)
             ? AnsweredAsync(held, answer, contents, instant, open, cancellationToken)
-            : LookupFor(held) is { } lookup ? LookedUpAsync(held, lookup, open, cancellationToken)
             : RowsAsync(held, open, cancellationToken);
         await foreach (RecordBatch batch in batches.ConfigureAwait(false))
         {
@@ -633,18 +642,72 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
-    /// One object's rows by its identifier's index (<see cref="VortexDataset.LookupAsync"/>), with no open of it: the rows of
-    /// the blocks the index leaves, the scan's filter kept, as the dataset's. The object's rows as any other's when its index
-    /// cannot say.
+    /// The scan of a lookup of an identifier: every object the walk keeps that takes the lookup (<see cref="LookupFor"/>)
+    /// looked up at once, as many reads in flight as the session lets be, and the objects' rows given in the tree's order;
+    /// an object that does not take it read as the scan reads any, when its turn comes. A lookup takes four round trips
+    /// whatever the object holds: thirty objects looked up one after the other would wait for 120.
     /// </summary>
-    private async IAsyncEnumerable<RecordBatch> LookedUpAsync(
-        PositionedObject held, VortexExpr lookup, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
+    private async IAsyncEnumerable<RecordBatch> LookedUpAsync(VortexExpr lookup, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         LookupColumns(out int[]? columns);
-        List<RecordBatch>? found = await _dataset.LookupAsync(held.Entry, lookup, columns, cancellationToken).ConfigureAwait(false);
+        List<(PositionedObject Held, Task<List<RecordBatch>?>? Found)> objects = [];
+        using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try
+        {
+            await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (Covered(held) > 0)
+                {
+                    objects.Add((held, LookupFor(held) is null ? null : _dataset.LookupAsync(held.Entry, lookup, columns, stopped.Token).AsTask()));
+                }
+            }
+
+            foreach ((PositionedObject held, Task<List<RecordBatch>?>? found) in objects)
+            {
+                IAsyncEnumerable<RecordBatch> batches = found is null
+                    ? RowsAsync(held, 1, cancellationToken)
+                    : FoundAsync(held, await found.ConfigureAwait(false), cancellationToken);
+                await foreach (RecordBatch batch in batches.ConfigureAwait(false))
+                {
+                    yield return batch;
+                }
+            }
+        }
+        finally
+        {
+            // A scan stopped or failed: the lookups still on their way are called off and end, and what they found is let go.
+            await stopped.CancelAsync().ConfigureAwait(false);
+            foreach ((_, Task<List<RecordBatch>?>? found) in objects)
+            {
+                if (found is null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    foreach (RecordBatch batch in await found.ConfigureAwait(false) ?? [])
+                    {
+                        batch.Dispose();
+                    }
+                }
+                catch (Exception) when (found.IsFaulted || found.IsCanceled)
+                {
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The rows an object's lookup found, the scan's filter kept, as the dataset's; the object's rows as any other's when its
+    /// index could not say (<paramref name="found"/> null). The batches stay the lookup's, which the scan lets go.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> FoundAsync(
+        PositionedObject held, List<RecordBatch>? found, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         if (found is null)
         {
-            await foreach (RecordBatch batch in RowsAsync(held, open, cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in RowsAsync(held, 1, cancellationToken).ConfigureAwait(false))
             {
                 yield return batch;
             }
@@ -658,12 +721,10 @@ internal sealed class DatasetScanBuilder
         }
 
         RecordBatch? view = null;
-        int next = 0;
         try
         {
-            for (; next < found.Count; next++)
+            foreach (RecordBatch batch in found)
             {
-                RecordBatch batch = found[next];
                 if (_filter is { } filter)
                 {
                     SelectBy(batch, filter);
@@ -678,10 +739,6 @@ internal sealed class DatasetScanBuilder
         finally
         {
             view?.Dispose();
-            foreach (RecordBatch batch in found)
-            {
-                batch.Dispose();
-            }
         }
     }
 

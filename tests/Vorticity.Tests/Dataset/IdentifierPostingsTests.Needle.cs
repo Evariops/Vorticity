@@ -31,6 +31,10 @@ public sealed partial class IdentifierPostingsTests
 
             Request needle = appended[1_234];
             bool cold = true;
+
+            // A store that answers in 20 ms: the objects are looked up together, so the scan's dependent round trips are a
+            // lookup's, four, however many objects it looks up.
+            inner.Latency = TimeSpan.FromMilliseconds(20);
             Request other = appended[5_678];
             foreach ((VortexExpr filter, Request[] rows) in new[]
             {
@@ -43,11 +47,12 @@ public sealed partial class IdentifierPostingsTests
                 store.Reset();
                 List<string> found = await IdsAsync(dataset.ScanBuilder().Where(filter).WithMetrics(metrics));
                 long lookedUpBytes = store.BytesRead;
+                long lookedUpSteps = store.DependentSteps;
                 store.Reset();
                 List<string> opened = await IdsAsync(dataset.ScanBuilder().Where(filter).WithIndexes(false));
                 long openedBytes = store.BytesRead;
                 Console.Out.Write(FormattableString.Invariant(
-                    $"NEEDLE {filter}: {found.Count} rows, {metrics.ObjectsLookedUp} objects looked up and {metrics.ObjectsOpened} opened, {lookedUpBytes} bytes against {openedBytes} opening them.\n"));
+                    $"NEEDLE {filter}: {found.Count} rows, {metrics.ObjectsLookedUp} objects looked up and {metrics.ObjectsOpened} opened, {lookedUpSteps} dependent steps, {lookedUpBytes} bytes against {openedBytes} opening them.\n"));
                 Assert.Equal(rows.Select(r => r.RequestId).Order(StringComparer.Ordinal), found.Order(StringComparer.Ordinal));
                 Assert.Equal(opened.Order(StringComparer.Ordinal), found.Order(StringComparer.Ordinal));
                 Assert.Equal(contents, metrics.ObjectsLookedUp);
@@ -55,6 +60,7 @@ public sealed partial class IdentifierPostingsTests
 
                 // Cold, the first time, both: the opens' objects stay open in the handle after, and read nothing again.
                 Assert.True(!cold || lookedUpBytes < openedBytes, $"{lookedUpBytes} bytes looked up against {openedBytes} opening");
+                Assert.True(!cold || lookedUpSteps <= 4 + others, $"{lookedUpSteps} dependent steps");
                 cold = false;
             }
 
