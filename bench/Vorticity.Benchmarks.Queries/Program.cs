@@ -217,6 +217,18 @@ if (Text(args, "--micro") == "lifecycle")
         Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0));
 }
 
+// --micro qp-dashboard: the client's questions of a --qp run's TSV against the review's targets, a Markdown table (QpDashboard.cs).
+if (Text(args, "--micro") == "qp-dashboard")
+{
+    if (Text(args, "--tsv") is not { } qpTsv)
+    {
+        Console.Error.WriteLine("--micro qp-dashboard reads the TSV of a --qp run: --tsv FILE [--label TEXT].");
+        return 2;
+    }
+
+    return QpDashboard.Run(qpTsv, Text(args, "--label"));
+}
+
 // --micro logs: the client's log records of a day, their sources, their keys and the keys of more than one type (LogGeneratorV2.cs).
 if (Text(args, "--micro") == "logs")
 {
