@@ -110,7 +110,7 @@ internal sealed class SpanGeneratorV2
         double day = (at.TimeOfDay.TotalHours + (Mix(service, 1, 29) % 24)) / 24 % 1;
         int generation = (int)(day * Deploys[service]);
         int replica = _random.Next(Replicas[service]);
-        string pod = $"{ServiceNames[service]}-{Hex64(Mix(service, generation, 31))[..5]}-{Hex64(Mix(service, (generation * 64) + replica, 37))[..5]}";
+        string pod = PodOf(service, generation, replica);
         string host = HostNames[(int)(Mix(service, (generation * 64) + replica, 41) % Hosts)];
         string version = $"{1 + (Mix(service, generation, 43) % 9)}.{Mix(service, generation, 47) % 100}.{Mix(service, generation, 67) % 100}";
 
@@ -130,6 +130,10 @@ internal sealed class SpanGeneratorV2
             at, state, Kinds[kind], environment, method, status, host, ServiceNames[service], peer, version, pod, fingerprint, route,
             exception, TraceIdOf(_trace ^ (_seedMix << 40)), SpanIdOf(span ^ (_seedMix << 40)), (long)duration);
     }
+
+    /// <summary>The name of replica <paramref name="replica"/> of service <paramref name="service"/>'s deploy <paramref name="generation"/>, as a cluster names a pod.</summary>
+    internal static string PodOf(int service, int generation, int replica) =>
+        $"{ServiceNames[service]}-{Hex64(Mix(service, generation, 31))[..5]}-{Hex64(Mix(service, (generation * 64) + replica, 37))[..5]}";
 
     /// <summary>The 32 hexadecimal digits of trace <paramref name="trace"/>: its number's XXH3-128.</summary>
     internal static string TraceIdOf(long trace)

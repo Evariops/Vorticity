@@ -86,6 +86,15 @@ internal static class PathsBench
         /// <summary>Whether the requests' ids look random, 32 hexadecimal digits of a hash, rather than count up (<c>--random-ids</c>).</summary>
         internal bool RandomIds { get; init; }
 
+        /// <summary>Whether the bench asks the client's questions, QP-1 to QP-10, over the requests and the client's spans and log records (<c>--qp</c>).</summary>
+        internal bool Qp { get; init; }
+
+        /// <summary>The hours of the client's spans and log records (<c>--qp-hours</c>): a day sealed, and the hours of the next fresh.</summary>
+        internal int QpHours { get; init; } = 30;
+
+        /// <summary>Their rows a second (<c>--qp-rate</c>): a tenth of the design's.</summary>
+        internal double QpRate { get; init; } = 5_000;
+
         internal bool BuildOnly { get; init; }
 
         internal bool Verify { get; init; }
@@ -152,6 +161,10 @@ internal static class PathsBench
                 ? DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"), settings.RandomIds)
                 : DesignBuild.LoadAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelPeriods, settings.WriteDegree, Path.Combine(settings.Store, "scratch"), settings.RandomIds));
         Built logs = await EnsureAsync(settings, $"logs-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
+        Built? spans = !settings.Qp ? null
+            : await EnsureAsync(settings, $"spans-v2-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}", store => FillSpansAsync(store, settings));
+        Built? logs2 = !settings.Qp ? null
+            : await EnsureAsync(settings, $"logs-v2-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}", store => FillLogsV2Async(store, settings));
         if (settings.BuildOnly)
         {
             return 0;
@@ -218,6 +231,11 @@ internal static class PathsBench
             Asked<LogRow>("logs", "status_code ToInt64() >= 500, per service, text parsed", scan => scan.Where(r => r.Attributes["http.response.status_code"].ToInt64() >= 500).GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
         ];
 
+        if (settings.Qp)
+        {
+            questions = QpQuestions(settings, requests.Needle, spans!.Needle, half);
+        }
+
         bool failed = false;
         foreach (int degree in settings.Degrees)
         {
@@ -228,7 +246,7 @@ internal static class PathsBench
                     continue;
                 }
 
-                Built built = question.Set == "logs" ? logs : requests;
+                Built built = question.Set switch { "logs" => logs, "spans" => spans!, "logs2" => logs2!, _ => requests };
                 string? synopsesDigest = null;
                 foreach (bool synopses in question.Aggregates ? new[] { true, false } : [false])
                 {
@@ -611,6 +629,91 @@ internal static class PathsBench
     {
         VortexWriteOptions write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget) };
         return (await QuestionBench.FillLogsAsync(store, settings.LogHours, settings.LogRate, write, null, settings.WriteDegree), string.Empty);
+    }
+
+    /// <summary>
+    /// The client's spans (<see cref="SpanGeneratorV2"/>) of <c>--qp-hours</c> at <c>--qp-rate</c>, appended and compacted
+    /// as a client's ingestion does, in periods of a day, their trace and span ids declared identifiers; and the trace id of
+    /// a span in the middle, a needle.
+    /// </summary>
+    private static async Task<(long Rows, string Needle)> FillSpansAsync(IObjectStore store, Settings settings)
+    {
+        Directory.CreateDirectory(Path.Combine(settings.Store, "scratch"));
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = settings.WriteDegree);
+        long perHour = (long)(settings.QpRate * 3_600);
+        int middle = settings.QpHours / 2;
+        string needle = string.Empty;
+        DatasetOptions options = new DatasetOptions
+        {
+            Session = session,
+            ClusteringKey = [nameof(GeneratedSpanV2.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
+            Identifiers = [nameof(GeneratedSpanV2.TraceId), nameof(GeneratedSpanV2.SpanId)],
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
+        };
+        long rows = await IncrementalBuild.FillAsync<GeneratedSpanV2>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>
+        {
+            SpanGeneratorV2 generator = new SpanGeneratorV2(2_000 + hour, hour * perHour);
+            long drawn = 0;
+            return at =>
+            {
+                GeneratedSpanV2 span = generator.Next(at);
+                if (hour == middle && ++drawn == perHour / 2)
+                {
+                    needle = span.TraceId;
+                }
+
+                return span;
+            };
+        });
+        return (rows, needle);
+    }
+
+    /// <summary>The client's log records (<see cref="LogGeneratorV2"/>) of <c>--qp-hours</c> at <c>--qp-rate</c>, as the spans.</summary>
+    private static async Task<(long Rows, string Needle)> FillLogsV2Async(IObjectStore store, Settings settings)
+    {
+        Directory.CreateDirectory(Path.Combine(settings.Store, "scratch"));
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = settings.WriteDegree);
+        long perHour = (long)(settings.QpRate * 3_600);
+        DatasetOptions options = new DatasetOptions
+        {
+            Session = session,
+            ClusteringKey = [nameof(LogRow.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
+        };
+        long rows = await IncrementalBuild.FillAsync<LogRow>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>
+        {
+            LogGeneratorV2 generator = new LogGeneratorV2(3_000 + hour);
+            return generator.Next;
+        });
+        return (rows, string.Empty);
+    }
+
+    /// <summary>
+    /// The client's questions, QP-1 to QP-10 but QP-8, which needs thirteen months, as its review writes them: over the
+    /// spans, the log records and the requests, "now" the end of their hours. The requests' ids hold no null, so an exclusion
+    /// leaves out the review's "|| id == null".
+    /// </summary>
+    private static Question[] QpQuestions(Settings settings, string requestNeedle, string traceNeedle, TimeSpan half)
+    {
+        DateTimeOffset end = QuestionBench.Start.AddHours(settings.QpHours);
+        DateTimeOffset lastQuarter = end.AddMinutes(-15);
+        string pod = SpanGeneratorV2.PodOf(0, 0, 0);
+        return
+        [
+            Asked<GeneratedSpanV2>("spans", "QP-1 one service's routes under 5xx, per hour", scan => scan.Where(s => s.Service == "svc-000" && s.HttpStatus >= 500).GroupBy(s => (s.Route, s.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Route, g.Key.Item2, g.Count()))),
+            Asked<GeneratedSpanV2>("spans", "QP-2 the pods of one route", scan => scan.Where(s => s.Route == "/api/s0/r0").GroupBy(s => s.Pod).Select(g => (g.Key, g.Count()))),
+            Asked<GeneratedSpanV2>("spans", "QP-2 the exception groups of one pod's errors", scan => scan.Where(s => s.Pod == pod && s.Status == "error").GroupBy(s => s.ExceptionGroup).Select(g => (g.Key, g.Count()))),
+            Asked<LogRow>("logs2", "QP-3 services under status_code AsInt64() >= 500", scan => scan.Where(r => r.Attributes["http.response.status_code"].AsInt64() >= 500).GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
+            Rows<GeneratedSpanV2>("spans", "QP-4 the spans of one trace (needle)", scan => scan.Where(s => s.TraceId == traceNeedle)),
+            Rows<GeneratedRequest>("requests", "QP-4 the rows of one request id (needle)", scan => scan.Where(r => r.RequestId == requestNeedle)),
+            Asked<GeneratedRequest>("requests", "QP-5 every row but one request's, per service and per 12 hours", scan => scan.Where(r => r.RequestId != requestNeedle).GroupBy(r => (r.Service, r.At.Bucket(half))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()))),
+            Asked<GeneratedSpanV2>("spans", "QP-6 the 99th percentile of duration per service, the last 15 minutes", scan => scan.Where(s => s.At >= lastQuarter).GroupBy(s => s.Service).Select(g => (g.Key, g.Quantile(s => s.DurationNs, 0.99)))),
+            Asked<GeneratedRequest>("requests", "QP-7 distinct hosts per region, but one request's", scan => scan.Where(r => r.RequestId != requestNeedle).GroupBy(r => r.Region).Select(g => (g.Key, g.ApproximateCountDistinct(r => r.Host)))),
+            Asked<LogRow>("logs2", "QP-9 services under status_code AsInt64() >= 500, the last 15 minutes", scan => scan.Where(r => r.Attributes["http.response.status_code"].AsInt64() >= 500 && r.At >= lastQuarter).GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
+            Asked<LogRow>("logs2", "QP-10 feature.flag.new-cart == on, per service", scan => scan.Where(r => r.Attributes["feature.flag.new-cart"].AsString() == "on").GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
+        ];
     }
 
     /// <summary>The commit the bench was built from, and whether the tree is dirty.</summary>
