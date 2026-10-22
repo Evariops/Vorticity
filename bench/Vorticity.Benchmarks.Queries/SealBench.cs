@@ -4,8 +4,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.Indexes;
 using Vorticity.IO;
 
 namespace Vorticity.Benchmarks.Queries;
@@ -103,6 +105,22 @@ internal static class SealBench
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"{jobs} jobs in {seconds:F1} s, {busy / seconds:F1} cores busy of {Environment.ProcessorCount}, a peak of {self.PeakWorkingSet64 / 1e9:F2} GB in memory"));
+
+            // What the jobs wrote: each object's slices and the order inside them.
+            await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, default))
+            {
+                await using ObjectLease lease = await dataset.RentAsync(held.Entry, default);
+                if (await SliceTable.ReadAsync(lease.File, default) is not { } table)
+                {
+                    continue;
+                }
+
+                string order = string.Join(", ", table.Order.Select(
+                    entry => entry >= 0 && entry < lease.File.DType.FieldCount ? lease.File.DType.GetFieldName(entry) : entry.ToString(CultureInfo.InvariantCulture)));
+                Console.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"  object of {held.Entry.Rows:N0} rows, {held.Entry.Bytes:N0} bytes: {table.Slices.Count} slices of {table.Slices.Min(s => s.Rows):N0} to {table.Slices.Max(s => s.Rows):N0} rows, order [{order}]"));
+            }
         }
         finally
         {
