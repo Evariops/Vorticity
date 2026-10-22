@@ -493,14 +493,14 @@ time, which encodes it and holds it in the synopsis part's spool until the choic
 
 A table that cannot be worth its bytes is given up as it grows, before it costs the merges and the
 spool anything more. The budget of the whole object is projected from the data written so far, scaled
-to the object's rows, which the job's first pass counted; a table of slices is projected from its rows
-so far, scaled likewise; a coarse table of an hour, and a column's value counts, from the distinct
-groups of the hour, counted by a HyperLogLog sketch per depth and projected to the hour's rows by a
-power of its rows fitted through two points, as Heaps' law has it; a table of the object from its own
-sketch. A table whose rows so far take more than the budget, or whose projection takes twice as much,
-is given up, the margin against values that come in a burst and then repeat. Under 64 MiB of data, and
-during the merges at the end, nothing is given up, and the choice weighs every table against the whole
-data. On three hours of 60 000 rows whose third column is almost unique to each row, the four tables of
+to the object's rows, which the job's first pass counted or a seal in one pass reads off its inputs; a
+table of slices is projected from its rows so far, scaled likewise; a coarse table of an hour, and a
+column's value counts, from the distinct groups of the hour, counted by a HyperLogLog sketch per depth
+and projected to the hour's rows by a power of its rows fitted through two points, as Heaps' law has
+it; a table of the object from its own sketch. A table whose rows so far take more than the budget, or
+whose projection takes twice as much, is given up, the margin against values that come in a burst and
+then repeat. Under 64 MiB of data, during the merges at the end, and in an object of one pass whose
+rows are unknown, nothing is given up, and the choice weighs every table against the whole data. On three hours of 60 000 rows whose third column is almost unique to each row, the four tables of
 that column were given up at the sixth of thirty slices, the projection 58 846 rows for about 57 000,
 and the choice kept the same tables, to the byte, as when every one was built to the end.
 
