@@ -47,7 +47,8 @@ internal static class ZonePruningPlan
     /// <remarks>
     /// The zone map is first in line: it is already loaded and answers from min/max and null
     /// counts. The Bloom filters come next, over the blocks still live, and the list stops at an
-    /// empty mask.
+    /// empty mask. A column whose every question hashed postings answer over the whole file has no
+    /// zone map decoded: the postings say where its values are.
     /// </remarks>
     internal static async ValueTask<BlockMask?> RefineAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
@@ -85,14 +86,20 @@ internal static class ZonePruningPlan
         List<PruningStep>? steps = null, Scanning.ScanCounters? metrics = null, bool indexes = true,
         BlockMask? scope = null)
     {
+        long blockRows = Scanning.SplitPlan.NaturalBatchRows(tree);
+
+        // The locating indexes are asked first what they answer: a column whose every question hashed
+        // postings answer over the whole file, a declared identifier's, has no zone map decoded, the
+        // bounds of every block, which values spread over the file leave wide -- read to prune none.
+        Indexes.KeyIndexPruner? locating = indexes && blockRows > 0
+            ? await Indexes.KeyIndexPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
+            : null;
         (ZonePruner? zones, int segments, long bytes) =
-            await BuildCountedAsync(file, tree, filter, metrics, cancellationToken).ConfigureAwait(false);
+            await BuildCountedAsync(file, tree, filter, metrics, locating, cancellationToken).ConfigureAwait(false);
         // The price of consulting a structure belongs to the scan's cost: the zone maps read here
         // are bytes the scan asked its source for, and they go to the same sink the batches feed,
         // so that the sink and the source agree about what was requested.
         Scanning.ScanCounters.Note(metrics, segments, bytes);
-
-        long blockRows = Scanning.SplitPlan.NaturalBatchRows(tree);
 
         // The path directories first among the indexes: one small read refutes the whole file, or the
         // slices that hold no path the filter asks for.
@@ -116,9 +123,6 @@ internal static class ZonePruningPlan
 
         Indexes.BloomPruner? blooms = indexes && blockRows > 0
             ? await Indexes.BloomPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
-            : null;
-        Indexes.KeyIndexPruner? locating = indexes && blockRows > 0
-            ? await Indexes.KeyIndexPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
             : null;
         Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? keysRead = indexes && blockRows > 0 ? KeysRead(filter) : null;
         if (zones is null && blooms is null && locating is null && pathRanges is null && keysRead is null)
@@ -626,17 +630,18 @@ internal static class ZonePruningPlan
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken)
     {
         (ZonePruner? pruner, _, _) =
-            await BuildCountedAsync(file, tree, filter, metrics: null, cancellationToken).ConfigureAwait(false);
+            await BuildCountedAsync(file, tree, filter, metrics: null, locating: null, cancellationToken).ConfigureAwait(false);
         return pruner;
     }
 
     /// <summary>
     /// <see cref="BuildAsync"/>, with the segments and bytes it read to build the pruner -- what
-    /// consulting the zone maps cost this scan.
+    /// consulting the zone maps cost this scan -- and without the columns <paramref name="locating"/>
+    /// answers alone.
     /// </summary>
     private static async ValueTask<(ZonePruner? Pruner, int Segments, long Bytes)> BuildCountedAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, Scanning.ScanCounters? metrics,
-        CancellationToken cancellationToken)
+        Indexes.KeyIndexPruner? locating, CancellationToken cancellationToken)
     {
         // The filter's own field references, whose paths are already split and encoded; a filter
         // names a handful of columns, so a repeated one is found by looking back.
@@ -650,7 +655,8 @@ internal static class ZonePruningPlan
         List<Candidate> candidates = [];
         for (int i = 0; i < fields.Count; i++)
         {
-            if (!NamedBefore(fields, i) && TryLocate(tree, fields[i], out LayoutNode node, out ZoneMap map))
+            if (!NamedBefore(fields, i) && locating?.AnswersAlone(fields[i].Path) != true
+                && TryLocate(tree, fields[i], out LayoutNode node, out ZoneMap map))
             {
                 candidates.Add(new Candidate(fields[i], node, map));
             }

@@ -82,6 +82,52 @@ internal sealed class KeyIndexPruner
     internal long Bytes { get; private set; }
 
     /// <summary>
+    /// Whether this pruner alone answers what the filter asks of the column at <paramref name="path"/>: hashed
+    /// postings, a declared identifier's, cover every block of the file, and every question of the filter that reads
+    /// the column is one they answer, each able to prove absence.
+    /// </summary>
+    /// <remarks>
+    /// The column's zone maps would add nothing then but a false block of the postings now and then, for the bounds of
+    /// every block of the file, which values spread over it leave wide: decoded to prune no block.
+    /// </remarks>
+    internal bool AnswersAlone(string path) =>
+        _columns.TryGetValue(path, out Column? column) && column.Hashes && column.CoversAll && AskedOnly(_filter, path, column);
+
+    /// <summary>
+    /// Whether every leaf of <paramref name="expr"/> that reads the column at <paramref name="path"/> is a question
+    /// <paramref name="column"/> answers, each of its presence sets able to prove absence.
+    /// </summary>
+    private bool AskedOnly(VortexExpr expr, string path, Column column)
+    {
+        if (expr is LogicalExpr logical)
+        {
+            return AskedOnly(logical.Left, path, column) && AskedOnly(logical.Right, path, column);
+        }
+
+        if (_leaves.TryGetValue(expr, out Leaf leaf) && ReferenceEquals(leaf.Column, column))
+        {
+            for (int set = leaf.First; set < leaf.First + leaf.Sets; set++)
+            {
+                if (!column.Asked.Keyed(set))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        Reading reading = new Reading(path);
+        return Scanning.ScanBuilder.VisitFields(expr, ref reading);
+    }
+
+    /// <summary>A walk over a filter's columns that stops at the column at <c>path</c>, or at a function of it.</summary>
+    private readonly struct Reading(string path) : Scanning.ScanBuilder.IFieldVisitor
+    {
+        public bool Visit(FieldExpr field) => !string.Equals(field.Path, path, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The pruner for <paramref name="filter"/>, or <see langword="null"/> when no column it tests
     /// for equality carries a usable locating entry.
     /// </summary>
@@ -970,7 +1016,14 @@ internal sealed class KeyIndexPruner
             Runs = runs;
             _blocks = blocks;
             _words = (blocks + 63) >> 6;
+            CoversAll = Covers(runs, blocks);
         }
+
+        /// <summary>Whether the runs place each key at the blocks its hash occurs in, as hashed postings do.</summary>
+        internal bool Hashes => _hashes;
+
+        /// <summary>Whether the runs cover every block of the file, so that their claims speak for each one.</summary>
+        internal bool CoversAll { get; }
 
         /// <summary>What the filter asks of the column, shared with every file it is asked of.</summary>
         internal Asked Asked { get; }
@@ -986,6 +1039,26 @@ internal sealed class KeyIndexPruner
         internal int Stride => _hashes
             ? KeyRunOptions.HashedStride
             : _rows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
+
+        /// <summary>
+        /// Whether <paramref name="runs"/>, in the order of their blocks as a writer lists them, leave none of the
+        /// file's <paramref name="blocks"/> uncovered; runs in another order are taken for a gap.
+        /// </summary>
+        private static bool Covers(List<Run> runs, int blocks)
+        {
+            ulong next = 0;
+            foreach (Run run in runs)
+            {
+                if (run.Meta.FirstBlock > next)
+                {
+                    return false;
+                }
+
+                next = Math.Max(next, run.Meta.EndBlock);
+            }
+
+            return runs.Count > 0 && next >= (ulong)blocks;
+        }
 
         /// <summary>
         /// The segments of <paramref name="table"/> whose range may hold one of the column's keys,
