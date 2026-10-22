@@ -66,8 +66,6 @@ public sealed partial class SynopsisContentsTests
         SynopsisContents[] contents = [.. periods.Select(p => SynopsisContents.From(p.Synopsis.Span)!)];
         Assert.All(contents, c => Assert.NotEmpty(c.Tables));
 
-        // No chunk of a synopsis column, which no reader asks an entry for: they were most of a large object's entry.
-        Assert.All(contents, c => Assert.Empty(c.Columns));
         long partBytes = contents.Sum(c => c.PartEnd - c.PartStart);
 
         // Cold, every object at once: one round trip, a request an object, nothing past the parts. A latency
@@ -232,8 +230,7 @@ public sealed partial class SynopsisContentsTests
             [
                 (new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4), [new TableChunk(new IndexSegment(4_096, 512, 6, 9), 0, 3_600_000_000, 3), new TableChunk(new IndexSegment(4_608, 128, 6, 10), 3_600_000_000, 3_600_000_000, 1)]),
                 (new SynopsisTableInfo(SynopsisTableKind.Values, SynopsisBucket.Slice, [1], [3], 2), [new TableChunk(new IndexSegment(4_736, 64, 6, 11), 0, 60_000_000, 2) { Keys = new ValueBounds([1, 1, (byte)'a'], [1, 2, (byte)'e', (byte)'u']) }]),
-            ],
-            [(1, [new ChunkSpan(4_608, 300, 6, 0, 15)])]);
+            ]);
         SynopsisContents back = SynopsisContents.From(contents.ToBytes())!;
         Assert.Equal(contents.Schema, back.Schema);
         Assert.Equal(contents.Encodings, back.Encodings);
@@ -243,7 +240,6 @@ public sealed partial class SynopsisContentsTests
         Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(Unbounded), back.Tables.SelectMany(t => t.Chunks).Select(Unbounded));
         Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(Bounds), back.Tables.SelectMany(t => t.Chunks).Select(Bounds));
         Assert.Equal(contents.Tables.Select(t => t.Table), back.Tables.Select(t => t.Table), Same);
-        Assert.Equal(contents.Columns.Select(c => (c.Field, c.Chunks.Single())), back.Columns.Select(c => (c.Field, c.Chunks.Single())));
         Assert.Null(SynopsisContents.From([1, 2, 3]));
 
         ObjectEntry entry = new ObjectEntry("data/a.vortex", 7, 15, 9_000, 11, (ObjectSummaries?)null).WithFooterBytes(80_000).WithSynopsis(contents.ToBytes());

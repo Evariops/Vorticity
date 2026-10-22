@@ -26,10 +26,6 @@ namespace Vorticity.Indexes;
 /// <param name="PartStart">Where the synopsis part starts in the file.</param>
 /// <param name="PartEnd">Where it ends.</param>
 /// <param name="Tables">Each synopsis table, and its chunks: their regions, the buckets they count over and their rows.</param>
-/// <param name="Columns">
-/// Each synopsis column, and its chunks: what the entries of earlier writers carry, which no reader asks for; a writer
-/// leaves them out, as they made most of a large object's entry.
-/// </param>
 /// <param name="PathDirectories">
 /// Each variant column's path directory, and its region: what a question on a path the tables do not name
 /// reads first, before that path's regions.
@@ -42,7 +38,6 @@ internal sealed record SynopsisContents(
     long PartStart,
     long PartEnd,
     IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> Tables,
-    IReadOnlyList<(int Field, ChunkSpan[] Chunks)> Columns,
     IReadOnlyList<(int Field, IndexSegment Region)>? PathDirectories = null)
 {
     /// <summary>
@@ -64,10 +59,13 @@ internal sealed record SynopsisContents(
     private const int TagPartStart = 5;
     private const int TagPartEnd = 6;
     private const int TagTable = 7;
-    private const int TagColumn = 8;
+
+    // Tag 8 held the synopsis columns of the branch's first writers, which no reader asked for: skipped, as an unknown tag is.
     private const int TagSchema = 9;
     private const int TagTableInfo = 1;
-    private const int TagTableRegion = 2;
+
+    // Tag 2 of a table held the one region of the branch's first tables, before they came in chunks: skipped, as an
+    // unknown tag is.
     private const int TagTableChunk = 3;
     private const int TagChunkRegion = 1;
     private const int TagChunkFirst = 2;
@@ -75,8 +73,6 @@ internal sealed record SynopsisContents(
     private const int TagChunkRows = 4;
     private const int TagChunkLeastKey = 5;
     private const int TagChunkGreatestKey = 6;
-    private const int TagColumnField = 1;
-    private const int TagColumnChunks = 2;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -392,13 +388,6 @@ internal sealed record SynopsisContents(
                 }
             }
 
-            foreach ((int field, ChunkSpan[] chunks) in Columns)
-            {
-                using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumn);
-                writer.WriteUInt32Always(TagColumnField, (uint)field);
-                writer.WriteBytes(TagColumnChunks, new SliceChunks([], [chunks]).ColumnBytes(0));
-            }
-
             writer.WriteBytes(TagSchema, Schema);
             foreach ((int field, IndexSegment region) in PathDirectories ?? [])
             {
@@ -424,9 +413,7 @@ internal sealed record SynopsisContents(
     internal static SynopsisContents? From(ReadOnlySpan<byte> bytes) => From(new ReadOnlyMemory<byte>(bytes.ToArray()));
 
     /// <summary>
-    /// The contents <paramref name="bytes"/> hold, or null when they do not decode or are of a later version; the chunks of
-    /// the synopsis columns left in the bytes, which no reader of the contents asks for, parsed when one does
-    /// (<see cref="ColumnChunks"/>).
+    /// The contents <paramref name="bytes"/> hold, or null when they do not decode or are of a later version.
     /// </summary>
     internal static SynopsisContents? From(ReadOnlyMemory<byte> bytes)
     {
@@ -440,7 +427,6 @@ internal sealed record SynopsisContents(
             long start = 0;
             long end = 0;
             List<(SynopsisTableInfo, IReadOnlyList<TableChunk>)> tables = [];
-            List<(int, ReadOnlyMemory<byte>)> columns = [];
             List<(int, IndexSegment)> pathDirectories = [];
             IndexSegment? indexDirectory = null;
             byte[]? schema = null;
@@ -475,15 +461,6 @@ internal sealed record SynopsisContents(
 
                         tables.Add(table);
                         break;
-                    case (TagColumn, ProtoWireType.LengthDelimited):
-                        ReadOnlySpan<byte> message = reader.ReadLengthDelimited();
-                        if (ColumnField(new ProtoReader(message)) is not { } column)
-                        {
-                            return null;
-                        }
-
-                        columns.Add((column, bytes.Slice(reader.Position - message.Length, message.Length)));
-                        break;
                     case (TagSchema, ProtoWireType.LengthDelimited):
                         schema = reader.ReadLengthDelimited().ToArray();
                         break;
@@ -505,7 +482,7 @@ internal sealed record SynopsisContents(
             }
 
             return version == Version && slices is not null && schema is not null && end >= start
-                ? new SynopsisContents(schema, encodings, slices, directories, start, end, tables, new ColumnChunks([.. columns]), pathDirectories)
+                ? new SynopsisContents(schema, encodings, slices, directories, start, end, tables, pathDirectories)
                 {
                     DirectoryRegion = indexDirectory,
                 }
@@ -519,14 +496,12 @@ internal sealed record SynopsisContents(
 
     /// <summary>
     /// A table and its chunks, which the message <paramref name="message"/> holds, its chunks checked and left in the bytes
-    /// (<see cref="TableChunks"/>); a table of contents written before tables came in chunks names one region, which is
-    /// then the table's one chunk, over every bucket.
+    /// (<see cref="TableChunks"/>); null for a table of no chunk.
     /// </summary>
     private static (SynopsisTableInfo, IReadOnlyList<TableChunk>)? Table(ReadOnlyMemory<byte> message)
     {
         ProtoReader reader = new ProtoReader(message.Span);
         SynopsisTableInfo? table = null;
-        IndexSegment? region = null;
         int count = 0;
         int keyBytes = 0;
         int declared = 0;
@@ -536,9 +511,6 @@ internal sealed record SynopsisContents(
             {
                 case (TagTableInfo, ProtoWireType.LengthDelimited):
                     table = SynopsisTableInfo.From(reader.ReadLengthDelimited());
-                    break;
-                case (TagTableRegion, ProtoWireType.LengthDelimited):
-                    region = IndexDirectory.ReadSegment(reader.ReadMessage());
                     break;
                 case (TagTableChunk, ProtoWireType.LengthDelimited):
                     if (!Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest))
@@ -556,17 +528,7 @@ internal sealed record SynopsisContents(
             }
         }
 
-        if (table is null)
-        {
-            return null;
-        }
-
-        if (count == 0 && region is { } whole)
-        {
-            return (table, new TableChunk[] { new TableChunk(whole, long.MinValue, long.MaxValue, table.Rows) });
-        }
-
-        return count > 0 ? (table, new TableChunks(message, count, keyBytes, declared)) : null;
+        return table is not null && count > 0 ? (table, new TableChunks(message, count, keyBytes, declared)) : null;
     }
 
     /// <summary>
@@ -758,91 +720,6 @@ internal sealed record SynopsisContents(
         return field is { } at && region is { } segment ? (at, segment) : null;
     }
 
-    /// <summary>The field of the synopsis column a message names, when it names one and its chunks; null otherwise. Its chunks are not read.</summary>
-    private static int? ColumnField(ProtoReader reader)
-    {
-        int? field = null;
-        bool chunks = false;
-        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
-        {
-            switch (tag, wire)
-            {
-                case (TagColumnField, ProtoWireType.Varint):
-                    field = checked((int)reader.ReadVarint32());
-                    break;
-                case (TagColumnChunks, ProtoWireType.LengthDelimited):
-                    reader.SkipField(wire);
-                    chunks = true;
-                    break;
-                default:
-                    reader.SkipField(wire);
-                    break;
-            }
-        }
-
-        return chunks ? field : null;
-    }
-
-    /// <summary>
-    /// The chunks of each synopsis column, as the bytes of the contents hold them, each column's parsed the first time it
-    /// is asked for: no reader of the contents asks for them, and parsed at every open of an object they were most of
-    /// what its contents held, a megabyte and a half of an hour of 180 M rows, kept as long as its entry. A column whose
-    /// chunks do not decode has none.
-    /// </summary>
-    internal sealed class ColumnChunks((int Field, ReadOnlyMemory<byte> Message)[] columns) : IReadOnlyList<(int Field, ChunkSpan[] Chunks)>
-    {
-        private readonly ChunkSpan[]?[] _parsed = new ChunkSpan[]?[columns.Length];
-
-        public int Count => columns.Length;
-
-        public (int Field, ChunkSpan[] Chunks) this[int index]
-        {
-            get
-            {
-                ref ChunkSpan[]? parsed = ref _parsed[index];
-                if (System.Threading.Volatile.Read(ref parsed) is not { } chunks)
-                {
-                    chunks = Column(new ProtoReader(columns[index].Message.Span))?.Item2 ?? [];
-                    System.Threading.Volatile.Write(ref parsed, chunks);
-                }
-
-                return (columns[index].Field, chunks);
-            }
-        }
-
-        public IEnumerator<(int Field, ChunkSpan[] Chunks)> GetEnumerator()
-        {
-            for (int i = 0; i < columns.Length; i++)
-            {
-                yield return this[i];
-            }
-        }
-
-        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
-    }
-
-    private static (int, ChunkSpan[])? Column(ProtoReader reader)
-    {
-        int? field = null;
-        ChunkSpan[]? chunks = null;
-        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
-        {
-            switch (tag, wire)
-            {
-                case (TagColumnField, ProtoWireType.Varint):
-                    field = checked((int)reader.ReadVarint32());
-                    break;
-                case (TagColumnChunks, ProtoWireType.LengthDelimited):
-                    chunks = SliceChunks.ColumnFrom(reader.ReadLengthDelimited());
-                    break;
-                default:
-                    reader.SkipField(wire);
-                    break;
-            }
-        }
-
-        return field is { } at && chunks is not null ? (at, chunks) : null;
-    }
 }
 
 /// <summary>

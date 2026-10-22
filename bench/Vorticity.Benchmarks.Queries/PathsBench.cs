@@ -274,9 +274,7 @@ internal static class PathsBench
             string parts = entry.Contents is not { } contents ? "no table of contents" : string.Create(
                 CultureInfo.InvariantCulture,
                 $"contents {entry.Synopsis.Length / 1e6:F2} MB: {contents.Slices.Slices.Count} slices in {contents.Slices.ToBytes().Length / 1e3:F1} KB, " +
-                $"{contents.Tables.Count} tables of {contents.Tables.Sum(table => table.Chunks.Count)} chunks, " +
-                $"{contents.Columns.Count} synopsis columns of {contents.Columns.Sum(column => column.Chunks.Length)} chunks in " +
-                $"{contents.Columns.Sum(column => (long)new Vorticity.Indexes.SliceChunks([], [column.Chunks]).ColumnBytes(0).Length) / 1e6:F2} MB, schema {contents.Schema.Length} B");
+                $"{contents.Tables.Count} tables of {contents.Tables.Sum(table => table.Chunks.Count)} chunks, schema {contents.Schema.Length} B");
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {entry.Key}: {entry.Rows:N0} rows, entry {bytes / 1e6:F2} MB, {parts}"));
         }
 

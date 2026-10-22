@@ -90,7 +90,7 @@ public sealed partial class SynopsisOrderTests
     }
 
     [Fact]
-    public void ASliceTableKeepsItsOrderAndReadsTheFirstVersion()
+    public void ASliceTableKeepsItsOrderAndRefusesAnEarlierVersion()
     {
         SliceTable table = new SliceTable(
             TimeUnit.Microseconds,
@@ -106,13 +106,10 @@ public sealed partial class SynopsisOrderTests
         Assert.Equal(table.Slices, read.Slices);
         Assert.Equal(table.Paths, read.Paths);
 
-        // A table of the first version, with no order: rows in time order. Its last two bytes are the
-        // counts of the order and of the paths, which later versions write.
-        byte[] first = new SliceTable(TimeUnit.Microseconds, table.Slices).ToBytes();
-        first[0] = 1;
-        SliceTable old = SliceTable.FromBytes(first[..^2])!;
-        Assert.Empty(old.Order);
-        Assert.Equal(table.Slices, old.Slices);
+        // A table of a version before the one written, which no store holds, does not decode.
+        byte[] earlier = table.ToBytes();
+        earlier[0] = 3;
+        Assert.Null(SliceTable.FromBytes(earlier));
     }
 
     private static async Task<int[]> OrderAsync(VortexFile file, int[] candidates, long rows)

@@ -482,6 +482,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             {
                 for (int c = 0; c < payload.Count; c++)
                 {
+                    // A table of one chunk says no chunk in its options (IndexWriter): that chunk holds every bucket and row.
                     (long first, long last, int rows) = chunks is { } held && held.Count == payload.Count
                         ? held[c]
                         : payload.Count == 1 ? (long.MinValue, long.MaxValue, table.Rows) : (0, -1, -1);

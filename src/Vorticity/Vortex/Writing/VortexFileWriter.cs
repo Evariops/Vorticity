@@ -198,7 +198,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         return new SynopsisContents(
             Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories,
-            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, [], pathDirectories);
+            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, pathDirectories);
     }
 
     /// <summary>

@@ -31,18 +31,15 @@ internal readonly record struct TimeSlice(long Start, long End, long FirstRow, l
 /// </remarks>
 internal sealed class SliceTable
 {
-    // Version 1 holds the slices alone, version 2 the order inside them after them, its fields as they
-    // are, version 3 the order's entries zigzagged, a variant field's shapes below zero, and version 4 the
-    // object's synopsis paths after the order, which its entries from SynopsisPath.Base name.
+    // The slices, the order inside them, its entries zigzagged, a variant field's shapes below zero, then the object's
+    // synopsis paths, which the order's entries from SynopsisPath.Base name. The versions before were the branch's
+    // own, which no store of a release holds.
     private const byte Version = 4;
-    private const byte ShapesVersion = 3;
 
     // A path's class word: the class, and above the classes whether the path lies in the residual and whether
     // the object holds floats there.
     private const uint ResidualFlag = 0x100;
     private const uint FloatsFlag = 0x200;
-    private const byte OrderVersion = 2;
-    private const byte FirstVersion = 1;
 
     /// <summary>
     /// A table of <paramref name="slices"/> over instants counted in <paramref name="unit"/>, whose rows
@@ -171,8 +168,7 @@ internal sealed class SliceTable
         try
         {
             ProtoReader reader = new ProtoReader(bytes);
-            ulong version = reader.ReadVarint();
-            if (version is not (Version or ShapesVersion or OrderVersion or FirstVersion))
+            if (reader.ReadVarint() != Version)
             {
                 return null;
             }
@@ -199,47 +195,38 @@ internal sealed class SliceTable
                 end = stop;
             }
 
-            int[] order = [];
-            if (version != FirstVersion)
+            ulong fields = reader.ReadVarint();
+            if (fields > (ulong)bytes.Length)
             {
-                ulong fields = reader.ReadVarint();
-                if (fields > (ulong)bytes.Length)
-                {
-                    return null;
-                }
-
-                order = new int[(int)fields];
-                for (int i = 0; i < order.Length; i++)
-                {
-                    ulong entry = reader.ReadVarint();
-                    order[i] = version >= ShapesVersion ? checked((int)UnZigZag(entry)) : checked((int)entry);
-                }
+                return null;
             }
 
-            SynopsisPath[] paths = [];
-            if (version == Version)
+            int[] order = new int[(int)fields];
+            for (int i = 0; i < order.Length; i++)
             {
-                ulong held = reader.ReadVarint();
-                if (held > (ulong)bytes.Length)
+                order[i] = checked((int)UnZigZag(reader.ReadVarint()));
+            }
+
+            ulong held = reader.ReadVarint();
+            if (held > (ulong)bytes.Length)
+            {
+                return null;
+            }
+
+            SynopsisPath[] paths = new SynopsisPath[(int)held];
+            for (int i = 0; i < paths.Length; i++)
+            {
+                int field = checked((int)reader.ReadVarint());
+                string key = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                ulong word = reader.ReadVarint();
+                ulong @class = word & ~(ulong)(ResidualFlag | FloatsFlag);
+                if (@class > byte.MaxValue || !Enum.IsDefined((Types.Variants.VariantClass)(byte)@class))
                 {
                     return null;
                 }
 
-                paths = new SynopsisPath[(int)held];
-                for (int i = 0; i < paths.Length; i++)
-                {
-                    int field = checked((int)reader.ReadVarint());
-                    string key = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
-                    ulong word = reader.ReadVarint();
-                    ulong @class = word & ~(ulong)(ResidualFlag | FloatsFlag);
-                    if (@class > byte.MaxValue || !Enum.IsDefined((Types.Variants.VariantClass)(byte)@class))
-                    {
-                        return null;
-                    }
-
-                    paths[i] = new SynopsisPath(
-                        field, key, (Types.Variants.VariantClass)(byte)@class, (word & ResidualFlag) != 0, (word & FloatsFlag) != 0);
-                }
+                paths[i] = new SynopsisPath(
+                    field, key, (Types.Variants.VariantClass)(byte)@class, (word & ResidualFlag) != 0, (word & FloatsFlag) != 0);
             }
 
             return reader.End && Problem(slices) is null ? new SliceTable(unit, slices, order, paths) : null;
