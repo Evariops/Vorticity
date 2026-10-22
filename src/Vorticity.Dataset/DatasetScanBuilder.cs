@@ -829,16 +829,25 @@ internal sealed class DatasetScanBuilder
             return default;
         }
 
+        // A part of the object is answered under a window that ends where the part does: the slices it begins and ends
+        // with, or the one slice that holds it, a lane's share of an edge, whose answer is then that edge alone.
         (long, long)? within = null;
+        long first = Math.Max(_from, held.FirstRow) - held.FirstRow;
+        bool inSlice = false;
         if (covered != held.Entry.Rows)
         {
-            if (held.Entry.HasDeletions || _take is not null
-                || Within(contents.Slices.Slices, Math.Max(_from, held.FirstRow) - held.FirstRow, covered) is not { } part)
+            if (held.Entry.HasDeletions || _take is not null)
             {
                 return default;
             }
 
-            within = part;
+            (long, long)? slice = SliceHolding(contents.Slices.Slices, first, covered);
+            within = Within(contents.Slices.Slices, first, covered) ?? slice;
+            inSlice = slice is not null;
+            if (within is null)
+            {
+                return default;
+            }
         }
 
         DType schema;
@@ -862,14 +871,64 @@ internal sealed class DatasetScanBuilder
         }
 
         // An answer that cannot take the values of identifiers the filter leaves out of its tables, a distinct count
-        // from sketches, takes them for absent instead: the identifier's index says so before the tables answer.
+        // from sketches, takes them for absent instead: the identifier's index says so before the tables answer. A part
+        // in one slice the window cuts answers with that edge alone, read by the object's chunk directories with no open
+        // of it, where a scan of its rows read the footer, 31 MB for a day's, and the instant's zone map.
         SynopsisQuestion question = QuestionOf(request, key.InstantPath);
         IReadOnlyDictionary<string, FilterLiteral>? partition = PartitionFilter.ValuesOf(held.Entry, key);
-        return (SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions)
-                ?? (question.MayExclude ? SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, assumeAbsent: true) : null))
-            is { } answer
-            ? (answer, contents, key.InstantPath)
-            : default;
+        if ((SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, edgesAlone: inSlice)
+                ?? (question.MayExclude ? SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, assumeAbsent: true, edgesAlone: inSlice) : null))
+            is not { } answer)
+        {
+            return default;
+        }
+
+        // A share of a slice: its own rows of the edge, or, should the tables answer the slice, its rows, which no table holds apart.
+        if (inSlice && answer.Edges is [TimeSlice edge] && (edge.FirstRow != first || edge.Rows != covered))
+        {
+            if (answer.Parts.Count > 0)
+            {
+                return default;
+            }
+
+            answer = answer with { Edges = [new TimeSlice(edge.Start, edge.End, first, covered)] };
+        }
+        else if (inSlice && Within(contents.Slices.Slices, first, covered) is null)
+        {
+            return default;
+        }
+
+        return (answer, contents, key.InstantPath);
+    }
+
+    /// <summary>
+    /// The instants of the one slice of <paramref name="slices"/> that holds rows <paramref name="first"/> to
+    /// <paramref name="first"/> + <paramref name="count"/> of an object, its start to its end, inclusive: what a lane's share
+    /// of an edge, or a whole edge, lies in. Null when no one slice holds them all.
+    /// </summary>
+    private static (long Low, long High)? SliceHolding(IReadOnlyList<TimeSlice> slices, long first, long count)
+    {
+        int low = 0;
+        int high = slices.Count - 1;
+        while (low <= high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            TimeSlice slice = slices[middle];
+            if (first < slice.FirstRow)
+            {
+                high = middle - 1;
+            }
+            else if (first >= slice.FirstRow + slice.Rows)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                return first + count <= slice.FirstRow + slice.Rows ? (slice.Start, slice.End - 1) : null;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

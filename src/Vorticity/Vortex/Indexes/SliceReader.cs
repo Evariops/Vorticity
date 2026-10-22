@@ -355,6 +355,31 @@ internal sealed class SliceReader : IDisposable
     }
 
     /// <summary>
+    /// The rows strictly inside <paramref name="first"/> to <paramref name="end"/> at which a chunk of one of
+    /// <paramref name="fields"/> starts, in order and once each: where the span may be cut so that each part reads chunks
+    /// of its own but those the cut falls in, as an open file's splits are cut. The directories of the columns not read
+    /// before are read first, the pages that span reaches of a paged one.
+    /// </summary>
+    internal async ValueTask<long[]> ChunkStartsAsync(int[] fields, long first, long end, CancellationToken cancellationToken)
+    {
+        TimeSlice span = new TimeSlice(0, 1, first, end - first);
+        await LoadAsync(fields, [span], cancellationToken).ConfigureAwait(false);
+        SortedSet<long> starts = [];
+        foreach (int field in fields)
+        {
+            foreach (ChunkSpan chunk in Overlapping(field, first, end - first))
+            {
+                if (chunk.FirstRow > first && chunk.FirstRow < end)
+                {
+                    starts.Add(chunk.FirstRow);
+                }
+            }
+        }
+
+        return [.. starts];
+    }
+
+    /// <summary>
     /// Reads, the first time it is asked for, what a read of column <paramref name="field"/>'s rows starts from: its chunk
     /// directory, or a paged column's page table, whose pages a read reads as its spans reach them. What a reader that learns
     /// late which rows it reads, a lookup after its postings, reads first, beside its other reads.

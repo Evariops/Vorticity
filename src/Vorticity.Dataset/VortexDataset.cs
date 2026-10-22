@@ -2829,6 +2829,23 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The rows strictly inside <paramref name="first"/> to <paramref name="end"/> of the object <paramref name="entry"/>
+    /// names at which a chunk of one of <paramref name="columns"/> starts, read from its chunk directories with no open of it
+    /// (<see cref="Indexes.SliceReader.ChunkStartsAsync"/>): where a span of its rows may be cut between lanes.
+    /// </summary>
+    internal async ValueTask<long[]> ChunkStartsAsync(
+        ObjectEntry entry, Indexes.SynopsisContents contents, int[] columns, long first, long end, CancellationToken cancellationToken)
+    {
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            using Indexes.SliceReader reader = Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents)
+                ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
+            return await reader.ChunkStartsAsync(columns, first, end, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// The rows of slice <paramref name="slice"/> of the object <paramref name="entry"/> names, of every column
     /// or of <paramref name="columns"/>, read with no open of the object: the chunk directories its entry's
     /// table of contents names, then the slice's chunks, in two round trips. Null when the entry carries no

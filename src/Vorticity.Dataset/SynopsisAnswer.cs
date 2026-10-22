@@ -275,10 +275,14 @@ internal sealed record SynopsisAnswer(
     /// Whether the values of identifiers the filter leaves out are taken for absent from the object (<see cref="Absent"/>)
     /// rather than taken out of its tables (<see cref="Excluded"/>).
     /// </param>
+    /// <param name="edgesAlone">
+    /// Whether an object, or a part of it, whose every row the edges hold answers with its edges alone, which its chunk
+    /// directories read, rather than with null and its rows: what a lane that reads a share of an edge asks.
+    /// </param>
     internal static SynopsisAnswer? Of(
         SynopsisQuestion question, SynopsisContents contents, DType schema, (long Least, long Greatest)? held = null,
         IReadOnlyDictionary<string, FilterLiteral>? partition = null, (long Low, long High)? within = null, bool marked = false,
-        bool assumeAbsent = false)
+        bool assumeAbsent = false, bool edgesAlone = false)
     {
         string instant = question.Instant;
         StateRequest request = question.Request;
@@ -524,9 +528,9 @@ internal sealed record SynopsisAnswer(
             }
         }
 
-        // An object whose every row the edges hold is read as rows, with no table.
+        // An object whose every row the edges hold is read as rows, with no table, unless the caller reads its edges alone.
         int count = (whole.KeptCount > 0 ? 1 : 0) + (hours is { KeptCount: > 0 } ? 1 : 0) + (runs is { KeptCount: > 0 } ? 1 : 0);
-        if (count == 0 && edges is not null)
+        if (count == 0 && edges is not null && !edgesAlone)
         {
             return null;
         }

@@ -11,7 +11,7 @@ namespace Vorticity.Dataset;
 /// object: its filter's conjuncts and the columns each reads, its keys of time, and the filter on keys the last answer
 /// built, which the next takes when the same conjuncts make it. An object's answer then builds its parts, its buckets
 /// and its edges alone
-/// (<see cref="SynopsisAnswer.Of(SynopsisQuestion, Indexes.SynopsisContents, Types.DType, ValueTuple{long, long}?, IReadOnlyDictionary{string, FilterLiteral}?, ValueTuple{long, long}?, bool, bool)"/>).
+/// (<see cref="SynopsisAnswer.Of(SynopsisQuestion, Indexes.SynopsisContents, Types.DType, ValueTuple{long, long}?, IReadOnlyDictionary{string, FilterLiteral}?, ValueTuple{long, long}?, bool, bool, bool)"/>).
 /// </summary>
 internal sealed class SynopsisQuestion
 {

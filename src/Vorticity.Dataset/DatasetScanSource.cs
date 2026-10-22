@@ -307,7 +307,7 @@ internal sealed class DatasetScanSource : ScanSource
                 if (edge.Rows >= 2 * edgeShare)
                 {
                     long first = objects[o].Held.FirstRow + edge.FirstRow;
-                    (cut ??= []).Add(CutAsync(objects[o].Held, new RowRange(first, first + edge.Rows), edgeShare, spec.Projection, cancellationToken));
+                    (cut ??= []).Add(CutEdgeAsync(objects[o].Held, new RowRange(first, first + edge.Rows), edgeShare, spec, cancellationToken));
                     cutting.Add(cut[^1]);
                 }
             }
@@ -492,6 +492,80 @@ internal sealed class DatasetScanSource : ScanSource
             pieces.Add(new RowRange(start, rows.End));
             return [.. pieces];
         }
+    }
+
+    /// <summary>
+    /// <see cref="CutAsync"/> for an edge of an answer, the rows of a slice its window cuts, which its pieces read by the
+    /// object's chunk directories: cut between the chunks of the columns they read as those directories say, with no open
+    /// of the object, where an open read its footer, 31 MB for a day's. An object whose schema is not the version's, or
+    /// with rows a delete marked, is opened as before.
+    /// </summary>
+    private async Task<RowRange[]> CutEdgeAsync(PositionedObject held, RowRange rows, long share, ScanSpec spec, CancellationToken cancellationToken)
+    {
+        if (held.Entry.Contents is not { } contents || held.Entry.HasDeletions || EdgeFields(held.Entry, contents, spec) is not { } fields)
+        {
+            return await CutAsync(held, rows, share, spec.Projection, cancellationToken).ConfigureAwait(false);
+        }
+
+        long[] starts = await _dataset.ChunkStartsAsync(
+            held.Entry, contents, fields, rows.Start - held.FirstRow, rows.End - held.FirstRow, cancellationToken).ConfigureAwait(false);
+        long parts = rows.Length / share;
+        List<RowRange> pieces = [];
+        long start = rows.Start;
+        for (int c = 0; c < starts.Length && pieces.Count < parts - 1; c++)
+        {
+            long at = held.FirstRow + starts[c];
+            if (at - start >= share && at < rows.End)
+            {
+                pieces.Add(new RowRange(start, at));
+                start = at;
+            }
+        }
+
+        pieces.Add(new RowRange(start, rows.End));
+        return [.. pieces];
+    }
+
+    /// <summary>
+    /// The top-level columns of the object of <paramref name="contents"/> the pieces of an edge read: the projection's and
+    /// the filter's. Null when the object's schema is not the version's, whose columns the projection names.
+    /// </summary>
+    private int[]? EdgeFields(ObjectEntry entry, Indexes.SynopsisContents contents, ScanSpec spec)
+    {
+        Types.DType schema;
+        try
+        {
+            schema = contents.SchemaType;
+        }
+        catch (VortexFormatException)
+        {
+            return null;
+        }
+
+        if (_version.Schema.ColumnsOf(schema, entry.Key) is not null)
+        {
+            return null;
+        }
+
+        SortedSet<int> fields = [];
+        FieldMask mask = spec.Projection ?? FieldMask.All;
+        int selected = mask.SelectedCount(schema.FieldCount);
+        for (int i = 0; i < selected; i++)
+        {
+            fields.Add(mask.SelectedField(i));
+        }
+
+        HashSet<string> named = new HashSet<string>(System.StringComparer.Ordinal);
+        spec.Filter?.CollectFields(named);
+        foreach (string name in named)
+        {
+            if (schema.IndexOfField(name.Split('.')[0]) is int field and >= 0)
+            {
+                fields.Add(field);
+            }
+        }
+
+        return fields.Count == 0 ? null : [.. fields];
     }
 
     /// <summary>The engine's scan for <paramref name="spec"/>, adding what the objects' scans count to <paramref name="counters"/>.</summary>
