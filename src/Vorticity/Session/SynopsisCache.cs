@@ -13,9 +13,9 @@ namespace Vorticity;
 /// <summary>
 /// A cache on the local disk of what a question reads of a dataset's objects without the rest of their
 /// data: the tables of their synopses, their slices' chunk directories, their index directories, their
-/// variant columns' path directories, and the pages and segments of their indexes' runs a lookup reads. A
-/// question over a month answers from the disk once those regions have been read, and makes no request to
-/// the store for them.
+/// variant columns' path directories, and the pages and segments of their indexes' runs a lookup reads;
+/// and the pages of the dataset's tree, which say what objects it holds. A question over a month answers
+/// from the disk once those regions have been read, and makes no request to the store for them.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -27,12 +27,18 @@ namespace Vorticity;
 /// the store.
 /// </para>
 /// <para>
+/// A page of a dataset's tree is kept by the XXH3-128 hash of its bytes, which the page or the header naming
+/// it gives: a page never changes, and every version that names it holds the same bytes, so a handle opened
+/// later, whose own pages start empty, reads the tree from the disk. Its reader checks the hash at each read.
+/// A sealed dataset's pages stay off the disk: they are plaintext of its commit objects.
+/// </para>
+/// <para>
 /// A region read from the store enters the cache behind the question that read it: the buffer its reader
 /// read it into is held until a writer of the cache's own has written it, and a read of the region meanwhile
 /// is served from that buffer. A file costs about 1.7 ms to create, close and rename on Windows, which the
 /// question paid for each region it read: past a quarter of a second of a cold question that read 104 MB of
-/// tables. Past <see cref="MaxPendingBytes"/> waiting, a region is written before its reader goes on. A sealed
-/// object's frames are written at once.
+/// tables. Past <see cref="MaxPendingBytes"/> waiting, a region is written before its reader goes on. A page of
+/// a tree waits so too, its array its own, which never changes. A sealed object's frames are written at once.
 /// </para>
 /// <para>
 /// A sealed object leaves no plaintext on the disk. The cache keeps its trailer and the frames that hold a
@@ -319,7 +325,7 @@ public sealed class SynopsisCache : IDisposable
         }
 
         string name = NameOf(uid, region);
-        if (!TryQueue(uid, name, owner, bytes))
+        if (!TryQueue(uid, name, owner, bytes, page: null))
         {
             Keep(uid, name, bytes.Span);
         }
@@ -343,16 +349,18 @@ public sealed class SynopsisCache : IDisposable
 
     /// <summary>
     /// Puts a region read from the store to wait for its write, a writer started if fewer than <see cref="MaxWriters"/>
-    /// run; false when the caller writes it, past the bytes waiting or the capacity.
+    /// run; false when the caller writes it, past the bytes waiting or the capacity. A page of a tree comes as
+    /// <paramref name="page"/>, with no owner nor buffer.
     /// </summary>
-    private bool TryQueue(UInt128 uid, string name, SegmentOwner owner, VortexBuffer bytes)
+    private bool TryQueue(UInt128 uid, string name, SegmentOwner? owner, VortexBuffer bytes, byte[]? page)
     {
         if (Volatile.Read(ref _disposed) != 0)
         {
             return true;
         }
 
-        if (bytes.Length > CapacityBytes)
+        int length = page?.Length ?? bytes.Length;
+        if (length > CapacityBytes)
         {
             return false;
         }
@@ -365,20 +373,20 @@ public sealed class SynopsisCache : IDisposable
                 return true;
             }
 
-            if (_pendingHeld + bytes.Length > Math.Min(MaxPendingBytes, CapacityBytes))
+            if (_pendingHeld + length > Math.Min(MaxPendingBytes, CapacityBytes))
             {
                 return false;
             }
 
-            Pending pending = new Pending(new Entry(name, ShardOf(uid), bytes.Length), owner.Retain(), bytes);
+            Pending pending = new Pending(new Entry(name, ShardOf(uid), length), owner?.Retain(), bytes, page);
             _pending[name] = pending;
             _queue.Enqueue(pending);
-            _pendingHeld += bytes.Length;
+            _pendingHeld += length;
             start = _writers < MaxWriters;
             _writers += start ? 1 : 0;
         }
 
-        VortexTelemetry.SynopsisFetched(bytes.Length);
+        VortexTelemetry.SynopsisFetched(length);
         if (start)
         {
             ThreadPool.UnsafeQueueUserWorkItem(static cache => cache.Drain(), this, preferLocal: false);
@@ -432,7 +440,7 @@ public sealed class SynopsisCache : IDisposable
         try
         {
             WriteFault?.Invoke(PathOf(pending.Entry));
-            written = Write(pending.Entry, pending.Bytes.Span);
+            written = Write(pending.Entry, pending.Span);
         }
         finally
         {
@@ -447,7 +455,7 @@ public sealed class SynopsisCache : IDisposable
                 }
             }
 
-            pending.Owner.Release();
+            pending.Owner?.Release();
         }
 
         Delete(evicted);
@@ -464,14 +472,16 @@ public sealed class SynopsisCache : IDisposable
     {
         lock (_gate)
         {
-            if (_pending.Count == 0 || !_pending.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Pending? pending))
+            if (_pending.Count == 0
+                || !_pending.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Pending? pending)
+                || pending.Owner is not { } held)
             {
                 owner = null!;
                 return false;
             }
 
             pending.Hits = Math.Min(MaxHits, pending.Hits + 1);
-            owner = new IO.SliceSegmentOwner(pending.Owner, pending.Bytes);
+            owner = new IO.SliceSegmentOwner(held, pending.Bytes);
         }
 
         Served(owner.Length);
@@ -483,6 +493,67 @@ public sealed class SynopsisCache : IDisposable
     /// them, which its reader authenticated before handing them over, when they fit the capacity.
     /// </summary>
     internal void AdmitSealed(UInt128 uid, string name, ReadOnlySpan<byte> bytes) => Keep(uid, name, bytes);
+
+    /// <summary>
+    /// Keeps a page of a dataset's tree, named by the XXH3-128 <paramref name="hash"/> of its bytes, which never change: a
+    /// page any version or dataset holds under that hash is these bytes. A handle opened later, by this process or the next,
+    /// then reads its tree from the disk, where its own cache of pages starts empty. Written behind its reader, as a region
+    /// is: <paramref name="page"/> is held until then, and must not change.
+    /// </summary>
+    internal void AdmitPage(UInt128 hash, byte[] page)
+    {
+        string name = PageNameOf(hash, page.Length);
+        if (!TryQueue(hash, name, owner: null, default, page))
+        {
+            Keep(hash, name, page);
+        }
+    }
+
+    /// <summary>
+    /// The page of <paramref name="length"/> bytes kept under its <paramref name="hash"/>, read whole into a new array, or
+    /// the one waiting for its write; null when the cache does not hold it. Its reader checks it against the hash, and
+    /// drops it through <see cref="DropPage"/> when it does not hold it.
+    /// </summary>
+    internal byte[]? TryReadPage(UInt128 hash, int length)
+    {
+        string name = PageNameOf(hash, length);
+        byte[]? waiting = null;
+        lock (_gate)
+        {
+            if (_pending.Count > 0 && _pending.TryGetValue(name, out Pending? pending) && pending.Page is { } held)
+            {
+                pending.Hits = Math.Min(MaxHits, pending.Hits + 1);
+                waiting = held;
+            }
+        }
+
+        if (waiting is not null)
+        {
+            Served(length);
+            return waiting;
+        }
+
+        if (Find(name) is not { } entry)
+        {
+            return null;
+        }
+
+        byte[] page = new byte[length];
+        if (!ReadWhole(entry, page))
+        {
+            Drop(entry, corrupt: true);
+            return null;
+        }
+
+        Served(length);
+        return page;
+    }
+
+    /// <summary>Drops the page kept under <paramref name="hash"/>, which did not hash to it: a corrupt entry.</summary>
+    internal void DropPage(UInt128 hash, int length) => DropSealed(PageNameOf(hash, length));
+
+    /// <summary>The file name of a tree page: its hash and its length.</summary>
+    internal static string PageNameOf(UInt128 hash, int length) => string.Create(CultureInfo.InvariantCulture, $"{hash:x32}-{length:x}-page");
 
     /// <summary>Drops the sealed bytes kept under <paramref name="name"/>, which did not authenticate: a corrupt entry.</summary>
     internal void DropSealed(string name)
@@ -1245,14 +1316,24 @@ public sealed class SynopsisCache : IDisposable
         internal IO.MappedFileOwner? Verified { get; set; }
     }
 
-    /// <summary>A region waiting for its write: its entry to be, the buffer its reader handed over, held, and its reads meanwhile.</summary>
-    private sealed class Pending(Entry entry, SegmentOwner owner, VortexBuffer bytes)
+    /// <summary>
+    /// A region waiting for its write: its entry to be, the buffer its reader handed over, held, and its reads meanwhile;
+    /// or a page of a tree, in an array of its own.
+    /// </summary>
+    private sealed class Pending(Entry entry, SegmentOwner? owner, VortexBuffer bytes, byte[]? page)
     {
         internal Entry Entry { get; } = entry;
 
-        internal SegmentOwner Owner { get; } = owner;
+        /// <summary>What holds a region's buffer until its write; null for a page.</summary>
+        internal SegmentOwner? Owner { get; } = owner;
 
         internal VortexBuffer Bytes { get; } = bytes;
+
+        /// <summary>A page's bytes; null for a region.</summary>
+        internal byte[]? Page { get; } = page;
+
+        /// <summary>The bytes its write writes.</summary>
+        internal ReadOnlySpan<byte> Span => Page is null ? Bytes.Span : new ReadOnlySpan<byte>(Page);
 
         internal int Hits { get; set; }
     }

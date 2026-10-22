@@ -640,7 +640,9 @@ be checked against the service ([Azure's checksums](#83-checksums)).
 A session may keep on the local disk what questions read of a dataset's objects without their data
 (`VortexSessionOptions.SynopsisCache`): their synopsis tables, their slices' chunk directories, their
 index directories and their variant columns' path directories, and the fence pages and run segments a
-lookup of an identifier reads. Only a region of an index enters it, never the data nor the footer: one
+lookup of an identifier reads; and the pages of the dataset's tree, by the hash of their bytes ([the
+pages a handle keeps](13-dataset.md#3-objects-and-keys)), unless the dataset is sealed. Only a region
+of an index enters it, never the data nor the footer: one
 an object's table of contents declares, with a checksum, or a page or a segment of a run its reader
 names with the checksum the directory or the parent page gave. An object never changes, so an entry is
 never stale: its key is the object's uid, the region's place and length and its checksum, all known

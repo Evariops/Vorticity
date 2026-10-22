@@ -2888,14 +2888,21 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// A page source for one version, holding what the read that opened it brought back, and reading
-    /// through the pages this handle kept from the versions before.
+    /// through the pages this handle kept from the versions before, then through the disk of the
+    /// session's synopsis cache, where a handle opened earlier left the pages it read.
     /// </summary>
     private CommitPageSource PagesOf(ulong version, CommitObject commit)
     {
-        CommitPageSource pages = new CommitPageSource(_store, _pageCache) { Reading = version };
+        CommitPageSource pages = new CommitPageSource(_store, _pageCache, PageDisk) { Reading = version };
         pages.Open(version, commit);
         return pages;
     }
+
+    /// <summary>
+    /// The session's synopsis cache, which keeps the tree pages the handle reads on the disk: null for none, and for a
+    /// sealed dataset, whose pages stay off the disk, which holds no plaintext of it.
+    /// </summary>
+    private SynopsisCache? PageDisk => _store is SealedObjectStore { Seals: true } ? null : Session.Options.SynopsisCache;
 
     /// <summary>
     /// Completes a caller's draft and puts it in the store, keyed after <paramref name="firstRow"/>

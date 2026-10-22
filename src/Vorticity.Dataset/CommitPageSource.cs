@@ -38,12 +38,20 @@ internal sealed class CommitPageSource : IPageSource
     private byte[]? _built;
     private long _builtStart;
 
-    /// <summary>A source reading through <paramref name="store"/>, and through the handle's cache when it has one.</summary>
-    public CommitPageSource(IObjectStore store, PageCache? cache = null)
+    // The session's synopsis cache, which keeps the pages read on the disk, by their hash: what a handle opened later, whose
+    // own cache starts empty, finds there. Null for none, and for a sealed dataset, which leaves no plaintext on the disk.
+    private readonly SynopsisCache? _disk;
+
+    /// <summary>
+    /// A source reading through <paramref name="store"/>, through the handle's cache when it has one, and through the disk of
+    /// <paramref name="disk"/> when given.
+    /// </summary>
+    public CommitPageSource(IObjectStore store, PageCache? cache = null, SynopsisCache? disk = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         _store = store;
         _cache = cache;
+        _disk = disk;
     }
 
     /// <summary>How many pages were read through the store rather than found in hand.</summary>
@@ -208,6 +216,18 @@ internal sealed class CommitPageSource : IPageSource
             return kept;
         }
 
+        // The disk's, when an earlier handle read the page: checked against its hash, as a page the store gives is.
+        if (_disk?.TryReadPage(reference.Hash, reference.Length) is { } held)
+        {
+            if (XxHash128.HashToUInt128(held) == reference.Hash)
+            {
+                Hold(reference, held);
+                return held;
+            }
+
+            _disk.DropPage(reference.Hash, reference.Length);
+        }
+
         byte[] page;
         try
         {
@@ -219,8 +239,10 @@ internal sealed class CommitPageSource : IPageSource
         }
 
         // Kept because a page is immutable and a commit reads the same ones twice by construction:
-        // the descent that looks a key up and the merge that rewrites its leaf are the same page.
+        // the descent that looks a key up and the merge that rewrites its leaf are the same page. And on
+        // the disk, for the handles opened after this one.
         Hold(reference, page);
+        _disk?.AdmitPage(reference.Hash, page);
         return page;
     }
 

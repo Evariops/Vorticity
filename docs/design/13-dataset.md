@@ -106,7 +106,13 @@ version to the next: the pages it read from the store, evicted least recently us
 versions brought back of their pages regions, and where each version's pages start. A refresh or a
 commit only asks the store again for the pages that changed. Pages are kept page by page only when
 read from the store, and kept by version when a read brought them back with their commit, since most
-of what a version wrote the next one rewrites, and a budget in bytes would fill up with those.
+of what a version wrote the next one rewrites, and a budget in bytes would fill up with those. With a
+synopsis cache on the session ([the synopsis cache](19-object-storage.md#105-the-synopsis-cache-on-the-local-disk)),
+a page read from the store is also kept on the local disk under its XXH3-128, which names those bytes
+in every version and dataset: a handle opened later, after a restart or in another process, whose
+memory starts empty, reads the tree from the disk and checks each page against its hash. A walk of a
+tree of 20 000 objects that asked the store for 20 pages asks for none after a restart. A sealed
+dataset's pages stay off the disk, since they are plaintext of its commit objects.
 
 `<inverted version>` is `10²⁰ − 1 − version` in twenty digits, so the newest commit sorts first and
 the first key of a listing of `commit/` is the latest version (see [the latest
