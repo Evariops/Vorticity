@@ -2929,6 +2929,7 @@ Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> Identifiers { get; init; }
+Vorticity.Dataset:     property IReadOnlyList<string> ShreddedPaths { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> SummaryColumns { get; init; }
 Vorticity.Dataset:     property Nullable<TimeSpan> ErasureDelay { get; init; }
 Vorticity.Dataset:     property PeriodOptions Periods { get; init; }
@@ -2938,6 +2939,7 @@ Vorticity.Dataset:     property VortexSession Session { get; init; }
 Vorticity.Dataset:     property VortexWriteOptions Write { get; init; }
 Vorticity.Dataset:     property bool Encrypted { get; init; }
 Vorticity.Dataset:     property bool LockedStore { get; init; }
+Vorticity.Dataset:     property bool ShredOnAppend { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
 Vorticity.Dataset:     property int MaxPartitionValues { get; init; }

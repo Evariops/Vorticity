@@ -1047,12 +1047,21 @@ internal static class DatasetCompactor
     private const long SmallestTableBytes = 1_452;
 
     /// <summary>
-    /// The keys of the variant column <paramref name="field"/> the dataset declares as identifiers, each
-    /// with the class it is read in, which every object shreds wherever a row holds one; null for none.
+    /// The keys of the variant column <paramref name="field"/> the dataset declares as identifiers or as shredded paths,
+    /// each with the class it is read in, which every object shreds wherever a row holds one; null for none. A key
+    /// declared both ways keeps its identifier's class, the one its index holds.
     /// </summary>
     private static Dictionary<string, VariantClass>? IdentifierKeys(VortexDataset dataset, Vorticity.Types.DType schema, int field)
     {
         Dictionary<string, VariantClass>? keys = null;
+        foreach (string declared in dataset.Options.ShreddedPaths ?? [])
+        {
+            if (VortexDataset.ShreddedPath(declared, schema) is { } path && path.Field == field)
+            {
+                (keys ??= new Dictionary<string, VariantClass>(StringComparer.Ordinal))[path.Key] = path.Class;
+            }
+        }
+
         foreach (string identifier in dataset.Options.Identifiers ?? [])
         {
             if (VortexDataset.IdentifierPath(identifier, schema) is { } path && path.Field == field)

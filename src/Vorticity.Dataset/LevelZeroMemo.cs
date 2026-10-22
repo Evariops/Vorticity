@@ -13,10 +13,12 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// The objects of level 0 a query node read through keys of their variant columns, shredded in memory once.
-/// An object of level 0 is stored as it was appended, never shredded, so each question on a key of it would
-/// parse every row. The first question reads the object whole and writes it again in memory, the keys asked
-/// shredded at the class most of their values hold, with their path maps; every later question on those
-/// keys reads that copy through them alone, as it reads an object a job shredded.
+/// An object of level 0 is stored as it was appended, shredded only in the declared paths when its handle
+/// shredded on append, so each question on another key of it would parse every row. The first question
+/// reads the object whole and writes it again in memory, the keys asked shredded at the class most of their
+/// values hold, with their path maps; every later question on those keys reads that copy through them
+/// alone, as it reads an object a job shredded. An object whose append shredded every key asked is read as
+/// it lies, by those keys, with no copy.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -57,6 +59,37 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
     /// <summary>How many copies the memory budget refused to keep.</summary>
     internal long Refused => Interlocked.Read(ref _refused);
 
+    /// <summary>How many leases an object served as it lies, an append having shredded the keys asked.</summary>
+    internal long AsAppended => Interlocked.Read(ref _asAppended);
+
+    private long _asAppended;
+
+    // The keys, by column, each object an append shredded was found to read by: a question on them leases it as it lies.
+    // Under the lock of the copies.
+    private readonly Dictionary<UInt128, Dictionary<string, HashSet<string>>> _lying = [];
+
+    /// <summary>Whether the object <paramref name="uid"/> names was found to read by every key of <paramref name="wanted"/>.</summary>
+    private bool Lying(UInt128 uid, Dictionary<string, HashSet<string>> wanted)
+    {
+        lock (_copies)
+        {
+            if (!_lying.TryGetValue(uid, out Dictionary<string, HashSet<string>>? found))
+            {
+                return false;
+            }
+
+            foreach ((string column, HashSet<string> names) in wanted)
+            {
+                if (!found.TryGetValue(column, out HashSet<string>? held) || !held.IsSupersetOf(names))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
     /// <summary>The objects whose copies the memo holds.</summary>
     internal int Held
     {
@@ -87,6 +120,40 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
         if (Leased(entry.Uid, wanted, out _) is { } served)
         {
             return served;
+        }
+
+        // An object an append shredded the keys of (DatasetOptions.ShredOnAppend), as a job shreds them, is read by those
+        // keys as it lies: no copy is made of it, and a later question on them reads it with no look at its path maps.
+        if (Lying(entry.Uid, wanted))
+        {
+            Interlocked.Increment(ref _asAppended);
+            return await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
+        }
+
+        ObjectLease? lying = await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (await Indexes.VariantKeyReads.ShredsEveryAsync(lying.File, keys, cancellationToken).ConfigureAwait(false))
+            {
+                Interlocked.Increment(ref _asAppended);
+                lock (_copies)
+                {
+                    if (!_disposed)
+                    {
+                        _lying[entry.Uid] = Wanted(keys, _lying.GetValueOrDefault(entry.Uid));
+                    }
+                }
+
+                (ObjectLease handed, lying) = (lying, null);
+                return handed;
+            }
+        }
+        finally
+        {
+            if (lying is not null)
+            {
+                await lying.DisposeAsync().ConfigureAwait(false);
+            }
         }
 
         // A question waits only on one that shreds the same object, and finds its copy once that one is done.
@@ -250,7 +317,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
     /// </summary>
     internal async ValueTask ForgetMovedAsync(DatasetSnapshot version, CancellationToken cancellationToken)
     {
-        if (Held == 0 || Interlocked.Read(ref _checked) >= (long)version.Version || Volatile.Read(ref _disposed))
+        if (!Remembers() || Interlocked.Read(ref _checked) >= (long)version.Version || Volatile.Read(ref _disposed))
         {
             return;
         }
@@ -276,10 +343,19 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
     // The latest version whose level 0 the memo compared its copies with.
     private long _checked = -1;
 
-    /// <summary>Drops the copies of objects no longer in level 0 of <paramref name="version"/>.</summary>
+    /// <summary>Whether the memo holds a copy, or remembers an object found to read by its keys as it lies.</summary>
+    private bool Remembers()
+    {
+        lock (_copies)
+        {
+            return _copies.Count > 0 || _lying.Count > 0;
+        }
+    }
+
+    /// <summary>Drops the copies of objects no longer in level 0 of <paramref name="version"/>, and forgets those it read as they lie.</summary>
     private async ValueTask ForgetAsync(DatasetSnapshot version, CancellationToken cancellationToken)
     {
-        if (_copies.Count == 0 || Interlocked.Read(ref _checked) >= (long)version.Version)
+        if (!Remembers() || Interlocked.Read(ref _checked) >= (long)version.Version)
         {
             return;
         }
@@ -295,6 +371,14 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
         List<(UInt128, Copy)> gone = [];
         lock (_copies)
         {
+            foreach (UInt128 uid in _lying.Keys)
+            {
+                if (!levelZero.Contains(uid))
+                {
+                    _lying.Remove(uid);
+                }
+            }
+
             foreach ((UInt128 uid, Copy copy) in _copies)
             {
                 if (!levelZero.Contains(uid))
@@ -449,6 +533,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
             }
 
             Volatile.Write(ref _disposed, true);
+            _lying.Clear();
             all = [.. System.Linq.Enumerable.Select(_copies, c => (c.Key, c.Value))];
         }
 

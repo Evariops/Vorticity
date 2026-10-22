@@ -144,7 +144,8 @@ internal sealed record CommitHeader
 
     /// <summary>The features this library knows: a header that names another is refused, a later library's.</summary>
     internal const DatasetFeatures KnownFeatures =
-        DatasetFeatures.EntryFields | DatasetFeatures.ErasureDelay | DatasetFeatures.Periods | DatasetFeatures.Identifiers | DatasetFeatures.Partitions;
+        DatasetFeatures.EntryFields | DatasetFeatures.ErasureDelay | DatasetFeatures.Periods | DatasetFeatures.Identifiers | DatasetFeatures.Partitions
+        | DatasetFeatures.ShreddedPaths;
 
     /// <summary>
     /// Whether the dataset is compacted by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which the lateness
@@ -190,6 +191,12 @@ internal sealed record CommitHeader
     /// </summary>
     public IReadOnlyList<string> Identifiers { get; init; } = [];
 
+    /// <summary>
+    /// The keys of variant columns every job shreds into columns of their own (<see cref="DatasetOptions.ShreddedPaths"/>),
+    /// kept by every header; empty for none. A header that carries any names <see cref="DatasetFeatures.ShreddedPaths"/>.
+    /// </summary>
+    public IReadOnlyList<string> ShreddedPaths { get; init; } = [];
+
     /// <summary>The longest delay a header reads, in seconds: what a <see cref="TimeSpan"/> holds.</summary>
     private const ulong MaxDelaySeconds = (ulong)(long.MaxValue / TimeSpan.TicksPerSecond);
 
@@ -218,6 +225,7 @@ internal sealed record CommitHeader
         internal const int PeriodLength = 21;
         internal const int PeriodChanges = 22;
         internal const int PartitionColumns = 23;
+        internal const int ShreddedPaths = 24;
     }
 
     internal static class PeriodChangeField
@@ -335,6 +343,11 @@ internal sealed record CommitHeader
         foreach (string column in Identifiers)
         {
             writer.WriteString(Field.Identifiers, column);
+        }
+
+        foreach (string path in ShreddedPaths)
+        {
+            writer.WriteString(Field.ShreddedPaths, path);
         }
 
         if (PeriodLength is { } length)
@@ -542,6 +555,7 @@ internal sealed record CommitHeader
         TimeSpan? erasureDelay = null;
         TimeSpan? lateness = null;
         List<string> identifiers = [];
+        List<string> shreddedPaths = [];
         SliceWidth? periodLength = null;
         List<PeriodChange> periodChanges = [];
         int partitionColumns = 0;
@@ -613,6 +627,9 @@ internal sealed record CommitHeader
                     case (Field.Identifiers, ProtoWireType.LengthDelimited):
                         identifiers.Add(System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                         break;
+                    case (Field.ShreddedPaths, ProtoWireType.LengthDelimited):
+                        shreddedPaths.Add(System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
+                        break;
                     case (Field.PeriodLength, ProtoWireType.Varint):
                         periodLength = PeriodUnit(reader.ReadVarint());
                         break;
@@ -675,6 +692,7 @@ internal sealed record CommitHeader
             ErasureDelay = erasureDelay,
             Lateness = lateness,
             Identifiers = identifiers,
+            ShreddedPaths = shreddedPaths,
             PeriodLength = periodLength,
             PeriodChanges = periodChanges,
             PartitionColumns = partitionColumns,

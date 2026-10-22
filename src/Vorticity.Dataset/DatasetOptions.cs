@@ -320,6 +320,24 @@ public sealed record DatasetOptions
     public IReadOnlyList<string>? Identifiers { get; init; }
 
     /// <summary>
+    /// Keys of variant columns that every object a job writes keeps in a column of its own, in one class, written as a
+    /// filter reads them, <c>Attributes['http.status_code'].AsInt64()</c>: shredded whatever the rows a job counts, so
+    /// that a question on the key reads that column rather than parse the variant, and the object's synopsis counts its
+    /// values. A key read as a string, an integer, a double or a boolean (<c>AsString</c>, <c>AsInt64</c>,
+    /// <c>AsDouble</c>, <c>AsBool</c>). Null, the default, names none. Fixed when the dataset is created and carried by
+    /// every commit.
+    /// </summary>
+    public IReadOnlyList<string>? ShreddedPaths { get; init; }
+
+    /// <summary>
+    /// Whether an append shreds the <see cref="ShreddedPaths"/> as a job does, so that a question on them over the rows
+    /// no job has rewritten yet, the last minutes', reads their columns rather than parse the variant, at the price of
+    /// the shredding in each append. False, the default, leaves an append's variants whole until a job rewrites them.
+    /// A setting of the handle, which each writer chooses.
+    /// </summary>
+    public bool ShredOnAppend { get; init; }
+
+    /// <summary>
     /// The bytes an object's marks may take: <see cref="MarkedVectorBytes"/>, or a part of the
     /// object's own (<see cref="MarkedVectorShare"/>), whichever is more.
     /// </summary>
@@ -391,6 +409,7 @@ public sealed record DatasetOptions
             ErasureDelay = header.ErasureDelay,
             Periods = PeriodsOf(header, Periods),
             Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
+            ShreddedPaths = header.ShreddedPaths.Count > 0 ? header.ShreddedPaths : null,
         }
         : this with
         {
@@ -399,6 +418,7 @@ public sealed record DatasetOptions
             ErasureDelay = null,
             Periods = PeriodsOf(header, Periods),
             Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
+            ShreddedPaths = header.ShreddedPaths.Count > 0 ? header.ShreddedPaths : null,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,

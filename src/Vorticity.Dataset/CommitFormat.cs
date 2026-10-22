@@ -129,6 +129,12 @@ internal enum DatasetFeatures : ulong
     /// two partitions, against the retention each holds.
     /// </summary>
     Partitions = 16,
+
+    /// <summary>
+    /// Keys of variant columns every job shreds into columns of their own, which a library that does not know them
+    /// would drop from the headers it writes.
+    /// </summary>
+    ShreddedPaths = 32,
 }
 
 /// <summary>

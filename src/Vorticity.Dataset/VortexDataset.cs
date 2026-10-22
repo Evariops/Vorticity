@@ -428,6 +428,65 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The shredded paths as a commit keeps them (<see cref="DatasetOptions.ShreddedPaths"/>): a key of a variant column
+    /// of <paramref name="schema"/> read as a string, an integer, a double or a boolean, written as a plan writes it.
+    /// Refuses any other, and a key named twice, in one class or two.
+    /// </summary>
+    private static string[] RequireShreddedPaths(IReadOnlyList<string> paths, DType schema)
+    {
+        HashSet<(int, string)> seen = [];
+        string[] kept = new string[paths.Count];
+        for (int i = 0; i < paths.Count; i++)
+        {
+            if (paths[i] is not { } text || schema.Kind != DTypeKind.Struct || ShreddedPath(text, schema) is not { } path)
+            {
+                throw new ArgumentException(
+                    $"The shredded path '{paths[i]}' names no key of a variant column of the dataset's schema read as a string, an integer, a double or a boolean, such as Attributes['status'].AsInt64().",
+                    nameof(DatasetOptions.ShreddedPaths));
+            }
+
+            if (!seen.Add((path.Field, path.Key)))
+            {
+                throw new ArgumentException($"The key of the shredded path '{text}' is named twice.", nameof(DatasetOptions.ShreddedPaths));
+            }
+
+            kept[i] = path.Text;
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// The key of a variant column a shredded path names, and the class it is kept in, for a path written
+    /// <c>Attributes['status'].AsInt64()</c>, <c>.AsString()</c>, <c>.AsDouble()</c> or <c>.AsBool()</c>; null for any
+    /// other. <c>Text</c> is the path as a plan writes it.
+    /// </summary>
+    internal static (int Field, string Key, Types.Variants.VariantClass Class, string Text)? ShreddedPath(string path, DType schema)
+    {
+        if (Expressions.ExprText.LastPath(path) is not ([string column], [{ Key: { } key }], { } read))
+        {
+            return null;
+        }
+
+        Types.Variants.VariantClass? @class = read switch
+        {
+            Compute.VariantRead.AsString => Types.Variants.VariantClass.String,
+            Compute.VariantRead.AsInt64 => Types.Variants.VariantClass.Integer,
+            Compute.VariantRead.AsDouble => Types.Variants.VariantClass.Double,
+            Compute.VariantRead.AsBool => Types.Variants.VariantClass.Boolean,
+            _ => null,
+        };
+        int field = schema.IndexOfField(column);
+        if (@class is null || field < 0 || schema.GetField(field).Kind != DTypeKind.Variant)
+        {
+            return null;
+        }
+
+        string text = new Compute.VariantFieldExpr(new Expressions.FieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
+        return (field, key, @class.Value, text);
+    }
+
+    /// <summary>
     /// The key of a variant column an identifier names, and the class its values are read in, for an
     /// identifier written <c>Attributes['user'].AsString()</c> or <c>.AsInt64()</c>; null for any other,
     /// a column's name among them. <c>Text</c> is the path as a plan writes it, the name a write
@@ -824,7 +883,43 @@ public sealed class VortexDataset : IAsyncDisposable
     /// options, plus the sorted run the clustering key requires.
     /// </summary>
     /// <returns>The draft; write its rows, then append it, or dispose it to abandon it.</returns>
-    public ObjectDraft StartObject() => StartObjectUnder(Snapshot.Schema);
+    public ObjectDraft StartObject() =>
+        StartObjectUnder(Snapshot.Schema, shredded: _options.ShredOnAppend ? DeclaredShredding(Snapshot.Schema.DType) : null);
+
+    /// <summary>
+    /// The shredding of the <see cref="DatasetOptions.ShreddedPaths"/> by variant column, each key in its class, which an
+    /// append writes when <see cref="DatasetOptions.ShredOnAppend"/> says so; null for none.
+    /// </summary>
+    private Dictionary<string, Types.Variants.VariantShredding>? DeclaredShredding(DType schema)
+    {
+        Dictionary<string, List<(string, Types.Variants.VariantShredding)>>? keys = null;
+        foreach (string declared in Snapshot.Header.ShreddedPaths)
+        {
+            if (ShreddedPath(declared, schema) is { } path)
+            {
+                string column = schema.GetFieldName(path.Field);
+                if (!(keys ??= new(StringComparer.Ordinal)).TryGetValue(column, out List<(string, Types.Variants.VariantShredding)>? list))
+                {
+                    keys[column] = list = [];
+                }
+
+                list.Add((path.Key, Types.Variants.VariantShredding.Primitive(path.Class)));
+            }
+        }
+
+        if (keys is null)
+        {
+            return null;
+        }
+
+        Dictionary<string, Types.Variants.VariantShredding> plans = new(StringComparer.Ordinal);
+        foreach ((string column, List<(string, Types.Variants.VariantShredding)> list) in keys)
+        {
+            plans[column] = Types.Variants.VariantShredding.Object([.. list]);
+        }
+
+        return plans;
+    }
 
     /// <summary>
     /// Starts a data object under <paramref name="schema"/>: what a rewrite uses, whose rows are read
@@ -845,7 +940,8 @@ public sealed class VortexDataset : IAsyncDisposable
             _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes, byteBound);
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with { RowBound = rowBound, CarriesSlices = sliced };
 
-        // The variant columns a job shreds, each in long chunks of its own; an append shreds nothing.
+        // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
+        // handle says so (DatasetOptions.ShredOnAppend), and nothing otherwise.
         if (shredded is { Count: > 0 })
         {
             write = write with
@@ -2039,6 +2135,13 @@ public sealed class VortexDataset : IAsyncDisposable
             features |= DatasetFeatures.Identifiers;
         }
 
+        string[] shredded = [];
+        if (options.ShreddedPaths is { Count: > 0 } paths)
+        {
+            shredded = RequireShreddedPaths(paths, schema);
+            features |= DatasetFeatures.ShreddedPaths;
+        }
+
         CommitHeader template = new CommitHeader
         {
             Version = 1,
@@ -2055,6 +2158,7 @@ public sealed class VortexDataset : IAsyncDisposable
             PeriodLength = options.Periods?.Length,
             PartitionColumns = options.PartitionColumns,
             Identifiers = declared,
+            ShreddedPaths = shredded,
             Features = features,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,

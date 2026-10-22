@@ -257,6 +257,24 @@ appends shred nothing and carry no index on the key, until a compaction rewrites
 neither a column nor such a key, or a key read in another class, is refused when the dataset is
 created.
 
+A key that questions filter or group by, but look up no value of, is declared shredded instead, in the
+class it is read in:
+
+```csharp
+ShreddedPaths = ["Attributes['http.response.status_code'].AsInt64()"],
+```
+
+Every compaction then keeps the key in a column of its own, whatever share of the rows holds it, so that
+`r.Attributes["http.response.status_code"].AsInt64() >= 500` reads that column instead of parsing the
+attributes, and the objects' synopses count its values. The class is one of `AsString`, `AsInt64`,
+`AsDouble` and `AsBool`; values of another class at the key stay in the column's residual.
+
+Appends leave the attributes whole, so a question over the last minutes, which no compaction has
+rewritten yet, still parses them once per query node. A handle opened with `ShredOnAppend = true`
+shreds the declared keys in each append too, and its questions then read those objects by the keys as
+they lie. The append pays for it: on 100,000 rows of eight keys, 65 ms against 23 ms, for an object
+5 % smaller.
+
 ## Watch out
 
 * `AppendIndexesAsync` rewrites the tail even when every index is abandoned, and the file takes a new

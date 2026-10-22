@@ -657,7 +657,7 @@ such fields. A feature stays named in every header after the one that introduced
 that hold its entries stay in the trees, and a dataset that never uses one is written in format 2 or
 3 as before. The others are settings fixed when the dataset is created, which a library that does not
 know them would ignore against what the dataset promises: the erasure delay, compaction by periods
-and its lateness horizon, and the identifier columns. A library refuses a header that names a feature
+and its lateness horizon, the identifier columns, and the shredded paths. A library refuses a header that names a feature
 it does not know, as it refuses a later format, so that a feature added later is never read as
 nothing; and it refuses one whose flag of periods, lateness horizon and length of a period do not
 come together, reading a dataset's periods from the flag.
@@ -686,6 +686,11 @@ Identifier columns (`DatasetOptions.Identifiers`) name the
 columns whose values questions look up one at a time; each names a column of the schema, once. A key
 that leads with a timestamp is encoded as the timestamp's storage, its seek keys too
 ([06-row-encoding.md](06-row-encoding.md#6-unsupported-types)).
+Shredded paths (`DatasetOptions.ShreddedPaths`) name keys of variant columns, each read in one class as a
+filter reads it, `Attributes['status'].AsInt64()`: every job shreds them into columns of their own, the
+keys its census counted or not, as it shreds an identifier's key, so that a question on one reads its
+column and the object's synopsis counts its values. Each names a key of a variant column of the
+schema, once, in a class among string, integer, double and boolean.
 
 ## 9. The read-path budget
 

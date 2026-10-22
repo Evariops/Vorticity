@@ -103,6 +103,34 @@ internal sealed class VariantKeyReads
     }
 
     /// <summary>
+    /// Whether the path maps of <paramref name="file"/> let a reader read every key of <paramref name="columns"/> by key in
+    /// every chunk, as it reads an object a job shredded those keys in: what an object an append shredded them in holds.
+    /// </summary>
+    internal static async ValueTask<bool> ShredsEveryAsync(
+        VortexFile file, IReadOnlyDictionary<string, string[]> columns, CancellationToken cancellationToken)
+    {
+        DType schema = file.DType;
+        if (schema.Kind != DTypeKind.Struct || !file.HasIndexDirectory || columns.Count == 0)
+        {
+            return false;
+        }
+
+        DTypeArena types = new DTypeArena();
+        foreach ((string name, string[] wanted) in columns)
+        {
+            int field = schema.IndexOfField(name);
+            if (field < 0 || schema.GetField(field).Kind != DTypeKind.Variant
+                || await VariantPathMap.ReadAsync(file, field, wanted, cancellationToken).ConfigureAwait(false) is not { } map
+                || Column(map, wanted, types) is null)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// The chunks of <paramref name="columns"/> in <paramref name="file"/> that its path maps let a
     /// reader read by keys; null when none does.
     /// </summary>
