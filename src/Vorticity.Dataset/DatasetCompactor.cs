@@ -647,21 +647,23 @@ internal static class DatasetCompactor
 
     /// <summary>
     /// An input's rows, in its own order or in key order along <paramref name="paths"/>, as
-    /// <paramref name="schema"/>'s columns: its own scan, each batch reshaped when it was written
-    /// under another schema.
+    /// <paramref name="schema"/>'s columns, or those of them <paramref name="fields"/> names: its own scan, each batch
+    /// reshaped when it was written under another schema.
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
-        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken, bool wide = false)
+        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken, bool wide = false,
+        int[]? fields = null)
     {
         VortexFile file = lease.File;
+        FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            return LiveRowsAsync(file, file.ScanBuilder, entry, paths, wide, cancellationToken);
+            return LiveRowsAsync(file, fields is null ? file.ScanBuilder : () => file.ScanBuilder().ProjectMask(projection), entry, paths, wide, cancellationToken);
         }
 
         // The clustering key keeps its columns under every schema, so a key-ordered read of an
         // earlier object names them as the dataset does.
-        ObjectReadPlan read = columns.Read(null, FieldMask.All);
+        ObjectReadPlan read = columns.Read(null, projection);
         return ObjectColumns.ReshapeAsync(
             LiveRowsAsync(file, () => file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, paths, wide, cancellationToken),
             read.Shape,
@@ -804,7 +806,12 @@ internal static class DatasetCompactor
     /// so an input opens only once it could hold the next row; the job's own order breaks ties among
     /// inputs holding the same key.
     /// </summary>
-    private static KeyOrderedMerge InputsMerged(VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
+    /// <remarks>
+    /// With <paramref name="fields"/>, each input reads those fields of <paramref name="schema"/> alone, the clustering
+    /// key's among them, and the rows merged hold them alone.
+    /// </remarks>
+    private static KeyOrderedMerge InputsMerged(
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken, int[]? fields = null)
     {
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         for (int i = 0; i < job.Inputs.Count; i++)
@@ -821,7 +828,7 @@ internal static class DatasetCompactor
             key.Paths,
             descending: false,
             rankedTies: false,
-            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken, wide: job.Cut is not null),
+            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken, wide: job.Cut is not null, fields),
             opened: null,
             cancellationToken);
     }
@@ -834,16 +841,18 @@ internal static class DatasetCompactor
     /// its paths (<see cref="ShreddingChoice"/>), before a row is written.
     /// </summary>
     /// <remarks>
-    /// The pass reads the inputs whole a second time: the instant and the candidate columns alone would
-    /// do, read through a projection, which a later change takes.
+    /// The pass reads the columns it counts alone: the clustering key, the candidate columns and the variant columns,
+    /// through a projection of each input, where it read every column, the identifiers' and the texts' that no order
+    /// takes among them, and decoded them all a second time.
     /// </remarks>
     private static async ValueTask<IReadOnlyDictionary<(int Level, long Period), ObjectPlan>> PlanSlicesAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
     {
         PeriodCut cut = job.Cut!;
-        PeriodPlanner planner = new PeriodPlanner(dataset, schema, key, cut.Unit);
+        int[]? counted = PeriodPlanner.Counted(dataset, schema, key);
+        PeriodPlanner planner = new PeriodPlanner(dataset, schema, key, cut.Unit, counted);
         List<Cut> cuts = [];
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken, counted);
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
@@ -878,10 +887,19 @@ internal static class DatasetCompactor
         private readonly long _target;
         private readonly int[] _candidates;
         private readonly int[] _variants;
+
+        // The candidates' and the variant columns' places in the rows the planner is given: the schema's own, or their
+        // places among the fields a projection of the rows keeps.
+        private readonly int[] _candidatesRead;
+        private readonly int[] _variantsRead;
         private readonly int _textBound;
         private readonly Dictionary<(int Level, long Period), (SecondCounts Seconds, CardinalitySketch[] Sketches, PathCensus[] Paths)> _tallies = [];
 
-        internal PeriodPlanner(VortexDataset dataset, DatasetSchema schema, ClusteringKey key, TimeUnit unit)
+        /// <summary>
+        /// A planner of the objects of <paramref name="schema"/> a job or a load writes, given rows that hold the fields
+        /// <paramref name="fields"/> names alone, ascending, a projection's (<see cref="Counted"/>), or every field.
+        /// </summary>
+        internal PeriodPlanner(VortexDataset dataset, DatasetSchema schema, ClusteringKey key, TimeUnit unit, int[]? fields = null)
         {
             _dataset = dataset;
             _schema = schema;
@@ -891,6 +909,29 @@ internal static class DatasetCompactor
             _candidates = SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers);
             _variants = VariantColumns(schema.DType);
             _textBound = dataset.Options.Write.StringBoundBytes;
+            _candidatesRead = fields is null ? _candidates : [.. _candidates.Select(field => Array.BinarySearch(fields, field))];
+            _variantsRead = fields is null ? _variants : [.. _variants.Select(field => Array.BinarySearch(fields, field))];
+        }
+
+        /// <summary>
+        /// The fields of <paramref name="schema"/> the planner counts, ascending: the clustering key's, the candidates and the
+        /// variant columns, what a seal's first pass reads of its inputs; null, every field, for a key on a nested column.
+        /// </summary>
+        internal static int[]? Counted(VortexDataset dataset, DatasetSchema schema, ClusteringKey key)
+        {
+            SortedSet<int> fields = [.. SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers), .. VariantColumns(schema.DType)];
+            foreach (string path in key.Paths)
+            {
+                int field = schema.DType.IndexOfField(path);
+                if (field < 0)
+                {
+                    return null;
+                }
+
+                fields.Add(field);
+            }
+
+            return [.. fields];
         }
 
         /// <summary>Counts the rows of <paramref name="part"/>, every one of which goes to the object of <paramref name="level"/> and <paramref name="period"/>.</summary>
@@ -904,10 +945,10 @@ internal static class DatasetCompactor
 
             ReadOnlySpan<long> instants = ColumnPath.Instants(part, _instant);
             tally.Seconds.Add(instants);
-            SynopsisOrder.Count(part, _candidates, tally.Sketches);
+            SynopsisOrder.Count(part, _candidatesRead, tally.Sketches);
             for (int v = 0; v < _variants.Length; v++)
             {
-                tally.Paths[v].Add(part, _variants[v], instants);
+                tally.Paths[v].Add(part, _variantsRead[v], instants);
             }
         }
 
