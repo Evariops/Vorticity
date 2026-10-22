@@ -2379,7 +2379,19 @@ public sealed class VortexDataset : IAsyncDisposable
             // allocated.
             Indexes.IndexDirectory? directory;
             Func<uint, bool>? indexed = ColumnsOf(filter, schema);
-            using (Buffers.SegmentOwner bytes = await read.ConfigureAwait(false))
+            Buffers.SegmentOwner owner;
+            try
+            {
+                owner = await read.ConfigureAwait(false);
+            }
+            catch
+            {
+                // The chunk directories are read into the slice reader the method lets go on its way out: they end first.
+                await ((Task)Task.WhenAll(chunks)).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                throw;
+            }
+
+            using (Buffers.SegmentOwner bytes = owner)
             {
                 await Task.WhenAll(chunks).ConfigureAwait(false);
                 if (!region.Holds(bytes.Buffer.Span)
@@ -2499,8 +2511,19 @@ public sealed class VortexDataset : IAsyncDisposable
 
             // The first round trip: the path directory beside the column's chunk directory.
             ValueTask<Indexes.VariantDirectory?> directory = ReadPathDirectoryAsync(entry, field, cancellationToken);
-            ValueTask<long> chunks = slices.ColumnBytesAsync(field, cancellationToken);
-            Indexes.VariantDirectory? paths = await directory.ConfigureAwait(false);
+            Task<long> chunks = slices.ColumnBytesAsync(field, cancellationToken).AsTask();
+            Indexes.VariantDirectory? paths;
+            try
+            {
+                paths = await directory.ConfigureAwait(false);
+            }
+            catch
+            {
+                // The chunk directory is read into the slice reader the method lets go on its way out: it ends first.
+                await ((Task)chunks).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                throw;
+            }
+
             await chunks.ConfigureAwait(false);
             if (paths is null)
             {

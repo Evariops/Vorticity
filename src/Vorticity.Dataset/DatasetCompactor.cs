@@ -1525,7 +1525,7 @@ internal static class DatasetCompactor
                             _sorter = null;
                             bool complete = sorter.Complete;
                             SliceTable table = sorter.Table;
-                            sorter.Dispose();
+                            await sorter.DisposeAsync().ConfigureAwait(false);
                             if (!complete)
                             {
                                 throw new DatasetIntegrityException(
@@ -1581,9 +1581,14 @@ internal static class DatasetCompactor
                 return;
             }
 
-            // A slice being written reads the draft and the synopsis: its write ends, whatever it ends with, before they go.
-            _sorter?.Dispose();
-            _sorter = null;
+            // A slice being written reads the draft and the synopsis: its write ends, whatever it ends with, before they go,
+            // waited for on no lane, which the slice's write may need.
+            if (_sorter is { } sorter)
+            {
+                _sorter = null;
+                await sorter.DisposeAsync().ConfigureAwait(false);
+            }
+
             _draft = null;
             _synopsis?.Dispose();
             _synopsis = null;

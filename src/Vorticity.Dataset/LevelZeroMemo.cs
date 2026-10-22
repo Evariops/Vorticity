@@ -38,6 +38,9 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
     private long _served;
     private long _refused;
 
+    // Set under the gate: a memo let go keeps no copy, and serves the objects as they lie.
+    private bool _disposed;
+
     /// <summary>How many times an object was read whole and shredded in memory.</summary>
     internal long Shredded => Interlocked.Read(ref _shredded);
 
@@ -67,9 +70,19 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
     internal async ValueTask<ObjectLease> RentAsync(
         VortexDataset dataset, DatasetSnapshot version, ObjectEntry entry, IReadOnlyDictionary<string, string[]> keys, CancellationToken cancellationToken)
     {
+        if (Volatile.Read(ref _disposed))
+        {
+            return await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
+        }
+
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (_disposed)
+            {
+                return await version.RentAsync(entry, cancellationToken).ConfigureAwait(false);
+            }
+
             await ForgetAsync(version, cancellationToken).ConfigureAwait(false);
             Dictionary<string, HashSet<string>> wanted = Wanted(keys, null);
             if (_copies.TryGetValue(entry.Uid, out Copy? held))
@@ -130,7 +143,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
     /// </summary>
     internal async ValueTask ForgetMovedAsync(DatasetSnapshot version, CancellationToken cancellationToken)
     {
-        if (Held == 0 || Interlocked.Read(ref _checked) >= (long)version.Version)
+        if (Held == 0 || Interlocked.Read(ref _checked) >= (long)version.Version || Volatile.Read(ref _disposed))
         {
             return;
         }
@@ -138,7 +151,10 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await ForgetAsync(version, cancellationToken).ConfigureAwait(false);
+            if (!_disposed)
+            {
+                await ForgetAsync(version, cancellationToken).ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -308,17 +324,37 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
         return new Copy(copy, bytes.Length, shredded);
     }
 
+    /// <summary>Drops every copy, once a rent under way has ended: one that comes after keeps none, and reads the object as it lies.</summary>
     public async ValueTask DisposeAsync()
     {
-        List<(UInt128, Copy)> all;
-        lock (_copies)
+        if (Volatile.Read(ref _disposed))
         {
-            all = [.. System.Linq.Enumerable.Select(_copies, c => (c.Key, c.Value))];
+            return;
         }
 
-        foreach ((UInt128 uid, Copy copy) in all)
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
         {
-            await DropAsync(uid, copy).ConfigureAwait(false);
+            if (_disposed)
+            {
+                return;
+            }
+
+            Volatile.Write(ref _disposed, true);
+            List<(UInt128, Copy)> all;
+            lock (_copies)
+            {
+                all = [.. System.Linq.Enumerable.Select(_copies, c => (c.Key, c.Value))];
+            }
+
+            foreach ((UInt128 uid, Copy copy) in all)
+            {
+                await DropAsync(uid, copy).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _gate.Release();
         }
 
         _gate.Dispose();
@@ -327,6 +363,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
     /// <summary>One object's copy: the open file, its bytes, the keys it shreds; closed once dropped and no lease holds it.</summary>
     private sealed class Copy(VortexFile file, long bytes, Dictionary<string, HashSet<string>> keys)
     {
+        private readonly Lock _sync = new Lock();
         private int _leases;
         private bool _dropped;
 
@@ -352,7 +389,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
 
         internal ObjectLease Lease(bool dropWithLastLease = false)
         {
-            lock (this)
+            lock (_sync)
             {
                 _leases++;
                 _dropped |= dropWithLastLease;
@@ -363,7 +400,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
 
         internal ValueTask DropAsync()
         {
-            lock (this)
+            lock (_sync)
             {
                 _dropped = true;
                 if (_leases > 0)
@@ -377,7 +414,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
 
         private ValueTask ReturnAsync()
         {
-            lock (this)
+            lock (_sync)
             {
                 if (--_leases > 0 || !_dropped)
                 {

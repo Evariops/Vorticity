@@ -165,6 +165,40 @@ internal sealed class ShreddedVariant
         {
             _scratch = System.Buffers.ArrayPool<byte>.Shared.Rent(256);
         }
+
+        // The scratch goes back to the pool however the rows end, a malformed one included.
+        int count = own;
+        try
+        {
+            WriteRows(root, rows, into, values, metadataViews, metadataBuffers, own);
+            if (_buffers.Length < own + 1)
+            {
+                _buffers = new VortexBuffer[own + 1];
+            }
+
+            root.ValueBuffers.AsSpan(0, own).CopyTo(_buffers);
+            if (_used > 0)
+            {
+                VortexBuffer data = arena.AllocateUninitialized(_used, 64, out Span<byte> written).Slice(0, _used);
+                _scratch.AsSpan(0, _used).CopyTo(written);
+                _buffers[count++] = data;
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(_scratch);
+            _scratch = [];
+            _used = 0;
+        }
+
+        return arena.AddVarBinView(_binary, rows, Validity.NonNullable, views, _buffers.AsSpan(0, count));
+    }
+
+    /// <summary>Each row's view into <paramref name="into"/>, its value written into the scratch where the row is rebuilt.</summary>
+    private void WriteRows(
+        Shred root, int rows, Span<byte> into, ReadOnlySpan<byte> values, ReadOnlySpan<byte> metadataViews,
+        ReadOnlySpan<VortexBuffer> metadataBuffers, int own)
+    {
         VariantDictionary dictionary = default;
         ulong lastLow = 0;
         ulong lastHigh = 0;
@@ -212,26 +246,6 @@ internal sealed class ShreddedVariant
             Write(root, row, in dictionary);
             CanonicalSupport.WriteView(ref MemoryMarshal.GetReference(view), ref _scratch[start], _used - start, own, start);
         }
-
-        if (_buffers.Length < own + 1)
-        {
-            _buffers = new VortexBuffer[own + 1];
-        }
-
-        root.ValueBuffers.AsSpan(0, own).CopyTo(_buffers);
-        int count = own;
-        if (_used > 0)
-        {
-            VortexBuffer data = arena.AllocateUninitialized(_used, 64, out Span<byte> written).Slice(0, _used);
-            _scratch.AsSpan(0, _used).CopyTo(written);
-            _buffers[count++] = data;
-        }
-
-        System.Buffers.ArrayPool<byte>.Shared.Return(_scratch);
-        _scratch = [];
-        _used = 0;
-
-        return arena.AddVarBinView(_binary, rows, Validity.NonNullable, views, _buffers.AsSpan(0, count));
     }
 
     /// <summary>The dictionary of <paramref name="metadata"/>; a new generation of field ids when it is not the last row's.</summary>

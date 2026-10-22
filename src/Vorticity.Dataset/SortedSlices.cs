@@ -51,7 +51,7 @@ namespace Vorticity.Dataset;
 /// ends with the rows (<see cref="EndAsync"/>); <see cref="DrainAsync"/> waits for the last one to be written.
 /// </para>
 /// </remarks>
-internal sealed class SortedSlices : IDisposable
+internal sealed class SortedSlices : IDisposable, IAsyncDisposable
 {
     /// <summary>
     /// The slices held at most: one whose rows come in, and one sorting, then written. A third, filling while the two
@@ -265,8 +265,38 @@ internal sealed class SortedSlices : IDisposable
     }
 
     /// <summary>
-    /// Lets the buffers go, once every slice being sorted or written is done with them: a caller that gives the object up
-    /// rather than drains it has its reason already, so what those threw is observed and dropped.
+    /// Lets the buffers go, once every slice being sorted or written is done with them, waited for on no lane: a caller that
+    /// gives the object up rather than drains it has its reason already, so what those threw is observed and dropped.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        _last = null;
+        for (int b = 0; b < _flights.Length; b++)
+        {
+            if (_flights[b] is { } flight)
+            {
+                _flights[b] = null;
+                try
+                {
+                    await WaitAsync(flight).ConfigureAwait(false);
+                }
+                catch (Exception) when (flight.IsFaulted || flight.IsCanceled)
+                {
+                    // The flight's own failure, observed: the caller gives the object up for a reason of its own.
+                }
+            }
+        }
+
+        foreach (Buffer buffer in _buffers)
+        {
+            buffer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DisposeAsync"/> for a caller that holds no lane of the session's, which may wait for the slices in flight
+    /// on its thread: one that holds a lane gives the object up through <see cref="DisposeAsync"/>, which gives the lane
+    /// back while it waits.
     /// </summary>
     public void Dispose()
     {
