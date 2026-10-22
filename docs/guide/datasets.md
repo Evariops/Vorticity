@@ -244,7 +244,11 @@ DatasetOptions options = new DatasetOptions
 ```
 
 Every object then holds one retention value. An append is split into an object per value, and each
-value grows its own periods, so a period never mixes rows that expire at different times. Partition
+value grows its own periods, so a period never mixes rows that expire at different times. An append
+of batches (`AppendAsync(batches)`) splits its rows as they come, an object per value; an object
+started with `StartObject`, whose writer is yours, is written whole first, so when its rows hold
+several values it is read back and written again an object per value, the first left for vacuum.
+Append rows of several values as batches, or start an object per value. Partition
 columns should have a few values: an append that holds more than `MaxPartitionValues` of them, 64 by
 default, is refused. That bound is per append, and nothing bounds the values a dataset gathers over
 time, each of which grows periods of its own: `PlanCompactionAsync` says how many the dataset holds
