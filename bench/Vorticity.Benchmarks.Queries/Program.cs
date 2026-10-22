@@ -217,6 +217,12 @@ if (Text(args, "--micro") == "lifecycle")
         Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0));
 }
 
+// --micro spans: the client's spans of a day, and the values each column holds against its figure (SpanGeneratorV2.cs).
+if (Text(args, "--micro") == "spans")
+{
+    return SpanGeneratorV2.Run(Option(args, "--seed", 31), Option(args, "--rows", 10_000_000));
+}
+
 // --micro s3profile: the waits and the turns of the store --profile s3 answers as, drawn without waiting (StoreProfileMicro.cs).
 if (Text(args, "--micro") == "s3profile")
 {
