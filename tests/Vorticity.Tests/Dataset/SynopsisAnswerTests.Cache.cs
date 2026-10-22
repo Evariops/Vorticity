@@ -284,6 +284,49 @@ public sealed partial class SynopsisAnswerTests
     }
 
     /// <summary>
+    /// A write behind its reader that fails past what the disk throws, here a fault the test raises, is counted and left
+    /// to the store: the flush returns, the region is not held, and the next region is written and served as before.
+    /// </summary>
+    [Fact]
+    public async Task AWriteThatFailsBehindItsReaderLeavesTheCacheWorking()
+    {
+        string directory = CacheDirectory();
+        try
+        {
+            UInt128 uid = 0xfa17;
+            using SynopsisCache cache = new SynopsisCache(directory, 1 << 20);
+            IndexSegment Admitted(int seed)
+            {
+                byte[] bytes = new byte[4_096 + seed];
+                new Random(seed).NextBytes(bytes);
+                IndexSegment region = IndexSegment.Of(seed * 65_536L, bytes, 6);
+                Vorticity.Buffers.NativeSegmentOwner block = Vorticity.Buffers.AlignedBufferPool.Shared.Rent(bytes.Length, 64);
+                bytes.CopyTo(block.WritableSpan);
+                cache.Admit(uid, region, block, Vorticity.Buffers.VortexBuffer.FromPinned(block.WritableSpan[..bytes.Length], 6));
+                block.Release();
+                return region;
+            }
+
+            cache.WriteFault = static _ => throw new InvalidOperationException("a write that fails past the disk's failures");
+            IndexSegment failed = Admitted(1);
+            Task flushed = Task.Run(cache.Flush, Ct);
+            Assert.Same(flushed, await Task.WhenAny(flushed, Task.Delay(TimeSpan.FromSeconds(10), Ct)));
+            Assert.Equal(1, cache.FailedWrites);
+            Assert.False(cache.Holds(uid, failed));
+
+            cache.WriteFault = null;
+            IndexSegment kept = Admitted(2);
+            cache.Flush();
+            Assert.True(cache.Holds(uid, kept));
+            Assert.Single(Directory.GetFiles(directory, SynopsisCache.NameOf(uid, kept), SearchOption.AllDirectories));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// One cache owns a directory: a second is refused while the first is open. Once it is disposed, the next
     /// one finds every entry the first kept, and deletes what a write left under its temporary name.
     /// </summary>

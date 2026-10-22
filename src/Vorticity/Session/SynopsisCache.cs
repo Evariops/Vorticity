@@ -95,6 +95,7 @@ public sealed class SynopsisCache : IDisposable
     private long _corrupt;
     private long _evictions;
     private long _refused;
+    private long _failedWrites;
     private int _disposed;
 
     /// <summary>Opens the cache in <paramref name="directory"/>, created if it does not exist, and walks what it holds.</summary>
@@ -387,7 +388,11 @@ public sealed class SynopsisCache : IDisposable
         return true;
     }
 
-    /// <summary>Writes the regions waiting, the oldest first, until none is left.</summary>
+    /// <summary>
+    /// Writes the regions waiting, the oldest first, until none is left. A region whose write fails, whatever the
+    /// failure, is counted and left to the store: the cache only spares reads, and a writer that ended on an exception
+    /// would end its thread of the pool and leave a flush waiting for it.
+    /// </summary>
     private void Drain()
     {
         while (true)
@@ -406,34 +411,57 @@ public sealed class SynopsisCache : IDisposable
                 }
             }
 
-            bool written = false;
-            List<Entry> evicted = [];
             try
             {
-                written = Write(pending.Entry, pending.Bytes.Span);
+                Settle(pending);
             }
-            finally
+            catch (Exception)
             {
-                // Read meanwhile, it comes in with its reads, as it would have from the disk.
                 lock (_gate)
                 {
-                    _pending.Remove(pending.Entry.Name);
-                    _pendingHeld -= pending.Entry.Bytes;
-                    if (written)
-                    {
-                        Enter(pending.Entry, pending.Hits, evicted);
-                    }
+                    _failedWrites++;
                 }
-
-                pending.Owner.Release();
-            }
-
-            foreach (Entry victim in evicted)
-            {
-                TryDelete(PathOf(victim));
             }
         }
     }
+
+    /// <summary>Writes <paramref name="pending"/>'s file and takes it in, or lets it go when the write fails.</summary>
+    private void Settle(Pending pending)
+    {
+        bool written = false;
+        List<Entry> evicted = [];
+        try
+        {
+            WriteFault?.Invoke(PathOf(pending.Entry));
+            written = Write(pending.Entry, pending.Bytes.Span);
+        }
+        finally
+        {
+            // Read meanwhile, it comes in with its reads, as it would have from the disk.
+            lock (_gate)
+            {
+                _pending.Remove(pending.Entry.Name);
+                _pendingHeld -= pending.Entry.Bytes;
+                if (written)
+                {
+                    Enter(pending.Entry, pending.Hits, evicted);
+                }
+            }
+
+            pending.Owner.Release();
+        }
+
+        foreach (Entry victim in evicted)
+        {
+            TryDelete(PathOf(victim));
+        }
+    }
+
+    /// <summary>A fault a test raises before a region's file is written, given its path; null for none.</summary>
+    internal Action<string>? WriteFault { get; set; }
+
+    /// <summary>The regions a writer of the cache's failed to write, past the failures of the disk it expects.</summary>
+    internal long FailedWrites => Count(ref _failedWrites);
 
     /// <summary>A region waiting for its write, served from the buffer its reader handed over, the read counted; false when none waits under <paramref name="name"/>.</summary>
     private bool TryPending(ReadOnlySpan<char> name, out SegmentOwner owner)
