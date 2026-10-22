@@ -71,6 +71,22 @@ public sealed partial class VariantBlockStatsTests
     }
 
     /// <summary>
+    /// Statistics regular enough to compress past a thousand times their frame are read back: a flag that alternates
+    /// from block to block over sixteen thousand blocks of four rows, whose region zstd squeezes to a few dozen bytes,
+    /// refutes the blocks that hold it false, where a reader that took such a body for a forged one pruned none.
+    /// </summary>
+    [Fact]
+    public async Task StatisticsThatCompressPastAThousandTimesAreRead()
+    {
+        Doc[] rows = [.. Enumerable.Range(0, 64_000).Select(i => new Doc(i, i, Variant.Object(("flag", Variant.From(i / 4 % 2 == 0)))))];
+        await using VortexFile file = await OpenAsync(await WriteAsync(rows, blockRows: 4));
+        ScanPlan plan = await file.Scan<Doc>().Where(r => r.Attributes["flag"].AsBool() == true).ExplainAsync(Ct);
+        Assert.Equal(16_000, plan.Blocks);
+        Assert.Equal(8_000, plan.LiveBlocks);
+        Assert.Equal(32_000, await file.Scan<Doc>().Where(r => r.Attributes["flag"].AsBool() == true).CountAsync(Ct));
+    }
+
+    /// <summary>
     /// The column sets a parallel write keeps in a pool outlive it: a write on four threads that counts
     /// a variant's keys, then one of a wider schema that counts none, takes them back without reading
     /// the first one's slots, and writes the bytes it writes on one thread.
@@ -127,14 +143,14 @@ public sealed partial class VariantBlockStatsTests
             ("status", Variant.From((long)i)))))];
     }
 
-    private static async Task<byte[]> WriteAsync(Doc[] rows)
+    private static async Task<byte[]> WriteAsync(Doc[] rows, int blockRows = 100)
     {
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-blockstats-{Guid.NewGuid():N}.vortex");
         try
         {
             VortexWriteOptions options = new VortexWriteOptions
             {
-                BlockRows = 100,
+                BlockRows = blockRows,
                 ShreddedVariants = new Dictionary<string, VariantShredding> { [nameof(Doc.Attributes)] = Plan },
             };
             await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Doc>(path, options))

@@ -16,6 +16,13 @@ namespace Vorticity.Arrays;
 /// </remarks>
 internal static class ZstdDecoders
 {
+    /// <summary>
+    /// The most bytes a zstd frame decodes to, per byte of it: a block of 128 KiB takes four bytes at the least, its
+    /// header and the one byte it repeats. A body that claims more than this many times its frame is no frame's, where
+    /// one of a thousand times is a region of regular statistics, a flag set every other block of thousands.
+    /// </summary>
+    internal const int MostExpansion = 32_768;
+
     private const int Capacity = 16;
 
     private static readonly ZstdDecompressor?[] Decoders = new ZstdDecompressor?[Capacity];

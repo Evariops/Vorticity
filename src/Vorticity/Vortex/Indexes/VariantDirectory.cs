@@ -636,10 +636,10 @@ internal sealed class VariantDirectory
                 return null;
             }
 
-            // A body of more than a thousand times its frame is not one this writer made.
+            // A body of more than zstd's most expansion of its frame is no frame's.
             ulong declared = header.ReadVarint();
             ReadOnlySpan<byte> frame = bytes[(bytes.Length - header.Remaining)..];
-            if (declared > (ulong)frame.Length * 1_000 || declared > int.MaxValue)
+            if (declared > (ulong)frame.Length * ZstdDecoders.MostExpansion || declared > int.MaxValue)
             {
                 return null;
             }
