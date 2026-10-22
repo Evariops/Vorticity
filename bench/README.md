@@ -364,7 +364,8 @@ The query bench (`bench/Vorticity.Benchmarks.Queries`, the `vortex-queries` runn
 that measure a dataset compacted by periods, on generated data at a fraction of the design's example
 ([20-time-window-aggregates.md](../docs/design/20-time-window-aggregates.md)). Each counts requests,
 round trips and rows rather than relying on time alone, since the counts are what holds from one
-machine to another. Run each with `DOTNET_TieredCompilation=0`.
+machine to another. Run each with `DOTNET_TieredCompilation=0`. `--help` lists every `--micro` the
+runner knows, and a name it does not know is refused rather than taken for the query matrix.
 
 | mode | what it measures | a run |
 |---|---|---|
