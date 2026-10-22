@@ -576,6 +576,25 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 ArrayPool<byte>.Shared.Return(buffer);
             }
+
+            // The list of each table's chunks, a region of the file past every table's chunks, the lists side by side, which
+            // the entry names in their place: a question reads the lists of the tables it answers from alone, in a request an
+            // object, where every table's chunks were most of a day's entry; a list between two tables' chunks had that
+            // request read the chunks between the lists.
+            for (int t = 0; t < _tables.Count; t++)
+            {
+                (SynopsisTableInfo table, IReadOnlyList<TableChunk> written, IReadOnlyList<byte[]> dtypes) = _tables[t];
+                if (written is not TableChunk[] { Length: > 0 } chunks)
+                {
+                    continue;
+                }
+
+                byte[] list = Indexes.SynopsisContents.ListBytes(chunks);
+                long at = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
+                await writer._sink.WriteAsync(list, cancellationToken).ConfigureAwait(false);
+                TableBytes += list.Length;
+                _tables[t] = (table, new Indexes.SynopsisContents.TableChunks(IndexSegment.Of(at, list, (byte)VortexLimits.MaxAlignmentExponent), chunks), dtypes);
+            }
         }
 
         public void Dispose()

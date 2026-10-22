@@ -121,6 +121,8 @@ internal static class SliceCostMicro
                     continue;
                 }
 
+                // The tables' lists of chunks, which the entry names apart from it, loaded first.
+                await dataset.LoadSynopsisListsAsync([(held.Entry, contents, null)], default);
                 foreach ((Indexes.SynopsisTableInfo info, System.Collections.Generic.IReadOnlyList<Indexes.TableChunk> chunks) in contents.Tables)
                 {
                     if (info.Bucket == Indexes.SynopsisBucket.Slice)

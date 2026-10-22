@@ -526,6 +526,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         IO.ISegmentReader source, SynopsisContents contents, ISynopsisReads? reads, VortexReadOptions? options,
         CancellationToken cancellationToken)
     {
+        await LoadListsAsync(source, contents, reads, cancellationToken).ConfigureAwait(false);
         Wanted[] wanted = WantedOf(contents, reads);
         (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
         ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
@@ -546,6 +547,11 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
     internal static SynopsisTableSet? ReadCached(SynopsisCache cache, UInt128 uid, SynopsisContents contents, ISynopsisReads? reads, VortexReadOptions? options)
     {
+        if (!LoadListsCached(cache, uid, contents, reads))
+        {
+            return null;
+        }
+
         // Every chunk held, asked before one is read: a read that falls back to the reader then counts no hit twice.
         Wanted[] wanted = WantedOf(contents, reads);
         if (wanted.Length == 0)
@@ -615,9 +621,74 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     }
 
     /// <summary>
+    /// Loads the lists of the chunks the contents name apart (<see cref="SynopsisContents.TableChunks.List"/>) of the tables
+    /// <paramref name="reads"/> reads, every one when it is null, that no read loaded yet: their regions read from
+    /// <paramref name="source"/> in one round trip. A list that does not hold its checksum, or chunks the entry does not say,
+    /// stays unloaded, counted, and its table is read as rows. Then tells <paramref name="reads"/> (<see cref="ISynopsisReads.Loaded"/>).
+    /// </summary>
+    internal static async ValueTask LoadListsAsync(IO.ISegmentReader source, SynopsisContents contents, ISynopsisReads? reads, CancellationToken cancellationToken)
+    {
+        if (contents.Unloaded(reads) is { } unloaded)
+        {
+            using IO.SegmentRequestSet requests = new IO.SegmentRequestSet(unloaded.Count);
+            int[] slots = new int[unloaded.Count];
+            for (int i = 0; i < unloaded.Count; i++)
+            {
+                IndexSegment list = unloaded[i].List!.Value;
+                slots[i] = requests.Add(new Serialization.Schemas.SegmentSpec(list.Offset, list.Length, list.AlignmentExponent, 0, 0));
+            }
+
+            await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            for (int i = 0; i < unloaded.Count; i++)
+            {
+                if (!unloaded[i].Load(requests.GetBuffer(slots[i]).Span))
+                {
+                    VortexTelemetry.SynopsisTableCorruption();
+                }
+            }
+        }
+
+        reads?.Loaded(contents);
+    }
+
+    /// <summary>
+    /// <see cref="LoadListsAsync"/> from the synopsis cache alone, with no reader and no request: false when it does not hold
+    /// a list wanted, which a reader then reads.
+    /// </summary>
+    internal static bool LoadListsCached(SynopsisCache cache, UInt128 uid, SynopsisContents contents, ISynopsisReads? reads)
+    {
+        if (contents.Unloaded(reads) is { } unloaded)
+        {
+            foreach (SynopsisContents.TableChunks listed in unloaded)
+            {
+                if (!cache.TryRead(uid, listed.List!.Value, out Buffers.SegmentOwner owner))
+                {
+                    return false;
+                }
+
+                try
+                {
+                    if (!listed.Load(owner.Buffer.Span))
+                    {
+                        return false;
+                    }
+                }
+                finally
+                {
+                    owner.Release();
+                }
+            }
+        }
+
+        reads?.Loaded(contents);
+        return true;
+    }
+
+    /// <summary>
     /// The chunks of <paramref name="contents"/>'s tables <paramref name="reads"/> keeps, every one when it is null, each with
     /// its table's row type: counted, then named, in an array of their number, a few an object, where lists of them grew for
-    /// each. By index, as every list of the contents: an interface's enumerator is an allocation a list.
+    /// each. By index, as every list of the contents: an interface's enumerator is an allocation a list. A table whose list of
+    /// chunks did not load has none read.
     /// </summary>
     private static Wanted[] WantedOf(SynopsisContents contents, ISynopsisReads? reads)
     {
@@ -625,7 +696,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         for (int t = 0; t < contents.Tables.Count; t++)
         {
             (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
-            if (reads?.ReadsTable(table) == false)
+            if (reads?.ReadsTable(table) == false || chunks is SynopsisContents.TableChunks { Loaded: false })
             {
                 continue;
             }
@@ -643,7 +714,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         for (int t = 0; t < contents.Tables.Count && at < count; t++)
         {
             (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
-            if (reads?.ReadsTable(table) == false)
+            if (reads?.ReadsTable(table) == false || chunks is SynopsisContents.TableChunks { Loaded: false })
             {
                 continue;
             }
@@ -898,6 +969,12 @@ internal interface ISynopsisReads
 
     /// <summary>Whether a chunk of <paramref name="table"/> may be read: the chunks of a table it is not are not looked at, nor parsed.</summary>
     bool ReadsTable(SynopsisTableInfo table);
+
+    /// <summary>
+    /// The lists of the chunks of the tables it reads are loaded (<see cref="SynopsisTableInfo.LoadListsAsync"/>): what it
+    /// decides of their chunks before <see cref="Reads"/> is asked, it decides now. Called again at every load.
+    /// </summary>
+    void Loaded(SynopsisContents contents);
 
     /// <summary>The fields of <paramref name="table"/>'s rows decoded: <see cref="Layouts.FieldMask.All"/> for every one.</summary>
     Layouts.FieldMask Fields(SynopsisTableInfo table);

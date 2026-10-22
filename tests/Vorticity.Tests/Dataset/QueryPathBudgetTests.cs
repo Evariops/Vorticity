@@ -51,17 +51,19 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// <summary>
     /// The ceilings of each path: requests and bytes cold, requests and bytes warm, and the bytes one warm ask
     /// allocates, 2 % above what it measured alone: in the full suite, the pools other classes left hold more or
-    /// less, which moved a path by 1.3 %. Measured on 2026-10-20 at the commit that set them.
+    /// less, which moved a path by 1.3 %. Measured on 2026-10-20 at the commit that set them. The cold requests of the
+    /// paths that fold tables rose by one an object on 2026-10-22: the lists of the tables' chunks, which their entries
+    /// no longer hold, read before the chunks.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["synopses: count by service"] = new(4, 6880, 0, 0, 25152),
-        ["synopses: count by service, at eight lanes"] = new(4, 6880, 0, 0, 27328),
-        ["synopses: count by service and hour"] = new(4, 6880, 0, 0, 29888),
+        ["synopses: count by service"] = new(8, 6880, 0, 0, 25152),
+        ["synopses: count by service, at eight lanes"] = new(8, 6880, 0, 0, 27328),
+        ["synopses: count by service and hour"] = new(8, 6880, 0, 0, 29888),
         ["synopses: by minute, the last hour, under a predicate"] = new(3, 101020, 2, 35424, 61440),
-        ["synopses: an unaligned window"] = new(7, 107472, 2, 66728, 81280),
+        ["synopses: an unaligned window"] = new(10, 107472, 2, 66728, 81280),
         ["synopses: every row but one id"] = new(8, 297014, 4, 34768, 54528),
-        ["synopses: measures by region and hour"] = new(4, 4112, 0, 0, 41664),
+        ["synopses: measures by region and hour"] = new(8, 4112, 0, 0, 41664),
         ["synopses: count by route, a shredded path"] = new(8, 268148, 4, 5902, 65216),
         ["rows: count by service and hour"] = new(8, 392758, 4, 130512, 43520),
         ["rows: count by route, a shredded path"] = new(8, 268148, 4, 5902, 58816),

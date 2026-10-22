@@ -10,10 +10,10 @@ namespace Vorticity.Tests.Dataset;
 public sealed partial class SynopsisContentsTests
 {
     /// <summary>
-    /// The tables of a sealed hour of calls, of which a question reads a few: the contents check every table's chunks and
-    /// parse none, a table's the first time one is asked for, as the contents hold them; the regions the contents declare
-    /// count every table's, and find a table's once it is parsed, the only regions a read through the cache asks for, as
-    /// a question learns them from the chunks.
+    /// The tables of a sealed hour of calls, of which a question reads a few: the entry names each table's list of chunks,
+    /// a region of the object, and holds none of its chunks; a list loaded is checked and parsed the first time a chunk is
+    /// asked for; the regions the contents declare count every table's list and chunks, and find a table's chunks once they
+    /// are parsed, the only regions a read through the cache asks for, as a question learns them from the chunks.
     /// </summary>
     [Fact]
     public async Task ATableParsesItsChunksTheFirstTimeOneIsAskedFor()
@@ -46,14 +46,23 @@ public sealed partial class SynopsisContentsTests
             break;
         }
 
-        // Every table's chunks in the bytes, their count known; the regions counted, none parsed.
+        // Every table's list named, its chunks' count known, none in the entry.
         SynopsisContents contents = SynopsisContents.From(hour.Synopsis.Span)!;
         Assert.True(contents.Tables.Count > 1);
-        Assert.All(contents.Tables, t => Assert.Null(Assert.IsType<SynopsisContents.TableChunks>(t.Chunks).Parsed));
-        List<IndexSegment> declared = SynopsisCacheReader.Declared(SynopsisContents.From(hour.Synopsis.Span)!);
+        Assert.All(contents.Tables, t => Assert.False(Assert.IsType<SynopsisContents.TableChunks>(t.Chunks).Loaded));
+        Assert.All(contents.Tables, t => Assert.True(t.Chunks.Count > 0));
+        Assert.Throws<System.InvalidOperationException>(() => contents.Tables[0].Chunks[0]);
+
+        // The lists loaded, a round trip: checked, none parsed; the regions counted, lists and chunks, by a walk of contents
+        // of their own, their lists loaded too, which parses every table.
+        await dataset.LoadSynopsisListsAsync([(hour, contents, new FieldsRead(_ => []))], Ct);
+        Assert.All(contents.Tables, t => Assert.True(((SynopsisContents.TableChunks)t.Chunks).Loaded));
+        Assert.All(contents.Tables, t => Assert.Null(((SynopsisContents.TableChunks)t.Chunks).Parsed));
+        SynopsisContents walked = SynopsisContents.From(hour.Synopsis.Span)!;
+        await dataset.LoadSynopsisListsAsync([(hour, walked, null)], Ct);
+        List<IndexSegment> declared = SynopsisCacheReader.Declared(walked);
         IReadOnlyDictionary<(ulong Offset, uint Length), IndexSegment> regions = contents.DeclaredRegions;
         Assert.Equal(declared.Select(r => (r.Offset, r.Length)).Distinct().Count(), regions.Count);
-        Assert.All(contents.Tables, t => Assert.True(t.Chunks.Count > 0));
         Assert.All(contents.Tables, t => Assert.Null(((SynopsisContents.TableChunks)t.Chunks).Parsed));
 
         // One table asked for: its chunks parsed, no other's, and its regions found.
@@ -64,9 +73,14 @@ public sealed partial class SynopsisContentsTests
         Assert.True(regions.TryGetValue((first.Region.Offset, first.Region.Length), out IndexSegment found));
         Assert.Equal(first.Region, found);
 
-        // The chunks parsed are those the bytes hold: the contents of their arrays write the same bytes. The bounds of a
-        // table of values parse through the same store, which the round trip of the contents reads back.
+        // The chunks parsed are those the lists hold: written in an entry of their own, which outweighs the one that names
+        // their lists, they read back the same. The bounds of a table of values parse through the same store, which the
+        // round trip of the contents reads back.
         SynopsisContents held = contents with { Tables = [.. contents.Tables.Select(t => (t.Table, (IReadOnlyList<TableChunk>)[.. t.Chunks]))] };
-        Assert.Equal(hour.Synopsis.ToArray(), held.ToBytes());
+        byte[] inline = held.ToBytes();
+        Assert.True(hour.Synopsis.Length < inline.Length, $"an entry of {hour.Synopsis.Length} B, {inline.Length} B with its chunks");
+        SynopsisContents back = SynopsisContents.From(inline)!;
+        Assert.Equal(held.Tables.SelectMany(t => t.Chunks).Select(Bounds), back.Tables.SelectMany(t => t.Chunks).Select(Bounds));
+        Assert.Equal(held.Tables.SelectMany(t => t.Chunks).Select(Unbounded), back.Tables.SelectMany(t => t.Chunks).Select(Unbounded));
     }
 }

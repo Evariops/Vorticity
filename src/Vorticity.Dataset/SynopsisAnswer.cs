@@ -50,6 +50,9 @@ internal sealed class SynopsisPart(SynopsisTableInfo table)
     /// </summary>
     internal HashSet<ulong>? Pruned { get; set; }
 
+    /// <summary>Whether <see cref="Pruned"/> was worked out, once the table's chunks were known (<see cref="SynopsisAnswer.Prune"/>).</summary>
+    internal bool PrunedKnown { get; set; }
+
     /// <summary>The fields of the table's rows read: every one, or those the answer reads of them (<see cref="SynopsisAnswer.Project"/>).</summary>
     internal Layouts.FieldMask Fields { get; set; }
 
@@ -517,20 +520,46 @@ internal sealed record SynopsisAnswer(
         }
 
         // A table of a column's values says the least and the greatest value each chunk holds: the chunks the filter on the
-        // keys rules out are not read.
+        // keys rules out are not read, once the chunks are known (Prune).
         VortexExpr? keyFilter = onKeyCount == 0 ? null : question.KeyFilter(joined, onKeys[..onKeyCount]);
-        for (int p = 0; p < parts.Length && keyFilter is not null && renames is null; p++)
-        {
-            parts[p].Pruned = Pruned(contents, schema, parts[p].Table, keyFilter);
-        }
-
-        return new SynopsisAnswer(
+        SynopsisAnswer answer = new SynopsisAnswer(
             parts, (IReadOnlyList<TimeSlice>?)edges ?? [], keyFilter is null ? null : GroupPredicates.Rewrite(keyFilter, StateRequest.KeyField), request,
             (IReadOnlyList<(VortexExpr, VortexExpr)>?)excluded ?? [])
         {
             Constants = (IReadOnlyList<(string, FilterLiteral)>?)constants ?? [],
             Renames = renames,
         };
+        answer.Prune(contents);
+        return answer;
+    }
+
+    void ISynopsisReads.Loaded(SynopsisContents contents) => Prune(contents);
+
+    /// <summary>
+    /// Works out the chunks each part's table rules out by the filter on its keys (<see cref="SynopsisPart.Pruned"/>), once
+    /// the table's chunks are known: at once for chunks the entry holds, when their list is loaded otherwise. A part whose
+    /// chunks are not known yet prunes none until then, nor an answer that reads a key under another name (<see cref="Renames"/>).
+    /// </summary>
+    internal void Prune(SynopsisContents contents)
+    {
+        if (KeyFilter is not { } filter || Renames is not null)
+        {
+            return;
+        }
+
+        for (int p = 0; p < Parts.Count; p++)
+        {
+            SynopsisPart part = Parts[p];
+            for (int t = 0; t < contents.Tables.Count && !part.PrunedKnown; t++)
+            {
+                if (ReferenceEquals(contents.Tables[t].Table, part.Table) && contents.Tables[t].Chunks is not SynopsisContents.TableChunks { Loaded: false })
+                {
+                    // The schema the answer was made over, which its contents read and hold.
+                    part.Pruned = Pruned(contents, contents.SchemaType, part.Table, filter);
+                    part.PrunedKnown = true;
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -574,7 +603,8 @@ internal sealed record SynopsisAnswer(
             return null;
         }
 
-        ZonePruner pruner = new ZonePruner(filter, [new ZoneColumn(Expr.Field(schema.GetFieldName(key)), 1, chunks.Count, zones)]);
+        // The filter names the key as a batch of states carries it (StateRequest.KeyField).
+        ZonePruner pruner = new ZonePruner(filter, [new ZoneColumn(Expr.Field(StateRequest.KeyColumn(schema.GetFieldName(key))), 1, chunks.Count, zones)]);
         HashSet<ulong>? pruned = null;
         for (int c = 0; c < chunks.Count; c++)
         {
@@ -918,7 +948,7 @@ internal sealed record SynopsisAnswer(
         for (int t = 0; t < contents.Tables.Count; t++)
         {
             (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
-            if (!ReadsTable(table))
+            if (!ReadsTable(table) || chunks is SynopsisContents.TableChunks { Loaded: false })
             {
                 continue;
             }
@@ -962,7 +992,8 @@ internal sealed record SynopsisAnswer(
                 tables[p] = ReferenceEquals(contents.Tables[t].Table, Parts[p].Table) ? t : tables[p];
             }
 
-            if (tables[p] < 0)
+            // A table whose chunks are not known yet cuts nothing.
+            if (tables[p] < 0 || contents.Tables[tables[p]].Chunks is SynopsisContents.TableChunks { Loaded: false })
             {
                 return;
             }
@@ -1242,6 +1273,12 @@ internal sealed record SynopsisAnswer(
             (SynopsisTableInfo info, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
             if (ReferenceEquals(info, part.Table))
             {
+                // A list of chunks that did not load, its region failing its checksum, leaves the object to its rows.
+                if (chunks is SynopsisContents.TableChunks { Loaded: false })
+                {
+                    return false;
+                }
+
                 table = t;
                 for (int c = 0; c < chunks.Count; c++)
                 {

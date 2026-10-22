@@ -182,12 +182,13 @@ public sealed partial class SynopsisAnswerTests
 
     /// <summary>
     /// A window inside one sealed hour, cutting it, on a store that answers in 20 ms, the tree's pages in hand:
-    /// the hour's tables and its edge slices are read beside each other, with no open of the object, two
-    /// dependent round trips, the chunk directories before the chunks of every edge together, a chunk two
-    /// edges share read once; a window on the hour's bounds, one.
+    /// the lists of the chunks of the hour's tables first, which the cut reads, then the hour's tables and its
+    /// edge slices beside each other, with no open of the object, three dependent round trips, the chunk
+    /// directories before the chunks of every edge together, a chunk two edges share read once; a window on the
+    /// hour's bounds, two, the lists then the chunks.
     /// </summary>
     [Fact]
-    public async Task AnUnalignedWindowCostsTwoRoundTripsAnAlignedOneOne()
+    public async Task AnUnalignedWindowCostsThreeRoundTripsAnAlignedOneTwo()
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
@@ -198,8 +199,8 @@ public sealed partial class SynopsisAnswerTests
         inner.Latency = TimeSpan.FromMilliseconds(20);
         foreach ((string name, DateTimeOffset from, DateTimeOffset to, long steps, long requests) in new[]
         {
-            ("unaligned", Noon.AddMinutes(37.5), Noon.AddMinutes(52.25), 2L, 3L),
-            ("aligned", Noon.AddHours(1), Noon.AddHours(2), 1L, 1L),
+            ("unaligned", Noon.AddMinutes(37.5), Noon.AddMinutes(52.25), 3L, 4L),
+            ("aligned", Noon.AddHours(1), Noon.AddHours(2), 2L, 2L),
         })
         {
             store.Reset();

@@ -448,11 +448,9 @@ public sealed partial class SynopsisAnswerTests
                     continue;
                 }
 
-                IEnumerable<IndexSegment> regions = contents.Tables.SelectMany(table => table.Chunks.Select(chunk => chunk.Region))
-                    .Concat(contents.ChunkDirectories)
-                    .Concat((contents.PathDirectories ?? []).Select(path => path.Region))
-                    .Concat(contents.DirectoryRegion is { } directoryRegion ? [directoryRegion] : []);
-                foreach (IndexSegment region in regions)
+                // The tables' lists of chunks loaded, the regions they name are declared with them.
+                await dataset.LoadSynopsisListsAsync([(held.Entry, contents, null)], Ct);
+                foreach (IndexSegment region in SynopsisCacheReader.Declared(contents))
                 {
                     declared.Add(SynopsisCache.NameOf(held.Entry.Uid, region));
                 }

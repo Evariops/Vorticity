@@ -21,13 +21,13 @@ public sealed partial class SynopsisContentsTests
 
     /// <summary>
     /// Two sealed hours of calls on a store that answers in 100 ms: every object's synopsis tables, read at
-    /// once through the tables of contents their entries carry, take one dependent round trip and a request
-    /// an object, read none of the bytes past their synopsis parts, and are the tables the directory names.
-    /// A slice of one takes two round trips, its chunk directory then its chunks, and holds the rows a whole
-    /// open reads.
+    /// once through the tables of contents their entries carry, take two dependent round trips, the lists of
+    /// their chunks then their chunks, and a request an object each, read none of the bytes past their synopsis
+    /// parts, and are the tables the directory names. A slice of one takes two round trips, its chunk directory
+    /// then its chunks, and holds the rows a whole open reads.
     /// </summary>
     [Fact]
-    public async Task AWholePeriodReadsItsSynopsisInOneRoundTripAndASliceInTwo()
+    public async Task AWholePeriodReadsItsSynopsisInTwoRoundTripsAndASliceInTwo()
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
@@ -68,17 +68,25 @@ public sealed partial class SynopsisContentsTests
 
         long partBytes = contents.Sum(c => c.PartEnd - c.PartStart);
 
-        // Cold, every object at once: one round trip, a request an object, nothing past the parts. A latency
-        // longer than what readying a read takes, which the tests running beside this one stretch: at 20 ms,
-        // a thread held that long between the two objects' reads under a loaded full suite counted two steps.
+        // Cold, every object at once: the lists in one round trip, a request an object, then the chunks in one
+        // more, a request an object, nothing past the parts. The store counts a step when a read starts with
+        // none in flight, so each round trip is counted on its own: an object's chunks, asked the instant its
+        // lists arrive, would count with the other's lists still in flight. A latency longer than what readying
+        // a read takes, which the tests running beside this one stretch: at 20 ms, a thread held that long
+        // between the two objects' reads under a loaded full suite counted two steps.
         inner.Latency = TimeSpan.FromMilliseconds(100);
+        store.Reset();
+        await dataset.LoadSynopsisListsAsync([.. periods.Select(p => (p, p.Contents!, (ISynopsisReads?)null))], Ct);
+        Assert.Equal(1, store.DependentSteps);
+        Assert.Equal(periods.Count, store.Requests);
+        long listBytes = store.BytesRead;
         store.Reset();
         SynopsisTableSet?[] sets = await Task.WhenAll(periods.Select(p => dataset.ReadSynopsisAsync(p, null, Ct).AsTask()));
         Assert.Equal(1, store.DependentSteps);
         Assert.Equal(periods.Count, store.Requests);
-        Assert.InRange(store.BytesRead, 1, partBytes);
+        Assert.InRange(listBytes + store.BytesRead, 1, partBytes);
         Console.Out.Write(FormattableString.Invariant(
-            $"SYNOPSIS CONTENTS: {periods.Count} objects, entries of {string.Join('/', periods.Select(p => p.ToBytes().Length))} bytes, the contents {string.Join('/', periods.Select(p => p.Synopsis.Length))}, {store.BytesRead} bytes read of {partBytes} in the parts.\n"));
+            $"SYNOPSIS CONTENTS: {periods.Count} objects, entries of {string.Join('/', periods.Select(p => p.ToBytes().Length))} bytes, the contents {string.Join('/', periods.Select(p => p.Synopsis.Length))}, {listBytes} bytes of lists and {store.BytesRead} of chunks read of {partBytes} in the parts.\n"));
 
         // The tables the directory names, row for row.
         for (int i = 0; i < periods.Count; i++)
@@ -216,6 +224,54 @@ public sealed partial class SynopsisContentsTests
     /// A table of contents reads back as it was written, a chunk of a table of values with the least and the greatest of
     /// its values, and an entry carries it through its bytes.
     /// </summary>
+    /// <summary>
+    /// A table whose chunks a writer listed apart: its entry names the list and its chunks' count, and reads back with the
+    /// list not loaded, its chunks refused until it is; the list's bytes load it, the same chunks, keys and all; bytes that
+    /// fail the list's checksum, or a list of another count, are refused, the table left unloaded.
+    /// </summary>
+    [Fact]
+    public void ATableListedApartLoadsItsChunksFromItsList()
+    {
+        TableChunk[] chunks =
+        [
+            new TableChunk(new IndexSegment(4_096, 512, 6, 9), 0, 3_600_000_000, 3) { Keys = new ValueBounds([1, 1, (byte)'a'], [1, 2, (byte)'e']) },
+            new TableChunk(new IndexSegment(4_608, 128, 6, 10), 3_600_000_000, 3_600_000_000, 1) { Keys = new ValueBounds([1, 1, (byte)'f'], [1, 3, (byte)'u']) },
+        ];
+        byte[] list = SynopsisContents.ListBytes(chunks);
+        IndexSegment region = IndexSegment.Of(8_192, list, 6);
+        SliceTable slices = new SliceTable(TimeUnit.Microseconds, [new TimeSlice(0, 60_000_000, 0, 4)], [1]);
+        SynopsisContents contents = new SynopsisContents(
+            Vorticity.Types.Serialization.DTypeFlatBuffers.Serialize(Vorticity.VortexTypes.ToDType(Call.Schema, new Vorticity.Types.DTypeArena())),
+            ["vortex.primitive"],
+            slices,
+            [new IndexSegment(100, 20, 0, 7)],
+            4_096,
+            8_192 + list.Length,
+            [(new SynopsisTableInfo(SynopsisTableKind.Values, SynopsisBucket.Hour, [1], [3], 4), new SynopsisContents.TableChunks(region, chunks))]);
+
+        SynopsisContents back = SynopsisContents.From(contents.ToBytes())!;
+        SynopsisContents.TableChunks listed = Assert.IsType<SynopsisContents.TableChunks>(back.Tables[0].Chunks);
+        Assert.Equal(region, listed.List);
+        Assert.Equal(2, listed.Count);
+        Assert.False(listed.Loaded);
+        Assert.Throws<System.InvalidOperationException>(() => listed[0]);
+
+        byte[] torn = [.. list];
+        torn[^1] ^= 1;
+        Assert.False(listed.Load(torn));
+        Assert.False(listed.Loaded);
+
+        // A list that holds its checksum and other chunks than the entry counts is refused too.
+        byte[] one = SynopsisContents.ListBytes(chunks[..1]);
+        SynopsisContents.TableChunks miscounted = new SynopsisContents.TableChunks(IndexSegment.Of(8_192, one, 6), 2, listed.KeyBytes, listed.Declared);
+        Assert.False(miscounted.Load(one));
+
+        Assert.True(listed.Load(list));
+        Assert.True(listed.Loaded);
+        Assert.Equal(chunks.Select(Unbounded), listed.Select(Unbounded));
+        Assert.Equal(chunks.Select(Bounds), listed.Select(Bounds));
+    }
+
     [Fact]
     public void TheContentsAndTheEntryRoundTrip()
     {
@@ -315,6 +371,10 @@ public sealed partial class SynopsisContentsTests
         public bool Reads(SynopsisTableInfo table, TableChunk chunk) => true;
 
         public bool ReadsTable(SynopsisTableInfo table) => true;
+
+        public void Loaded(SynopsisContents contents)
+        {
+        }
 
         public Vorticity.Layouts.FieldMask Fields(SynopsisTableInfo table) =>
             Vorticity.Layouts.FieldMask.Subset(new Vorticity.Layouts.FieldMaskNode(fields(table), null));

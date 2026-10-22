@@ -205,8 +205,7 @@ internal sealed class DatasetScanSource : ScanSource
             }
 
             bool light = false;
-            Indexes.SynopsisContents? contents = null;
-            SynopsisAnswer? answer = answering?.AnswerOf(held, out light, out contents);
+            SynopsisAnswer? answer = answering?.AnswerOf(held, out light, out _);
 
             // An object read as rows reads the slices its window reaches alone, as its scan does (DatasetScanBuilder.Of):
             // those are the rows its lanes share, where a day's object cut at its every row left the last 15 minutes,
@@ -220,9 +219,41 @@ internal sealed class DatasetScanSource : ScanSource
 
             if (end > start)
             {
-                long states = answer is not null && Cuttable(answer, held) ? answer.Weight(contents!) : 0;
-                objects.Add((held, new RowRange(start, end), answer is not null, light, states, answer));
+                objects.Add((held, new RowRange(start, end), answer is not null, light, 0, answer));
                 total += answer is not null ? 0 : end - start;
+            }
+        }
+
+        // An answer is weighed by the chunks of its tables, whose lists an entry names apart: those no question loaded yet,
+        // loaded over the objects at once, a round trip, before the weights. Lists another question loaded since the answer
+        // was made prune it now.
+        List<(ObjectEntry, Indexes.SynopsisContents, Indexes.ISynopsisReads?)>? lists = null;
+        for (int o = 0; o < objects.Count; o++)
+        {
+            if (objects[o].Answer is { } listing && objects[o].Held.Entry.Contents is { } listed)
+            {
+                if (listed.HasUnloaded(listing))
+                {
+                    (lists ??= []).Add((objects[o].Held.Entry, listed, listing));
+                }
+                else
+                {
+                    listing.Prune(listed);
+                }
+            }
+        }
+
+        if (lists is not null)
+        {
+            await _dataset.LoadSynopsisListsAsync(lists, cancellationToken).ConfigureAwait(false);
+        }
+
+        for (int o = 0; o < objects.Count; o++)
+        {
+            if (objects[o].Answer is { } weighed && Cuttable(weighed, objects[o].Held))
+            {
+                long states = weighed.Weight(objects[o].Held.Entry.Contents!);
+                objects[o] = objects[o] with { States = states };
                 totalStates += states;
             }
         }

@@ -67,6 +67,16 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
 
         foreach ((SynopsisTableInfo _, IReadOnlyList<TableChunk> chunks) in contents.Tables)
         {
+            // A table's chunks listed apart are known once their list is loaded; their list is a region of its own.
+            if (chunks is SynopsisContents.TableChunks { List: { } list } listed)
+            {
+                Declare(list);
+                if (!listed.Loaded)
+                {
+                    continue;
+                }
+            }
+
             foreach (TableChunk chunk in chunks)
             {
                 Declare(chunk.Region);

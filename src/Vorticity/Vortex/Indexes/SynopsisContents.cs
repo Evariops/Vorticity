@@ -67,6 +67,13 @@ internal sealed record SynopsisContents(
     // Tag 2 of a table held the one region of the branch's first tables, before they came in chunks: skipped, as an
     // unknown tag is.
     private const int TagTableChunk = 3;
+
+    // A table whose chunks are listed apart, in a region of the object (TableChunks.List): the region, then the chunks'
+    // count, the bytes of their keys' bounds and how many of them say a checksum, all known before the list is read.
+    private const int TagTableList = 4;
+    private const int TagTableCount = 5;
+    private const int TagTableKeyBytes = 6;
+    private const int TagTableDeclared = 7;
     private const int TagChunkRegion = 1;
     private const int TagChunkFirst = 2;
     private const int TagChunkLast = 3;
@@ -152,6 +159,15 @@ internal sealed record SynopsisContents(
                 Declare(directory);
             }
 
+            // A table's list of chunks apart from the entry is a region the cache keeps, as its chunks are.
+            foreach ((SynopsisTableInfo _, IReadOnlyList<TableChunk> chunks) in contents.Tables)
+            {
+                if (chunks is TableChunks { List: { } list })
+                {
+                    Declare(list);
+                }
+            }
+
             int count = _directories.Count;
             for (int t = 0; t < contents.Tables.Count; t++)
             {
@@ -171,6 +187,7 @@ internal sealed record SynopsisContents(
             _count = count;
         }
 
+        /// <summary>Every region the contents declare, the chunks of a list no read loaded yet among them.</summary>
         public int Count => _count;
 
         public IndexSegment this[(ulong Offset, uint Length) key] =>
@@ -237,7 +254,10 @@ internal sealed record SynopsisContents(
             }
         }
 
-        /// <summary>Every region, every table's chunks parsed: what a walk of the whole map asks for.</summary>
+        /// <summary>
+        /// Every region, every table's chunks parsed: what a walk of the whole map asks for. The chunks of a list no read
+        /// loaded yet are not among them, nor counted apart: the map keeps the walk once every list is.
+        /// </summary>
         private Dictionary<(ulong, uint), IndexSegment> Whole
         {
             get
@@ -251,6 +271,14 @@ internal sealed record SynopsisContents(
                 foreach (IndexSegment region in SynopsisCacheReader.Declared(_contents))
                 {
                     regions[(region.Offset, region.Length)] = region;
+                }
+
+                foreach ((SynopsisTableInfo _, IReadOnlyList<TableChunk> chunks) in _contents.Tables)
+                {
+                    if (chunks is TableChunks { Loaded: false })
+                    {
+                        return regions;
+                    }
                 }
 
                 return System.Threading.Interlocked.CompareExchange(ref _whole, regions, null) ?? regions;
@@ -373,18 +401,16 @@ internal sealed record SynopsisContents(
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagTable);
                 writer.WriteBytes(TagTableInfo, table.OptionBytes());
-                foreach (TableChunk chunk in chunks)
+                if (chunks is TableChunks { List: { } list } listed)
                 {
-                    using ProtoWriter.MessageScope part = writer.BeginMessage(TagTableChunk);
-                    IndexDirectory.WriteSegment(ref writer, TagChunkRegion, chunk.Region);
-                    writer.WriteUInt64Always(TagChunkFirst, unchecked((ulong)chunk.FirstBucket));
-                    writer.WriteUInt64Always(TagChunkLast, unchecked((ulong)chunk.LastBucket));
-                    writer.WriteUInt64Always(TagChunkRows, (ulong)chunk.Rows);
-                    if (chunk.Keys is { } keys)
-                    {
-                        writer.WriteBytes(TagChunkLeastKey, keys.Least);
-                        writer.WriteBytes(TagChunkGreatestKey, keys.Greatest);
-                    }
+                    IndexDirectory.WriteSegment(ref writer, TagTableList, list);
+                    writer.WriteUInt64Always(TagTableCount, (ulong)listed.Count);
+                    writer.WriteUInt64Always(TagTableKeyBytes, (ulong)listed.KeyBytes);
+                    writer.WriteUInt64Always(TagTableDeclared, (ulong)listed.Declared);
+                }
+                else
+                {
+                    WriteChunks(ref writer, chunks);
                 }
             }
 
@@ -407,6 +433,77 @@ internal sealed record SynopsisContents(
         {
             writer.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The list of <paramref name="chunks"/> a writer lays in the object, apart from the entry (<see cref="TableChunks.List"/>):
+    /// the chunk fields of a table's message, alone.
+    /// </summary>
+    internal static byte[] ListBytes(IReadOnlyList<TableChunk> chunks)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            WriteChunks(ref writer, chunks);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>Writes <paramref name="chunks"/> as the chunk fields of a table's message, or of its list.</summary>
+    private static void WriteChunks(ref ProtoWriter writer, IReadOnlyList<TableChunk> chunks)
+    {
+        foreach (TableChunk chunk in chunks)
+        {
+            using ProtoWriter.MessageScope part = writer.BeginMessage(TagTableChunk);
+            IndexDirectory.WriteSegment(ref writer, TagChunkRegion, chunk.Region);
+            writer.WriteUInt64Always(TagChunkFirst, unchecked((ulong)chunk.FirstBucket));
+            writer.WriteUInt64Always(TagChunkLast, unchecked((ulong)chunk.LastBucket));
+            writer.WriteUInt64Always(TagChunkRows, (ulong)chunk.Rows);
+            if (chunk.Keys is { } keys)
+            {
+                writer.WriteBytes(TagChunkLeastKey, keys.Least);
+                writer.WriteBytes(TagChunkGreatestKey, keys.Greatest);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The tables whose chunks are listed apart and were not loaded yet, among those <paramref name="reads"/> reads, every
+    /// one when it is null: what a read of their chunks reads first, in one round trip (<see cref="TableChunks.Load"/>).
+    /// Null for none.
+    /// </summary>
+    internal List<TableChunks>? Unloaded(ISynopsisReads? reads)
+    {
+        List<TableChunks>? unloaded = null;
+        for (int t = 0; t < Tables.Count; t++)
+        {
+            (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = Tables[t];
+            if (chunks is TableChunks { Loaded: false } listed && (reads is null || reads.ReadsTable(table)))
+            {
+                (unloaded ??= []).Add(listed);
+            }
+        }
+
+        return unloaded;
+    }
+
+    /// <summary>Whether a table <paramref name="reads"/> reads, every one when it is null, waits for its list (<see cref="Unloaded"/>).</summary>
+    internal bool HasUnloaded(ISynopsisReads? reads)
+    {
+        for (int t = 0; t < Tables.Count; t++)
+        {
+            (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = Tables[t];
+            if (chunks is TableChunks { Loaded: false } && (reads is null || reads.ReadsTable(table)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>The contents <paramref name="bytes"/> hold, or null when they do not decode or are of a later version.</summary>
@@ -496,7 +593,8 @@ internal sealed record SynopsisContents(
 
     /// <summary>
     /// A table and its chunks, which the message <paramref name="message"/> holds, its chunks checked and left in the bytes
-    /// (<see cref="TableChunks"/>); null for a table of no chunk.
+    /// (<see cref="TableChunks"/>), or listed apart in a region of the object the message names, read when a question loads
+    /// it; null for a table of no chunk.
     /// </summary>
     private static (SynopsisTableInfo, IReadOnlyList<TableChunk>)? Table(ReadOnlyMemory<byte> message)
     {
@@ -505,12 +603,28 @@ internal sealed record SynopsisContents(
         int count = 0;
         int keyBytes = 0;
         int declared = 0;
+        IndexSegment? list = null;
+        int listed = 0;
+        int listedKeyBytes = 0;
+        int listedDeclared = 0;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field, wire)
             {
                 case (TagTableInfo, ProtoWireType.LengthDelimited):
                     table = SynopsisTableInfo.From(reader.ReadLengthDelimited());
+                    break;
+                case (TagTableList, ProtoWireType.LengthDelimited):
+                    list = IndexDirectory.ReadSegment(reader.ReadMessage());
+                    break;
+                case (TagTableCount, ProtoWireType.Varint):
+                    listed = checked((int)reader.ReadVarint());
+                    break;
+                case (TagTableKeyBytes, ProtoWireType.Varint):
+                    listedKeyBytes = checked((int)reader.ReadVarint());
+                    break;
+                case (TagTableDeclared, ProtoWireType.Varint):
+                    listedDeclared = checked((int)reader.ReadVarint());
                     break;
                 case (TagTableChunk, ProtoWireType.LengthDelimited):
                     if (!Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest))
@@ -528,7 +642,20 @@ internal sealed record SynopsisContents(
             }
         }
 
-        return table is not null && count > 0 ? (table, new TableChunks(message, count, keyBytes, declared)) : null;
+        if (table is null)
+        {
+            return null;
+        }
+
+        // A table listed apart names its list, with a checksum, and holds no chunk of its own.
+        if (list is { } region)
+        {
+            return count == 0 && listed > 0 && region.Checksum is not null && listedDeclared <= listed
+                ? (table, new TableChunks(region, listed, listedKeyBytes, listedDeclared))
+                : null;
+        }
+
+        return count > 0 ? (table, new TableChunks(message, count, keyBytes, declared)) : null;
     }
 
     /// <summary>
@@ -588,19 +715,68 @@ internal sealed record SynopsisContents(
     }
 
     /// <summary>
-    /// The chunks of a table, as the bytes of the contents hold them, parsed the first time one is asked for, checked when
-    /// the contents were: a question reads the chunks of the tables it answers from, a few of an object's, and the chunks of
-    /// every table were most of what a cold question allocated, 13 MB over the 22 objects of days the design's tables of
-    /// values per slice cut in 47 836 chunks. Their count is known before.
+    /// The chunks of a table, parsed the first time one is asked for: from the bytes of the contents, checked when the
+    /// contents were, or from their list, a region of the object the entry names (<see cref="List"/>), read and checked when
+    /// a question loads it (<see cref="Load"/>). A question reads the chunks of the tables it answers from, a few of an
+    /// object's: the chunks of every table were most of what a cold question allocated, 13 MB over the 22 objects of days the
+    /// design's tables of values per slice cut in 47 836 chunks, and most of a day's entry, 0.32 MB. Their count is known
+    /// before.
     /// </summary>
-    internal sealed class TableChunks(ReadOnlyMemory<byte> message, int count, int keyBytes, int declared) : IReadOnlyList<TableChunk>
+    internal sealed class TableChunks : IReadOnlyList<TableChunk>
     {
+        private readonly ReadOnlyMemory<byte> _message;
+        private readonly int _count;
+        private readonly int _keyBytes;
+        private readonly int _declared;
+
+        // The list read from the object, once loaded; null before, and for chunks the contents hold.
+        private byte[]? _list;
+
         private TableChunk[]? _parsed;
 
-        public int Count => count;
+        /// <summary>The chunks the message of a table in the contents holds, <paramref name="count"/> of them.</summary>
+        internal TableChunks(ReadOnlyMemory<byte> message, int count, int keyBytes, int declared)
+        {
+            _message = message;
+            _count = count;
+            _keyBytes = keyBytes;
+            _declared = declared;
+        }
+
+        /// <summary>The <paramref name="count"/> chunks <paramref name="list"/> lists, read when a question loads it.</summary>
+        internal TableChunks(IndexSegment list, int count, int keyBytes, int declared)
+            : this(ReadOnlyMemory<byte>.Empty, count, keyBytes, declared)
+        {
+            List = list;
+        }
+
+        /// <summary>The chunks a writer listed in <paramref name="list"/>: known, with no read.</summary>
+        internal TableChunks(IndexSegment list, TableChunk[] chunks)
+            : this(list, chunks.Length, KeyBytesOf(chunks), DeclaredOf(chunks))
+        {
+            bool ordered = true;
+            for (int i = 1; i < chunks.Length && ordered; i++)
+            {
+                ordered = chunks[i - 1].Region.Offset < chunks[i].Region.Offset;
+            }
+
+            _ordered = ordered;
+            _parsed = chunks;
+        }
+
+        public int Count => _count;
 
         /// <summary>The chunks whose regions say a checksum, which the synopsis cache may keep.</summary>
-        internal int Declared => declared;
+        internal int Declared => _declared;
+
+        /// <summary>The bytes of the chunks' keys' bounds, which the parse lays in one store.</summary>
+        internal int KeyBytes => _keyBytes;
+
+        /// <summary>The region of the object that lists the chunks, apart from the entry; null for chunks the contents hold.</summary>
+        internal IndexSegment? List { get; }
+
+        /// <summary>Whether the chunks may be parsed: the contents hold them, or their list was loaded.</summary>
+        internal bool Loaded => List is null || System.Threading.Volatile.Read(ref _list) is not null || Parsed is not null;
 
         /// <summary>The chunks, when they were parsed; null before.</summary>
         internal TableChunk[]? Parsed => System.Threading.Volatile.Read(ref _parsed);
@@ -610,6 +786,70 @@ internal sealed record SynopsisContents(
         public IEnumerator<TableChunk> GetEnumerator() => ((IEnumerable<TableChunk>)(Parsed ?? Parse())).GetEnumerator();
 
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+        /// <summary>
+        /// Takes the list <paramref name="bytes"/> read of the object: false, and nothing taken, when they do not hold the list's
+        /// checksum, or hold chunks other than the entry says, in count, in bytes of keys or in checksums. True once loaded.
+        /// </summary>
+        internal bool Load(ReadOnlySpan<byte> bytes)
+        {
+            if (Loaded)
+            {
+                return true;
+            }
+
+            if (List is not { } list || !list.Holds(bytes))
+            {
+                return false;
+            }
+
+            int count = 0;
+            int keyBytes = 0;
+            int declared = 0;
+            ProtoReader reader = new ProtoReader(bytes);
+            while (reader.TryReadTag(out int field, out ProtoWireType wire))
+            {
+                if (field != TagTableChunk || wire != ProtoWireType.LengthDelimited
+                    || !Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest))
+                {
+                    return false;
+                }
+
+                count++;
+                keyBytes += least.Length + greatest.Length;
+                declared += chunk.Region.Checksum is null ? 0 : 1;
+            }
+
+            if (count != _count || keyBytes != _keyBytes || declared != _declared)
+            {
+                return false;
+            }
+
+            System.Threading.Interlocked.CompareExchange(ref _list, bytes.ToArray(), null);
+            return true;
+        }
+
+        private static int KeyBytesOf(TableChunk[] chunks)
+        {
+            int bytes = 0;
+            foreach (TableChunk chunk in chunks)
+            {
+                bytes += chunk.Keys is { } keys ? keys.Least.Length + keys.Greatest.Length : 0;
+            }
+
+            return bytes;
+        }
+
+        private static int DeclaredOf(TableChunk[] chunks)
+        {
+            int declared = 0;
+            foreach (TableChunk chunk in chunks)
+            {
+                declared += chunk.Region.Checksum is null ? 0 : 1;
+            }
+
+            return declared;
+        }
 
         /// <summary>Whether the parsed chunks lie in the order of their regions' offsets, as a writer lays them: a region is then looked for by halves.</summary>
         private bool _ordered;
@@ -652,13 +892,20 @@ internal sealed record SynopsisContents(
         }
 
         /// <summary>Parses the chunks, their keys in one store, once: a reader that parses them beside another keeps the first's.</summary>
+        /// <exception cref="InvalidOperationException">The chunks are listed apart, and no question loaded their list.</exception>
         private TableChunk[] Parse()
         {
+            ReadOnlySpan<byte> message = List is null
+                ? _message.Span
+                : System.Threading.Volatile.Read(ref _list)
+                    ?? throw new InvalidOperationException("The chunks of a synopsis table are listed in its object, and no read loaded the list.");
+            int count = _count;
+            int keyBytes = _keyBytes;
             TableChunk[] chunks = new TableChunk[count];
             byte[] bytes = keyBytes == 0 ? [] : new byte[keyBytes];
             int[] offsets = keyBytes == 0 ? [] : new int[(2 * count) + 1];
             TableBounds? keys = keyBytes == 0 ? null : new TableBounds(bytes, offsets);
-            ProtoReader reader = new ProtoReader(message.Span);
+            ProtoReader reader = new ProtoReader(message);
             int c = 0;
             int at = 0;
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
