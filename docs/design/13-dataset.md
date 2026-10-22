@@ -178,12 +178,18 @@ A leaf entry describes one data object:
   summaries, as a zero where a count of deleted rows would stand, which no earlier entry holds there,
   then their length and their tagged bytes, so an entry without them keeps its bytes
 - for an object of sorted slices, the table of contents of its synopsis: the object's schema, the
-  encodings its blobs name, its slice table and the region of each column's chunk directory, the
-  extent of its synopsis part, and the region of each synopsis table and each synopsis column's
-  chunks ([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
-  A reader of its tables then reads them in one round trip, and a reader of a slice in two, with no
-  open of the object. It is a tagged field like the footer's length, about a kilobyte for a period
-  of an hour, most of it the slice table
+  encodings its blobs name, its slice table and the region of each column's chunk directory, or of
+  its page table with the first row of each page ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)),
+  the extent of its synopsis part, each synopsis table with its chunks, or with the region of their
+  list, its checksum and what it holds for a table of many chunks ([the synopsis tables](10-indexes.md#49-vorticitysynopsistablev1-the-synopsis-tables)),
+  each variant column's path directory, the region of the object's index directory, and where in it
+  the entry of each locating index lies ([the directory](10-indexes.md#3-the-directory-and-the-runs)).
+  With no open of the object, a reader of its tables reads the lists of those that keep them apart,
+  for every object at once, then their chunks; a reader of a slice reads its columns' directories,
+  then its chunks; and a lookup by a value reads its index entries with its columns' page tables,
+  then its postings, the pages of its rows and its chunks, four round trips. It is a tagged field
+  like the footer's length, about 2.2 KB for a period of an hour, and 19.7 KB for a day, where
+  it took 318 KB while it held every table's chunks
 
 An internal entry holds a page reference to a child, the sum of its rows, the union of its children's
 summaries, and the tally of the objects under it: their bytes, the largest of them, the rows marked
@@ -651,7 +657,10 @@ such fields. A feature stays named in every header after the one that introduced
 that hold its entries stay in the trees, and a dataset that never uses one is written in format 2 or
 3 as before. The others are settings fixed when the dataset is created, which a library that does not
 know them would ignore against what the dataset promises: the erasure delay, compaction by periods
-and its lateness horizon, and the identifier columns.
+and its lateness horizon, and the identifier columns. A library refuses a header that names a feature
+it does not know, as it refuses a later format, so that a feature added later is never read as
+nothing; and it refuses one whose flag of periods, lateness horizon and length of a period do not
+come together, reading a dataset's periods from the flag.
 
 A dataset compacted by periods (`DatasetOptions.Periods`) declares its instant as the first column of
 its clustering key, a timestamp in UTC or naive, which it reads as UTC, and a lateness horizon, how

@@ -207,9 +207,9 @@ Eight rules carry the design.
 | sorted time slices | counts of every combination of the repeating columns, per slice, stored as the rows' own order | [11-write-strategy.md, sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants), [10-indexes.md, the time slices of a file](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file), [12-index-reads.md, sources of order](12-index-reads.md#2-sources-of-order) |
 | the synopsis | run statistics, coarse tables and value counts, chosen within a budget | [10-indexes.md, the synopsis part](10-indexes.md#48-vorticitysynopsiscolumnsv1-the-synopsis-part) and [its tables](10-indexes.md#49-vorticitysynopsistablev1-the-synopsis-tables) |
 | states | exact sums over any window, distributions, distinct sketches, the same bits by every path | [16-queries.md, distributions and quantiles](16-queries.md#56-distributions-and-quantiles), [states kept past a scan](16-queries.md#57-states-kept-past-a-scan), [10-indexes.md, the kinds of persisted states](10-indexes.md#56-the-kinds-of-persisted-states) |
-| reading without the data | one round trip per object cold for whole periods, two for a shorter window, no footer | [12-index-reads.md, the rows of a time slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer), [13-dataset.md, what a node carries](13-dataset.md#42-what-a-node-carries) for the table of contents in the leaf entry |
+| reading without the data | one round trip per object cold for whole periods, two for a shorter window, one more for a table that lists its chunks apart, no footer | [12-index-reads.md, the rows of a time slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer), [13-dataset.md, what a node carries](13-dataset.md#42-what-a-node-carries) for the table of contents in the leaf entry |
 | answering a question | synopses first, rows last, exact edges, exclusions, deletes corrected, newest first | [12-index-reads.md, aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis), [16-queries.md, statistics and zone maps](16-queries.md#93-statistics-and-zone-maps) |
-| needles | an identifier found in three dependent reads per object cold, two warm | [10-indexes.md, hashed postings](10-indexes.md#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash), [the policy](10-indexes.md#6-the-policy) |
+| needles | an identifier found in three dependent reads per object cold, four where its chunk directories are paged, one warm | [10-indexes.md, hashed postings](10-indexes.md#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash), [the policy](10-indexes.md#6-the-policy) |
 | the synopsis cache | warm questions make no request to the store | [19-object-storage.md, the synopsis cache](19-object-storage.md#105-the-synopsis-cache-on-the-local-disk), [09-contracts.md](09-contracts.md) |
 | retention and late rows | expiry reads nothing, late rows rewrite nothing large | [13-dataset.md, deleting and updating rows](13-dataset.md#12-deleting-and-updating-rows) for expiry and partition columns, [13-dataset.md, the commit protocol](13-dataset.md#8-the-commit-protocol) for late rows |
 | columns known only at run time | the same answers for columns added later | [16-queries.md, the tool path](16-queries.md#11-the-tool-path), [10-indexes.md, the policy](10-indexes.md#6-the-policy) |
@@ -273,11 +273,11 @@ costs a few nanoseconds to group (measured, `vortex-queries --micro synopsistabl
 
 - A question over the columns of the synopsis part, on a window aligned on slices, reads no data row,
   makes one round trip per object cold when its window covers whole periods and two when it is
-  shorter, none warm, and walks at most the rows of the coarsest table that holds its columns per
+  shorter, one more when it reads a table that lists its chunks apart, a day's largest, none warm, and walks at most the rows of the coarsest table that holds its columns per
   bucket.
 - An edge reads the rows of at most one slice at each end, found through the chunk directories.
-- A needle on a declared identifier makes three dependent reads per object cold and two warm, then
-  reads the rows it finds.
+- A needle on a declared identifier makes three dependent reads per object cold, four on an object
+  whose chunk directories are paged, and one warm, then reads the rows it finds.
 - No question reads a column it does not touch, or a value twice.
 - A selective question reads no more than over the same rows in objects of 4 MiB, by the rule that
   sizes chunks from the footer's cap. A question that scans reads no more than the rows of the columns
@@ -381,7 +381,7 @@ of a day under late rows and four writers, 2.7 times when rows come in order (me
 | 4 | the depth of the synopsis part | every synopsis column. A reader takes the regions it needs, not the whole part | where the budget stops |
 | 5 | tables over subsets of columns | none beyond the prefixes of the order and each column's value counts | admitted by their benefit per byte, as every other table |
 | 6 | edges | exact by default, their rows stated by the plan. `ScanOptions.AlignWindow` moves each end to the nearest bound the tables answer at, a slice's, an hour's or the object's, no further than its rows, and the metrics return the window applied, the same whether states or rows answer: a window that cuts its first and last hours, 8 requests in 6 round trips warm, aligned none (measured) | moved to slice boundaries by default, which changes what a question means without its asking |
-| 7 | the synopsis part's table of contents | in the object's leaf entry, about 1.1 KB for an hour, so one round trip per object for whole periods and two for a shorter window | read from the object's index directory, one round trip more |
+| 7 | the synopsis part's table of contents | in the object's leaf entry, about 2.2 KB for an hour and 19.7 KB for a day, a table of many chunks listing them in a region of the object, so one round trip per object for whole periods and two for a shorter window, one more for such a table: a day's entry held 320 KB with every table's chunks, which every walk of the tree read | read from the object's index directory, one round trip more |
 | 8 | deletes | tables corrected by the marked rows' contributions, computed at read | deltas written beside the vector, or the runs of every marked bucket |
 | 9 | the lateness horizon | declared by the application, checked by the dataset's counters, on the data's time partition by partition: a partition that receives nothing more keeps its last period unsealed, exact at a few requests more | chosen by the dataset from the lateness it measures, or a clock, which would seal a lagging partition too early |
 | 10 | rows later than the horizon | the late level beside their sealed period, sealed again when the late level is crowded, counted, or refused on request. On periods of an hour with a tail an hour late, every period is sealed about three times (measured) | a partition of their own, which loses their retention, or a rewrite of their period at once |

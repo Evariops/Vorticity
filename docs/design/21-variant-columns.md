@@ -271,7 +271,7 @@ rows and the 640 rows of one object when one of its rows holds a float.
 | 8 | the column budget | by the cost: the bytes a path's occurrences cost in the residual against what its column costs, null slots included | a fixed number of paths |
 | 9 | paths left in the residual | counted by the synopsis where its budget admits them, over the rows that hold them, so they answer as measures | counted only once shredded |
 | 10 | the order inside a slice | by the runs each column adds, measured on a sample of the object's first slice, fixed per object | by numbers of distinct values, per slice, as for declared columns alone |
-| 11 | the paths the table of contents names | every table kept, about 30 bytes each, and each variant column's path directory | those a cost model weighs against the bytes of every leaf entry |
+| 11 | the paths the table of contents names | every table kept, about 50 bytes each, 80 to 110 when it holds its chunks, and each variant column's path directory | those a cost model weighs against the bytes of every leaf entry |
 | 12 | where shredding happens | in the jobs that already rewrite every row of a slice, level 0's exit, the fresh merges and the seal, with level 0's variants shredded in memory once per query node | in the append, as other writers do, which puts its cost on ingestion |
 | 13 | reading one path | the path map, and only the buffers of the top-level key read | every chunk's segment read whole, every path's bytes with it |
 | 14 | the variant column's chunks | long chunks of its own, about 10⁶ rows | the file's chunks, which multiply the trees |

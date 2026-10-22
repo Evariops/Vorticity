@@ -226,8 +226,11 @@ returning a list, because it is an ordered walk with an early exit, and a list w
 An object a dataset of periods writes keeps, beside its data, a synopsis: tables of counts, exact
 sums and extremes for the combinations of its synopsis columns, by slice, by hour and over the whole
 object ([the synopsis tables](10-indexes.md#49-vorticitysynopsistablev1-the-synopsis-tables)). Its
-entry in the dataset's tree carries the table of contents, each table's keys, measures, bucket, rows
-and region with its checksum, so deciding what an object answers reads nothing.
+entry in the dataset's tree carries the table of contents, each table's keys, measures, bucket and
+rows, and its chunks, or the region of their list with its checksum for a table of many chunks, so
+deciding what an object answers reads nothing. A question then reads the lists of the tables it reads
+that keep theirs apart, for every object at once, from the synopsis cache or in one round trip, and
+the chunks that hold the buckets it folds.
 
 An aggregation that asks for states ([states](16-queries.md#93-statistics-and-zone-maps)) is answered
 object by object. The filter splits into bounds on the instant, which make the window, and predicates
@@ -359,7 +362,12 @@ type, which the caller knows from the dataset's schema. The chunks that overlap 
 rows and joined, so a slice that starts inside a chunk reads that chunk whole, as any read of a flat
 chunk does. A read may name the columns it wants, and then fetches only their regions and chunks: the
 edges of a window read the instant alone. Requests 1 to 4 are small, are paid once per file, and a
-dataset's leaf entry that records the regions spares the first three. A file without the slice
+dataset's leaf entry that records the regions spares the first three. A column of many chunks lays
+its region out in pages ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)):
+a reader of the file alone reads it whole, while a reader given the leaf entry, which holds the first
+row of each page, reads the column's page table and the pages that hold the slice's rows in request
+4, each checked against its checksum. The page table stays with the entry, and a later read asks for
+its pages by the checksums the table gave, which the synopsis cache keeps them by. A file without the slice
 kinds, or with ones that do not decode or do not cover its rows, opens no such reader, and its rows
 are read through an open as before.
 
