@@ -63,6 +63,10 @@ internal static class VariantShredder
             }
         }
 
+        // Rows in a run of the same metadata share its dictionary, which each object node looks its keys up in once: a run
+        // a source's rows, which the slice's sort keeps together.
+        ReadOnlySpan<byte> previous = default;
+        int epoch = -1;
         for (int row = 0; row < rows; row++)
         {
             if (!ArenaWords.IsValid(arena, node, row))
@@ -72,8 +76,15 @@ internal static class VariantShredder
             }
 
             ReadOnlySpan<byte> bytes = ArenaWords.IsValid(arena, value, row) ? LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue;
-            VariantDictionary dictionary = VariantDictionary.Read(LiteralReader.ViewAt(metadataNode, row));
-            root.Present(in dictionary, bytes);
+            ReadOnlySpan<byte> metadataBytes = LiteralReader.ViewAt(metadataNode, row);
+            if (epoch < 0 || !metadataBytes.SequenceEqual(previous))
+            {
+                epoch++;
+                previous = metadataBytes;
+            }
+
+            VariantDictionary dictionary = VariantDictionary.Read(metadataBytes);
+            root.Present(in dictionary, epoch, bytes);
         }
 
         int tree = root.Typed(arena, types, rows, metadata, out _);
@@ -215,8 +226,11 @@ internal static class VariantShredder
         /// <summary>A row that does not hold the node.</summary>
         internal abstract void Absent();
 
-        /// <summary>A row whose node holds <paramref name="value"/>, its keys named by <paramref name="dictionary"/>.</summary>
-        internal abstract void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value);
+        /// <summary>
+        /// A row whose node holds <paramref name="value"/>, its keys named by <paramref name="dictionary"/>, the same as every
+        /// row of its run of <paramref name="epoch"/>.
+        /// </summary>
+        internal abstract void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value);
 
         /// <summary>The node's typed column over <paramref name="rows"/> rows.</summary>
         internal abstract int Typed(CanonicalArena arena, DTypeArena types, int rows, int metadata, out DType dtype);
@@ -256,7 +270,7 @@ internal static class VariantShredder
             Values.AppendNull();
         }
 
-        internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
+        internal override void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value)
         {
             Held.Append(true);
             VariantScalar scalar = VariantScalar.Read(value);
@@ -285,6 +299,11 @@ internal static class VariantShredder
         private readonly Bits _objects = new Bits();
         private int[] _kept = new int[8];
 
+        // The plan's key of each field id of the dictionary the rows of run _epoch share: rows of one source share their
+        // metadata, whose field names a search of the plan per field and per row looked up again.
+        private int[] _keyOf = [];
+        private int _epoch = -1;
+
         /// <summary>The node of the plan's key <paramref name="index"/>.</summary>
         internal Group FieldAt(int index) => _fields[index];
 
@@ -312,7 +331,7 @@ internal static class VariantShredder
             Values.AppendNull();
         }
 
-        internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
+        internal override void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value)
         {
             Held.Append(true);
             if ((value[0] & 0x03) != ParquetVariant.BasicObject)
@@ -333,11 +352,38 @@ internal static class VariantShredder
                 _kept = new int[Math.Max(fields.Count, 2 * _kept.Length)];
             }
 
+            // The plan's key of each field id of the run's dictionary, looked up once a run: -2 for an id not looked up yet.
+            if (epoch != _epoch)
+            {
+                _epoch = epoch;
+                if (_keyOf.Length < dictionary.Count)
+                {
+                    _keyOf = new int[Math.Max(dictionary.Count, 2 * _keyOf.Length)];
+                }
+
+                _keyOf.AsSpan(0, dictionary.Count).Fill(-2);
+            }
+
             _found.AsSpan().Fill(-1);
             int kept = 0;
             for (int i = 0; i < fields.Count; i++)
             {
-                int key = _plan.IndexOf(dictionary[fields.IdAt(i)]);
+                int id = fields.IdAt(i);
+                int key;
+                if ((uint)id < (uint)dictionary.Count)
+                {
+                    key = _keyOf[id];
+                    if (key == -2)
+                    {
+                        _keyOf[id] = key = _plan.IndexOf(dictionary[id]);
+                    }
+                }
+                else
+                {
+                    // An id out of the dictionary: its read refuses it, as before.
+                    key = _plan.IndexOf(dictionary[id]);
+                }
+
                 if (key >= 0)
                 {
                     _found[key] = i;
@@ -353,7 +399,7 @@ internal static class VariantShredder
             {
                 if (_found[k] >= 0)
                 {
-                    _fields[k].Present(in dictionary, fields.ValueAt(_found[k]));
+                    _fields[k].Present(in dictionary, epoch, fields.ValueAt(_found[k]));
                 }
                 else
                 {
@@ -422,7 +468,7 @@ internal static class VariantShredder
             Values.AppendNull();
         }
 
-        internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
+        internal override void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value)
         {
             Held.Append(true);
             if ((value[0] & 0x03) == ParquetVariant.BasicArray)
