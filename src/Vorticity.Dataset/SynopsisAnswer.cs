@@ -1478,11 +1478,30 @@ internal sealed record SynopsisAnswer(
                 fields[width + c] = constant;
             }
 
+            int bucketed = fields[0];
+            ReadOnlySpan<long> buckets = arena.GetNode(bucketed).Values.Cast<long>()[..count];
+
+            // The filter on the keys first, over the table's columns as they lie, of which it reads no bucket. Where it
+            // holds for few rows, those rows alone go on, gathered: a question of one value of a column, whose table of
+            // values lies in the order of its values within each hour, keeps a row in a few hundred, where selecting
+            // every row by its bucket and making every row's instant took four fifths of a question for one host per
+            // minute.
+            Span<byte> states = default;
+            if (KeyFilter is { } keyFilter)
+            {
+                _ = arena.Allocate(count, 1, out states);
+                states.Clear();
+                FilterEvaluator.Evaluate(keyFilter, arena, arena.AddStruct(root, count, Validity.NonNullable, fields), count, states);
+                if (corrected is null && Gathered(arena, root, fields, buckets, states, stoodAt, part, bucketType, startRow) is { } few)
+                {
+                    into.Add(few);
+                    continue;
+                }
+            }
+
             // The runs of the chunk's buckets, found once, a vector at a time: the instants' column is made of them, and
             // the rows are selected by them, where each scanned the buckets for them again, a third of a question that
             // folds a million rows of runs.
-            int bucketed = fields[0];
-            ReadOnlySpan<long> buckets = arena.GetNode(bucketed).Values.Cast<long>()[..count];
             int[] rented = System.Buffers.ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
             try
             {
@@ -1499,13 +1518,6 @@ internal sealed record SynopsisAnswer(
                 int words = Math.Max((count + 63) >> 6, 1);
                 VortexBuffer selection = arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bits);
                 bits.Clear();
-                Span<byte> states = default;
-                if (KeyFilter is { } keyFilter)
-                {
-                    _ = arena.Allocate(count, 1, out states);
-                    states.Clear();
-                    FilterEvaluator.Evaluate(keyFilter, arena, node, count, states);
-                }
 
                 // A bucket's verdict is taken once for all its rows. With no filter on the keys and no row taken out,
                 // every row of a bucket kept stands for a row and is kept, its run's bits set a word at a time; else a
@@ -1565,6 +1577,74 @@ internal sealed record SynopsisAnswer(
         }
 
         return selected;
+    }
+
+    /// <summary>
+    /// The rows of a chunk whose filter on the keys, its <paramref name="states"/>, holds for few of them, as a batch of their
+    /// own: those that stand for a row, in the column of <paramref name="fields"/> at <paramref name="stoodAt"/>, and whose
+    /// bucket the part folds, their columns gathered and their instants made from their buckets; null when the filter holds
+    /// for an eighth of the chunk's rows or more, which a selection of its runs keeps in place for less.
+    /// </summary>
+    private static RecordBatch? Gathered(
+        CanonicalArena arena, DType root, ReadOnlySpan<int> fields, ReadOnlySpan<long> buckets, ReadOnlySpan<byte> states, int stoodAt,
+        SynopsisPart part, DType bucketType, long startRow)
+    {
+        int count = buckets.Length;
+        int held = System.MemoryExtensions.Count(states, Trilean.True);
+        if (count == 0 || held >= Math.Max(count >> 3, 1))
+        {
+            return null;
+        }
+
+        // The rows the filter holds for, found in order a vector at a time, the rows of one value lying together; those
+        // rows lie in the order of their buckets, whose verdict is taken once a bucket. The rows kept are numbered in the
+        // arena, the gather's and then the runs' of their buckets.
+        ReadOnlySpan<long> stood = arena.GetNode(fields[stoodAt]).Values.Cast<long>();
+        _ = arena.AllocateUninitialized(held * sizeof(int), sizeof(int), out Span<byte> keptBytes);
+        Span<int> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, int>(keptBytes);
+        int taken = 0;
+        long last = 0;
+        bool folds = false;
+        bool any = false;
+        for (int from = 0; from < count;)
+        {
+            int at = states[from..].IndexOf(Trilean.True);
+            if (at < 0)
+            {
+                break;
+            }
+
+            int row = from + at;
+            long bucket = buckets[row];
+            if (!any || bucket != last)
+            {
+                (last, folds, any) = (bucket, part.Holds(bucket), true);
+            }
+
+            if (folds && stood[row] > 0)
+            {
+                kept[taken++] = row;
+            }
+
+            from = row + 1;
+        }
+
+        Span<int> gathered = fields.Length <= 64 ? stackalloc int[64] : new int[fields.Length];
+        gathered = gathered[..fields.Length];
+        for (int f = 0; f < fields.Length; f++)
+        {
+            gathered[f] = CanonicalFilter.Apply(arena, fields[f], kept[..taken]);
+        }
+
+        // The instants of the buckets kept, by their runs, as a chunk's are made.
+        if (taken > 0)
+        {
+            int bucketed = gathered[0];
+            ReadOnlySpan<long> keptBuckets = arena.GetNode(bucketed).Values.Cast<long>()[..taken];
+            gathered[0] = InstantsOf(arena, bucketed, keptBuckets, kept[..BucketRuns.Ends(keptBuckets, kept)], bucketType, part.Instants);
+        }
+
+        return new RecordBatch(arena, arena.AddStruct(root, taken, Validity.NonNullable, gathered), startRow) { CarriesStates = true };
     }
 
     /// <summary>The fields of every chunk read of <paramref name="part"/>'s table that holds a bucket it folds, as their nodes, which a correction reads.</summary>
