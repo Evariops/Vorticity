@@ -163,6 +163,9 @@ internal static partial class PathsBench
         /// <summary>The objects each handle of <c>--qps</c> keeps open (<c>--open-objects</c>); 0 for the dataset's default.</summary>
         internal int OpenObjects { get; init; }
 
+        /// <summary>The handles <c>--qps</c> opens on each dataset, which its clients share in turn (<c>--handles</c>); one by default.</summary>
+        internal int Handles { get; init; } = 1;
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }

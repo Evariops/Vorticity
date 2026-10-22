@@ -38,7 +38,7 @@ internal static partial class PathsBench
     private static async Task ThroughputAsync(Settings settings, IReadOnlyList<Question> questions, Func<Question, Built> builtOf, bool cached, int clients)
     {
         string cache = Path.Combine(settings.Store, "cache", Guid.NewGuid().ToString("N"));
-        Dictionary<Built, (FileObjectStore Files, CountingObjectStore Store, VortexDataset Dataset)> sets = [];
+        Dictionary<Built, (FileObjectStore Files, CountingObjectStore Store, VortexDataset[] Datasets)> sets = [];
         try
         {
             await using VortexSession session = VortexSession.Create(o =>
@@ -48,7 +48,8 @@ internal static partial class PathsBench
                 o.SegmentCache = settings.SegmentCacheBytes > 0 ? new SegmentCache(settings.SegmentCacheBytes) : null;
             });
 
-            // A store, as remote as the profile says, and a handle a set the questions read; every client shares them.
+            // A store, as remote as the profile says, and --handles handles a set the questions read, which the clients share in
+            // turn.
             foreach (Question question in questions)
             {
                 Built built = builtOf(question);
@@ -67,17 +68,26 @@ internal static partial class PathsBench
                     BytesPerSecond = settings.BytesPerSecond,
                 };
                 CountingObjectStore store = new CountingObjectStore(remote);
-                sets[built] = (files, store, await VortexDataset.OpenAsync(
-                    store, new DatasetOptions { Session = session, MaxOpenObjects = settings.OpenObjects > 0 ? settings.OpenObjects : new DatasetOptions().MaxOpenObjects }));
+                VortexDataset[] handles = new VortexDataset[Math.Max(settings.Handles, 1)];
+                for (int h = 0; h < handles.Length; h++)
+                {
+                    handles[h] = await VortexDataset.OpenAsync(
+                        store, new DatasetOptions { Session = session, MaxOpenObjects = settings.OpenObjects > 0 ? settings.OpenObjects : new DatasetOptions().MaxOpenObjects });
+                }
+
+                sets[built] = (files, store, handles);
             }
 
             // Every question once first: their code compiled, and, cached, every region they read held.
             foreach (Question question in questions)
             {
-                await AskOnceAsync(question, sets[builtOf(question)].Dataset);
+                foreach (VortexDataset handle in sets[builtOf(question)].Datasets)
+                {
+                    await AskOnceAsync(question, handle);
+                }
             }
 
-            foreach ((FileObjectStore _, CountingObjectStore store, VortexDataset _) in sets.Values)
+            foreach ((FileObjectStore _, CountingObjectStore store, VortexDataset[] _) in sets.Values)
             {
                 store.Reset();
             }
@@ -97,7 +107,8 @@ internal static partial class PathsBench
                     {
                         Question question = questions[turn % questions.Count];
                         long asked = Stopwatch.GetTimestamp();
-                        await AskOnceAsync(question, sets[builtOf(question)].Dataset);
+                        VortexDataset[] handles = sets[builtOf(question)].Datasets;
+                        await AskOnceAsync(question, handles[client % handles.Length]);
                         latencies[client].Add((turn % questions.Count, (Stopwatch.GetTimestamp() - asked) * 1000.0 / Stopwatch.Frequency));
                     }
                 });
@@ -127,9 +138,13 @@ internal static partial class PathsBench
         }
         finally
         {
-            foreach ((FileObjectStore files, CountingObjectStore store, VortexDataset dataset) in sets.Values)
+            foreach ((FileObjectStore files, CountingObjectStore store, VortexDataset[] handles) in sets.Values)
             {
-                await dataset.DisposeAsync();
+                foreach (VortexDataset handle in handles)
+                {
+                    await handle.DisposeAsync();
+                }
+
                 await store.DisposeAsync();
                 await files.DisposeAsync();
             }
