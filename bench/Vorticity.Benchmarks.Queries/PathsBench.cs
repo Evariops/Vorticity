@@ -791,12 +791,13 @@ internal static class PathsBench
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
 
             // --declared: the columns QP-1 and QP-2 filter and group by together, which the order of the spans' facets
-            // places far apart.
+            // places far apart, and the service alone, whose durations' sketches by slice answer QP-6's last minutes.
             SynopsisGroupings = !settings.Declared ? null :
             [
                 [nameof(GeneratedSpanV2.Service), nameof(GeneratedSpanV2.HttpStatus), nameof(GeneratedSpanV2.Route)],
                 [nameof(GeneratedSpanV2.Route), nameof(GeneratedSpanV2.Pod)],
                 [nameof(GeneratedSpanV2.Pod), nameof(GeneratedSpanV2.Status), nameof(GeneratedSpanV2.ExceptionGroup)],
+                [nameof(GeneratedSpanV2.Service)],
             ],
         };
         long rows = await IncrementalBuild.FillAsync<GeneratedSpanV2>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>

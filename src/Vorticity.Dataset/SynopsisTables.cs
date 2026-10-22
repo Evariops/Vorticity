@@ -495,7 +495,7 @@ internal sealed partial class SynopsisTables : IDisposable
             }
         }
 
-        await AddGroupingsAsync(arena, sorted.RootIndex, rows, keyCodes, columns, cancellationToken).ConfigureAwait(false);
+        await AddGroupingsAsync(start, arena, sorted.RootIndex, rows, keyCodes, columns, cancellationToken).ConfigureAwait(false);
 
         _hourRowsSeen += rows;
         Note(_hourly, _hourGrowth, _hourRowsSeen);
@@ -857,9 +857,10 @@ internal sealed partial class SynopsisTables : IDisposable
     /// <summary>
     /// A table the object may keep, added to those the choice weighs: its measures every measure but its keys, whose
     /// states would only repeat them, and the words of a record that hold the count and those measures' states; a table
-    /// of sketches, a sketch of each of those measures.
+    /// of sketches, a sketch of each of those measures, and with <paramref name="distinctBelow"/> the distinct sketches of
+    /// the keys deeper than its own.
     /// </summary>
-    private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes, bool bounded = false)
+    private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes, bool bounded = false, bool distinctBelow = true)
     {
         List<int> measures = [];
         List<int> sketched = [];
@@ -886,7 +887,7 @@ internal sealed partial class SynopsisTables : IDisposable
 
         // A table of sketches holds, besides its measures', the distinct sketch of each key deeper than its own the hour's
         // merge carries, a column or a number, of which an approximate distinct count merges the sketches.
-        int[] distinctAt = sketches ? DistinctPositions(keys.Length) : [];
+        int[] distinctAt = sketches && distinctBelow ? DistinctPositions(keys.Length) : [];
         int[] distinct = [.. distinctAt.Select(at => _keys[at])];
         DType rowType = new SynopsisTableInfo(kind, bucket, keys, kept, 0) { Distinct = distinct }.RowType(_schema, _paths, _types);
         ChunkStage stage = new ChunkStage(shapes, [.. words], sketches ? kept.Length + distinct.Length : 0, bounded);

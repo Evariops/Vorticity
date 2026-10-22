@@ -339,13 +339,15 @@ public sealed record DatasetOptions
 
     /// <summary>
     /// Columns that questions filter and group by together, beyond the prefixes of an object's synopsis order: each
-    /// grouping two to four synopsis columns, or keys of variant columns written as a filter reads them, the first the
+    /// grouping one to four synopsis columns, or keys of variant columns written as a filter reads them, the first the
     /// one questions pick values of, <c>["Service", "HttpStatus", "Route"]</c>. Every job writes a table of each grouping
-    /// by hour and by object beside the prefix tables, weighed by the same choice under the same budget, its chunks
-    /// bounded by the first column's values, so that a question over those columns alone, whatever columns the order
-    /// places between them, reads that table rather than the rows or the deepest prefix. A grouping that names a column
-    /// an object's order does not hold writes no table in it. Null, the default, declares none. A setting of the handle
-    /// that runs the jobs.
+    /// of two columns or more by hour and by object beside the prefix tables, and tables of each grouping's measures'
+    /// sketches by slice, by hour and by object, weighed by the same choice under the same budget, their chunks bounded
+    /// by the first column's values, so that a question over those columns alone, whatever columns the order places
+    /// between them, reads those tables rather than the rows or the deepest prefix: a quantile per service over the last
+    /// minutes, declared <c>["Service"]</c>, reads the sketches of the slices its window keeps whole. A grouping that
+    /// names a column an object's order does not hold writes no table in it. Null, the default, declares none. A setting
+    /// of the handle that runs the jobs.
     /// </summary>
     public IReadOnlyList<IReadOnlyList<string>>? SynopsisGroupings { get; init; }
 

@@ -87,8 +87,50 @@ public sealed partial class SynopsisAnswerTests
     }
 
     /// <summary>
+    /// A grouping of one column, the service, over spans of 800 rows a minute, whose slices' sketches take fewer bytes
+    /// than their columns: its tables of sketches by slice, by hour and by object answer a quantile by service over a
+    /// window that cuts its hours from the slices it keeps whole, and read as rows only the two slices it cuts, where
+    /// without the grouping no table of slices holds a sketch and every slice of the hours cut is read as rows. Both give
+    /// the bits of the rows.
+    /// </summary>
+    [Fact]
+    public async Task AQuantileOverAWindowThatCutsHoursReadsTheSlicesOfItsGrouping()
+    {
+        DateTimeOffset start = new DateTimeOffset(2026, 10, 19, 22, 0, 0, TimeSpan.Zero);
+        DateTimeOffset from = start.AddMinutes(10.5);
+        DateTimeOffset to = start.AddMinutes(101.5);
+        Func<Scan<Spanned>, Vorticity.Aggregation> question = scan => scan.Where(s => s.At >= from && s.At < to)
+            .GroupBy(s => s.Service).Select(g => (g.Key, g.Count(), g.Quantile(s => s.DurationNs, 0.99), g.Quantile(s => s.DurationNs, 0.5)));
+        long[] rows = new long[2];
+        List<string>? first = null;
+        foreach (bool declared in new[] { true, false })
+        {
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexDataset dataset = await SpannedAsync(store, declared ? [[nameof(Spanned.Service)]] : [], rowsAnHour: 48_000);
+            (List<string> on, ScanMetrics metrics) = await GroupsAsync(question(dataset.Scan<Spanned>().With(new ScanOptions { UseSynopses = true })));
+            (List<string> off, _) = await GroupsAsync(question(dataset.Scan<Spanned>().With(new ScanOptions { UseSynopses = false })));
+            ScanPlan plan = await question(dataset.Scan<Spanned>().With(new ScanOptions { UseSynopses = true })).ExplainAsync(Ct);
+            Console.Out.Write(
+                $"GROUPED QUANTILE declared {declared}: {on.Count} groups, {metrics.SynopsisRows} table rows and {metrics.Rows} rows ({metrics.EdgeRows} at edges): " +
+                $"{string.Join(" | ", plan.States.Select(step => $"{step.Read} {step.Detail} x{step.Count}"))}\n");
+            Assert.NotEmpty(on);
+            Assert.Equal(off, on);
+            Assert.Equal(first ??= on, on);
+            rows[declared ? 0 : 1] = metrics.Rows + metrics.EdgeRows;
+            if (declared)
+            {
+                Assert.True(metrics.SynopsisRows > 0, "no sketch folded");
+                Assert.Contains(plan.States, step => step.Detail.StartsWith("Sketches by Slice on (Service)", StringComparison.Ordinal));
+            }
+        }
+
+        Assert.True(rows[0] * 10 < rows[1], $"{rows[0]} rows read with the grouping, {rows[1]} without");
+    }
+
+    /// <summary>
     /// A grouping that names a column no object's order holds, the instant, or a column twice, writes no table, and the
-    /// questions over its columns read what they read without it.
+    /// questions over its columns read what they read without it; a grouping of one column writes no table of states,
+    /// whose values the order's counts hold.
     /// </summary>
     [Fact]
     public async Task AGroupingTheOrderDoesNotHoldWritesNoTable()
@@ -110,11 +152,11 @@ public sealed partial class SynopsisAnswerTests
     private const int SpannedRowsAnHour = 8_000;
 
     /// <summary>
-    /// Three hours of spans from 22:00, <see cref="SpannedRowsAnHour"/> an hour, appended in parts and compacted under periods
-    /// of a day, every table kept and cut in chunks of 64 rows: the day's two hours sealed, the next hour in the fresh levels.
-    /// Six services of ten routes and three pods each, six hosts, two states and four HTTP statuses.
+    /// Three hours of spans from 22:00, <paramref name="rowsAnHour"/> an hour, appended in parts and compacted under periods
+    /// of a day, every table kept and cut in chunks of 64 rows: the day's two hours sealed, the next hour in the fresh levels;
+    /// slices of a minute. Six services of ten routes and three pods each, six hosts, two states and four HTTP statuses.
     /// </summary>
-    private static async Task<VortexDataset> SpannedAsync(Vorticity.IO.IObjectStore store, IReadOnlyList<IReadOnlyList<string>> groupings)
+    private static async Task<VortexDataset> SpannedAsync(Vorticity.IO.IObjectStore store, IReadOnlyList<IReadOnlyList<string>> groupings, int rowsAnHour = SpannedRowsAnHour)
     {
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Spanned.Schema, new DatasetOptions
         {
@@ -126,7 +168,7 @@ public sealed partial class SynopsisAnswerTests
         }, Ct);
         DateTimeOffset start = new DateTimeOffset(2026, 10, 19, 22, 0, 0, TimeSpan.Zero);
         Random random = new Random(71);
-        int rows = SpannedRowsAnHour * 3;
+        int rows = rowsAnHour * 3;
         int parts = 24;
         for (int part = 0; part < parts; part++)
         {
@@ -135,7 +177,7 @@ public sealed partial class SynopsisAnswerTests
                 int service = random.Next(6);
                 long status = random.Next(10) switch { < 6 => 200L, < 8 => 404L, 8 => 500L, _ => 503L };
                 return new Spanned(
-                    start.AddSeconds((((long)part * (rows / parts)) + i) * 3_600.0 / SpannedRowsAnHour),
+                    start.AddSeconds((((long)part * (rows / parts)) + i) * 3_600.0 / rowsAnHour),
                     status >= 500 && random.Next(2) == 0 ? "error" : "ok",
                     $"svc-{service}",
                     status,

@@ -436,8 +436,8 @@ internal sealed record SynopsisAnswer(
         // window keeps whole; inside an object's bucket it cuts, the table of hours of fewest rows the hours
         // it keeps whole; inside the buckets it cuts, the runs of the slices of fewest rows the slices it keeps,
         // and the slices cut are read as rows. Without a table of slices, a bucket cut is read as rows. A distribution
-        // is read from a table of sketches of a grid as fine as it asks, which no table of slices is; a question of none
-        // reads the tables of states alone, a table of sketches holding the same rows in more bytes.
+        // is read from a table of sketches of a grid as fine as it asks, of slices only for a declared grouping's; a
+        // question of none reads the tables of states alone, a table of sketches holding the same rows in more bytes.
         bool sketched = request.SketchBits > 0;
 
         // A distinct count merges a table's distinct sketches where no row comes out of the table: a sketch is corrected

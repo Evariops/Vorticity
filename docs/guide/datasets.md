@@ -176,6 +176,16 @@ column of a grouping may be a key of a variant column the objects shred, written
 it, `Attributes['http.response.status_code'].AsInt64()`. A grouping is a setting of the handle that
 runs the compactions, and an object whose order does not hold one of its columns writes no table of it.
 
+A grouping also keeps the sketches of its measures by slice, by hour and by object, for quantiles and
+distributions. A grouping of one column keeps those alone, its values' counts being in the order's
+tables already: declare `["Service"]` and a 99th percentile per service over the last 15 minutes reads
+the sketches of the minutes its window holds whole and the rows of the one it cuts, where no prefix
+holding the service would have kept sketches by slice. The choice keeps a table of sketches by slice
+only where it costs fewer bytes than the columns it answers for, that is where a slice holds many rows
+per group: on three hours of spans at 800 rows a minute, a quantile per service over a window that
+cuts its hours read 540 rows of sketches and 800 rows at its edges, against 72,800 rows without the
+grouping.
+
 A window whose ends fall inside an hour reads the rows its tables cannot answer there: the slices it
 cuts when a table of slices holds the question's keys, the whole hour when only the hour's table does.
 A dashboard over the last N minutes has an end inside an hour every time. `ScanOptions.AlignWindow`
