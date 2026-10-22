@@ -1871,7 +1871,8 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// Names each table of the synopsis part: an entry on the root, its one run's payloads the table's chunks, whose
-    /// buckets and rows the entry's options say after the table's own.
+    /// buckets and rows the entry's options say after the table's own, then, for a table of sketches that lays them apart,
+    /// the regions of its chunks' distinct sketches, as many; each at its dtype, as <paramref name="tables"/> gives them.
     /// </summary>
     internal void AddSynopsisTables(
         IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> tables, long rows, int blockRows)
@@ -1879,10 +1880,15 @@ internal sealed class IndexWriter : IDisposable
         int length = Math.Max(blockRows, 1);
         foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks, IReadOnlyList<byte[]> dtypes) in tables)
         {
-            IndexSegment[] regions = new IndexSegment[chunks.Count];
-            for (int c = 0; c < regions.Length; c++)
+            bool apart = chunks.Count > 0 && chunks[0].Distinct is not null;
+            IndexSegment[] regions = new IndexSegment[apart ? 2 * chunks.Count : chunks.Count];
+            for (int c = 0; c < chunks.Count; c++)
             {
                 regions[c] = chunks[c].Region;
+                if (apart)
+                {
+                    regions[chunks.Count + c] = chunks[c].Distinct!.Value;
+                }
             }
 
             _entries.Add(new IndexEntry(

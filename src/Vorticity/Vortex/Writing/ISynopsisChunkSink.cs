@@ -19,12 +19,14 @@ internal interface ISynopsisChunkSink
     /// Encodes the rows <paramref name="node"/> holds, a struct of <paramref name="arena"/>, as a chunk of
     /// <paramref name="table"/> whose buckets run from <paramref name="firstBucket"/> to <paramref name="lastBucket"/>,
     /// and whose first key's values, for a table of values, from <paramref name="leastKey"/> to
-    /// <paramref name="greatestKey"/>, null when it does not say; and holds it. The caller may reuse the arena once it
-    /// completes.
+    /// <paramref name="greatestKey"/>, null when it does not say; and holds it. For a table of sketches that lays its
+    /// distinct sketches apart, <paramref name="sketches"/> is the struct of those of the same rows, which the chunk
+    /// writes in a region of their own, and -1 for any other. The caller may reuse the arena once it completes.
     /// </summary>
-    /// <returns>The chunk's bytes.</returns>
+    /// <returns>The chunk's bytes, its sketches' among them.</returns>
     ValueTask<long> SpoolChunkAsync(
-        int table, CanonicalArena arena, int node, long firstBucket, long lastBucket, byte[]? leastKey, byte[]? greatestKey, CancellationToken cancellationToken);
+        int table, CanonicalArena arena, int node, int sketches, long firstBucket, long lastBucket, byte[]? leastKey, byte[]? greatestKey,
+        CancellationToken cancellationToken);
 
     /// <summary>Gives up <paramref name="table"/>, for the reason <paramref name="verdict"/> the report gives: none of its chunks is written.</summary>
     void DropTable(int table, string verdict);

@@ -81,6 +81,9 @@ internal sealed record SynopsisContents(
     private const int TagChunkLeastKey = 5;
     private const int TagChunkGreatestKey = 6;
 
+    // The region of a chunk's distinct sketches, which a table of sketches lays apart from the rest of its rows.
+    private const int TagChunkDistinct = 7;
+
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
     internal DType SchemaIn(DTypeArena types) => DTypeFlatBuffers.Read(Schema, types);
@@ -180,7 +183,7 @@ internal sealed record SynopsisContents(
 
                 for (int c = 0; c < chunks.Count; c++)
                 {
-                    count += chunks[c].Region.Checksum is null ? 0 : 1;
+                    count += Declares(chunks[c].Region, chunks[c].Distinct);
                 }
             }
 
@@ -226,15 +229,22 @@ internal sealed record SynopsisContents(
             return false;
         }
 
-        /// <summary>The region of <paramref name="chunks"/> at <paramref name="offset"/>, of <paramref name="length"/> bytes, with a checksum, looked for one by one.</summary>
+        /// <summary>
+        /// The region of <paramref name="chunks"/> at <paramref name="offset"/>, of <paramref name="length"/> bytes, with a checksum,
+        /// a chunk's own or its distinct sketches', looked for one by one.
+        /// </summary>
         internal static bool TryFind(IReadOnlyList<TableChunk> chunks, ulong offset, uint length, out IndexSegment region)
         {
             for (int c = 0; c < chunks.Count; c++)
             {
-                region = chunks[c].Region;
-                if (region.Offset == offset && region.Length == length && region.Checksum is not null)
+                TableChunk chunk = chunks[c];
+                foreach (IndexSegment? held in (ReadOnlySpan<IndexSegment?>)[chunk.Region, chunk.Distinct])
                 {
-                    return true;
+                    if (held is { } found && found.Offset == offset && found.Length == length && found.Checksum is not null)
+                    {
+                        region = found;
+                        return true;
+                    }
                 }
             }
 
@@ -309,8 +319,11 @@ internal sealed record SynopsisContents(
         }
     }
 
-    /// <summary>The row types <see cref="TableRowTypes"/> built, their arena, which nothing adds to after, and their fields' names; null until then.</summary>
-    private System.Runtime.CompilerServices.StrongBox<(DTypeArena Arena, DType[] Rows, string[][] Names)>? _rowTypes;
+    /// <summary>
+    /// The row types <see cref="TableRowTypes"/> built, their arena, which nothing adds to after, their fields' names, and
+    /// the halves <see cref="TableApartTypes"/> names; null until then.
+    /// </summary>
+    private System.Runtime.CompilerServices.StrongBox<(DTypeArena Arena, DType[] Rows, string[][] Names, DType[] Mains, DType[] Distincts)>? _rowTypes;
 
     /// <summary>
     /// The row type of each table, by its place among <see cref="Tables"/>, built the first time a read of the tables
@@ -321,28 +334,56 @@ internal sealed record SynopsisContents(
     {
         get
         {
-            if (System.Threading.Volatile.Read(ref _rowTypes) is { } known)
-            {
-                return known.Value;
-            }
-
-            DTypeArena arena = new DTypeArena();
-            DType schema = SchemaType;
-            DType[] rows = new DType[Tables.Count];
-            string[][] names = new string[rows.Length][];
-            for (int t = 0; t < rows.Length; t++)
-            {
-                rows[t] = Tables[t].Table.RowType(schema, Slices.Paths, arena);
-                names[t] = new string[rows[t].FieldCount];
-                for (int f = 0; f < names[t].Length; f++)
-                {
-                    names[t][f] = rows[t].GetFieldName(f);
-                }
-            }
-
-            System.Runtime.CompilerServices.StrongBox<(DTypeArena, DType[], string[][])> built = new((arena, rows, names));
-            return (System.Threading.Interlocked.CompareExchange(ref _rowTypes, built, null) ?? built).Value;
+            (DTypeArena arena, DType[] rows, string[][] names, _, _) = RowTypes();
+            return (arena, rows, names);
         }
+    }
+
+    /// <summary>
+    /// For each table of sketches that holds distinct sketches, by its place among <see cref="Tables"/>, the struct of the
+    /// first fields of its row type and that of its distinct sketches, its last (<see cref="SynopsisTableInfo.RowHalves"/>): what
+    /// a chunk that lays the sketches apart decodes from its two regions. A default type for the other tables.
+    /// </summary>
+    internal (DType[] Mains, DType[] Distincts) TableApartTypes
+    {
+        get
+        {
+            (_, _, _, DType[] mains, DType[] distincts) = RowTypes();
+            return (mains, distincts);
+        }
+    }
+
+    private (DTypeArena Arena, DType[] Rows, string[][] Names, DType[] Mains, DType[] Distincts) RowTypes()
+    {
+        if (System.Threading.Volatile.Read(ref _rowTypes) is { } known)
+        {
+            return known.Value;
+        }
+
+        DTypeArena arena = new DTypeArena();
+        DType schema = SchemaType;
+        DType[] rows = new DType[Tables.Count];
+        string[][] names = new string[rows.Length][];
+        DType[] mains = new DType[rows.Length];
+        DType[] distincts = new DType[rows.Length];
+        for (int t = 0; t < rows.Length; t++)
+        {
+            SynopsisTableInfo table = Tables[t].Table;
+            rows[t] = table.RowType(schema, Slices.Paths, arena);
+            names[t] = new string[rows[t].FieldCount];
+            for (int f = 0; f < names[t].Length; f++)
+            {
+                names[t][f] = rows[t].GetFieldName(f);
+            }
+
+            if (table.Distinct.Length > 0)
+            {
+                (mains[t], distincts[t]) = SynopsisTableInfo.RowHalves(rows[t], table.Distinct.Length, arena);
+            }
+        }
+
+        System.Runtime.CompilerServices.StrongBox<(DTypeArena, DType[], string[][], DType[], DType[])> built = new((arena, rows, names, mains, distincts));
+        return (System.Threading.Interlocked.CompareExchange(ref _rowTypes, built, null) ?? built).Value;
     }
 
     // Per table, the struct its batches of states were last read under.
@@ -467,6 +508,11 @@ internal sealed record SynopsisContents(
             {
                 writer.WriteBytes(TagChunkLeastKey, keys.Least);
                 writer.WriteBytes(TagChunkGreatestKey, keys.Greatest);
+            }
+
+            if (chunk.Distinct is { } distinct)
+            {
+                IndexDirectory.WriteSegment(ref writer, TagChunkDistinct, distinct);
             }
         }
     }
@@ -627,14 +673,14 @@ internal sealed record SynopsisContents(
                     listedDeclared = checked((int)reader.ReadVarint());
                     break;
                 case (TagTableChunk, ProtoWireType.LengthDelimited):
-                    if (!Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest))
+                    if (!Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest, out IndexSegment? distinct))
                     {
                         return null;
                     }
 
                     count++;
                     keyBytes += least.Length + greatest.Length;
-                    declared += chunk.Region.Checksum is null ? 0 : 1;
+                    declared += Declares(chunk.Region, distinct);
                     break;
                 default:
                     reader.SkipField(wire);
@@ -647,10 +693,11 @@ internal sealed record SynopsisContents(
             return null;
         }
 
-        // A table listed apart names its list, with a checksum, and holds no chunk of its own.
+        // A table listed apart names its list, with a checksum, and holds no chunk of its own; a chunk declares its region
+        // and that of its distinct sketches at most.
         if (list is { } region)
         {
-            return count == 0 && listed > 0 && region.Checksum is not null && listedDeclared <= listed
+            return count == 0 && listed > 0 && region.Checksum is not null && listedDeclared <= 2L * listed
                 ? (table, new TableChunks(region, listed, listedKeyBytes, listedDeclared))
                 : null;
         }
@@ -658,11 +705,17 @@ internal sealed record SynopsisContents(
         return count > 0 ? (table, new TableChunks(message, count, keyBytes, declared)) : null;
     }
 
+    /// <summary>The regions a chunk declares with a checksum, which the synopsis cache may keep: its own, and its distinct sketches'.</summary>
+    private static int Declares(IndexSegment region, IndexSegment? distinct) =>
+        (region.Checksum is null ? 0 : 1) + (distinct is { Checksum: not null } ? 1 : 0);
+
     /// <summary>
-    /// The chunk <paramref name="reader"/> holds, and the bounds of its key, both empty when it says none: false when it
-    /// names no region, or no rows, or bounds of its buckets that cross.
+    /// The chunk <paramref name="reader"/> holds, the bounds of its key, both empty when it says none, and the region of
+    /// its distinct sketches, null when it lays none apart: false when it names no region, or no rows, or bounds of its
+    /// buckets that cross.
     /// </summary>
-    private static bool Chunk(ProtoReader reader, out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest)
+    private static bool Chunk(
+        ProtoReader reader, out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest, out IndexSegment? distinct)
     {
         IndexSegment? region = null;
         long first = long.MinValue;
@@ -670,6 +723,7 @@ internal sealed record SynopsisContents(
         int rows = -1;
         least = default;
         greatest = default;
+        distinct = null;
         bool knowsLeast = false;
         bool knowsGreatest = false;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
@@ -686,6 +740,9 @@ internal sealed record SynopsisContents(
                     break;
                 case (TagChunkRegion, ProtoWireType.LengthDelimited):
                     region = IndexDirectory.ReadSegment(reader.ReadMessage());
+                    break;
+                case (TagChunkDistinct, ProtoWireType.LengthDelimited):
+                    distinct = IndexDirectory.ReadSegment(reader.ReadMessage());
                     break;
                 case (TagChunkFirst, ProtoWireType.Varint):
                     first = unchecked((long)reader.ReadVarint());
@@ -710,8 +767,10 @@ internal sealed record SynopsisContents(
             greatest = default;
         }
 
+        // Its distinct sketches lie past its own region, as a writer lays them, which a search of the chunks' regions by their
+        // offsets counts on (TableChunks.TryFind).
         chunk = region is { } at ? new TableChunk(at, first, last, rows) : default;
-        return region is not null && rows >= 0 && first <= last;
+        return region is { } own && rows >= 0 && first <= last && (distinct is not { } apart || apart.Offset >= own.Offset + own.Length);
     }
 
     /// <summary>
@@ -766,7 +825,7 @@ internal sealed record SynopsisContents(
 
         public int Count => _count;
 
-        /// <summary>The chunks whose regions say a checksum, which the synopsis cache may keep.</summary>
+        /// <summary>The regions of the chunks that say a checksum, their distinct sketches' among them, which the synopsis cache may keep.</summary>
         internal int Declared => _declared;
 
         /// <summary>The bytes of the chunks' keys' bounds, which the parse lays in one store.</summary>
@@ -810,14 +869,14 @@ internal sealed record SynopsisContents(
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
             {
                 if (field != TagTableChunk || wire != ProtoWireType.LengthDelimited
-                    || !Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest))
+                    || !Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest, out IndexSegment? distinct))
                 {
                     return false;
                 }
 
                 count++;
                 keyBytes += least.Length + greatest.Length;
-                declared += chunk.Region.Checksum is null ? 0 : 1;
+                declared += Declares(chunk.Region, distinct);
             }
 
             if (count != _count || keyBytes != _keyBytes || declared != _declared)
@@ -845,7 +904,7 @@ internal sealed record SynopsisContents(
             int declared = 0;
             foreach (TableChunk chunk in chunks)
             {
-                declared += chunk.Region.Checksum is null ? 0 : 1;
+                declared += Declares(chunk.Region, chunk.Distinct);
             }
 
             return declared;
@@ -855,8 +914,8 @@ internal sealed record SynopsisContents(
         private bool _ordered;
 
         /// <summary>
-        /// The region of the chunks at <paramref name="offset"/>, of <paramref name="length"/> bytes, with a checksum: by halves
-        /// over chunks in the order of their offsets, one by one otherwise.
+        /// The region of the chunks at <paramref name="offset"/>, of <paramref name="length"/> bytes, with a checksum, a chunk's
+        /// own or its distinct sketches': by halves over chunks in the order of their offsets, one by one otherwise.
         /// </summary>
         internal bool TryFind(ulong offset, uint length, out IndexSegment region)
         {
@@ -887,11 +946,21 @@ internal sealed record SynopsisContents(
                 }
             }
 
+            // No chunk's own: the distinct sketches of the last chunk before it, which lie past that chunk's region.
+            if (high >= 0 && chunks[high].Distinct is { } distinct && distinct.Offset == offset)
+            {
+                region = distinct;
+                return region.Length == length && region.Checksum is not null;
+            }
+
             region = default;
             return false;
         }
 
-        /// <summary>Parses the chunks, their keys in one store, once: a reader that parses them beside another keeps the first's.</summary>
+        /// <summary>
+        /// Parses the chunks, their keys and the regions of their distinct sketches in one store, once: a reader that parses
+        /// them beside another keeps the first's.
+        /// </summary>
         /// <exception cref="InvalidOperationException">The chunks are listed apart, and no question loaded their list.</exception>
         private TableChunk[] Parse()
         {
@@ -916,8 +985,8 @@ internal sealed record SynopsisContents(
                     continue;
                 }
 
-                Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest);
-                if (keys is not null)
+                Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest, out IndexSegment? distinct);
+                if (keyBytes != 0)
                 {
                     offsets[2 * c] = at;
                     least.CopyTo(bytes.AsSpan(at));
@@ -926,10 +995,16 @@ internal sealed record SynopsisContents(
                     greatest.CopyTo(bytes.AsSpan(at));
                     at += greatest.Length;
                     offsets[(2 * c) + 2] = at;
-                    chunk = chunk with { Keys = new ValueBounds(keys, c) };
                 }
 
-                chunks[c++] = chunk;
+                if (distinct is { } apart)
+                {
+                    keys ??= new TableBounds([], []);
+                    keys.HoldDistinct(c, count, apart);
+                }
+
+                chunks[c] = keys is null ? chunk : new TableChunk(chunk.Region, chunk.FirstBucket, chunk.LastBucket, chunk.Rows, keys, c);
+                c++;
             }
 
             bool ordered = true;
@@ -974,7 +1049,8 @@ internal sealed record SynopsisContents(
 /// and how many there are. A table's rows lie in the order of their buckets, or of their hours and then their values
 /// for a table of a column's values per slice, so its chunks follow each other in time, and a question reads only the
 /// chunks of the buckets it folds; a chunk of a table of values says the least and the greatest value it holds too,
-/// so that a question of some values reads only the chunks that may hold them.
+/// so that a question of some values reads only the chunks that may hold them. A chunk of a table of sketches may lay
+/// its distinct sketches in a region of their own, which a question that counts no distinct value does not read.
 /// </summary>
 /// <param name="Region">Where the chunk's rows lie, with their checksum.</param>
 /// <param name="FirstBucket">The least bucket of its rows: a slice's start, an hour's, or 0 for the object.</param>
@@ -982,10 +1058,18 @@ internal sealed record SynopsisContents(
 /// <param name="Rows">Its rows.</param>
 internal readonly record struct TableChunk(IndexSegment Region, long FirstBucket, long LastBucket, int Rows)
 {
-    // The chunk's place among those whose keys the store holds, then the store: an index and one reference, where the
-    // copies of two took a chunk past the bytes a warm question allocates.
+    // The chunk's place among those whose keys and distinct sketches' regions the store holds, then the store: an index
+    // and one reference, where the copies of two took a chunk past the bytes a warm question allocates.
     private readonly int _keyIndex;
     private readonly TableBounds? _keys;
+
+    /// <summary>The chunk whose bounds and region of distinct sketches are those of chunk <paramref name="index"/> of <paramref name="store"/>.</summary>
+    internal TableChunk(IndexSegment region, long firstBucket, long lastBucket, int rows, TableBounds? store, int index)
+        : this(region, firstBucket, lastBucket, rows)
+    {
+        _keys = store;
+        _keyIndex = index;
+    }
 
     /// <summary>
     /// For a chunk of a table of values, the least and the greatest value of its key its rows hold; null when the chunk
@@ -996,6 +1080,13 @@ internal readonly record struct TableChunk(IndexSegment Region, long FirstBucket
         get => _keys?.Bounds(_keyIndex);
         init => (_keys, _keyIndex) = value is { } bounds ? (bounds.Store, bounds.Chunk) : (null, 0);
     }
+
+    /// <summary>
+    /// For a chunk of a table of sketches that lays its distinct sketches apart, the region that holds them, past its own:
+    /// its rows' last fields (<see cref="SynopsisTableInfo.Distinct"/>), the others in <see cref="Region"/>; null when its
+    /// region holds them, or it holds none.
+    /// </summary>
+    internal IndexSegment? Distinct => _keys?.Distinct(_keyIndex);
 
     /// <summary>Whether the chunk may hold a row of a bucket from <paramref name="first"/> to <paramref name="last"/>.</summary>
     internal bool Overlaps(long first, long last) => FirstBucket <= last && LastBucket >= first;
@@ -1036,15 +1127,39 @@ internal readonly struct ValueBounds
 /// <summary>
 /// The least and the greatest value of the key of each chunk of a table of values, in one buffer the table's chunks share:
 /// chunk <c>i</c>'s least lies from offset <c>2i</c> to <c>2i + 1</c>, its greatest from <c>2i + 1</c> to <c>2i + 2</c>, both
-/// empty when the chunk says none, as an encoded value is never empty.
+/// empty when the chunk says none, as an encoded value is never empty. For a table of sketches whose chunks lay their
+/// distinct sketches apart, the region of each chunk's (<see cref="TableChunk.Distinct"/>), the buffer empty.
 /// </summary>
 internal sealed class TableBounds(byte[] bytes, int[] offsets)
 {
+    // The region of each chunk's distinct sketches, null for a table whose chunks lay none apart.
+    private IndexSegment?[]? _distinct;
+
     /// <summary>A store of one chunk's bounds.</summary>
     internal static TableBounds Of(byte[] least, byte[] greatest) => new([.. least, .. greatest], [0, least.Length, least.Length + greatest.Length]);
 
+    /// <summary>A store of one chunk's bounds, none when either is null, and of the region of its distinct sketches, none when it is null.</summary>
+    internal static TableBounds? Of(byte[]? least, byte[]? greatest, IndexSegment? distinct)
+    {
+        TableBounds? store = least is null || greatest is null ? null : Of(least, greatest);
+        if (distinct is { } apart)
+        {
+            store ??= new TableBounds([], []);
+            store.HoldDistinct(0, 1, apart);
+        }
+
+        return store;
+    }
+
     /// <summary>The bounds of chunk <paramref name="chunk"/>, null when it says none.</summary>
-    internal ValueBounds? Bounds(int chunk) => offsets[2 * chunk] == offsets[(2 * chunk) + 1] ? null : new ValueBounds(this, chunk);
+    internal ValueBounds? Bounds(int chunk) =>
+        offsets.Length == 0 || offsets[2 * chunk] == offsets[(2 * chunk) + 1] ? null : new ValueBounds(this, chunk);
+
+    /// <summary>The region of chunk <paramref name="chunk"/>'s distinct sketches, null when it lays none apart.</summary>
+    internal IndexSegment? Distinct(int chunk) => _distinct?[chunk];
+
+    /// <summary>Holds <paramref name="region"/> as the distinct sketches of chunk <paramref name="chunk"/> of <paramref name="count"/>, before the store is shared.</summary>
+    internal void HoldDistinct(int chunk, int count, IndexSegment region) => (_distinct ??= new IndexSegment?[count])[chunk] = region;
 
     internal ReadOnlySpan<byte> Least(int chunk) => bytes.AsSpan(offsets[2 * chunk], offsets[(2 * chunk) + 1] - offsets[2 * chunk]);
 

@@ -80,6 +80,10 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
             foreach (TableChunk chunk in chunks)
             {
                 Declare(chunk.Region);
+                if (chunk.Distinct is { } distinct)
+                {
+                    Declare(distinct);
+                }
             }
         }
 

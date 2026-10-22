@@ -53,7 +53,9 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// allocates, 2 % above what it measured alone: in the full suite, the pools other classes left hold more or
     /// less, which moved a path by 1.3 %. Measured on 2026-10-20 at the commit that set them. The cold requests of the
     /// paths that fold tables rose by one an object on 2026-10-22: the lists of the tables' chunks, which their entries
-    /// no longer hold, read before the chunks.
+    /// no longer hold, read before the chunks. The cold bytes of four paths rose by 36 the same day, the tables of
+    /// sketches laying their distinct sketches apart: 28 for those regions, which the objects' index directories name,
+    /// and 8 for where the rest of the objects then lies.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
@@ -62,11 +64,11 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
         ["synopses: count by service and hour"] = new(8, 6880, 0, 0, 29888),
         ["synopses: by minute, the last hour, under a predicate"] = new(3, 101020, 2, 35424, 61440),
         ["synopses: an unaligned window"] = new(10, 107472, 2, 66728, 81280),
-        ["synopses: every row but one id"] = new(8, 297014, 4, 34768, 54528),
+        ["synopses: every row but one id"] = new(8, 297050, 4, 34768, 54528),
         ["synopses: measures by region and hour"] = new(8, 4112, 0, 0, 41664),
-        ["synopses: count by route, a shredded path"] = new(8, 268148, 4, 5902, 65216),
-        ["rows: count by service and hour"] = new(8, 392758, 4, 130512, 43520),
-        ["rows: count by route, a shredded path"] = new(8, 268148, 4, 5902, 58816),
+        ["synopses: count by route, a shredded path"] = new(8, 268184, 4, 5902, 65216),
+        ["rows: count by service and hour"] = new(8, 392794, 4, 130512, 43520),
+        ["rows: count by route, a shredded path"] = new(8, 268184, 4, 5902, 58816),
         ["rows: the rows of one id"] = new(6, 335643, 2, 73408, 60864),
     };
 

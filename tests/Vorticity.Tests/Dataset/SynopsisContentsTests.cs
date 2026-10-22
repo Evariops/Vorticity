@@ -88,13 +88,16 @@ public sealed partial class SynopsisContentsTests
         Console.Out.Write(FormattableString.Invariant(
             $"SYNOPSIS CONTENTS: {periods.Count} objects, entries of {string.Join('/', periods.Select(p => p.ToBytes().Length))} bytes, the contents {string.Join('/', periods.Select(p => p.Synopsis.Length))}, {listBytes} bytes of lists and {store.BytesRead} of chunks read of {partBytes} in the parts.\n"));
 
-        // The tables the directory names, row for row.
+        // The tables the directory names, row for row, those of sketches whose chunks lay their distinct sketches apart among
+        // them, which the directory names after the chunks.
         for (int i = 0; i < periods.Count; i++)
         {
             using SynopsisTableSet read = sets[i]!;
             await using ObjectLease lease = await dataset.RentAsync(periods[i], Ct);
             using SynopsisTableSet named = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
             Assert.Equal(named.Tables.Select(t => t.Table), read.Tables.Select(t => t.Table), Same);
+            Assert.Contains(read.Tables, t => t.Chunk.Distinct is not null);
+            Assert.Equal(read.Tables.Select(t => t.Chunk.Distinct), named.Tables.Select(t => t.Chunk.Distinct));
             for (int t = 0; t < named.Tables.Count; t++)
             {
                 Assert.Equal(Columns(named.Arena, named.Tables[t].Node), Columns(read.Arena, read.Tables[t].Node));

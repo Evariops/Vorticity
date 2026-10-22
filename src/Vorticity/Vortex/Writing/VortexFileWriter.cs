@@ -386,22 +386,36 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         /// <summary>
-        /// Encodes the rows <paramref name="node"/> holds as a chunk of held table <paramref name="table"/>, its buckets
-        /// <paramref name="buckets"/> and its key's values <paramref name="keys"/>, and holds it; its bytes.
+        /// Encodes the rows <paramref name="nodes"/> holds, and the distinct sketches of the same rows apart when it names
+        /// them, as a chunk of held table <paramref name="table"/>, its buckets <paramref name="buckets"/> and its key's values
+        /// <paramref name="keys"/>, and holds it; its bytes.
         /// </summary>
         internal async ValueTask<long> SpoolTableChunkAsync(
-            VortexFileWriter writer, int table, CanonicalArena arena, int node, (long First, long Last) buckets, (byte[]? Least, byte[]? Greatest) keys,
-            CancellationToken cancellationToken)
+            VortexFileWriter writer, int table, CanonicalArena arena, (int Rows, int Sketches) nodes, (long First, long Last) buckets,
+            (byte[]? Least, byte[]? Greatest) keys, CancellationToken cancellationToken)
         {
             HeldTable held = _heldTables[table];
             _tableBlobs ??= new ArrayBlobWriter.Workspace { FrameRows = writer._rowBlock, SizeFirst = writer._sizeFirst, ZstdLevel = writer._zstdLevel };
             EncodingDictionary? own = _tableEncodings;
-            using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(_tableBlobs, arena, node, own ?? writer._arrayEncodings, writer._compress);
-            held.DType ??= Types.Serialization.DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
-            long at = await _held.AppendAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
-            held.Chunks.Add((at, blob.Length, buckets.First, buckets.Last, arena.GetNode(node).Length, own is not null, keys.Least, keys.Greatest));
-            held.Bytes += blob.Length;
-            return blob.Length;
+            (long At, int Length) rows = await KeepAsync(nodes.Rows).ConfigureAwait(false);
+            held.DType ??= Types.Serialization.DTypeFlatBuffers.Serialize(arena.GetNode(nodes.Rows).DType);
+            (long At, int Length) sketches = (-1, 0);
+            if (nodes.Sketches >= 0)
+            {
+                sketches = await KeepAsync(nodes.Sketches).ConfigureAwait(false);
+                held.DistinctDType ??= Types.Serialization.DTypeFlatBuffers.Serialize(arena.GetNode(nodes.Sketches).DType);
+            }
+
+            held.Chunks.Add((rows, sketches, buckets.First, buckets.Last, arena.GetNode(nodes.Rows).Length, own is not null, keys.Least, keys.Greatest));
+            held.Bytes += rows.Length + sketches.Length;
+            return rows.Length + sketches.Length;
+
+            // A struct encoded as a blob, then held: where it waits, and its bytes. The workspace's blob is let go before the next.
+            async ValueTask<(long, int)> KeepAsync(int node)
+            {
+                using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(_tableBlobs, arena, node, own ?? writer._arrayEncodings, writer._compress);
+                return (await _held.AppendAsync(blob.Memory, cancellationToken).ConfigureAwait(false), blob.Length);
+            }
         }
 
         /// <summary>Gives up held table <paramref name="table"/>, for the reason <paramref name="verdict"/>: its chunks stay in the scratch store, never written.</summary>
@@ -411,14 +425,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal void Declare(IReadOnlyList<(SynopsisTableInfo Table, int Held)> tables) => _declared = tables;
 
         /// <summary>
-        /// A table held as its chunks come: where each waits, its bytes, its buckets and its rows, and whether it was encoded
-        /// against the tables' own dictionary; and its rows' dtype.
+        /// A table held as its chunks come: where each waits and its bytes, those of its distinct sketches laid apart, -1 and
+        /// none when it lays none apart, its buckets and its rows, and whether it was encoded against the tables' own
+        /// dictionary; and its rows' dtype, and its distinct sketches'.
         /// </summary>
         private sealed class HeldTable
         {
-            internal List<(long At, int Length, long First, long Last, int Rows, bool Own, byte[]? LeastKey, byte[]? GreatestKey)> Chunks { get; } = [];
+            internal List<((long At, int Length) Held, (long At, int Length) Sketches, long First, long Last, int Rows, bool Own, byte[]? LeastKey, byte[]? GreatestKey)> Chunks { get; } = [];
 
             internal byte[]? DType { get; set; }
+
+            internal byte[]? DistinctDType { get; set; }
 
             internal long Bytes { get; set; }
 
@@ -502,10 +519,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 // A table given up still asks its grain's question, at bytes no budget holds.
                 HeldTable chunks = _heldTables[held];
-                sizes.Add((table, chunks.Dropped is not null ? long.MaxValue : chunks.Bytes + (chunks.DType?.Length ?? 0)));
-                foreach ((long _, int length, long _, long _, int _, bool _, byte[]? _, byte[]? _) in chunks.Chunks)
+                sizes.Add((table, chunks.Dropped is not null ? long.MaxValue : chunks.Bytes + (chunks.DType?.Length ?? 0) + (chunks.DistinctDType?.Length ?? 0)));
+                foreach (((long, int Length) rows, (long, int Length) sketches, long _, long _, int _, bool _, byte[]? _, byte[]? _) in chunks.Chunks)
                 {
-                    longest = Math.Max(longest, length);
+                    longest = Math.Max(longest, Math.Max(rows.Length, sketches.Length));
                 }
             }
 
@@ -533,40 +550,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                         continue;
                     }
 
-                    // The chunks one after another, each aligned as a segment is, read back from where they waited.
+                    // The chunks one after another, each aligned as a segment is, read back from where they waited; a chunk's
+                    // distinct sketches laid apart right after it. The dtypes of the chunks' regions, then of their sketches'.
                     TableChunk[] chunks = new TableChunk[held.Chunks.Count];
-                    byte[][] dtypes = new byte[chunks.Length][];
+                    bool apart = held.DistinctDType is not null;
+                    byte[][] dtypes = new byte[apart ? 2 * chunks.Length : chunks.Length][];
                     for (int c = 0; c < chunks.Length; c++)
                     {
-                        (long at, int length, long first, long last, int rows, bool own, byte[]? least, byte[]? greatest) = held.Chunks[c];
-                        Memory<byte> bytes = buffer.AsMemory(0, length);
-                        await _held.ReadAsync(at, bytes, cancellationToken).ConfigureAwait(false);
-                        if (own)
-                        {
-                            if (map is null)
-                            {
-                                map = new ushort[_tableEncodings!.Count];
-                                for (int id = 0; id < map.Length; id++)
-                                {
-                                    map[id] = id < _seeded ? (ushort)id : writer._arrayEncodings.Intern(_tableEncodings.Ids[id]);
-                                    renumbers |= map[id] != id;
-                                }
-                            }
-
-                            if (renumbers)
-                            {
-                                ArrayBlobWriter.Renumber(bytes.Span, map);
-                            }
-                        }
-
-                        long aligned = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
-                        await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
-                        TableBytes += length;
-                        chunks[c] = new TableChunk(IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent), first, last, rows)
-                        {
-                            Keys = least is null || greatest is null ? null : new ValueBounds(least, greatest),
-                        };
+                        ((long At, int Length) rows, (long At, int Length) sketches, long first, long last, int count, bool own, byte[]? least, byte[]? greatest) = held.Chunks[c];
+                        IndexSegment region = await WriteHeldAsync(rows, own).ConfigureAwait(false);
+                        IndexSegment? distinct = sketches.At >= 0 ? await WriteHeldAsync(sketches, own).ConfigureAwait(false) : null;
+                        chunks[c] = new TableChunk(region, first, last, count, TableBounds.Of(least, greatest, distinct), 0);
                         dtypes[c] = held.DType!;
+                        if (apart)
+                        {
+                            dtypes[chunks.Length + c] = held.DistinctDType!;
+                        }
                     }
 
                     _tables.Add((_declared[i].Table, chunks, dtypes));
@@ -594,6 +593,36 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 await writer._sink.WriteAsync(list, cancellationToken).ConfigureAwait(false);
                 TableBytes += list.Length;
                 _tables[t] = (table, new Indexes.SynopsisContents.TableChunks(IndexSegment.Of(at, list, (byte)VortexLimits.MaxAlignmentExponent), chunks), dtypes);
+            }
+
+            // A blob held, read back from where it waited, its ids renumbered to the file's when it was encoded against the
+            // tables' own dictionary, then written aligned as a segment is: its region, with its checksum.
+            async ValueTask<IndexSegment> WriteHeldAsync((long At, int Length) blob, bool own)
+            {
+                Memory<byte> bytes = buffer.AsMemory(0, blob.Length);
+                await _held.ReadAsync(blob.At, bytes, cancellationToken).ConfigureAwait(false);
+                if (own)
+                {
+                    if (map is null)
+                    {
+                        map = new ushort[_tableEncodings!.Count];
+                        for (int id = 0; id < map.Length; id++)
+                        {
+                            map[id] = id < _seeded ? (ushort)id : writer._arrayEncodings.Intern(_tableEncodings.Ids[id]);
+                            renumbers |= map[id] != id;
+                        }
+                    }
+
+                    if (renumbers)
+                    {
+                        ArrayBlobWriter.Renumber(bytes.Span, map);
+                    }
+                }
+
+                long aligned = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
+                await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+                TableBytes += blob.Length;
+                return IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent);
             }
         }
 
@@ -802,8 +831,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     int ISynopsisChunkSink.OpenTable() => Part().OpenTable();
 
     ValueTask<long> ISynopsisChunkSink.SpoolChunkAsync(
-        int table, CanonicalArena arena, int node, long firstBucket, long lastBucket, byte[]? leastKey, byte[]? greatestKey, CancellationToken cancellationToken) =>
-        Part().SpoolTableChunkAsync(this, table, arena, node, (firstBucket, lastBucket), (leastKey, greatestKey), cancellationToken);
+        int table, CanonicalArena arena, int node, int sketches, long firstBucket, long lastBucket, byte[]? leastKey, byte[]? greatestKey,
+        CancellationToken cancellationToken) =>
+        Part().SpoolTableChunkAsync(this, table, arena, (node, sketches), (firstBucket, lastBucket), (leastKey, greatestKey), cancellationToken);
 
     void ISynopsisChunkSink.DropTable(int table, string verdict) => Part().DropTable(table, verdict);
 

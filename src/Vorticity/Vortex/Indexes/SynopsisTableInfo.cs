@@ -203,6 +203,27 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     }
 
     /// <summary>
+    /// The two structs a chunk of a table of sketches lays its rows in when it lays its <paramref name="distinct"/> distinct
+    /// sketches apart, built in <paramref name="types"/>: the first fields of <paramref name="row"/>, in one region, and its
+    /// last, the distinct sketches, in another, which a question that counts no distinct value does not read.
+    /// </summary>
+    internal static (DType Main, DType Distinct) RowHalves(DType row, int distinct, DTypeArena types)
+    {
+        int width = row.FieldCount;
+        string[] names = new string[width];
+        DType[] fields = new DType[width];
+        for (int f = 0; f < width; f++)
+        {
+            names[f] = row.GetFieldName(f);
+            fields[f] = row.GetField(f);
+        }
+
+        int first = width - distinct;
+        return (types.Struct(names.AsSpan(0, first), fields.AsSpan(0, first), row.Nullability),
+            types.Struct(names.AsSpan(first), fields.AsSpan(first), row.Nullability));
+    }
+
+    /// <summary>
     /// The name of a key or measure <paramref name="entry"/>: its field's, or its path's, <c>field["key"]</c>. A measure's
     /// states are named from it, and a key's column in a table by <see cref="StateRequest.KeyColumn"/>.
     /// </summary>
@@ -472,20 +493,25 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
         DTypeArena types = new DTypeArena();
         List<Wanted> found = [];
+        List<Apart> aparts = [];
+        bool split = false;
         foreach (IndexEntry entry in directory?.Entries ?? [])
         {
             // The tables lie in the file itself: an append drops them. A table's chunks are its run's payloads, the
-            // buckets and rows of each in the entry's options after the table's own.
+            // buckets and rows of each in the entry's options after the table's own. A table of sketches that lays its
+            // chunks' distinct sketches apart names their regions after its chunks', as many, at their own structs.
             if (entry.Kind == IndexKinds.SynopsisTable && From(entry.Options, out List<(long First, long Last, int Rows)>? chunks) is { } table
                 && entry.Runs is [IndexRun { Origin: 0, Payload: { Count: > 0 } payload, PayloadDTypes: { } dtypes }]
                 && dtypes.Count == payload.Count)
             {
-                for (int c = 0; c < payload.Count; c++)
+                bool apart = table.Distinct.Length > 0 && payload.Count == 2 * (chunks?.Count ?? 1);
+                int count = apart ? payload.Count / 2 : payload.Count;
+                for (int c = 0; c < count; c++)
                 {
                     // A table of one chunk says no chunk in its options (IndexWriter): that chunk holds every bucket and row.
-                    (long first, long last, int rows) = chunks is { } held && held.Count == payload.Count
+                    (long first, long last, int rows) = chunks is { } held && held.Count == count
                         ? held[c]
-                        : payload.Count == 1 ? (long.MinValue, long.MaxValue, table.Rows) : (0, -1, -1);
+                        : count == 1 ? (long.MinValue, long.MaxValue, table.Rows) : (0, -1, -1);
                     if (rows < 0)
                     {
                         break;
@@ -493,16 +519,20 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
 
                     // A chunk whose struct does not decode is left out, as one whose rows do not.
                     DType row;
+                    DType distinct = default;
                     try
                     {
                         row = DTypeFlatBuffers.Read(dtypes[c], types);
+                        distinct = apart ? DTypeFlatBuffers.Read(dtypes[count + c], types) : default;
                     }
                     catch (VortexFormatException)
                     {
                         continue;
                     }
 
-                    found.Add(new Wanted(table, new TableChunk(payload[c], first, last, rows), row));
+                    found.Add(new Wanted(table, new TableChunk(payload[c], first, last, rows, TableBounds.Of(null, null, apart ? payload[count + c] : null), 0), row));
+                    aparts.Add(apart ? new Apart(Whole(row, distinct, types), distinct, Layouts.FieldMask.All) : default);
+                    split |= apart;
                 }
             }
         }
@@ -512,7 +542,23 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             return new SynopsisTableSet(new ScanContext([]), []);
         }
 
-        return await DecodeAsync(file.Segments, file.CreateIndexContext(0), [.. found], cancellationToken).ConfigureAwait(false);
+        return await DecodeAsync(file.Segments, file.CreateIndexContext(0), [.. found], split ? [.. aparts] : null, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The struct of a chunk's whole row, the fields of <paramref name="rest"/> then those of <paramref name="distinct"/>, in <paramref name="types"/>, which holds both.</summary>
+    private static DType Whole(DType rest, DType distinct, DTypeArena types)
+    {
+        int width = rest.FieldCount + distinct.FieldCount;
+        string[] names = new string[width];
+        DType[] fields = new DType[width];
+        for (int f = 0; f < width; f++)
+        {
+            (DType holder, int at) = f < rest.FieldCount ? (rest, f) : (distinct, f - rest.FieldCount);
+            names[f] = holder.GetFieldName(at);
+            fields[f] = holder.GetField(at);
+        }
+
+        return types.Struct(names, fields, rest.Nullability);
     }
 
     /// <summary>
@@ -527,10 +573,10 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         CancellationToken cancellationToken)
     {
         await LoadListsAsync(source, contents, reads, cancellationToken).ConfigureAwait(false);
-        Wanted[] wanted = WantedOf(contents, reads);
+        Wanted[] wanted = WantedOf(contents, reads, out Apart[]? apart);
         (ArrayEncodingId[] resolved, string[] ids) = contents.EncodingTable;
         ScanContext context = Contexts.RentDetached(options ?? VortexReadOptions.Default, resolved, ids);
-        SynopsisTableSet set = await DecodeAsync(source, context, wanted, cancellationToken, Contexts, reads).ConfigureAwait(false);
+        SynopsisTableSet set = await DecodeAsync(source, context, wanted, apart, cancellationToken, Contexts, reads).ConfigureAwait(false);
         set.Types = contents.TableRowTypes.Arena;
         return set;
     }
@@ -553,7 +599,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         }
 
         // Every chunk held, asked before one is read: a read that falls back to the reader then counts no hit twice.
-        Wanted[] wanted = WantedOf(contents, reads);
+        Wanted[] wanted = WantedOf(contents, reads, out Apart[]? apart);
         if (wanted.Length == 0)
         {
             return null;
@@ -561,7 +607,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
 
         for (int i = 0; i < wanted.Length; i++)
         {
-            if (!cache.Holds(uid, wanted[i].Chunk.Region))
+            if (!cache.Holds(uid, wanted[i].Chunk.Region) || (Sketched(apart, i) && !cache.Holds(uid, wanted[i].Chunk.Distinct!.Value)))
             {
                 return null;
             }
@@ -574,7 +620,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         bool kept = false;
         try
         {
-            if (Add(requests, wanted) is false)
+            if (Add(requests, wanted, apart) is false)
             {
                 missed = true;
                 return null;
@@ -583,7 +629,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             for (int slot = 0; slot < requests.Count; slot++)
             {
                 Serialization.Schemas.SegmentSpec spec = requests.GetSpec(slot);
-                IndexSegment region = RegionOf(wanted, spec);
+                IndexSegment region = RegionOf(wanted, apart, spec);
                 cache.Asked?.Invoke(uid, region);
                 if (!cache.TryRead(uid, region, out Buffers.SegmentOwner owner))
                 {
@@ -596,7 +642,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             }
 
             requests.Complete();
-            SynopsisTableSet set = Decoded(context, wanted, requests, Contexts, reads, verified: true);
+            SynopsisTableSet set = Decoded(context, wanted, apart, requests, Contexts, reads, verified: true);
             set.Types = contents.TableRowTypes.Arena;
             kept = true;
             return set;
@@ -688,10 +734,13 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// The chunks of <paramref name="contents"/>'s tables <paramref name="reads"/> keeps, every one when it is null, each with
     /// its table's row type: counted, then named, in an array of their number, a few an object, where lists of them grew for
     /// each. By index, as every list of the contents: an interface's enumerator is an allocation a list. A table whose list of
-    /// chunks did not load has none read.
+    /// chunks did not load has none read. A chunk that lays its distinct sketches apart decodes the rest of its row from its
+    /// region, and the sketches from theirs when <paramref name="reads"/> decodes one of them, which <paramref name="apart"/>
+    /// says at the chunk's place; null when no chunk's are read.
     /// </summary>
-    private static Wanted[] WantedOf(SynopsisContents contents, ISynopsisReads? reads)
+    private static Wanted[] WantedOf(SynopsisContents contents, ISynopsisReads? reads, out Apart[]? apart)
     {
+        apart = null;
         int count = 0;
         for (int t = 0; t < contents.Tables.Count; t++)
         {
@@ -719,20 +768,78 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 continue;
             }
 
+            Layouts.FieldMask? sketches = null;
+            bool asked = false;
             for (int c = 0; c < chunks.Count; c++)
             {
-                if (reads?.Reads(table, chunks[c]) ?? true)
+                TableChunk chunk = chunks[c];
+                if (!(reads?.Reads(table, chunk) ?? true))
                 {
-                    wanted[at++] = new Wanted(table, chunks[c], rows[t]);
+                    continue;
                 }
+
+                // A chunk that names the sketches' region of a table that holds none decodes as a whole, and fails to.
+                if (chunk.Distinct is null || table.Distinct.Length == 0)
+                {
+                    wanted[at++] = new Wanted(table, chunk, rows[t]);
+                    continue;
+                }
+
+                // The fields of the sketches the read decodes, the same for every chunk of the table.
+                (DType[] mains, DType[] distincts) = contents.TableApartTypes;
+                if (!asked)
+                {
+                    sketches = DistinctFields(table, rows[t], reads);
+                    asked = true;
+                }
+
+                if (sketches is { } fields)
+                {
+                    (apart ??= new Apart[count])[at] = new Apart(rows[t], distincts[t], fields);
+                }
+
+                wanted[at++] = new Wanted(table, chunk, mains[t]);
             }
         }
 
         return wanted;
     }
 
-    /// <summary>The region of <paramref name="wanted"/>'s chunk <paramref name="spec"/> names: its offset and length.</summary>
-    private static IndexSegment RegionOf(Wanted[] wanted, in Serialization.Schemas.SegmentSpec spec)
+    /// <summary>
+    /// The fields of <paramref name="table"/>'s distinct sketches, the last of its row type <paramref name="row"/>, that
+    /// <paramref name="reads"/> decodes, every one when it is null, as a mask of their own struct; null for none.
+    /// </summary>
+    private static Layouts.FieldMask? DistinctFields(SynopsisTableInfo table, DType row, ISynopsisReads? reads)
+    {
+        Layouts.FieldMask fields = reads?.Fields(table) ?? Layouts.FieldMask.All;
+        int width = row.FieldCount;
+        int first = width - table.Distinct.Length;
+        int selected = fields.SelectedCount(width);
+        int before = fields.SelectedCount(first);
+        if (selected == before)
+        {
+            return null;
+        }
+
+        if (fields.IsAll || selected - before == table.Distinct.Length)
+        {
+            return Layouts.FieldMask.All;
+        }
+
+        Span<int> picked = stackalloc int[selected - before];
+        for (int s = before; s < selected; s++)
+        {
+            picked[s - before] = fields.SelectedField(s) - first;
+        }
+
+        return Layouts.FieldMasks.Of(picked);
+    }
+
+    /// <summary>Whether <paramref name="apart"/> says the read fetches the distinct sketches of chunk <paramref name="i"/> from their own region.</summary>
+    private static bool Sketched(Apart[]? apart, int i) => apart is not null && !apart[i].Row.IsDefault;
+
+    /// <summary>The region of <paramref name="wanted"/>'s chunk, or of its distinct sketches, <paramref name="spec"/> names: its offset and length.</summary>
+    private static IndexSegment RegionOf(Wanted[] wanted, Apart[]? apart, in Serialization.Schemas.SegmentSpec spec)
     {
         for (int i = 0; i < wanted.Length; i++)
         {
@@ -741,18 +848,31 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             {
                 return region;
             }
+
+            if (Sketched(apart, i) && wanted[i].Chunk.Distinct is { } distinct && distinct.Offset == spec.Offset && distinct.Length == spec.Length)
+            {
+                return distinct;
+            }
         }
 
         throw new InvalidOperationException("A slot of a read of tables names no chunk of them.");
     }
 
-    /// <summary>Registers each chunk's region in <paramref name="requests"/>, its slot noted; false when <paramref name="wanted"/> is empty.</summary>
-    private static bool Add(IO.SegmentRequestSet requests, Wanted[] wanted)
+    /// <summary>
+    /// Registers each chunk's region in <paramref name="requests"/>, and that of its distinct sketches when <paramref name="apart"/>
+    /// says they are read, their slots noted; false when <paramref name="wanted"/> is empty.
+    /// </summary>
+    private static bool Add(IO.SegmentRequestSet requests, Wanted[] wanted, Apart[]? apart)
     {
         for (int i = 0; i < wanted.Length; i++)
         {
             IndexSegment region = wanted[i].Chunk.Region;
             wanted[i].Slot = requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+            if (Sketched(apart, i))
+            {
+                IndexSegment distinct = wanted[i].Chunk.Distinct!.Value;
+                apart![i].Slot = requests.Add(new Serialization.Schemas.SegmentSpec(distinct.Offset, distinct.Length, distinct.AlignmentExponent, 0, 0));
+            }
         }
 
         return wanted.Length > 0;
@@ -772,7 +892,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// it; a chunk whose region does not hold its checksum, or does not decode, is left out.
     /// </summary>
     private static async ValueTask<SynopsisTableSet> DecodeAsync(
-        IO.ISegmentReader source, ScanContext context, Wanted[] wanted, CancellationToken cancellationToken, ScanContexts? pool = null,
+        IO.ISegmentReader source, ScanContext context, Wanted[] wanted, Apart[]? apart, CancellationToken cancellationToken, ScanContexts? pool = null,
         ISynopsisReads? reads = null)
     {
         // The context's set, which a context given back holds empty: the rows lie in the bytes read, which the set of
@@ -781,13 +901,13 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         bool kept = false;
         try
         {
-            if (!Add(requests, wanted))
+            if (!Add(requests, wanted, apart))
             {
                 return new SynopsisTableSet(context, [], pool);
             }
 
             await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            SynopsisTableSet set = Decoded(context, wanted, requests, pool, reads, verified: false);
+            SynopsisTableSet set = Decoded(context, wanted, apart, requests, pool, reads, verified: false);
             kept = true;
             return set;
         }
@@ -810,10 +930,11 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// arena at its table's row type, only the fields <paramref name="reads"/> names of it; a chunk whose region does not hold
     /// its checksum, or does not decode, is left out, and counted (<c>vortex.synopsis_tables.corrupt</c>): its object is read
     /// as rows. The checksums of regions the synopsis cache served, which verified them, are not reckoned again
-    /// (<paramref name="verified"/>).
+    /// (<paramref name="verified"/>). A chunk that lays its distinct sketches apart is decoded from its region, and from
+    /// theirs when <paramref name="apart"/> says the read takes them, into one struct of the fields read.
     /// </summary>
     private static SynopsisTableSet Decoded(
-        ScanContext context, Wanted[] wanted, IO.SegmentRequestSet requests, ScanContexts? pool, ISynopsisReads? reads, bool verified)
+        ScanContext context, Wanted[] wanted, Apart[]? apart, IO.SegmentRequestSet requests, ScanContexts? pool, ISynopsisReads? reads, bool verified)
     {
         ReadTable[] tables = new ReadTable[wanted.Length];
         int read = 0;
@@ -821,7 +942,9 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         {
             (SynopsisTableInfo table, TableChunk chunk, DType row, int slot) = wanted[i];
             Buffers.VortexBuffer bytes = requests.GetBuffer(slot);
-            if (!verified && !chunk.Region.Holds(bytes.Span))
+            bool sketched = Sketched(apart, i);
+            Buffers.VortexBuffer sketches = sketched ? requests.GetBuffer(apart![i].Slot) : default;
+            if (!verified && (!chunk.Region.Holds(bytes.Span) || (sketched && !chunk.Distinct!.Value.Holds(sketches.Span))))
             {
                 VortexTelemetry.SynopsisTableCorruption();
                 continue;
@@ -852,6 +975,12 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
 
                 int node = context.Decode.DecodeRoot(in root, row, chunk.Rows);
                 bool narrowed = !fields.IsAll && context.FieldsHonoured;
+                if (chunk.Distinct is not null && table.Distinct.Length > 0)
+                {
+                    node = Unite(context, node, narrowed, row, fields, sketches, sketched ? apart![i] : default, chunk.Rows);
+                    narrowed = !fields.IsAll;
+                }
+
                 tables[read++] = new ReadTable(table, chunk, node) { Fields = narrowed ? fields : Layouts.FieldMask.All };
             }
             catch (VortexFormatException)
@@ -876,13 +1005,111 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         return new SynopsisTableSet(context, read == tables.Length ? tables : tables[..read], pool);
     }
 
-    /// <summary>A chunk of a table a read fetches: the table, the chunk, the row type it decodes at, and the slot of its region in the read.</summary>
+    /// <summary>
+    /// The struct of the fields <paramref name="fields"/> names of a chunk that lays its distinct sketches apart, every one
+    /// of its row when it names every one: those of the rest of its row, node <paramref name="rest"/> of struct
+    /// <paramref name="restRow"/>, which holds them alone when <paramref name="restNarrowed"/>; then those of its sketches,
+    /// decoded from <paramref name="bytes"/> when <paramref name="apart"/> says the read takes them.
+    /// </summary>
+    private static int Unite(
+        ScanContext context, int rest, bool restNarrowed, DType restRow, Layouts.FieldMask fields, Buffers.VortexBuffer bytes, in Apart apart, int rows)
+    {
+        if (apart.Row.IsDefault)
+        {
+            // The rest of the row alone, the read naming none of the sketches: as decoded when it names every field of it.
+            int width = restRow.FieldCount;
+            return restNarrowed || fields.SelectedCount(width) == width ? rest : Joined(context, restRow, width, fields, rest, false, -1, false);
+        }
+
+        (int sketches, bool sketchesNarrowed) = DecodeSketches(context, bytes, apart, rows);
+        return Joined(context, apart.Row, apart.Row.FieldCount - apart.Distinct.FieldCount, fields, rest, restNarrowed, sketches, sketchesNarrowed);
+    }
+
+    /// <summary>
+    /// Decodes the distinct sketches of a chunk, <paramref name="bytes"/> read of their region, into <paramref name="context"/>'s
+    /// arena at <paramref name="apart"/>'s struct, only the fields it names: their node, and whether it holds those alone.
+    /// </summary>
+    private static (int Node, bool Narrowed) DecodeSketches(ScanContext context, Buffers.VortexBuffer bytes, in Apart apart, int rows)
+    {
+        context.Decode.LoadBlob(bytes);
+        ArrayNode root = context.Nodes.Root;
+        if (apart.Fields.IsAll)
+        {
+            return (context.Decode.DecodeRoot(in root, apart.Distinct, rows), false);
+        }
+
+        context.ExchangePushedFields(apart.Fields);
+        context.FieldsHonoured = false;
+        try
+        {
+            int node = context.Decode.DecodeRoot(in root, apart.Distinct, rows);
+            return (node, context.FieldsHonoured);
+        }
+        finally
+        {
+            context.ExchangePushedFields(Layouts.FieldMask.All);
+        }
+    }
+
+    /// <summary>
+    /// The struct of the fields <paramref name="fields"/> names of <paramref name="row"/>, of a chunk that lays its distinct
+    /// sketches apart: those before <paramref name="first"/> from node <paramref name="rest"/>, the rest of the row, those from
+    /// it on from node <paramref name="sketches"/>, the sketches, -1 when the read takes none; each node holding the fields
+    /// named alone when it is narrowed, every one of its struct otherwise. At <paramref name="row"/> itself when every field
+    /// is read, at a struct of the fields read in the decoding context's types otherwise, as a projection's
+    /// (<c>StructDecoder</c>).
+    /// </summary>
+    private static int Joined(
+        ScanContext context, DType row, int first, Layouts.FieldMask fields, int rest, bool restNarrowed, int sketches, bool sketchesNarrowed)
+    {
+        CanonicalArena arena = context.Canonical;
+        int count = fields.SelectedCount(row.FieldCount);
+        using Arrays.Decoders.Canonical.Scratch<int> children = new Arrays.Decoders.Canonical.Scratch<int>(count, stackalloc int[64]);
+        int r = 0;
+        int d = 0;
+        for (int s = 0; s < count; s++)
+        {
+            int field = fields.SelectedField(s);
+            children.Span[s] = field < first
+                ? arena.GetNode(rest).GetFieldIndex(restNarrowed ? r++ : field)
+                : arena.GetNode(sketches).GetFieldIndex(sketchesNarrowed ? d++ : field - first);
+        }
+
+        int length = arena.GetNode(rest).Length;
+        Validity validity = arena.GetNode(rest).Validity;
+        if (fields.IsAll)
+        {
+            return arena.AddStruct(row, length, validity, children.Span);
+        }
+
+        using Arrays.Decoders.Canonical.Scratch<int> names = new Arrays.Decoders.Canonical.Scratch<int>(count, stackalloc int[64]);
+        using Arrays.Decoders.Canonical.Scratch<DType> types = new Arrays.Decoders.Canonical.Scratch<DType>(count, default);
+        for (int s = 0; s < count; s++)
+        {
+            names.Span[s] = context.Types.InternName(row.GetFieldNameUtf8(fields.SelectedField(s)));
+            types.Span[s] = DTypeImport.Into(context.Types, arena.GetNode(children.Span[s]).DType);
+        }
+
+        return arena.AddStruct(context.Types.Struct(names.Span, types.Span, row.Nullability), length, validity, children.Span);
+    }
+
+    /// <summary>A chunk of a table a read fetches: the table, the chunk, the row type its region decodes at, and the slot of its region in the read.</summary>
     private record struct Wanted(SynopsisTableInfo Table, TableChunk Chunk, DType Row)
     {
         internal int Slot { get; set; }
 
         internal readonly void Deconstruct(out SynopsisTableInfo table, out TableChunk chunk, out DType row, out int slot) =>
             (table, chunk, row, slot) = (Table, Chunk, Row, Slot);
+    }
+
+    /// <summary>
+    /// The distinct sketches a read fetches of a chunk that lays them apart (<see cref="TableChunk.Distinct"/>): the row type
+    /// of the whole chunk, the struct of its sketches, the fields of these the read decodes, and the slot of their region in
+    /// the read. A default <see cref="Row"/> where a chunk's are not read.
+    /// </summary>
+    private record struct Apart(DType Row, DType Distinct, Layouts.FieldMask Fields)
+    {
+        internal int Slot { get; set; }
     }
 }
 
