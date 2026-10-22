@@ -35,8 +35,24 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
     private long _firstInstant = long.MinValue;
     private long _gap;
 
+    /// <summary>
+    /// The most keys the census counts, every depth of objects together: past them, the values of a key it has not met
+    /// are counted as their object's other keys', and the census is <see cref="Partial"/>. Keys used as data, an id a
+    /// key, would otherwise grow it by a count of a few hundred bytes a key, without end.
+    /// </summary>
+    internal const int MaxKeys = 16_384;
+
+    // The keys counted so far, every depth together.
+    private int _keyCount;
+
     /// <summary>The bytes a text bound keeps; 0 for none.</summary>
     internal int StringBoundBytes { get; } = stringBoundBytes;
+
+    /// <summary>
+    /// Whether keys past <see cref="MaxKeys"/> were counted as their objects' other keys': a directory of what the census
+    /// counted then refutes nothing by a path's absence.
+    /// </summary>
+    internal bool Partial { get; private set; }
 
     /// <summary>The counts of the column's values themselves.</summary>
     internal PathCount Root { get; } = new PathCount();
@@ -65,6 +81,14 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
         Arrays.CanonicalNode metadataNode = arena.GetNode(metadata);
         Arrays.CanonicalNode valueNode = arena.GetNode(value);
         bool timed = sliceTargetRows > 0 && instants.Length == batch.RowCount;
+        if (timed && instants.Length > 0)
+        {
+            // A slice is as wide as its target rows take at the rate of the rows counted, this batch's among them: the
+            // first batch too, whose values would otherwise each open a span of their own.
+            _firstInstant = _firstInstant == long.MinValue ? instants[0] : _firstInstant;
+            _gap = (long)Math.Min((double)(instants[^1] - _firstInstant) / Math.Max(Rows + batch.RowCount, 1) * sliceTargetRows, long.MaxValue / 4);
+        }
+
         for (int row = 0; row < batch.RowCount; row++)
         {
             if (!Arrays.ArenaWords.IsValid(arena, column, row))
@@ -73,17 +97,10 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
                 continue;
             }
 
-            Add(
+            Count(
                 Compute.LiteralReader.ViewAt(metadataNode, row),
                 Arrays.ArenaWords.IsValid(arena, value, row) ? Compute.LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue,
                 timed ? instants[row] : long.MinValue);
-        }
-
-        if (timed && instants.Length > 0)
-        {
-            // A slice is as wide as its target rows take at the rate counted so far.
-            _firstInstant = _firstInstant == long.MinValue ? instants[0] : _firstInstant;
-            _gap = (long)Math.Min((double)(instants[^1] - _firstInstant) / Math.Max(Rows, 1) * sliceTargetRows, long.MaxValue / 4);
         }
     }
 
@@ -93,6 +110,20 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
     /// </summary>
     /// <exception cref="VortexFormatException">The value or the metadata does not decode.</exception>
     internal void Add(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, long instant = long.MinValue)
+    {
+        // A slice as wide as its target rows take at the rate of the rows counted so far, this one among them, as a
+        // batch of rows reckons it for all its rows at once.
+        if (sliceTargetRows > 0 && instant != long.MinValue)
+        {
+            _firstInstant = _firstInstant == long.MinValue ? instant : _firstInstant;
+            _gap = (long)Math.Min((double)(instant - _firstInstant) / (Rows + 1) * sliceTargetRows, long.MaxValue / 4);
+        }
+
+        Count(metadata, value, instant);
+    }
+
+    /// <summary>Counts a row of <paramref name="value"/> at <paramref name="instant"/>, under the gap reckoned for it.</summary>
+    private void Count(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, long instant)
     {
         _instant = instant;
         Rows++;
@@ -165,6 +196,9 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
 
         /// <summary>The values counted at this path.</summary>
         internal long Values { get; private set; }
+
+        /// <summary>The values of the keys of the objects at this path past the census's <see cref="MaxKeys"/>, which it counts no further.</summary>
+        internal long OtherKeys { get; private set; }
 
         /// <summary>The keys of the objects at this path, each with its counts; empty when no object was.</summary>
         internal IReadOnlyDictionary<string, PathCount> Keys => _keys ?? (IReadOnlyDictionary<string, PathCount>)EmptyKeys;
@@ -256,7 +290,15 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
                         string name = census.Name(in dictionary, fields.IdAt(i));
                         if (!_keys.TryGetValue(name, out PathCount? key))
                         {
+                            if (census._keyCount >= MaxKeys)
+                            {
+                                OtherKeys++;
+                                census.Partial = true;
+                                continue;
+                            }
+
                             _keys[name] = key = new PathCount();
+                            census._keyCount++;
                         }
 
                         key.Add(census, in dictionary, fields.ValueAt(i), depth + 1);

@@ -127,7 +127,7 @@ internal sealed class VariantDirectory
         List<PathEntry> entries = [];
         List<string> path = [];
         Walk(census.Root, shredding, slices, path, entries);
-        return new VariantDirectory(census.Rows, entries, slices?.Count ?? 0);
+        return new VariantDirectory(census.Rows, entries, slices?.Count ?? 0, partial: census.Partial);
     }
 
     private static void Walk(

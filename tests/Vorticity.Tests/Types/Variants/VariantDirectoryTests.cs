@@ -156,6 +156,52 @@ public sealed class VariantDirectoryTests
     }
 
     /// <summary>
+    /// A hundred thousand keys, each held by one row, beside a key every row holds: the census counts
+    /// <see cref="PathCensus.MaxKeys"/> keys and the values of the rest as their object's other keys', so that what it
+    /// holds stays bounded, and the directory it gives refutes nothing by a path's absence, the keys it did not count
+    /// among them.
+    /// </summary>
+    [Fact]
+    public void ACensusPastItsKeysCountsTheRestAsOthersAndRefutesNoAbsence()
+    {
+        PathCensus census = new PathCensus();
+        for (int i = 0; i < 100_000; i++)
+        {
+            Variant row = Variant.Object(($"user.{i}", Variant.From((long)i)), ("route", Variant.From("/a")));
+            census.Add(row.Metadata.Span, row.Value.Span);
+        }
+
+        Assert.True(census.Partial);
+        Assert.Equal(PathCensus.MaxKeys, census.Root.Keys.Count);
+        Assert.Equal(100_000 - (PathCensus.MaxKeys - 1), census.Root.OtherKeys);
+        Assert.Equal(100_000, census.Root.Keys["route"].Values);
+
+        VariantDirectory directory = VariantDirectory.From(census, null);
+        Assert.True(directory.Partial);
+        Dictionary<string, VariantDirectory> directories = new() { ["Attributes"] = VariantDirectory.From(directory.ToBytes())! };
+        Assert.True(VariantDirectory.MayMatch(Has("never"), directories));
+        Assert.True(VariantDirectory.MayMatch(Has("user.99999"), directories));
+        Assert.True(VariantDirectory.MayMatch(Has("user.1"), directories));
+    }
+
+    /// <summary>
+    /// A hundred rows a second apart, counted one at a time in slices of 25 rows: a path every row holds keeps one span
+    /// of time from its first rows on, where a census that reckoned no gap for rows counted one at a time kept one a row.
+    /// </summary>
+    [Fact]
+    public void ACensusSpansAPathBySlicesFromItsFirstRows()
+    {
+        PathCensus census = new PathCensus(sliceTargetRows: 25);
+        for (int i = 0; i < 100; i++)
+        {
+            Variant row = Variant.Object(("all", Variant.From((long)i)));
+            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+        }
+
+        Assert.Equal([0L, 99_000L], census.Root.Keys["all"].Spans.ToArray());
+    }
+
+    /// <summary>
     /// Two thousand keys, each held by one row but a few held by many: over its budget the directory
     /// leaves the rarest out, keeps those held most, and refutes nothing by a path's absence any more.
     /// </summary>
