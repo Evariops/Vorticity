@@ -306,6 +306,7 @@ if (Text(args, "--micro") == "paths")
         LoopColdSeconds = Option(args, "--loop-cold", 0),
         NoDigest = args.Contains("--no-digest"),
         MaxReads = Option(args, "--max-reads", 0),
+        SegmentCacheBytes = Option(args, "--segment-cache-mb", 0) * (1L << 20),
         KeepHandles = args.Contains("--keep-handles"),
         WarmSeconds = args.Contains("--warm") ? double.Parse(Text(args, "--warm")!, CultureInfo.InvariantCulture) : 3,
     });

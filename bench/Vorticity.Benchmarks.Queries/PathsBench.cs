@@ -138,6 +138,13 @@ internal static class PathsBench
         /// <summary>The reads each session keeps in flight at most (<see cref="VortexSessionOptions.MaxConcurrentReads"/>); zero for the session's default.</summary>
         internal int MaxReads { get; init; }
 
+        /// <summary>
+        /// The bytes of the segment cache of the session a question is asked warm by (<see cref="VortexSessionOptions.SegmentCache"/>,
+        /// <c>--segment-cache-mb</c>), as a query node keeps the segments it read; zero for none, the default, which has every
+        /// warm round read its rows again.
+        /// </summary>
+        internal long SegmentCacheBytes { get; init; }
+
         /// <summary>Whether the store keeps each object it reads open (<see cref="HeldFileObjectStore"/>) rather than open and close its file at every read.</summary>
         internal bool KeepHandles { get; init; }
 
@@ -202,7 +209,7 @@ internal static class PathsBench
             $"{settings.Latency} ms a request{(settings.LatencyP99 > settings.Latency ? $" at the median, {settings.LatencyP99} at the 99th percentile" : string.Empty)}, " +
             $"{(settings.LinkBitsPerSecond > 0 ? $"a link of {settings.LinkBitsPerSecond / 1e9:0.##} Gb/s" : "no limit on the link")}{(settings.BytesPerSecond > 0 ? $", {settings.BytesPerSecond / 1e6:0} MB/s a read" : string.Empty)}" +
             $"{(settings.ReadsPerSecondPerPrefix > 0 ? $", {settings.ReadsPerSecondPerPrefix:0} reads a second a prefix" : string.Empty)}; " +
-            $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows); processor time from cycles at {ProcessCpu.GigaHertz:F2} GHz; {label}");
+            $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows){(settings.SegmentCacheBytes > 0 ? $", segments kept in {settings.SegmentCacheBytes >> 20} MiB" : string.Empty)}; processor time from cycles at {ProcessCpu.GigaHertz:F2} GHz; {label}");
         Console.WriteLine(
             $"{"question",-62} {"path",-8} {"",-4} {"dop",3} {"ms",9} {"cpu ms",9} {"alloc MB",9} {"priv MB",8} {"ws MB",8} {"req",6} {"steps",6} {"MB",8} {"states",9} {"rows",11} {"groups",7}");
 
@@ -496,6 +503,7 @@ internal static class PathsBench
                 o.MaxDegreeOfParallelism = degree;
                 o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
                 o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
+                o.SegmentCache = settings.SegmentCacheBytes > 0 ? new SegmentCache(settings.SegmentCacheBytes) : null;
             });
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
             using TextWriter? trace = settings.TraceReads is { } traced ? TextWriter.Synchronized(new StreamWriter(traced, append: true)) : null;
