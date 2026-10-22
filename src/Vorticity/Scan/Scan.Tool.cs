@@ -177,7 +177,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.CountAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.CountAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -193,7 +193,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.AnyAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.AnyAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {

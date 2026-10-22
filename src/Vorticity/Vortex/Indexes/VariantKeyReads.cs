@@ -441,13 +441,17 @@ internal sealed class VariantKeyReads
             CanonicalArena arena = context.Canonical;
             Span<int> stack = stackalloc int[16];
             using Scratch<int> groups = new(Keys.Length, stack);
+
+            // One column of nulls serves every place the chunk holds none, where one a place took 16 bytes a row each:
+            // 16 MB a key of a chunk of a million rows, three or four times over.
+            int none = -1;
             for (int k = 0; k < Keys.Length; k++)
             {
                 Key key = Keys[k];
                 if (key.Part is not { } part)
                 {
                     // No row of the chunk holds the key: every row reads null there, and nothing is read.
-                    int absent = Nulls(arena, Binary, Rows);
+                    int absent = None();
                     groups.Span[k] = arena.AddStruct(Groups[k], Rows, Validity.NonNullable, [absent, absent, arena.AddNull(key.Typed, Rows)]);
                     continue;
                 }
@@ -480,8 +484,8 @@ internal sealed class VariantKeyReads
                 }
                 else
                 {
-                    metadata = Nulls(arena, Binary, Rows);
-                    values = Nulls(arena, Binary, Rows);
+                    metadata = None();
+                    values = metadata;
                     typed = context.Decode.DecodeRoot(in root, key.Shape, Rows);
                 }
 
@@ -489,8 +493,10 @@ internal sealed class VariantKeyReads
             }
 
             int tree = arena.AddStruct(Tree, Rows, Validity.NonNullable, groups.Span);
-            int none = Nulls(arena, Binary, Rows);
-            return arena.AddStruct(variant, Rows, variant.IsNullable ? Validity.AllValid : Validity.NonNullable, [none, none, tree]);
+            int nulls = None();
+            return arena.AddStruct(variant, Rows, variant.IsNullable ? Validity.AllValid : Validity.NonNullable, [nulls, nulls, tree]);
+
+            int None() => none >= 0 ? none : none = Nulls(arena, Binary, Rows);
         }
 
         private static SegmentSpec Spec(PathChunk part) => new SegmentSpec(part.Offset, part.Length, part.AlignmentExponent, 0, 0);

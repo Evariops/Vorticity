@@ -49,6 +49,13 @@ internal sealed record ScanSpec
     internal IReadOnlyDictionary<string, string[]>? VariantKeys { get; init; }
 
     /// <summary>
+    /// The spec of a terminal that delivers no column but <paramref name="uses"/>: a variant column those and the filter
+    /// read through top-level keys is read by those keys alone (<see cref="VariantKeys"/>), where a count over a filter on
+    /// one key parsed every row's variant.
+    /// </summary>
+    internal ScanSpec Reading(IEnumerable<FieldExpr> uses) => this with { VariantKeys = Indexes.VariantKeyReads.Of(uses, Filter) };
+
+    /// <summary>
     /// Whether the consumer reads the encoded forms itself, as an aggregation does, so that a block
     /// counts as decoded only when a column of it reached canonical form.
     /// </summary>

@@ -106,6 +106,13 @@ public sealed partial class IdentifierPostingsTests
                 Assert.Equal(onAppend ? 3 * asked : 0, dataset.LevelZero.AsAppended);
                 Assert.Equal(onAppend ? 0 : 3, dataset.LevelZero.Shredded);
             }
+
+            // A count reads the key alone too, through the same leases.
+            Assert.Equal(
+                rows.Count(r => r.Attributes["status"]?.AsInt64() >= 400),
+                await dataset.Scan<Visit>().Where(r => r.Attributes["status"].AsInt64() >= 400).CountAsync(Ct));
+            Assert.Equal(onAppend ? 9 : 0, dataset.LevelZero.AsAppended);
+            Assert.Equal(onAppend ? 0 : 3, dataset.LevelZero.Shredded);
         }
     }
 
