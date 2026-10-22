@@ -318,6 +318,25 @@ A seal is a compaction for its commit: a delete that marks one of its inputs whi
 it, and its outputs are left for vacuum. Carrying the marks over to the period's object instead is
 worth measuring on jobs of minutes over gigabytes, and is not done.
 
+### Resuming a seal
+
+A seal of a day at the design's rate reads and writes some 170 GB, and a failure starts it again from
+nothing: its object is one upload, whose writer holds until the end what the end writes, the chunk
+directories, the zone maps, the postings' pages, the synopsis tables' runs, the census of the paths.
+Three ways to lose less were weighed, none built:
+
+| | how | what it takes | what it leaves |
+|---|---|---|---|
+| a checkpointed upload | at the end of a part, the writer saves its state beside the upload's parts, and a seal that fails takes the upload back from there | every builder of the writer able to save and restore itself: its open chunks, its pages in the scratch, its counts, the slice being sorted | gigabytes of state saved at each checkpoint, and a writer twice as hard to change |
+| the hours sealed first | a period's hours sealed one at a time, each an object committed alone, then the day's object assembled from theirs | slices that keep the order and the shredding their hour chose, where the slice table holds one order for the whole object; the day's tables merged from the hours' | the day rewritten whole a second time, unless it is assembled by copying the hours' segments, a format change |
+| a shorter period | the length of a period follows its load already, under the object cap among its constraints (`DatasetOptions.MaxObjectBytes`, no bound by default): a lower cap bounds what a failure costs | nothing new | more objects over a window, a request each |
+
+The third is there today: a dataset whose failed seals cost too much lowers its object cap, and each
+seal at risk is that much smaller. The second is the shape of a seal that resumes, at the price of a
+format change, and waits for a measure of how often seals fail. A delete that marks an input while
+the seal runs is the common reason a seal starts again, and carrying its marks over to the period's
+object answers it without either.
+
 ## 4. Folding marks where no merge goes
 
 A purge is a job with a single input: an object rewritten alone, without its marked rows, in its own
