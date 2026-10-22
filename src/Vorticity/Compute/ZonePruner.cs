@@ -178,7 +178,7 @@ internal sealed class ZonePruner : IBlockPruner
                 if (comparison.Value.Kind != FilterLiteralKind.Null &&
                     Find(comparison.Field) is { HasStatistics: true } column &&
                     column.ZoneLength == live.BlockRows && column.RowCount == live.RowCount &&
-                    column.Table.TryMayMatch(op, comparison.Value, nanMatches, words))
+                    column.Table.TryMayMatch(op, comparison.Value, nanMatches, words, scope))
                 {
                     return;
                 }
