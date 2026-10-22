@@ -112,8 +112,9 @@ public sealed partial class DatasetPeriodsCompactionTests
 
         // Its synopsis column, the status it is sorted by, lies in its synopsis part, as the seal's does; a slice of a few
         // rows keeps no table, which reading them costs less than.
-        Assert.NotEmpty(SynopsisColumnsOf(loadedHour.Indexes));
-        Assert.Equal(SynopsisColumnsOf(sealedHour.Indexes), SynopsisColumnsOf(loadedHour.Indexes));
+        int[] loadedPart = await PartColumnsAsync(dataset, await FirstAsync(dataset, PeriodLevels.Periods));
+        Assert.NotEmpty(loadedPart);
+        Assert.Equal(await PartColumnsAsync(sealer, await FirstAsync(sealer, PeriodLevels.Periods)), loadedPart);
 
         // A period the dataset holds rows of, one that starts no period, rows of another period, parts out of order, and
         // a part whose rows go back in time, are refused, and leave the dataset as it was.
@@ -262,9 +263,16 @@ public sealed partial class DatasetPeriodsCompactionTests
     private static Request[] RequestsOf(List<DateTimeOffset> instants, int first) =>
         [.. instants.Select((at, i) => new Request(at, $"r-{first + i}", 200 + (i % 3 * 100), at.ToUnixTimeSeconds() * 7_919L % 1_000_003))];
 
-    /// <summary>The synopsis columns entries of an object's indexes, as <see cref="ShapeAsync"/> gives them, by their kind and column.</summary>
-    private static string[] SynopsisColumnsOf(string[] indexes) =>
-        [.. indexes.Where(index => index.StartsWith(IndexKinds.SynopsisColumns, StringComparison.Ordinal)).Select(index => index[..index.LastIndexOf(' ')])];
+    /// <summary>The columns of an object whose every chunk lies in its synopsis part, as its table of contents bounds it, by their fields.</summary>
+    private static async Task<int[]> PartColumnsAsync(VortexDataset dataset, TreeEntry period)
+    {
+        ObjectEntry entry = ObjectEntry.FromBytes(period.Value.Span);
+        SynopsisContents contents = entry.Contents!;
+        await using ObjectLease lease = await dataset.RentAsync(entry, Ct);
+        List<VortexSegment>[] columns = await Vorticity.Tests.Writing.ColumnSegments.OfAsync(lease.File, Ct);
+        return [.. Enumerable.Range(0, columns.Length).Where(f => columns[f].Count > 0
+            && columns[f].TrueForAll(s => s.Offset >= contents.PartStart && s.Offset + s.Length <= contents.PartEnd))];
+    }
 
     /// <summary>An object's slice table, and each of its indexes as its kind, its column and its options.</summary>
     private static async Task<(SliceTable Slices, string[] Indexes)> ShapeAsync(VortexDataset dataset, TreeEntry period)

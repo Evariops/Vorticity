@@ -484,54 +484,68 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     }
 
     /// <summary>
-    /// Every synopsis table of <paramref name="file"/>, their regions read together, each table's rows
-    /// decoded over the file's encodings; those whose region does not hold its checksum, or does not
-    /// decode, left out.
+    /// Every synopsis table of <paramref name="file"/>, read through its index directory, which names each table's list of
+    /// chunks: the lists read together, then the chunks, each table's rows decoded at the struct the file's schema and its
+    /// slices' paths give it (<see cref="RowType"/>), over the file's encodings. A table whose list does not hold its checksum
+    /// or does not parse, or whose keys name paths the file's slices do not, and a chunk whose region does not hold its
+    /// checksum or does not decode, are left out.
     /// </summary>
     internal static async ValueTask<SynopsisTableSet> ReadAsync(VortexFile file, CancellationToken cancellationToken)
     {
+        // The tables lie in the file itself: an append drops them. A table's entry names its list alone.
         IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
+        List<(SynopsisTableInfo Table, IndexSegment List)> listed = [];
+        IReadOnlyList<SynopsisPath> paths = [];
+        foreach (IndexEntry entry in directory?.Entries ?? [])
+        {
+            if (entry.Kind == IndexKinds.Slices && SliceTable.FromBytes(entry.Options) is { } slices)
+            {
+                paths = slices.Paths;
+            }
+            else if (entry.Kind == IndexKinds.SynopsisTable && From(entry.Options, out _) is { } table
+                && entry.Runs is [IndexRun { Origin: 0, Payload: [IndexSegment list], PayloadDTypes.Count: 0 }])
+            {
+                listed.Add((table, list));
+            }
+        }
+
+        if (listed.Count == 0)
+        {
+            return new SynopsisTableSet(new ScanContext([]), []);
+        }
+
         DTypeArena types = new DTypeArena();
         List<Wanted> found = [];
         List<Apart> aparts = [];
         bool split = false;
-        foreach (IndexEntry entry in directory?.Entries ?? [])
+        using (IO.SegmentRequestSet requests = new IO.SegmentRequestSet(listed.Count))
         {
-            // The tables lie in the file itself: an append drops them. A table's chunks are its run's payloads, the
-            // buckets and rows of each in the entry's options after the table's own. A table of sketches that lays its
-            // chunks' distinct sketches apart names their regions after its chunks', as many, at their own structs.
-            if (entry.Kind == IndexKinds.SynopsisTable && From(entry.Options, out List<(long First, long Last, int Rows)>? chunks) is { } table
-                && entry.Runs is [IndexRun { Origin: 0, Payload: { Count: > 0 } payload, PayloadDTypes: { } dtypes }]
-                && dtypes.Count == payload.Count)
+            int[] slots = new int[listed.Count];
+            for (int t = 0; t < listed.Count; t++)
             {
-                bool apart = table.Distinct.Length > 0 && payload.Count == 2 * (chunks?.Count ?? 1);
-                int count = apart ? payload.Count / 2 : payload.Count;
-                for (int c = 0; c < count; c++)
+                IndexSegment list = listed[t].List;
+                slots[t] = requests.Add(new Serialization.Schemas.SegmentSpec(list.Offset, list.Length, list.AlignmentExponent, 0, 0));
+            }
+
+            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+
+            for (int t = 0; t < listed.Count; t++)
+            {
+                (SynopsisTableInfo table, IndexSegment list) = listed[t];
+                if (!Named(table, paths.Count) || SynopsisContents.TableChunks.Listed(list, requests.GetBuffer(slots[t]).Span) is not { } chunks)
                 {
-                    // A table of one chunk says no chunk in its options (IndexWriter): that chunk holds every bucket and row.
-                    (long first, long last, int rows) = chunks is { } held && held.Count == count
-                        ? held[c]
-                        : count == 1 ? (long.MinValue, long.MaxValue, table.Rows) : (0, -1, -1);
-                    if (rows < 0)
-                    {
-                        break;
-                    }
+                    VortexTelemetry.SynopsisTableCorruption();
+                    continue;
+                }
 
-                    // A chunk whose struct does not decode is left out, as one whose rows do not.
-                    DType row;
-                    DType distinct = default;
-                    try
-                    {
-                        row = DTypeFlatBuffers.Read(dtypes[c], types);
-                        distinct = apart ? DTypeFlatBuffers.Read(dtypes[count + c], types) : default;
-                    }
-                    catch (VortexFormatException)
-                    {
-                        continue;
-                    }
-
-                    found.Add(new Wanted(table, new TableChunk(payload[c], first, last, rows, TableBounds.Of(null, null, apart ? payload[count + c] : null), 0), row));
-                    aparts.Add(apart ? new Apart(Whole(row, distinct, types), distinct, Layouts.FieldMask.All) : default);
+                DType row = table.RowType(file.DType, paths, types);
+                (DType main, DType distinct) = table.Distinct.Length > 0 ? RowHalves(row, table.Distinct.Length, types) : default;
+                for (int c = 0; c < chunks.Count; c++)
+                {
+                    TableChunk chunk = chunks[c];
+                    bool apart = chunk.Distinct is not null && table.Distinct.Length > 0;
+                    found.Add(new Wanted(table, chunk, apart ? main : row));
+                    aparts.Add(apart ? new Apart(row, distinct, Layouts.FieldMask.All) : default);
                     split |= apart;
                 }
             }
@@ -542,23 +556,26 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             return new SynopsisTableSet(new ScanContext([]), []);
         }
 
-        return await DecodeAsync(file.Segments, file.CreateIndexContext(0), [.. found], split ? [.. aparts] : null, cancellationToken).ConfigureAwait(false);
+        SynopsisTableSet set = await DecodeAsync(file.Segments, file.CreateIndexContext(0), [.. found], split ? [.. aparts] : null, cancellationToken).ConfigureAwait(false);
+        set.Types = types;
+        return set;
     }
 
-    /// <summary>The struct of a chunk's whole row, the fields of <paramref name="rest"/> then those of <paramref name="distinct"/>, in <paramref name="types"/>, which holds both.</summary>
-    private static DType Whole(DType rest, DType distinct, DTypeArena types)
+    /// <summary>Whether every path <paramref name="table"/>'s keys, measures and distinct sketches name is one of the <paramref name="paths"/> a file's slices name.</summary>
+    private static bool Named(SynopsisTableInfo table, int paths)
     {
-        int width = rest.FieldCount + distinct.FieldCount;
-        string[] names = new string[width];
-        DType[] fields = new DType[width];
-        for (int f = 0; f < width; f++)
+        foreach (int[] entries in (ReadOnlySpan<int[]>)[table.Keys, table.Measures, table.Distinct])
         {
-            (DType holder, int at) = f < rest.FieldCount ? (rest, f) : (distinct, f - rest.FieldCount);
-            names[f] = holder.GetFieldName(at);
-            fields[f] = holder.GetField(at);
+            foreach (int entry in entries)
+            {
+                if (SynopsisPath.Names(entry) && SynopsisPath.Place(entry) >= paths)
+                {
+                    return false;
+                }
+            }
         }
 
-        return types.Struct(names, fields, rest.Nullability);
+        return true;
     }
 
     /// <summary>

@@ -903,30 +903,60 @@ internal sealed record SynopsisContents(
                 return false;
             }
 
-            int count = 0;
-            int keyBytes = 0;
-            int declared = 0;
-            ProtoReader reader = new ProtoReader(bytes);
-            while (reader.TryReadTag(out int field, out ProtoWireType wire))
-            {
-                if (field != TagTableChunk || wire != ProtoWireType.LengthDelimited
-                    || !Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest, out IndexSegment? distinct))
-                {
-                    return false;
-                }
-
-                count++;
-                keyBytes += least.Length + greatest.Length;
-                declared += Declares(chunk.Region, distinct);
-            }
-
-            if (count != _count || keyBytes != _keyBytes || declared != _declared)
+            if (Counted(bytes) is not (int count, int keyBytes, int declared) || count != _count || keyBytes != _keyBytes || declared != _declared)
             {
                 return false;
             }
 
             System.Threading.Interlocked.CompareExchange(ref _list, bytes.ToArray(), null);
             return true;
+        }
+
+        /// <summary>
+        /// The chunks the list <paramref name="bytes"/>, read of its region <paramref name="list"/>, holds, loaded: what a reader
+        /// with no table of contents to say what the list holds reads of a file's own directory; null when the bytes do not
+        /// hold the list's checksum, or hold no chunk, or one that does not parse.
+        /// </summary>
+        internal static TableChunks? Listed(IndexSegment list, ReadOnlySpan<byte> bytes)
+        {
+            if (!list.Holds(bytes) || Counted(bytes) is not (int count and > 0, int keyBytes, int declared))
+            {
+                return null;
+            }
+
+            TableChunks chunks = new TableChunks(list, count, keyBytes, declared);
+            return chunks.Load(bytes) ? chunks : null;
+        }
+
+        /// <summary>The chunks a list's <paramref name="bytes"/> hold, the bytes of their keys' bounds and the regions they declare; null when one does not parse.</summary>
+        private static (int Count, int KeyBytes, int Declared)? Counted(ReadOnlySpan<byte> bytes)
+        {
+            int count = 0;
+            int keyBytes = 0;
+            int declared = 0;
+            try
+            {
+                ProtoReader reader = new ProtoReader(bytes);
+                while (reader.TryReadTag(out int field, out ProtoWireType wire))
+                {
+                    if (field != TagTableChunk || wire != ProtoWireType.LengthDelimited
+                        || !Chunk(reader.ReadMessage(), out TableChunk chunk, out ReadOnlySpan<byte> least, out ReadOnlySpan<byte> greatest, out IndexSegment? distinct))
+                    {
+                        return null;
+                    }
+
+                    count++;
+                    keyBytes += least.Length + greatest.Length;
+                    declared += Declares(chunk.Region, distinct);
+                }
+            }
+            catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)
+            {
+                // A list that holds its checksum yet does not parse, as a table of contents another writer forged: no chunks.
+                return null;
+            }
+
+            return (count, keyBytes, declared);
         }
 
         private static int KeyBytesOf(TableChunk[] chunks)

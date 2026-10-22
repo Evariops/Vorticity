@@ -98,6 +98,13 @@ public sealed partial class SynopsisContentsTests
             Assert.Equal(named.Tables.Select(t => t.Table), read.Tables.Select(t => t.Table), Same);
             Assert.Contains(read.Tables, t => t.Chunk.Distinct is not null);
             Assert.Equal(read.Tables.Select(t => t.Chunk.Distinct), named.Tables.Select(t => t.Chunk.Distinct));
+
+            // The directory names each table by its list alone, the one the contents name, and none of the part's columns.
+            IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
+            Assert.DoesNotContain(directory.Entries, e => e.Kind == IndexKinds.SynopsisColumns);
+            Assert.Equal(
+                periods[i].Contents!.Tables.Select(t => ((SynopsisContents.TableChunks)t.Chunks).List!.Value),
+                directory.Entries.Where(e => e.Kind == IndexKinds.SynopsisTable).Select(e => Assert.Single(e.Runs[0].Payload)));
             for (int t = 0; t < named.Tables.Count; t++)
             {
                 Assert.Equal(Columns(named.Arena, named.Tables[t].Node), Columns(read.Arena, read.Tables[t].Node));

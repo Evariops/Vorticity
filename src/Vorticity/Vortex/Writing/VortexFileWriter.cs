@@ -190,7 +190,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         List<(SynopsisTableInfo, IReadOnlyList<TableChunk>)> tables = [];
         if (_synopsisPart is { } part)
         {
-            foreach ((SynopsisTableInfo info, IReadOnlyList<TableChunk> held, IReadOnlyList<byte[]> _) in part.Tables)
+            foreach ((SynopsisTableInfo info, IReadOnlyList<TableChunk> held) in part.Tables)
             {
                 tables.Add((info, held));
             }
@@ -349,16 +349,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         private readonly RunScratch _columns = new RunScratch(spool.Memory / 2, spool.Directory, spool.Seal);
         private readonly RunScratch _held = new RunScratch(spool.Memory / 2, spool.Directory, spool.Seal);
         // Each column's chunk held: its column, its place among the column's chunks, where it lies from the part's start,
-        // its bytes and their checksum.
-        private readonly List<(int Field, int Chunk, long At, int Length, ulong Checksum)> _chunks = [];
-        private readonly List<(int Field, IndexSegment Region)> _regions = [];
+        // and its bytes.
+        private readonly List<(int Field, int Chunk, long At, int Length)> _chunks = [];
 
         // The tables as their chunks arrive, encoded and held in a scratch store of their own; the tables declared once the
-        // rows are all in, each by what it holds and its place among those held; then, once written, each with its chunks'
-        // regions and their dtypes.
+        // rows are all in, each by what it holds and its place among those held; then, once written, each with its chunks.
         private readonly List<HeldTable> _heldTables = [];
         private IReadOnlyList<(SynopsisTableInfo Table, int Held)> _declared = [];
-        private readonly List<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> _tables = [];
+        private readonly List<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> _tables = [];
 
         // What encodes the tables' chunks: the writer's own may be encoding its data's chunks on its fan at the time.
         private ArrayBlobWriter.Workspace? _tableBlobs;
@@ -397,11 +395,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             return true;
         }
 
-        /// <summary>Each chunk of the part as written: its column, and its region with its checksum.</summary>
-        internal IReadOnlyList<(int Field, IndexSegment Region)> Regions => _regions;
-
-        /// <summary>Each table of the part as written: what it is, its chunks, and the dtype of each one's rows.</summary>
-        internal IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> Tables => _tables;
+        /// <summary>Each table of the part as written: what it is, and its chunks, listed apart (<see cref="Indexes.SynopsisContents.TableChunks.List"/>).</summary>
+        internal IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> Tables => _tables;
 
         /// <summary>A table whose chunks are held as they come, by its place among those held.</summary>
         internal int OpenTable()
@@ -452,7 +447,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// <summary>
         /// A table held as its chunks come: where each waits and its bytes, those of its distinct sketches laid apart, -1 and
         /// none when it lays none apart, its buckets and its rows, and whether it was encoded against the tables' own
-        /// dictionary; and its rows' dtype, and its distinct sketches'.
+        /// dictionary; and the dtypes of its rows and of its distinct sketches, whose bytes the choice weighs with its chunks',
+        /// as it did when the directory held them.
         /// </summary>
         private sealed class HeldTable
         {
@@ -489,7 +485,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             await _columns.AppendAsync(blob, cancellationToken).ConfigureAwait(false);
-            _chunks.Add((field, chunk, at, blob.Length, System.IO.Hashing.XxHash3.HashToUInt64(blob.Span)));
+            _chunks.Add((field, chunk, at, blob.Length));
             ColumnBytes += blob.Length;
         }
 
@@ -519,11 +515,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     ArrayPool<byte>.Shared.Return(buffer);
                 }
 
-                foreach ((int field, int chunk, long at, int length, ulong checksum) in _chunks)
+                foreach ((int field, int chunk, long at, int length) in _chunks)
                 {
                     writer._columnSegments[field].At(chunk) = writer.AddSegment(
                         new SegmentSpec((ulong)(Start + at), (uint)length, (byte)VortexLimits.MaxAlignmentExponent, 0, 0));
-                    _regions.Add((field, new IndexSegment((ulong)(Start + at), (uint)length, (byte)VortexLimits.MaxAlignmentExponent, checksum)));
                 }
             }
 
@@ -576,24 +571,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     }
 
                     // The chunks one after another, each aligned as a segment is, read back from where they waited; a chunk's
-                    // distinct sketches laid apart right after it. The dtypes of the chunks' regions, then of their sketches'.
+                    // distinct sketches laid apart right after it.
                     TableChunk[] chunks = new TableChunk[held.Chunks.Count];
-                    bool apart = held.DistinctDType is not null;
-                    byte[][] dtypes = new byte[apart ? 2 * chunks.Length : chunks.Length][];
                     for (int c = 0; c < chunks.Length; c++)
                     {
                         ((long At, int Length) rows, (long At, int Length) sketches, long first, long last, int count, bool own, byte[]? least, byte[]? greatest) = held.Chunks[c];
                         IndexSegment region = await WriteHeldAsync(rows, own).ConfigureAwait(false);
                         IndexSegment? distinct = sketches.At >= 0 ? await WriteHeldAsync(sketches, own).ConfigureAwait(false) : null;
                         chunks[c] = new TableChunk(region, first, last, count, TableBounds.Of(least, greatest, distinct), 0);
-                        dtypes[c] = held.DType!;
-                        if (apart)
-                        {
-                            dtypes[chunks.Length + c] = held.DistinctDType!;
-                        }
                     }
 
-                    _tables.Add((_declared[i].Table, chunks, dtypes));
+                    _tables.Add((_declared[i].Table, chunks));
                 }
             }
             finally
@@ -607,7 +595,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // request read the chunks between the lists.
             for (int t = 0; t < _tables.Count; t++)
             {
-                (SynopsisTableInfo table, IReadOnlyList<TableChunk> written, IReadOnlyList<byte[]> dtypes) = _tables[t];
+                (SynopsisTableInfo table, IReadOnlyList<TableChunk> written) = _tables[t];
                 if (written is not TableChunk[] { Length: > 0 } chunks)
                 {
                     continue;
@@ -617,7 +605,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 long at = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
                 await writer._sink.WriteAsync(list, cancellationToken).ConfigureAwait(false);
                 TableBytes += list.Length;
-                _tables[t] = (table, new Indexes.SynopsisContents.TableChunks(IndexSegment.Of(at, list, (byte)VortexLimits.MaxAlignmentExponent), chunks), dtypes);
+                _tables[t] = (table, new Indexes.SynopsisContents.TableChunks(IndexSegment.Of(at, list, (byte)VortexLimits.MaxAlignmentExponent), chunks));
             }
 
             // A blob held, read back from where it waited, its ids renumbered to the file's when it was encoded against the
@@ -2756,10 +2744,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
-            // Where the synopsis columns' chunks lie in the synopsis part, for a reader of the part alone.
+            // The synopsis tables, each by the list of its chunks. The synopsis columns' chunks are the columns' segments, which
+            // the footer names, and their chunk directories: a day's directory listed each of them again, 7 MB.
             if (_synopsisPart is { } part)
             {
-                closed.AddSynopsisColumns(part.Regions, part.Start, part.End, _rowCount, _blockRows);
                 closed.AddSynopsisTables(part.Tables, _rowCount, _blockRows);
             }
 

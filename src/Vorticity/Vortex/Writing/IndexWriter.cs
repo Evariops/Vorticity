@@ -1840,60 +1840,23 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Names where each synopsis column's chunks lie in the synopsis part, <paramref name="start"/> to
-    /// <paramref name="end"/>: an entry per column, its one run over every block of the file's
-    /// <paramref name="rows"/> holding the chunks' regions in row order, the part's extent in its options.
+    /// Names each table of the synopsis part: an entry on the root, the table's options, its one run's payload the list of
+    /// its chunks (<see cref="SynopsisContents.TableChunks.List"/>), which names their regions and buckets, and those of the
+    /// distinct sketches a chunk lays apart. The list alone: a chunk's region and dtype each, a day's 4 759 chunks, took
+    /// 4.5 MB of the directory, which every reader of the directory read whole. A table's rows decode at the struct the
+    /// file's schema and its slices' paths give it (<see cref="SynopsisTableInfo.RowType"/>).
     /// </summary>
-    internal void AddSynopsisColumns(IReadOnlyList<(int Field, IndexSegment Region)> regions, long start, long end, long rows, int blockRows)
+    internal void AddSynopsisTables(IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> tables, long rows, int blockRows)
     {
         int length = Math.Max(blockRows, 1);
-        byte[] options = new byte[16];
-        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(options, start);
-        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(options.AsSpan(8), end);
-        SortedDictionary<int, List<IndexSegment>> byField = [];
-        foreach ((int field, IndexSegment region) in regions)
+        foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) in tables)
         {
-            if (!byField.TryGetValue(field, out List<IndexSegment>? list))
+            if (chunks is SynopsisContents.TableChunks { List: { } list })
             {
-                byField[field] = list = [];
+                _entries.Add(new IndexEntry(
+                    IndexKinds.SynopsisTable, [], (ulong)length, table.OptionBytes(),
+                    [new IndexRun(0, Blocks(rows, length), [list], [], (ulong)table.Rows, [])]));
             }
-
-            list.Add(region);
-        }
-
-        foreach ((int field, List<IndexSegment> chunks) in byField)
-        {
-            _entries.Add(new IndexEntry(
-                IndexKinds.SynopsisColumns, [checked((uint)field)], (ulong)length, options,
-                [new IndexRun(0, Blocks(rows, length), chunks, [])]));
-        }
-    }
-
-    /// <summary>
-    /// Names each table of the synopsis part: an entry on the root, its one run's payloads the table's chunks, whose
-    /// buckets and rows the entry's options say after the table's own, then, for a table of sketches that lays them apart,
-    /// the regions of its chunks' distinct sketches, as many; each at its dtype, as <paramref name="tables"/> gives them.
-    /// </summary>
-    internal void AddSynopsisTables(
-        IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> tables, long rows, int blockRows)
-    {
-        int length = Math.Max(blockRows, 1);
-        foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks, IReadOnlyList<byte[]> dtypes) in tables)
-        {
-            bool apart = chunks.Count > 0 && chunks[0].Distinct is not null;
-            IndexSegment[] regions = new IndexSegment[apart ? 2 * chunks.Count : chunks.Count];
-            for (int c = 0; c < chunks.Count; c++)
-            {
-                regions[c] = chunks[c].Region;
-                if (apart)
-                {
-                    regions[chunks.Count + c] = chunks[c].Distinct!.Value;
-                }
-            }
-
-            _entries.Add(new IndexEntry(
-                IndexKinds.SynopsisTable, [], (ulong)length, table.OptionBytes(chunks.Count > 1 ? chunks : null),
-                [new IndexRun(0, Blocks(rows, length), regions, [.. dtypes], (ulong)table.Rows, [])]));
         }
     }
 

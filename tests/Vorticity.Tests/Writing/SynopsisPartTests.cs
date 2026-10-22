@@ -1,13 +1,13 @@
 // The synopsis part: the synopsis columns' chunks, held until the end of the data and written together
-// after the rest of it, one contiguous range that the index directory names chunk by chunk, each with
-// its checksum; the rows read as they would without it.
+// after the rest of it, one contiguous range whose segments the footer names as any column's; the rows
+// read as they would without it.
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Indexes;
+using Vorticity.File;
 using Xunit;
 
 namespace Vorticity.Tests.Writing;
@@ -19,8 +19,7 @@ public sealed partial class SynopsisPartTests
     /// <summary>
     /// Twenty thousand rows in chunks of two blocks, a region and a status in the synopsis part, held in a
     /// spool of a kilobyte so that they wait in its file: every chunk of the two columns lies in one range
-    /// after the rest of the data, in the order they came, each region's bytes its checksum's, and the
-    /// rows are the ones written.
+    /// after the rest of the data, in the order they came, and the rows are the ones written.
     /// </summary>
     [Fact]
     public async Task TheSynopsisColumnsLieTogetherAfterTheData()
@@ -42,32 +41,25 @@ public sealed partial class SynopsisPartTests
                 await writer.CompleteAsync(Ct);
             }
 
-            byte[] bytes = await System.IO.File.ReadAllBytesAsync(path, Ct);
             await using VortexFile file = await VortexFile.OpenAsync(path, cancellationToken: Ct);
-            IndexDirectory directory = (await file.ReadIndexDirectoryAsync(Ct))!;
-            IndexEntry[] entries = [.. directory.Entries.Where(e => e.Kind == IndexKinds.SynopsisColumns)];
-            Assert.Equal(
-                [(uint)file.DType.IndexOfField(nameof(Row.Region)), (uint)file.DType.IndexOfField(nameof(Row.Status))],
-                entries.Select(e => e.ColumnPath[0]).Order());
+            List<VortexSegment>[] columns = await ColumnSegments.OfAsync(file, Ct);
 
-            // One range: the regions of both columns, end to end but for each segment's alignment.
-            long start = BitConverter.ToInt64(entries[0].Options, 0);
-            long end = BitConverter.ToInt64(entries[0].Options, 8);
-            IndexSegment[] regions = [.. entries.SelectMany(e => e.Runs[0].Payload).OrderBy(r => r.Offset)];
-            Assert.True(regions.Length > 4, $"{regions.Length} chunks");
-            Assert.Equal((ulong)start, regions[0].Offset);
-            Assert.Equal((ulong)end, regions[^1].Offset + regions[^1].Length);
-            for (int i = 1; i < regions.Length; i++)
+            // One range: the segments of both columns, end to end but for each segment's alignment.
+            VortexSegment[] part = [.. columns[file.DType.IndexOfField(nameof(Row.Region))]
+                .Concat(columns[file.DType.IndexOfField(nameof(Row.Status))]).OrderBy(s => s.Offset)];
+            Assert.True(part.Length > 4, $"{part.Length} chunks");
+            for (int i = 1; i < part.Length; i++)
             {
-                ulong gap = regions[i].Offset - (regions[i - 1].Offset + regions[i - 1].Length);
-                Assert.InRange(gap, 0UL, (ulong)VortexLimits.MaxAlignment - 1);
+                long gap = part[i].Offset - (part[i - 1].Offset + part[i - 1].Length);
+                Assert.InRange(gap, 0, VortexLimits.MaxAlignment - 1);
             }
 
-            Assert.All(regions, region => Assert.True(region.Holds(bytes.AsSpan((int)region.Offset, (int)region.Length))));
-
-            // After every other data segment, and before the index regions.
-            HashSet<long> part = [.. regions.Select(r => (long)r.Offset)];
-            Assert.All(file.SegmentMap.Where(s => !part.Contains((long)s.Offset) && (long)s.Offset < start), s => Assert.True((long)s.Offset + s.Length <= start));
+            // After every other column's segments.
+            long start = part[0].Offset;
+            foreach (VortexSegment other in columns[file.DType.IndexOfField(nameof(Row.Id))].Concat(columns[file.DType.IndexOfField(nameof(Row.Host))]))
+            {
+                Assert.True(other.Offset + other.Length <= start, $"a segment at {other.Offset} past the part's start at {start}");
+            }
 
             Assert.Equal(rows, await file.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct));
         }

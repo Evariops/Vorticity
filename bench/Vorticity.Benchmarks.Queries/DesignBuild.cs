@@ -244,18 +244,25 @@ internal static class DesignBuild
         await foreach (TreeEntry entry in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, default))
         {
             ObjectEntry held = ObjectEntry.FromBytes(entry.Value.Span);
-            await using ObjectLease lease = await dataset.RentAsync(held, default);
-            IndexDirectory? directory = await lease.File.ReadIndexDirectoryAsync();
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  period of {held.Rows:N0} rows, {lease.File.FileLength / 1e6:F0} MB:"));
-            foreach (IndexEntry table in directory?.Entries.Where(e => e.Kind == IndexKinds.SynopsisTable) ?? [])
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  period of {held.Rows:N0} rows, {held.Bytes / 1e6:F0} MB:"));
+            if (held.Contents is not { } contents)
             {
-                if (SynopsisTableInfo.From(table.Options) is { } info)
+                continue;
+            }
+
+            // The tables as the entry's table of contents names them, their chunks in the lists it names apart.
+            await dataset.LoadSynopsisListsAsync([(held, contents, null)], default);
+            foreach ((SynopsisTableInfo info, IReadOnlyList<TableChunk> chunks) in contents.Tables)
+            {
+                long bytes = 0;
+                foreach (TableChunk chunk in chunks)
                 {
-                    long bytes = table.Runs[0].Payload.Sum(chunk => (long)chunk.Length);
-                    Console.WriteLine(string.Create(
-                        CultureInfo.InvariantCulture,
-                        $"    {info.Kind} per {info.Bucket} of {info.Keys.Length} keys: {info.Rows:N0} rows, {bytes / 1e3:F0} KB in {table.Runs[0].Payload.Count} chunks"));
+                    bytes += chunk.Region.Length + (chunk.Distinct?.Length ?? 0);
                 }
+
+                Console.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"    {info.Kind} per {info.Bucket} of {info.Keys.Length} keys: {info.Rows:N0} rows, {bytes / 1e3:F0} KB in {chunks.Count} chunks"));
             }
         }
     }
