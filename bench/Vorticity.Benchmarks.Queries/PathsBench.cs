@@ -95,6 +95,13 @@ internal static class PathsBench
         /// <summary>Their rows a second (<c>--qp-rate</c>): a tenth of the design's.</summary>
         internal double QpRate { get; init; } = 5_000;
 
+        /// <summary>
+        /// Whether the client's spans and log records declare what their questions read (<c>--declared</c>): groupings of the
+        /// spans' synopsis columns for QP-1 and QP-2, and the log records' status code and feature flag shredded, on append too,
+        /// for QP-3, QP-9 and QP-10. Their stores are named apart.
+        /// </summary>
+        internal bool Declared { get; init; }
+
         internal bool BuildOnly { get; init; }
 
         internal bool Verify { get; init; }
@@ -162,18 +169,30 @@ internal static class PathsBench
                 : DesignBuild.LoadAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelPeriods, settings.WriteDegree, Path.Combine(settings.Store, "scratch"), settings.RandomIds));
         Built logs = await EnsureAsync(settings, $"logs-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
         Built? spans = !settings.Qp ? null
-            : await EnsureAsync(settings, $"spans-v2-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}", store => FillSpansAsync(store, settings));
+            : await EnsureAsync(settings, $"spans-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}", store => FillSpansAsync(store, settings));
         Built? logs2 = !settings.Qp ? null
-            : await EnsureAsync(settings, $"logs-v2-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}", store => FillLogsV2Async(store, settings));
+            : await EnsureAsync(settings, $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}", store => FillLogsV2Async(store, settings));
         if (settings.BuildOnly)
         {
             return 0;
         }
 
+        // --entries: each store's entries, and with --explain its tables, with no question asked.
         if (settings.Entries)
         {
-            await EntriesAsync(requests.Directory);
-            await EntriesAsync(logs.Directory);
+            foreach (Built? built in new[] { requests, logs, spans, logs2 })
+            {
+                if (built is not null)
+                {
+                    Console.WriteLine($"  {built.Directory}");
+                    await EntriesAsync(built.Directory);
+                    if (settings.Explain)
+                    {
+                        await TablesAsync(built);
+                    }
+                }
+            }
+
             return 0;
         }
 
@@ -189,8 +208,13 @@ internal static class PathsBench
 
         if (settings.Explain)
         {
-            await TablesAsync(requests);
-            await TablesAsync(logs);
+            foreach (Built? built in new[] { requests, logs, spans, logs2 })
+            {
+                if (built is not null)
+                {
+                    await TablesAsync(built);
+                }
+            }
         }
 
         DateTimeOffset end = QuestionBench.Start.AddHours(settings.Hours);
@@ -757,6 +781,15 @@ internal static class PathsBench
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
             Identifiers = [nameof(GeneratedSpanV2.TraceId), nameof(GeneratedSpanV2.SpanId)],
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
+
+            // --declared: the columns QP-1 and QP-2 filter and group by together, which the order of the spans' facets
+            // places far apart.
+            SynopsisGroupings = !settings.Declared ? null :
+            [
+                [nameof(GeneratedSpanV2.Service), nameof(GeneratedSpanV2.HttpStatus), nameof(GeneratedSpanV2.Route)],
+                [nameof(GeneratedSpanV2.Route), nameof(GeneratedSpanV2.Pod)],
+                [nameof(GeneratedSpanV2.Pod), nameof(GeneratedSpanV2.Status), nameof(GeneratedSpanV2.ExceptionGroup)],
+            ],
         };
         long rows = await IncrementalBuild.FillAsync<GeneratedSpanV2>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>
         {
@@ -776,6 +809,12 @@ internal static class PathsBench
         return (rows, needle);
     }
 
+    /// <summary>The log records' status code as QP-3 and QP-9 read it.</summary>
+    private const string StatusCode = "Attributes['http.response.status_code'].AsInt64()";
+
+    /// <summary>The feature flag QP-10 reads.</summary>
+    private const string NewCart = "Attributes['feature.flag.new-cart'].AsString()";
+
     /// <summary>The client's log records (<see cref="LogGeneratorV2"/>) of <c>--qp-hours</c> at <c>--qp-rate</c>, as the spans.</summary>
     private static async Task<(long Rows, string Needle)> FillLogsV2Async(IObjectStore store, Settings settings)
     {
@@ -788,6 +827,12 @@ internal static class PathsBench
             ClusteringKey = [nameof(LogRow.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
+
+            // --declared: the keys of the attributes QP-3, QP-9 and QP-10 filter by, shredded by every job and every append,
+            // and the service they group by with them.
+            ShreddedPaths = !settings.Declared ? null : [StatusCode, NewCart],
+            ShredOnAppend = settings.Declared,
+            SynopsisGroupings = !settings.Declared ? null : [[StatusCode, nameof(LogRow.ServiceName)], [NewCart, nameof(LogRow.ServiceName)]],
         };
         long rows = await IncrementalBuild.FillAsync<LogRow>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>
         {

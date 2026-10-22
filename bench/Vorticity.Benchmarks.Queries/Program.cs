@@ -292,6 +292,7 @@ if (Text(args, "--micro") == "paths")
         Rebuild = args.Contains("--rebuild"),
         RandomIds = args.Contains("--random-ids"),
         Qp = args.Contains("--qp"),
+        Declared = args.Contains("--declared"),
         QpHours = Option(args, "--qp-hours", 30),
         QpRate = Option(args, "--qp-rate", 5_000),
         BuildOnly = args.Contains("--build-only"),
