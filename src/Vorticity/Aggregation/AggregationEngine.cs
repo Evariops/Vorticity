@@ -2539,9 +2539,10 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// Folds a batch of states (<see cref="RecordBatch.CarriesStates"/>), which only a pass that asked
-    /// for them (<see cref="StateRequest"/>) is sent: its key columns, read by the names and through the
-    /// functions the rows' are, give each row its group, and each slot folds its aggregate's states, a row
-    /// standing for the rows of the data it counts, to the bits those rows would have given.
+    /// for them (<see cref="StateRequest"/>) is sent: its key columns, read through the functions the rows'
+    /// are, by the names a batch of states gives them (<see cref="StateRequest.KeyField"/>), give each row
+    /// its group, and each slot folds its aggregate's states, a row standing for the rows of the data it
+    /// counts, to the bits those rows would have given.
     /// </summary>
     private void ProcessStates(RecordBatch batch)
     {
@@ -2577,7 +2578,7 @@ internal sealed class AggregationPartition
         {
             for (int c = 0; c < _keyCount; c++)
             {
-                int node = FilterEvaluator.Resolve(arena, root, _columns[c].Field, rows);
+                int node = FilterEvaluator.Resolve(arena, root, StateRequest.KeyField(_columns[c].Field), rows);
                 while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
                 {
                     node = arena.GetNode(node).StorageIndex;
@@ -2630,7 +2631,7 @@ internal sealed class AggregationPartition
 
                 // A distinct count folds the column the states are keyed by, a value a row of states: the values the
                 // rows hold, each met once or more, which a distinct count does not tell apart.
-                int node = FilterEvaluator.Resolve(arena, root, _columns[column].Field, rows);
+                int node = FilterEvaluator.Resolve(arena, root, StateRequest.KeyField(_columns[column].Field), rows);
                 while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
                 {
                     node = arena.GetNode(node).StorageIndex;

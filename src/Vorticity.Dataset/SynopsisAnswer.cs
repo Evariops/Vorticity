@@ -192,7 +192,10 @@ internal sealed class SynopsisPart(SynopsisTableInfo table)
 /// </summary>
 /// <param name="Parts">The tables read, each with the buckets it folds.</param>
 /// <param name="Edges">The slices whose rows are read, the window or a key of time cutting through them.</param>
-/// <param name="KeyFilter">The part of the filter on the tables' keys, evaluated on their rows; null for none.</param>
+/// <param name="KeyFilter">
+/// The part of the filter on the tables' keys, evaluated on their rows, its keys under the names the rows give them
+/// (<see cref="StateRequest.KeyField"/>); null for none.
+/// </param>
 /// <param name="Request">What the aggregation asks: the states a row taken out must be taken out of.</param>
 /// <param name="Excluded">
 /// The values of identifiers the filter leaves out, <c>id != v || id == null</c>: the whole minus the part, the
@@ -522,7 +525,7 @@ internal sealed record SynopsisAnswer(
         }
 
         return new SynopsisAnswer(
-            parts, (IReadOnlyList<TimeSlice>?)edges ?? [], keyFilter, request,
+            parts, (IReadOnlyList<TimeSlice>?)edges ?? [], keyFilter is null ? null : GroupPredicates.Rewrite(keyFilter, StateRequest.KeyField), request,
             (IReadOnlyList<(VortexExpr, VortexExpr)>?)excluded ?? [])
         {
             Constants = (IReadOnlyList<(string, FilterLiteral)>?)constants ?? [],
@@ -1128,7 +1131,7 @@ internal sealed record SynopsisAnswer(
                 column = function.Column;
             }
 
-            read.Add(column.Path);
+            read.Add(StateRequest.KeyColumn(column.Path));
             if (Request.DistinctColumn(k) is { } distinct)
             {
                 read.Add(distinct);

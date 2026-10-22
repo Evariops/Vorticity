@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -18,12 +19,87 @@ namespace Vorticity.Aggregating;
 /// table of sketches answers, or a distinct count of a column, exact or approximate, which the states are then
 /// keyed by too; none filtered, nor a key's top, nor a chosen row's
 /// column, and whose every key is a column, a function of one, or a path of a variant a synopsis counts
-/// (<see cref="VariantFieldExpr.CountedClass"/>). A path's states carry its text as their name.
+/// (<see cref="VariantFieldExpr.CountedClass"/>). A path's states carry its text as their name, a key's column the
+/// name <see cref="KeyColumn"/> gives it.
 /// </remarks>
 internal sealed class StateRequest
 {
     /// <summary>The column of the rows of the data a row of states stands for.</summary>
     internal const string RowsColumn = "count";
+
+    /// <summary>The column of a table of states' buckets, which a batch of states carries under the instant's name.</summary>
+    internal const string BucketColumn = "bucket";
+
+    /// <summary>What ends the name of a key's column whose own name a column of states could take (<see cref="KeyColumn"/>).</summary>
+    private const string KeyMark = "#key";
+
+    /// <summary>The words that end the name of a column of states, after a dot and the name of its measure or key.</summary>
+    private static readonly string[] StateWords = ["values", "low", "high", "m0", "m1", "m2", "meta", "min", "max", "sketch", "distinct"];
+
+    /// <summary>The keys <see cref="KeyField"/> renamed, each renamed once and let go with its key.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<FieldExpr, FieldExpr> Renamed = [];
+
+    /// <summary>
+    /// The name a key's column takes in a table of states and in a batch of them: its own, unless a column of states could
+    /// take it too, the bucket's, the rows', or one that ends in a dot and a state's word, or it ends in the mark the others
+    /// take; then its own followed by that mark. No key takes the name of another column, nor of another key, and a table
+    /// none of whose keys is named so keeps the names it always had.
+    /// </summary>
+    internal static string KeyColumn(string name) => Reserved(name) ? name + KeyMark : name;
+
+    /// <summary>
+    /// The key <paramref name="key"/> as a batch of states carries it: its column under the name <see cref="KeyColumn"/>
+    /// gives it, through the same functions; a path as it is, under its text. A key whose column keeps its name is
+    /// itself, and one renamed is made once for the key.
+    /// </summary>
+    internal static FieldExpr KeyField(FieldExpr key)
+    {
+        FieldExpr column = ColumnOf(key);
+        return column.GetType() == typeof(FieldExpr) && Reserved(column.Path) ? Renamed.GetValue(key, Rename) : key;
+    }
+
+    /// <summary>The key <paramref name="key"/> over its column renamed by <see cref="KeyColumn"/>.</summary>
+    private static FieldExpr Rename(FieldExpr key)
+    {
+        FieldExpr named = new FieldExpr([KeyColumn(ColumnOf(key).Path)]);
+        return key is FunctionFieldExpr functions ? functions.Over(named) : named;
+    }
+
+    /// <summary>The column <paramref name="key"/> reads, under its functions.</summary>
+    private static FieldExpr ColumnOf(FieldExpr key)
+    {
+        while (key is FunctionFieldExpr function)
+        {
+            key = function.Column;
+        }
+
+        return key;
+    }
+
+    /// <summary>Whether a column of states could take the name <paramref name="name"/> (<see cref="KeyColumn"/>).</summary>
+    private static bool Reserved(string name)
+    {
+        if (name is RowsColumn or BucketColumn || name.EndsWith(KeyMark, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        ReadOnlySpan<char> word = name.AsSpan(name.LastIndexOf('.') + 1);
+        if (word.Length == name.Length)
+        {
+            return false;
+        }
+
+        foreach (string state in StateWords)
+        {
+            if (word.SequenceEqual(state))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private StateRequest(FieldExpr[] keys, string?[] inputs, FieldExpr?[] inputFields, AggregateKind[] kinds)
     {

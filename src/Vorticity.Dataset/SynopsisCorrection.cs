@@ -109,11 +109,13 @@ internal static class SynopsisCorrection
         }
 
         // Per measure and table row, whether a row taken out held one of its extremes: past that, the top of
-        // its float sum may be gone with it.
+        // its float sum may be gone with it. Per measure, whether its sum takes a float's five words.
         bool[][] spent = new bool[table.Measures.Length][];
+        bool[] floats = new bool[table.Measures.Length];
         for (int m = 0; m < spent.Length; m++)
         {
             spent[m] = new bool[rows];
+            floats[m] = SynopsisTableInfo.SumsFloats(table.Measures[m], schema, []);
         }
 
         foreach (RecordBatch batch in removed)
@@ -123,7 +125,8 @@ internal static class SynopsisCorrection
             int[] keyNodes = new int[keys];
             for (int k = 0; k < keys; k++)
             {
-                int field = struct_.DType.IndexOfField(rowType.GetFieldName(1 + k));
+                // The rows hold a key under its column's name, which a table may have marked (StateRequest.KeyColumn).
+                int field = struct_.DType.IndexOfField(schema.GetFieldName(table.Keys[k]));
                 if (field < 0)
                 {
                     return false;
@@ -193,8 +196,7 @@ internal static class SynopsisCorrection
                 int column = count + 1;
                 for (int m = 0; m < measureNodes.Length; m++)
                 {
-                    bool floats = rowType.GetFieldName(column + 1).EndsWith(".sum.m0", StringComparison.Ordinal);
-                    int words = floats ? 5 : 2;
+                    int words = floats[m] ? 5 : 2;
                     if (measureNodes[m] >= 0 && LiteralReader.TryRead(from, measureNodes[m], r, out FilterLiteral value)
                         && !Remove(states, column, words, row, value, needs[m], ref spent[m][row]))
                     {

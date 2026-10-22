@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.File;
 using Vorticity.Serialization.Protobuf;
@@ -145,52 +146,37 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// <paramref name="paths"/>, built in <paramref name="types"/>: the bucket, each key at its field's type
     /// or its path's class, the count, then per measure its count of values, its sum's words (two for an
     /// integer, five for a float), its least and its greatest, all 64-bit; for a table of sketches, then each
-    /// measure's sketch and each of its <see cref="Distinct"/> keys' distinct sketch, binary. The writer builds its rows at
-    /// this type, and a reader decodes them at it.
+    /// measure's sketch and each of its <see cref="Distinct"/> keys' distinct sketch, binary. The names are those a batch
+    /// of states reads (<see cref="StateRequest"/>), a key's the one <see cref="StateRequest.KeyColumn"/> gives it, so
+    /// that no key takes another column's. The writer builds its rows at this type, and a reader decodes them at it.
     /// </summary>
     internal DType RowType(DType schema, IReadOnlyList<SynopsisPath> paths, DTypeArena types)
     {
         DType longs = types.Primitive(PType.I64, Nullability.NonNullable);
-        List<string> names = ["bucket"];
+        List<string> names = [StateRequest.BucketColumn];
         List<DType> fields = [longs];
         foreach (int key in Keys)
         {
-            names.Add(NameOf(key, schema, paths));
+            names.Add(StateRequest.KeyColumn(NameOf(key, schema, paths)));
             fields.Add(SynopsisPath.Names(key)
                 ? ClassType(paths[SynopsisPath.Place(key)].Class, types)
                 : VortexTypes.ToDType(VortexTypes.FromDType(schema.GetField(key)), types));
         }
 
-        names.Add("count");
+        names.Add(StateRequest.RowsColumn);
         fields.Add(longs);
         foreach (int measure in Measures)
         {
             string name = NameOf(measure, schema, paths);
-            bool floats;
-            if (SynopsisPath.Names(measure))
-            {
-                floats = paths[SynopsisPath.Place(measure)].Class == Types.Variants.VariantClass.Double;
-            }
-            else
-            {
-                DType dtype = schema.GetField(measure);
-                while (dtype.Kind == DTypeKind.Extension)
-                {
-                    dtype = dtype.StorageType;
-                }
-
-                floats = dtype.PType.IsFloat();
-            }
-
-            string[] words = floats ? ["m0", "m1", "m2", "meta", "high"] : ["low", "high"];
-            names.Add($"{name}.values");
+            string[] words = SumsFloats(measure, schema, paths) ? ["m0", "m1", "m2", "meta", "high"] : ["low", "high"];
+            names.Add(StateRequest.ValuesOf(name));
             foreach (string word in words)
             {
-                names.Add($"{name}.sum.{word}");
+                names.Add(StateRequest.SumWord(name, word));
             }
 
-            names.Add($"{name}.min");
-            names.Add($"{name}.max");
+            names.Add(StateRequest.LeastOf(name));
+            names.Add(StateRequest.GreatestOf(name));
             for (int i = 0; i < words.Length + 3; i++)
             {
                 fields.Add(longs);
@@ -202,13 +188,13 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             DType sketch = types.Binary(Nullability.NonNullable);
             foreach (int measure in Measures)
             {
-                names.Add($"{NameOf(measure, schema, paths)}.sketch");
+                names.Add(StateRequest.SketchOf(NameOf(measure, schema, paths)));
                 fields.Add(sketch);
             }
 
             foreach (int key in Distinct)
             {
-                names.Add($"{NameOf(key, schema, paths)}.distinct");
+                names.Add(StateRequest.DistinctOf(NameOf(key, schema, paths)));
                 fields.Add(sketch);
             }
         }
@@ -216,11 +202,34 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         return types.Struct([.. names], [.. fields], Nullability.NonNullable);
     }
 
-    /// <summary>The name a key or measure <paramref name="entry"/> takes in a table: its field's, or its path's, <c>field["key"]</c>.</summary>
+    /// <summary>
+    /// The name of a key or measure <paramref name="entry"/>: its field's, or its path's, <c>field["key"]</c>. A measure's
+    /// states are named from it, and a key's column in a table by <see cref="StateRequest.KeyColumn"/>.
+    /// </summary>
     internal static string NameOf(int entry, DType schema, IReadOnlyList<SynopsisPath> paths) =>
         SynopsisPath.Names(entry) && paths[SynopsisPath.Place(entry)] is { } path
             ? $"{schema.GetFieldName(path.Field)}[\"{path.Key}\"]"
             : schema.GetFieldName(entry);
+
+    /// <summary>
+    /// Whether the sum of measure <paramref name="measure"/> takes a float's five words rather than an integer's two: a
+    /// path of doubles, or a column whose storage holds floats.
+    /// </summary>
+    internal static bool SumsFloats(int measure, DType schema, IReadOnlyList<SynopsisPath> paths)
+    {
+        if (SynopsisPath.Names(measure))
+        {
+            return paths[SynopsisPath.Place(measure)].Class == Types.Variants.VariantClass.Double;
+        }
+
+        DType dtype = schema.GetField(measure);
+        while (dtype.Kind == DTypeKind.Extension)
+        {
+            dtype = dtype.StorageType;
+        }
+
+        return dtype.PType.IsFloat();
+    }
 
     /// <summary>The nullable type a path's values of <paramref name="class"/> are read at: the typed column the shredder builds for it.</summary>
     internal static DType ClassType(Types.Variants.VariantClass @class, DTypeArena types) => @class switch

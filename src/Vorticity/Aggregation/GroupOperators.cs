@@ -142,17 +142,44 @@ internal static class GroupPredicates
         return fields.Exists(field => field is ResultFieldExpr);
     }
 
-    /// <summary><paramref name="predicate"/> with each field replaced by <paramref name="map"/>'s.</summary>
-    internal static VortexExpr Rewrite(VortexExpr predicate, Func<FieldExpr, FieldExpr> map) => predicate switch
+    /// <summary>
+    /// <paramref name="predicate"/> with each field replaced by <paramref name="map"/>'s: a part of it whose fields
+    /// <paramref name="map"/> gives back as they are is kept as it is, the whole predicate when none changes.
+    /// </summary>
+    internal static VortexExpr Rewrite(VortexExpr predicate, Func<FieldExpr, FieldExpr> map)
     {
-        ComparisonExpr comparison => new ComparisonExpr(map(comparison.Field), comparison.Op, comparison.Value),
-        NullCheckExpr check => new NullCheckExpr(map(check.Field), check.IsNull),
-        InExpr membership => new InExpr(map(membership.Field), membership.Literals),
-        StringMatchExpr match => new StringMatchExpr(map(match.Field), match.Op, match.Pattern, match.Escape),
-        ListContainsExpr contains => new ListContainsExpr(map(contains.Field), contains.Value),
-        ColumnComparisonExpr columns => new ColumnComparisonExpr(map(columns.Left), columns.Op, map(columns.Right)),
-        LogicalExpr logical => Expr.Logical(logical.IsAnd, Rewrite(logical.Left, map), Rewrite(logical.Right, map)),
-        NotExpr not => new NotExpr(Rewrite(not.Operand, map)),
-        _ => predicate,
-    };
+        switch (predicate)
+        {
+            case ComparisonExpr comparison:
+                return Changed(comparison.Field, map, out FieldExpr field) ? new ComparisonExpr(field, comparison.Op, comparison.Value) : predicate;
+            case NullCheckExpr check:
+                return Changed(check.Field, map, out field) ? new NullCheckExpr(field, check.IsNull) : predicate;
+            case InExpr membership:
+                return Changed(membership.Field, map, out field) ? new InExpr(field, membership.Literals) : predicate;
+            case StringMatchExpr match:
+                return Changed(match.Field, map, out field) ? new StringMatchExpr(field, match.Op, match.Pattern, match.Escape) : predicate;
+            case ListContainsExpr contains:
+                return Changed(contains.Field, map, out field) ? new ListContainsExpr(field, contains.Value) : predicate;
+            case ColumnComparisonExpr columns:
+                bool left = Changed(columns.Left, map, out FieldExpr leftField);
+                bool right = Changed(columns.Right, map, out FieldExpr rightField);
+                return left || right ? new ColumnComparisonExpr(leftField, columns.Op, rightField) : predicate;
+            case LogicalExpr logical:
+                VortexExpr first = Rewrite(logical.Left, map);
+                VortexExpr second = Rewrite(logical.Right, map);
+                return ReferenceEquals(first, logical.Left) && ReferenceEquals(second, logical.Right) ? predicate : Expr.Logical(logical.IsAnd, first, second);
+            case NotExpr not:
+                VortexExpr operand = Rewrite(not.Operand, map);
+                return ReferenceEquals(operand, not.Operand) ? predicate : new NotExpr(operand);
+            default:
+                return predicate;
+        }
+    }
+
+    /// <summary>Whether <paramref name="map"/> gives <paramref name="field"/> another field, <paramref name="mapped"/>.</summary>
+    private static bool Changed(FieldExpr field, Func<FieldExpr, FieldExpr> map, out FieldExpr mapped)
+    {
+        mapped = map(field);
+        return !ReferenceEquals(mapped, field);
+    }
 }
