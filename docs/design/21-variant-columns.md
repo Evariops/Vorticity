@@ -202,6 +202,13 @@ rows. The others read their rows, each for a reason that holds at any scale:
   it, so they cannot give the others' group.
 - `ToInt64()` reads every class.
 
+Declared, the first two answer from tables too. A key the application declares shredded
+(`DatasetOptions.ShreddedPaths`) is a column of every object whatever share of the rows holds it, so
+it enters the order and keys the tables as any column does; a grouping that names it with
+`ServiceName` (`DatasetOptions.SynopsisGroupings`) keeps a table of the two by hour and by object,
+whatever columns the order places between them. `ToInt64()` still reads the rows: a key is counted in
+the one class most of its values hold.
+
 `AsDouble()` reads floats too, which the double class the tables count leaves out. Each object's slice
 table says, path by path, whether the object holds a float there, so a question that reads a double
 path so answers from the tables of every object that holds none and reads the rows of the others: a
@@ -223,7 +230,7 @@ rows and the 640 rows of one object when one of its rows holds a float.
 | keys that are data | one lookup: the blocks its postings name. A grouping by key: every entry of the path directories | the path directory, which counts the keys of the residual | a grouping over keys reads them all |
 | a path whose type class changes from row to row | for a question on the class left in the field's `value`, that `value` in every chunk that holds the class | the dominant class is shredded per chunk, and the path map's counts skip the chunks that hold none of the class asked | half and half costs the parse of half the rows, for the class not shredded |
 | a range on a shredded path whose values the order scatters, such as a duration | the path's typed column in every chunk that holds it | block statistics kept where they prune, those that prune least dropped first under the budget ([columns nothing summarizes](20-time-window-aggregates.md#55-columns-nothing-summarizes)) | the path's bytes, as for a declared column |
-| rows not yet out of level 0, which appends write unshredded | every variant of those rows parsed, for any path: eight appends of three seconds hold 1.2 × 10⁶ rows, about 120 MB of attributes and 60 to 120 ms of one core to parse, spread over the lanes (estimate) | the compaction loop shreds them as they leave level 0, and each query node keeps a shredded copy of an object of level 0 until it leaves | a parse per node and per object of level 0, and more behind a lagging loop |
+| rows not yet out of level 0, which appends write unshredded | every variant of those rows parsed, for any path: eight appends of three seconds hold 1.2 × 10⁶ rows, about 120 MB of attributes and 60 to 120 ms of one core to parse, spread over the lanes (estimate) | the compaction loop shreds them as they leave level 0, and each query node keeps a shredded copy of an object of level 0 until it leaves; a handle that shreds its declared keys at each append (`ShredOnAppend`) leaves objects read as they lie | a parse per node and per object of level 0, and more behind a lagging loop |
 | an object at its column budget | the paths left over stay in the residual | the paths that pay least are the ones left | their rows' residual |
 | a question over keys no chunk shreds | each chunk's segment, its residual parsed | the chunk gives its residual alone, the keys it shreds neither decoded nor put back, three times faster over log records | the residual's parse |
 | many whole rows shown | a take per shredded column of each row's shape | rows of one shape read the same columns | in proportion to the rows and their paths |
@@ -272,7 +279,7 @@ rows and the 640 rows of one object when one of its rows holds a float.
 | 9 | paths left in the residual | counted by the synopsis where its budget admits them, over the rows that hold them, so they answer as measures | counted only once shredded |
 | 10 | the order inside a slice | by the runs each column adds, measured on a sample of the object's first slice, fixed per object | by numbers of distinct values, per slice, as for declared columns alone |
 | 11 | the paths the table of contents names | every table kept, about 50 bytes each, 80 to 110 when it holds its chunks, and each variant column's path directory | those a cost model weighs against the bytes of every leaf entry |
-| 12 | where shredding happens | in the jobs that already rewrite every row of a slice, level 0's exit, the fresh merges and the seal, with level 0's variants shredded in memory once per query node | in the append, as other writers do, which puts its cost on ingestion |
+| 12 | where shredding happens | in the jobs that already rewrite every row of a slice, level 0's exit, the fresh merges and the seal, with level 0's variants shredded in memory once per query node; the keys an application declares (`DatasetOptions.ShreddedPaths`) shredded by every job whatever their share of the rows, and at each append too by a handle that asks it (`ShredOnAppend`): 65 ms an append of 100 000 rows of eight keys against 23, for an object 5 % smaller (measured) | in every append, as other writers do, which puts its cost on every ingestion |
 | 13 | reading one path | the path map, and only the buffers of the top-level key read | every chunk's segment read whole, every path's bytes with it |
 | 14 | the variant column's chunks | long chunks of its own, about 10⁶ rows | the file's chunks, which multiply the trees |
 | 15 | where what the format lacks for a path lives | the index directory, which Rust never reads, until an edition freezes a layout for paths | a layout of our own, which a strict Rust reader refuses to open ([where an index lives](10-indexes.md#2-where-an-index-lives)) |
@@ -282,7 +289,7 @@ rows and the 640 rows of one object when one of its rows holds a float.
 | 19 | the validity of a shredded field | through the compressor, as runs where it has few, which Rust reads. `vortex.sparse` at nine nulls in ten, where each byte it saves costs about a third of a nanosecond of decode on integers, doubles and text alike (measured) | a plain bitmap, a bit per row and per field, or `vortex.sparse` chosen per chunk by that price, which makes about the same choices and needs the dense plan priced first |
 | 20 | the shapes a variant chunk holds | each chunk shreds the keys its rows hold, in the order by runs (measured). The shape first waits for the price of a run | the shape first in the order, chunks cut where the shape changes, or a budget that counts a chunk's shapes |
 | 21 | a path's encoding across chunks | chosen per chunk, each key's region of the path map one zstd frame, 32 to 82 bytes a chunk (measured) | fixed per object, at a cost in compression |
-| 22 | the variants of level 0 | shredded in memory once per query node and object, kept until it leaves level 0 | shredded in the append, from the previous object's choice of paths |
+| 22 | the variants of level 0 | shredded in memory once per query node and object, kept until it leaves level 0, a lock per object and its memory reserved before the copy; an object an append shredded read as it lies, with no copy | shredded in the append, from the previous object's choice of paths, for every handle |
 
 ## 8. Alternatives weighed
 
