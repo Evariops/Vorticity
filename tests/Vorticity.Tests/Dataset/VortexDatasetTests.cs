@@ -218,6 +218,31 @@ public sealed class VortexDatasetTests
     }
 
     [Fact]
+    public async Task OptionsBuiltAlikeAreEqualAndEachCreationDrawsItsSeed()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Assert.Equal(new DatasetOptions(), new DatasetOptions());
+
+        DTypeArena types = new DTypeArena();
+        await using MemoryObjectStore first = new MemoryObjectStore();
+        await using MemoryObjectStore second = new MemoryObjectStore();
+        await using VortexDataset one = await VortexDataset.CreateAsync(first, Schema(types), new DatasetOptions(), ct);
+        await using VortexDataset other = await VortexDataset.CreateAsync(second, Schema(types), new DatasetOptions(), ct);
+        Assert.NotEqual(0UL, one.Seed);
+        Assert.NotEqual(one.Seed, other.Seed);
+
+        // A seed given is the one written, and the one a handle opened later chunks by.
+        await using MemoryObjectStore third = new MemoryObjectStore();
+        await using (VortexDataset seeded = await VortexDataset.CreateAsync(third, Schema(types), new DatasetOptions { Seed = 42 }, ct))
+        {
+            Assert.Equal(42UL, seeded.Seed);
+        }
+
+        await using VortexDataset reopened = await VortexDataset.OpenAsync(third, cancellationToken: ct);
+        Assert.Equal(42UL, reopened.Seed);
+    }
+
+    [Fact]
     public async Task OpeningAStoreWithoutADatasetSaysSo()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

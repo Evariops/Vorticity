@@ -2165,7 +2165,7 @@ public sealed class VortexDataset : IAsyncDisposable
         CommitHeader template = new CommitHeader
         {
             Version = 1,
-            Seed = options.Seed,
+            Seed = DatasetOptions.SeedOf(options),
             Schema = DTypeProtobuf.Serialize(schema),
             ClusteringKey = [.. options.ClusteringKey ?? []],
             Retention = options.Retention,

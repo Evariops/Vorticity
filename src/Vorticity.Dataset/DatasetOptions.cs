@@ -367,8 +367,23 @@ public sealed record DatasetOptions
     /// </summary>
     internal int InlineVectorBytes { get; init; } = 256;
 
-    /// <summary>The chunking seed, drawn once at creation and carried by every header.</summary>
-    internal ulong Seed { get; init; } = (ulong)Random.Shared.NextInt64();
+    /// <summary>
+    /// The chunking seed every header carries; 0, the default, for one drawn at creation (<see cref="SeedOf"/>), so that
+    /// options built alike are equal.
+    /// </summary>
+    internal ulong Seed { get; init; }
+
+    /// <summary>The seed a creation under <paramref name="options"/> writes: theirs, or one drawn now, never 0.</summary>
+    internal static ulong SeedOf(DatasetOptions options)
+    {
+        ulong seed = options.Seed;
+        while (seed == 0)
+        {
+            seed = (ulong)Random.Shared.NextInt64();
+        }
+
+        return seed;
+    }
 
     /// <summary>
     /// The compaction settings every header carries: the level cap, level 1's object size and the
