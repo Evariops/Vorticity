@@ -195,7 +195,7 @@ internal static class SynopsisOrder
             case PType.F64:
             {
                 double d = MemoryMarshal.Read<double>(value);
-                d = double.IsNaN(d) ? double.NaN : d == 0 ? 0 : d;
+                d = FloatKey.Normal(d);
                 MemoryMarshal.Write(scratch, in d);
                 return scratch[..sizeof(double)];
             }
@@ -203,7 +203,7 @@ internal static class SynopsisOrder
             case PType.F32:
             {
                 float f = MemoryMarshal.Read<float>(value);
-                f = float.IsNaN(f) ? float.NaN : f == 0 ? 0 : f;
+                f = FloatKey.Normal(f);
                 MemoryMarshal.Write(scratch, in f);
                 return scratch[..sizeof(float)];
             }

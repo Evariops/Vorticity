@@ -216,14 +216,14 @@ internal sealed class FixedCardinalitySlot<TValue>(StorageKind kind) : Cardinali
         if (typeof(TValue) == typeof(double))
         {
             double d = Unsafe.As<TValue, double>(ref value);
-            d = double.IsNaN(d) ? double.NaN : d == 0 ? 0 : d;
+            d = FloatKey.Normal(d);
             return Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<double>(ref d)));
         }
 
         if (typeof(TValue) == typeof(float))
         {
             float f = Unsafe.As<TValue, float>(ref value);
-            f = float.IsNaN(f) ? float.NaN : f == 0 ? 0 : f;
+            f = FloatKey.Normal(f);
             return Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<float>(ref f)));
         }
 

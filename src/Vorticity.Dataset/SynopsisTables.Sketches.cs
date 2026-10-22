@@ -219,14 +219,14 @@ internal sealed partial class SynopsisTables
             case sizeof(double):
             {
                 double d = BitConverter.ToDouble(value);
-                d = double.IsNaN(d) ? double.NaN : d == 0 ? 0 : d;
+                d = FloatKey.Normal(d);
                 return CardinalitySlot.Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<double>(ref d)));
             }
 
             case sizeof(float):
             {
                 float f = BitConverter.ToSingle(value);
-                f = float.IsNaN(f) ? float.NaN : f == 0 ? 0 : f;
+                f = FloatKey.Normal(f);
                 return CardinalitySlot.Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<float>(ref f)));
             }
 
@@ -872,12 +872,12 @@ internal sealed partial class SynopsisTables
                     if (value.Length == sizeof(double))
                     {
                         double number = BitConverter.ToDouble(value);
-                        BitConverter.TryWriteBytes(bits, number == 0 ? 0.0 : double.IsNaN(number) ? double.NaN : number);
+                        BitConverter.TryWriteBytes(bits, FloatKey.Normal(number));
                     }
                     else
                     {
                         float number = BitConverter.ToSingle(value);
-                        BitConverter.TryWriteBytes(bits, number == 0 ? 0f : float.IsNaN(number) ? float.NaN : number);
+                        BitConverter.TryWriteBytes(bits, FloatKey.Normal(number));
                     }
                 }
 

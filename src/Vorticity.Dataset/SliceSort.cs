@@ -584,13 +584,13 @@ internal static class SliceSort
             case PType.F64:
             {
                 double d = MemoryMarshal.Read<double>(value);
-                return BitConverter.DoubleToUInt64Bits(double.IsNaN(d) ? double.NaN : d == 0 ? 0 : d);
+                return BitConverter.DoubleToUInt64Bits(FloatKey.Normal(d));
             }
 
             case PType.F32:
             {
                 float f = MemoryMarshal.Read<float>(value);
-                return BitConverter.SingleToUInt32Bits(float.IsNaN(f) ? float.NaN : f == 0 ? 0 : f);
+                return BitConverter.SingleToUInt32Bits(FloatKey.Normal(f));
             }
 
             case PType.F16:
