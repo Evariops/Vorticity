@@ -160,6 +160,22 @@ of every object that holds no float at the path, and reads the rows of the other
 every kind of value, so it reads the rows, as a key an object leaves unshredded does, since its tables
 count only the rows that hold it.
 
+The tables follow one order of the columns per object, fewest values first, and hold the prefixes of
+that order the budget keeps. A question over two columns the order places far apart, a route and a
+pod after a dozen facets, finds them together only in the deepest prefix, whose rows come close to the
+rows themselves. Declare the columns your questions filter and group by together, and every
+compaction keeps a table of each grouping, by hour and by object, weighed under the same budget:
+
+```csharp
+SynopsisGroupings = [["Service", "HttpStatus", "Route"], ["Route", "Pod"]],
+```
+
+Put first the column the questions pick values of: each chunk of the table says the least and the
+greatest value of it that it holds, so a question of one route reads the chunks that may hold it. A
+column of a grouping may be a key of a variant column the objects shred, written as a filter reads
+it, `Attributes['http.response.status_code'].AsInt64()`. A grouping is a setting of the handle that
+runs the compactions, and an object whose order does not hold one of its columns writes no table of it.
+
 A window whose ends fall inside an hour reads the rows its tables cannot answer there: the slices it
 cuts when a table of slices holds the question's keys, the whole hour when only the hour's table does.
 A dashboard over the last N minutes has an end inside an hour every time. `ScanOptions.AlignWindow`

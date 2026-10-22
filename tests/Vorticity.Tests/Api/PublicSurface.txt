@@ -2927,6 +2927,7 @@ Vorticity.Dataset:     method bool op_Equality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method bool op_Inequality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property IReadOnlyList<IReadOnlyList<string>> SynopsisGroupings { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> Identifiers { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> ShreddedPaths { get; init; }

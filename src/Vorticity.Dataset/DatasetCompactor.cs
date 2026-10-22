@@ -1369,7 +1369,10 @@ internal static class DatasetCompactor
                         // own, their chunks held by the writer.
                         _synopsis = new SynopsisTables(
                             _schema.DType, table.Unit, SynopsisTables.Measures(_schema.DType, instant), _draft.Writer, table.Paths, table.Slices,
-                            _dataset.Options.SynopsisChunking);
+                            _dataset.Options.SynopsisChunking)
+                        {
+                            Groupings = _dataset.Options.SynopsisGroupings,
+                        };
                         _slices = new SliceWriter(_draft.Writer, _synopsis, _dataset.Session.WriteLanes, Timings);
                         _declare = true;
                     }
@@ -1412,7 +1415,10 @@ internal static class DatasetCompactor
             };
 
             _synopsis = new SynopsisTables(
-                _schema.DType, streamed.Unit, SynopsisTables.Measures(_schema.DType, instant), _draft.Writer, chunking: _dataset.Options.SynopsisChunking);
+                _schema.DType, streamed.Unit, SynopsisTables.Measures(_schema.DType, instant), _draft.Writer, chunking: _dataset.Options.SynopsisChunking)
+            {
+                Groupings = _dataset.Options.SynopsisGroupings,
+            };
             _slices = new SliceWriter(_draft.Writer, _synopsis, _dataset.Session.WriteLanes, Timings);
             _declare = true;
         }

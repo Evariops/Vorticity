@@ -495,10 +495,13 @@ internal sealed partial class SynopsisTables : IDisposable
             }
         }
 
+        await AddGroupingsAsync(arena, sorted.RootIndex, rows, keyCodes, columns, cancellationToken).ConfigureAwait(false);
+
         _hourRowsSeen += rows;
         Note(_hourly, _hourGrowth, _hourRowsSeen);
         Note(_whole, _objectGrowth, _rowsWritten + rows);
         Note(_values, _valueGrowth, _hourRowsSeen);
+        NoteGroupings(_hourRowsSeen, _rowsWritten + rows);
         Prune();
         _rowsWritten += rows;
 
@@ -693,6 +696,7 @@ internal sealed partial class SynopsisTables : IDisposable
         }
 
         await FinishSketchesAsync(cancellationToken).ConfigureAwait(false);
+        await FinishGroupingsAsync(cancellationToken).ConfigureAwait(false);
 
         // Every table with rows, and every one given up, which the choice still weighs as a grain asked.
         foreach (Candidate table in _candidates)
@@ -845,6 +849,9 @@ internal sealed partial class SynopsisTables : IDisposable
         {
             _valueGrowth[v] = _values[v] is null ? null : new Growth();
         }
+
+        // The declared groupings' tables, weighed after those of the order.
+        SettleGroupings();
     }
 
     /// <summary>
@@ -943,6 +950,7 @@ internal sealed partial class SynopsisTables : IDisposable
         await FlushHourAsync(_sliceValues, cancellationToken).ConfigureAwait(false);
 
         await CloseSketchesAsync(cancellationToken).ConfigureAwait(false);
+        await CloseGroupingsAsync(cancellationToken).ConfigureAwait(false);
         await FlushHourAsync(_hourly, cancellationToken).ConfigureAwait(false);
         await FlushHourAsync(_values, cancellationToken).ConfigureAwait(false);
         await FlushHourAsync(_sketchedHours, cancellationToken).ConfigureAwait(false);
@@ -1354,6 +1362,11 @@ internal sealed partial class SynopsisTables : IDisposable
             {
                 RuleOut(_values[v]!, _valueSum[v] + values.Distinct, (_valueSum[v] + values.Projected(hourRows)) * scale, perRow);
             }
+        }
+
+        if (_groupings.Length > 0)
+        {
+            PruneGroupings(RuleOut, hourRows, scale, perRow);
         }
 
         _hourDepth = Math.Min(_hourDepth, DeepestCoarse());

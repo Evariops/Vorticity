@@ -586,13 +586,14 @@ internal sealed record SynopsisAnswer(
     }
 
     /// <summary>
-    /// The chunks of <paramref name="table"/> whose values of its key <paramref name="filter"/> rules out, by the offsets of
-    /// their regions: a table of one column's values, whose chunks say the least and the greatest they hold, each chunk a
-    /// zone of the zone pruner; null for none. A float's key, whose NaNs the bounds leave out, prunes nothing.
+    /// The chunks of <paramref name="table"/> whose values of its first key <paramref name="filter"/> rules out, by the
+    /// offsets of their regions: a table of one column's values, or of a declared grouping, whose chunks say the least and
+    /// the greatest value of that key they hold, each chunk a zone of the zone pruner; null for none. A float's key, whose
+    /// NaNs the bounds leave out, prunes nothing.
     /// </summary>
     private static HashSet<ulong>? Pruned(SynopsisContents contents, DType schema, SynopsisTableInfo table, VortexExpr filter)
     {
-        if (table.Kind != SynopsisTableKind.Values || table.Keys is not [int key] || SynopsisPath.Names(key))
+        if (table.Kind is not (SynopsisTableKind.Values or SynopsisTableKind.Coarse) || table.Keys is not [int key, ..] || SynopsisPath.Names(key))
         {
             return null;
         }
@@ -605,7 +606,7 @@ internal sealed record SynopsisAnswer(
 
         DType dtype = schema.GetField(key);
         KeyShape shape = KeyShape.Of(dtype);
-        if (chunks is not { Count: > 1 } || dtype.Kind == DTypeKind.Extension || shape.Form == KeyForm.Float)
+        if (chunks is not { Count: > 1 } || dtype.Kind == DTypeKind.Extension || shape.Form == KeyForm.Float || !AnyBounded(chunks))
         {
             return null;
         }
@@ -638,6 +639,20 @@ internal sealed record SynopsisAnswer(
         }
 
         return pruned;
+    }
+
+    /// <summary>Whether a chunk of <paramref name="chunks"/> says the bounds of its first key: none does in a table of a prefix of the order.</summary>
+    private static bool AnyBounded(IReadOnlyList<TableChunk> chunks)
+    {
+        for (int c = 0; c < chunks.Count; c++)
+        {
+            if (chunks[c].Keys is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>The value a component of a run's key holds, as a filter's literal; null for none, or a null.</summary>
