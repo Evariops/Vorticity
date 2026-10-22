@@ -643,19 +643,16 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 return null;
             }
 
-            for (int slot = 0; slot < requests.Count; slot++)
+            // Each chunk's slot filled from the chunk, in the chunks' order: a slot's region found by a walk of the chunks
+            // cost the square of a table cut in tens of thousands of chunks.
+            for (int i = 0; i < wanted.Length; i++)
             {
-                Serialization.Schemas.SegmentSpec spec = requests.GetSpec(slot);
-                IndexSegment region = RegionOf(wanted, apart, spec);
-                cache.Asked?.Invoke(uid, region);
-                if (!cache.TryRead(uid, region, out Buffers.SegmentOwner owner))
+                if (!FillCached(cache, uid, requests, wanted[i].Slot, wanted[i].Chunk.Region)
+                    || (Sketched(apart, i) && !FillCached(cache, uid, requests, apart![i].Slot, wanted[i].Chunk.Distinct!.Value)))
                 {
                     missed = true;
                     return null;
                 }
-
-                requests.SetResult(slot, owner);
-                requests.NoteCacheHit();
             }
 
             requests.Complete();
@@ -855,24 +852,26 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     /// <summary>Whether <paramref name="apart"/> says the read fetches the distinct sketches of chunk <paramref name="i"/> from their own region.</summary>
     private static bool Sketched(Apart[]? apart, int i) => apart is not null && !apart[i].Row.IsDefault;
 
-    /// <summary>The region of <paramref name="wanted"/>'s chunk, or of its distinct sketches, <paramref name="spec"/> names: its offset and length.</summary>
-    private static IndexSegment RegionOf(Wanted[] wanted, Apart[]? apart, in Serialization.Schemas.SegmentSpec spec)
+    /// <summary>
+    /// Fills <paramref name="slot"/> of <paramref name="requests"/> with <paramref name="region"/> as the cache holds it,
+    /// unless a chunk that names the same region filled it; false when the cache holds it no more.
+    /// </summary>
+    private static bool FillCached(SynopsisCache cache, UInt128 uid, IO.SegmentRequestSet requests, int slot, IndexSegment region)
     {
-        for (int i = 0; i < wanted.Length; i++)
+        if (requests.IsFilled(slot))
         {
-            IndexSegment region = wanted[i].Chunk.Region;
-            if ((ulong)region.Offset == spec.Offset && (uint)region.Length == spec.Length)
-            {
-                return region;
-            }
-
-            if (Sketched(apart, i) && wanted[i].Chunk.Distinct is { } distinct && distinct.Offset == spec.Offset && distinct.Length == spec.Length)
-            {
-                return distinct;
-            }
+            return true;
         }
 
-        throw new InvalidOperationException("A slot of a read of tables names no chunk of them.");
+        cache.Asked?.Invoke(uid, region);
+        if (!cache.TryRead(uid, region, out Buffers.SegmentOwner owner))
+        {
+            return false;
+        }
+
+        requests.SetResult(slot, owner);
+        requests.NoteCacheHit();
+        return true;
     }
 
     /// <summary>

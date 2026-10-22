@@ -90,6 +90,9 @@ public sealed class SynopsisCache : IDisposable
     private readonly Dictionary<string, LinkedListNode<(string Name, long Bytes)>> _ghosts = new Dictionary<string, LinkedListNode<(string Name, long Bytes)>>(StringComparer.Ordinal);
     private readonly Dictionary<string, TaskCompletionSource> _reading = new Dictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
     private readonly Dictionary<string, Pending> _pending = new Dictionary<string, Pending>(StringComparer.Ordinal);
+
+    // How many writes wait, as the gate last left them: what a read asks before it takes the gate to look among them.
+    private int _pendingCount;
     private readonly Queue<Pending> _queue = new Queue<Pending>();
     private long _pendingHeld;
     private int _writers;
@@ -380,6 +383,7 @@ public sealed class SynopsisCache : IDisposable
 
             Pending pending = new Pending(new Entry(name, ShardOf(uid), length), owner?.Retain(), bytes, page);
             _pending[name] = pending;
+            Volatile.Write(ref _pendingCount, _pending.Count);
             _queue.Enqueue(pending);
             _pendingHeld += length;
             start = _writers < MaxWriters;
@@ -426,7 +430,7 @@ public sealed class SynopsisCache : IDisposable
             {
                 lock (_gate)
                 {
-                    _failedWrites++;
+                    Interlocked.Increment(ref _failedWrites);
                 }
             }
         }
@@ -448,6 +452,7 @@ public sealed class SynopsisCache : IDisposable
             lock (_gate)
             {
                 _pending.Remove(pending.Entry.Name);
+                Volatile.Write(ref _pendingCount, _pending.Count);
                 _pendingHeld -= pending.Entry.Bytes;
                 if (written)
                 {
@@ -470,6 +475,14 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>A region waiting for its write, served from the buffer its reader handed over, the read counted; false when none waits under <paramref name="name"/>.</summary>
     private bool TryPending(ReadOnlySpan<char> name, out SegmentOwner owner)
     {
+        // No write waiting, the case of every read once the cache holds a question's regions: no gate taken. A count
+        // read as a write is queued may say none, and the region is then read where it lies, as before its write.
+        if (Volatile.Read(ref _pendingCount) == 0)
+        {
+            owner = null!;
+            return false;
+        }
+
         lock (_gate)
         {
             if (_pending.Count == 0
@@ -589,7 +602,7 @@ public sealed class SynopsisCache : IDisposable
         {
             if (!_entries.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Entry? entry))
             {
-                _misses++;
+                Interlocked.Increment(ref _misses);
                 VortexTelemetry.SynopsisMiss();
                 return null;
             }
@@ -787,11 +800,8 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>Counts <paramref name="length"/> bytes served from the disk.</summary>
     private void Served(int length)
     {
-        lock (_gate)
-        {
-            _hits++;
-        }
-
+        // Counted with no gate: a read the cache serves took it to find its region, and every lane reads.
+        Interlocked.Increment(ref _hits);
         VortexTelemetry.SynopsisHit(length);
     }
 
@@ -808,7 +818,7 @@ public sealed class SynopsisCache : IDisposable
         {
             lock (_gate)
             {
-                _refused++;
+                Interlocked.Increment(ref _refused);
             }
 
             VortexTelemetry.SynopsisRefusal();
@@ -992,13 +1002,7 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>The file name of a sealed object's trailer.</summary>
     internal static string TrailerNameOf(UInt128 uid) => string.Create(CultureInfo.InvariantCulture, $"{uid:x32}-trailer");
 
-    private long Count(ref long counter)
-    {
-        lock (_gate)
-        {
-            return counter;
-        }
-    }
+    private static long Count(ref long counter) => Interlocked.Read(ref counter);
 
     private static string ShardOf(UInt128 uid) => ((byte)uid).ToString("x2", CultureInfo.InvariantCulture);
 
@@ -1155,7 +1159,7 @@ public sealed class SynopsisCache : IDisposable
         _held -= entry.Bytes;
         VortexTelemetry.SynopsisHolds(-entry.Bytes);
         evicted.Add(entry);
-        _evictions++;
+        Interlocked.Increment(ref _evictions);
         VortexTelemetry.SynopsisEvicted();
     }
 
@@ -1179,7 +1183,7 @@ public sealed class SynopsisCache : IDisposable
             Remove(entry);
             if (corrupt)
             {
-                _corrupt++;
+                Interlocked.Increment(ref _corrupt);
                 VortexTelemetry.SynopsisCorruption();
             }
         }
