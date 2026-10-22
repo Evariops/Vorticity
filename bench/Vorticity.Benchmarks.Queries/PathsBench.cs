@@ -160,6 +160,9 @@ internal static partial class PathsBench
         /// <summary>Whether <c>--qps</c> also gives each question's asks and latencies (<c>--qps-by-question</c>).</summary>
         internal bool QpsByQuestion { get; init; }
 
+        /// <summary>The objects each handle of <c>--qps</c> keeps open (<c>--open-objects</c>); 0 for the dataset's default.</summary>
+        internal int OpenObjects { get; init; }
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }

@@ -67,7 +67,8 @@ internal static partial class PathsBench
                     BytesPerSecond = settings.BytesPerSecond,
                 };
                 CountingObjectStore store = new CountingObjectStore(remote);
-                sets[built] = (files, store, await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }));
+                sets[built] = (files, store, await VortexDataset.OpenAsync(
+                    store, new DatasetOptions { Session = session, MaxOpenObjects = settings.OpenObjects > 0 ? settings.OpenObjects : new DatasetOptions().MaxOpenObjects }));
             }
 
             // Every question once first: their code compiled, and, cached, every region they read held.
