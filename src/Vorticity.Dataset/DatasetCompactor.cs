@@ -99,6 +99,15 @@ internal readonly record struct LoadedPeriod(long Period, long Rows, long Bytes,
 /// one, a concatenation otherwise.</summary>
 internal static class DatasetCompactor
 {
+    /// <summary>
+    /// The least rows the slices of a job of periods may aim at for its objects to be written in one pass: from it on, the
+    /// first slice of a stream, which holds the rows it judges its order from, is the first unit a count of every row cuts at
+    /// any steady pace, a unit of the width a count chooses holding more than a thirtieth of twice the target, the widths
+    /// being sixty times apart at most. Slices of fewer rows, which a stream would hold together in its first slice until it
+    /// judged its order, two passes cut.
+    /// </summary>
+    private const long OnePassTargetRows = 32L * SortedSlices.JudgedRows;
+
     /// <summary>Reads the job's inputs and replaces them by the objects it writes; the dataset moves
     /// to the version the commit creates.</summary>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
@@ -244,11 +253,10 @@ internal static class DatasetCompactor
         {
             Plans = planner?.Plans(),
             Streamed = planner is not null ? null : new StreamPlan(
-                calendar.Unit,
+                calendar,
                 SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers),
                 dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows,
-                period.ExpectedRows,
-                TimeSlicer.SecondsBetween(period.Period, next, calendar.Unit)),
+                period.ExpectedRows),
             InstantPath = key.InstantPath,
             Timings = timings,
             Hold = hold,
@@ -392,15 +400,29 @@ internal static class DatasetCompactor
         // how objects of an earlier schema come to hold the current one.
         DatasetSchema schema = dataset.Snapshot.Schema;
 
-        // A job of a dataset of periods writes its objects in sorted slices: a first pass over its rows
-        // cuts each object's slices, picks the order inside them and the paths its variant columns
-        // shred, the second sorts and writes them. The instant must be a top-level column, which
-        // slices are declared on. Appends write neither slices nor shredded variants.
+        // A job of a dataset of periods writes its objects in sorted slices. Of a schema with a variant
+        // column, or slices of fewer rows than a stream cuts as a count does, a first pass over its rows
+        // cuts each object's slices, picks the order inside them and the paths its variant columns shred,
+        // the second sorts and writes them; of another, each object is written in one pass, as a load
+        // writes it, its slices cut as its rows come and its order judged on its first slice's. The
+        // instant must be a top-level column, which slices are declared on. Appends write neither slices
+        // nor shredded variants.
         IReadOnlyDictionary<(int Level, long Period), ObjectPlan>? plans = null;
-        if (merge && job.Cut is not null && !key!.InstantPath.Contains('.'))
+        StreamPlan? streamed = null;
+        long target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
+        if (merge && job.Cut is { } cut && !key!.InstantPath.Contains('.'))
         {
-            using Activity? planning = DatasetTelemetry.StartCompactionPass("plan");
-            plans = await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false);
+            if (VariantColumns(schema.DType).Length > 0 || target < OnePassTargetRows)
+            {
+                using Activity? planning = DatasetTelemetry.StartCompactionPass("plan");
+                plans = await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // A seal's one object holds every row the job reads; the objects of another share them out.
+                streamed = new StreamPlan(
+                    cut.Calendar, SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers), target, cut.Slices ? job.Rows : 0);
+            }
         }
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job
@@ -413,11 +435,12 @@ internal static class DatasetCompactor
             for (int doublings = 0; ; doublings++)
             {
                 outputs = new ObjectStream(
-                    dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null, rowBound: job.Rows, job.ToLevel,
-                    ObjectBound.Of(job.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                    dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null && streamed is null, rowBound: job.Rows,
+                    job.ToLevel, ObjectBound.Of(job.Bytes, doublings, dataset.Options.BoundOutPerIn))
                 {
                     Plans = plans,
-                    InstantPath = plans is null ? null : key!.InstantPath,
+                    Streamed = streamed,
+                    InstantPath = plans is null && streamed is null ? null : key!.InstantPath,
                     Partition = key?.SharedPartition(job.Inputs.Select(static input => input.Entry.Summaries)),
                 };
                 try
@@ -1140,11 +1163,18 @@ internal static class DatasetCompactor
         ImmutableDictionary<string, VariantDirectory> Directories);
 
     /// <summary>
-    /// What a load writes an object of one pass with, its slices cut as its rows come: the unit of its instant, the columns
-    /// that may be its synopsis columns, the rows a slice aims at, the rows the object is expected to hold, 0 when unknown,
-    /// and the seconds its period spans.
+    /// What a load or a job writes an object of one pass with, its slices cut as its rows come: the calendar of its periods,
+    /// the columns that may be its synopsis columns, the rows a slice aims at, and the rows the object is expected to hold,
+    /// 0 when unknown.
     /// </summary>
-    internal sealed record StreamPlan(TimeUnit Unit, int[] Candidates, long Target, long ExpectedRows, double PeriodSeconds);
+    internal sealed record StreamPlan(PeriodCalendar Calendar, int[] Candidates, long Target, long ExpectedRows)
+    {
+        /// <summary>The unit of the instant.</summary>
+        internal TimeUnit Unit => Calendar.Unit;
+
+        /// <summary>The seconds <paramref name="period"/> spans.</summary>
+        internal double SecondsOf(long period) => TimeSlicer.SecondsBetween(period, Calendar.Next(period), Calendar.Unit);
+    }
 
     /// <summary>
     /// The change of period length the load of the period a seal wrote calls for, or null: the bytes and
@@ -1446,7 +1476,8 @@ internal static class DatasetCompactor
             double rows = Math.Max(TimeSlicer.RowsAt(pace, TimeSlicer.WidthAt(pace, streamed.Target)), SortedSlices.JudgedRows);
             _stream = new SliceStream(streamed.Unit, streamed.Target, least: SortedSlices.JudgedRows);
             _streamed = streamed;
-            _draft = _dataset.StartObjectUnder(_schema, _inKeyOrder, streamed.ExpectedRows, sliced: true, byteBound: _byteBound);
+            _draft = _dataset.StartObjectUnder(
+                _schema, _inKeyOrder, streamed.ExpectedRows > 0 ? streamed.ExpectedRows : _rowBound, sliced: true, byteBound: _byteBound);
             _draft.Partition = Partition;
             _sorter = new SortedSlices(_stream, streamed.Candidates, instant, _schema.DType, rows, streamed.Target)
             {
@@ -1466,14 +1497,16 @@ internal static class DatasetCompactor
 
         /// <summary>
         /// Tells the writer and the synopsis of an object of one pass what its first slice judged, before it is written: the
-        /// rows its period holds at the pace of the rows judged, unless it is expected to hold some, which size its chunks
-        /// and its hashed postings; and the extent the synopsis weighs its tables by, which gives up none before the end
-        /// without the rows expected, and spans hours when its period does.
+        /// rows its period holds at the pace of the rows judged, unless it is expected to hold some, at most the rows a job
+        /// reads, which size its chunks and its hashed postings; and the extent the synopsis weighs its tables by, which gives
+        /// up none before the end without the rows expected, and spans hours when its period does.
         /// </summary>
         private void Judged(SliceStream stream, StreamPlan streamed)
         {
-            _draft!.Writer.DeclareRowBound(streamed.ExpectedRows > 0 ? streamed.ExpectedRows : (long)(stream.Pace * streamed.PeriodSeconds));
-            _synopsis!.Extend(stream.Extent(streamed.ExpectedRows, streamed.PeriodSeconds > 3_600));
+            double seconds = streamed.SecondsOf(_period);
+            long rows = streamed.ExpectedRows > 0 ? streamed.ExpectedRows : (long)(stream.Pace * seconds);
+            _draft!.Writer.DeclareRowBound(_rowBound > 0 ? Math.Min(rows, _rowBound) : rows);
+            _synopsis!.Extend(stream.Extent(streamed.ExpectedRows, seconds > 3_600));
         }
 
         // The stream an object of one pass cuts its slices with, and what it was started with; null for another.
