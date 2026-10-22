@@ -94,7 +94,7 @@ if (Text(args, "--micro") == "load")
 {
     int periods = Option(args, "--periods", 4);
     return await LoadMicro.Run(
-        Text(args, "--store") ?? "E:/vorticity-load-micro",
+        Text(args, "--store") ?? BenchStores.Of("load-micro"),
         periods,
         Option(args, "--parallel", periods),
         Option(args, "--minutes", 3),
@@ -117,7 +117,7 @@ if (Text(args, "--micro") == "entries")
 if (Text(args, "--micro") == "seal")
 {
     return await SealBench.Run(
-        Text(args, "--store") ?? "E:/vorticity-seal",
+        Text(args, "--store") ?? BenchStores.Of("seal"),
         Option(args, "--minutes", 10),
         Option(args, "--rate", 50_000),
         Option(args, "--part-minutes", 10),

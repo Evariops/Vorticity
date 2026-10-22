@@ -20,7 +20,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// <remarks>
 /// <para>
 /// The store is a <see cref="FileObjectStore"/> under <c>--store</c> (the <c>VORTICITY_PATHS_STORE</c> variable, or
-/// <c>E:/vorticity-queries</c>), each request answered <c>--latency</c> ms (5 by default) after it is sent, to the
+/// <c>~/.cache/vorticity/paths</c>, <see cref="BenchStores"/>), each request answered <c>--latency</c> ms (5 by default) after it is sent, to the
 /// tenth of a millisecond (<see cref="PreciseDelay"/>), the reads' bytes crossing one link of <c>--gbps</c> (10 by
 /// default, 0 for none) and each read's at most <c>--mbps</c> when set; the synopsis cache reads its own disk, with
 /// neither. A dataset is written the first time its parameters are asked for (<c>--hours</c>, <c>--rate</c> requests a
@@ -43,7 +43,7 @@ internal static class PathsBench
     /// <summary>What a run asks for.</summary>
     internal sealed record Settings
     {
-        internal string Store { get; init; } = Environment.GetEnvironmentVariable("VORTICITY_PATHS_STORE") ?? "E:/vorticity-queries";
+        internal string Store { get; init; } = Environment.GetEnvironmentVariable("VORTICITY_PATHS_STORE") ?? BenchStores.Of("paths");
 
         internal int Hours { get; init; } = 24;
 
