@@ -55,6 +55,12 @@ internal static class PathsBench
 
         internal int Latency { get; init; } = 5;
 
+        /// <summary>The round trip's 99th percentile in milliseconds, its waits drawn around <see cref="Latency"/>; zero for every wait at the median.</summary>
+        internal int LatencyP99 { get; init; }
+
+        /// <summary>The reads a second the store serves a prefix of keys at most; zero for no limit.</summary>
+        internal double ReadsPerSecondPerPrefix { get; init; }
+
         internal double BytesPerSecond { get; init; }
 
         internal double LinkBitsPerSecond { get; init; } = 10e9;
@@ -158,7 +164,9 @@ internal static class PathsBench
         string label = settings.Label ?? Commit();
         Console.WriteLine(
             $"store {settings.Store}: {requests.Rows:N0} requests over {settings.Hours} h, {logs.Rows:N0} log records over {settings.LogHours} h; " +
-            $"{settings.Latency} ms a request, {(settings.LinkBitsPerSecond > 0 ? $"a link of {settings.LinkBitsPerSecond / 1e9:0.##} Gb/s" : "no limit on the link")}{(settings.BytesPerSecond > 0 ? $", {settings.BytesPerSecond / 1e6:0} MB/s a read" : string.Empty)}; " +
+            $"{settings.Latency} ms a request{(settings.LatencyP99 > settings.Latency ? $" at the median, {settings.LatencyP99} at the 99th percentile" : string.Empty)}, " +
+            $"{(settings.LinkBitsPerSecond > 0 ? $"a link of {settings.LinkBitsPerSecond / 1e9:0.##} Gb/s" : "no limit on the link")}{(settings.BytesPerSecond > 0 ? $", {settings.BytesPerSecond / 1e6:0} MB/s a read" : string.Empty)}" +
+            $"{(settings.ReadsPerSecondPerPrefix > 0 ? $", {settings.ReadsPerSecondPerPrefix:0} reads a second a prefix" : string.Empty)}; " +
             $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows); processor time from cycles at {ProcessCpu.GigaHertz:F2} GHz; {label}");
         Console.WriteLine(
             $"{"question",-62} {"path",-8} {"",-4} {"dop",3} {"ms",9} {"cpu ms",9} {"alloc MB",9} {"priv MB",8} {"ws MB",8} {"req",6} {"steps",6} {"MB",8} {"states",9} {"rows",11} {"groups",7}");
@@ -401,6 +409,8 @@ internal static class PathsBench
         }
 
         remote.Latency = TimeSpan.FromMilliseconds(settings.Latency);
+        remote.LatencyP99 = TimeSpan.FromMilliseconds(settings.LatencyP99);
+        remote.ReadsPerSecondPerPrefix = settings.ReadsPerSecondPerPrefix;
         remote.LinkBitsPerSecond = settings.LinkBitsPerSecond;
         remote.BytesPerSecond = settings.BytesPerSecond;
         string cache = Path.Combine(settings.Store, "cache", Guid.NewGuid().ToString("N"));

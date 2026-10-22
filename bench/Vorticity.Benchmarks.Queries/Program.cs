@@ -217,6 +217,12 @@ if (Text(args, "--micro") == "lifecycle")
         Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0));
 }
 
+// --micro s3profile: the waits and the turns of the store --profile s3 answers as, drawn without waiting (StoreProfileMicro.cs).
+if (Text(args, "--micro") == "s3profile")
+{
+    return await StoreProfileMicro.Run();
+}
+
 // --micro cachetrace: the regions a run of questions asks of the synopsis cache, replayed through three eviction policies (CacheTrace.cs).
 if (Text(args, "--micro") == "cachetrace")
 {
@@ -244,8 +250,12 @@ if (Text(args, "--micro") == "paths")
         PartMinutes = Option(args, "--part-minutes", 10),
         LogHours = Option(args, "--log-hours", 12),
         LogRate = Option(args, "--log-rate", 1_000),
-        Latency = args.Contains("--latency") ? int.Parse(Text(args, "--latency")!, CultureInfo.InvariantCulture) : 5,
-        BytesPerSecond = Option(args, "--mbps", 0) * 1e6,
+        // --profile s3: a round trip of 30 ms at the median and 120 at the 99th percentile, 90 MB/s a connection, and
+        // 5 500 reads a second a prefix, as S3 serves them; each figure may still be given on its own.
+        Latency = args.Contains("--latency") ? int.Parse(Text(args, "--latency")!, CultureInfo.InvariantCulture) : S3(args) ? 30 : 5,
+        LatencyP99 = (int)Option(args, "--latency-p99", S3(args) ? 120 : 0),
+        ReadsPerSecondPerPrefix = Option(args, "--prefix-reads", S3(args) ? 5_500 : 0),
+        BytesPerSecond = Option(args, "--mbps", S3(args) ? 90 : 0) * 1e6,
         LinkBitsPerSecond = args.Contains("--gbps") ? double.Parse(Text(args, "--gbps")!, CultureInfo.InvariantCulture) * 1e9 : 10e9,
         Rounds = Option(args, "--rounds", 5),
         RowsRounds = Option(args, "--rows-rounds", 1),
@@ -562,6 +572,9 @@ static string? Text(string[] args, string name)
     int at = Array.IndexOf(args, name);
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
+
+// Whether the store answers as S3 does (--profile s3).
+static bool S3(string[] args) => Text(args, "--profile") is "s3";
 
 // A fixture named by its rows rather than registered: spread-random-N, spread-strided-N or groupby-N-K, each
 // with -core2025.10 for that edition; null for any other name.
