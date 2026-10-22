@@ -710,6 +710,27 @@ frames and trailer as well. The cache reports
 on the library's meter, under `vortex.synopsis_cache.*`: hits, misses, bytes from the disk and from the
 store, evictions, refused admissions, corrupt regions and bytes held.
 
+### 10.6 Several processes on one machine
+
+A directory has one cache, and a cache is one process's: the queues that choose what leaves, the
+names of what the small queue dropped and the bytes held live in its memory, rebuilt by a walk of the
+directory when it opens. Two processes on one directory would each drop the files the other reads and
+count the bytes twice, so the second is refused (`InvalidOperationException`). Processes of one machine
+each give their session a directory of their own and a share of the disk, and each reads from the store
+the regions the others already hold.
+
+Three ways to share were weighed, none built yet:
+
+| | how | what it costs | what it leaves |
+|---|---|---|---|
+| a companion process | one process owns the directory and answers the others over a local socket: which of a batch of regions it holds, each lent while the asker maps it, and the regions they read from the store, which it adopts by a rename | a round trip of the socket per batch, tens of microseconds, against a warm question of a few milliseconds | a process to run and watch beside the application, and the cache gone while it restarts |
+| an index on the disk | the queues and the bytes held in a mapped file every process updates under a lock of the system | every hit takes the lock to move its entry along the queues | the lock's contention at sixteen lanes in each process, and a file left half-updated by a process that dies holding it |
+| peers read, owners write | each process writes and evicts its own directory, and on a miss looks for the region in its peers' directories before the store: an entry never changes and is checked by its checksum, so a file a peer drops under a read is a miss, read again from the store | a look in each peer's directory per miss, a few microseconds a file name | each process's share of the disk still its own: a region two processes read lies twice |
+
+The third needs no process and no lock and keeps every guarantee an entry has today, so it comes first
+if a measure of several processes per machine asks for it (the questions per second of a node, H10 of
+the action plan). Until then the limit stands as written above.
+
 ## 11. Writing
 
 ### 11.1 A file written to a location
