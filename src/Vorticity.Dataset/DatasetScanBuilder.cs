@@ -297,10 +297,47 @@ internal sealed class DatasetScanBuilder
     internal DatasetScanBuilder WithReadAhead(int splits)
     {
         _readAhead = splits;
+        _readAheadGranted = true;
         return this;
     }
 
     private int _readAhead;
+
+    /// <summary>Whether an aggregation granted the scan its reads ahead, none among them, which its objects read as granted.</summary>
+    private bool _readAheadGranted;
+
+    /// <summary>
+    /// Has the scan of one lane of an object read ahead, over a store whose read is a round trip, as many of its splits as
+    /// a pass's lanes keep in flight together (<see cref="AggregationEngine.TotalAhead"/>), reserved in the session's
+    /// budget as a pass reserves them: half as many at a time as the budget grants fewer, and none below two, the scan
+    /// then decoding a batch ahead as before. The reservation, held while the scan reads; null when it reads none ahead:
+    /// an aggregation's lane, granted its own, a scan of several lanes, of a take, or of a file that costs no round trip.
+    /// </summary>
+    private QueryMemory? ReadsAhead(ScanBuilder scan, VortexFile file)
+    {
+        int degree = _options.DegreeOfParallelism > 0 ? _options.DegreeOfParallelism : _dataset.Session.Options.MaxDegreeOfParallelism;
+        if (_readAheadGranted || degree > 1 || _options.Prefetch > 1 || _take is not null || _orderPaths is not null
+            || file.Source.CostsNoRoundTrip || scan.LargestSplitBytes() is not (> 0 and var split))
+        {
+            return null;
+        }
+
+        QueryMemory memory = new QueryMemory(_dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        int ahead = AggregationEngine.TotalAhead(split);
+        while (ahead >= BatchAsyncEnumerator.ReadAheadSplits && !memory.TryGrow(ahead * split))
+        {
+            ahead /= 2;
+        }
+
+        if (ahead < BatchAsyncEnumerator.ReadAheadSplits)
+        {
+            memory.Dispose();
+            return null;
+        }
+
+        scan.WithReadAhead(ahead);
+        return memory;
+    }
 
     /// <summary>
     /// A lease of <paramref name="held"/>: for a scan that reads keys of variant columns, an object of level 0
@@ -756,7 +793,9 @@ internal sealed class DatasetScanBuilder
                 // The object's own scan, which every object of the version's schema with no row
                 // marked is read by, rebased into one view for the whole object.
                 RecordBatch? view = null;
-                await foreach (RecordBatch batch in Of(lease.File, held).ExecuteAsync()
+                ScanBuilder scan = Of(lease.File, held);
+                using QueryMemory? ahead = ReadsAhead(scan, lease.File);
+                await foreach (RecordBatch batch in scan.ExecuteAsync()
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     yield return InDataset(batch, held.FirstRow, ref view);

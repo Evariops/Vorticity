@@ -1058,7 +1058,10 @@ give every lane that much starts on half as many lanes, down to one. Over a sour
 reads (a store, or positional reads), a lane's splits read ahead of its decode are admitted with it,
 each as large as the layout's largest split, which a walk of the layout finds before the pass: its
 share of sixteen for the pass, two at least, so that one lane reads sixteen ahead, two lanes eight,
-four lanes four and eight or more two each. A pass of one lane reads ahead too over an object store,
+four lanes four and eight or more two each. Over an object store, a round trip a read, the pass reads
+ahead together as many splits as hold 16 MiB, a link's bandwidth times its latency with a margin,
+between sixteen and sixty-four: splits of 120 KB keep sixty-four reads in flight, where sixteen left a
+store 5 ms away to bound a scan of rows by its latency. A pass of one lane reads ahead too over an object store,
 its decode on the caller's flow, where it decoded a split ahead on a lane of its own and waited on
 each read in turn; its reads past two take a quarter of the ceiling at most. Under a budget short of
 them, the lanes read one split fewer ahead at a time, down to none, before they are halved, and give

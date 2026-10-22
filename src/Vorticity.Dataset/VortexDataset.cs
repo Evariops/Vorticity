@@ -678,8 +678,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// A page that shows a month can show its newest day while the rest is read: a part's answer is final
     /// for its range of time, so once a part is delivered the window from its start to the window's end is
     /// answered. A question over one period reads the synopses of its sealed objects, a round trip for
-    /// them all, and the parts are asked several at once, as many as the session lets reads be in flight,
-    /// so a month asked part by part costs about the round trips of one question over it. Answers over
+    /// them all, and the parts are asked several at once, sixteen at most and no more than the session lets
+    /// reads be in flight, so a month asked part by part costs about the round trips of one question over it. Answers over
     /// parts add up for counts and sums, and their extremes are the window's, but a mean over the window
     /// is its sum over its count.
     /// </remarks>
@@ -700,7 +700,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         PeriodCalendar calendar = PeriodCalendar.Of(Snapshot.Header, PeriodOptions.InstantOf(key));
-        return WindowParts.AskAsync(WindowParts.Of(calendar, from, to), Session.Options.MaxConcurrentReads, question, cancellationToken);
+        return WindowParts.AskAsync(WindowParts.Of(calendar, from, to), Math.Min(Session.Options.MaxConcurrentReads, WindowParts.Width), question, cancellationToken);
     }
 
     /// <summary>

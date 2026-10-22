@@ -55,7 +55,7 @@ fanning out. So:
   file is the same bytes at any degree.
 - I/O concurrency is separate and always on. The batch read of the I/O interface issues overlapping
   reads whatever the degree, because hiding latency is the point on an object store. It is bounded
-  per session by `MaxConcurrentReads`, 16 by default, across every scan of every file. A mapped file
+  per session by `MaxConcurrentReads`, 128 by default, across every scan of every file. A mapped file
   and bytes in memory have no reads to bound.
 
 [threads.md](../guide/threads.md) shows what each one costs and when parallelism pays off.

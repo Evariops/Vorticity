@@ -596,7 +596,7 @@ whole object's hashes only, so a ranged read relies on TLS and the format's chec
 
 ### 10.1 The reads in flight
 
-The session's bound on reads in flight counts batch reads, 16 by default, on every store: a batch
+The session's bound on reads in flight counts batch reads, 128 by default, on every store: a batch
 takes one slot, and the source then issues every coalesced range of the batch at once
 (`SessionReader.cs`, `ReadManyAsync`, and `ObjectSegmentSource.cs`, the reads issued together). Over
 HTTP/1.1 a request in flight is a connection, and the store sends at most `MaxConnections` requests
@@ -607,7 +607,11 @@ What a link needs in flight is its bandwidth times its latency. At 10 Gb/s and 3
 first-byte latency the store measured, was built and removed: as it sized itself, it fell to one
 request in flight once ranges passed a few megabytes, it bounded again what the connections and the
 session already bound, and nothing measured it against a service. It comes back with a measurement
-of a scan against the services, if the session's count falls short of a link.
+of a scan against the services, if the session's count falls short of a link. What a scan keeps in
+flight is sized in bytes instead, by a fixed target: a pass reads ahead as many splits as hold
+16 MiB, between sixteen and sixty-four, and so does a plain scan of one lane, both reserved in the
+memory budget ([admission](16-queries.md)). Sixteen in flight, the session's bound until then, left a
+store 5 ms away to bound a scan of rows by its latency.
 
 ### 10.2 Bytes land once
 

@@ -3637,7 +3637,7 @@ internal static class AggregationEngine
             // many splits as the lanes of a wide pass read together: each of its reads waited on the one before.
             bool readsAhead = ranges is not null || source.ReadsRoundTrips;
             long splitBytes = readsAhead ? source.ReadAheadBytes(pass) : 0;
-            int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, out int ahead);
+            int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, source.ReadsRoundTrips, out int ahead);
 
             // A lane's table reads its slots ahead once past its share of a cache: one lane alone has its
             // cluster's to itself.
@@ -4089,7 +4089,7 @@ internal static class AggregationEngine
     /// decides.
     /// </summary>
     internal static int Admit(QueryMemory memory, int lanes, int batchRows = 0, int spilledRow = 0) =>
-        Admit(memory, lanes, batchRows, spilledRow, splitBytes: 0, out _);
+        Admit(memory, lanes, batchRows, spilledRow, splitBytes: 0, roundTrips: false, out _);
 
     /// <summary>
     /// <see cref="Admit(QueryMemory, int, int, int)"/>, each lane reading <paramref name="ahead"/> splits
@@ -4099,10 +4099,19 @@ internal static class AggregationEngine
     /// again as far as they fit. A lane without reads ahead waits on each of its reads. Nothing is reserved
     /// for a source that reads in place, whose lanes read their share ahead.
     /// </summary>
-    internal static int Admit(QueryMemory memory, int lanes, int batchRows, int spilledRow, long splitBytes, out int ahead)
+    internal static int Admit(QueryMemory memory, int lanes, int batchRows, int spilledRow, long splitBytes, out int ahead) =>
+        Admit(memory, lanes, batchRows, spilledRow, splitBytes, roundTrips: false, out ahead);
+
+    /// <summary>
+    /// <see cref="Admit(QueryMemory, int, int, int, long, out int)"/>, over a store whose read is a round trip when
+    /// <paramref name="roundTrips"/> says so: the lanes then read ahead together as many splits as hold
+    /// <see cref="ReadAheadTarget"/> bytes (<see cref="TotalAhead"/>), rather than <see cref="ReadAheadTotal"/>.
+    /// </summary>
+    internal static int Admit(QueryMemory memory, int lanes, int batchRows, int spilledRow, long splitBytes, bool roundTrips, out int ahead)
     {
         long working = Working(batchRows);
-        ahead = AheadOf(lanes);
+        int total = roundTrips ? TotalAhead(splitBytes) : ReadAheadTotal;
+        ahead = AheadOf(lanes, total);
         long laneBytes = working + (splitBytes * ahead);
 
         // Their working memory a quarter of the ceiling at most: past it, their tables share the rest so
@@ -4118,7 +4127,7 @@ internal static class AggregationEngine
             }
 
             lanes = Math.Max(1, lanes / 2);
-            ahead = AheadOf(lanes);
+            ahead = AheadOf(lanes, total);
             laneBytes = working + (splitBytes * ahead);
         }
 
@@ -4137,7 +4146,7 @@ internal static class AggregationEngine
             }
 
             lanes = Math.Max(1, lanes / 2);
-            ahead = AheadOf(lanes);
+            ahead = AheadOf(lanes, total);
             laneBytes = working + (splitBytes * ahead);
             TrimAlone(lanes, working, splitBytes, memory.Ceiling, ref ahead, ref laneBytes);
         }
@@ -4166,8 +4175,28 @@ internal static class AggregationEngine
     /// </summary>
     internal const int ReadAheadTotal = 16;
 
-    /// <summary>The splits each of <paramref name="lanes"/> lanes reads ahead: its share of <see cref="ReadAheadTotal"/>, two at least.</summary>
-    private static int AheadOf(int lanes) => Math.Max(BatchAsyncEnumerator.ReadAheadSplits, ReadAheadTotal / Math.Max(lanes, 1));
+    /// <summary>
+    /// The bytes the lanes of a pass keep in flight together over a store whose read is a round trip: a link's bandwidth
+    /// times its latency, with a margin, 10 Gb/s by 5 ms being 6.25 MB. Splits of 120 KB then keep sixty-four reads in
+    /// flight where sixteen left the latency to bound a scan of rows: the rows holding a flag of the logs, over a store
+    /// 5 ms away, waited 2.4 s on 5,472 reads at sixteen; at sixty-four, with as many reads let in flight, a percentile
+    /// over 540 M rows fell from 5.5 s to 1.9 s, against 1.6 s for the link alone (2026-10-19).
+    /// </summary>
+    internal const long ReadAheadTarget = 16L << 20;
+
+    /// <summary>The most splits the lanes of a pass read ahead together, whatever their size.</summary>
+    internal const int ReadAheadMost = 64;
+
+    /// <summary>
+    /// The splits the lanes of a pass read ahead together over a store whose read is a round trip, each of
+    /// <paramref name="splitBytes"/> bytes at most: as many as hold <see cref="ReadAheadTarget"/>, between
+    /// <see cref="ReadAheadTotal"/> and <see cref="ReadAheadMost"/>.
+    /// </summary>
+    internal static int TotalAhead(long splitBytes) =>
+        splitBytes <= 0 ? ReadAheadTotal : (int)Math.Clamp(ReadAheadTarget / splitBytes, ReadAheadTotal, ReadAheadMost);
+
+    /// <summary>The splits each of <paramref name="lanes"/> lanes reads ahead: its share of <paramref name="total"/>, two at least.</summary>
+    private static int AheadOf(int lanes, int total) => Math.Max(BatchAsyncEnumerator.ReadAheadSplits, total / Math.Max(lanes, 1));
 
     /// <summary>Gives back the working memory of <paramref name="lanes"/> lanes <see cref="Admit(QueryMemory, int, int, int)"/> admitted, their batches of <paramref name="batchRows"/> rows.</summary>
     internal static void Dismiss(QueryMemory memory, int lanes, int batchRows) => memory.LetGo(lanes * Working(batchRows));

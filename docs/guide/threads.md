@@ -37,7 +37,7 @@ A `VortexSession` holds what would otherwise be process-wide state, so a host de
 |---|---|---|
 | `MemoryPool` | `AlignedMemoryPool.Shared` | every batch and builder buffer, and the segments read by a source of yours. The file sources of the library read into `AlignedMemoryPool.Shared` |
 | `SegmentCache` | none | segments kept across scans, one budget for every file of the session whose reads do I/O |
-| `MaxConcurrentReads` | 16 | reads in flight across every scan of every file of the session whose reads do I/O |
+| `MaxConcurrentReads` | 128 | reads in flight across every scan of every file of the session whose reads do I/O |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer uses |
 | `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file |
 | `MappedFileCacheCount` | 64 | files opened from a path that stay mapped after they are closed, so the next open reuses the mapping |
@@ -50,7 +50,7 @@ A `VortexSession` holds what would otherwise be process-wide state, so a host de
 The options are set inside `Create` and frozen when it returns. Setting one afterwards throws
 `InvalidOperationException: The session is created; its options are frozen. Set them inside
 VortexSession.Create.` `VortexFile.OpenAsync(path)` uses `VortexSession.Default`, which is
-immutable: the shared pool, no cache, 16 reads in flight, no parallelism, and 64 closed files kept
+immutable: the shared pool, no cache, 128 reads in flight, no parallelism, and 64 closed files kept
 mapped.
 
 A session is disposed after its files. Disposing it while one is still open throws
