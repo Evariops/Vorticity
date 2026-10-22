@@ -267,6 +267,11 @@ internal static class PathsBench
                         Print(settings, label, question, path, "warm", degree, warm);
                     }
 
+                    if (synopses && question.Window is { } window && settings.Temperatures is "all" or "cold")
+                    {
+                        Print(settings, label, question, path, "first", degree, await FirstAsync(settings, built, window, degree));
+                    }
+
                     string digest = warm.Digest ?? cold.Digest ?? string.Empty;
                     if (synopses)
                     {
@@ -336,7 +341,14 @@ internal static class PathsBench
     }
 
     /// <summary>A question of the catalogue: its dataset, its name, and how it is asked of a dataset under scan options.</summary>
-    private sealed record Question(string Set, string Name, bool Aggregates, Func<VortexDataset, ScanOptions, Asking> Ask);
+    private sealed record Question(string Set, string Name, bool Aggregates, Func<VortexDataset, ScanOptions, Asking> Ask)
+    {
+        /// <summary>
+        /// The window a newest-first asking cuts at its periods' starts, and the question asked over a part of it; null when the
+        /// question has no first result to time (<see cref="FirstAsync"/>).
+        /// </summary>
+        internal (DateTimeOffset From, DateTimeOffset To, Func<VortexDataset, ScanOptions, DateTimeOffset, DateTimeOffset, Asking> Ask)? Window { get; init; }
+    }
 
     /// <summary>A question asked: its batches, and what the scan did once they are read; its plan, for an aggregation.</summary>
     private sealed record Asking(IAsyncEnumerator<RecordBatch> Batches, Func<ScanMetrics> Metrics)
@@ -351,6 +363,24 @@ internal static class PathsBench
             Aggregation aggregation = ask(dataset.Scan<TRecord>().With(options with { AlignWindow = align }));
             return new Asking(aggregation.Query.Batches(default), () => aggregation.Metrics) { Explain = () => aggregation.ExplainAsync() };
         });
+
+    /// <summary>
+    /// An aggregation, asked as <see cref="Asked"/> does, whose first result <c>--qp</c> times too: the part of the window from
+    /// <paramref name="from"/> to <paramref name="to"/> a newest-first asking delivers first, each part bounded by
+    /// <paramref name="within"/>.
+    /// </summary>
+    private static Question AskedOver<TRecord>(
+        string set, string name, DateTimeOffset from, DateTimeOffset to, Func<Scan<TRecord>, DateTimeOffset, DateTimeOffset, Scan<TRecord>> within,
+        Func<Scan<TRecord>, Aggregation> ask)
+        where TRecord : IVortexRecord<TRecord> =>
+        Asked(set, name, ask) with
+        {
+            Window = (from, to, (dataset, options, partFrom, partTo) =>
+            {
+                Aggregation aggregation = ask(within(dataset.Scan<TRecord>().With(options), partFrom, partTo));
+                return new Asking(aggregation.Query.Batches(default), () => aggregation.Metrics);
+            }),
+        };
 
     private static Question Rows<TRecord>(string set, string name, Func<Scan<TRecord>, Scan<TRecord>> ask)
         where TRecord : IVortexRecord<TRecord> =>
@@ -564,6 +594,83 @@ internal static class PathsBench
             digests ? digest.ToString() : "-", memory.Private, memory.Working);
     }
 
+    /// <summary>
+    /// The first result of an aggregation, as the client's review defines it: cold, by a session and a handle opened for it with
+    /// an empty synopsis cache, the window asked part by part newest first (<see cref="VortexDataset.AskNewestFirstAsync"/>), and
+    /// the time its first part took to arrive. The other figures are the whole asking's, its groups the parts, its rows the
+    /// answers' rows.
+    /// </summary>
+    private static async Task<Measured> FirstAsync(
+        Settings settings, Built built, (DateTimeOffset From, DateTimeOffset To, Func<VortexDataset, ScanOptions, DateTimeOffset, DateTimeOffset, Asking> Ask) window,
+        int degree)
+    {
+        ScanOptions options = new ScanOptions { UseSynopses = true, DegreeOfParallelism = degree };
+        await using FileObjectStore files = new FileObjectStore(built.Directory);
+        LatencyObjectStore remote = new LatencyObjectStore(settings.KeepHandles ? new HeldFileObjectStore(files) : files)
+        {
+            Latency = TimeSpan.FromMilliseconds(settings.Latency),
+            LatencyP99 = TimeSpan.FromMilliseconds(settings.LatencyP99),
+            ReadsPerSecondPerPrefix = settings.ReadsPerSecondPerPrefix,
+            LinkBitsPerSecond = settings.LinkBitsPerSecond,
+            BytesPerSecond = settings.BytesPerSecond,
+        };
+        await using CountingObjectStore store = new CountingObjectStore(remote);
+        string cache = Path.Combine(settings.Store, "cache", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using VortexSession session = VortexSession.Create(o =>
+            {
+                o.MaxDegreeOfParallelism = degree;
+                o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
+                o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
+            });
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
+            store.Reset();
+            long allocated = GC.GetTotalAllocatedBytes(precise: true);
+            double cpu = ProcessCpu.Milliseconds();
+            long begin = Stopwatch.GetTimestamp();
+            double first = 0;
+            long parts = 0;
+            long rows = 0;
+            await foreach (WindowPart<long> part in dataset.AskNewestFirstAsync(window.From, window.To, async (from, to, ct) =>
+            {
+                Asking asking = window.Ask(dataset, options, from, to);
+                long answered = 0;
+                await using (asking.Batches)
+                {
+                    while (await asking.Batches.MoveNextAsync())
+                    {
+                        answered += asking.Batches.Current.SelectedRows;
+                    }
+                }
+
+                return answered;
+            }))
+            {
+                if (parts++ == 0)
+                {
+                    first = Stopwatch.GetElapsedTime(begin).TotalMilliseconds;
+                }
+
+                rows += part.Answer;
+            }
+
+            return new Measured(
+                store.Requests, store.DependentSteps, store.BytesRead, 0, rows, first, ProcessCpu.Milliseconds() - cpu,
+                GC.GetTotalAllocatedBytes(precise: true) - allocated, parts, Digest: null);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(cache, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
     private static void Print(Settings settings, string label, Question question, string path, string temperature, int degree, Measured m)
     {
         string name = temperature == "cold" ? question.Name : string.Empty;
@@ -697,22 +804,27 @@ internal static class PathsBench
     /// </summary>
     private static Question[] QpQuestions(Settings settings, string requestNeedle, string traceNeedle, TimeSpan half)
     {
-        DateTimeOffset end = QuestionBench.Start.AddHours(settings.QpHours);
+        DateTimeOffset start = QuestionBench.Start;
+        DateTimeOffset end = start.AddHours(settings.QpHours);
+        DateTimeOffset requestsEnd = start.AddHours(settings.Hours);
         DateTimeOffset lastQuarter = end.AddMinutes(-15);
         string pod = SpanGeneratorV2.PodOf(0, 0, 0);
+        static Scan<GeneratedSpanV2> Spans(Scan<GeneratedSpanV2> scan, DateTimeOffset from, DateTimeOffset to) => scan.Where(s => s.At >= from && s.At < to);
+        static Scan<LogRow> Logs(Scan<LogRow> scan, DateTimeOffset from, DateTimeOffset to) => scan.Where(r => r.At >= from && r.At < to);
+        static Scan<GeneratedRequest> Requests(Scan<GeneratedRequest> scan, DateTimeOffset from, DateTimeOffset to) => scan.Where(r => r.At >= from && r.At < to);
         return
         [
-            Asked<GeneratedSpanV2>("spans", "QP-1 one service's routes under 5xx, per hour", scan => scan.Where(s => s.Service == "svc-000" && s.HttpStatus >= 500).GroupBy(s => (s.Route, s.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Route, g.Key.Item2, g.Count()))),
-            Asked<GeneratedSpanV2>("spans", "QP-2 the pods of one route", scan => scan.Where(s => s.Route == "/api/s0/r0").GroupBy(s => s.Pod).Select(g => (g.Key, g.Count()))),
-            Asked<GeneratedSpanV2>("spans", "QP-2 the exception groups of one pod's errors", scan => scan.Where(s => s.Pod == pod && s.Status == "error").GroupBy(s => s.ExceptionGroup).Select(g => (g.Key, g.Count()))),
-            Asked<LogRow>("logs2", "QP-3 services under status_code AsInt64() >= 500", scan => scan.Where(r => r.Attributes["http.response.status_code"].AsInt64() >= 500).GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
+            AskedOver<GeneratedSpanV2>("spans", "QP-1 one service's routes under 5xx, per hour", start, end, Spans, scan => scan.Where(s => s.Service == "svc-000" && s.HttpStatus >= 500).GroupBy(s => (s.Route, s.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Route, g.Key.Item2, g.Count()))),
+            AskedOver<GeneratedSpanV2>("spans", "QP-2 the pods of one route", start, end, Spans, scan => scan.Where(s => s.Route == "/api/s0/r0").GroupBy(s => s.Pod).Select(g => (g.Key, g.Count()))),
+            AskedOver<GeneratedSpanV2>("spans", "QP-2 the exception groups of one pod's errors", start, end, Spans, scan => scan.Where(s => s.Pod == pod && s.Status == "error").GroupBy(s => s.ExceptionGroup).Select(g => (g.Key, g.Count()))),
+            AskedOver<LogRow>("logs2", "QP-3 services under status_code AsInt64() >= 500", start, end, Logs, scan => scan.Where(r => r.Attributes["http.response.status_code"].AsInt64() >= 500).GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
             Rows<GeneratedSpanV2>("spans", "QP-4 the spans of one trace (needle)", scan => scan.Where(s => s.TraceId == traceNeedle)),
             Rows<GeneratedRequest>("requests", "QP-4 the rows of one request id (needle)", scan => scan.Where(r => r.RequestId == requestNeedle)),
-            Asked<GeneratedRequest>("requests", "QP-5 every row but one request's, per service and per 12 hours", scan => scan.Where(r => r.RequestId != requestNeedle).GroupBy(r => (r.Service, r.At.Bucket(half))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()))),
-            Asked<GeneratedSpanV2>("spans", "QP-6 the 99th percentile of duration per service, the last 15 minutes", scan => scan.Where(s => s.At >= lastQuarter).GroupBy(s => s.Service).Select(g => (g.Key, g.Quantile(s => s.DurationNs, 0.99)))),
-            Asked<GeneratedRequest>("requests", "QP-7 distinct hosts per region, but one request's", scan => scan.Where(r => r.RequestId != requestNeedle).GroupBy(r => r.Region).Select(g => (g.Key, g.ApproximateCountDistinct(r => r.Host)))),
-            Asked<LogRow>("logs2", "QP-9 services under status_code AsInt64() >= 500, the last 15 minutes", scan => scan.Where(r => r.Attributes["http.response.status_code"].AsInt64() >= 500 && r.At >= lastQuarter).GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
-            Asked<LogRow>("logs2", "QP-10 feature.flag.new-cart == on, per service", scan => scan.Where(r => r.Attributes["feature.flag.new-cart"].AsString() == "on").GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
+            AskedOver<GeneratedRequest>("requests", "QP-5 every row but one request's, per service and per 12 hours", start, requestsEnd, Requests, scan => scan.Where(r => r.RequestId != requestNeedle).GroupBy(r => (r.Service, r.At.Bucket(half))).Select(g => (g.Key.Service, g.Key.Item2, g.Count()))),
+            AskedOver<GeneratedSpanV2>("spans", "QP-6 the 99th percentile of duration per service, the last 15 minutes", lastQuarter, end, Spans, scan => scan.Where(s => s.At >= lastQuarter).GroupBy(s => s.Service).Select(g => (g.Key, g.Quantile(s => s.DurationNs, 0.99)))),
+            AskedOver<GeneratedRequest>("requests", "QP-7 distinct hosts per region, but one request's", start, requestsEnd, Requests, scan => scan.Where(r => r.RequestId != requestNeedle).GroupBy(r => r.Region).Select(g => (g.Key, g.ApproximateCountDistinct(r => r.Host)))),
+            AskedOver<LogRow>("logs2", "QP-9 services under status_code AsInt64() >= 500, the last 15 minutes", lastQuarter, end, Logs, scan => scan.Where(r => r.Attributes["http.response.status_code"].AsInt64() >= 500 && r.At >= lastQuarter).GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
+            AskedOver<LogRow>("logs2", "QP-10 feature.flag.new-cart == on, per service", start, end, Logs, scan => scan.Where(r => r.Attributes["feature.flag.new-cart"].AsString() == "on").GroupBy(r => r.ServiceName).Select(g => (g.Key, g.Count()))),
         ];
     }
 
