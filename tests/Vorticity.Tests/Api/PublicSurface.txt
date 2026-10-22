@@ -2979,6 +2979,7 @@ Vorticity.Dataset:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.Dataset:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.Dataset:     property bool Durable { get; init; }
+Vorticity.Dataset:     property int HeldFiles { get; init; }
 Vorticity.Dataset:     property string Root { get; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.IndexingOptions : IEquatable<IndexingOptions>
 Vorticity.Dataset:     ctor IndexingOptions()
