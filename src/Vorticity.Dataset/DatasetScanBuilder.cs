@@ -681,30 +681,63 @@ internal sealed class DatasetScanBuilder
     /// <summary>
     /// The scan of a lookup of an identifier: every object the walk keeps that takes the lookup (<see cref="LookupFor"/>)
     /// looked up at once, as many reads in flight as the session lets be, and the objects' rows given in the tree's order;
-    /// an object that does not take it read as the scan reads any, when its turn comes. A lookup takes four round trips
-    /// whatever the object holds: thirty objects looked up one after the other would wait for 120.
+    /// an object that does not take it, a small one whose footer an open reads in a request, read as the scan reads any,
+    /// <see cref="LookupReads"/> of them at once, the rows they keep copied. A lookup takes four round trips whatever the
+    /// object holds, and an open and a read of a small object two or three: thirty objects one after the other would wait
+    /// for 120, or for 60 to 90.
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> LookedUpAsync(VortexExpr lookup, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         LookupColumns(out int[]? columns);
-        List<(PositionedObject Held, Task<List<RecordBatch>?>? Found)> objects = [];
+        List<(PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)> objects = [];
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        SemaphoreSlim? reading = null;
         try
         {
+            int read = 0;
             await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
             {
                 if (Covered(held) > 0)
                 {
-                    objects.Add((held, LookupFor(held) is null ? null : _dataset.LookupAsync(held.Entry, lookup, columns, stopped.Token).AsTask()));
+                    bool looked = LookupFor(held) is not null;
+                    objects.Add((held, looked ? _dataset.LookupAsync(held.Entry, lookup, columns, stopped.Token).AsTask() : null, looked));
+                    read += looked ? 0 : 1;
                 }
             }
 
-            foreach ((PositionedObject held, Task<List<RecordBatch>?>? found) in objects)
+            // Objects read as rows, two or more, read ahead together; one alone is read when its turn comes, as a scan reads it.
+            for (int i = 0; i < objects.Count && read > 1; i++)
             {
-                IAsyncEnumerable<RecordBatch> batches = found is null
-                    ? RowsAsync(held, 1, cancellationToken)
-                    : FoundAsync(held, await found.ConfigureAwait(false), cancellationToken);
-                await foreach (RecordBatch batch in batches.ConfigureAwait(false))
+                if (!objects[i].Looked)
+                {
+                    reading ??= new SemaphoreSlim(LookupReads);
+                    objects[i] = (objects[i].Held, ReadAheadAsync(objects[i].Held, reading, stopped.Token), false);
+                }
+            }
+
+            foreach ((PositionedObject held, Task<List<RecordBatch>?>? found, bool looked) in objects)
+            {
+                if (looked)
+                {
+                    await foreach (RecordBatch batch in FoundAsync(held, await found!.ConfigureAwait(false), cancellationToken).ConfigureAwait(false))
+                    {
+                        yield return batch;
+                    }
+
+                    continue;
+                }
+
+                if (found is not null)
+                {
+                    foreach (RecordBatch batch in await found.ConfigureAwait(false) ?? [])
+                    {
+                        yield return batch;
+                    }
+
+                    continue;
+                }
+
+                await foreach (RecordBatch batch in RowsAsync(held, 1, cancellationToken).ConfigureAwait(false))
                 {
                     yield return batch;
                 }
@@ -712,9 +745,10 @@ internal sealed class DatasetScanBuilder
         }
         finally
         {
-            // A scan stopped or failed: the lookups still on their way are called off and end, and what they found is let go.
+            // A scan stopped or failed: the lookups and the reads still on their way are called off and end, and what they
+            // found is let go.
             await stopped.CancelAsync().ConfigureAwait(false);
-            foreach ((_, Task<List<RecordBatch>?>? found) in objects)
+            foreach ((_, Task<List<RecordBatch>?>? found, _) in objects)
             {
                 if (found is null)
                 {
@@ -732,6 +766,46 @@ internal sealed class DatasetScanBuilder
                 {
                 }
             }
+
+            reading?.Dispose();
+        }
+    }
+
+    /// <summary>The objects a lookup's scan reads as rows at once, those that do not take the lookup.</summary>
+    private const int LookupReads = 16;
+
+    /// <summary>
+    /// The rows of <paramref name="held"/> the scan keeps, read as the scan reads any object once <paramref name="reading"/>
+    /// lets one more be read, each batch that keeps a row copied, the scan's own batches being let go as it moves on.
+    /// </summary>
+    private async Task<List<RecordBatch>?> ReadAheadAsync(PositionedObject held, SemaphoreSlim reading, CancellationToken cancellationToken)
+    {
+        await reading.WaitAsync(cancellationToken).ConfigureAwait(false);
+        List<RecordBatch> kept = [];
+        try
+        {
+            await foreach (RecordBatch batch in RowsAsync(held, 1, cancellationToken).ConfigureAwait(false))
+            {
+                if (batch.SelectedRows > 0)
+                {
+                    kept.Add(batch.View.ToOwned());
+                }
+            }
+
+            return kept;
+        }
+        catch
+        {
+            foreach (RecordBatch batch in kept)
+            {
+                batch.Dispose();
+            }
+
+            throw;
+        }
+        finally
+        {
+            reading.Release();
         }
     }
 
@@ -2472,11 +2546,15 @@ internal sealed class DatasetScanBuilder
     {
         if (_metrics is { } metrics)
         {
-            metrics.ObjectsOpened++;
-            metrics.Cursors = Math.Max(metrics.Cursors, open);
-            if (lease.WasCached)
+            // A lookup's scan opens the objects it reads as rows several at once.
+            lock (metrics)
             {
-                metrics.CacheHits++;
+                metrics.ObjectsOpened++;
+                metrics.Cursors = Math.Max(metrics.Cursors, open);
+                if (lease.WasCached)
+                {
+                    metrics.CacheHits++;
+                }
             }
         }
     }

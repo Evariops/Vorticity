@@ -64,7 +64,9 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// 27,288 bytes to 27,376 alone, past its ceiling, set again 2 % above. A part of an object that one slice its window
     /// cuts holds then read that edge by the object's chunk directories rather than by a scan of its rows, which opened the
     /// object: the unaligned window rose from 81,248 bytes to 81,648, its ceiling set again 2 % above, and the same window
-    /// at eight lanes, whose lanes read their shares of an edge so, was given ceilings.
+    /// at eight lanes, whose lanes read their shares of an edge so, was given ceilings. The small objects a needle reads as
+    /// rows were then read ahead together, the rows each keeps copied into batches of its own: the rows of one id rose
+    /// past their ceiling of 60,864 bytes to 63,496, the ceiling set again 2 % above.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
@@ -79,7 +81,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
         ["synopses: count by route, a shredded path"] = new(8, 268256, 4, 5902, 65216),
         ["rows: count by service and hour"] = new(8, 392866, 4, 130512, 43520),
         ["rows: count by route, a shredded path"] = new(8, 268256, 4, 5902, 58816),
-        ["rows: the rows of one id"] = new(6, 335730, 2, 73408, 60864),
+        ["rows: the rows of one id"] = new(6, 335730, 2, 73408, 64768),
     };
 
     private readonly Fixture _fixture;
