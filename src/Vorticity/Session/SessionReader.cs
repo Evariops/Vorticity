@@ -23,11 +23,17 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
     private readonly SemaphoreSlim _gate;
     private readonly SegmentCache? _cache;
 
+    // What its segments are kept under in the cache: the store's reader, under the synopsis cache's, whose regions are the
+    // same bytes. A store's reader equals another of the same object, so that a read of an object with no open of it, whose
+    // readers are its own and a synopsis cache's made for it, finds what the reads before it kept.
+    private readonly ISegmentReader _key;
+
     private SessionReader(ISegmentReader inner, SemaphoreSlim gate, SegmentCache? cache)
     {
         _inner = inner;
         _gate = gate;
         _cache = cache;
+        _key = inner is SynopsisCacheReader cached ? cached.Inner : inner;
     }
 
     internal ISegmentReader Inner => _inner;
@@ -52,7 +58,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
     {
-        if (_cache is not null && _cache.TryGet(_inner, (long)spec.Offset, (int)spec.Length, out SegmentOwner cached, out VortexBuffer view))
+        if (_cache is not null && _cache.TryGet(_key, (long)spec.Offset, (int)spec.Length, out SegmentOwner cached, out VortexBuffer view))
         {
             return Slice(cached, view);
         }
@@ -68,7 +74,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
             _gate.Release();
         }
 
-        _cache?.Add(_inner, (long)spec.Offset, owner, owner.Buffer);
+        _cache?.Add(_key, (long)spec.Offset, owner, owner.Buffer);
         return owner;
     }
 
@@ -105,7 +111,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
                     }
 
                     SegmentSpec spec = requests.GetSpec(slot);
-                    if (_cache.TryGet(_inner, (long)spec.Offset, (int)spec.Length, out SegmentOwner owner, out VortexBuffer view))
+                    if (_cache.TryGet(_key, (long)spec.Offset, (int)spec.Length, out SegmentOwner owner, out VortexBuffer view))
                     {
                         try
                         {
@@ -145,7 +151,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
                 {
                     if (held is null || !held[slot])
                     {
-                        _cache.Add(_inner, (long)requests.GetSpec(slot).Offset, requests.GetOwner(slot), requests.GetBuffer(slot));
+                        _cache.Add(_key, (long)requests.GetSpec(slot).Offset, requests.GetOwner(slot), requests.GetBuffer(slot));
                     }
                 }
             }
@@ -183,7 +189,7 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
 
     public ValueTask DisposeAsync()
     {
-        _cache?.Evict(_inner);
+        _cache?.Evict(_key);
         return _inner.DisposeAsync();
     }
 

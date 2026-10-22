@@ -144,17 +144,39 @@ public sealed partial class SynopsisContentsTests
     /// <summary>
     /// An hour of calls whose attributes hold a route, and on about one row in a hundred a key no table
     /// counts: a question on that key reads, cold, the path directory beside the column's chunk directory,
-    /// then the slices that may hold the key, two round trips, and warm none at all; it finds every row that
-    /// holds the key.
+    /// then the slices that may hold the key, two round trips, and warm none at all, whether the session
+    /// keeps the declared regions in a synopsis cache as well or not; it finds every row that holds the key.
     /// </summary>
-    [Fact]
-    public async Task APathNoTableNamesReadsInTwoRoundTripsColdAndNoneWarm()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task APathNoTableNamesReadsInTwoRoundTripsColdAndNoneWarm(bool synopsisCache)
+    {
+        string directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vorticity-path-cache-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await PathReadsAsync(directory, synopsisCache);
+        }
+        finally
+        {
+            if (System.IO.Directory.Exists(directory))
+            {
+                System.IO.Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    private static async Task PathReadsAsync(string directory, bool synopsisCache)
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
         // A session of its own, with a cache that keeps what a read fetched for the next.
-        await using VortexSession session = VortexSession.Create(static options => options.SegmentCache = new SegmentCache(64 << 20));
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.SegmentCache = new SegmentCache(64 << 20);
+            options.SynopsisCache = synopsisCache ? new SynopsisCache(directory, 64 << 20) : null;
+        });
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Tagged.Schema, new DatasetOptions
         {
             Session = session,
