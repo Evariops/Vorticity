@@ -172,32 +172,12 @@ internal sealed class VariantShapes
     /// from its header byte alone: a short string or the string primitive, the booleans' primitives, the
     /// four integers', the double's.
     /// </summary>
-    private static bool Holds(VariantShredding field, ReadOnlySpan<byte> value)
+    private static bool Holds(VariantShredding field, ReadOnlySpan<byte> value) => field.Kind switch
     {
-        int header = value[0];
-        int basic = header & 0x03;
-        int primitive = basic == ParquetVariant.BasicPrimitive ? header >> 2 : -1;
-        return field.Kind switch
-        {
-            VariantShreddingKind.Object => basic == ParquetVariant.BasicObject,
-            VariantShreddingKind.List => basic == ParquetVariant.BasicArray,
-            _ => field.Class switch
-            {
-                VariantClass.Integer => primitive is >= IntegerFirst and <= IntegerLast,
-                VariantClass.Double => primitive == DoubleType,
-                VariantClass.String => basic == ParquetVariant.BasicShortString || primitive == StringType,
-                _ => primitive is TrueType or FalseType,
-            },
-        };
-    }
-
-    // The type ids of the variant encoding's primitives a typed column holds.
-    private const int TrueType = 1;
-    private const int FalseType = 2;
-    private const int IntegerFirst = 3;
-    private const int IntegerLast = 6;
-    private const int DoubleType = 7;
-    private const int StringType = 16;
+        VariantShreddingKind.Object => (value[0] & 0x03) == ParquetVariant.BasicObject,
+        VariantShreddingKind.List => (value[0] & 0x03) == ParquetVariant.BasicArray,
+        _ => VariantClasses.OfHeader(value[0]) == field.Class,
+    };
 
     private static void Set(Span<ulong> shape, int bit, int value) => shape[bit >> 6] |= (ulong)value << (bit & 63);
 

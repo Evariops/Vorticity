@@ -448,14 +448,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
                 : SlotOf(VariantScalar.Read(value).Kind);
 
         /// <summary>The slot of a scalar of <paramref name="kind"/>: its shreddable class, or anything else.</summary>
-        private static int SlotOf(VariantKind kind) => kind switch
-        {
-            VariantKind.Int8 or VariantKind.Int16 or VariantKind.Int32 or VariantKind.Int64 => (int)VariantClass.Integer,
-            VariantKind.Double => (int)VariantClass.Double,
-            VariantKind.String => (int)VariantClass.String,
-            VariantKind.Bool => (int)VariantClass.Boolean,
-            _ => OtherSlot,
-        };
+        private static int SlotOf(VariantKind kind) => VariantClasses.Of(kind) is { } @class ? (int)@class : OtherSlot;
     }
 }
 

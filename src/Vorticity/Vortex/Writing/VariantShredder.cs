@@ -183,23 +183,8 @@ internal static class VariantShredder
         return built;
     }
 
-    /// <summary>
-    /// Whether <paramref name="value"/> is of <paramref name="class"/>, from its header byte alone: a short
-    /// string or the string primitive, the four integers', the double's, the booleans'.
-    /// </summary>
-    private static bool OfClass(VariantClass @class, ReadOnlySpan<byte> value)
-    {
-        int header = value[0];
-        int basic = header & 0x03;
-        int primitive = basic == ParquetVariant.BasicPrimitive ? header >> 2 : -1;
-        return @class switch
-        {
-            VariantClass.Integer => primitive is >= 3 and <= 6,
-            VariantClass.Double => primitive == 7,
-            VariantClass.String => basic == ParquetVariant.BasicShortString || primitive == 16,
-            _ => primitive is 1 or 2,
-        };
-    }
+    /// <summary>Whether <paramref name="value"/> is of <paramref name="class"/>, from its header byte alone (<see cref="VariantClasses.OfHeader"/>).</summary>
+    private static bool OfClass(VariantClass @class, ReadOnlySpan<byte> value) => VariantClasses.OfHeader(value[0]) == @class;
 
     /// <summary>
     /// One node of the shredding over the rows: its typed column, what of each row it does not take, and
@@ -529,7 +514,7 @@ internal static class VariantShredder
     }
 
     /// <summary>The typed column of one class, its rows appended one at a time.</summary>
-    private abstract class TypedColumn
+    private abstract class TypedColumn(VariantClass @class)
     {
         protected Bits Valid { get; } = new Bits();
 
@@ -548,7 +533,7 @@ internal static class VariantShredder
         internal bool Fits(ReadOnlySpan<byte> value) => Takes(VariantScalar.Read(value).Kind);
 
         /// <summary>Whether a value of <paramref name="kind"/> is of the column's class.</summary>
-        internal abstract bool Takes(VariantKind kind);
+        internal bool Takes(VariantKind kind) => VariantClasses.Of(kind) == @class;
 
         /// <summary>Appends <paramref name="value"/>, which fits.</summary>
         internal abstract void Append(ReadOnlySpan<byte> value);
@@ -559,11 +544,9 @@ internal static class VariantShredder
     }
 
     /// <summary>Integers of every width, as 64-bit integers.</summary>
-    private sealed class IntegerColumn : TypedColumn
+    private sealed class IntegerColumn() : TypedColumn(VariantClass.Integer)
     {
         private long[] _values = new long[64];
-
-        internal override bool Takes(VariantKind kind) => kind is VariantKind.Int8 or VariantKind.Int16 or VariantKind.Int32 or VariantKind.Int64;
 
         internal override void Append(ReadOnlySpan<byte> value) => Add((long)VariantScalar.Read(value).Integer, true);
 
@@ -589,11 +572,9 @@ internal static class VariantShredder
     }
 
     /// <summary>64-bit floats.</summary>
-    private sealed class DoubleColumn : TypedColumn
+    private sealed class DoubleColumn() : TypedColumn(VariantClass.Double)
     {
         private double[] _values = new double[64];
-
-        internal override bool Takes(VariantKind kind) => kind == VariantKind.Double;
 
         internal override void Append(ReadOnlySpan<byte> value) => Add(VariantScalar.Read(value).Number, true);
 
@@ -619,11 +600,9 @@ internal static class VariantShredder
     }
 
     /// <summary>Booleans.</summary>
-    private sealed class BooleanColumn : TypedColumn
+    private sealed class BooleanColumn() : TypedColumn(VariantClass.Boolean)
     {
         private readonly Bits _values = new Bits();
-
-        internal override bool Takes(VariantKind kind) => kind == VariantKind.Bool;
 
         internal override void Append(ReadOnlySpan<byte> value)
         {
@@ -645,11 +624,9 @@ internal static class VariantShredder
     }
 
     /// <summary>UTF-8 text.</summary>
-    private sealed class StringColumn : TypedColumn
+    private sealed class StringColumn() : TypedColumn(VariantClass.String)
     {
         private readonly BinaryColumn _values = new BinaryColumn();
-
-        internal override bool Takes(VariantKind kind) => kind == VariantKind.String;
 
         internal override void Append(ReadOnlySpan<byte> value)
         {
