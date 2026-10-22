@@ -737,6 +737,7 @@ internal static class ZonePruningPlan
             }
 
             // Then a look again: the map is kept, or its decoding failed and this scan claims it.
+            file.NoteZoneWait();
             await other.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
     }

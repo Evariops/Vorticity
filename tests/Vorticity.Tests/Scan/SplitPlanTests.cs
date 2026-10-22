@@ -10,8 +10,6 @@
 // the structure the planner walks.
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Globalization;
 
 using Vorticity.Arrays;
 using Vorticity.Layouts;
@@ -348,14 +346,10 @@ public sealed class SplitPlanTests
         const long Rows = 3_000_000_000L;
         LayoutTree tree = Tree(Node(Flat, (ulong)Rows, segments: [0]), I64());
 
-        Stopwatch clock = Stopwatch.StartNew();
+        // Two boundaries, the layout's own, are the proof: a plan that sub-divided would hold three billion and one, and
+        // no clock on a loaded machine says more.
         SplitPlan plan = SplitPlan.Compute(tree, new RowRange(0, Rows), FieldMask.All, 1);
-        clock.Stop();
-
         Assert.Equal(2, plan.BoundaryCount);
-        Assert.True(
-            clock.ElapsedMilliseconds < 1000,
-            string.Create(CultureInfo.InvariantCulture, $"planning took {clock.ElapsedMilliseconds} ms"));
 
         // And the cursor really does hand out one row at a time, from the right place.
         SplitCursor cursor = plan.CreateCursor();

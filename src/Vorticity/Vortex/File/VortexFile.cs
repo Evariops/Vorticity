@@ -1458,6 +1458,17 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>
+    /// How many times a scan waited for another's decoding of a zone map rather than read it: what a test that starts
+    /// scans together waits for before it lets the first one's read go.
+    /// </summary>
+    internal int ZoneWaits => Volatile.Read(ref _zoneWaits);
+
+    private int _zoneWaits;
+
+    /// <summary>Counts a scan about to wait for another's decoding of a zone map.</summary>
+    internal void NoteZoneWait() => Interlocked.Increment(ref _zoneWaits);
+
+    /// <summary>
     /// Ends the decoding of zoned node <paramref name="node"/>'s zone map that <see cref="ClaimZones"/>
     /// gave the caller: the map is kept before the decoding ends, so a scan coming after finds it, and
     /// the scans awaiting it get it, or null when the decoding failed, for each of them to look again

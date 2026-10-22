@@ -184,10 +184,11 @@ public sealed class ScanExplainTests
             plans[s] = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(ct), ct);
         }
 
-        // The first read parked, then time for the other scans to miss the map too: a scan decoding
-        // it again would park a read of its own.
+        // The first read parked, then every other scan waiting for its decoding: a scan decoding it
+        // again would park a read of its own.
         await ParkedAsync(gated, 1, ct);
-        await Task.Delay(200, ct);
+        await WaitingAsync(file, Scans - 1, ct);
+        Assert.Equal(Scans - 1, file.ZoneWaits);
         int parked = gated.Parked;
         gated.ReleaseAll();
         Assert.Equal(1, parked);
@@ -224,7 +225,8 @@ public sealed class ScanExplainTests
         Task<ScanExplanation> first = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(cancelled.Token), ct);
         await ParkedAsync(gated, 1, ct);
         Task<ScanExplanation> second = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(ct), ct);
-        await Task.Delay(200, ct);
+        await WaitingAsync(file, 1, ct);
+        Assert.Equal(1, file.ZoneWaits);
         Assert.Equal(1, gated.Parked);
 
         // The first scan's read cancelled, its gate stays counted, and the second scan parks its own.
@@ -242,6 +244,16 @@ public sealed class ScanExplainTests
     {
         long deadline = Environment.TickCount64 + 10_000;
         while (gated.Parked < count && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(1, ct);
+        }
+    }
+
+    /// <summary>Waits, ten seconds at most, for <paramref name="count"/> scans of <paramref name="file"/> to wait for another's decoding.</summary>
+    private static async Task WaitingAsync(VortexFile file, int count, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (file.ZoneWaits < count && Environment.TickCount64 < deadline)
         {
             await Task.Delay(1, ct);
         }
