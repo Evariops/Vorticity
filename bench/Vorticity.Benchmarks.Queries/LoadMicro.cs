@@ -71,7 +71,7 @@ internal static class LoadMicro
                 loads[p] = new PeriodRows(
                     TimeSlicer.InstantOf(QuestionBench.Start.AddHours(first), unit),
                     [.. Enumerable.Range(0, periodHours * minutes).Select(at => (Func<CancellationToken, IAsyncEnumerable<RecordBatch>>)(token =>
-                        DesignBuild.RowsAsync(row, unit, first + (at / minutes), at % minutes * perMinute, perMinute, perHour, 1_000 + ((first + (at / minutes)) * 60) + (at % minutes), token)))])
+                        DesignBuild.RowsAsync(row, unit, first + (at / minutes), at % minutes * perMinute, perMinute, perHour, 1_000 + ((first + (at / minutes)) * 60) + (at % minutes), false, token)))])
                 {
                     ExpectedRows = periodHours * minutes * perMinute,
                 };

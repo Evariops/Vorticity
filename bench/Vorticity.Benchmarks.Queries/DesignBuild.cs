@@ -38,7 +38,7 @@ internal static class DesignBuild
     };
 
     internal static async Task<(long Rows, string Needle)> FillAsync(
-        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes, string scratch)
+        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes, string scratch, bool randomIds = false)
     {
         // The runs the writers and the synopsis tables move to disk wait beside the store, on its disk.
         System.IO.Directory.CreateDirectory(scratch);
@@ -62,7 +62,7 @@ internal static class DesignBuild
                 while (next < hours && next < Volatile.Read(ref s_appended) + parallel)
                 {
                     int hour = next++;
-                    written[hour] = Task.Run(() => WriteHourAsync(dataset, hour, perHour, partMinutes));
+                    written[hour] = Task.Run(() => WriteHourAsync(dataset, hour, perHour, partMinutes, randomIds: randomIds));
                 }
             }
 
@@ -89,7 +89,7 @@ internal static class DesignBuild
 
                 if (hour == hours / 2)
                 {
-                    needle = $"req-{(hour * perHour) + (perHour / 2):x12}";
+                    needle = RequestGenerator.IdOf((hour * perHour) + (perHour / 2), randomIds);
                 }
 
                 double seconds = Stopwatch.GetElapsedTime(begin).TotalSeconds;
@@ -119,7 +119,7 @@ internal static class DesignBuild
     /// incremental build ends with, written once, where one wrote each row three times over on a core or two.
     /// </summary>
     internal static async Task<(long Rows, string Needle)> LoadAsync(
-        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, string scratch)
+        IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, string scratch, bool randomIds = false)
     {
         System.IO.Directory.CreateDirectory(scratch);
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = writeDegree);
@@ -137,7 +137,7 @@ internal static class DesignBuild
             DType row = dataset.Snapshot.Schema.DType;
             TimeUnit unit = PeriodOptions.InstantOf(dataset.Key);
             long perHour = (long)(rate * 3_600);
-            CheckColumns(row, unit, perHour);
+            CheckColumns(row, unit, perHour, randomIds);
 
             // A day's hours are its parts, each drawn by its own generator, written one after the other: the rows it holds
             // are known.
@@ -149,7 +149,7 @@ internal static class DesignBuild
                 int held = Math.Min(24, hours - first);
                 periods[day] = new PeriodRows(
                     TimeSlicer.InstantOf(QuestionBench.Start.AddHours(first), unit),
-                    [.. Enumerable.Range(first, held).Select(hour => (Func<CancellationToken, IAsyncEnumerable<RecordBatch>>)(token => RowsAsync(row, unit, hour, 0, perHour, perHour, 1_000 + hour, token)))])
+                    [.. Enumerable.Range(first, held).Select(hour => (Func<CancellationToken, IAsyncEnumerable<RecordBatch>>)(token => RowsAsync(row, unit, hour, 0, perHour, perHour, 1_000 + hour, randomIds, token)))])
                 {
                     ExpectedRows = held * perHour,
                 };
@@ -164,7 +164,7 @@ internal static class DesignBuild
                 $"  loaded {days} periods in {seconds:F0} s, {loaded.Sum(p => p.Rows) / seconds / 1e6:F2} M rows a second: {loaded.Sum(p => p.Bytes) / 1e9:F1} GB, a peak of {self.PeakWorkingSet64 / 1e9:F2} GB in memory, {GC.GetTotalAllocatedBytes() / 1e9:F1} GB allocated, {GC.CollectionCount(2)} collections of generation 2"));
             await TablesAsync(dataset);
             int needleHour = hours / 2;
-            return (hours * perHour, $"req-{(needleHour * perHour) + (perHour / 2):x12}");
+            return (hours * perHour, RequestGenerator.IdOf((needleHour * perHour) + (perHour / 2), randomIds));
         }
     }
 
@@ -174,11 +174,12 @@ internal static class DesignBuild
     /// <summary>
     /// Rows <paramref name="first"/> to <paramref name="first"/> + <paramref name="count"/> of <paramref name="hour"/>, a row
     /// every 3 600 s / <paramref name="perHour"/>, drawn by a generator of <paramref name="seed"/> whose first id is the first
-    /// row's number among the dataset's, in batches of the columns of <paramref name="row"/>, each valid until the next: the
+    /// row's number among the dataset's, the ids random-looking when <paramref name="randomIds"/> says so, in batches of the
+    /// columns of <paramref name="row"/>, each valid until the next: the
     /// rows <see cref="WriteHourAsync"/> draws for a whole hour of seed 1 000 + <paramref name="hour"/>, but late ones.
     /// </summary>
     internal static async IAsyncEnumerable<RecordBatch> RowsAsync(
-        DType row, TimeUnit unit, int hour, long first, long count, long perHour, int seed, [EnumeratorCancellation] CancellationToken cancellationToken)
+        DType row, TimeUnit unit, int hour, long first, long count, long perHour, int seed, bool randomIds, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         await Task.Yield();
         CanonicalArena arena = new CanonicalArena();
@@ -186,7 +187,7 @@ internal static class DesignBuild
         double step = (double)TimeSlicer.Units(TimeSpan.FromHours(1), unit) / perHour;
         try
         {
-            RequestColumns columns = new RequestColumns(new RequestGenerator(seed, (hour * perHour) + first), row);
+            RequestColumns columns = new RequestColumns(new RequestGenerator(seed, (hour * perHour) + first, randomIds), row);
             long origin = TimeSlicer.InstantOf(QuestionBench.Start.AddHours(hour), unit);
             for (long drawn = first; drawn < first + count; drawn += LoadBatchRows)
             {
@@ -209,17 +210,17 @@ internal static class DesignBuild
     /// Holds <see cref="RequestColumns"/> to the requests <see cref="RequestGenerator.Next"/> draws of the same seed, read
     /// back as records: every column of every row, the instants included, before a load writes a row drawn so.
     /// </summary>
-    private static void CheckColumns(DType row, TimeUnit unit, long perHour)
+    private static void CheckColumns(DType row, TimeUnit unit, long perHour, bool randomIds)
     {
         const int Rows = 20_000;
         const int Hour = 7;
-        RequestGenerator records = new RequestGenerator(1_000 + Hour, Hour * perHour);
+        RequestGenerator records = new RequestGenerator(1_000 + Hour, Hour * perHour, randomIds);
         CanonicalArena arena = new CanonicalArena();
         try
         {
             long origin = TimeSlicer.InstantOf(QuestionBench.Start.AddHours(Hour), unit);
             double step = (double)TimeSlicer.Units(TimeSpan.FromHours(1), unit) / perHour;
-            int root = new RequestColumns(new RequestGenerator(1_000 + Hour, Hour * perHour), row).Fill(arena, origin, step, 0, Rows);
+            int root = new RequestColumns(new RequestGenerator(1_000 + Hour, Hour * perHour, randomIds), row).Fill(arena, origin, step, 0, Rows);
             using RecordBatch batch = RecordBatch.Over(arena, root, 0, null);
             GeneratedRequest[] read = new GeneratedRequest[Rows];
             GeneratedRequest.ReadRows(batch.As<GeneratedRequest>(), read);
@@ -273,9 +274,10 @@ internal static class DesignBuild
     /// The rows of one hour, drawn by a generator seeded by the hour, written into drafts of <paramref name="partMinutes"/> minutes each;
     /// its first <paramref name="minutes"/> minutes alone when fewer than 60.
     /// </summary>
-    internal static async Task<List<ObjectDraft>> WriteHourAsync(VortexDataset dataset, int hour, long perHour, int partMinutes, int minutes = 60, bool lateRows = true)
+    internal static async Task<List<ObjectDraft>> WriteHourAsync(
+        VortexDataset dataset, int hour, long perHour, int partMinutes, int minutes = 60, bool lateRows = true, bool randomIds = false)
     {
-        RequestGenerator generator = new RequestGenerator(1_000 + hour, hour * perHour);
+        RequestGenerator generator = new RequestGenerator(1_000 + hour, hour * perHour, randomIds);
         Random late = new Random(7_000 + hour);
         DateTimeOffset start = QuestionBench.Start.AddHours(hour);
         long perPart = perHour * partMinutes / 60;

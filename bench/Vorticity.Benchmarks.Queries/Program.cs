@@ -266,6 +266,7 @@ if (Text(args, "--micro") == "paths")
         Budget = Option(args, "--budget", 100),
         WriteDegree = Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
         Rebuild = args.Contains("--rebuild"),
+        RandomIds = args.Contains("--random-ids"),
         BuildOnly = args.Contains("--build-only"),
         Entries = args.Contains("--entries"),
         Verify = args.Contains("--verify"),

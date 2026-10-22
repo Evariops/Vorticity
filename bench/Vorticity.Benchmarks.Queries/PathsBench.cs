@@ -83,6 +83,9 @@ internal static class PathsBench
 
         internal bool Rebuild { get; init; }
 
+        /// <summary>Whether the requests' ids look random, 32 hexadecimal digits of a hash, rather than count up (<c>--random-ids</c>).</summary>
+        internal bool RandomIds { get; init; }
+
         internal bool BuildOnly { get; init; }
 
         internal bool Verify { get; init; }
@@ -143,11 +146,11 @@ internal static class PathsBench
         Directory.CreateDirectory(settings.Store);
         Built requests = await EnsureAsync(
             settings,
-            $"requests-{(!settings.Design ? string.Empty : settings.Incremental ? "design-" : "design-load-")}h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}",
+            $"requests-{(!settings.Design ? string.Empty : settings.Incremental ? "design-" : "design-load-")}h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}{(settings.RandomIds ? "-rid" : string.Empty)}",
             store => !settings.Design ? FillRequestsAsync(store, settings)
                 : settings.Incremental
-                ? DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"))
-                : DesignBuild.LoadAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelPeriods, settings.WriteDegree, Path.Combine(settings.Store, "scratch")));
+                ? DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"), settings.RandomIds)
+                : DesignBuild.LoadAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelPeriods, settings.WriteDegree, Path.Combine(settings.Store, "scratch"), settings.RandomIds));
         Built logs = await EnsureAsync(settings, $"logs-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
         if (settings.BuildOnly)
         {
@@ -601,7 +604,7 @@ internal static class PathsBench
     private static async Task<(long Rows, string Needle)> FillRequestsAsync(IObjectStore store, Settings settings)
     {
         VortexWriteOptions write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget) };
-        return await QuestionBench.FillRequestsAsync(store, settings.Hours, settings.Rate, write, degree: settings.WriteDegree);
+        return await QuestionBench.FillRequestsAsync(store, settings.Hours, settings.Rate, write, degree: settings.WriteDegree, randomIds: settings.RandomIds);
     }
 
     private static async Task<(long Rows, string Needle)> FillLogsAsync(IObjectStore store, Settings settings)
