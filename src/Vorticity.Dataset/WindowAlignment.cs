@@ -57,10 +57,15 @@ internal static class WindowAlignment
             return null;
         }
 
-        // The objects each end cuts, the one of most rows first.
+        // The objects each end cuts, the one of most rows first: those whose instants may hold an end, found by their
+        // summaries and their pages', where a walk of every object read every page of the dataset at each question.
+        FieldExpr instantColumn = Expr.Field(instant);
+        VortexExpr? lowEnd = low == long.MinValue ? null : Expr.Eq(instantColumn, Expr.Literal(FilterLiteral.From(low)));
+        VortexExpr? highEnd = high == long.MaxValue ? null : Expr.Eq(instantColumn, Expr.Literal(FilterLiteral.From(high)));
+        SummaryPruner cutting = new SummaryPruner(lowEnd is null ? highEnd! : highEnd is null ? lowEnd : Expr.Or(lowEnd, highEnd));
         (long Rows, SynopsisContents Contents, DType Schema, (long Least, long Greatest) Held)? starts = null;
         (long Rows, SynopsisContents Contents, DType Schema, (long Least, long Greatest) Held)? ends = null;
-        await foreach (PositionedObject held in version.WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        await foreach (PositionedObject held in version.WalkAsync(cutting, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
         {
             ObjectEntry entry = held.Entry;
             if (!entry.Summaries.TryGet(instant, out ColumnSummary summary)

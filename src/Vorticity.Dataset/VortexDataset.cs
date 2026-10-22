@@ -1087,8 +1087,28 @@ public sealed class VortexDataset : IAsyncDisposable
         TimeUnit unit = PeriodOptions.InstantOf(key);
         PeriodCalendar calendar = PeriodCalendar.Of(version.Header, unit);
         long horizon = TimeSlicer.Units(version.Header.Lateness ?? TimeSpan.Zero, unit);
+
+        // Only the objects whose instants may reach the earliest end of a period an appended row lies in, past the
+        // horizon, found by their summaries and their pages': an object short of it closes none of their periods, and a
+        // walk of every object read every page of the dataset at each append.
+        long earliest = long.MaxValue;
+        foreach (WrittenObject produced in written)
+        {
+            if (Instants(produced.Entry.Summaries, key) is { } appended)
+            {
+                earliest = Math.Min(earliest, calendar.Next(calendar.Floor(appended.Least)));
+            }
+        }
+
+        if (earliest == long.MaxValue)
+        {
+            return;
+        }
+
+        long reach = horizon > 0 && earliest > long.MaxValue - horizon ? long.MaxValue : earliest + horizon;
+        SummaryPruner closing = new SummaryPruner(Expr.Ge(Expr.Field(key.InstantPath), Expr.Literal(FilterLiteral.From(reach))));
         Dictionary<string, long> newest = new Dictionary<string, long>(StringComparer.Ordinal);
-        await foreach (PositionedObject held in version.WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        await foreach (PositionedObject held in version.WalkAsync(closing, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
         {
             if (held.Level is not (0 or PeriodLevels.Late) && Instants(held.Entry.Summaries, key) is { } instants)
             {
