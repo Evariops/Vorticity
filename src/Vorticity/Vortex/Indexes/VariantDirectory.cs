@@ -298,7 +298,7 @@ internal sealed class VariantDirectory
     /// The least text above every text that starts with <paramref name="prefix"/>: the prefix up to its
     /// last byte below 255, that byte one more; null when every byte is 255.
     /// </summary>
-    private static byte[]? Above(ReadOnlySpan<byte> prefix)
+    internal static byte[]? Above(ReadOnlySpan<byte> prefix)
     {
         for (int i = prefix.Length - 1; i >= 0; i--)
         {

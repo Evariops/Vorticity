@@ -344,17 +344,6 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
             }
         }
 
-        /// <summary>
-        /// Counts a value of the path, <paramref name="scalar"/>, in the class a question reads it as and
-        /// widens that class's bounds, text bounds cut to <paramref name="stringBoundBytes"/>: what a
-        /// count of one block's values of a shredded path is made of.
-        /// </summary>
-        internal void Note(VariantScalar scalar, int stringBoundBytes)
-        {
-            Values++;
-            Bound(stringBoundBytes, scalar);
-        }
-
         /// <summary>Counts <paramref name="scalar"/> in the class a question reads it as, and widens that class's bounds.</summary>
         private void Bound(PathCensus census, VariantScalar scalar) => Bound(census.StringBoundBytes, scalar);
 

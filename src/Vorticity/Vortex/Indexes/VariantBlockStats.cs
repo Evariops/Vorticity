@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using ManagedCompressions.Zstd;
 using Vorticity.Arrays;
 using Vorticity.File;
+using Vorticity.Serialization;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types.Variants;
 
@@ -63,10 +64,26 @@ internal sealed class ChunkBlockBounds
         return [.. keys];
     }
 
-    /// <summary>One key and class over a chunk: its blocks that hold a value, each its count and bounds.</summary>
+    /// <summary>
+    /// One key and class over a chunk: its blocks that hold a value, each its count and bounds, a block counted at a time
+    /// as the rows come in order.
+    /// </summary>
     internal sealed class KeyBlocks(int index, string key, PathClass @class, int blockRows, int stringBoundBytes)
     {
-        private readonly List<(int Block, PathCensus.PathCount Count)> _blocks = [];
+        private readonly List<BlockBounds> _blocks = [];
+
+        // The block being counted, -1 before its first value: its values and their bounds, an integer's least and
+        // greatest, a boolean's values seen, a text's least and greatest cut to the bound, in buffers of that length.
+        private int _block = -1;
+        private long _values;
+        private long _low = long.MaxValue;
+        private long _high = long.MinValue;
+        private int _booleans;
+        private byte[]? _minText;
+        private byte[]? _maxText;
+        private int _minTextLength = -1;
+        private int _maxTextLength = -1;
+        private bool _maxTextCut;
 
         /// <summary>The key's index among the shredding's keys.</summary>
         internal int Index => index;
@@ -75,22 +92,114 @@ internal sealed class ChunkBlockBounds
 
         internal PathClass Class => @class;
 
-        /// <summary>The blocks of the chunk that hold a value, in order, each counted from the chunk's first.</summary>
-        internal IReadOnlyList<(int Block, PathCensus.PathCount Count)> Blocks => _blocks;
+        /// <summary>The blocks of the chunk that hold a value, in order, each counted from the chunk's first, once its rows are all noted.</summary>
+        internal IReadOnlyList<BlockBounds> Blocks
+        {
+            get
+            {
+                Close();
+                return _blocks;
+            }
+        }
 
-        /// <summary>Counts the value <paramref name="scalar"/> of row <paramref name="row"/> of the chunk.</summary>
+        /// <summary>Counts the value <paramref name="scalar"/> of row <paramref name="row"/> of the chunk, a value of the key's class.</summary>
         internal void Note(int row, VariantScalar scalar)
         {
             int block = row / blockRows;
-            if (_blocks.Count == 0 || _blocks[^1].Block != block)
+            if (block != _block)
             {
-                _blocks.Add((block, new PathCensus.PathCount()));
+                Close();
+                _block = block;
             }
 
-            _blocks[^1].Count.Note(scalar, stringBoundBytes);
+            _values++;
+            switch (@class)
+            {
+                case PathClass.Integer:
+                    long integer = (long)scalar.Integer;
+                    _low = Math.Min(_low, integer);
+                    _high = Math.Max(_high, integer);
+                    break;
+                case PathClass.Boolean:
+                    _booleans |= scalar.Integer != 0 ? 2 : 1;
+                    break;
+                case PathClass.String when stringBoundBytes > 0:
+                    Text(scalar.Bytes);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        /// <summary>Widens the block's text bounds by <paramref name="text"/>, cut to the bound, as a path's count does.</summary>
+        private void Text(ReadOnlySpan<byte> text)
+        {
+            ReadOnlySpan<byte> cut = text[..Math.Min(text.Length, stringBoundBytes)];
+            bool longer = text.Length > stringBoundBytes;
+            if (_minTextLength < 0)
+            {
+                _minText ??= new byte[stringBoundBytes];
+                _maxText ??= new byte[stringBoundBytes];
+                cut.CopyTo(_minText);
+                cut.CopyTo(_maxText);
+                _minTextLength = _maxTextLength = cut.Length;
+                _maxTextCut = longer;
+                return;
+            }
+
+            if (cut.SequenceCompareTo(_minText.AsSpan(0, _minTextLength)) < 0)
+            {
+                cut.CopyTo(_minText);
+                _minTextLength = cut.Length;
+            }
+
+            int order = cut.SequenceCompareTo(_maxText.AsSpan(0, _maxTextLength));
+            if (order > 0)
+            {
+                cut.CopyTo(_maxText);
+                _maxTextLength = cut.Length;
+                _maxTextCut = longer;
+            }
+            else if (order == 0)
+            {
+                _maxTextCut |= longer;
+            }
+        }
+
+        /// <summary>Ends the block being counted, its bounds kept as a path directory gives them, and starts none.</summary>
+        private void Close()
+        {
+            if (_block < 0)
+            {
+                return;
+            }
+
+            (long low, long high, byte[]? min, byte[]? max) = @class switch
+            {
+                PathClass.Integer => (_low, _high, null, null),
+                PathClass.Boolean => ((long)_booleans, 0L, null, null),
+                PathClass.String when _minTextLength >= 0 => (0L, 0L, _minText.AsSpan(0, _minTextLength).ToArray(),
+                    _maxTextCut ? VariantDirectory.Above(_maxText.AsSpan(0, _maxTextLength)) : _maxText.AsSpan(0, _maxTextLength).ToArray()),
+                _ => (0L, 0L, (byte[]?)null, (byte[]?)null),
+            };
+            _blocks.Add(new BlockBounds(_block, _values, low, high, min, max));
+            _block = -1;
+            _values = 0;
+            _low = long.MaxValue;
+            _high = long.MinValue;
+            _booleans = 0;
+            _minTextLength = _maxTextLength = -1;
+            _maxTextCut = false;
         }
     }
 }
+
+/// <summary>
+/// One block's values of a shredded key of one class: how many, and their bounds there as a path directory's entry
+/// holds them, an integer's least and greatest, a boolean's values seen (1 for false, 2 for true), a text's least and
+/// the least text above its greatest, both cut to the census's bound.
+/// </summary>
+internal readonly record struct BlockBounds(int Block, long Values, long Low, long High, byte[]? MinText, byte[]? MaxText);
 
 /// <summary>
 /// The block statistics of a variant column's shredded keys: per key and class, for each block of the
@@ -117,16 +226,32 @@ internal sealed class VariantBlockStats
 {
     private const byte Version = 1;
 
+    // The regions of statistics built to be written, a key's each, encoded once.
+    private readonly byte[][]? _regions;
+
     internal VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, IReadOnlyList<(int Block, PathEntry Entry)[]> blocks)
     {
         Keys = keys;
         Blocks = blocks;
     }
 
+    /// <summary>Statistics built to be written: the keys and classes, and each one's region (<see cref="KeyBytes"/>).</summary>
+    private VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, byte[][] regions)
+    {
+        (int Block, PathEntry Entry)[][] none = new (int, PathEntry)[regions.Length][];
+        Array.Fill(none, []);
+        Keys = keys;
+        Blocks = none;
+        _regions = regions;
+    }
+
     /// <summary>The keys and classes counted.</summary>
     internal IReadOnlyList<(string Key, PathClass Class)> Keys { get; }
 
-    /// <summary>Per key and class, its blocks that hold a value in the file's order, each its count and bounds; empty for a region not read.</summary>
+    /// <summary>
+    /// Per key and class, its blocks that hold a value in the file's order, each its count and bounds; empty for a region
+    /// not read, and for statistics built to be written, which hold their regions instead.
+    /// </summary>
     internal IReadOnlyList<(int Block, PathEntry Entry)[]> Blocks { get; }
 
     /// <summary>Which of the keys and classes is <paramref name="key"/> of <paramref name="class"/>, or -1.</summary>
@@ -205,35 +330,19 @@ internal sealed class VariantBlockStats
         }
     }
 
-    /// <summary>The region of key <paramref name="key"/>: its blocks, behind a version byte and the body's length, the body one zstd frame.</summary>
-    internal byte[] KeyBytes(int key)
+    /// <summary>The region of key <paramref name="key"/> of statistics built to be written (<see cref="Builder.Build"/>).</summary>
+    /// <exception cref="InvalidOperationException">The statistics were read, not built.</exception>
+    internal byte[] KeyBytes(int key) =>
+        _regions is { } regions ? regions[key] : throw new InvalidOperationException("Block statistics read from a file hold no region to write.");
+
+    /// <summary>
+    /// The region of a key whose <paramref name="count"/> blocks <paramref name="blocks"/> holds encoded (<see cref="Builder"/>):
+    /// behind a version byte and the body's length, the body, their count then their bytes, one zstd frame.
+    /// </summary>
+    private static byte[] Encode(int count, ReadOnlySpan<byte> blocks)
     {
-        ProtoWriter body = new ProtoWriter();
-        byte[] plain;
-        try
-        {
-            (int Block, PathEntry Entry)[] blocks = Blocks[key];
-            body.WriteVarint((ulong)blocks.Length);
-            int previous = 0;
-            foreach ((int block, PathEntry entry) in blocks)
-            {
-                body.WriteVarint((ulong)(block - previous));
-                previous = block;
-                body.WriteVarint((ulong)entry.Values);
-                body.WriteVarint(Zigzag(entry.Low));
-                body.WriteVarint(Zigzag(entry.High));
-                body.WriteVarint((entry.MinText is null ? 0 : 1UL) | (entry.MaxText is null ? 0 : 2UL));
-                Text(ref body, entry.MinText);
-                Text(ref body, entry.MaxText);
-            }
-
-            plain = body.WrittenSpan.ToArray();
-        }
-        finally
-        {
-            body.Dispose();
-        }
-
+        byte[] plain = new byte[Varint.Size((ulong)count) + blocks.Length];
+        blocks.CopyTo(plain.AsSpan(Varint.Write(plain, (ulong)count)));
         byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(plain.Length)];
         ZstdCompressor encoder = Writing.ZstdEncoders.Rent();
         int written;
@@ -260,15 +369,6 @@ internal sealed class VariantBlockStats
         finally
         {
             writer.Dispose();
-        }
-
-        static void Text(ref ProtoWriter writer, byte[]? text)
-        {
-            if (text is not null)
-            {
-                writer.WriteVarint((ulong)text.Length);
-                writer.WriteRawBytes(text);
-            }
         }
     }
 
@@ -326,8 +426,8 @@ internal sealed class VariantBlockStats
             {
                 block = checked(block + (int)reader.ReadVarint());
                 long values = checked((long)reader.ReadVarint());
-                long low = Unzigzag(reader.ReadVarint());
-                long high = Unzigzag(reader.ReadVarint());
+                long low = Varint.ZigZagDecode64(reader.ReadVarint());
+                long high = Varint.ZigZagDecode64(reader.ReadVarint());
                 ulong flags = reader.ReadVarint();
                 byte[]? min = (flags & 1) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
                 byte[]? max = (flags & 2) != 0 ? reader.ReadLengthDelimited().ToArray() : null;
@@ -411,28 +511,23 @@ internal sealed class VariantBlockStats
         return (null, 0, 0);
     }
 
-    private static ulong Zigzag(long value) => (ulong)((value << 1) ^ (value >> 63));
-
-    private static long Unzigzag(ulong value) => (long)(value >> 1) ^ -(long)(value & 1);
-
     /// <summary>
-    /// The block statistics of one variant column as its chunks are written: each chunk's bounds added
-    /// at the chunk's first block, then kept where they prune.
+    /// The block statistics of one variant column as its chunks are written: each chunk's bounds added at the chunk's
+    /// first block, each key's blocks held encoded as its region's body holds them until the file ends, a dozen bytes a
+    /// block of an integer key rather than a path directory's entry, then kept where they prune.
     /// </summary>
     internal sealed class Builder(IReadOnlyList<(string Key, PathClass Class)> keys)
     {
-        private readonly List<(int Block, PathEntry Entry)>[] _blocks = Lists(keys.Count);
+        private readonly KeyStream[] _streams = Streams(keys.Count);
 
         /// <summary>Adds a chunk's bounds, its blocks counted from <paramref name="firstBlock"/>.</summary>
         internal void Add(int firstBlock, ChunkBlockBounds chunk)
         {
             for (int key = 0; key < keys.Count; key++)
             {
-                string[] path = [keys[key].Key];
-                foreach ((int block, PathCensus.PathCount count) in chunk.Keys[key].Blocks)
+                foreach (BlockBounds bounds in chunk.Keys[key].Blocks)
                 {
-                    (long low, long high, bool _, byte[]? min, byte[]? max) = VariantDirectory.Bounds(count, keys[key].Class);
-                    _blocks[key].Add((firstBlock + block, new PathEntry(path, keys[key].Class, count.Read(keys[key].Class), PathPlace.Typed, low, high, false, min, max)));
+                    _streams[key].Append(firstBlock + bounds.Block, bounds);
                 }
             }
         }
@@ -447,7 +542,7 @@ internal sealed class VariantBlockStats
             List<(int Key, double Narrowing)> kept = [];
             for (int key = 0; key < keys.Count; key++)
             {
-                if (Narrowing(_blocks[key], keys[key].Class, blocks) is double narrowing and > 0)
+                if (Narrowing(_streams[key], keys[key].Class, blocks) is double narrowing and > 0)
                 {
                     kept.Add((key, narrowing));
                 }
@@ -455,24 +550,22 @@ internal sealed class VariantBlockStats
 
             kept.Sort(static (a, b) => b.Narrowing.CompareTo(a.Narrowing));
             List<(string, PathClass)> names = [];
-            List<(int, PathEntry)[]> regions = [];
+            List<byte[]> regions = [];
             long bytes = 0;
             foreach ((int key, double _) in kept)
             {
-                (int, PathEntry)[] entries = [.. _blocks[key]];
-                VariantBlockStats one = new VariantBlockStats([keys[key]], [entries]);
-                long size = one.KeyBytes(0).Length;
-                if (bytes + size > maxBytes)
+                byte[] region = Encode(_streams[key].Count, _streams[key].Body);
+                if (bytes + region.Length > maxBytes)
                 {
                     continue;
                 }
 
-                bytes += size;
+                bytes += region.Length;
                 names.Add(keys[key]);
-                regions.Add(entries);
+                regions.Add(region);
             }
 
-            return names.Count == 0 ? null : new VariantBlockStats(names, regions);
+            return names.Count == 0 ? null : new VariantBlockStats(names, [.. regions]);
         }
 
         /// <summary>
@@ -482,31 +575,31 @@ internal sealed class VariantBlockStats
         /// range its own range leaves out for an integer, and for a text or a boolean whether its bounds
         /// are narrower than the key's.
         /// </summary>
-        private static double Narrowing(List<(int Block, PathEntry Entry)> blocks, PathClass @class, int total)
+        private static double Narrowing(KeyStream stream, PathClass @class, int total)
         {
-            if (blocks.Count == 0 || total <= 0)
+            if (stream.Count == 0 || total <= 0)
             {
                 return 0;
             }
 
-            double narrowed = total - blocks.Count;
+            double narrowed = total - stream.Count;
             switch (@class)
             {
                 case PathClass.Integer:
                 {
                     long low = long.MaxValue;
                     long high = long.MinValue;
-                    foreach ((int _, PathEntry entry) in blocks)
+                    for (BoundsReader block = stream.Read(); block.MoveNext();)
                     {
-                        low = Math.Min(low, entry.Low);
-                        high = Math.Max(high, entry.High);
+                        low = Math.Min(low, block.Low);
+                        high = Math.Max(high, block.High);
                     }
 
                     if (high > low)
                     {
-                        foreach ((int _, PathEntry entry) in blocks)
+                        for (BoundsReader block = stream.Read(); block.MoveNext();)
                         {
-                            narrowed += 1 - (((double)entry.High - entry.Low) / ((double)high - low));
+                            narrowed += 1 - (((double)block.High - block.Low) / ((double)high - low));
                         }
                     }
 
@@ -516,31 +609,39 @@ internal sealed class VariantBlockStats
                 case PathClass.String:
                 {
                     // Without text bounds, no block's range is known.
-                    byte[]? least = null;
-                    byte[]? greatest = null;
+                    ReadOnlySpan<byte> least = default;
+                    ReadOnlySpan<byte> greatest = default;
+                    bool anyLeast = false;
+                    bool anyGreatest = false;
                     bool unbounded = false;
-                    foreach ((int _, PathEntry entry) in blocks)
+                    for (BoundsReader block = stream.Read(); block.MoveNext();)
                     {
-                        if (entry.MinText is not { } min)
+                        if (!block.HasMin)
                         {
                             return narrowed / total;
                         }
 
-                        least = least is null || min.AsSpan().SequenceCompareTo(least) < 0 ? min : least;
-                        if (entry.MaxText is not { } max)
+                        if (!anyLeast || block.Min.SequenceCompareTo(least) < 0)
+                        {
+                            least = block.Min;
+                            anyLeast = true;
+                        }
+
+                        if (!block.HasMax)
                         {
                             unbounded = true;
                         }
-                        else if (greatest is null || max.AsSpan().SequenceCompareTo(greatest) > 0)
+                        else if (!anyGreatest || block.Max.SequenceCompareTo(greatest) > 0)
                         {
-                            greatest = max;
+                            greatest = block.Max;
+                            anyGreatest = true;
                         }
                     }
 
-                    foreach ((int _, PathEntry entry) in blocks)
+                    for (BoundsReader block = stream.Read(); block.MoveNext();)
                     {
-                        bool above = entry.MinText!.AsSpan().SequenceCompareTo(least) > 0;
-                        bool below = entry.MaxText is { } max && (unbounded || max.AsSpan().SequenceCompareTo(greatest) < 0);
+                        bool above = block.Min.SequenceCompareTo(least) > 0;
+                        bool below = block.HasMax && (unbounded || block.Max.SequenceCompareTo(greatest) < 0);
                         narrowed += above || below ? 1 : 0;
                     }
 
@@ -548,9 +649,9 @@ internal sealed class VariantBlockStats
                 }
 
                 case PathClass.Boolean:
-                    foreach ((int _, PathEntry entry) in blocks)
+                    for (BoundsReader block = stream.Read(); block.MoveNext();)
                     {
-                        narrowed += entry.Low is 1 or 2 ? 1 : 0;
+                        narrowed += block.Low is 1 or 2 ? 1 : 0;
                     }
 
                     break;
@@ -562,15 +663,115 @@ internal sealed class VariantBlockStats
             return narrowed / total;
         }
 
-        private static List<(int, PathEntry)>[] Lists(int count)
+        private static KeyStream[] Streams(int count)
         {
-            List<(int, PathEntry)>[] lists = new List<(int, PathEntry)>[count];
+            KeyStream[] streams = new KeyStream[count];
             for (int i = 0; i < count; i++)
             {
-                lists[i] = [];
+                streams[i] = new KeyStream();
             }
 
-            return lists;
+            return streams;
+        }
+
+        /// <summary>
+        /// One key's blocks so far, encoded as its region's body holds them after their count: each block's distance from
+        /// the one before, its values, its bounds zigzagged, which texts follow, and those texts.
+        /// </summary>
+        private sealed class KeyStream
+        {
+            private byte[] _bytes = [];
+            private int _length;
+            private int _previous;
+
+            /// <summary>The blocks held.</summary>
+            internal int Count { get; private set; }
+
+            internal ReadOnlySpan<byte> Body => _bytes.AsSpan(0, _length);
+
+            /// <summary>Holds the bounds <paramref name="bounds"/> of block <paramref name="block"/>, one past the last held.</summary>
+            internal void Append(int block, in BlockBounds bounds)
+            {
+                int most = (5 * 10) + (bounds.MinText?.Length ?? 0) + (bounds.MaxText?.Length ?? 0) + 10;
+                if (_length + most > _bytes.Length)
+                {
+                    Array.Resize(ref _bytes, Math.Max(_length + most, Math.Max(256, _bytes.Length * 2)));
+                }
+
+                Write((ulong)(block - _previous));
+                _previous = block;
+                Write((ulong)bounds.Values);
+                Write(Varint.ZigZagEncode64(bounds.Low));
+                Write(Varint.ZigZagEncode64(bounds.High));
+                Write((bounds.MinText is null ? 0 : 1UL) | (bounds.MaxText is null ? 0 : 2UL));
+                Text(bounds.MinText);
+                Text(bounds.MaxText);
+                Count++;
+            }
+
+            /// <summary>The blocks held, read back in order.</summary>
+            internal BoundsReader Read() => new BoundsReader(Body, Count);
+
+            private void Write(ulong value) => _length += Varint.Write(_bytes.AsSpan(_length), value);
+
+            private void Text(byte[]? text)
+            {
+                if (text is not null)
+                {
+                    Write((ulong)text.Length);
+                    text.CopyTo(_bytes, _length);
+                    _length += text.Length;
+                }
+            }
+        }
+
+        /// <summary>The blocks of a key's stream, one at a time, their texts views of its bytes.</summary>
+        private ref struct BoundsReader
+        {
+            private ProtoReader _reader;
+            private int _left;
+
+            internal BoundsReader(ReadOnlySpan<byte> body, int count)
+            {
+                _reader = new ProtoReader(body);
+                _left = count;
+            }
+
+            internal int Block { get; private set; }
+
+            internal long Values { get; private set; }
+
+            internal long Low { get; private set; }
+
+            internal long High { get; private set; }
+
+            internal bool HasMin { get; private set; }
+
+            internal bool HasMax { get; private set; }
+
+            internal ReadOnlySpan<byte> Min { get; private set; }
+
+            internal ReadOnlySpan<byte> Max { get; private set; }
+
+            internal bool MoveNext()
+            {
+                if (_left == 0)
+                {
+                    return false;
+                }
+
+                _left--;
+                Block += (int)_reader.ReadVarint();
+                Values = (long)_reader.ReadVarint();
+                Low = Varint.ZigZagDecode64(_reader.ReadVarint());
+                High = Varint.ZigZagDecode64(_reader.ReadVarint());
+                ulong texts = _reader.ReadVarint();
+                HasMin = (texts & 1) != 0;
+                HasMax = (texts & 2) != 0;
+                Min = HasMin ? _reader.ReadLengthDelimited() : default;
+                Max = HasMax ? _reader.ReadLengthDelimited() : default;
+                return true;
+            }
         }
     }
 }
