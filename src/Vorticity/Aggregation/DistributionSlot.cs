@@ -14,7 +14,7 @@ namespace Vorticity.Aggregating;
 internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
     where TValue : unmanaged, INumberBase<TValue>
 {
-    /// <summary>What a value may add at most: a sparse bucket's index and count, or a window's slot and its growth.</summary>
+    /// <summary>What a value adds at least to the growth the slot asks for: a sparse bucket's index and count.</summary>
     private const long BytesPerValue = sizeof(int) + sizeof(long);
 
     private readonly int _bits;
@@ -26,6 +26,12 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
     private TValue[] _values = [];
     private MaskCache _rows;
     private ulong[] _clip = [];
+
+    // The bytes the sketches grew by, and the values and states stepped into them, over the slot's life: what a value
+    // costs them on average once their windows densify and widen, where a sparse bucket's twelve bytes left the budget
+    // short of a window's growth.
+    private long _grown;
+    private long _stepped;
 
     internal DistributionSlot(int bits, Func<Distribution?, TResult> final)
     {
@@ -54,7 +60,10 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
         {
             if (end > start)
             {
-                _bytes += Sketch(group).AddAll(values[start..end]);
+                long added = Sketch(group).AddAll(values[start..end]);
+                _bytes += added;
+                _grown += added;
+                _stepped += end - start;
             }
 
             return;
@@ -76,6 +85,8 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
             }
 
             _bytes += grown;
+            _grown += grown;
+            _stepped += rows.Count;
         }
 
         if (!(start == 0 && end == input.Rows && input.Selection.IsEmpty))
@@ -89,12 +100,16 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
         ReadOnlySpan<TValue> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
         RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
         long grown = 0;
+        long stepped = 0;
         while (rows.Next(out int row))
         {
             grown += Sketch(groups[row]).Add(double.CreateTruncating(values[row]));
+            stepped++;
         }
 
         _bytes += grown;
+        _grown += grown;
+        _stepped += stepped;
     }
 
     /// <summary>
@@ -126,6 +141,8 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
         }
 
         _bytes += grown;
+        _grown += grown;
+        _stepped += groups.Length;
         return true;
 
         long Merge(int group, ReadOnlySpan<byte> sketch)
@@ -183,7 +200,8 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
     internal override long Footprint => ((long)_sketches.Length * IntPtr.Size) + _bytes;
 
     internal override long GrowthFor(int more) =>
-        (_groups + (long)more > _sketches.Length ? (long)Scratch.Capacity(_groups + more, _sketches.Length) * IntPtr.Size : 0) + (more * BytesPerValue);
+        (_groups + (long)more > _sketches.Length ? (long)Scratch.Capacity(_groups + more, _sketches.Length) * IntPtr.Size : 0)
+        + (more * Math.Max(BytesPerValue, _stepped == 0 ? 0 : _grown / _stepped));
 
     internal override bool SpillsStates => true;
 

@@ -46,6 +46,16 @@ internal sealed partial class SynopsisTables
     /// <summary>The most groups an hour or the object holds at the depth sketched, past which its deepest tables of sketches are given up.</summary>
     private const int HeldSketchGroups = 4 * SketchedGroups;
 
+    /// <summary>
+    /// The most bytes the groups of an hour or of the object hold, past which its deepest tables of sketches are given up
+    /// as past <see cref="HeldSketchGroups"/>: sixteen thousand groups of a few dense distinct sketches each would hold
+    /// a gigabyte. <see cref="DefaultHeldSketchBytes"/>; a test lowers it.
+    /// </summary>
+    internal long HeldSketchBytes { get; init; } = DefaultHeldSketchBytes;
+
+    /// <summary>The bytes of sketches an hour or the object holds at most by default: 256 MiB.</summary>
+    internal const long DefaultHeldSketchBytes = 256L << 20;
+
     // The tables of sketches by depth, of the hour and of the object; the depth of the groups the hour's slices fill, -1
     // when none is kept; those groups and the object's; and the bytes of a sketch encoded.
     private Candidate?[] _sketchedHours = [];
@@ -305,6 +315,11 @@ internal sealed partial class SynopsisTables
         {
             GiveUpSketches(hour.Depth, FormattableString.Invariant($"given up as its groups grew: {hour.Count} groups of sketches in an hour, past {HeldSketchGroups}"));
         }
+
+        while (_sketchDepth >= 0 && hour.Bytes() is var held && held > HeldSketchBytes)
+        {
+            GiveUpSketches(hour.Depth, FormattableString.Invariant($"given up as its groups grew: {held} bytes of sketches in an hour, past {HeldSketchBytes}"));
+        }
     }
 
     /// <summary>
@@ -396,11 +411,13 @@ internal sealed partial class SynopsisTables
         {
             object_.Coarsen(Math.Min(whole, hour.Depth));
             object_.MergeFrom(hour);
-            while (object_.Count > HeldSketchGroups && object_.Depth >= 0)
+            while ((object_.Count > HeldSketchGroups || object_.Bytes() is var held && held > HeldSketchBytes) && object_.Depth >= 0)
             {
                 if (_sketchedWhole[object_.Depth] is { } table)
                 {
-                    Drop(table, FormattableString.Invariant($"given up as its groups grew: {object_.Count} groups of sketches in the object, past {HeldSketchGroups}"));
+                    Drop(table, object_.Count > HeldSketchGroups
+                        ? FormattableString.Invariant($"given up as its groups grew: {object_.Count} groups of sketches in the object, past {HeldSketchGroups}")
+                        : FormattableString.Invariant($"given up as its groups grew: {object_.Bytes()} bytes of sketches in the object, past {HeldSketchBytes}"));
                 }
 
                 object_.Coarsen(Math.Min(object_.Depth - 1, Deepest(_sketchedWhole)));
@@ -591,6 +608,30 @@ internal sealed partial class SynopsisTables
         internal int Depth { get; private set; } = depth;
 
         internal int Count => _keys.Count;
+
+        /// <summary>
+        /// The bytes the groups hold: their keys and states, and their sketches as their values grew them, a window or a
+        /// map of buckets a measure, a dense distinct sketch of 16 KiB a key past a thousand values.
+        /// </summary>
+        internal long Bytes()
+        {
+            long bytes = (long)_words.Length * sizeof(long);
+            for (int g = 0; g < _keys.Count; g++)
+            {
+                bytes += _keys[g].Length + (4L * IntPtr.Size);
+                foreach (QuantileSketch sketch in _sketches[g])
+                {
+                    bytes += sketch.Bytes;
+                }
+
+                foreach (CardinalitySketch? distinct in _distinct[g])
+                {
+                    bytes += distinct?.Bytes ?? 0;
+                }
+            }
+
+            return bytes;
+        }
 
         /// <summary>The group of the key <paramref name="key"/>, of <see cref="Depth"/> components: a new one of no row when it has none.</summary>
         internal int Of(ReadOnlySpan<byte> key)
