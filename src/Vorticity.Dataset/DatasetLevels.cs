@@ -111,7 +111,7 @@ internal sealed class DatasetLevels
             }
         }
 
-        bool byPeriods = header.Lateness is not null;
+        bool byPeriods = header.ByPeriods;
         if (highest < 0)
         {
             return byPeriods ? NoneByPeriods : None;

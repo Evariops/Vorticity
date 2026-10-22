@@ -30,12 +30,12 @@ internal sealed class PeriodCalendar
         _unit = unit;
     }
 
-    /// <summary>The length of a dataset whose header names none.</summary>
-    internal const SliceWidth DefaultLength = SliceWidth.Day;
-
-    /// <summary>The calendar a header records, over an instant counted in <paramref name="unit"/>: a day for a header that names no length.</summary>
-    internal static PeriodCalendar Of(CommitHeader header, TimeUnit unit) =>
-        new PeriodCalendar(header.PeriodLength ?? DefaultLength, header.PeriodChanges, unit);
+    /// <summary>The calendar a header of a dataset of periods records, over an instant counted in <paramref name="unit"/>.</summary>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods.</exception>
+    internal static PeriodCalendar Of(CommitHeader header, TimeUnit unit) => new PeriodCalendar(
+        header.PeriodLength ?? throw new InvalidOperationException("The dataset declares no periods (DatasetOptions.Periods): it has no calendar."),
+        header.PeriodChanges,
+        unit);
 
     /// <summary>The changes the dataset made, in order.</summary>
     internal IReadOnlyList<PeriodChange> Changes => _changes;

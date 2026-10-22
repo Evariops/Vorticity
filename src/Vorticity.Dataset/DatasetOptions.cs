@@ -359,7 +359,7 @@ public sealed record DatasetOptions
             ? new PeriodOptions
             {
                 Lateness = lateness,
-                Length = header.PeriodLength ?? SliceWidth.Day,
+                Length = header.PeriodLength ?? throw new InvalidOperationException("A header of a dataset of periods names no period length."),
                 SliceTargetRows = asked?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows,
                 RefuseLateRows = asked?.RefuseLateRows ?? false,
             }

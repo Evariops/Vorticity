@@ -303,6 +303,21 @@ public sealed class CommitObjectTests
         CommitHeader reread = CommitObject.Open(fourth, fourth.Length).Header;
         Assert.Equal(DatasetFeatures.EntryFields, reread.Features);
         Assert.Equal(counting.Sources, reread.Sources);
+
+        // A feature this library does not know is a later format's, refused as a later format is; so is a flag of periods
+        // without its lateness horizon, and one that goes with it reads back.
+        CommitHeader unknown = featured with { Features = DatasetFeatures.EntryFields | (DatasetFeatures)(1UL << 40) };
+        byte[] unknownBytes = new CommitObjectBuilder(unknown.Version).Build(unknown);
+        CommitFormatException unknownRefused = Assert.Throws<CommitFormatException>(() => CommitObject.Open(unknownBytes, unknownBytes.Length));
+        Assert.Contains("features 0x10000000000", unknownRefused.Message, StringComparison.Ordinal);
+
+        CommitHeader alone = featured with { Features = DatasetFeatures.Periods };
+        byte[] aloneBytes = new CommitObjectBuilder(alone.Version).Build(alone);
+        Assert.Throws<CommitFormatException>(() => CommitObject.Open(aloneBytes, aloneBytes.Length));
+
+        CommitHeader periods = alone with { Lateness = TimeSpan.FromMinutes(5), PeriodLength = SliceWidth.Hour };
+        byte[] periodsBytes = new CommitObjectBuilder(periods.Version).Build(periods);
+        Assert.True(CommitObject.Open(periodsBytes, periodsBytes.Length).Header.ByPeriods);
     }
 
     // An entry that records its object's footer length: the same bytes as before up to its summaries, the

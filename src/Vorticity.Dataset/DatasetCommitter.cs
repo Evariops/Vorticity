@@ -369,6 +369,11 @@ internal static class DatasetCommitter
                 Features = template.Features | FeaturesOf(operations),
             };
             header = Fitted(WithoutHeld(header));
+            if (header.ByPeriods != header.Lateness.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "A commit would write a header whose flag of periods and lateness horizon disagree, which every reader refuses.");
+            }
 
             // 3. One conditional creation. Once it is in, nothing after it can exist yet.
             string key = CommitKey.For(version);
@@ -1105,12 +1110,13 @@ internal static class DatasetCommitter
 
                 case DatasetOperation.ChangePeriodLength change:
                 {
-                    // Dropped when worked out on a calendar another writer changed first, when it asks for the length the
-                    // calendar ends on already, or when it does not follow the calendar's last change: the changes stay few,
-                    // and in the order of their boundaries, which a calendar reads them in.
+                    // Dropped on a dataset with no periods, when worked out on a calendar another writer changed first, when it
+                    // asks for the length the calendar ends on already, or when it does not follow the calendar's last change:
+                    // the changes stay few, and in the order of their boundaries, which a calendar reads them in.
                     IReadOnlyList<PeriodChange> held = schema.PeriodChanges;
-                    SliceWidth last = held.Count > 0 ? held[^1].Length : schema.PeriodLength ?? PeriodCalendar.DefaultLength;
-                    if (held.Count != change.After || change.Change.Length == last || (held.Count > 0 && change.Change.From <= held[^1].From))
+                    if (schema.PeriodLength is not { } first || held.Count != change.After
+                        || change.Change.Length == (held.Count > 0 ? held[^1].Length : first)
+                        || (held.Count > 0 && change.Change.From <= held[^1].From))
                     {
                         outcomes.Add(OperationOutcome.Dropped);
                     }

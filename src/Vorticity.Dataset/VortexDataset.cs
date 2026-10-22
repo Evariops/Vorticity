@@ -634,7 +634,7 @@ public sealed class VortexDataset : IAsyncDisposable
             throw new ArgumentException($"The window from {from:O} to {to:O} is empty.", nameof(to));
         }
 
-        if (Snapshot.Header.Lateness is null || Key is not { } key)
+        if (!Snapshot.Header.ByPeriods || Key is not { } key)
         {
             throw new InvalidOperationException(
                 "A window is asked part by part on the periods of a dataset, and this dataset declares none (DatasetOptions.Periods): ask its question over the whole window.");

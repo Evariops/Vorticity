@@ -142,6 +142,16 @@ internal sealed record CommitHeader
     /// </summary>
     public DatasetFeatures Features { get; init; }
 
+    /// <summary>The features this library knows: a header that names another is refused, a later library's.</summary>
+    internal const DatasetFeatures KnownFeatures =
+        DatasetFeatures.EntryFields | DatasetFeatures.ErasureDelay | DatasetFeatures.Periods | DatasetFeatures.Identifiers | DatasetFeatures.Partitions;
+
+    /// <summary>
+    /// Whether the dataset is compacted by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which the lateness
+    /// horizon goes with, a header that names one and not the other being refused.
+    /// </summary>
+    internal bool ByPeriods => (Features & DatasetFeatures.Periods) != 0;
+
     /// <summary>
     /// The most time a deleted row stays in the store's bytes after its delete
     /// (<see cref="DatasetOptions.ErasureDelay"/>), fixed at creation and kept by every header; null
@@ -157,8 +167,8 @@ internal sealed record CommitHeader
     public TimeSpan? Lateness { get; init; }
 
     /// <summary>
-    /// The calendar unit a period of a dataset compacted by periods spans (<see cref="PeriodOptions.Length"/>);
-    /// null for a dataset that is not, or one whose header predates the field, whose periods are days.
+    /// The calendar unit a period of a dataset compacted by periods spans (<see cref="PeriodOptions.Length"/>),
+    /// which its every header names; null for a dataset that is not.
     /// </summary>
     internal SliceWidth? PeriodLength { get; init; }
 
@@ -628,6 +638,19 @@ internal sealed record CommitHeader
         if (version == 0)
         {
             throw new CommitFormatException("A commit header names no version.");
+        }
+
+        // A feature this library does not know is one of a later format, which it would misread.
+        if ((features & ~KnownFeatures) != 0)
+        {
+            throw new CommitFormatException(
+                $"A commit header names features 0x{(ulong)(features & ~KnownFeatures):x} this library does not know: a later library wrote the dataset.");
+        }
+
+        if (((features & DatasetFeatures.Periods) != 0) != lateness.HasValue || lateness.HasValue != periodLength.HasValue)
+        {
+            throw new CommitFormatException(
+                "A commit header's flag of periods, its lateness horizon and its period length disagree: each goes with the others.");
         }
 
         return new CommitHeader

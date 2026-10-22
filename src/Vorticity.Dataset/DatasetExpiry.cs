@@ -36,7 +36,7 @@ internal static class DatasetExpiry
     internal static async ValueTask<DateTimeOffset> RunAsync(
         VortexDataset dataset, VortexExpr? partition, DateTimeOffset before, CancellationToken cancellationToken, bool removes = true)
     {
-        if (dataset.Snapshot.Header.Lateness is null || dataset.Key is not { } key)
+        if (!dataset.Snapshot.Header.ByPeriods || dataset.Key is not { } key)
         {
             throw new InvalidOperationException(
                 "Expiry drops whole periods, and this dataset declares none (DatasetOptions.Periods): delete its rows instead.");
