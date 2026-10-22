@@ -1,5 +1,7 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO.Hashing;
 using System.Text;
 using Vorticity.Serialization.Protobuf;
 
@@ -36,10 +38,239 @@ internal sealed class SliceChunks
 {
     private const byte Version = 1;
 
+    /// <summary>
+    /// The version of a column's region whose chunks lie in pages of fixed-width entries, behind a table that says how many
+    /// and holds each page's checksum (<see cref="PageTable"/>): a read of a slice reads the pages of its rows alone, where a
+    /// day's column held 44 000 chunks in half a megabyte that every read of a slice read and parsed whole.
+    /// </summary>
+    internal const byte PagedVersion = 2;
+
+    /// <summary>The bytes of a chunk's entry in a page: its first row, its offset, its length and its rows, little-endian.</summary>
+    internal const int EntryBytes = 24;
+
+    /// <summary>The entries of a page the writer lays by default: 128, 3 KB.</summary>
+    internal const int DefaultPageEntries = 128;
+
+    // A page table's header: the version, the chunks' alignment, two bytes kept, the entries a page and the chunks.
+    private const int TableHeaderBytes = 12;
+
+    /// <summary>The bytes of a page table of <paramref name="pages"/> pages: its header, and a checksum a page.</summary>
+    internal static int TableBytes(int pages) => TableHeaderBytes + (8 * pages);
+
     internal SliceChunks(IReadOnlyList<string> encodings, IReadOnlyList<ChunkSpan[]> columns)
     {
         Encodings = encodings;
         Columns = columns;
+    }
+
+    /// <summary>
+    /// The columns whose directories lie in pages of <paramref name="pageEntries"/> chunks, and the first row of each page: those
+    /// whose chunks start at the rows the first such column's do, each of them aligned alike, when they hold more chunks than a
+    /// page. Every paged column shares the pages' first rows, which the table of contents holds once. None when no column has
+    /// more than a page of chunks.
+    /// </summary>
+    internal (int[] Columns, long[] PageRows)? Paging(int pageEntries)
+    {
+        ChunkSpan[]? reference = null;
+        List<int> paged = [];
+        for (int column = 0; column < Columns.Count; column++)
+        {
+            ChunkSpan[] chunks = Columns[column];
+            if (chunks.Length <= pageEntries || !Pageable(chunks) || (reference is not null && !SameRows(reference, chunks)))
+            {
+                continue;
+            }
+
+            reference ??= chunks;
+            paged.Add(column);
+        }
+
+        if (reference is null)
+        {
+            return null;
+        }
+
+        long[] rows = new long[(reference.Length + pageEntries - 1) / pageEntries];
+        for (int page = 0; page < rows.Length; page++)
+        {
+            rows[page] = reference[page * pageEntries].FirstRow;
+        }
+
+        return ([.. paged], rows);
+    }
+
+    /// <summary>Whether a page's entries hold <paramref name="chunks"/>: one alignment for all, and rows a 32-bit count holds.</summary>
+    private static bool Pageable(ChunkSpan[] chunks)
+    {
+        foreach (ChunkSpan chunk in chunks)
+        {
+            if (chunk.AlignmentExponent != chunks[0].AlignmentExponent || chunk.Rows > uint.MaxValue)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool SameRows(ChunkSpan[] reference, ChunkSpan[] chunks)
+    {
+        if (reference.Length != chunks.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            if (reference[i].FirstRow != chunks[i].FirstRow || reference[i].Rows != chunks[i].Rows)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The region of paged column <paramref name="column"/>: its page table, of <paramref name="tableLength"/> bytes, then its
+    /// pages of <paramref name="pageEntries"/> entries each, the last shorter, end to end.
+    /// </summary>
+    internal byte[] PagedBytes(int column, int pageEntries, out int tableLength)
+    {
+        ChunkSpan[] chunks = Columns[column];
+        int pages = (chunks.Length + pageEntries - 1) / pageEntries;
+        tableLength = TableBytes(pages);
+        byte[] bytes = new byte[tableLength + (chunks.Length * EntryBytes)];
+        Span<byte> table = bytes.AsSpan(0, tableLength);
+        table[0] = PagedVersion;
+        table[1] = chunks[0].AlignmentExponent;
+        BinaryPrimitives.WriteInt32LittleEndian(table[4..], pageEntries);
+        BinaryPrimitives.WriteInt32LittleEndian(table[8..], chunks.Length);
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            Span<byte> entry = bytes.AsSpan(tableLength + (i * EntryBytes), EntryBytes);
+            BinaryPrimitives.WriteInt64LittleEndian(entry, chunks[i].FirstRow);
+            BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], chunks[i].Offset);
+            BinaryPrimitives.WriteUInt32LittleEndian(entry[16..], chunks[i].Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(entry[20..], checked((uint)chunks[i].Rows));
+        }
+
+        for (int page = 0; page < pages; page++)
+        {
+            int start = tableLength + (page * pageEntries * EntryBytes);
+            int length = Math.Min(pageEntries, chunks.Length - (page * pageEntries)) * EntryBytes;
+            BinaryPrimitives.WriteUInt64LittleEndian(table[(TableHeaderBytes + (8 * page))..], XxHash3.HashToUInt64(bytes.AsSpan(start, length)));
+        }
+
+        return bytes;
+    }
+
+    /// <summary>
+    /// The page table of a paged column's region: the chunks' alignment, the entries of a page, the chunks, and each page's
+    /// checksum. Page <c>k</c> lies <c>k × PageEntries × EntryBytes</c> past the table's end, its entries those of its chunks.
+    /// </summary>
+    internal sealed record PageTable(byte Alignment, int PageEntries, int Count, ulong[] Checksums)
+    {
+        /// <summary>The table's own bytes.</summary>
+        internal int Length => TableBytes(Checksums.Length);
+
+        /// <summary>Where page <paramref name="page"/> lies past the table's end, and its bytes.</summary>
+        internal (long Offset, int Length) Page(int page) =>
+            ((long)page * PageEntries * EntryBytes, Math.Min(PageEntries, Count - (page * PageEntries)) * EntryBytes);
+    }
+
+    /// <summary>The page table <paramref name="bytes"/> hold, or null when they hold none, or one whose counts do not agree.</summary>
+    internal static PageTable? TableFrom(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length < TableHeaderBytes || bytes[0] != PagedVersion)
+        {
+            return null;
+        }
+
+        int pageEntries = BinaryPrimitives.ReadInt32LittleEndian(bytes[4..]);
+        int count = BinaryPrimitives.ReadInt32LittleEndian(bytes[8..]);
+        if (pageEntries <= 0 || count <= 0)
+        {
+            return null;
+        }
+
+        long pages = ((long)count + pageEntries - 1) / pageEntries;
+        if (bytes.Length != TableHeaderBytes + (8 * pages))
+        {
+            return null;
+        }
+
+        ulong[] checksums = new ulong[pages];
+        for (int page = 0; page < checksums.Length; page++)
+        {
+            checksums[page] = BinaryPrimitives.ReadUInt64LittleEndian(bytes[(TableHeaderBytes + (8 * page))..]);
+        }
+
+        return new PageTable(bytes[1], pageEntries, count, checksums);
+    }
+
+    /// <summary>
+    /// The chunks page <paramref name="page"/> of <paramref name="table"/> holds, its <paramref name="bytes"/>: null when they
+    /// do not hold the page's checksum, or chunks that do not follow each other, or do not start at <paramref name="firstRow"/>.
+    /// </summary>
+    internal static ChunkSpan[]? PageFrom(PageTable table, int page, ReadOnlySpan<byte> bytes, long firstRow)
+    {
+        if (bytes.Length != table.Page(page).Length || XxHash3.HashToUInt64(bytes) != table.Checksums[page])
+        {
+            return null;
+        }
+
+        ChunkSpan[] chunks = new ChunkSpan[bytes.Length / EntryBytes];
+        long row = firstRow;
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            ReadOnlySpan<byte> entry = bytes.Slice(i * EntryBytes, EntryBytes);
+            long first = BinaryPrimitives.ReadInt64LittleEndian(entry);
+            uint rows = BinaryPrimitives.ReadUInt32LittleEndian(entry[20..]);
+            if (first != row)
+            {
+                return null;
+            }
+
+            chunks[i] = new ChunkSpan(BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]), BinaryPrimitives.ReadUInt32LittleEndian(entry[16..]), table.Alignment, first, rows);
+            row += rows;
+        }
+
+        return chunks;
+    }
+
+    /// <summary>The chunks of a paged column's whole region <paramref name="bytes"/>, every page checked; null when one does not hold.</summary>
+    private static ChunkSpan[]? PagedFrom(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length < TableHeaderBytes)
+        {
+            return null;
+        }
+
+        int pageEntries = BinaryPrimitives.ReadInt32LittleEndian(bytes[4..]);
+        int count = BinaryPrimitives.ReadInt32LittleEndian(bytes[8..]);
+        long pages = pageEntries <= 0 || count <= 0 ? -1 : ((long)count + pageEntries - 1) / pageEntries;
+        if (pages < 0 || bytes.Length != TableHeaderBytes + (8 * pages) + ((long)count * EntryBytes)
+            || TableFrom(bytes[..(TableHeaderBytes + (int)(8 * pages))]) is not { } table)
+        {
+            return null;
+        }
+
+        ChunkSpan[] chunks = new ChunkSpan[count];
+        long row = 0;
+        for (int page = 0; page < table.Checksums.Length; page++)
+        {
+            (long offset, int length) = table.Page(page);
+            if (PageFrom(table, page, bytes.Slice(table.Length + (int)offset, length), row) is not { } held)
+            {
+                return null;
+            }
+
+            held.CopyTo(chunks, page * pageEntries);
+            row = held[^1].EndRow;
+        }
+
+        return chunks;
     }
 
     /// <summary>The array encodings of the file, in the order their trees name them.</summary>
@@ -166,6 +397,20 @@ internal sealed class SliceChunks
     internal static int ColumnInto(ReadOnlySpan<byte> bytes, out ChunkSpan[] chunks)
     {
         chunks = [];
+
+        // A paged column's whole region, as a reader with no table of contents reads it.
+        if (!bytes.IsEmpty && bytes[0] == PagedVersion)
+        {
+            if (PagedFrom(bytes) is not { } paged)
+            {
+                return -1;
+            }
+
+            chunks = System.Buffers.ArrayPool<ChunkSpan>.Shared.Rent(Math.Max(paged.Length, 1));
+            paged.CopyTo(chunks, 0);
+            return paged.Length;
+        }
+
         try
         {
             ProtoReader reader = new ProtoReader(bytes);
@@ -218,6 +463,11 @@ internal sealed class SliceChunks
     /// <summary>The chunks a column's region <paramref name="bytes"/> holds, or null when they do not decode.</summary>
     internal static ChunkSpan[]? ColumnFrom(ReadOnlySpan<byte> bytes)
     {
+        if (!bytes.IsEmpty && bytes[0] == PagedVersion)
+        {
+            return PagedFrom(bytes);
+        }
+
         try
         {
             ProtoReader reader = new ProtoReader(bytes);

@@ -101,10 +101,10 @@ public sealed partial class SynopsisAnswerTests
     }
 
     /// <summary>
-    /// The objects written in chunks of a block of 16 rows, and every edge of an answer, a slice its window cuts, cut at
-    /// four lanes between them into pieces of its rows alone: every question gives the bits its rows give and its answer
-    /// at one lane, and a window that cuts slices reads fewer of their rows as an answer's edges than one lane does, the
-    /// rest by pieces of their own.
+    /// The objects written in chunks of a block of 16 rows, their directories in pages of four chunks, and every edge of an
+    /// answer, a slice its window cuts, cut at four lanes between them into pieces of its rows alone: every question gives
+    /// the bits its rows give and its answer at one lane, and a window that cuts slices reads fewer of their rows as an
+    /// answer's edges than one lane does, the rest by pieces of their own.
     /// </summary>
     [Theory]
     [MemberData(nameof(Questions))]
@@ -114,7 +114,7 @@ public sealed partial class SynopsisAnswerTests
         await using VortexDataset dataset = await FilledAsync(store, tuned: options => options with
         {
             LeastEdgePieceRows = 1,
-            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000), BlockRows = 16, ChunkTargetBytes = 1 },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000), BlockRows = 16, ChunkTargetBytes = 1, ChunkPageEntries = 4 },
         });
         Vorticity.Aggregation aggregation = Question(dataset.Scan<Request>().With(new ScanOptions { DegreeOfParallelism = 4 }), question);
         (List<string> cut, ScanMetrics metrics) = await GroupsAsync(aggregation);
@@ -133,7 +133,7 @@ public sealed partial class SynopsisAnswerTests
     /// <summary>
     /// A window read by its rows, the objects written in blocks of 16 rows: each object's scan covers the rows of the
     /// slices the window reaches and none of the rest, its plan and its zone maps counting their blocks alone, and the
-    /// answer is the one its tables give.
+    /// answer is the one its tables give, their edges read by the pages of four chunks their directories lie in.
     /// </summary>
     [Fact]
     public async Task AWindowReadByItsRowsCoversTheRowsOfItsSlicesAlone()
@@ -141,10 +141,19 @@ public sealed partial class SynopsisAnswerTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await FilledAsync(store, tuned: options => options with
         {
-            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000), BlockRows = 16, ChunkTargetBytes = 1 },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000), BlockRows = 16, ChunkTargetBytes = 1, ChunkPageEntries = 4 },
         });
         (List<string> rows, ScanMetrics metrics) = await AskAsync(dataset, "an unaligned window", synopses: false);
         (List<string> tables, _) = await AskAsync(dataset, "an unaligned window", synopses: true);
+
+        // Its hours' columns hold more chunks than a page of their directories: their edges are read by pages.
+        int paged = 0;
+        await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, Ct))
+        {
+            paged += held.Entry.Contents?.Paging is not null ? 1 : 0;
+        }
+
+        Assert.True(paged >= 2, $"{paged} objects page their directories");
         long considered = metrics.BlocksDecoded + metrics.BlocksPruned;
         Console.Out.Write($"WINDOW ROWS: {considered} blocks considered, {metrics.BlocksDecoded} decoded, {metrics.Rows} rows.\n");
         Assert.Equal(tables, rows);

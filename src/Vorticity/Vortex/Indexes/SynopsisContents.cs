@@ -54,7 +54,41 @@ internal sealed record SynopsisContents(
     /// </summary>
     internal IReadOnlyList<LocatingEntry>? Locating { get; init; }
 
+    /// <summary>
+    /// How the paged columns' chunk directories lie (<see cref="SliceChunks.PagedVersion"/>): each such column names its page
+    /// table in <see cref="ChunkDirectories"/>, and the first row of each page, which every paged column shares, says which
+    /// pages a slice's rows lie in, with no read. Null when no column's directory is paged.
+    /// </summary>
+    internal ChunkPaging? Paging { get; init; }
+
+    // The page tables of the paged columns a read loaded, by column; null until one is.
+    private SliceChunks.PageTable?[]? _pageTables;
+
+    /// <summary>
+    /// Column <paramref name="column"/>'s page table, once a read of it loaded and checked it (<see cref="KeepPageTable"/>):
+    /// what a later read asks the column's pages by, with their checksums, which the synopsis cache keeps them by. Null before.
+    /// </summary>
+    internal SliceChunks.PageTable? PageTable(int column) =>
+        System.Threading.Volatile.Read(ref _pageTables) is { } tables ? System.Threading.Volatile.Read(ref tables[column]) : null;
+
+    /// <summary>Keeps <paramref name="table"/>, read and checked, as column <paramref name="column"/>'s page table; a read beside that kept one first leaves it.</summary>
+    internal void KeepPageTable(int column, SliceChunks.PageTable table)
+    {
+        SliceChunks.PageTable?[] tables = System.Threading.Volatile.Read(ref _pageTables)
+            ?? System.Threading.Interlocked.CompareExchange(ref _pageTables, new SliceChunks.PageTable?[ChunkDirectories.Count], null)
+            ?? _pageTables!;
+        System.Threading.Interlocked.CompareExchange(ref tables[column], table, null);
+    }
+
     private const int TagIndexDirectory = 11;
+
+    // The paging of the chunk directories: the entries of a page, the chunks of a paged column, the first row of each page,
+    // and the paged columns, the last two as deltas, packed.
+    private const int TagPaging = 13;
+    private const int TagPagingEntries = 1;
+    private const int TagPagingCount = 2;
+    private const int TagPagingRows = 3;
+    private const int TagPagingColumns = 4;
     private const int TagPathDirectory = 10;
     private const int TagDirectoryField = 1;
     private const int TagDirectoryRegion = 2;
@@ -496,6 +530,15 @@ internal sealed record SynopsisContents(
                 IndexDirectory.WriteSegment(ref writer, TagLocatingRegion, located.Region);
             }
 
+            if (Paging is { } paging)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagPaging);
+                writer.WriteUInt64Always(TagPagingEntries, (ulong)paging.PageEntries);
+                writer.WriteUInt64Always(TagPagingCount, (ulong)paging.Count);
+                writer.WriteBytesAlways(TagPagingRows, Deltas(paging.PageRows));
+                writer.WriteBytesAlways(TagPagingColumns, Deltas(Array.ConvertAll(paging.Columns, static c => (long)c)));
+            }
+
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -601,6 +644,7 @@ internal sealed record SynopsisContents(
             List<(int, IndexSegment)> pathDirectories = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
+            ChunkPaging? paging = null;
             byte[]? schema = null;
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
             {
@@ -655,20 +699,31 @@ internal sealed record SynopsisContents(
 
                         (locating ??= []).Add(located);
                         break;
+                    case (TagPaging, ProtoWireType.LengthDelimited):
+                        if ((paging = Paged(reader.ReadMessage())) is null)
+                        {
+                            return null;
+                        }
+
+                        break;
                     default:
                         reader.SkipField(wire);
                         break;
                 }
             }
 
-            // The entries of a directory lie within it.
+            // The entries of a directory lie within it; a paged column's page table, whose length its pages give, is a chunk
+            // directory the contents name, and its pages cover the slices' rows.
             return version == Version && slices is not null && schema is not null && end >= start
                 && (locating is null || (indexDirectory is { } named && locating.TrueForAll(l => l.Region.Offset >= named.Offset
                     && l.Region.Offset + l.Region.Length <= named.Offset + named.Length)))
+                && (paging is null || (slices.Slices.Count > 0 && paging.PageRows[^1] < slices.Rows && Array.TrueForAll(paging.Columns, c =>
+                    c < directories.Count && directories[c].Length == SliceChunks.TableBytes(paging.PageRows.Length))))
                 ? new SynopsisContents(schema, encodings, slices, directories, start, end, tables, pathDirectories)
                 {
                     DirectoryRegion = indexDirectory,
                     Locating = locating,
+                    Paging = paging,
                 }
                 : null;
         }
@@ -1139,6 +1194,127 @@ internal sealed record SynopsisContents(
         }
 
         return column is { } on && kind is not null && region is { Checksum: not null } segment ? new LocatingEntry(on, kind, segment) : null;
+    }
+
+    /// <summary>
+    /// The paging the message names: null when a count is not positive, the pages' first rows do not start at 0 and rise, their
+    /// number is not the pages the chunks fill, or the columns do not rise.
+    /// </summary>
+    private static ChunkPaging? Paged(ProtoReader reader)
+    {
+        long entries = 0;
+        long count = 0;
+        long[]? rows = null;
+        long[]? columns = null;
+        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
+        {
+            switch (tag, wire)
+            {
+                case (TagPagingEntries, ProtoWireType.Varint):
+                    entries = checked((long)reader.ReadVarint());
+                    break;
+                case (TagPagingCount, ProtoWireType.Varint):
+                    count = checked((long)reader.ReadVarint());
+                    break;
+                case (TagPagingRows, ProtoWireType.LengthDelimited):
+                    rows = FromDeltas(reader.ReadLengthDelimited());
+                    break;
+                case (TagPagingColumns, ProtoWireType.LengthDelimited):
+                    columns = FromDeltas(reader.ReadLengthDelimited());
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        if (entries is <= 0 or > int.MaxValue || count is <= 0 or > int.MaxValue || rows is not { Length: > 0 } || columns is not { Length: > 0 }
+            || rows.Length != (count + entries - 1) / entries || rows[0] != 0 || columns[^1] > int.MaxValue)
+        {
+            return null;
+        }
+
+        for (int i = 1; i < rows.Length; i++)
+        {
+            if (rows[i] <= rows[i - 1])
+            {
+                return null;
+            }
+        }
+
+        for (int i = 1; i < columns.Length; i++)
+        {
+            if (columns[i] <= columns[i - 1])
+            {
+                return null;
+            }
+        }
+
+        return new ChunkPaging((int)entries, (int)count, rows, Array.ConvertAll(columns, static c => (int)c));
+    }
+
+    /// <summary><paramref name="values"/>, which do not fall, as the varints of each one's rise over the one before, the first's over 0.</summary>
+    private static byte[] Deltas(long[] values)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            long previous = 0;
+            foreach (long value in values)
+            {
+                writer.WriteVarint(checked((ulong)(value - previous)));
+                previous = value;
+            }
+
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>The values <see cref="Deltas"/> wrote.</summary>
+    private static long[] FromDeltas(ReadOnlySpan<byte> bytes)
+    {
+        List<long> values = [];
+        ProtoReader reader = new ProtoReader(bytes);
+        long value = 0;
+        while (!reader.End)
+        {
+            value = checked(value + checked((long)reader.ReadVarint()));
+            values.Add(value);
+        }
+
+        return [.. values];
+    }
+}
+
+/// <summary>
+/// How a file's paged chunk directories lie (<see cref="SliceChunks.PagedVersion"/>), as its table of contents names it
+/// (<see cref="SynopsisContents.Paging"/>): every paged column holds the same chunks, at the same rows, in pages alike.
+/// </summary>
+/// <param name="PageEntries">The chunks of a full page.</param>
+/// <param name="Count">The chunks of a paged column.</param>
+/// <param name="PageRows">The first row of each page, rising from 0.</param>
+/// <param name="Columns">The paged columns, rising.</param>
+internal sealed record ChunkPaging(int PageEntries, int Count, long[] PageRows, int[] Columns)
+{
+    /// <summary>Whether column <paramref name="column"/>'s directory is paged.</summary>
+    internal bool Pages(int column) => Array.BinarySearch(Columns, column) >= 0;
+
+    /// <summary>Where page <paramref name="page"/> of a paged column lies past its page table, and its bytes.</summary>
+    internal (long Offset, int Length) Page(int page) =>
+        ((long)page * PageEntries * SliceChunks.EntryBytes, Math.Min(PageEntries, Count - (page * PageEntries)) * SliceChunks.EntryBytes);
+
+    /// <summary>The first and the last page that hold a row of <c>[first, first + rows)</c>, which a span of a row at least reaches.</summary>
+    internal (int First, int Last) PagesOf(long first, long rows) => (PageOf(first), PageOf(first + Math.Max(rows, 1) - 1));
+
+    /// <summary>The page that holds row <paramref name="row"/>: the last whose first row is not past it.</summary>
+    private int PageOf(long row)
+    {
+        int at = Array.BinarySearch(PageRows, row);
+        return at >= 0 ? at : Math.Max(~at - 1, 0);
     }
 }
 

@@ -1749,16 +1749,30 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>
     /// Writes where the chunks of each column lie, a region per column from the sink's position, and
     /// adds the entry that names them: on the root, the encodings in its options, one run over every
-    /// block of the file's <paramref name="rows"/>, each region checksummed as every payload is.
+    /// block of the file's <paramref name="rows"/>, each region checksummed as every payload is. The
+    /// columns <paramref name="paged"/> names lay their chunks in pages of <paramref name="pageEntries"/>
+    /// behind a table of the pages' checksums (<see cref="SliceChunks.PagedBytes"/>). The regions a table of
+    /// contents names: each column's, or a paged column's page table.
     /// </summary>
     internal async ValueTask<IndexSegment[]> AddSliceChunksAsync(
-        ISegmentSink sink, SliceChunks chunks, long rows, int blockRows, CancellationToken cancellationToken)
+        ISegmentSink sink, SliceChunks chunks, int[] paged, int pageEntries, long rows, int blockRows, CancellationToken cancellationToken)
     {
         IndexSegment[] regions = new IndexSegment[chunks.Columns.Count];
+        IndexSegment[] named = new IndexSegment[regions.Length];
         for (int column = 0; column < regions.Length; column++)
         {
+            long at = sink.Position;
+            if (Array.BinarySearch(paged, column) >= 0)
+            {
+                byte[] pages = chunks.PagedBytes(column, pageEntries, out int table);
+                regions[column] = IndexSegment.Of(at, pages, 0);
+                named[column] = IndexSegment.Of(at, pages.AsSpan(0, table), 0);
+                await sink.WriteAsync(pages, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
             byte[] bytes = chunks.ColumnBytes(column);
-            regions[column] = IndexSegment.Of(sink.Position, bytes, 0);
+            regions[column] = named[column] = IndexSegment.Of(at, bytes, 0);
             await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
         }
 
@@ -1766,7 +1780,7 @@ internal sealed class IndexWriter : IDisposable
         _entries.Add(new IndexEntry(
             IndexKinds.SliceChunks, [], (ulong)length, chunks.OptionBytes(),
             [new IndexRun(0, Blocks(rows, length), regions, [])]));
-        return regions;
+        return named;
     }
 
     /// <summary>

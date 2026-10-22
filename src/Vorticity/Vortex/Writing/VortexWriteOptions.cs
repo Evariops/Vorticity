@@ -293,6 +293,13 @@ public sealed record VortexWriteOptions
     internal IReadOnlyList<string>? SynopsisColumns { get; init; }
 
     /// <summary>
+    /// The chunks of a page of a sliced file's chunk directories, those that hold more than a page laid in pages
+    /// (<see cref="global::Vorticity.Indexes.SliceChunks.PagedVersion"/>): <see cref="global::Vorticity.Indexes.SliceChunks.DefaultPageEntries"/>. Lowered by tests,
+    /// so that objects of a few chunks lay their directories in pages as a day's do.
+    /// </summary>
+    internal int ChunkPageEntries { get; init; } = global::Vorticity.Indexes.SliceChunks.DefaultPageEntries;
+
+    /// <summary>
     /// The data under which no synopsis table is given up before the end, every one weighed by the choice against the
     /// whole data: <see cref="IndexWriter.DefaultEarlyChoiceBytes"/>. Lowered by tests, so that objects of a few rows
     /// meet the early verdicts that only large ones do otherwise.

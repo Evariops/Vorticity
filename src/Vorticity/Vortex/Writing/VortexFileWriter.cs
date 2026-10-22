@@ -333,6 +333,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Where the synopsis part's chunks wait: their memory, their scratch directory, whether it is sealed.</summary>
     private (long Memory, string? Directory, bool Seal) _synopsisSpool;
 
+    // The chunks of a page of the chunk directories laid in pages (VortexWriteOptions.ChunkPageEntries).
+    private int _chunkPageEntries = SliceChunks.DefaultPageEntries;
+
     /// <summary>
     /// The chunks of the synopsis columns, held in a scratch store until the end of the data, then
     /// written together before the index regions: the synopsis part, one contiguous range of bytes.
@@ -1214,6 +1217,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The synopsis part's chunks wait where the indexes' runs do, its tables' with its columns'.
         writer._synopsisSpool = (options.ScratchMemoryBytes, options.ScratchDirectory, options.SealScratch);
+        writer._chunkPageEntries = Math.Max(options.ChunkPageEntries, 1);
         writer.MarkSynopsis(options.SynopsisColumns ?? [], nameof(options));
 
         foreach (KeyValuePair<string, VariantDirectory> column in options.VariantDirectories ?? ImmutableDictionary<string, VariantDirectory>.Empty)
@@ -2728,10 +2732,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
             SliceChunks? chunks = null;
             IndexSegment[] chunkDirectories = [];
+            ChunkPaging? paging = null;
             if (_slices is not null)
             {
+                // The columns of more than a page of chunks, which start at the same rows, lay their directories in pages,
+                // the first row of each page the table of contents' once.
                 chunks = ChunkDirectory();
-                chunkDirectories = await closed.AddSliceChunksAsync(_sink, chunks, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                (int[] Columns, long[] PageRows)? paged = chunks.Paging(_chunkPageEntries);
+                chunkDirectories = await closed.AddSliceChunksAsync(
+                    _sink, chunks, paged?.Columns ?? [], _chunkPageEntries, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                paging = paged is { } laid
+                    ? new ChunkPaging(_chunkPageEntries, chunks.Columns[laid.Columns[0]].Length, laid.PageRows, laid.Columns)
+                    : null;
             }
 
             // Where each shredded key of a variant column lies, for a reader of one key.
@@ -2771,7 +2783,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // A sliced file's table of contents, now that every region it names is written.
             if (_slices is { } sliced)
             {
-                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories);
+                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories) with { Paging = paging };
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

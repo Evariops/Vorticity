@@ -49,9 +49,13 @@ internal sealed class SliceReader : IDisposable
     private readonly System.Threading.Lock _gate = new System.Threading.Lock();
     private readonly long _rows;
 
+    // How the paged columns' directories lie, when the table of contents says, and what was read of them: null for a file none
+    // of whose directories is paged, whose readers hold none of it.
+    private readonly PagedColumns? _paged;
+
     private SliceReader(
         ISegmentReader source, DType schema, VortexReadOptions options, SliceTable slices, string[] encodings,
-        IReadOnlyList<IndexSegment> regions, long rows)
+        IReadOnlyList<IndexSegment> regions, long rows, SynopsisContents? contents = null)
     {
         _source = source;
         _schema = schema;
@@ -61,7 +65,44 @@ internal sealed class SliceReader : IDisposable
         _columns = new ChunkSpan[]?[regions.Count];
         _counts = new int[regions.Count];
         _rows = rows;
+        _paged = contents?.Paging is { } paging ? new PagedColumns(paging, regions.Count, contents) : null;
         Slices = slices;
+    }
+
+    /// <summary>Whether column <paramref name="field"/>'s directory lies in pages, which a read of a span reads those of alone.</summary>
+    private bool Paged(int field) => _paged is { } paged && paged.Paging.Pages(field);
+
+    /// <summary>
+    /// How a file's paged directories lie, and what a reader read of them: each column's page table, and its pages, each its
+    /// chunks. The page tables are the contents' too (<see cref="SynopsisContents.PageTable"/>), which every later read of
+    /// the object starts from, its pages asked with their checksums.
+    /// </summary>
+    private sealed class PagedColumns(ChunkPaging paging, int columns, SynopsisContents contents)
+    {
+        internal ChunkPaging Paging { get; } = paging;
+
+        internal SynopsisContents Contents { get; } = contents;
+
+        internal SliceChunks.PageTable?[] Tables { get; } = new SliceChunks.PageTable?[columns];
+
+        internal ChunkSpan[]?[]?[] Pages { get; } = new ChunkSpan[]?[]?[columns];
+
+        /// <summary>Column <paramref name="field"/>'s page table, this reader's or the contents' when an earlier read loaded it; null when none did.</summary>
+        internal SliceChunks.PageTable? Table(int field)
+        {
+            if (System.Threading.Volatile.Read(ref Tables[field]) is { } held)
+            {
+                return held;
+            }
+
+            if (Contents.PageTable(field) is { } kept)
+            {
+                System.Threading.Interlocked.CompareExchange(ref Tables[field], kept, null);
+                System.Threading.Interlocked.CompareExchange(ref Pages[field], new ChunkSpan[]?[kept.Checksums.Length], null);
+            }
+
+            return System.Threading.Volatile.Read(ref Tables[field]);
+        }
     }
 
     /// <summary>The file's time slices.</summary>
@@ -148,7 +189,8 @@ internal sealed class SliceReader : IDisposable
     /// <summary>
     /// A reader of the slices of a file its table of contents <paramref name="contents"/> describes, opened
     /// with no read at all: the contents name the file's schema, its slice table and the chunk directories
-    /// the directory would. Null when they do not cover the schema's columns.
+    /// the directory would, a paged column's page table, whose pages the contents' first rows place. Null when
+    /// they do not cover the schema's columns.
     /// </summary>
     /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
     internal static SliceReader? Open(ISegmentReader source, VortexReadOptions? options, SynopsisContents contents)
@@ -156,7 +198,9 @@ internal sealed class SliceReader : IDisposable
         ArgumentNullException.ThrowIfNull(source);
         DType schema = contents.SchemaType;
         return schema.Kind == DTypeKind.Struct && contents.ChunkDirectories.Count == schema.FieldCount
-            ? new SliceReader(source, schema, options ?? VortexReadOptions.Default, contents.Slices, [.. contents.Encodings], contents.ChunkDirectories, contents.Slices.Rows)
+            ? new SliceReader(
+                source, schema, options ?? VortexReadOptions.Default, contents.Slices, [.. contents.Encodings], contents.ChunkDirectories, contents.Slices.Rows,
+                contents)
             : null;
     }
 
@@ -195,7 +239,7 @@ internal sealed class SliceReader : IDisposable
     internal async ValueTask<RecordBatch[]> ReadSpansAsync(IReadOnlyList<TimeSlice> spans, int[]? columns, CancellationToken cancellationToken)
     {
         int[] fields = columns ?? AllColumns();
-        await LoadChunksAsync(fields, cancellationToken).ConfigureAwait(false);
+        await LoadAsync(fields, spans, cancellationToken).ConfigureAwait(false);
         using SegmentRequestSet shared = new SegmentRequestSet();
         int[][] slots = new int[spans.Count][];
         for (int s = 0; s < slots.Length; s++)
@@ -251,7 +295,8 @@ internal sealed class SliceReader : IDisposable
     private async ValueTask<RecordBatch> ReadSpanAsync(TimeSlice span, int[]? columns, CancellationToken cancellationToken)
     {
         int[] fields = columns ?? AllColumns();
-        await LoadChunksAsync(fields, cancellationToken).ConfigureAwait(false);
+        // The span a paged column reads the pages of; none for a file whose directories are all read whole.
+        await LoadAsync(fields, _paged is null ? [] : [span], cancellationToken).ConfigureAwait(false);
 
         ScanContext context = new ScanContext(_encodings, _options);
         try
@@ -273,14 +318,14 @@ internal sealed class SliceReader : IDisposable
         int chunkCount = 0;
         foreach (int field in fields)
         {
-            chunkCount += SliceChunks.Overlapping(Chunks(field), span.FirstRow, span.Rows).Length;
+            chunkCount += Overlapping(field, span.FirstRow, span.Rows).Length;
         }
 
         int[] slots = new int[chunkCount];
         int next = 0;
         foreach (int field in fields)
         {
-            foreach (ChunkSpan chunk in SliceChunks.Overlapping(Chunks(field), span.FirstRow, span.Rows))
+            foreach (ChunkSpan chunk in Overlapping(field, span.FirstRow, span.Rows))
             {
                 slots[next++] = requests.Add(new SegmentSpec(chunk.Offset, chunk.Length, chunk.AlignmentExponent, 0, 0));
             }
@@ -301,7 +346,7 @@ internal sealed class SliceReader : IDisposable
         int next = 0;
         for (int i = 0; i < fields.Length; i++)
         {
-            decoded[i] = Column(context, schema.GetField(i), Chunks(fields[i]), span, length, slots, ref next);
+            decoded[i] = Column(context, schema.GetField(i), Overlapping(fields[i], span.FirstRow, span.Rows), span, length, slots, ref next);
         }
 
         int root = context.Canonical.AddStruct(
@@ -310,14 +355,21 @@ internal sealed class SliceReader : IDisposable
     }
 
     /// <summary>
-    /// What column <paramref name="field"/> weighs in the file: the bytes of its chunks, as its chunk
-    /// directory lists them, read the first time it is asked for.
+    /// Reads, the first time it is asked for, what a read of column <paramref name="field"/>'s rows starts from: its chunk
+    /// directory, or a paged column's page table, whose pages a read reads as its spans reach them. What a reader that learns
+    /// late which rows it reads, a lookup after its postings, reads first, beside its other reads.
+    /// </summary>
+    internal ValueTask LoadDirectoryAsync(int field, CancellationToken cancellationToken) => LoadAsync([field], [], cancellationToken);
+
+    /// <summary>
+    /// What column <paramref name="field"/> weighs in the file: the bytes of its chunks, as its chunk directory lists them, read
+    /// whole the first time it is asked for, every page of a paged one.
     /// </summary>
     internal async ValueTask<long> ColumnBytesAsync(int field, CancellationToken cancellationToken)
     {
-        await LoadChunksAsync([field], cancellationToken).ConfigureAwait(false);
+        await LoadAsync([field], [new TimeSlice(0, 1, 0, _rows)], cancellationToken).ConfigureAwait(false);
         long bytes = 0;
-        foreach (ChunkSpan chunk in Chunks(field))
+        foreach (ChunkSpan chunk in Overlapping(field, 0, _rows))
         {
             bytes += chunk.Length;
         }
@@ -336,17 +388,154 @@ internal sealed class SliceReader : IDisposable
         return all;
     }
 
-    /// <summary>Reads the chunk directories of the <paramref name="fields"/> not read yet, in one request set.</summary>
-    private async ValueTask LoadChunksAsync(int[] fields, CancellationToken cancellationToken)
+    /// <summary>
+    /// The chunks of column <paramref name="field"/>, in row order, that hold a row of <c>[first, first + rows)</c>, loaded first
+    /// (<see cref="LoadAsync"/>): of its whole directory, or of the pages that hold those rows.
+    /// </summary>
+    private ReadOnlySpan<ChunkSpan> Overlapping(int field, long first, long rows)
     {
-        int missing = 0;
+        if (!Paged(field))
+        {
+            return SliceChunks.Overlapping(Chunks(field), first, rows);
+        }
+
+        (int from, int to) = _paged!.Paging.PagesOf(first, rows);
+        ChunkSpan[]?[] pages = System.Threading.Volatile.Read(ref _paged!.Pages[field]) ?? throw Unloaded(field, from);
+        if (from == to)
+        {
+            return SliceChunks.Overlapping(System.Threading.Volatile.Read(ref pages[from]) ?? throw Unloaded(field, from), first, rows);
+        }
+
+        // A span across pages: their chunks end to end.
+        List<ChunkSpan> joined = [];
+        for (int page = from; page <= to; page++)
+        {
+            joined.AddRange(System.Threading.Volatile.Read(ref pages[page]) ?? throw Unloaded(field, page));
+        }
+
+        return SliceChunks.Overlapping(joined.ToArray(), first, rows);
+    }
+
+    private static InvalidOperationException Unloaded(int field, int page) => new($"Page {page} of column {field}'s chunk directory was not loaded.");
+
+    /// <summary>
+    /// Reads in one request set what reading <paramref name="spans"/> of the <paramref name="fields"/> needs and was not read:
+    /// a column's whole chunk directory; or a paged column's page table and the pages that hold the spans' rows, each page
+    /// checked against its checksum in the table, and its chunks against the rows the table of contents places it at.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A directory, a page table or a page does not decode, or does not cover the file's rows.</exception>
+    private async ValueTask LoadAsync(int[] fields, IReadOnlyList<TimeSlice> spans, CancellationToken cancellationToken)
+    {
         foreach (int field in fields)
         {
             if ((uint)field >= (uint)_columns.Length)
             {
                 throw new ArgumentOutOfRangeException(nameof(fields), field, $"The file has {_columns.Length} columns.");
             }
+        }
 
+        if (_paged is null)
+        {
+            await LoadWholeAsync(fields, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // What each column asks, by its slot: its directory or its page table (page -1), and its pages, a page with its checksum
+        // when its table is known, which the synopsis cache keeps it by. A read whose directories are all in hand, as a warm
+        // question's, asks nothing and makes no set.
+        List<(int Field, int Page, IndexSegment Region)>? asked = null;
+        foreach (int field in fields)
+        {
+            IndexSegment region = _regions[field];
+            bool paged = Paged(field);
+            SliceChunks.PageTable? table = paged ? _paged!.Table(field) : null;
+            if (paged ? table is null : System.Threading.Volatile.Read(ref _columns[field]) is null)
+            {
+                Ask(ref asked, field, -1, region);
+            }
+
+            if (!paged)
+            {
+                continue;
+            }
+
+            // A page lies past the table, at its place among the column's pages.
+            ChunkSpan[]?[]? pages = System.Threading.Volatile.Read(ref _paged!.Pages[field]);
+            for (int s = 0; s < spans.Count; s++)
+            {
+                (int from, int to) = _paged!.Paging.PagesOf(spans[s].FirstRow, spans[s].Rows);
+                for (int page = from; page <= to; page++)
+                {
+                    if (pages is not null && System.Threading.Volatile.Read(ref pages[page]) is not null)
+                    {
+                        continue;
+                    }
+
+                    (long offset, int length) = _paged.Paging.Page(page);
+                    Ask(ref asked, field, page, new IndexSegment(region.Offset + region.Length + (ulong)offset, (uint)length, 0, table?.Checksums[page]));
+                }
+            }
+        }
+
+        if (asked is null)
+        {
+            return;
+        }
+
+        using SegmentRequestSet requests = new SegmentRequestSet(asked.Count);
+        int[] slots = new int[asked.Count];
+        IndexSegment[] regions = new IndexSegment[asked.Count];
+        for (int i = 0; i < slots.Length; i++)
+        {
+            IndexSegment held = asked[i].Region;
+            slots[i] = requests.Add(new SegmentSpec(held.Offset, held.Length, held.AlignmentExponent, 0, 0));
+            regions[slots[i]] = held;
+        }
+
+        await _source.ReadRegionsAsync(requests, regions.AsMemory(0, requests.Count), cancellationToken).ConfigureAwait(false);
+
+        // The directories and the tables first, a page checked against its table.
+        for (int i = 0; i < slots.Length; i++)
+        {
+            if (asked[i].Page < 0)
+            {
+                Took(asked[i].Field, requests.GetBuffer(slots[i]).Span);
+            }
+        }
+
+        for (int i = 0; i < slots.Length; i++)
+        {
+            (int field, int page, IndexSegment _) = asked[i];
+            if (page < 0)
+            {
+                continue;
+            }
+
+            long end = page + 1 < _paged!.Paging.PageRows.Length ? _paged.Paging.PageRows[page + 1] : _rows;
+            if (SliceChunks.PageFrom(System.Threading.Volatile.Read(ref _paged!.Tables[field])!, page, requests.GetBuffer(slots[i]).Span, _paged.Paging.PageRows[page]) is not { } chunks
+                || chunks[^1].EndRow != end)
+            {
+                throw new VortexFormatException(
+                    $"Page {page} of column {field}'s chunk directory does not hold its checksum, or chunks from row {_paged.Paging.PageRows[page]} to {end}.");
+            }
+
+            // A page two reads loaded at once keeps the first's chunks.
+            lock (_gate)
+            {
+                _paged!.Pages[field]![page] ??= chunks;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads the whole chunk directories of the <paramref name="fields"/> not read yet, in one request set, a file none of
+    /// whose directories is paged: none at all, and nothing made, once they are in hand.
+    /// </summary>
+    private async ValueTask LoadWholeAsync(int[] fields, CancellationToken cancellationToken)
+    {
+        int missing = 0;
+        foreach (int field in fields)
+        {
             missing += System.Threading.Volatile.Read(ref _columns[field]) is null ? 1 : 0;
         }
 
@@ -368,38 +557,73 @@ internal sealed class SliceReader : IDisposable
         await _source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
         for (int i = 0; i < fields.Length; i++)
         {
-            if (slots[i] < 0)
+            if (slots[i] >= 0)
             {
-                continue;
+                Took(fields[i], requests.GetBuffer(slots[i]).Span);
+            }
+        }
+    }
+
+    /// <summary>Asks <paramref name="region"/>, page <paramref name="page"/> of <paramref name="field"/> or its directory, once.</summary>
+    private static void Ask(ref List<(int Field, int Page, IndexSegment Region)>? asked, int field, int page, IndexSegment region)
+    {
+        for (int i = 0; asked is not null && i < asked.Count; i++)
+        {
+            if (asked[i].Field == field && asked[i].Page == page)
+            {
+                return;
+            }
+        }
+
+        (asked ??= []).Add((field, page, region));
+    }
+
+    /// <summary>Takes column <paramref name="field"/>'s whole chunk directory, or a paged column's page table, read as <paramref name="bytes"/>.</summary>
+    private void Took(int field, ReadOnlySpan<byte> bytes)
+    {
+        if (Paged(field))
+        {
+            if (!_regions[field].Holds(bytes) || SliceChunks.TableFrom(bytes) is not { } table
+                || table.PageEntries != _paged!.Paging.PageEntries || table.Count != _paged.Paging.Count || table.Checksums.Length != _paged.Paging.PageRows.Length)
+            {
+                throw new VortexFormatException($"The page table of column {field}'s chunk directory does not decode, or is not the one its table of contents says.");
             }
 
-            ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
-            ChunkSpan[] chunks = [];
-            int count = _regions[fields[i]].Holds(bytes) ? SliceChunks.ColumnInto(bytes, out chunks) : -1;
-            if (count < 0 || (count == 0 ? 0 : chunks[count - 1].EndRow) != _rows)
-            {
-                if (count >= 0)
-                {
-                    System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
-                }
-
-                throw new VortexFormatException(
-                    $"The chunk directory of column {fields[i]} does not decode, or does not cover the file's {_rows} rows.");
-            }
-
-            // A column two reads loaded at once keeps the first's chunks; the other's go back.
             lock (_gate)
             {
-                if (_columns[fields[i]] is null)
-                {
-                    _counts[fields[i]] = count;
-                    System.Threading.Volatile.Write(ref _columns[fields[i]], chunks);
-                    continue;
-                }
+                _paged!.Tables[field] ??= table;
+                _paged!.Pages[field] ??= new ChunkSpan[]?[table.Checksums.Length];
             }
 
-            System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
+            _paged.Contents.KeepPageTable(field, table);
+            return;
         }
+
+        ChunkSpan[] chunks = [];
+        int count = _regions[field].Holds(bytes) ? SliceChunks.ColumnInto(bytes, out chunks) : -1;
+        if (count < 0 || (count == 0 ? 0 : chunks[count - 1].EndRow) != _rows)
+        {
+            if (count >= 0)
+            {
+                System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
+            }
+
+            throw new VortexFormatException(
+                $"The chunk directory of column {field} does not decode, or does not cover the file's {_rows} rows.");
+        }
+
+        // A column two reads loaded at once keeps the first's chunks; the other's go back.
+        lock (_gate)
+        {
+            if (_columns[field] is null)
+            {
+                _counts[field] = count;
+                System.Threading.Volatile.Write(ref _columns[field], chunks);
+                return;
+            }
+        }
+
+        System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
     }
 
     /// <summary>The struct of the <paramref name="fields"/> of the schema, built in <paramref name="arena"/>.</summary>
@@ -416,11 +640,10 @@ internal sealed class SliceReader : IDisposable
         return arena.Struct(names, types, _schema.Nullability);
     }
 
-    /// <summary>One column's rows of the slice: its overlapping chunks decoded, cut to the slice and joined.</summary>
+    /// <summary>One column's rows of the slice: its <paramref name="chunks"/> that overlap it decoded, cut to the slice and joined.</summary>
     private static int Column(
-        ScanContext context, DType type, ReadOnlySpan<ChunkSpan> column, TimeSlice span, int length, int[] slots, ref int next)
+        ScanContext context, DType type, ReadOnlySpan<ChunkSpan> chunks, TimeSlice span, int length, int[] slots, ref int next)
     {
-        ReadOnlySpan<ChunkSpan> chunks = SliceChunks.Overlapping(column, span.FirstRow, span.Rows);
         int[] parts = new int[chunks.Length];
         for (int i = 0; i < chunks.Length; i++)
         {

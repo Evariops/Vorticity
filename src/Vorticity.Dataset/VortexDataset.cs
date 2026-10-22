@@ -2446,10 +2446,10 @@ public sealed class VortexDataset : IAsyncDisposable
 
             // The chunk directories of the columns the rows are read for: each read and parsed for every column, at every
             // lookup, was a fifth of what a question that leaves an identifier out allocated.
-            Task<long>[] chunks = new Task<long>[columns?.Length ?? schema.FieldCount];
+            Task[] chunks = new Task[columns?.Length ?? schema.FieldCount];
             for (int c = 0; c < chunks.Length; c++)
             {
-                chunks[c] = slices.ColumnBytesAsync(columns?[c] ?? c, cancellationToken).AsTask();
+                chunks[c] = slices.LoadDirectoryAsync(columns?[c] ?? c, cancellationToken).AsTask();
             }
 
             Indexes.IndexDirectory? directory;
@@ -2640,7 +2640,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
             // The first round trip: the path directory beside the column's chunk directory.
             ValueTask<Indexes.VariantDirectory?> directory = ReadPathDirectoryAsync(entry, field, cancellationToken);
-            Task<long> chunks = slices.ColumnBytesAsync(field, cancellationToken).AsTask();
+            Task chunks = slices.LoadDirectoryAsync(field, cancellationToken).AsTask();
             Indexes.VariantDirectory? paths;
             try
             {

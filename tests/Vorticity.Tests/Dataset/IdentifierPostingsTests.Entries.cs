@@ -15,10 +15,13 @@ public sealed partial class IdentifierPostingsTests
     /// <summary>
     /// Two sealed hours of requests, the id declared an identifier: the table of contents of each names the entry of the
     /// id's hashed postings, a region of its own within the index directory and smaller than it; a lookup of one id asks
-    /// for that entry and never for the directory, and finds the id's row.
+    /// for that entry and never for the directory, and finds the id's row. So it does in chunks of 16 rows whose directories
+    /// lie in pages of four (<paramref name="paged"/>), their pages read once the postings say the blocks.
     /// </summary>
-    [Fact]
-    public async Task ALookupReadsTheEntryOfItsIdentifierAndNotTheWholeDirectory()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ALookupReadsTheEntryOfItsIdentifierAndNotTheWholeDirectory(bool paged)
     {
         string directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vorticity-postings-entry-" + Guid.NewGuid().ToString("N"));
         try
@@ -41,6 +44,7 @@ public sealed partial class IdentifierPostingsTests
                 ClusteringKey = [nameof(Request.At)],
                 Identifiers = [nameof(Request.RequestId)],
                 Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+                Write = paged ? new VortexWriteOptions { BlockRows = 16, ChunkTargetBytes = 1, ChunkPageEntries = 4 } : VortexWriteOptions.Default,
             }, Ct);
             Random random = new Random(31);
             List<Request> appended = [];
@@ -71,6 +75,7 @@ public sealed partial class IdentifierPostingsTests
             for (int h = 0; h < hours.Count; h++)
             {
                 SynopsisContents contents = hours[h].Contents!;
+                Assert.Equal(paged, contents.Paging is not null);
                 IndexSegment whole = contents.DirectoryRegion!.Value;
                 LocatingEntry postings = Assert.Single(contents.Locating!, l => l.Kind == IndexKinds.PostingsHashed);
                 Assert.Equal(1u, postings.Column);
