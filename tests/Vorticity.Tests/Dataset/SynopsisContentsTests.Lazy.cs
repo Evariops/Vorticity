@@ -10,10 +10,11 @@ namespace Vorticity.Tests.Dataset;
 public sealed partial class SynopsisContentsTests
 {
     /// <summary>
-    /// The tables of a sealed hour of calls, of which a question reads a few: the entry names each table's list of chunks,
-    /// a region of the object, and holds none of its chunks; a list loaded is checked and parsed the first time a chunk is
-    /// asked for; the regions the contents declare count every table's list and chunks, and find a table's chunks once they
-    /// are parsed, the only regions a read through the cache asks for, as a question learns them from the chunks.
+    /// The tables of a sealed hour of calls, listed apart as a day's large tables are, of which a question reads a few: the
+    /// entry names each table's list of chunks, a region of the object, and holds none of its chunks; a list loaded is
+    /// checked and parsed the first time a chunk is asked for; the regions the contents declare count every table's list
+    /// and chunks, and find a table's chunks once they are parsed, the only regions a read through the cache asks for, as
+    /// a question learns them from the chunks.
     /// </summary>
     [Fact]
     public async Task ATableParsesItsChunksTheFirstTimeOneIsAskedFor()
@@ -23,7 +24,7 @@ public sealed partial class SynopsisContentsTests
         {
             ClusteringKey = [nameof(Call.At)],
             Periods = new PeriodOptions { Lateness = System.TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
-            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000), InlineListBytes = 0 },
         }, Ct);
         System.Random random = new System.Random(5);
         for (int part = 0; part < 16; part++)

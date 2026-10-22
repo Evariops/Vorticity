@@ -80,6 +80,14 @@ internal sealed record SynopsisContents(
         System.Threading.Interlocked.CompareExchange(ref tables[column], table, null);
     }
 
+    /// <summary>
+    /// The bytes of a table's list at most for its entry to keep its chunks in its place (<see cref="TableChunks.List"/>):
+    /// a few chunks, whose list would cost a question a round trip for some bytes. The tables of an hour's object all keep
+    /// theirs, where their lists doubled the requests of a question over twelve of them; of a day's 44 tables, the 33 of
+    /// one to seven chunks, whose lists take 3.1 KB, keep theirs, and the larger ones keep their lists apart.
+    /// </summary>
+    internal const int InlineListBytes = 512;
+
     private const int TagIndexDirectory = 11;
 
     // The paging of the chunk directories: the entries of a page, the chunks of a paged column, the first row of each page,

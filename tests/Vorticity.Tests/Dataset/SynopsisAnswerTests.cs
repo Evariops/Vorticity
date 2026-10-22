@@ -191,31 +191,36 @@ public sealed partial class SynopsisAnswerTests
 
     /// <summary>
     /// A window inside one sealed hour, cutting it, on a store that answers in 20 ms, the tree's pages in hand:
-    /// the lists of the chunks of the hour's tables first, which the cut reads, then the hour's tables and its
-    /// edge slices beside each other, with no open of the object, three dependent round trips, the chunk
-    /// directories before the chunks of every edge together, a chunk two edges share read once; a window on the
-    /// hour's bounds, two, the lists then the chunks.
+    /// the hour's tables and its edge slices are read beside each other, with no open of the object, two
+    /// dependent round trips, the chunk directories before the chunks of every edge together, a chunk two
+    /// edges share read once; a window on the hour's bounds, one. The hour's tables are small enough for its
+    /// entry to hold their chunks; listed apart, as a day's large tables are, their lists come first, a round
+    /// trip and a request more.
     /// </summary>
-    [Fact]
-    public async Task AnUnalignedWindowCostsThreeRoundTripsAnAlignedOneTwo()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnUnalignedWindowCostsTwoRoundTripsAnAlignedOne(bool listed)
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
-        await using VortexDataset dataset = await FilledAsync(store);
+        await using VortexDataset dataset = await FilledAsync(
+            store, tuned: listed ? options => options with { Write = options.Write with { InlineListBytes = 0 } } : null);
 
         // The version's pages read once, by a count the summaries answer.
         _ = await dataset.Scan<Request>().Where(r => r.At >= Noon).CountAsync(Ct);
         inner.Latency = TimeSpan.FromMilliseconds(20);
+        long more = listed ? 1 : 0;
         foreach ((string name, DateTimeOffset from, DateTimeOffset to, long steps, long requests) in new[]
         {
-            ("unaligned", Noon.AddMinutes(37.5), Noon.AddMinutes(52.25), 3L, 4L),
-            ("aligned", Noon.AddHours(1), Noon.AddHours(2), 2L, 2L),
+            ("unaligned", Noon.AddMinutes(37.5), Noon.AddMinutes(52.25), 2L + more, 3L + more),
+            ("aligned", Noon.AddHours(1), Noon.AddHours(2), 1L + more, 1L + more),
         })
         {
             store.Reset();
             (List<string> on, ScanMetrics metrics) = await GroupsAsync(
                 dataset.Scan<Request>().Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
-            Console.Out.Write($"ROUND TRIPS {name}: {store.DependentSteps} dependent steps, {store.Requests} requests, {metrics.SynopsisRows} table rows, {metrics.EdgeRows} edge rows.\n");
+            Console.Out.Write($"ROUND TRIPS {name}{(listed ? ", lists apart" : string.Empty)}: {store.DependentSteps} dependent steps, {store.Requests} requests, {metrics.SynopsisRows} table rows, {metrics.EdgeRows} edge rows.\n");
             Assert.True(metrics.SynopsisRows > 0);
             Assert.Equal(requests, store.Requests);
 

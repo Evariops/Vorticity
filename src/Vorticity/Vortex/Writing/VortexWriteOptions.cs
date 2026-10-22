@@ -300,6 +300,13 @@ public sealed record VortexWriteOptions
     internal int ChunkPageEntries { get; init; } = global::Vorticity.Indexes.SliceChunks.DefaultPageEntries;
 
     /// <summary>
+    /// The bytes of a synopsis table's list of chunks at most for the entry to keep the chunks in its place:
+    /// <see cref="global::Vorticity.Indexes.SynopsisContents.InlineListBytes"/>. Zero by tests, so that small objects list every
+    /// table apart as a day lists its large ones.
+    /// </summary>
+    internal int InlineListBytes { get; init; } = global::Vorticity.Indexes.SynopsisContents.InlineListBytes;
+
+    /// <summary>
     /// The data under which no synopsis table is given up before the end, every one weighed by the choice against the
     /// whole data: <see cref="IndexWriter.DefaultEarlyChoiceBytes"/>. Lowered by tests, so that objects of a few rows
     /// meet the early verdicts that only large ones do otherwise.

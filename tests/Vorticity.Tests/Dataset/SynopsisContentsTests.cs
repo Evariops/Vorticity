@@ -21,13 +21,16 @@ public sealed partial class SynopsisContentsTests
 
     /// <summary>
     /// Two sealed hours of calls on a store that answers in 100 ms: every object's synopsis tables, read at
-    /// once through the tables of contents their entries carry, take two dependent round trips, the lists of
-    /// their chunks then their chunks, and a request an object each, read none of the bytes past their synopsis
-    /// parts, and are the tables the directory names. A slice of one takes two round trips, its chunk directory
-    /// then its chunks, and holds the rows a whole open reads.
+    /// once through the tables of contents their entries carry, take a dependent round trip and a request an
+    /// object, the entries holding the chunks of tables this small, read none of the bytes past their synopsis
+    /// parts, and are the tables the directory names, which names each table by its list. Listed apart, as a
+    /// day's large tables are, the lists come first, a round trip and a request an object more. A slice of one
+    /// takes two round trips, its chunk directory then its chunks, and holds the rows a whole open reads.
     /// </summary>
-    [Fact]
-    public async Task AWholePeriodReadsItsSynopsisInTwoRoundTripsAndASliceInTwo()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AWholePeriodReadsItsSynopsisInARoundTripAndASliceInTwo(bool listed)
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
@@ -40,7 +43,11 @@ public sealed partial class SynopsisContentsTests
             Session = session,
             ClusteringKey = [nameof(Call.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
-            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },
+            Write = new VortexWriteOptions
+            {
+                Indexes = IndexPolicy.None.WithBudgetPerMille(1_000),
+                InlineListBytes = listed ? 0 : SynopsisContents.InlineListBytes,
+            },
         }, Ct);
         Random random = new Random(5);
         for (int part = 0; part < 16; part++)
@@ -68,17 +75,17 @@ public sealed partial class SynopsisContentsTests
 
         long partBytes = contents.Sum(c => c.PartEnd - c.PartStart);
 
-        // Cold, every object at once: the lists in one round trip, a request an object, then the chunks in one
-        // more, a request an object, nothing past the parts. The store counts a step when a read starts with
-        // none in flight, so each round trip is counted on its own: an object's chunks, asked the instant its
-        // lists arrive, would count with the other's lists still in flight. A latency longer than what readying
-        // a read takes, which the tests running beside this one stretch: at 20 ms, a thread held that long
-        // between the two objects' reads under a loaded full suite counted two steps.
+        // Cold, every object at once: the lists in one round trip, a request an object, when the tables list their
+        // chunks apart, then the chunks in one more, a request an object, nothing past the parts. The store counts
+        // a step when a read starts with none in flight, so each round trip is counted on its own: an object's
+        // chunks, asked the instant its lists arrive, would count with the other's lists still in flight. A
+        // latency longer than what readying a read takes, which the tests running beside this one stretch: at
+        // 20 ms, a thread held that long between the two objects' reads under a loaded full suite counted two steps.
         inner.Latency = TimeSpan.FromMilliseconds(100);
         store.Reset();
         await dataset.LoadSynopsisListsAsync([.. periods.Select(p => (p, p.Contents!, (ISynopsisReads?)null))], Ct);
-        Assert.Equal(1, store.DependentSteps);
-        Assert.Equal(periods.Count, store.Requests);
+        Assert.Equal(listed ? 1 : 0, store.DependentSteps);
+        Assert.Equal(listed ? periods.Count : 0, store.Requests);
         long listBytes = store.BytesRead;
         store.Reset();
         SynopsisTableSet?[] sets = await Task.WhenAll(periods.Select(p => dataset.ReadSynopsisAsync(p, null, Ct).AsTask()));
@@ -99,12 +106,17 @@ public sealed partial class SynopsisContentsTests
             Assert.Contains(read.Tables, t => t.Chunk.Distinct is not null);
             Assert.Equal(read.Tables.Select(t => t.Chunk.Distinct), named.Tables.Select(t => t.Chunk.Distinct));
 
-            // The directory names each table by its list alone, the one the contents name, and none of the part's columns.
+            // The directory names each table by its list alone, the one the contents name when they list it apart, and
+            // none of the part's columns.
             IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
             Assert.DoesNotContain(directory.Entries, e => e.Kind == IndexKinds.SynopsisColumns);
-            Assert.Equal(
-                periods[i].Contents!.Tables.Select(t => ((SynopsisContents.TableChunks)t.Chunks).List!.Value),
-                directory.Entries.Where(e => e.Kind == IndexKinds.SynopsisTable).Select(e => Assert.Single(e.Runs[0].Payload)));
+            IndexSegment[] lists = [.. directory.Entries.Where(e => e.Kind == IndexKinds.SynopsisTable).Select(e => Assert.Single(e.Runs[0].Payload))];
+            Assert.Equal(periods[i].Contents!.Tables.Count, lists.Length);
+            Assert.All(periods[i].Contents!.Tables, t => Assert.Equal(listed, t.Chunks is SynopsisContents.TableChunks { List: not null }));
+            if (listed)
+            {
+                Assert.Equal(periods[i].Contents!.Tables.Select(t => ((SynopsisContents.TableChunks)t.Chunks).List!.Value), lists);
+            }
             for (int t = 0; t < named.Tables.Count; t++)
             {
                 Assert.Equal(Columns(named.Arena, named.Tables[t].Node), Columns(read.Arena, read.Tables[t].Node));

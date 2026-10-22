@@ -57,17 +57,19 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// sketches laying their distinct sketches apart: 28 for those regions, which the objects' index directories name,
     /// and 8 for where the rest of the objects then lies. Then the directories stopped listing the synopsis tables'
     /// chunks and columns, an object 17.5 KB lighter: an open reads the last 64 KB from an offset aligned on 64 bytes,
-    /// up to 63 bytes more or less with the file's length, and five paths read 72 more over their four objects.
+    /// up to 63 bytes more or less with the file's length, and five paths read 72 more over their four objects. The
+    /// requests then fell back the same day, and those bytes with them: an entry keeps the chunks of the tables whose
+    /// lists would take 512 bytes or less, as all of these hours' do.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["synopses: count by service"] = new(8, 6880, 0, 0, 25152),
-        ["synopses: count by service, at eight lanes"] = new(8, 6880, 0, 0, 27328),
-        ["synopses: count by service and hour"] = new(8, 6880, 0, 0, 29888),
+        ["synopses: count by service"] = new(4, 6640, 0, 0, 25152),
+        ["synopses: count by service, at eight lanes"] = new(4, 6640, 0, 0, 27328),
+        ["synopses: count by service and hour"] = new(4, 6640, 0, 0, 29888),
         ["synopses: by minute, the last hour, under a predicate"] = new(3, 101020, 2, 35424, 61440),
-        ["synopses: an unaligned window"] = new(10, 107472, 2, 66728, 81280),
+        ["synopses: an unaligned window"] = new(7, 107200, 2, 66728, 81280),
         ["synopses: every row but one id"] = new(8, 297122, 4, 34768, 54528),
-        ["synopses: measures by region and hour"] = new(8, 4112, 0, 0, 41664),
+        ["synopses: measures by region and hour"] = new(4, 3872, 0, 0, 41664),
         ["synopses: count by route, a shredded path"] = new(8, 268256, 4, 5902, 65216),
         ["rows: count by service and hour"] = new(8, 392866, 4, 130512, 43520),
         ["rows: count by route, a shredded path"] = new(8, 268256, 4, 5902, 58816),

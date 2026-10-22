@@ -184,6 +184,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// reads their chunk directories, and in the entry of a day of the design's requests they took 4.73 of its
     /// 4.87 MB, a chunk span a column and some 98 000 rows. Ten such days held 48.7 MB of entries, which the
     /// handle's 32 MiB of tree pages could not keep: a question over them read eight pages again, 39 MB.
+    /// A table whose list is small keeps its chunks in its place (<see cref="VortexWriteOptions.InlineListBytes"/>); its
+    /// list stays in the file, which the index directory names for a reader of the file alone.
     /// </remarks>
     private SynopsisContents Contents(SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories)
     {
@@ -192,7 +194,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             foreach ((SynopsisTableInfo info, IReadOnlyList<TableChunk> held) in part.Tables)
             {
-                tables.Add((info, held));
+                tables.Add((info, held is global::Vorticity.Indexes.SynopsisContents.TableChunks { List.Length: var length } listed && length <= _inlineListBytes ? [.. listed] : held));
             }
         }
 
@@ -335,6 +337,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     // The chunks of a page of the chunk directories laid in pages (VortexWriteOptions.ChunkPageEntries).
     private int _chunkPageEntries = SliceChunks.DefaultPageEntries;
+
+    // The bytes of a table's list at most for the entry to keep its chunks (VortexWriteOptions.InlineListBytes).
+    private int _inlineListBytes = global::Vorticity.Indexes.SynopsisContents.InlineListBytes;
 
     /// <summary>
     /// The chunks of the synopsis columns, held in a scratch store until the end of the data, then
@@ -1218,6 +1223,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // The synopsis part's chunks wait where the indexes' runs do, its tables' with its columns'.
         writer._synopsisSpool = (options.ScratchMemoryBytes, options.ScratchDirectory, options.SealScratch);
         writer._chunkPageEntries = Math.Max(options.ChunkPageEntries, 1);
+        writer._inlineListBytes = Math.Max(options.InlineListBytes, 0);
         writer.MarkSynopsis(options.SynopsisColumns ?? [], nameof(options));
 
         foreach (KeyValuePair<string, VariantDirectory> column in options.VariantDirectories ?? ImmutableDictionary<string, VariantDirectory>.Empty)
