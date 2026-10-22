@@ -187,7 +187,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// A table whose list is small keeps its chunks in its place (<see cref="VortexWriteOptions.InlineListBytes"/>); its
     /// list stays in the file, which the index directory names for a reader of the file alone.
     /// </remarks>
-    private SynopsisContents Contents(SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories)
+    private SynopsisContents Contents(
+        SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging)
     {
         List<(SynopsisTableInfo, IReadOnlyList<TableChunk>)> tables = [];
         if (_synopsisPart is { } part)
@@ -200,7 +201,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         return new SynopsisContents(
             Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories,
-            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, pathDirectories);
+            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, pathDirectories)
+        {
+            Paging = paging,
+        };
     }
 
     /// <summary>
@@ -2789,7 +2793,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // A sliced file's table of contents, now that every region it names is written.
             if (_slices is { } sliced)
             {
-                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories) with { Paging = paging };
+                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.
@@ -2838,11 +2842,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // that locates a column's values in it, which a lookup reads alone.
         if (_contents is { } contents)
         {
-            SynopsisContents = (directory is null ? contents : contents with
-            {
-                DirectoryRegion = IndexSegment.Of(directoryOffset, directory, 0),
-                Locating = Locating(located!, directory, directoryOffset),
-            }).ToBytes();
+            SynopsisContents = (directory is null
+                ? contents
+                : contents.Naming(IndexSegment.Of(directoryOffset, directory, 0), Locating(located!, directory, directoryOffset))).ToBytes();
         }
 
         long dtypeOffset = _sink.Position;
