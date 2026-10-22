@@ -57,7 +57,8 @@ tests/**/golden/
 # A .vortex file anywhere else is scratch output and is never committed. The corpus and the forged
 # fixtures are the two deliberate exceptions -- the forged one matters: its manifest is tracked, so
 # ignoring the file it describes leaves a clone with a manifest pointing at nothing. The shredded
-# variants the reference wrote, a few kilobytes beside the test that reads them, are a third.
+# variants the reference wrote beside the test that reads them are a third: 18 files of 2 MB, a few
+# kilobytes each but chunks.parquet.vortex, 1.9 MB of chunks in the Parquet layout.
 *.vortex
 !tests/Vorticity.Conformance/corpus/**/*.vortex
 !tests/Vorticity.Conformance/forged/**/*.vortex
