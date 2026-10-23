@@ -139,6 +139,13 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         CacheTrace.Run((int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--questions", 2_000), (int)Option(args, "--seed", 29))),
     ["hashedend"] = ("what the end of a file's hashed postings holds with no bound on its rows (HashedEndMicro.cs)", () =>
         HashedEndMicro.Run(Text(args, "--store") ?? BenchStores.Of("hashedend"), Option(args, "--rows", 10_000_000))),
+    ["logwrite"] = ("what building the client's log records costs, as an ingestion builds them (LogWriteMicro.cs)", () => LogWriteMicro.Run(
+        Text(args, "--store") ?? BenchStores.Of("logwrite"),
+        Option(args, "--hours", 2),
+        Option(args, "--rate", 5_000),
+        Option(args, "--part-minutes", 10),
+        Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
+        Option(args, "--budget", 100))),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
     ["paths"] = ("every query path of a dataset of periods at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
