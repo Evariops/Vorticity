@@ -1,12 +1,18 @@
 // The buckets of a hashed postings index: an index written with no bound on its rows notes every pair in one bucket, which
 // the end cuts again by the next bits of the hashes, so that no sort holds more than about a bucket's aim, and the pairs
-// still come out in the hashes' order with the blocks of a hash in theirs.
+// still come out in the hashes' order with the blocks of a hash in theirs. An end that fails waits for the buckets it sorts
+// ahead on the session's lanes, which read the scratch the writer then lets go.
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
+using Vorticity.Indexes;
+using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
 
@@ -107,6 +113,59 @@ public sealed class HashedBucketsTests
             await buckets.RefineAsync(scratch, Ct);
             Assert.Equal(16, before);
             Assert.Equal(before, buckets.Buckets);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// An end of hashed postings that fails as it hands over its first bucket's segments leaves only once the buckets read
+    /// back and sorted ahead on the lanes have ended: the writer lets their scratch go when the failure reaches it. The sorts
+    /// of the buckets after the first are held until the failure is in, so the end is seen waiting for them.
+    /// </summary>
+    [Fact]
+    public async Task AFailedEndWaitsForTheBucketsSortedAhead()
+    {
+        string directory = TestScratch.Create("vorticity-hashed-end-");
+        try
+        {
+            using RunScratch scratch = new RunScratch(memoryBudget: 1 << 20, directory);
+            DTypeArena types = new DTypeArena();
+            DType longs = types.Primitive(PType.I64, Nullability.NonNullable);
+            Assert.True(KeyIndexBuilder.Supports(longs, out KeyLayout layout, out _, out _));
+            TaskCompletionSource held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using KeyIndexBuilder builder = KeyIndexBuilder.ForHashes(layout, KeyRunOptions.DefaultSegmentEntries);
+            builder.Scratch = scratch;
+            builder.BlockRows = 1_000;
+            builder.BucketBits = 3;
+            builder.Lanes = new LaneBudget(4);
+            builder.BeforeSort = bucket => bucket == 0 ? Task.CompletedTask : held.Task;
+            builder.Stream = (_, _) => throw new IOException("The sink failed.");
+
+            builder.Start(0, 0);
+            CanonicalArena arena = new CanonicalArena();
+            for (int block = 0; block < 8; block++)
+            {
+                VortexBuffer values = arena.Allocate(1_000 * sizeof(long), sizeof(long), out Span<byte> bytes);
+                Span<long> rows = MemoryMarshal.Cast<byte, long>(bytes);
+                for (int i = 0; i < rows.Length; i++)
+                {
+                    rows[i] = (block * 1_000L) + i;
+                }
+
+                builder.Accumulate(arena, arena.AddPrimitive(longs, 1_000, Validity.NonNullable, PType.I64, values), 0, 1_000);
+                builder.CloseBlock();
+            }
+
+            await builder.CloseChunkAsync(0, 8, 0, 8_000, Ct);
+            Task end = builder.EndOfDataAsync(Ct).AsTask();
+            await Task.Delay(200, Ct);
+            Assert.False(end.IsCompleted, "the end left while buckets were still sorted ahead");
+
+            held.SetResult();
+            await Assert.ThrowsAsync<IOException>(() => end);
         }
         finally
         {
