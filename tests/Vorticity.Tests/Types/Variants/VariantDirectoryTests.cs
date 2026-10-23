@@ -185,6 +185,39 @@ public sealed class VariantDirectoryTests
     }
 
     /// <summary>
+    /// Rows of one source share their metadata, here a dictionary of 20 000 keys, each row an object of two of them: the
+    /// census, which keeps the count of each id of a metadata its rows share, counts the keys, their values and the values
+    /// of the keys past its own as it does for the same rows each under a metadata of its own.
+    /// </summary>
+    [Fact]
+    public void ACensusOfRowsSharingTheirMetadataCountsAsOneOfRowsEachWithItsOwn()
+    {
+        const int Users = 20_000;
+        List<byte[]> keys = [Encoding.UTF8.GetBytes("route"), .. Enumerable.Range(0, Users).Select(u => Encoding.UTF8.GetBytes($"user.{u:D5}"))];
+        byte[] metadata = VariantEncoding.Metadata(keys);
+        byte[] route = VariantEncoding.String("/a"u8);
+        PathCensus shared = new PathCensus();
+        PathCensus own = new PathCensus();
+        for (int i = 0; i < 2 * Users; i++)
+        {
+            int user = i % Users;
+            shared.Add(metadata, VariantEncoding.Object([(0, route), (1 + user, VariantEncoding.Integer(i))]));
+            Variant row = Variant.Object(("route", Variant.From("/a")), ($"user.{user:D5}", Variant.From((long)i)));
+            own.Add(row.Metadata.Span, row.Value.Span);
+        }
+
+        Assert.True(shared.Partial);
+        Assert.True(own.Partial);
+        Assert.Equal(2 * (Users - (PathCensus.MaxKeys - 1)), shared.Root.OtherKeys);
+        Assert.Equal(own.Root.OtherKeys, shared.Root.OtherKeys);
+        Assert.Equal(own.Root.Keys.Count, shared.Root.Keys.Count);
+        foreach ((string key, PathCensus.PathCount count) in own.Root.Keys)
+        {
+            Assert.Equal(count.Values, shared.Root.Keys[key].Values);
+        }
+    }
+
+    /// <summary>
     /// A hundred rows a second apart, counted one at a time in slices of 25 rows: a path every row holds keeps one span
     /// of time from its first rows on, where a census that reckoned no gap for rows counted one at a time kept one a row.
     /// </summary>
