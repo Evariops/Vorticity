@@ -384,6 +384,9 @@ internal static class DatasetTelemetry
         CompactionTrigger.Marks => "marks",
         CompactionTrigger.Erasure => "erasure",
         CompactionTrigger.Neighbours => "neighbours",
+        CompactionTrigger.LateCeiling => "late_ceiling",
+        CompactionTrigger.FreshMerge => "fresh_merge",
+        CompactionTrigger.Seal => "seal",
         _ => "none",
     };
 }
