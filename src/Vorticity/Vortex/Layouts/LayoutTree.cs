@@ -862,12 +862,27 @@ internal sealed class LayoutTree
         /// <summary>Taken to publish a column, or a zone table one derived: its numbering and the budgets it spent are the tree's.</summary>
         internal readonly Lock Gate = new();
 
-        // The lock each column's parse is taken under, made the first time the column is parsed.
-        private readonly object?[] _parsing = new object?[count];
+        /// <summary>The locks the columns' parses are taken under, a column's chosen by its tree and its slot.</summary>
+        private static readonly object[] ParsingStripes = Stripes(64);
 
-        /// <summary>The lock the parse of column <paramref name="slot"/> is taken under, the same for every walk.</summary>
+        /// <summary>
+        /// The lock the parse of column <paramref name="slot"/> is taken under, the same for every walk: one of
+        /// <see cref="ParsingStripes"/>, which every tree shares, so that opening a file allocates no lock of its own. A tree's
+        /// columns take stripes in a row; another tree's column on the same stripe waits for a parse it did not need to.
+        /// </summary>
         internal object ParsingGate(int slot) =>
-            Volatile.Read(ref _parsing[slot]) ?? Interlocked.CompareExchange(ref _parsing[slot], new object(), null) ?? _parsing[slot]!;
+            ParsingStripes[(int)((uint)(RuntimeHelpers.GetHashCode(this) + slot) % (uint)ParsingStripes.Length)];
+
+        private static object[] Stripes(int count)
+        {
+            object[] stripes = new object[count];
+            for (int i = 0; i < count; i++)
+            {
+                stripes[i] = new object();
+            }
+
+            return stripes;
+        }
 
         internal readonly int SegmentCount = segmentCount;
 
