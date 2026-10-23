@@ -62,30 +62,40 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
     private const int LargeBlockSize = 8 * 1024 * 1024;
 
     /// <summary>
-    /// Bytes a class of blocks above <see cref="LargeBlockSize"/> may retain. A segment that size is
-    /// a whole column chunk, which a scan reads once per column and gives back before the next, so
-    /// a couple of parked blocks serve it; the floor that suits the small classes would park
-    /// hundreds of megabytes here.
+    /// The processors whose lanes and questions rent at once, which the budgets below grow with: 32
+    /// questions of a node, each at one lane, held some 32 blocks of a class where a scan holds a few,
+    /// and past the budgets every block given back was freed and the next rent took it from the
+    /// system again, under its heap's lock and with every page faulted anew.
     /// </summary>
-    private const long LargeRetentionBudget = 64L * 1024 * 1024;
+    private static readonly long Processors = Math.Max(1, Environment.ProcessorCount);
+
+    /// <summary>
+    /// Bytes a class of blocks above <see cref="LargeBlockSize"/> may retain: 16 MiB a processor,
+    /// 64 MiB at least. A segment that size is a whole column chunk, which a scan reads once per
+    /// column and gives back before the next, so a couple of parked blocks serve a scan; the floor
+    /// that suits the small classes would park hundreds of megabytes here.
+    /// </summary>
+    private static readonly long LargeRetentionBudget = Math.Max(64L << 20, Processors * (16L << 20));
 
     /// <summary>Largest permissible <c>maxPooledLength</c>: keeps every rounded size an int.</summary>
     private const int MaxPoolableLength = 1 << 30;
 
     /// <summary>
     /// Bytes one class of the graded pool may keep parked when the demand it meets asks for more
-    /// than its base retention: a wide batch holds a block of each of its columns at once.
+    /// than its base retention: a wide batch holds a block of each of its columns at once. 8 MiB a
+    /// processor, 64 MiB at least.
     /// </summary>
-    private const long DemandClassBudget = 64L * 1024 * 1024;
+    private static readonly long DemandClassBudget = Math.Max(64L << 20, Processors * (8L << 20));
 
-    /// <summary>Blocks a class widened to its demand keeps at most, however small they are.</summary>
-    private const int DemandBlocks = 4096;
+    /// <summary>Blocks a class widened to its demand keeps at most, however small they are: 256 a processor, 4 096 at least.</summary>
+    private static readonly int DemandBlocks = (int)Math.Max(4_096, Processors * 256);
 
     /// <summary>
     /// Bytes parked across every class, base retention included, under which a class may keep more
-    /// than its base retention: what the base retention of every class of the shared pool comes to.
+    /// than its base retention: what the base retention of every class of the shared pool comes to,
+    /// 32 MiB a processor, 256 MiB at least.
     /// </summary>
-    private const long DemandBudget = 256L * 1024 * 1024;
+    private static readonly long DemandBudget = Math.Max(256L << 20, Processors * (32L << 20));
 
     /// <summary>
     /// How long a class goes without a rent before a sweep frees what it keeps parked: the minute
@@ -167,9 +177,9 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
     /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
     /// <param name="demandBudget">Bytes parked across every class, base retention included, under which a class may keep more than its base retention.</param>
     /// <summary>Creates a pool, optionally grading retention by size class.</summary>
-    private AlignedBufferPool(int maxPooledLength, int maxPerBucket, bool graded, long demandBudget = DemandBudget)
+    private AlignedBufferPool(int maxPooledLength, int maxPerBucket, bool graded, long demandBudget = -1)
     {
-        _demandBudget = demandBudget;
+        _demandBudget = demandBudget < 0 ? DemandBudget : demandBudget;
         ArgumentOutOfRangeException.ThrowIfLessThan(maxPooledLength, MinBlockSize);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(maxPooledLength, MaxPoolableLength);
         ArgumentOutOfRangeException.ThrowIfNegative(maxPerBucket);
