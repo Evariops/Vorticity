@@ -261,7 +261,7 @@ internal static class VariantShredder
             VariantScalar scalar = VariantScalar.Read(value);
             if (_typed.Takes(scalar.Kind))
             {
-                _typed.Append(value);
+                _typed.Append(in scalar);
                 Values.AppendNull();
                 Bounds?.Note(Held.Count - 1, scalar);
                 return;
@@ -536,7 +536,10 @@ internal static class VariantShredder
         internal bool Takes(VariantKind kind) => VariantClasses.Of(kind) == @class;
 
         /// <summary>Appends <paramref name="value"/>, which fits.</summary>
-        internal abstract void Append(ReadOnlySpan<byte> value);
+        internal void Append(ReadOnlySpan<byte> value) => Append(VariantScalar.Read(value));
+
+        /// <summary>Appends a value of the column's class, read.</summary>
+        internal abstract void Append(in VariantScalar scalar);
 
         internal abstract void AppendNull();
 
@@ -548,7 +551,7 @@ internal static class VariantShredder
     {
         private long[] _values = new long[64];
 
-        internal override void Append(ReadOnlySpan<byte> value) => Add((long)VariantScalar.Read(value).Integer, true);
+        internal override void Append(in VariantScalar scalar) => Add((long)scalar.Integer, true);
 
         internal override void AppendNull() => Add(0, false);
 
@@ -576,7 +579,7 @@ internal static class VariantShredder
     {
         private double[] _values = new double[64];
 
-        internal override void Append(ReadOnlySpan<byte> value) => Add(VariantScalar.Read(value).Number, true);
+        internal override void Append(in VariantScalar scalar) => Add(scalar.Number, true);
 
         internal override void AppendNull() => Add(0, false);
 
@@ -604,9 +607,9 @@ internal static class VariantShredder
     {
         private readonly Bits _values = new Bits();
 
-        internal override void Append(ReadOnlySpan<byte> value)
+        internal override void Append(in VariantScalar scalar)
         {
-            _values.Append(VariantScalar.Read(value).Integer != 0);
+            _values.Append(scalar.Integer != 0);
             Valid.Append(true);
         }
 
@@ -628,9 +631,9 @@ internal static class VariantShredder
     {
         private readonly BinaryColumn _values = new BinaryColumn();
 
-        internal override void Append(ReadOnlySpan<byte> value)
+        internal override void Append(in VariantScalar scalar)
         {
-            _values.Append(VariantScalar.Read(value).Bytes);
+            _values.Append(scalar.Bytes);
             Valid.Append(true);
         }
 
