@@ -348,9 +348,10 @@ period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so
 the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
 appends, one row in a hundred late by up to half an hour, deletes now and then, and hours sealed ten
 minutes past their end. After each round it checks that every level but 0 and the late one is
-key-disjoint, that no object spans two periods, and that the key cursor and a key-ordered scan give
-back the rows appended and not deleted. A seed runs about 75 exits, 34 fresh merges and 7 seals,
-none abandoned.
+key-disjoint, that no object spans two periods but a joined one, and that the key cursor and a
+key-ordered scan give back the rows appended and not deleted. A seed runs about 75 exits, 34 fresh
+merges and 7 seals, none abandoned. A schedule of minutes, with late rows and deletes, joins its
+sealed minutes in tiers, 32 joins for 85 to 88 seals, and keeps the same invariants at each round.
 
 A seal is a compaction for its commit: a delete that marks one of its inputs while it runs abandons
 it, and its outputs are left for vacuum. Carrying the marks over to the period's object instead is
