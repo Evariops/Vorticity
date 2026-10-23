@@ -87,6 +87,14 @@ public sealed class RecordBatch : IDisposable
     {
     }
 
+    /// <summary>
+    /// A batch of states of rows (<see cref="CarriesStates"/>) over <paramref name="arena"/>'s root
+    /// <paramref name="rootCanonicalIndex"/>, as a dataset's synopsis answers an aggregation that asked for them: the
+    /// one way a batch comes to carry states, which no batch a scan reads or a caller holds does.
+    /// </summary>
+    internal static RecordBatch OfStates(CanonicalArena arena, int rootCanonicalIndex, long startRow) =>
+        new RecordBatch(arena, rootCanonicalIndex, startRow) { CarriesStates = true };
+
     private RecordBatch(CanonicalArena arena, int rootCanonicalIndex, long startRow, ScanContext? context, bool owns = false)
     {
         _owns = owns;
@@ -250,9 +258,10 @@ public sealed class RecordBatch : IDisposable
     /// <summary>
     /// Whether the batch holds states of rows rather than rows, as a dataset's synopsis keeps them: its
     /// key columns by their names, then per row the rows it stands for and each aggregate's states
-    /// (<see cref="Aggregating.StateInput"/>). Only an aggregation that asked for states is sent one.
+    /// (<see cref="Aggregating.StateInput"/>). Only an aggregation that asked for states is sent one, made by
+    /// <see cref="OfStates"/>; a batch bound again carries rows.
     /// </summary>
-    internal bool CarriesStates { get; set; }
+    internal bool CarriesStates { get; private set; }
 
     private Buffers.VortexBuffer _selection;
     private int _selected;

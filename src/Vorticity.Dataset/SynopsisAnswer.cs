@@ -1525,7 +1525,7 @@ internal sealed record SynopsisAnswer(
                 int selected = states.IsEmpty && corrected is null
                     ? SelectRuns(part, buckets, ends, bits)
                     : SelectRows(part, buckets, ends, arena.GetNode(fields[stoodAt]).Values.Cast<long>(), states, System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bits));
-                RecordBatch batch = new RecordBatch(arena, node, startRow) { CarriesStates = true };
+                RecordBatch batch = RecordBatch.OfStates(arena, node, startRow);
                 batch.Select(selection, selected);
                 into.Add(batch);
             }
@@ -1644,7 +1644,7 @@ internal sealed record SynopsisAnswer(
             gathered[0] = InstantsOf(arena, bucketed, keptBuckets, kept[..BucketRuns.Ends(keptBuckets, kept)], bucketType, part.Instants);
         }
 
-        return new RecordBatch(arena, arena.AddStruct(root, taken, Validity.NonNullable, gathered), startRow) { CarriesStates = true };
+        return RecordBatch.OfStates(arena, arena.AddStruct(root, taken, Validity.NonNullable, gathered), startRow);
     }
 
     /// <summary>The fields of every chunk read of <paramref name="part"/>'s table that holds a bucket it folds, as their nodes, which a correction reads.</summary>
