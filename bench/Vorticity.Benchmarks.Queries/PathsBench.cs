@@ -173,6 +173,12 @@ internal static partial class PathsBench
         /// </summary>
         internal string? SharedCache { get; init; }
 
+        /// <summary>
+        /// One of the client's stores, <c>spans</c> or <c>logs</c>, built alone in this process and kept, its build's cost
+        /// given (<c>--qp-write</c>); null to build every store the run needs.
+        /// </summary>
+        internal string? QpWrite { get; init; }
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }
@@ -189,6 +195,11 @@ internal static partial class PathsBench
         }
 
         Directory.CreateDirectory(settings.Store);
+        if (settings.QpWrite is { } kind)
+        {
+            return await WriteOneAsync(settings, kind);
+        }
+
         Built requests = await EnsureAsync(
             settings,
             $"requests-{(!settings.Design ? string.Empty : settings.Incremental ? "design-" : "design-load-")}h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}{(settings.RandomIds ? "-rid" : string.Empty)}",
@@ -197,10 +208,8 @@ internal static partial class PathsBench
                 ? DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"), settings.RandomIds)
                 : DesignBuild.LoadAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelPeriods, settings.WriteDegree, Path.Combine(settings.Store, "scratch"), settings.RandomIds));
         Built logs = await EnsureAsync(settings, $"logs-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
-        Built? spans = !settings.Qp ? null
-            : await EnsureAsync(settings, $"spans-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}", store => FillSpansAsync(store, settings));
-        Built? logs2 = !settings.Qp ? null
-            : await EnsureAsync(settings, $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}", store => FillLogsV2Async(store, settings));
+        Built? spans = !settings.Qp ? null : await EnsureAsync(settings, SpansName(settings), store => FillSpansAsync(store, settings));
+        Built? logs2 = !settings.Qp ? null : await EnsureAsync(settings, LogsV2Name(settings), store => FillLogsV2Async(store, settings));
         if (settings.BuildOnly)
         {
             return 0;
@@ -806,6 +815,50 @@ internal static partial class PathsBench
     /// as a client's ingestion does, in periods of a day, their trace and span ids declared identifiers; and the trace id of
     /// a span in the middle, a needle.
     /// </summary>
+    /// <summary>The name of the client's spans' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
+    private static string SpansName(Settings settings) =>
+        $"spans-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
+
+    /// <summary>The name of the client's log records' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
+    private static string LogsV2Name(Settings settings) =>
+        $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
+
+    /// <summary>
+    /// <c>--qp-write spans|logs</c>: that one of the client's stores alone, built as <c>--qp</c> builds it, in a process of
+    /// its own, so that the processors' time, the bytes allocated and the peak in memory it gives are its build's alone;
+    /// the store is kept, under the name <c>--qp</c> reads it by.
+    /// </summary>
+    private static async Task<int> WriteOneAsync(Settings settings, string kind)
+    {
+        string name = kind switch
+        {
+            "spans" => SpansName(settings),
+            "logs" => LogsV2Name(settings),
+            _ => throw new ArgumentException($"--qp-write takes spans or logs, not '{kind}'."),
+        };
+        if (!settings.Rebuild && System.IO.File.Exists(Path.Combine(settings.Store, name) + ".built"))
+        {
+            Console.WriteLine($"{Path.Combine(settings.Store, name)} is built already: --rebuild builds it again.");
+            return 0;
+        }
+
+        using Process self = Process.GetCurrentProcess();
+        TimeSpan cpu = self.TotalProcessorTime;
+        long allocated = GC.GetTotalAllocatedBytes();
+        long begin = Stopwatch.GetTimestamp();
+        Built built = kind == "spans"
+            ? await EnsureAsync(settings, name, store => FillSpansAsync(store, settings))
+            : await EnsureAsync(settings, name, store => FillLogsV2Async(store, settings));
+        double seconds = Stopwatch.GetElapsedTime(begin).TotalSeconds;
+        self.Refresh();
+        double busy = (self.TotalProcessorTime - cpu).TotalSeconds;
+        Console.WriteLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"{built.Rows:N0} rows of {kind} in {seconds:F0} s, {busy:F0} s of the processors ({busy / seconds:F1} cores): {built.Rows / seconds / 1e3:F0} k rows a second, " +
+            $"{busy * 1e9 / built.Rows:F0} ns of a processor and {(GC.GetTotalAllocatedBytes() - allocated) / (double)built.Rows:F0} bytes allocated a row; a peak of {self.PeakWorkingSet64 / 1e9:F2} GB"));
+        return 0;
+    }
+
     private static async Task<(long Rows, string Needle)> FillSpansAsync(IObjectStore store, Settings settings)
     {
         Directory.CreateDirectory(Path.Combine(settings.Store, "scratch"));
