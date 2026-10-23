@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -659,31 +660,66 @@ internal static class VariantShredder
     }
 
     /// <summary>Bits appended one at a time, as a validity or a column of booleans.</summary>
+    /// <remarks>
+    /// Counted alone while they are all set or all clear, as a key every object holds, or the residual of a key its class
+    /// types, lays them for a chunk's rows: their words are written from the first bit that differs on, where every row
+    /// of every node of the tree wrote one.
+    /// </remarks>
     private sealed class Bits
     {
-        private ulong[] _words = new ulong[1];
+        private ulong[] _words = [];
         private int _set;
+        private int _count;
+        private bool _mixed;
 
         /// <summary>The bits set.</summary>
         internal int SetCount => _set;
 
-        internal int Count { get; private set; }
+        internal int Count => _count;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal void Append(bool bit)
         {
-            int at = Count;
-            if (at >> 6 == _words.Length)
+            int at = _count++;
+            _set += bit ? 1 : 0;
+            if (_mixed)
             {
-                Array.Resize(ref _words, 2 * _words.Length);
+                Write(at, bit);
+            }
+            else if (_set != _count && _set != 0)
+            {
+                Mix(at, bit);
+            }
+        }
+
+        private void Write(int at, bool bit)
+        {
+            if (at >> 6 >= _words.Length)
+            {
+                Array.Resize(ref _words, Math.Max(2 * _words.Length, (at >> 6) + 1));
             }
 
             if (bit)
             {
                 _words[at >> 6] |= 1UL << (at & 63);
-                _set++;
+            }
+        }
+
+        /// <summary>Lays out the bits before <paramref name="at"/>, all the opposite of <paramref name="bit"/>, then writes it.</summary>
+        private void Mix(int at, bool bit)
+        {
+            _mixed = true;
+            _words = new ulong[Math.Max(1, (at >> 6) + 1) * 2];
+            if (!bit)
+            {
+                _words.AsSpan(0, at >> 6).Fill(ulong.MaxValue);
+                if ((at & 63) != 0)
+                {
+                    _words[at >> 6] = (1UL << (at & 63)) - 1;
+                }
             }
 
-            Count = at + 1;
+            Write(at, bit);
         }
 
         /// <summary>The validity of <paramref name="rows"/> rows these bits say are valid.</summary>
@@ -707,7 +743,21 @@ internal static class VariantShredder
         {
             int bytes = (rows + 7) / 8;
             VortexBuffer buffer = arena.Allocate(Math.Max(bytes, 1), 8, out Span<byte> into).Slice(0, bytes);
-            MemoryMarshal.AsBytes(_words.AsSpan()).Slice(0, bytes).CopyTo(into);
+            if (_mixed)
+            {
+                ReadOnlySpan<byte> words = MemoryMarshal.AsBytes(_words.AsSpan());
+                words[..Math.Min(bytes, words.Length)].CopyTo(into);
+            }
+            else if (_set > 0)
+            {
+                // Every bit set, none past the rows.
+                into[..(rows / 8)].Fill(0xFF);
+                if ((rows & 7) != 0)
+                {
+                    into[rows / 8] = (byte)((1 << (rows & 7)) - 1);
+                }
+            }
+
             return buffer;
         }
     }
@@ -782,7 +832,7 @@ internal static class VariantShredder
         {
             int bytes = checked(rows * ViewSize);
             VortexBuffer views = arena.Allocate(Math.Max(bytes, 1), 64, out Span<byte> into).Slice(0, bytes);
-            for (int row = 0; row < rows; row++)
+            for (int row = 0; _used > 0 && row < rows; row++)
             {
                 int start = _starts[row];
                 int length = _starts[row + 1] - start;
@@ -813,13 +863,19 @@ internal static class VariantShredder
 
         private void Close(int end, bool valid)
         {
+            // A start is written once a row holds bytes: those before it are zero, as the array is, and a column of no
+            // bytes, the residual of a key its class types, writes none.
             int row = _valid.Count;
-            if (row + 2 > _starts.Length)
+            if (end != 0)
             {
-                Array.Resize(ref _starts, 2 * _starts.Length);
+                if (row + 2 > _starts.Length)
+                {
+                    Array.Resize(ref _starts, Math.Max(2 * _starts.Length, row + 2));
+                }
+
+                _starts[row + 1] = end;
             }
 
-            _starts[row + 1] = end;
             _used = end;
             _held += valid ? 1 : 0;
             _valid.Append(valid);
