@@ -148,42 +148,4 @@ internal static class LoadMicro
 
         return Files * Length / seconds;
     }
-
-    /// <summary>The most private bytes the process holds while it is open, sampled every 100 ms on a thread of its own.</summary>
-    private sealed class PeakMemory : IDisposable
-    {
-        private readonly Thread _thread;
-        private volatile bool _stop;
-        private long _peak;
-
-        internal PeakMemory()
-        {
-            _thread = new Thread(Sample) { IsBackground = true, Name = "peak memory" };
-            _thread.Start();
-        }
-
-        internal long Peak => Interlocked.Read(ref _peak);
-
-        private void Sample()
-        {
-            using Process self = Process.GetCurrentProcess();
-            while (!_stop)
-            {
-                self.Refresh();
-                long bytes = self.PrivateMemorySize64;
-                if (bytes > Interlocked.Read(ref _peak))
-                {
-                    Interlocked.Exchange(ref _peak, bytes);
-                }
-
-                Thread.Sleep(100);
-            }
-        }
-
-        public void Dispose()
-        {
-            _stop = true;
-            _thread.Join();
-        }
-    }
 }

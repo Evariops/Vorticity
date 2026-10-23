@@ -87,7 +87,9 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Option(args, "--ceiling", 2),
         Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
         Option(args, "--budget", 100),
-        !args.Contains("--no-late"))),
+        !args.Contains("--no-late"),
+        Option(args, "--hours", 1),
+        args.Contains("--day"))),
     ["shredcost"] = ("what shredding a path costs and saves in a file's bytes (ShredCostMicro.cs)", () => ShredCostMicro.Run()),
     ["chunkshapes"] = ("the keys the chunks of a slice shred, three ways (ChunkShapesMicro.cs)", () =>
         Task.FromResult(ChunkShapesMicro.Run((int)Option(args, "--rows", 3_000_000), (int)Option(args, "--chunk-rows", 1_000_000)))),

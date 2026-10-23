@@ -427,6 +427,9 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
     internal long ClassCeilingBytes(int capacity) =>
         capacity > MaxPooledLength ? capacity : (long)Math.Max(1, _buckets[BucketIndexOf(capacity)].Ceiling) * capacity;
 
+    /// <summary>The bytes parked across every class: what a bench tells apart from the blocks in use.</summary>
+    internal long ParkedBytes => Interlocked.Read(ref _parkedBytes);
+
     /// <summary>The bytes <see cref="Rent"/> allocates for a block of <paramref name="length"/> bytes: its size class, or the length itself past the largest.</summary>
     /// <param name="length">Length in bytes, non-negative.</param>
     internal int CapacityFor(int length) => length > MaxPooledLength ? length : RoundedSize(length);
