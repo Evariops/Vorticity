@@ -782,12 +782,20 @@ internal sealed class SynopsisContents(
                         break;
                     case (TagTable, ProtoWireType.LengthDelimited):
                         ReadOnlySpan<byte> held = reader.ReadLengthDelimited();
-                        if (Table(bytes.Slice(reader.Position - held.Length, held.Length)) is not { } table)
+                        if (Table(bytes.Slice(reader.Position - held.Length, held.Length), out bool later) is { } table)
+                        {
+                            tables.Add(table);
+                        }
+                        else if (later)
+                        {
+                            // A table a later writer made is skipped, the object's other tables answering what they hold.
+                            VortexTelemetry.SynopsisTableUnknown();
+                        }
+                        else
                         {
                             return null;
                         }
 
-                        tables.Add(table);
                         break;
                     case (TagSchema, ProtoWireType.LengthDelimited):
                         schema = reader.ReadLengthDelimited().ToArray();
@@ -848,10 +856,12 @@ internal sealed class SynopsisContents(
     /// <summary>
     /// A table and its chunks, which the message <paramref name="message"/> holds, its chunks checked and left in the bytes
     /// (<see cref="TableChunks"/>), or listed apart in a region of the object the message names, read when a question loads
-    /// it; null for a table of no chunk.
+    /// it; null for a table of no chunk, and for a table of a kind or a version a later writer made, which
+    /// <paramref name="later"/> then says.
     /// </summary>
-    private static (SynopsisTableInfo, IReadOnlyList<TableChunk>)? Table(ReadOnlyMemory<byte> message)
+    private static (SynopsisTableInfo, IReadOnlyList<TableChunk>)? Table(ReadOnlyMemory<byte> message, out bool later)
     {
+        later = false;
         ProtoReader reader = new ProtoReader(message.Span);
         SynopsisTableInfo? table = null;
         int count = 0;
@@ -866,7 +876,9 @@ internal sealed class SynopsisContents(
             switch (field, wire)
             {
                 case (TagTableInfo, ProtoWireType.LengthDelimited):
-                    table = SynopsisTableInfo.From(reader.ReadLengthDelimited());
+                    ReadOnlySpan<byte> options = reader.ReadLengthDelimited();
+                    table = SynopsisTableInfo.From(options);
+                    later = table is null && SynopsisTableInfo.IsLater(options);
                     break;
                 case (TagTableList, ProtoWireType.LengthDelimited):
                     list = IndexDirectory.ReadSegment(reader.ReadMessage());

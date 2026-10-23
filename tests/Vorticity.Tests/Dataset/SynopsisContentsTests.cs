@@ -351,6 +351,65 @@ public sealed partial class SynopsisContentsTests
     }
 
     /// <summary>
+    /// A table a later writer made, of a kind this reader does not know, is skipped and counted, the contents' other tables
+    /// read as before; a table of a known kind whose options are torn still refuses the contents, as it did.
+    /// </summary>
+    [Fact]
+    public void ATableOfALaterKindIsSkippedAndTheOthersRead()
+    {
+        SliceTable slices = new SliceTable(TimeUnit.Microseconds, [new TimeSlice(0, 60_000_000, 0, 10)], [1]);
+        SynopsisContents contents = new SynopsisContents(
+            Vorticity.Types.Serialization.DTypeFlatBuffers.Serialize(Vorticity.VortexTypes.ToDType(Call.Schema, new Vorticity.Types.DTypeArena())),
+            ["vortex.primitive"],
+            slices,
+            [new IndexSegment(100, 20, 0, 7)],
+            4_096,
+            8_192,
+            [(new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4), [new TableChunk(new IndexSegment(4_096, 512, 6, 9), 0, 3_600_000_000, 3)])]);
+        byte[] whole = contents.ToBytes();
+        byte[] later = TableMessage(new SynopsisTableInfo((SynopsisTableKind)9, SynopsisBucket.Hour, [1], [3], 4).OptionBytes());
+        byte[] torn = TableMessage(new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4).OptionBytes()[..^1]);
+
+        long skipped = 0;
+        using System.Diagnostics.Metrics.MeterListener listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, listening) =>
+        {
+            if (instrument.Meter.Name == VortexDiagnostics.MeterName && instrument.Name == "vortex.synopsis_tables.unknown")
+            {
+                listening.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Add(ref skipped, value));
+        listener.Start();
+
+        SynopsisContents back = SynopsisContents.From([.. whole, .. later])!;
+        Assert.NotNull(back);
+        Assert.Equal(contents.Tables.Select(t => t.Table), back.Tables.Select(t => t.Table), Same);
+        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(Unbounded), back.Tables.SelectMany(t => t.Chunks).Select(Unbounded));
+        Assert.Equal(1, Interlocked.Read(ref skipped));
+
+        Assert.Null(SynopsisContents.From([.. whole, .. torn]));
+    }
+
+    /// <summary>A table's message as the contents lay it out, holding its options alone.</summary>
+    private static byte[] TableMessage(ReadOnlySpan<byte> options)
+    {
+        Vorticity.Serialization.Protobuf.ProtoWriter table = new Vorticity.Serialization.Protobuf.ProtoWriter();
+        Vorticity.Serialization.Protobuf.ProtoWriter message = new Vorticity.Serialization.Protobuf.ProtoWriter();
+        try
+        {
+            table.WriteBytes(1, options);
+            message.WriteBytes(7, table.WrittenSpan);
+            return message.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            table.Dispose();
+            message.Dispose();
+        }
+    }
+
+    /// <summary>
     /// A read of an object's tables that names some fields of their rows decodes those alone, in their order and under
     /// their names, their values a whole read's: a count by no key reads a table's bucket and count, of its eight
     /// columns and more.

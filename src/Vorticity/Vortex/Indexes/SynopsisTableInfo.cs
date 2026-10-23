@@ -251,6 +251,24 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     internal static SynopsisTableInfo? From(ReadOnlySpan<byte> bytes) => From(bytes, out _);
 
     /// <summary>
+    /// Whether the options <paramref name="bytes"/> are those of a table a later writer made, of a version or a kind this
+    /// reader does not know, which a reader skips; false for options of a version and a kind it knows, which are torn when
+    /// <see cref="From(ReadOnlySpan{byte})"/> refuses them.
+    /// </summary>
+    internal static bool IsLater(ReadOnlySpan<byte> bytes)
+    {
+        try
+        {
+            ProtoReader reader = new ProtoReader(bytes);
+            return reader.ReadVarint() > DistinctVersion || reader.ReadVarint() > (ulong)SynopsisTableKind.Sketches;
+        }
+        catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// The table the options <paramref name="bytes"/> describe, and its chunks' buckets and rows when they say them;
     /// null when they do not decode.
     /// </summary>

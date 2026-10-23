@@ -62,6 +62,7 @@ internal static class VortexTelemetry
     private static readonly Counter<long> SynopsisCorrupt = Meter.CreateCounter<long>("vortex.synopsis_cache.corrupt", "{region}", "Regions whose file on the disk failed its checksum, dropped and read again.");
     private static readonly UpDownCounter<long> SynopsisHeld = Meter.CreateUpDownCounter<long>("vortex.synopsis_cache.held", "By", "Bytes the synopsis caches hold on the local disk.");
     private static readonly Counter<long> SynopsisTablesCorrupt = Meter.CreateCounter<long>("vortex.synopsis_tables.corrupt", "{chunk}", "Chunks of synopsis tables that failed their checksum or did not decode, the question answered from the rows instead.");
+    private static readonly Counter<long> SynopsisTablesUnknown = Meter.CreateCounter<long>("vortex.synopsis_tables.unknown", "{table}", "Synopsis tables of a kind or a version a later writer made, which this reader skips, the object's other tables answering.");
 
     /// <summary>Starts the activity of one scan, or returns null when nothing listens.</summary>
     /// <remarks>
@@ -136,6 +137,9 @@ internal static class VortexTelemetry
 
     /// <summary>A chunk of a synopsis table that failed its checksum or did not decode: its object read as rows instead.</summary>
     internal static void SynopsisTableCorruption() => SynopsisTablesCorrupt.Add(1);
+
+    /// <summary>A synopsis table of a kind or a version a later writer made: skipped, the object's other tables answering.</summary>
+    internal static void SynopsisTableUnknown() => SynopsisTablesUnknown.Add(1);
 
     /// <summary>Starts the activity of one write, or returns null when nothing listens.</summary>
     internal static Activity? StartWrite() => Start("vortex.write");
