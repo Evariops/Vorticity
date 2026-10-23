@@ -137,6 +137,10 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["s3profile"] = ("the waits and the turns of the store --profile s3 answers as, drawn without waiting (StoreProfileMicro.cs)", () => StoreProfileMicro.Run()),
     ["cachetrace"] = ("the regions a run of questions asks of the synopsis cache, replayed through three eviction policies (CacheTrace.cs)", () =>
         CacheTrace.Run((int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--questions", 2_000), (int)Option(args, "--seed", 29))),
+    ["cacheviews"] = ("the synopsis cache under views of dashboards over a built requests store, replayed and counted (CacheViews.cs)", () =>
+        CacheViews.Run(
+            Text(args, "--store") ?? new PathsBench.Settings().Store, (int)Option(args, "--hours", 9_480), Option(args, "--rate", 500),
+            (int)Option(args, "--budget", 100), (int)Option(args, "--views", 200), (int)Option(args, "--seed", 31))),
     ["hashedend"] = ("what the end of a file's hashed postings holds with no bound on its rows (HashedEndMicro.cs)", () =>
         HashedEndMicro.Run(Text(args, "--store") ?? BenchStores.Of("hashedend"), Option(args, "--rows", 10_000_000))),
     ["logwrite"] = ("what building the client's log records costs, as an ingestion builds them (LogWriteMicro.cs)", () => LogWriteMicro.Run(

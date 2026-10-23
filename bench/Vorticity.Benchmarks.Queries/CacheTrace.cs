@@ -170,7 +170,7 @@ internal static class CacheTrace
     }
 
     /// <summary>A region's key: its object's uid and its place, mixed into 64 bits.</summary>
-    private static long KeyOf(UInt128 uid, IndexSegment region)
+    internal static long KeyOf(UInt128 uid, IndexSegment region)
     {
         ulong mixed = ((ulong)(uid >> 64) * 0x9E3779B97F4A7C15UL) ^ (ulong)uid ^ (region.Offset * 0xBF58476D1CE4E5B9UL) ^ region.Length;
         return (long)(mixed ^ (mixed >> 29));
