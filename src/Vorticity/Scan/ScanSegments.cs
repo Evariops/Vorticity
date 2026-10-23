@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Sources;
@@ -26,8 +27,10 @@ namespace Vorticity.Scanning;
 /// Each segment is read by exactly one batch, the first to claim it. A batch that needs a segment
 /// another batch has claimed and not yet read waits for that read instead of issuing its own: a
 /// batch claims all it lacks in one step under the lock, so it can only wait on a batch that claimed
-/// before it, and the waits cannot form a cycle. Once a read fails the scan is failing, and the
-/// batches still running read what they lack themselves.
+/// before it, and the waits cannot form a cycle. Before it waits, it reads and publishes what it
+/// claimed itself (<see cref="ReadOwnAsync"/>), so that a wait for another's segment delays neither
+/// its own read nor the batches after it that wait for its segments. Once a read fails the scan is
+/// failing, and the batches still running read what they lack themselves.
 /// </para>
 /// <para>
 /// A segment is needed by a contiguous run of the scan's batches, because it covers a contiguous
@@ -165,6 +168,79 @@ internal sealed class ScanSegments : IDisposable
             parked[Array.IndexOf(parked, null)] = waiter;
             return true;
         }
+    }
+
+    /// <summary>
+    /// Reads, while batch <paramref name="batch"/> waits for a segment another batch is reading, the segments it claimed
+    /// itself, and publishes them before it waits: a batch held back by another's small segment then makes its own read at
+    /// once rather than after the wait, and the batches waiting for what it claimed are not held back by its wait. Its
+    /// slots in <paramref name="requests"/> are filled from that read, made through <paramref name="own"/>, emptied after.
+    /// </summary>
+    /// <param name="requests">The batch's set, claimed, and blocked on another batch's read.</param>
+    /// <param name="batch">The batch's number.</param>
+    /// <param name="source">What the scan reads.</param>
+    /// <param name="own">An empty set of the batch's.</param>
+    /// <param name="metrics">The scan's counters, or null.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    internal async ValueTask ReadOwnAsync(
+        SegmentRequestSet requests, long batch, ISegmentReader source, SegmentRequestSet own, ScanCounters? metrics, CancellationToken cancellationToken)
+    {
+        if (!Owned(requests, batch, own))
+        {
+            return;
+        }
+
+        try
+        {
+            if (ScanCounters.Note(metrics, own))
+            {
+                await source.ReadManyAsync(own, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                own.Complete();
+            }
+
+            ScanCounters.Served(metrics, own);
+            Publish(own, batch);
+            for (int slot = 0; slot < own.Count; slot++)
+            {
+                SegmentSpec spec = own.GetSpec(slot);
+                requests.SetSharedResult(requests.IndexOf(spec.Offset, spec.Length), own.GetOwner(slot), own.GetBuffer(slot));
+            }
+        }
+        finally
+        {
+            own.Release();
+        }
+    }
+
+    /// <summary>
+    /// Registers in <paramref name="own"/> the segments of <paramref name="requests"/> that batch <paramref name="batch"/>
+    /// claimed and nobody holds yet; false when there are none.
+    /// </summary>
+    private bool Owned(SegmentRequestSet requests, long batch, SegmentRequestSet own)
+    {
+        using (Enter())
+        {
+            for (int i = 0; i < _count; i++)
+            {
+                ref Entry entry = ref _entries[i];
+                if (entry.Owner is not null || entry.Claimant != batch)
+                {
+                    continue;
+                }
+
+                int slot = requests.IndexOf(entry.Offset, entry.Length);
+                if (slot >= 0 && !requests.IsFilled(slot))
+                {
+                    own.AddTouched(requests.GetSpec(slot), requests.TouchesLittle(slot) ? 0 : long.MaxValue);
+                }
+            }
+        }
+
+        return own.Count > 0;
     }
 
     /// <summary>Holds what a batch read for the segments it claimed, and wakes the batches waiting for them.</summary>
