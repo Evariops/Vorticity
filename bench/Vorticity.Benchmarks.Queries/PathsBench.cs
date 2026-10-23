@@ -166,6 +166,13 @@ internal static partial class PathsBench
         /// <summary>The handles <c>--qps</c> opens on each dataset, which its clients share in turn (<c>--handles</c>); one by default.</summary>
         internal int Handles { get; init; } = 1;
 
+        /// <summary>
+        /// The root the synopsis cache of <c>--qps</c>'s warm runs shares with the caches of other processes
+        /// (<c>--shared-cache ROOT</c>, <c>SynopsisCache.OpenShared</c>), kept after the run, rather than a directory of its
+        /// own made for the run and deleted after it; null for the latter.
+        /// </summary>
+        internal string? SharedCache { get; init; }
+
         internal string? Tsv { get; init; }
 
         internal string? Label { get; init; }

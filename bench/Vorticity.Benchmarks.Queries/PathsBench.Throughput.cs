@@ -44,7 +44,9 @@ internal static partial class PathsBench
             await using VortexSession session = VortexSession.Create(o =>
             {
                 o.MaxConcurrentReads = settings.MaxReads > 0 ? settings.MaxReads : o.MaxConcurrentReads;
-                o.SynopsisCache = cached ? new SynopsisCache(cache, 8L << 30) : null;
+                o.SynopsisCache = !cached ? null
+                    : settings.SharedCache is { } root ? SynopsisCache.OpenShared(root, 8L << 30)
+                    : new SynopsisCache(cache, 8L << 30);
                 o.SegmentCache = settings.SegmentCacheBytes > 0 ? new SegmentCache(settings.SegmentCacheBytes) : null;
             });
 
@@ -123,6 +125,14 @@ internal static partial class PathsBench
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"{(cached ? "warm" : "no cache"),-10} {clients,7} {all.Length,7} {all.Length / seconds,9:F1} {Percentile(all, 0.5),9:F1} {Percentile(all, 0.99),9:F1} {requests / seconds,9:F0} {bytes / seconds / 1e6,8:F1} {busy / seconds,6:F1}"));
+
+            // A cache that shares a root says what it read from the directories of the others, and what it kept itself.
+            if (cached && settings.SharedCache is not null && session.Options.SynopsisCache is { } shared)
+            {
+                Console.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"  shared cache {shared.Directory}: {shared.PeerHits} reads from the other directories, {shared.Hits} hits, {shared.Misses} misses, {shared.HeldBytes / 1e6:F1} MB kept"));
+            }
 
             // With --qps-by-question, each question's asks and latencies under the load of all.
             if (settings.QpsByQuestion)

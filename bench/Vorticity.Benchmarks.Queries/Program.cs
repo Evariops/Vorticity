@@ -199,6 +199,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         QpsByQuestion = args.Contains("--qps-by-question"),
         OpenObjects = (int)Option(args, "--open-objects", 0),
         Handles = (int)Option(args, "--handles", 1),
+        SharedCache = Text(args, "--shared-cache"),
         Clients = args.Contains("--clients") ? [.. Text(args, "--clients")!.Split(',').Select(c => int.Parse(c, CultureInfo.InvariantCulture))] : [1, Environment.ProcessorCount],
     })),
 };

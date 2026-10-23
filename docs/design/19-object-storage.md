@@ -742,6 +742,8 @@ counts the hits a cache served from another's directory.
 A look in the others' directories costs a failed open of a file name per directory on each miss, and a
 hit costs an open, a read and a checksum, where the owner reads a view of a mapping it keeps. A process
 whose working set lies in another's directory pays that at each read, and the disk holds the set once.
+The throughput runs of the query bench take `--shared-cache ROOT` (`vortex-queries --micro paths --qps`)
+to measure it with two processes on one root.
 
 Three ways to share were weighed, and the third built:
 
