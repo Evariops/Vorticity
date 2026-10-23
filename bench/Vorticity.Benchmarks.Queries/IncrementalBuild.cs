@@ -41,6 +41,7 @@ internal static class IncrementalBuild
         }
 
         long begin = Stopwatch.GetTimestamp();
+        long hourBegan = begin;
         Start();
         for (int hour = 0; hour < hours; hour++)
         {
@@ -54,16 +55,21 @@ internal static class IncrementalBuild
 
             Volatile.Write(ref appended, hour + 1);
             Start();
+            long compacting = Stopwatch.GetTimestamp();
+            int jobs = 0;
             while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
             {
+                jobs++;
             }
 
-            if ((hour + 1) % 6 == 0 || hour + 1 == hours)
-            {
-                double seconds = Stopwatch.GetElapsedTime(begin).TotalSeconds;
-                Console.WriteLine(string.Create(
-                    CultureInfo.InvariantCulture, $"  hour {hour + 1} of {hours} appended and compacted, {(hour + 1) * perHour / seconds / 1e6:F2} M rows a second so far"));
-            }
+            // Each hour's own pace and what its compactions took beside the cumulative pace, so that a pace that wanes as
+            // the dataset grows shows by the hour.
+            long now = Stopwatch.GetTimestamp();
+            double seconds = Stopwatch.GetElapsedTime(begin, now).TotalSeconds;
+            Console.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"  hour {hour + 1} of {hours}: {perHour / Stopwatch.GetElapsedTime(hourBegan, now).TotalSeconds / 1e6:F2} M rows a second, {jobs} jobs in {Stopwatch.GetElapsedTime(compacting, now).TotalSeconds:F1} s; {(hour + 1) * perHour / seconds / 1e6:F2} M rows a second so far"));
+            hourBegan = now;
         }
 
         await QuestionBench.CompactAsync(dataset);
