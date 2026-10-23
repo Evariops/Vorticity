@@ -297,14 +297,13 @@ internal static class SynopsisCorrection
             int column = count + 1;
             for (int m = 0; m < measures; m++)
             {
-                int words = floats[m] ? 5 : 2;
                 if (measureNodes[b][m] >= 0 && LiteralReader.TryRead(from, measureNodes[b][m], r, out FilterLiteral value)
-                    && !Remove(states, column, words, value, needs[m], ref spent[(slot * measures) + m]))
+                    && !Remove(states, column, floats[m], value, needs[m], ref spent[(slot * measures) + m]))
                 {
                     return false;
                 }
 
-                column += 1 + words + 2;
+                column += MeasureLayout.Words(floats[m]);
             }
         }
 
@@ -413,22 +412,23 @@ internal static class SynopsisCorrection
     }
 
     /// <summary>
-    /// Takes one value out of a measure's states at <paramref name="column"/> (its count of values, then its
-    /// sum's words, its least and its greatest) that <paramref name="needs"/> says the question reads; false
-    /// when an extreme or a float sum it reads cannot say what is left.
+    /// Takes one value out of a measure's states at <paramref name="column"/>, laid out as <see cref="MeasureLayout"/>
+    /// says, that <paramref name="needs"/> says the question reads; false when an extreme or a float sum it reads cannot
+    /// say what is left.
     /// </summary>
     /// <param name="states">The count and states of the table row charged, by field.</param>
-    /// <param name="column">The field of the measure's count of values.</param>
-    /// <param name="words">The words of its sum: five for a float, two for an integer.</param>
+    /// <param name="column">The field of the measure's count of values, its first word.</param>
+    /// <param name="floats">Whether its sum is of floats.</param>
     /// <param name="value">The value taken out.</param>
     /// <param name="needs">Which of the measure's states the question reads.</param>
     /// <param name="spent">Whether a row taken out of this table row before held one of the measure's extremes; set when this one does.</param>
-    private static bool Remove(long[] states, int column, int words, FilterLiteral value, (bool Sum, bool Least, bool Greatest) needs, ref bool spent)
+    private static bool Remove(long[] states, int column, bool floats, FilterLiteral value, (bool Sum, bool Least, bool Greatest) needs, ref bool spent)
     {
-        long left = --states[column];
-        int least = column + 1 + words;
-        int greatest = least + 1;
-        if (words == 5)
+        long left = --states[column + MeasureLayout.Values];
+        int sumAt = column + MeasureLayout.Sum;
+        int least = column + MeasureLayout.Least(floats);
+        int greatest = column + MeasureLayout.Greatest(floats);
+        if (floats)
         {
             double number = value.FloatValue;
             bool extreme = !double.IsNaN(number)
@@ -436,19 +436,13 @@ internal static class SynopsisCorrection
             if (needs.Sum)
             {
                 // The least and the greatest call for the top; while both stay, so does it.
-                WideIndexedSum sum = default;
-                sum.Sum.M0 = states[column + 1];
-                sum.Sum.M1 = states[column + 2];
-                sum.Sum.M2 = states[column + 3];
-                sum.Sum.Meta = states[column + 4];
-                sum.High = states[column + 5];
+                WideIndexedSum sum = StateWords.SumOf(states, sumAt);
                 if (!sum.TryRemove(number, topStays: !spent && !extreme))
                 {
                     return false;
                 }
 
-                (states[column + 1], states[column + 2], states[column + 3], states[column + 4], states[column + 5]) =
-                    (sum.Sum.M0, sum.Sum.M1, sum.Sum.M2, sum.Sum.Meta, sum.High);
+                StateWords.Write(in sum, states, sumAt);
             }
 
             spent |= extreme;
@@ -458,9 +452,7 @@ internal static class SynopsisCorrection
         }
 
         Int128 integer = value.Kind == FilterLiteralKind.Unsigned ? (Int128)value.UnsignedValue : value.SignedValue;
-        Int128 total = new Int128(unchecked((ulong)states[column + 2]), unchecked((ulong)states[column + 1])) - integer;
-        states[column + 1] = unchecked((long)(ulong)total);
-        states[column + 2] = (long)(total >> 64);
+        StateWords.Write(StateWords.IntegerOf(states, sumAt) - integer, states, sumAt);
         long bits = value.Kind == FilterLiteralKind.Unsigned ? unchecked((long)value.UnsignedValue) : value.SignedValue;
         return left == 0 || ((!needs.Least || bits != states[least]) && (!needs.Greatest || bits != states[greatest]));
     }

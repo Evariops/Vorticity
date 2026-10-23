@@ -167,18 +167,9 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         fields.Add(longs);
         foreach (int measure in Measures)
         {
-            string name = NameOf(measure, schema, paths);
-            string[] words = SumsFloats(measure, schema, paths) ? ["m0", "m1", "m2", "meta", "high"] : ["low", "high"];
-            names.Add(StateRequest.ValuesOf(name));
-            foreach (string word in words)
+            foreach (string name in MeasureLayout.Names(NameOf(measure, schema, paths), SumsFloats(measure, schema, paths)))
             {
-                names.Add(StateRequest.SumWord(name, word));
-            }
-
-            names.Add(StateRequest.LeastOf(name));
-            names.Add(StateRequest.GreatestOf(name));
-            for (int i = 0; i < words.Length + 3; i++)
-            {
+                names.Add(name);
                 fields.Add(longs);
             }
         }

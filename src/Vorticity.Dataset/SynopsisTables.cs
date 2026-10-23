@@ -28,7 +28,7 @@ namespace Vorticity.Dataset;
 /// <para>
 /// A table's row is a bucket, the values of its keys, a count of rows, then for each measure column the
 /// count of its values, their exact sum (an <see cref="Int128"/> for integers, a <see cref="WideIndexedSum"/>
-/// for floats, in the words <see cref="PersistedStates"/> lays out), and their least and greatest, widened to
+/// for floats, in the words <see cref="MeasureLayout"/> lays out), and their least and greatest, widened to
 /// 64 bits, a float's NaN aside as the engine's Min and Max take it. Rows are in the order of their bucket,
 /// then of their keys' values, so that the same rows give the same tables, whoever writes them; those of a column's
 /// values per slice in the order of their hour, then of their value, then of their slice, each chunk saying the least
@@ -868,7 +868,7 @@ internal sealed partial class SynopsisTables : IDisposable
         int at = 1;
         for (int m = 0; m < _measures.Length; m++)
         {
-            int width = _kinds[m] == MeasureKind.Float ? 8 : 5;
+            int width = MeasureLayout.Words(_kinds[m] == MeasureKind.Float);
             if (!Contains(keys, _measures[m]))
             {
                 measures.Add(_measures[m]);
@@ -1958,27 +1958,25 @@ internal sealed partial class SynopsisTables : IDisposable
         /// <summary>Group <paramref name="group"/>'s states as the words of a record (<see cref="StateWords"/>).</summary>
         internal void Words(int group, Span<long> words)
         {
+            const int Sum = MeasureLayout.Sum;
             words[0] = Count[group];
             int at = 1;
             for (int m = 0; m < _kinds.Length; m++)
             {
-                words[at] = _values[m][group];
+                words[at + MeasureLayout.Values] = _values[m][group];
                 if (_kinds[m] == MeasureKind.Float)
                 {
-                    ref readonly WideIndexedSum sum = ref _floats[m][group];
-                    (words[at + 1], words[at + 2], words[at + 3], words[at + 4], words[at + 5]) = (sum.Sum.M0, sum.Sum.M1, sum.Sum.M2, sum.Sum.Meta, sum.High);
-                    words[at + 6] = _least[m][group];
-                    words[at + 7] = _greatest[m][group];
-                    at += 8;
+                    StateWords.Write(in _floats[m][group], words, at + Sum);
+                    words[at + MeasureLayout.FloatLeast] = _least[m][group];
+                    words[at + MeasureLayout.FloatGreatest] = _greatest[m][group];
+                    at += MeasureLayout.FloatWords;
                 }
                 else
                 {
-                    Int128 sum = _integers[m][group];
-                    words[at + 1] = unchecked((long)(ulong)sum);
-                    words[at + 2] = (long)(sum >> 64);
-                    words[at + 3] = _least[m][group];
-                    words[at + 4] = _greatest[m][group];
-                    at += 5;
+                    StateWords.Write(_integers[m][group], words, at + Sum);
+                    words[at + MeasureLayout.IntegerLeast] = _least[m][group];
+                    words[at + MeasureLayout.IntegerGreatest] = _greatest[m][group];
+                    at += MeasureLayout.IntegerWords;
                 }
             }
         }

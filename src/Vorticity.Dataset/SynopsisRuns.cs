@@ -249,12 +249,19 @@ internal static class KeyCodec
 
 /// <summary>
 /// The states of a group as the words a run's record holds them in, the order a table's columns take: a count of
-/// rows, then per measure its count of values, its exact sum's words (five for a float, two for an integer), its
-/// least and its greatest, a float's extremes NaN while it has seen none but NaN.
+/// rows, then each measure's states as <see cref="MeasureLayout"/> lays them out.
 /// </summary>
 internal static class StateWords
 {
     private static readonly long NoFloat = BitConverter.DoubleToInt64Bits(double.NaN);
+
+    // A measure's words, from its first.
+    private const int Values = MeasureLayout.Values;
+    private const int Sum = MeasureLayout.Sum;
+    private const int FloatLeast = MeasureLayout.FloatLeast;
+    private const int FloatGreatest = MeasureLayout.FloatGreatest;
+    private const int IntegerLeast = MeasureLayout.IntegerLeast;
+    private const int IntegerGreatest = MeasureLayout.IntegerGreatest;
 
     /// <summary>The words a group's states take.</summary>
     internal static int Count(ReadOnlySpan<MeasureKind> kinds)
@@ -262,7 +269,7 @@ internal static class StateWords
         int words = 1;
         foreach (MeasureKind kind in kinds)
         {
-            words += kind == MeasureKind.Float ? 8 : 5;
+            words += MeasureLayout.Words(kind == MeasureKind.Float);
         }
 
         return words;
@@ -277,14 +284,11 @@ internal static class StateWords
         {
             if (kind == MeasureKind.Float)
             {
-                words[at + 6] = NoFloat;
-                words[at + 7] = NoFloat;
-                at += 8;
+                words[at + FloatLeast] = NoFloat;
+                words[at + FloatGreatest] = NoFloat;
             }
-            else
-            {
-                at += 5;
-            }
+
+            at += MeasureLayout.Words(kind == MeasureKind.Float);
         }
     }
 
@@ -297,41 +301,43 @@ internal static class StateWords
         {
             if (kind == MeasureKind.Float)
             {
-                into[at] += from[at];
-                WideIndexedSum sum = Sum(into, at + 1);
-                WideIndexedSum other = Sum(from, at + 1);
+                into[at + Values] += from[at + Values];
+                WideIndexedSum sum = SumOf(into, at + Sum);
+                WideIndexedSum other = SumOf(from, at + Sum);
                 sum.Merge(in other);
-                (into[at + 1], into[at + 2], into[at + 3], into[at + 4], into[at + 5]) = (sum.Sum.M0, sum.Sum.M1, sum.Sum.M2, sum.Sum.Meta, sum.High);
-                double low = BitConverter.Int64BitsToDouble(from[at + 6]);
-                double high = BitConverter.Int64BitsToDouble(from[at + 7]);
-                double intoLow = BitConverter.Int64BitsToDouble(into[at + 6]);
-                double intoHigh = BitConverter.Int64BitsToDouble(into[at + 7]);
-                into[at + 6] = !double.IsNaN(low) && (double.IsNaN(intoLow) || low < intoLow) ? from[at + 6] : into[at + 6];
-                into[at + 7] = !double.IsNaN(high) && (double.IsNaN(intoHigh) || high > intoHigh) ? from[at + 7] : into[at + 7];
-                at += 8;
+                Write(in sum, into, at + Sum);
+                double low = BitConverter.Int64BitsToDouble(from[at + FloatLeast]);
+                double high = BitConverter.Int64BitsToDouble(from[at + FloatGreatest]);
+                double intoLow = BitConverter.Int64BitsToDouble(into[at + FloatLeast]);
+                double intoHigh = BitConverter.Int64BitsToDouble(into[at + FloatGreatest]);
+                into[at + FloatLeast] = !double.IsNaN(low) && (double.IsNaN(intoLow) || low < intoLow) ? from[at + FloatLeast] : into[at + FloatLeast];
+                into[at + FloatGreatest] = !double.IsNaN(high) && (double.IsNaN(intoHigh) || high > intoHigh) ? from[at + FloatGreatest] : into[at + FloatGreatest];
+                at += MeasureLayout.Words(floats: true);
                 continue;
             }
 
-            if (from[at] != 0)
+            if (from[at + Values] != 0)
             {
-                bool none = into[at] == 0;
-                into[at] += from[at];
-                Int128 total = new Int128(unchecked((ulong)into[at + 2]), unchecked((ulong)into[at + 1]))
-                    + new Int128(unchecked((ulong)from[at + 2]), unchecked((ulong)from[at + 1]));
-                into[at + 1] = unchecked((long)(ulong)total);
-                into[at + 2] = (long)(total >> 64);
+                bool none = into[at + Values] == 0;
+                into[at + Values] += from[at + Values];
+                Write(IntegerOf(into, at + Sum) + IntegerOf(from, at + Sum), into, at + Sum);
                 bool unsigned = kind == MeasureKind.Unsigned;
-                long least = from[at + 3];
-                long greatest = from[at + 4];
-                into[at + 3] = none || (unsigned ? (ulong)least < (ulong)into[at + 3] : least < into[at + 3]) ? least : into[at + 3];
-                into[at + 4] = none || (unsigned ? (ulong)greatest > (ulong)into[at + 4] : greatest > into[at + 4]) ? greatest : into[at + 4];
+                long least = from[at + IntegerLeast];
+                long greatest = from[at + IntegerGreatest];
+                into[at + IntegerLeast] = none || (unsigned ? (ulong)least < (ulong)into[at + IntegerLeast] : least < into[at + IntegerLeast])
+                    ? least
+                    : into[at + IntegerLeast];
+                into[at + IntegerGreatest] = none || (unsigned ? (ulong)greatest > (ulong)into[at + IntegerGreatest] : greatest > into[at + IntegerGreatest])
+                    ? greatest
+                    : into[at + IntegerGreatest];
             }
 
-            at += 5;
+            at += MeasureLayout.Words(floats: false);
         }
     }
 
-    private static WideIndexedSum Sum(ReadOnlySpan<long> words, int at)
+    /// <summary>The sum of floats whose words start at <paramref name="at"/>, in <see cref="MeasureLayout.SumWords"/>'s order.</summary>
+    internal static WideIndexedSum SumOf(ReadOnlySpan<long> words, int at)
     {
         WideIndexedSum sum = default;
         sum.Sum.M0 = words[at];
@@ -341,6 +347,16 @@ internal static class StateWords
         sum.High = words[at + 4];
         return sum;
     }
+
+    /// <summary>Writes the words of a sum of floats from <paramref name="at"/>, in <see cref="MeasureLayout.SumWords"/>'s order.</summary>
+    internal static void Write(in WideIndexedSum sum, Span<long> words, int at) =>
+        (words[at], words[at + 1], words[at + 2], words[at + 3], words[at + 4]) = (sum.Sum.M0, sum.Sum.M1, sum.Sum.M2, sum.Sum.Meta, sum.High);
+
+    /// <summary>The sum of integers whose words, low then high, start at <paramref name="at"/>.</summary>
+    internal static Int128 IntegerOf(ReadOnlySpan<long> words, int at) => new Int128(unchecked((ulong)words[at + 1]), unchecked((ulong)words[at]));
+
+    /// <summary>Writes the words of a sum of integers from <paramref name="at"/>, low then high.</summary>
+    internal static void Write(Int128 sum, Span<long> words, int at) => (words[at], words[at + 1]) = (unchecked((long)(ulong)sum), (long)(sum >> 64));
 }
 
 /// <summary>A growing buffer of bytes from the shared pool, the records of a run before it goes to its scratch store.</summary>

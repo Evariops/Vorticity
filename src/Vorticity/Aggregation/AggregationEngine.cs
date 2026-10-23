@@ -2674,7 +2674,9 @@ internal sealed class AggregationPartition
         }
 
         CanonicalNode batch = arena.GetNode(root);
-        bool floats = batch.DType.IndexOfField(StateRequest.SumWord(column, "m0")) >= 0;
+        bool floats = batch.DType.IndexOfField(StateRequest.SumWord(column, MeasureLayout.SumWords(floats: true)[0])) >= 0;
+        string[] names = MeasureLayout.Names(column, floats);
+        const int Sum = MeasureLayout.Sum;
 
         // A table of sketches holds each measure's besides its states, a binary column of them, which a distribution alone
         // looks for: its name is made for the batch.
@@ -2683,14 +2685,14 @@ internal sealed class AggregationPartition
         return new StateInput
         {
             Rows = rows,
-            Values = StateColumn(arena, root, StateRequest.ValuesOf(column)),
-            Sum0 = StateColumn(arena, root, StateRequest.SumWord(column, floats ? "m0" : "low")),
-            Sum1 = StateColumn(arena, root, StateRequest.SumWord(column, floats ? "m1" : "high")),
-            Sum2 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, "m2")) : default,
-            Sum3 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, "meta")) : default,
-            Sum4 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, "high")) : default,
-            Least = StateColumn(arena, root, StateRequest.LeastOf(column)),
-            Greatest = StateColumn(arena, root, StateRequest.GreatestOf(column)),
+            Values = StateColumn(arena, root, names[MeasureLayout.Values]),
+            Sum0 = StateColumn(arena, root, names[Sum]),
+            Sum1 = StateColumn(arena, root, names[Sum + 1]),
+            Sum2 = floats ? StateColumn(arena, root, names[Sum + 2]) : default,
+            Sum3 = floats ? StateColumn(arena, root, names[Sum + 3]) : default,
+            Sum4 = floats ? StateColumn(arena, root, names[Sum + 4]) : default,
+            Least = StateColumn(arena, root, names[MeasureLayout.Least(floats)]),
+            Greatest = StateColumn(arena, root, names[MeasureLayout.Greatest(floats)]),
             Floats = floats,
             SketchViews = sketch ? sketches.SketchViews : default,
             SketchData = sketch ? sketches.SketchData : default,

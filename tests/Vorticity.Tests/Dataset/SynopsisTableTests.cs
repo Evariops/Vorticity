@@ -503,14 +503,19 @@ public sealed partial class SynopsisTableTests
             WideIndexedSum[] floats = new WideIndexedSum[buckets.Length];
             if (kinds[m] == Kind.Float)
             {
-                long[][] words = [.. Enumerable.Range(0, 5).Select(_ => ColumnData.Values<long>(arena, Next()).ToArray())];
-                PersistedStates.Read(words[0], words[1], words[2], words[3], words[4], floats);
+                long[][] words = [.. Enumerable.Range(0, MeasureLayout.SumLength(floats: true)).Select(_ => ColumnData.Values<long>(arena, Next()).ToArray())];
+                for (int row = 0; row < buckets.Length; row++)
+                {
+                    floats[row] = StateWords.SumOf([.. words.Select(word => word[row])], 0);
+                }
             }
             else
             {
-                long[] low = ColumnData.Values<long>(arena, Next()).ToArray();
-                long[] high = ColumnData.Values<long>(arena, Next()).ToArray();
-                PersistedStates.Read(low, high, sums);
+                long[][] words = [.. Enumerable.Range(0, MeasureLayout.SumLength(floats: false)).Select(_ => ColumnData.Values<long>(arena, Next()).ToArray())];
+                for (int row = 0; row < buckets.Length; row++)
+                {
+                    sums[row] = StateWords.IntegerOf([.. words.Select(word => word[row])], 0);
+                }
             }
 
             long[] least = ColumnData.Values<long>(arena, Next()).ToArray();
