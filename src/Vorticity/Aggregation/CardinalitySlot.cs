@@ -230,7 +230,7 @@ internal sealed class FixedCardinalitySlot<TValue>(StorageKind kind) : Cardinali
         if (typeof(TValue) == typeof(Half))
         {
             Half h = Unsafe.As<TValue, Half>(ref value);
-            h = Half.IsNaN(h) ? Half.NaN : h == Half.Zero ? Half.Zero : h;
+            h = FloatKey.Normal(h);
             return Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<Half>(ref h)));
         }
 

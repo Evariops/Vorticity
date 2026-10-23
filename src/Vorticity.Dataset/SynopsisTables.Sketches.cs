@@ -214,29 +214,8 @@ internal sealed partial class SynopsisTables
             return CardinalitySlot.Hash(value);
         }
 
-        switch (value.Length)
-        {
-            case sizeof(double):
-            {
-                double d = BitConverter.ToDouble(value);
-                d = FloatKey.Normal(d);
-                return CardinalitySlot.Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<double>(ref d)));
-            }
-
-            case sizeof(float):
-            {
-                float f = BitConverter.ToSingle(value);
-                f = FloatKey.Normal(f);
-                return CardinalitySlot.Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<float>(ref f)));
-            }
-
-            default:
-            {
-                Half h = BitConverter.ToHalf(value);
-                h = Half.IsNaN(h) ? Half.NaN : h == Half.Zero ? Half.Zero : h;
-                return CardinalitySlot.Hash(MemoryMarshal.AsBytes(new ReadOnlySpan<Half>(ref h)));
-            }
-        }
+        Span<byte> scratch = stackalloc byte[sizeof(double)];
+        return CardinalitySlot.Hash(FloatKey.Normal(value, scratch));
     }
 
     /// <summary>The deepest depth of a table of sketches of the hour or of the object still kept; -1 for none.</summary>

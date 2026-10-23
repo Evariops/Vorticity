@@ -596,7 +596,7 @@ internal static class SliceSort
             case PType.F16:
             {
                 Half h = MemoryMarshal.Read<Half>(value);
-                return BitConverter.HalfToUInt16Bits(Half.IsNaN(h) ? Half.NaN : h == Half.Zero ? Half.Zero : h);
+                return BitConverter.HalfToUInt16Bits(FloatKey.Normal(h));
             }
 
             default:
