@@ -2675,8 +2675,10 @@ internal sealed class AggregationPartition
 
         CanonicalNode batch = arena.GetNode(root);
         bool floats = batch.DType.IndexOfField(StateRequest.SumWord(column, MeasureLayout.SumWords(floats: true)[0])) >= 0;
-        string[] names = MeasureLayout.Names(column, floats);
-        const int Sum = MeasureLayout.Sum;
+
+        // The columns MeasureLayout.Names lists, named one at a time: a batch of states would otherwise allocate their
+        // array, per measure and per batch.
+        ReadOnlySpan<string> sum = MeasureLayout.SumWords(floats);
 
         // A table of sketches holds each measure's besides its states, a binary column of them, which a distribution alone
         // looks for: its name is made for the batch.
@@ -2685,14 +2687,14 @@ internal sealed class AggregationPartition
         return new StateInput
         {
             Rows = rows,
-            Values = StateColumn(arena, root, names[MeasureLayout.Values]),
-            Sum0 = StateColumn(arena, root, names[Sum]),
-            Sum1 = StateColumn(arena, root, names[Sum + 1]),
-            Sum2 = floats ? StateColumn(arena, root, names[Sum + 2]) : default,
-            Sum3 = floats ? StateColumn(arena, root, names[Sum + 3]) : default,
-            Sum4 = floats ? StateColumn(arena, root, names[Sum + 4]) : default,
-            Least = StateColumn(arena, root, names[MeasureLayout.Least(floats)]),
-            Greatest = StateColumn(arena, root, names[MeasureLayout.Greatest(floats)]),
+            Values = StateColumn(arena, root, StateRequest.ValuesOf(column)),
+            Sum0 = StateColumn(arena, root, StateRequest.SumWord(column, sum[0])),
+            Sum1 = StateColumn(arena, root, StateRequest.SumWord(column, sum[1])),
+            Sum2 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, sum[2])) : default,
+            Sum3 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, sum[3])) : default,
+            Sum4 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, sum[4])) : default,
+            Least = StateColumn(arena, root, StateRequest.LeastOf(column)),
+            Greatest = StateColumn(arena, root, StateRequest.GreatestOf(column)),
             Floats = floats,
             SketchViews = sketch ? sketches.SketchViews : default,
             SketchData = sketch ? sketches.SketchData : default,
