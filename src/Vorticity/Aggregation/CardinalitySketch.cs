@@ -24,7 +24,7 @@ namespace Vorticity.Aggregating;
 /// O. Ertl, <i>New cardinality estimation algorithms for HyperLogLog sketches</i> (2017), algorithm 6.
 /// </para>
 /// </remarks>
-internal sealed class CardinalitySketch
+internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
 {
     /// <summary>The register index's bits.</summary>
     internal const int Precision = 14;
@@ -51,7 +51,7 @@ internal sealed class CardinalitySketch
     private byte[]? _dense;
 
     /// <summary>The bytes the sketch holds.</summary>
-    internal long Bytes =>
+    public long Bytes =>
         ((long)(_hashes?.Length ?? 0) * sizeof(ulong)) + ((long)(_table?.Length ?? 0) * sizeof(int)) + (_dense?.Length ?? 0);
 
     /// <summary>Whether the sketch still counts exactly.</summary>
@@ -92,7 +92,7 @@ internal sealed class CardinalitySketch
     }
 
     /// <summary>Merges <paramref name="other"/>: the union of their hashes, or each register's maximum.</summary>
-    internal void Merge(CardinalitySketch other)
+    public void Merge(CardinalitySketch other)
     {
         if (other._hashes is { } theirs)
         {
@@ -164,7 +164,7 @@ internal sealed class CardinalitySketch
     /// registers ascending by index, each <c>(index &lt;&lt; 8) | rank</c>: the same words for the same
     /// content, whichever form held it.
     /// </summary>
-    internal void Write(Action<long> word)
+    public void Write(Action<long> word)
     {
         if (_hashes is { } hashes)
         {
@@ -308,7 +308,7 @@ internal sealed class CardinalitySketch
     /// or each register's maximum, so that the sketch holds what adding the values of both would have made it hold.
     /// </summary>
     /// <exception cref="VortexFormatException">The bytes do not hold a sketch.</exception>
-    internal void MergeEncoded(ReadOnlySpan<byte> bytes)
+    public void MergeEncoded(ReadOnlySpan<byte> bytes)
     {
         if (bytes.IsEmpty)
         {

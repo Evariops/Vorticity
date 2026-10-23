@@ -27,7 +27,7 @@ namespace Vorticity.Aggregating;
 /// values it holds and not the range they span.
 /// </para>
 /// </remarks>
-internal sealed class QuantileSketch
+internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
 {
     /// <summary>The buckets a store keeps sorted before it becomes a dense window.</summary>
     internal const int SparseLimit = 32;
@@ -68,7 +68,7 @@ internal sealed class QuantileSketch
     internal long Zeros { get; private set; }
 
     /// <summary>The bytes the sketch holds in its arrays, which grow as it meets buckets.</summary>
-    internal long Bytes => _positive.Bytes + _negative.Bytes;
+    public long Bytes => _positive.Bytes + _negative.Bytes;
 
     /// <summary>The fewest mantissa bits whose buckets answer within <paramref name="relativeError"/>: <c>2^-k / (2 + 2^-k)</c> at most.</summary>
     /// <exception cref="ArgumentOutOfRangeException">The error is not in (0, 1).</exception>
@@ -178,7 +178,7 @@ internal sealed class QuantileSketch
 
     /// <summary>Adds <paramref name="other"/>'s counts, a sketch of the same grid.</summary>
     /// <exception cref="ArgumentException">The grids differ.</exception>
-    internal void Merge(QuantileSketch other)
+    public void Merge(QuantileSketch other)
     {
         if (other.Bits != Bits)
         {
@@ -230,7 +230,7 @@ internal sealed class QuantileSketch
     }
 
     /// <summary>The buckets of each store, written for a spill or a state: zeros and count, then each store's entries.</summary>
-    internal void Write(Action<long> word)
+    public void Write(Action<long> word)
     {
         word(Count);
         word(Zeros);
@@ -267,7 +267,7 @@ internal sealed class QuantileSketch
     /// so that the counts are those this grid gives the same values.
     /// </summary>
     /// <exception cref="VortexFormatException">The bytes do not hold a sketch, or one of a coarser grid.</exception>
-    internal void MergeEncoded(ReadOnlySpan<byte> bytes)
+    public void MergeEncoded(ReadOnlySpan<byte> bytes)
     {
         int at = 0;
         int bits = checked((int)ReadVarint(bytes, ref at));
