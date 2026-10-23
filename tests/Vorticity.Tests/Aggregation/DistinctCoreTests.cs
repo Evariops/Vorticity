@@ -65,7 +65,7 @@ public sealed partial class DistinctCoreTests
     public async Task ADistinctItsBudgetCannotHoldTellsEachValueOnceAfterItSpills(int degree)
     {
         (Row[] rows, string path) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-distinct-").FullName;
+        string scratch = TestScratch.Create("vorticity-distinct-");
         try
         {
             long peak = await PeakAsync(path, degree);
@@ -117,7 +117,7 @@ public sealed partial class DistinctCoreTests
             await writer.CompleteAsync(Ct);
         }
 
-        string scratch = Directory.CreateTempSubdirectory("vorticity-distinct-").FullName;
+        string scratch = TestScratch.Create("vorticity-distinct-");
         try
         {
             long peak = await PeakAsync(path, degree);

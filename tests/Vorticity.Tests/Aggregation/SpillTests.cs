@@ -33,7 +33,7 @@ public sealed partial class SpillTests
         // Part by part, the parts held in memory come out as the workers apply them; whole, they come
         // out together, then the parts spilled one at a time.
         (string path, long[] expected) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-spill-");
         try
         {
             long peak = await PeakAsync(path, degree);
@@ -99,7 +99,7 @@ public sealed partial class SpillTests
             await writer.CompleteAsync(Ct);
         }
 
-        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-spill-");
         try
         {
             // A value's page takes its record, its key and a number: 16 bytes.
@@ -137,7 +137,7 @@ public sealed partial class SpillTests
     public async Task TwoQueriesSpillAtOnceAndBothEndExact()
     {
         (string path, long[] expected) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-spill-");
         try
         {
             long peak = await PeakAsync(path, 4);
@@ -182,7 +182,7 @@ public sealed partial class SpillTests
     public async Task ACancelledSpillLeavesNoFileAndNoReservation()
     {
         (string path, _) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-spill-");
         try
         {
             long peak = await PeakAsync(path, 4);
@@ -229,7 +229,7 @@ public sealed partial class SpillTests
         // and the query's memory and scratch are given back once they are done. Under a tenth of its
         // peak, the lanes turn to the core, which spills; under a large budget, the core asked for.
         (string path, _) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-spill-");
         try
         {
             long peak = await PeakAsync(path, degree);
@@ -277,7 +277,7 @@ public sealed partial class SpillTests
             {
                 options.MaxDegreeOfParallelism = 4;
                 options.MemoryBudget = budget;
-                options.ScratchDirectory = Path.Combine(Path.GetTempPath(), $"vorticity-absent-{Guid.NewGuid():N}", "scratch");
+                options.ScratchDirectory = Path.Combine(ScratchDirectories.Of(null), $"vorticity-absent-{Guid.NewGuid():N}", "scratch");
             });
 
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
@@ -305,7 +305,7 @@ public sealed partial class SpillTests
         // sort of the groups an order spilled: the typed refusal, no file left, nothing reserved of
         // either budget.
         (string path, _) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-spill-");
         try
         {
             long peak = await PeakAsync(path, degree);
@@ -348,7 +348,7 @@ public sealed partial class SpillTests
     public async Task AScratchBudgetTheSpillFitsChangesNothing()
     {
         (string path, long[] expected) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-spill-");
         try
         {
             long peak = await PeakAsync(path, 4);
@@ -393,7 +393,7 @@ public sealed partial class SpillTests
         // breaks their ties, as one sort of every group would order them; a window after the order cut
         // across the sorted rows.
         (string path, long[] expected) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-spill-");
         try
         {
             long peak = await PeakAsync(path, degree);

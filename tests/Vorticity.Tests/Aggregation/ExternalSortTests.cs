@@ -24,7 +24,7 @@ public sealed partial class ExternalSortTests
     {
         Row[] rows = Rows_();
         string path = await WriteAsync(rows);
-        string scratch = Directory.CreateTempSubdirectory("vorticity-sort-").FullName;
+        string scratch = TestScratch.Create("vorticity-sort-");
         try
         {
             // What the result holds sorted in memory, under a large budget: the sort reserves it.
@@ -64,7 +64,7 @@ public sealed partial class ExternalSortTests
     {
         Row[] rows = Rows_();
         string path = await WriteAsync(rows);
-        string scratch = Directory.CreateTempSubdirectory("vorticity-sort-").FullName;
+        string scratch = TestScratch.Create("vorticity-sort-");
         try
         {
             long whole = await PeakAsync(path, descending: false, new QueryMemoryBudget(1L << 30), scratch);

@@ -216,7 +216,7 @@ public sealed partial class GroupSpillTests
         long result = await PeakAsync<TextTotal>(path, query);
         foreach ((int tenths, bool retire) in ((int, bool)[])[(30, true), (40, true), (60, true), (40, false)])
         {
-            string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+            string scratch = TestScratch.Create("vorticity-group-spill-");
             try
             {
                 QueryMemoryBudget budget = new QueryMemoryBudget(result / 10 * tenths);
@@ -255,13 +255,13 @@ public sealed partial class GroupSpillTests
         (string path, Row[] rows) = await Fixture.Async;
         HashSet<string> expected = [.. rows.Select(r => r.Name)];
         QueryMemoryBudget large = new QueryMemoryBudget(1L << 30);
-        await using (VortexSession measure = Session(4, large, Path.GetTempPath()))
+        await using (VortexSession measure = Session(4, large, ScratchDirectories.Of(null)))
         await using (VortexFile file = await measure.OpenAsync(path, cancellationToken: Ct))
         {
             Assert.Equal(expected.Count, (await file.Scan<Row>().Select(r => r.Name).Distinct().ToListAsync(Ct)).Count);
         }
 
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             QueryMemoryBudget budget = new QueryMemoryBudget(large.PeakBytes / 100 * percent);
@@ -298,9 +298,9 @@ public sealed partial class GroupSpillTests
         // Each answer as text, the same whether the lanes spill or not: every state the catalogue makes
         // goes to the scratch and comes back.
         (string path, _) = await Fixture.Async;
-        Dictionary<string, string> expected = await AnswersAsync(path, aggregate, 1, new QueryMemoryBudget(1L << 30), Path.GetTempPath());
+        Dictionary<string, string> expected = await AnswersAsync(path, aggregate, 1, new QueryMemoryBudget(1L << 30), ScratchDirectories.Of(null));
         long result = await CountPeakAsync(path);
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
@@ -321,7 +321,7 @@ public sealed partial class GroupSpillTests
         // spill it; past the budget, the typed refusal, nothing left.
         (string path, _) = await Fixture.Async;
         long result = await CountPeakAsync(path);
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
@@ -453,7 +453,7 @@ public sealed partial class GroupSpillTests
         Func<VortexFile, Vorticity.Aggregation> query = file => file.Scan<Row>().GroupBy(r => r.Name).Select(g => (g.Key, g.Sum(x => x.Price), g.Average(x => x.Price)));
         Dictionary<string, (long, long)> expected = await SharedAsync("price sums by name", () => BitsAsync(path, query, 1, new QueryMemoryBudget(1L << 30)));
         long result = await SharedAsync("peak of price sums by name", () => PeakAsync<NamePrice>(path, query));
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
@@ -467,7 +467,7 @@ public sealed partial class GroupSpillTests
 
         static async Task<Dictionary<string, (long, long)>> BitsAsync(string path, Func<VortexFile, Vorticity.Aggregation> query, int degree, QueryMemoryBudget budget, string? scratch = null)
         {
-            await using VortexSession session = Session(degree, budget, scratch ?? Path.GetTempPath());
+            await using VortexSession session = Session(degree, budget, scratch ?? ScratchDirectories.Of(null));
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             Vorticity.Aggregation grouped = query(file);
             Dictionary<string, (long, long)> bits = [];
@@ -490,7 +490,7 @@ public sealed partial class GroupSpillTests
         (string path, _) = await Fixture.Async;
         NameTotal[] expected = [.. (await NameTotalsAsync()).Values
             .OrderByDescending(t => t.Total).ThenBy(t => t.Name, StringComparer.Ordinal).Take(1_000)];
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             long result = await NamesPeakAsync(path);
@@ -523,7 +523,7 @@ public sealed partial class GroupSpillTests
     public async Task AConsumerThatStopsAtItsFirstGroupGivesEverythingBack(int degree)
     {
         (string path, _) = await Fixture.Async;
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             long result = await NamesPeakAsync(path);
@@ -550,7 +550,7 @@ public sealed partial class GroupSpillTests
     public async Task ACancelledSpillLeavesNoFileAndNoReservation()
     {
         (string path, _) = await Fixture.Async;
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             long result = await NamesPeakAsync(path);
@@ -586,7 +586,7 @@ public sealed partial class GroupSpillTests
     {
         (string path, _) = await Fixture.Async;
         Dictionary<string, NameTotal> expected = await NameTotalsAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             long result = await NamesPeakAsync(path);
@@ -624,7 +624,7 @@ public sealed partial class GroupSpillTests
         (string path, _) = await Fixture.Async;
         long result = await NamesPeakAsync(path);
         QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
-        await using VortexSession session = Session(4, budget, Path.Combine(Path.GetTempPath(), $"vorticity-absent-{Guid.NewGuid():N}", "scratch"));
+        await using VortexSession session = Session(4, budget, Path.Combine(ScratchDirectories.Of(null), $"vorticity-absent-{Guid.NewGuid():N}", "scratch"));
         await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
         await Assert.ThrowsAnyAsync<IOException>(async () =>
         {
@@ -639,7 +639,7 @@ public sealed partial class GroupSpillTests
     public async Task AScratchBudgetTheSpillPassesFailsTheQueryCleanly()
     {
         (string path, _) = await Fixture.Async;
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             long result = await NamesPeakAsync(path);
@@ -697,7 +697,7 @@ public sealed partial class GroupSpillTests
         where TKey : notnull
     {
         (string path, _) = await Fixture.Async;
-        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-group-spill-");
         try
         {
             long result = await SharedAsync($"peak of {name}", () => PeakAsync<TResult>(path, query));
