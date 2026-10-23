@@ -31,6 +31,7 @@ using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
+using static Vorticity.Tests.MemoryFiles;
 
 namespace Vorticity.Tests.Indexes;
 
@@ -456,9 +457,6 @@ public sealed class HashedPostingsTests
         WritePolicy = Policy,
         IndexBudgetPerMille = 1_000_000,
     };
-
-    private static async Task<VortexFile> OpenAsync(byte[] bytes) =>
-        await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
 
     private static async Task<(byte[] Bytes, WriteReport Report)> WriteAsync(
         int rows, VortexWriteOptions? options = null, VortexSession? session = null, Func<int, long?>? nullable = null)

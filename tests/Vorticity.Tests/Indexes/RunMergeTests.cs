@@ -27,6 +27,7 @@ using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
+using static Vorticity.Tests.MemoryFiles;
 
 namespace Vorticity.Tests.Indexes;
 
@@ -592,9 +593,6 @@ public sealed class RunMergeTests
     }
 
     // ------------------------------------------------------------------------------ the file
-
-    private static async Task<VortexFile> OpenAsync(byte[] bytes) =>
-        await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
 
     private static async Task<(byte[] Bytes, WriteReport Report)> WriteAsync(
         int rows, Guid? identity = null, long? scratchMemoryBytes = null, string? scratchDirectory = null,

@@ -32,6 +32,7 @@ using Vorticity.Types;
 using Vorticity.Types.Serialization;
 using Vorticity.Writing;
 using Xunit;
+using static Vorticity.Tests.MemoryFiles;
 
 namespace Vorticity.Tests.Indexes;
 
@@ -678,9 +679,6 @@ public sealed class FenceTreeTests
     }
 
     // ------------------------------------------------------------------------------ the file
-
-    private static async Task<VortexFile> OpenAsync(byte[] bytes) =>
-        await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
 
     private static async Task<int> DirectoryBytesAsync(int rows, FenceShape shape)
     {

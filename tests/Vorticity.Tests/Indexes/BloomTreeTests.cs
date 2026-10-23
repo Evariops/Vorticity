@@ -31,6 +31,7 @@ using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
+using static Vorticity.Tests.MemoryFiles;
 
 namespace Vorticity.Tests.Indexes;
 
@@ -544,9 +545,6 @@ public sealed class BloomTreeTests
 
         return count;
     }
-
-    private static async Task<VortexFile> OpenAsync(byte[] bytes) =>
-        await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
 
     private static VortexWriteOptions Options(IndexSpec policy) => new VortexWriteOptions
     {
