@@ -122,6 +122,7 @@ so a listener that enables one only pays for that one:
 | `vortex.scan.blocks_decoded`, `vortex.scan.blocks_pruned` | whether pruning works at all |
 | `vortex.cache.hits`, `vortex.cache.misses` | whether the session's segment cache does anything |
 | `vortex.synopsis_cache.hits`, `vortex.synopsis_cache.misses` | how often the synopsis caches on the local disk answer for the store |
+| `vortex.synopsis_cache.peer_hits` | the hits a cache that shares a root served from the directory of another cache of the root |
 | `vortex.synopsis_cache.bytes_from_disk`, `vortex.synopsis_cache.bytes_from_store` | the bytes they served, and the bytes the store sent them |
 | `vortex.synopsis_cache.evictions`, `vortex.synopsis_cache.refused` | the regions dropped past their capacity, and those larger than it |
 | `vortex.synopsis_cache.corrupt` | regions whose file failed its checksum, dropped and read again |

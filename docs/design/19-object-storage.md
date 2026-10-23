@@ -715,11 +715,35 @@ store, evictions, refused admissions, corrupt regions and bytes held.
 A directory has one cache, and a cache is one process's: the queues that choose what leaves, the
 names of what the small queue dropped and the bytes held live in its memory, rebuilt by a walk of the
 directory when it opens. Two processes on one directory would each drop the files the other reads and
-count the bytes twice, so the second is refused (`InvalidOperationException`). Processes of one machine
-each give their session a directory of their own and a share of the disk, and each reads from the store
-the regions the others already hold.
+count the bytes twice, so the second is refused (`InvalidOperationException`).
 
-Three ways to share were weighed, none built yet:
+Processes of one machine share a root instead (`SynopsisCache.OpenShared`). Each takes the first
+directory under the root no other cache holds, `p0`, `p1` and on up to 64, through the same lock of the
+system, and owns it as a cache of its own does: it writes there what the store sent it, and drops
+there what its capacity no longer holds. On a miss it looks for the entry in the other directories
+before it asks the store, by its file's name and length: a region read whole and checked against its
+checksum, a sealed object's frames and trailer and a tree's pages handed to their readers, which check
+them as they check the local cache's. What it reads there it does not keep again, so a region the
+processes read lies once on the disk, unless two of them read it from the store before either kept it;
+a sealed frame another directory holds counts as held, and is not kept again either. The root's own
+lock is held shared by every cache of the root, which a cache of its own, holding it alone, refuses and
+is refused by: a root is shared or owned, never both.
+
+Nothing else passes between the caches. A cache lists the other directories at most once a second,
+open or not: a directory whose cache closed is read until the next cache of the root takes it, with
+what it holds. An entry never changes and is checked at each read, so a file another cache drops under
+a read is read as it was, or missed and read again from the store. A cache opens another's file to read
+it whole, letting the system delete it meanwhile, and never maps it, so it never holds another's
+deletion back. Each cache's queues count its own reads only: an entry the others read often and
+its owner never leaves its owner's small queue, and the next of the others to miss it reads it from the
+store and keeps it in its own directory, where its reads count. `vortex.synopsis_cache.peer_hits`
+counts the hits a cache served from another's directory.
+
+A look in the others' directories costs a failed open of a file name per directory on each miss, and a
+hit costs an open, a read and a checksum, where the owner reads a view of a mapping it keeps. A process
+whose working set lies in another's directory pays that at each read, and the disk holds the set once.
+
+Three ways to share were weighed, and the third built:
 
 | | how | what it costs | what it leaves |
 |---|---|---|---|
@@ -727,9 +751,47 @@ Three ways to share were weighed, none built yet:
 | an index on the disk | the queues and the bytes held in a mapped file every process updates under a lock of the system | every hit takes the lock to move its entry along the queues | the lock's contention at sixteen lanes in each process, and a file left half-updated by a process that dies holding it |
 | peers read, owners write | each process writes and evicts its own directory, and on a miss looks for the region in its peers' directories before the store: an entry never changes and is checked by its checksum, so a file a peer drops under a read is a miss, read again from the store | a look in each peer's directory per miss, a few microseconds a file name | each process's share of the disk still its own: a region two processes read lies twice |
 
-The third needs no process and no lock and keeps every guarantee an entry has today, so it comes first
-if a measure of several processes per machine asks for it (the questions per second of a node, H10 of
-the action plan). Until then the limit stands as written above.
+The third needs no process to run beside the application and no lock beyond each directory's, and keeps
+every guarantee an entry has.
+
+### 10.7 A cache several machines share
+
+Machines that answer questions over the same datasets each read from the store the regions the others
+hold. A store of keys and values they share, such as Redis, Memcached or a cloud's cache service, can
+hold those regions for all of them, as a second tier: the local disk first, then the shared store,
+then the object store. Not built: it comes with the first store a deployment names.
+
+The tier is not the local cache's storage. The local cache reads its entries synchronously, a view of a
+mapping or a read of the system's cache, inside the paths that decide what a question reads, and its
+queues choose what leaves by its own process's reads (§10.5). A store of keys and values answers over
+the network, and evicts as its operator configures it, for every machine at once. So the local cache
+keeps its files and its queues, and the tier sits where the object store is asked, in the three readers
+that ask it for what the local cache keeps: the object's reader, for the regions its table of contents
+declares and the pages and segments of an index's runs (`SynopsisCacheReader`); the sealed reader, for
+a sealed object's frames and trailer; and the tree's page source, for its pages. For the entries of a
+batch the local cache missed, each reader asks the tier in one round trip, then the object store for the
+rest. It keeps what the tier sent in the local cache, as it keeps what the object store sends, and
+offers the tier what the object store sent, written behind the question as the local cache writes.
+
+The store implements two calls: a read of a batch of keys, each into a destination whose length its key
+names, which says which keys it held; and a write of a key's value, whose failure is ignored. A key is
+the local cache's file name: an object's uid with a region's place, length and checksum, or with a
+frame's place and length, or a page's hash and length. A value never changes, so nothing is ever
+invalidated, and no write of one machine can contradict another's.
+
+Every value is checked as a local file is: a region against its checksum, a frame and a trailer by
+their reader's authentication, a page against its hash. A store that loses, cuts or alters a value
+costs a read from the object store, never a wrong answer. A sealed dataset's values are the bytes its
+object store holds, encrypted, so the shared store sees no plaintext and no key. A plain dataset's are
+its indexes in the clear, tables of counts, sketches and postings: the shared store stands inside the
+boundary the object store does. A store that fails or answers past a deadline is passed over: the batch
+goes to the object store, as it would without the tier.
+
+What it costs: a round trip to the shared store for each batch the local cache missed, about a
+millisecond inside a region of a cloud against tens to an object store, the values' bytes, and a write
+for each region the object store sent. What it holds is the store's to bound, by its memory and its
+policy. A store on each machine could serve its processes in place of a shared root, at the price of a
+process to run beside the application, the companion weighed in §10.6.
 
 ## 11. Writing
 

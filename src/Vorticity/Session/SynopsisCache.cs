@@ -55,6 +55,10 @@ namespace Vorticity;
 /// for one read. Those that miss the same frames of a sealed object at once read them each.
 /// </para>
 /// <para>
+/// The caches of several processes share a root through <see cref="OpenShared"/>: each owns a directory under
+/// it, and reads from the others' what they keep before it asks the store, keeping none of it again.
+/// </para>
+/// <para>
 /// Past its capacity, the cache drops entries as S3-FIFO does, by their bytes: a new entry waits in a small
 /// queue, a tenth of the capacity, and only one read again there moves on to the main queue, so a sweep of a
 /// long window passes through without pushing
@@ -80,7 +84,25 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     /// <summary>The writers of the regions waiting that run at once at most.</summary>
     private const int MaxWriters = 2;
 
+    /// <summary>The prefix of the directories the caches that share a root take, one each: <c>p0</c>, <c>p1</c> and on.</summary>
+    private const string SlotPrefix = "p";
+
+    /// <summary>The caches that share a root at most.</summary>
+    private const int MaxSlots = 64;
+
+    /// <summary>How long the directories of the other caches of a root are taken as last listed, before they are listed again: a listing of at most 64 directories, once a second.</summary>
+    private const long PeersListedMilliseconds = 1_000;
+
     private readonly FileStream _lock;
+
+    // Of a cache that shares a root (OpenShared): the root, and its lock, which every cache of the root holds shared and a
+    // cache that would own the root alone is refused; the directories of the other caches of the root as last listed, and
+    // when.
+    private readonly string? _root;
+    private readonly FileStream? _rootLock;
+    private string[] _peers = [];
+    private long _peersListed;
+
     private readonly object _gate = new object();
     private readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
     private readonly LinkedList<Entry> _small = new LinkedList<Entry>();
@@ -100,6 +122,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     private long _smallHeld;
     private long _ghostHeld;
     private long _hits;
+    private long _peerHits;
     private long _misses;
     private long _corrupt;
     private long _evictions;
@@ -117,6 +140,11 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacityBytes"/> is not positive.</exception>
     /// <exception cref="InvalidOperationException">Another cache, in this process or another, owns the directory.</exception>
     public SynopsisCache(string directory, long capacityBytes)
+        : this(directory, capacityBytes, root: null, rootLock: null)
+    {
+    }
+
+    private SynopsisCache(string directory, long capacityBytes, string? root, FileStream? rootLock)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacityBytes);
@@ -132,7 +160,63 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
             throw new InvalidOperationException($"The synopsis cache directory '{Directory}' is owned by another cache.", cause);
         }
 
+        _root = root;
+        _rootLock = rootLock;
         Walk();
+        if (root is not null)
+        {
+            ListPeers();
+        }
+    }
+
+    /// <summary>
+    /// Opens a cache that shares <paramref name="root"/> with the caches of the machine's other processes: it takes the
+    /// first directory under the root no other cache holds, keeps up to <paramref name="capacityBytes"/> of regions there
+    /// as a cache of its own does, and on a miss reads the region from the directories of the others before the store
+    /// sends it. What it reads from another's directory stays there, the other cache's to keep or to drop.
+    /// </summary>
+    /// <param name="root">The directory the caches share, created if it does not exist.</param>
+    /// <param name="capacityBytes">The bytes of regions this cache keeps at most in the directory it takes.</param>
+    /// <returns>The cache; its <see cref="Directory"/> is the directory it took, which it owns while it is open.</returns>
+    /// <remarks>
+    /// The directory a cache took outlives it, as a cache's of its own does: the next cache of the root to take it finds
+    /// what it kept, and until then the others read it. The caches of a root each keep their own share of the disk, and
+    /// a region two of them read from the store before either kept it lies in both directories.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacityBytes"/> is not positive.</exception>
+    /// <exception cref="InvalidOperationException">A cache of its own owns the root, or 64 caches share it already.</exception>
+    public static SynopsisCache OpenShared(string root, long capacityBytes)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(root);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacityBytes);
+        string full = Path.GetFullPath(root);
+        System.IO.Directory.CreateDirectory(full);
+
+        // Held shared by every cache of the root, which a cache of its own, holding it alone, refuses, and is refused.
+        FileStream rootLock;
+        try
+        {
+            rootLock = new FileStream(Path.Combine(full, LockName), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+        }
+        catch (IOException cause)
+        {
+            throw new InvalidOperationException($"The synopsis cache directory '{full}' is owned by a cache of its own.", cause);
+        }
+
+        for (int slot = 0; slot < MaxSlots; slot++)
+        {
+            try
+            {
+                return new SynopsisCache(Path.Combine(full, SlotPrefix + slot.ToString(CultureInfo.InvariantCulture)), capacityBytes, full, rootLock);
+            }
+            catch (InvalidOperationException)
+            {
+                // Another cache holds this directory: the next one.
+            }
+        }
+
+        rootLock.Dispose();
+        throw new InvalidOperationException($"The synopsis cache directory '{full}' is shared by {MaxSlots} caches already.");
     }
 
     /// <summary>The directory the cache keeps its entries in.</summary>
@@ -156,7 +240,10 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     /// <summary>Regions read from the disk.</summary>
     internal long Hits => Count(ref _hits);
 
-    /// <summary>Regions asked of the cache that it did not hold.</summary>
+    /// <summary>Regions read from the directory of another cache of the root, counted among the <see cref="Hits"/> too.</summary>
+    internal long PeerHits => Count(ref _peerHits);
+
+    /// <summary>Regions asked of the cache that it did not hold, nor, when it shares a root, another cache of the root.</summary>
     internal long Misses => Count(ref _misses);
 
     /// <summary>Regions whose file did not hold their checksum, dropped.</summary>
@@ -191,7 +278,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
 
         if (Find(name) is not { } entry)
         {
-            return false;
+            return _root is not null && TryPeerRegion(region, name, out owner);
         }
 
         // On Windows, the entry's file mapped, once, while the cache keeps its handle: a region read is then a view of
@@ -261,7 +348,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     {
         if (Find(name) is not { } entry)
         {
-            return false;
+            return _root is not null && TryPeerBytes(name, destination);
         }
 
         if (!ReadWhole(entry, destination))
@@ -283,7 +370,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         owner = null!;
         if (Find(name) is not { } entry)
         {
-            return false;
+            return _root is not null && TryPeerWhole(name, maxLength, out owner);
         }
 
         long length = entry.Bytes;
@@ -548,7 +635,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
 
         if (Find(name) is not { } entry)
         {
-            return null;
+            return _root is not null ? TryPeerPage(name, length) : null;
         }
 
         byte[] page = new byte[length];
@@ -583,16 +670,27 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         }
     }
 
-    /// <summary>Whether the cache holds the sealed bytes kept under <paramref name="name"/>, without reading them.</summary>
+    /// <summary>
+    /// Whether the cache holds the sealed bytes kept under <paramref name="name"/>, without reading them, or, when it
+    /// shares a root, another cache of the root does: those it reads, and does not keep again.
+    /// </summary>
     internal bool HoldsSealed(string name)
     {
         lock (_gate)
         {
-            return _entries.ContainsKey(name);
+            if (_entries.ContainsKey(name))
+            {
+                return true;
+            }
         }
+
+        return _root is not null && PeersHold(name);
     }
 
-    /// <summary>The entry kept under <paramref name="name"/>, a read of it counted; null, counted a miss, when there is none.</summary>
+    /// <summary>
+    /// The entry kept under <paramref name="name"/>, a read of it counted; null when there is none, counted a miss unless
+    /// the cache shares a root, whose caller asks the other caches of the root first.
+    /// </summary>
     private Entry? Find(string name) => Find(name.AsSpan());
 
     /// <summary>As <see cref="Find(string)"/>, the name as characters a caller made where it liked.</summary>
@@ -602,8 +700,11 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         {
             if (!_entries.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Entry? entry))
             {
-                Interlocked.Increment(ref _misses);
-                VortexTelemetry.SynopsisMiss();
+                if (_root is null)
+                {
+                    Missed();
+                }
+
                 return null;
             }
 
@@ -797,6 +898,231 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         return handle;
     }
 
+    /// <summary>Counts a miss: a region the cache did not hold, nor, when it shares a root, another cache of the root.</summary>
+    private void Missed()
+    {
+        Interlocked.Increment(ref _misses);
+        VortexTelemetry.SynopsisMiss();
+    }
+
+    /// <summary>Counts <paramref name="length"/> bytes served from the directory of another cache of the root, a hit.</summary>
+    private void ServedByPeer(int length)
+    {
+        Interlocked.Increment(ref _peerHits);
+        VortexTelemetry.SynopsisPeerHit();
+        Served(length);
+    }
+
+    /// <summary>
+    /// The region named <paramref name="name"/> read from the directory of another cache of the root, checked against its
+    /// checksum, counted a hit; false, counted a miss, when no directory holds it whole. It stays in that directory, which
+    /// the other cache keeps or drops as its own reads say: a region the caches read is kept once.
+    /// </summary>
+    private bool TryPeerRegion(IndexSegment region, ReadOnlySpan<char> name, out SegmentOwner owner)
+    {
+        owner = null!;
+        int length = checked((int)region.Length);
+        using (SafeFileHandle? file = OpenPeer(name, length, out _))
+        {
+            if (file is not null)
+            {
+                NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+                try
+                {
+                    Span<byte> bytes = block.WritableSpan[..length];
+                    if (ReadAll(file, bytes) && region.Holds(bytes))
+                    {
+                        owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes, region.AlignmentExponent));
+                        ServedByPeer(length);
+                        return true;
+                    }
+                }
+                finally
+                {
+                    block.Release();
+                }
+            }
+        }
+
+        Missed();
+        return false;
+    }
+
+    /// <summary>
+    /// As <see cref="TryPeerRegion"/>, for the bytes of a sealed object kept under <paramref name="name"/>, which their
+    /// reader authenticates, read whole into <paramref name="destination"/>.
+    /// </summary>
+    private bool TryPeerBytes(ReadOnlySpan<char> name, Span<byte> destination)
+    {
+        using SafeFileHandle? file = OpenPeer(name, destination.Length, out _);
+        if (file is not null && ReadAll(file, destination))
+        {
+            ServedByPeer(destination.Length);
+            return true;
+        }
+
+        Missed();
+        return false;
+    }
+
+    /// <summary>As <see cref="TryPeerBytes"/>, for a sealed object's trailer, whose length only its file says, of no more than <paramref name="maxLength"/>.</summary>
+    private bool TryPeerWhole(string name, int maxLength, out SegmentOwner owner)
+    {
+        owner = null!;
+        using (SafeFileHandle? file = OpenPeer(name, -maxLength, out long length))
+        {
+            if (file is not null)
+            {
+                NativeSegmentOwner block = AlignedBufferPool.Shared.Rent((int)length, VortexLimits.MaxAlignment);
+                try
+                {
+                    Span<byte> bytes = block.WritableSpan[..(int)length];
+                    if (ReadAll(file, bytes))
+                    {
+                        owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes, 0));
+                        ServedByPeer((int)length);
+                        return true;
+                    }
+                }
+                finally
+                {
+                    block.Release();
+                }
+            }
+        }
+
+        Missed();
+        return false;
+    }
+
+    /// <summary>As <see cref="TryPeerBytes"/>, for a page of a dataset's tree, read into a new array, which its reader checks against its hash.</summary>
+    private byte[]? TryPeerPage(string name, int length)
+    {
+        using SafeFileHandle? file = OpenPeer(name, length, out _);
+        byte[]? page = file is null ? null : new byte[length];
+        if (page is not null && ReadAll(file!, page))
+        {
+            ServedByPeer(length);
+            return page;
+        }
+
+        Missed();
+        return null;
+    }
+
+    /// <summary>Whether another cache of the root keeps a file named <paramref name="name"/>, without reading it.</summary>
+    private bool PeersHold(string name)
+    {
+        foreach (string peer in Peers())
+        {
+            if (System.IO.File.Exists(Path.Join(peer, ShardOfName(name), name)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The file named <paramref name="name"/> in the directory of another cache of the root, opened to read whatever that
+    /// cache does with it meanwhile, of <paramref name="length"/> bytes, or of any length up to -<paramref name="length"/>
+    /// when it is negative; null when no directory holds such a file. A file the other cache deletes once opened is read
+    /// as it was: an entry never changes.
+    /// </summary>
+    private SafeFileHandle? OpenPeer(ReadOnlySpan<char> name, int length, out long found)
+    {
+        found = 0;
+        foreach (string peer in Peers())
+        {
+            SafeFileHandle? file;
+            try
+            {
+                file = System.IO.File.OpenHandle(
+                    Path.Join(peer, ShardOfName(name), name), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            }
+            catch (IOException)
+            {
+                continue;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            try
+            {
+                long bytes = RandomAccess.GetLength(file);
+                if (length >= 0 ? bytes == length : bytes > 0 && bytes <= -(long)length)
+                {
+                    found = bytes;
+                    SafeFileHandle kept = file;
+                    file = null;
+                    return kept;
+                }
+            }
+            catch (IOException)
+            {
+            }
+            finally
+            {
+                file?.Dispose();
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The directories the other caches of the root took, listed again once the last listing is older than
+    /// <see cref="PeersListedMilliseconds"/>.
+    /// </summary>
+    private string[] Peers()
+    {
+        if (Environment.TickCount64 - Volatile.Read(ref _peersListed) >= PeersListedMilliseconds)
+        {
+            ListPeers();
+        }
+
+        return Volatile.Read(ref _peers);
+    }
+
+    /// <summary>
+    /// Lists the directories the other caches of the root took, open or not: what a cache that closed kept is read until
+    /// another takes its directory. A listing the system refuses leaves the last one.
+    /// </summary>
+    internal void ListPeers()
+    {
+        try
+        {
+            List<string> peers = [];
+            string own = Path.GetFileName(Directory);
+            foreach (string slot in System.IO.Directory.EnumerateDirectories(_root!, SlotPrefix + "*"))
+            {
+                if (!string.Equals(Path.GetFileName(slot), own, StringComparison.Ordinal))
+                {
+                    peers.Add(slot);
+                }
+            }
+
+            Volatile.Write(ref _peers, [.. peers]);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+
+        Volatile.Write(ref _peersListed, Environment.TickCount64);
+    }
+
+    /// <summary>
+    /// The shard of the file named <paramref name="name"/>: every name opens with the 32 hexadecimal digits of the object's
+    /// uid, or of a page's hash, whose last two, its last byte, name the shard (<see cref="ShardOf"/>).
+    /// </summary>
+    private static ReadOnlySpan<char> ShardOfName(ReadOnlySpan<char> name) => name.Slice(30, 2);
+
     /// <summary>Counts <paramref name="length"/> bytes served from the disk.</summary>
     private void Served(int length)
     {
@@ -976,6 +1302,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
             }
 
             _lock.Dispose();
+            _rootLock?.Dispose();
             VortexTelemetry.SynopsisHolds(-HeldBytes);
         }
     }
@@ -1034,7 +1361,14 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         List<(Entry Entry, DateTime Written)> found = [];
         foreach (string shard in System.IO.Directory.EnumerateDirectories(Directory))
         {
+            // A shard is named by the two hexadecimal digits of a uid's last byte (ShardOf): the directories the caches of
+            // a shared root took, which a cache of its own may find there once they closed, are none.
             string shardName = Path.GetFileName(shard);
+            if (shardName.Length != 2 || !char.IsAsciiHexDigitLower(shardName[0]) || !char.IsAsciiHexDigitLower(shardName[1]))
+            {
+                continue;
+            }
+
             foreach (FileInfo file in new DirectoryInfo(shard).EnumerateFiles())
             {
                 if (file.Name.EndsWith(TemporaryExtension, StringComparison.Ordinal))

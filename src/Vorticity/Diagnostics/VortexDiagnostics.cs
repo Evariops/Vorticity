@@ -55,6 +55,7 @@ internal static class VortexTelemetry
     private static readonly Counter<long> WriteBytes = Meter.CreateCounter<long>("vortex.write.bytes", "By", "Bytes written by writers.");
     private static readonly Counter<long> SynopsisHits = Meter.CreateCounter<long>("vortex.synopsis_cache.hits", "{region}", "Regions a synopsis cache served from the local disk.");
     private static readonly Counter<long> SynopsisMisses = Meter.CreateCounter<long>("vortex.synopsis_cache.misses", "{region}", "Regions a synopsis cache did not hold.");
+    private static readonly Counter<long> SynopsisPeerHits = Meter.CreateCounter<long>("vortex.synopsis_cache.peer_hits", "{region}", "Regions a synopsis cache served from the directory of another cache of its shared root, counted among its hits.");
     private static readonly Counter<long> SynopsisDiskBytes = Meter.CreateCounter<long>("vortex.synopsis_cache.bytes_from_disk", "By", "Bytes a synopsis cache served from the local disk.");
     private static readonly Counter<long> SynopsisStoreBytes = Meter.CreateCounter<long>("vortex.synopsis_cache.bytes_from_store", "By", "Bytes of regions a synopsis cache was handed from the store.");
     private static readonly Counter<long> SynopsisEvictions = Meter.CreateCounter<long>("vortex.synopsis_cache.evictions", "{region}", "Regions a synopsis cache dropped past its capacity.");
@@ -122,6 +123,9 @@ internal static class VortexTelemetry
     }
 
     internal static void SynopsisMiss() => SynopsisMisses.Add(1);
+
+    /// <summary>A region a synopsis cache read from the directory of another cache of its shared root.</summary>
+    internal static void SynopsisPeerHit() => SynopsisPeerHits.Add(1);
 
     /// <summary>A region the store sent a synopsis cache.</summary>
     internal static void SynopsisFetched(long bytes) => SynopsisStoreBytes.Add(bytes);

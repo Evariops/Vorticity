@@ -70,7 +70,8 @@ public sealed class VortexSessionOptions
 
     /// <summary>
     /// The local disk's copy of what questions read of a dataset's objects without the rest of their data,
-    /// their synopses' tables and directories, across the processes that open it in turn; null keeps none.
+    /// their synopses' tables and directories, across the processes that open it in turn, or at once when they share a
+    /// root (<see cref="SynopsisCache.OpenShared"/>); null keeps none.
     /// The session owns it, and releases its directory when it is disposed.
     /// </summary>
     /// <remarks>

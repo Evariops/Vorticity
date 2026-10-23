@@ -303,9 +303,17 @@ directories that find its rows, never its data. An object never changes, so an e
 Each region is checked against its checksum whenever it is read from the disk, and one that fails is
 read again from the store. One process owns a directory at a time, and the entries outlive it: the
 next session that opens the directory finds them. A second cache on the same directory, in the same
-process or another, throws `InvalidOperationException`: give each process of a machine its directory
-and its share of the disk, `/var/cache/vorticity/<process>`, knowing that each then reads from the store
-the regions the others hold ([several processes](../design/19-object-storage.md#106-several-processes-on-one-machine)). Of an encrypted dataset, the cache keeps the
+process or another, throws `InvalidOperationException`. Processes of one machine share a root instead:
+
+```csharp
+options.SynopsisCache = SynopsisCache.OpenShared("/var/cache/vorticity", capacityBytes: 64L * 1024 * 1024 * 1024);
+```
+
+Each takes a directory of its own under the root, `p0`, `p1` and on, with its own share of the disk,
+and on a miss reads the region from the others' directories before it asks the store, without keeping
+it again: a region the processes read lies once on the disk, unless two of them read it from the store
+before either kept it ([several processes](../design/19-object-storage.md#106-several-processes-on-one-machine)).
+A root is shared or owned, never both. Of an encrypted dataset, the cache keeps the
 encrypted bytes the store holds, the frames around each region and the object's trailer, and decrypts
 them at each read: no key and no plain byte reaches the disk, and a frame altered there is refused and
 read again from the store. A frame is 64 KiB, so a small region costs the disk more than its own bytes.
