@@ -267,10 +267,32 @@ period, so its plan reads every leaf. Its jobs come in this order:
   level, where they follow every object, since only the first fresh level takes new rows. A closed
   period's objects wait for its seal instead. `F` is the fan-out until the cost model that weighs the
   objects a question over the recent hours reads against the rewrites per row gives it.
+- `F` adjacent objects of one partition in the periods level, each under an `F`-th of the joined size
+  (`CompactionOptions.JoinedPeriodBytes`, 1 GiB by default), join into one object of that level that
+  spans their periods, the periods between them included. The calendar is the dataset's, weighed on
+  its largest partition, so a partition that takes a hundredth of the rows seals objects a hundred
+  times smaller, an hour each: joined, they come near the size, in tiers as the fresh levels grow, a
+  row rewritten once each time its object grows `F`-fold. An object of an `F`-th of the size or more
+  never joins, so a joined object stays under the size. A join never spans two months of the
+  calendar, so an expiry keeps a joined object's rows at most a month past its cutoff, as it would a
+  partition whose periods last a month; and under an erasure delay a joined object stays what a purge
+  rewrites within half of it, as a period does. A late row of a period a joined object holds waits in
+  the late level as any late row does, and its second seal folds it into the whole object, with the
+  late rows of every period the object spans.
 - Purges and fragments, as for any dataset.
 
-Every job writes an object per period, so that no object spans two, and level 0's exit an object per
-level as well.
+Every job but a join writes an object per period, so that no object spans two, and level 0's exit an
+object per level as well. A joined object spans whole periods of one partition, adjacent in its level.
+A header names the joined objects a dataset holds among its features (`DatasetFeatures.JoinedPeriods`),
+from the commit of the first: a library that does not know them would seal a period one of them holds
+a second time, beside it, and refuses the dataset instead.
+
+A calendar of each partition, weighed on its own rows, was weighed against the joins, and left aside:
+the values of the partition columns are not bounded over a dataset's life, a tenant or a source each,
+and every header, written at each commit, would carry a length and its changes for each, where the
+joins need nothing beyond what the leaves say. A calendar of a partition also cuts in units, a day or
+a month, a size its rows set only within a factor of thirty, and keeps a small partition's month in
+its fresh objects until the month ends.
 
 Every such object is written in sorted slices. A job of a dataset with a variant column merges its
 inputs twice. The first pass reads the clustering key, the columns that may be synopsis columns and the

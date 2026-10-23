@@ -421,7 +421,10 @@ internal static class DatasetCompactor
             {
                 // A seal's one object holds every row the job reads; the objects of another share them out.
                 streamed = new StreamPlan(
-                    cut.Calendar, SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers), target, cut.Slices ? job.Rows : 0);
+                    cut.Calendar, SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers), target, cut.Slices ? job.Rows : 0)
+                {
+                    Span = cut.Span,
+                };
             }
         }
 
@@ -500,6 +503,7 @@ internal static class DatasetCompactor
             Expected = read,
             Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
             Range = job.Range,
+            Joins = job.Cut is { Span: { } span } joining && joining.Calendar.Next(span.Start) < span.End,
         };
 
         // A seal weighs the period it wrote, once every partition sealed it, and asks in the same commit for
@@ -1172,8 +1176,11 @@ internal static class DatasetCompactor
         /// <summary>The unit of the instant.</summary>
         internal TimeUnit Unit => Calendar.Unit;
 
-        /// <summary>The seconds <paramref name="period"/> spans.</summary>
-        internal double SecondsOf(long period) => TimeSlicer.SecondsBetween(period, Calendar.Next(period), Calendar.Unit);
+        /// <summary>The span of the one object a join writes (<see cref="PeriodCut.Span"/>); null for an object per period.</summary>
+        internal (long Start, long End)? Span { get; init; }
+
+        /// <summary>The seconds the object from <paramref name="period"/> spans: its period's, or a join's.</summary>
+        internal double SecondsOf(long period) => TimeSlicer.SecondsBetween(period, Span?.End ?? Calendar.Next(period), Calendar.Unit);
     }
 
     /// <summary>
@@ -1236,8 +1243,8 @@ internal static class DatasetCompactor
     private readonly record struct Cut(int End, int Level, long Period);
 
     /// <summary>
-    /// Cuts a run, sorted on its instant, into the parts that go to one level and one period, into
-    /// <paramref name="cuts"/>.
+    /// Cuts a run, sorted on its instant, into the parts that go to one level and one period, or to the one object
+    /// over a join's span (<see cref="PeriodCut.Span"/>), into <paramref name="cuts"/>.
     /// </summary>
     private static void CutRun(RecordBatch run, string instant, PeriodCut cut, int to, List<Cut> cuts)
     {
@@ -1248,14 +1255,21 @@ internal static class DatasetCompactor
         {
             long first = instants[at];
             int level = cut.LevelOf(first, to);
-            long period = cut.Calendar.Floor(first);
-            long stop = cut.Calendar.Next(period);
+
+            // A join, or a seal of a joined object, writes one object over the periods it spans.
+            long period = cut.Span?.Start ?? cut.Calendar.Floor(first);
+            long stop = cut.Span?.End ?? cut.Calendar.Next(period);
             if (level == PeriodLevels.Late && cut.Exit && cut.FreshAfter is { } after && after < long.MaxValue)
             {
                 stop = Math.Min(stop, after + 1);
             }
 
             int end = at + LowerBound(instants[at..], stop);
+            if (end == at)
+            {
+                throw new InvalidOperationException($"A row of instant {first} lies past the end, at {stop}, of the span its job writes.");
+            }
+
             cuts.Add(new Cut(end, level, period));
             at = end;
         }

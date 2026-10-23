@@ -655,9 +655,11 @@ rows, and refuse it, or worse. So the header names the features of format 4 the 
 `Features`, and a header that names one is written in commit format 4. The first is entries with
 such fields. A feature stays named in every header after the one that introduced it, since the pages
 that hold its entries stay in the trees, and a dataset that never uses one is written in format 2 or
-3 as before. The others are settings fixed when the dataset is created, which a library that does not
-know them would ignore against what the dataset promises: the erasure delay, compaction by periods
-and its lateness horizon, the identifier columns, and the shredded paths. A library refuses a header that names a feature
+3 as before. The others are settings, most fixed when the dataset is created, which a library that
+does not know them would ignore against what the dataset promises: the erasure delay, compaction by
+periods and its lateness horizon, the identifier columns, and the shredded paths; and the joined
+periods, objects of the periods level that span several periods, which such a library would seal a
+second time ([joins](15-compaction.md#a-dataset-of-periods)). A library refuses a header that names a feature
 it does not know, as it refuses a later format, so that a feature added later is never read as
 nothing; and it refuses one whose flag of periods, lateness horizon and length of a period do not
 come together, reading a dataset's periods from the flag.
@@ -824,9 +826,11 @@ ones.
 A dataset of periods also expires whole periods (`ExpireAsync(before)`). The cutoff is aligned down to
 the start of the period holding `before`, and every object whose instant's maximum lies before it is
 removed in one commit, from what the leaves say, without reading one. Every object above level 0 holds
-one period, so none straddles the cutoff, and an object of level 0 that does stays until its exit
-cuts it by period. A row thus outlives the cutoff by up to a period. `DatasetExpiryTests` counts no
-read of a data object for an expiry of two sealed hours, nor for a delete of the rows before them.
+one period, but a joined one, which holds several of a small partition: no other straddles the
+cutoff, a joined one stays until the last period it holds lies before it, and an object of level 0
+that straddles it stays until its exit cuts it by period. A row thus outlives the cutoff by up to a
+period, or the span of a joined object, a month at most. `DatasetExpiryTests` counts no read of a data object for an
+expiry of two sealed hours, nor for a delete of the rows before them.
 
 A dataset of periods may also declare its first clustering-key columns partition columns
 (`DatasetOptions.PartitionColumns`, a count), a tenant, a source or a retention whose rows are kept and

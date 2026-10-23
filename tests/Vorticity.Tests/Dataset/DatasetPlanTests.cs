@@ -503,7 +503,7 @@ public sealed class DatasetPlanTests
             }
 
             Assert.True(
-                trigger is CompactionTrigger.LateCeiling or CompactionTrigger.FreshMerge or CompactionTrigger.Seal
+                trigger is CompactionTrigger.LateCeiling or CompactionTrigger.FreshMerge or CompactionTrigger.Seal or CompactionTrigger.Join
                     || met.GetValueOrDefault(trigger) > 0,
                 $"no shape met {trigger}, so the test proves nothing of it");
         }

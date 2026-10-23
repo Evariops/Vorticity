@@ -256,6 +256,14 @@ time, each of which grows periods of its own: `PlanCompactionAsync` says how man
 grouped on the partition column is still answered from the synopses, since each object holds a single
 value of it.
 
+The length of a period is the dataset's, weighed on its largest partition, so a partition with a
+hundredth of the rows seals objects a hundred times smaller. Compaction joins them: ten adjacent sealed
+objects of one partition, each under a tenth of `CompactionOptions.JoinedPeriodBytes` (1 GiB by
+default), become one object that spans their periods, and joined objects join again, so that a small
+partition keeps objects near that size rather than one a period. A join never spans two months of the
+calendar. An expiry keeps a joined object until the last period it holds lies before the cutoff, so a
+small partition's rows may outlive the cutoff by up to a month; `JoinedPeriodBytes = 0` joins nothing.
+
 Each partition then expires on its own schedule, reading no data:
 
 ```csharp

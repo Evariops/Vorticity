@@ -145,7 +145,7 @@ internal sealed record CommitHeader
     /// <summary>The features this library knows: a header that names another is refused, a later library's.</summary>
     internal const DatasetFeatures KnownFeatures =
         DatasetFeatures.EntryFields | DatasetFeatures.ErasureDelay | DatasetFeatures.Periods | DatasetFeatures.Identifiers | DatasetFeatures.Partitions
-        | DatasetFeatures.ShreddedPaths;
+        | DatasetFeatures.ShreddedPaths | DatasetFeatures.JoinedPeriods;
 
     /// <summary>
     /// Whether the dataset is compacted by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which the lateness

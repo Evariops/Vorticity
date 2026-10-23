@@ -101,7 +101,7 @@ public sealed partial class PeriodLengthTests
     private static async Task<List<CompactionTrigger>> CompactedAsync(VortexDataset dataset)
     {
         List<CompactionTrigger> ran = [];
-        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 1 };
+        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 1, JoinedPeriodBytes = 0 };
         while (await dataset.CompactAsync(compaction, Ct) is { } result)
         {
             ran.Add(result.Trigger);

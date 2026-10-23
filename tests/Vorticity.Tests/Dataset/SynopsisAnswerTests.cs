@@ -282,7 +282,7 @@ public sealed partial class SynopsisAnswerTests
             await dataset.AppendAsync(draft, Ct);
         }
 
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, JoinedPeriodBytes = 0 }, Ct) is not null)
         {
         }
 

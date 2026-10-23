@@ -387,6 +387,7 @@ internal static class DatasetTelemetry
         CompactionTrigger.LateCeiling => "late_ceiling",
         CompactionTrigger.FreshMerge => "fresh_merge",
         CompactionTrigger.Seal => "seal",
+        CompactionTrigger.Join => "join",
         _ => "none",
     };
 }
