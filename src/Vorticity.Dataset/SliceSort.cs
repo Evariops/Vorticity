@@ -467,8 +467,6 @@ internal static class SliceSort
     /// </summary>
     private static int[] PackedPermutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows, SliceSortScratch scratch)
     {
-        const int Digit = 11;
-        const int Radix = 1 << Digit;
         int bits = 0;
         for (int k = 0; k < columns.Count; k++)
         {
@@ -499,33 +497,9 @@ internal static class SliceSort
             permutation[i] = i;
         }
 
-        Span<int> starts = SliceSortScratch.AtLeast(ref scratch.Starts, Radix + 1).AsSpan(0, Radix + 1);
-        for (int shift = 0; shift < bits; shift += Digit)
+        Span<int> counts = SliceSortScratch.AtLeast(ref scratch.Starts, RadixSort.Counts).AsSpan(0, RadixSort.Counts);
+        if (RadixSort.Sort(keys.AsSpan(0, rows), permutation.AsSpan(0, rows), otherKeys.AsSpan(0, rows), other.AsSpan(0, rows), bits, counts))
         {
-            starts.Clear();
-            for (int i = 0; i < rows; i++)
-            {
-                starts[(int)((keys[i] >> shift) & (Radix - 1)) + 1]++;
-            }
-
-            // A digit every row holds alike moves nothing.
-            if (rows == 0 || starts[(int)((keys[0] >> shift) & (Radix - 1)) + 1] == rows)
-            {
-                continue;
-            }
-
-            for (int d = 0; d < Radix; d++)
-            {
-                starts[d + 1] += starts[d];
-            }
-
-            for (int i = 0; i < rows; i++)
-            {
-                int at = starts[(int)((keys[i] >> shift) & (Radix - 1))]++;
-                otherKeys[at] = keys[i];
-                other[at] = permutation[i];
-            }
-
             (keys, otherKeys) = (otherKeys, keys);
             (permutation, other) = (other, permutation);
         }

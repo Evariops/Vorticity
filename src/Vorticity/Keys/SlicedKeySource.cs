@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -38,8 +39,6 @@ internal sealed class SlicedKeySource : KeySource
 {
     /// <summary>A slice ranked below this many rows takes an insertion sort, which a radix's buckets would cost more than.</summary>
     private const int SmallSlice = 64;
-
-    private const int DigitBits = 11;
 
     private readonly VortexFile _file;
     private readonly string _path;
@@ -308,10 +307,12 @@ internal sealed class SlicedKeySource : KeySource
             return;
         }
 
+        // The keys sorted as their distances from the low one, which are words of a few bits, then given back their low.
         ulong spread = 0;
         for (int i = 0; i < count; i++)
         {
-            spread |= (ulong)(keys[i] - low);
+            keys[i] -= low;
+            spread |= (ulong)keys[i];
         }
 
         int bits = 64 - BitOperations.LeadingZeroCount(spread);
@@ -319,52 +320,25 @@ internal sealed class SlicedKeySource : KeySource
         int[] rowScratch = ArrayPool<int>.Shared.Rent(count);
         try
         {
-            Span<int> starts = stackalloc int[1 << DigitBits];
-            long[] fromKeys = keys;
-            int[] fromRows = rows;
-            long[] toKeys = keyScratch;
-            int[] toRows = rowScratch;
-            for (int shift = 0; shift < bits; shift += DigitBits)
+            Span<int> counts = stackalloc int[RadixSort.Counts];
+            Span<ulong> words = MemoryMarshal.Cast<long, ulong>(keys.AsSpan(0, count));
+            Span<ulong> spareWords = MemoryMarshal.Cast<long, ulong>(keyScratch.AsSpan(0, count));
+            if (RadixSort.Sort(words, rows.AsSpan(0, count), spareWords, rowScratch.AsSpan(0, count), bits, counts))
             {
-                starts.Clear();
-                for (int i = 0; i < count; i++)
-                {
-                    starts[Digit(fromKeys[i], low, shift)]++;
-                }
-
-                int next = 0;
-                for (int d = 0; d < starts.Length; d++)
-                {
-                    int held = starts[d];
-                    starts[d] = next;
-                    next += held;
-                }
-
-                for (int i = 0; i < count; i++)
-                {
-                    int at = starts[Digit(fromKeys[i], low, shift)]++;
-                    toKeys[at] = fromKeys[i];
-                    toRows[at] = fromRows[i];
-                }
-
-                (fromKeys, toKeys) = (toKeys, fromKeys);
-                (fromRows, toRows) = (toRows, fromRows);
-            }
-
-            if (!ReferenceEquals(fromKeys, keys))
-            {
-                fromKeys.AsSpan(0, count).CopyTo(keys);
-                fromRows.AsSpan(0, count).CopyTo(rows);
+                spareWords.CopyTo(words);
+                rowScratch.AsSpan(0, count).CopyTo(rows);
             }
         }
         finally
         {
             ArrayPool<long>.Shared.Return(keyScratch);
             ArrayPool<int>.Shared.Return(rowScratch);
+            for (int i = 0; i < count; i++)
+            {
+                keys[i] += low;
+            }
         }
     }
-
-    private static int Digit(long key, long low, int shift) => (int)(((ulong)(key - low) >> shift) & ((1 << DigitBits) - 1));
 
     /// <summary>The first slice whose end is past <paramref name="key"/>: the first that may hold it or a key above it.</summary>
     private int FirstEndingAfter(long key)

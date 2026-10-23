@@ -362,47 +362,16 @@ internal sealed class HashedBuckets : IDisposable
 
     /// <summary>
     /// Sorts the first <paramref name="count"/> pairs of <paramref name="buffers"/> by the low <paramref name="bits"/> bits of
-    /// their hashes, stably, eleven bits a pass, a pass skipped where every pair holds the same digit.
+    /// their hashes, stably.
     /// </summary>
     private static void RadixSort(BucketBuffers buffers, int count, int bits)
     {
-        const int Digit = 11;
-        const int Radix = 1 << Digit;
-        Span<int> starts = buffers.Starts;
-        ulong[] hashes = buffers.Hashes;
-        uint[] blocks = buffers.Blocks;
-        ulong[] otherHashes = buffers.OtherHashes;
-        uint[] otherBlocks = buffers.OtherBlocks;
-        for (int shift = 0; shift < bits; shift += Digit)
+        if (Compute.RadixSort.Sort(
+                buffers.Hashes.AsSpan(0, count), buffers.Blocks.AsSpan(0, count),
+                buffers.OtherHashes.AsSpan(0, count), buffers.OtherBlocks.AsSpan(0, count), bits, buffers.Starts))
         {
-            starts.Clear();
-            for (int i = 0; i < count; i++)
-            {
-                starts[(int)((hashes[i] >> shift) & (Radix - 1)) + 1]++;
-            }
-
-            if (count <= 1 || starts[(int)((hashes[0] >> shift) & (Radix - 1)) + 1] == count)
-            {
-                continue;
-            }
-
-            for (int d = 0; d < Radix; d++)
-            {
-                starts[d + 1] += starts[d];
-            }
-
-            for (int i = 0; i < count; i++)
-            {
-                int at = starts[(int)((hashes[i] >> shift) & (Radix - 1))]++;
-                otherHashes[at] = hashes[i];
-                otherBlocks[at] = blocks[i];
-            }
-
-            (hashes, otherHashes) = (otherHashes, hashes);
-            (blocks, otherBlocks) = (otherBlocks, blocks);
+            buffers.Settle(buffers.OtherHashes, buffers.OtherBlocks);
         }
-
-        buffers.Settle(hashes, blocks);
     }
 
     private void GrowSeen()
@@ -485,7 +454,7 @@ internal sealed class HashedBuckets : IDisposable
 /// <summary>The arrays a bucket is read back and sorted in, two of each, kept from one bucket to the next.</summary>
 internal sealed class BucketBuffers
 {
-    private int[] _starts = new int[(1 << 11) + 1];
+    private int[] _starts = new int[Compute.RadixSort.Counts];
 
     /// <summary>The sorted pairs' hashes, valid up to the count the sort returned.</summary>
     internal ulong[] Hashes { get; private set; } = [];
