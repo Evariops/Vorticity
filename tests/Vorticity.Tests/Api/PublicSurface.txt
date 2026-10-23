@@ -3180,6 +3180,7 @@ Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, Dataset
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, ulong, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<long> WarmAsync(VortexExpr, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<long> WarmAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ulong> AddIdentifiersAsync(IReadOnlyList<string>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(IAsyncEnumerable<RecordBatch>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(ObjectDraft, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, IReadOnlyDictionary<string, string> = default, CancellationToken = default)
@@ -3187,6 +3188,7 @@ Vorticity.Dataset:     method ValueTask<ulong> ForgetSourcesAsync(IReadOnlyList<
 Vorticity.Dataset:     method ValueTask<ulong> ImportAsync(string, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RefreshAsync(CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RekeyAsync(CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ulong> SetShreddedPathsAsync(IReadOnlyList<string>, CancellationToken = default)
 Vorticity.Dataset:     method bool MayMatch<TRecord>(Func<Probe<TRecord>, Predicate>)
 Vorticity.Dataset:     method ulong SourceOffset(string)
 Vorticity.Dataset:     property Exception LastInlineCompactionFailure { get; }

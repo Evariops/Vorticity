@@ -399,7 +399,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// of one of its variant columns read as a string or an integer, <c>Attributes['user'].AsString()</c>,
     /// written as a plan writes it. Refuses any other, and one named twice.
     /// </summary>
-    private static string[] RequireIdentifiers(IReadOnlyList<string> identifiers, DType schema)
+    private static string[] RequireIdentifiers(IReadOnlyList<string> identifiers, DType schema, string parameter)
     {
         HashSet<string> seen = new(StringComparer.Ordinal);
         string[] kept = new string[identifiers.Count];
@@ -413,12 +413,12 @@ public sealed class VortexDataset : IAsyncDisposable
             {
                 throw new ArgumentException(
                     $"The identifier '{identifier}' names no column of the dataset's schema, nor a key of a variant column read as a string or an integer, such as Attributes['user'].AsString().",
-                    nameof(DatasetOptions.Identifiers));
+                    parameter);
             }
 
             if (!seen.Add(name))
             {
-                throw new ArgumentException($"The identifier '{identifier}' is named twice.", nameof(DatasetOptions.Identifiers));
+                throw new ArgumentException($"The identifier '{identifier}' is named twice.", parameter);
             }
 
             kept[i] = name;
@@ -432,7 +432,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// of <paramref name="schema"/> read as a string, an integer, a double or a boolean, written as a plan writes it.
     /// Refuses any other, and a key named twice, in one class or two.
     /// </summary>
-    private static string[] RequireShreddedPaths(IReadOnlyList<string> paths, DType schema)
+    private static string[] RequireShreddedPaths(IReadOnlyList<string> paths, DType schema, string parameter)
     {
         HashSet<(int, string)> seen = [];
         string[] kept = new string[paths.Count];
@@ -442,12 +442,12 @@ public sealed class VortexDataset : IAsyncDisposable
             {
                 throw new ArgumentException(
                     $"The shredded path '{paths[i]}' names no key of a variant column of the dataset's schema read as a string, an integer, a double or a boolean, such as Attributes['status'].AsInt64().",
-                    nameof(DatasetOptions.ShreddedPaths));
+                    parameter);
             }
 
             if (!seen.Add((path.Field, path.Key)))
             {
-                throw new ArgumentException($"The key of the shredded path '{text}' is named twice.", nameof(DatasetOptions.ShreddedPaths));
+                throw new ArgumentException($"The key of the shredded path '{text}' is named twice.", parameter);
             }
 
             kept[i] = path.Text;
@@ -883,21 +883,24 @@ public sealed class VortexDataset : IAsyncDisposable
     /// options, plus the sorted run the clustering key requires.
     /// </summary>
     /// <returns>The draft; write its rows, then append it, or dispose it to abandon it.</returns>
-    public ObjectDraft StartObject() =>
-        StartObjectUnder(Snapshot.Schema, shredded: _options.ShredOnAppend ? DeclaredShredding(Snapshot.Schema.DType) : null);
+    public ObjectDraft StartObject()
+    {
+        DatasetSchema schema = Snapshot.Schema;
+        return StartObjectUnder(schema, shredded: _options.ShredOnAppend ? DeclaredShredding(schema) : null);
+    }
 
     /// <summary>
     /// The shredding of the <see cref="DatasetOptions.ShreddedPaths"/> by variant column, each key in its class, which an
     /// append writes when <see cref="DatasetOptions.ShredOnAppend"/> says so; null for none.
     /// </summary>
-    private Dictionary<string, Types.Variants.VariantShredding>? DeclaredShredding(DType schema)
+    private static Dictionary<string, Types.Variants.VariantShredding>? DeclaredShredding(DatasetSchema schema)
     {
         Dictionary<string, List<(string, Types.Variants.VariantShredding)>>? keys = null;
-        foreach (string declared in Snapshot.Header.ShreddedPaths)
+        foreach (string declared in schema.ShreddedPaths)
         {
-            if (ShreddedPath(declared, schema) is { } path)
+            if (ShreddedPath(declared, schema.DType) is { } path)
             {
-                string column = schema.GetFieldName(path.Field);
+                string column = schema.DType.GetFieldName(path.Field);
                 if (!(keys ??= new(StringComparer.Ordinal)).TryGetValue(column, out List<(string, Types.Variants.VariantShredding)>? list))
                 {
                     keys[column] = list = [];
@@ -989,10 +992,10 @@ public sealed class VortexDataset : IAsyncDisposable
         // Each declared identifier's hashed postings, required and spared by the budget as the clustering
         // key's run is: a lookup of one value reads the objects that hold it and almost no other, one
         // segment of about 64 KiB an object, at about four bytes a (value, block) pair. A Bloom filter,
-        // which a tree of them loses past what one filter holds, is never tried on it. An identifier whose
-        // column a change of the schema dropped or renamed names nothing the write holds, and is left out
-        // rather than required.
-        foreach (string identifier in Snapshot.Header.Identifiers)
+        // which a tree of them loses past what one filter holds, is never tried on it. The identifiers are
+        // those of the version the write builds on, as its indexes are; one whose column a change of the
+        // schema dropped or renamed names nothing the write holds, and is left out rather than required.
+        foreach (string identifier in schema.Identifiers)
         {
             if (schema.DType.IndexOfField(identifier) >= 0 || IdentifierPath(identifier, schema.DType) is not null)
             {
@@ -1907,6 +1910,86 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Adds identifiers to the dataset's (<see cref="DatasetOptions.Identifiers"/>), in one commit that rewrites no object:
+    /// every object written from the version it creates carries hashed postings on them, appends and compactions alike,
+    /// and the objects written before are read without them.
+    /// </summary>
+    /// <param name="identifiers">
+    /// The identifiers, each a column of the schema or a key of a variant column read as a string or an integer,
+    /// <c>Attributes['user'].AsString()</c>; one the dataset has already stays as it is.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the commit.</param>
+    /// <returns>The version created, which this handle now reads; the one it held when the dataset has every identifier already.</returns>
+    /// <remarks>
+    /// A lookup of an added identifier reads an object written since by its postings, and one written before as a scan
+    /// reads any object, its rows found all the same, until a compaction rewrites it: a period already sealed, which no
+    /// job takes again, is read so until the retention lets it go. Two writers that add one identifier each keep both.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="identifiers"/> is null.</exception>
+    /// <exception cref="ArgumentException">An identifier names neither a column of the schema nor such a key, or is named twice.</exception>
+    /// <exception cref="InvalidOperationException">Another writer changed the schema first; refresh, and add the identifiers to the schema the dataset has now.</exception>
+    public async ValueTask<ulong> AddIdentifiersAsync(IReadOnlyList<string> identifiers, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(identifiers);
+        DatasetSnapshot version = Snapshot;
+        DatasetSchema current = version.Schema;
+        string[] adding = RequireIdentifiers(identifiers, current.DType, nameof(identifiers));
+        if (new HashSet<string>(current.Identifiers, StringComparer.Ordinal).IsSupersetOf(adding))
+        {
+            return version.Version;
+        }
+
+        CommitResult commit = await CommitAsync([new DatasetOperation.AddIdentifiers(current.Bytes, adding)], CommitKind.Index, cancellationToken)
+            .ConfigureAwait(false);
+        return commit.Outcomes[0] is OperationOutcome.Applied or OperationOutcome.AlreadyThere
+            ? commit.Version
+            : throw new InvalidOperationException(
+                $"Another writer changed the dataset's schema after version {version.Version}, which the identifiers were checked " +
+                $"against; version {commit.Version} has another. Refresh, and add the identifiers to the schema the dataset has now.");
+    }
+
+    /// <summary>
+    /// Sets the keys of variant columns every job shreds into columns of their own (<see cref="DatasetOptions.ShreddedPaths"/>),
+    /// in one commit that rewrites no object: each job that starts from the version it creates shreds these, and no
+    /// other the dataset declared, and the objects written before keep their columns as they lie.
+    /// </summary>
+    /// <param name="paths">
+    /// The paths, each a key of a variant column read as a string, an integer, a double or a boolean,
+    /// <c>Attributes['http.response.status_code'].AsInt64()</c>; empty for none. Every question reads what the rows hold,
+    /// whichever objects shred a key: a path added or taken away changes the cost of a question, never its answer.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the commit.</param>
+    /// <returns>The version created, which this handle now reads; the one it held when the dataset has these paths already.</returns>
+    /// <remarks>
+    /// A key an identifier names is shredded by every job whether a path names it or not, in the identifier's class.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> is null.</exception>
+    /// <exception cref="ArgumentException">A path names no such key, or a key is named twice.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// Another writer changed the schema or the paths first; refresh, and set the paths against those the dataset has now.
+    /// </exception>
+    public async ValueTask<ulong> SetShreddedPathsAsync(IReadOnlyList<string> paths, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        DatasetSnapshot version = Snapshot;
+        DatasetSchema current = version.Schema;
+        string[] set = RequireShreddedPaths(paths, current.DType, nameof(paths));
+        if (DatasetCommitter.SameNames(set, current.ShreddedPaths))
+        {
+            return version.Version;
+        }
+
+        CommitResult commit = await CommitAsync(
+                [new DatasetOperation.ChangeShreddedPaths(current.Bytes, current.ShreddedPaths, set)], CommitKind.Layout, cancellationToken)
+            .ConfigureAwait(false);
+        return commit.Outcomes[0] is OperationOutcome.Applied or OperationOutcome.AlreadyThere
+            ? commit.Version
+            : throw new InvalidOperationException(
+                $"Another writer changed the dataset's schema or its shredded paths after version {version.Version}, which these " +
+                $"were set against; version {commit.Version} has others. Refresh, and set the paths against those the dataset has now.");
+    }
+
+    /// <summary>
     /// What compaction is due on this version and what it would cost, read from the leaf entries
     /// alone; the plan's job is null when nothing is over its bound.
     /// </summary>
@@ -2156,14 +2239,14 @@ public sealed class VortexDataset : IAsyncDisposable
         string[] declared = [];
         if (options.Identifiers is { Count: > 0 } identifiers)
         {
-            declared = RequireIdentifiers(identifiers, schema);
+            declared = RequireIdentifiers(identifiers, schema, nameof(DatasetOptions.Identifiers));
             features |= DatasetFeatures.Identifiers;
         }
 
         string[] shredded = [];
         if (options.ShreddedPaths is { Count: > 0 } paths)
         {
-            shredded = RequireShreddedPaths(paths, schema);
+            shredded = RequireShreddedPaths(paths, schema, nameof(DatasetOptions.ShreddedPaths));
             features |= DatasetFeatures.ShreddedPaths;
         }
 

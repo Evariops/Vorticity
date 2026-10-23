@@ -694,6 +694,18 @@ keys its census counted or not, as it shreds an identifier's key, so that a ques
 column and the object's synopsis counts its values. Each names a key of a variant column of the
 schema, once, in a class among string, integer, double and boolean.
 
+Both lists change after the creation, each in a commit that rewrites no object. `AddIdentifiersAsync`
+joins identifiers to the version's, as two indexings join their policies, so two writers that add one
+each keep both; it is dropped on a version whose schema is not the one it checked them against.
+`SetShreddedPathsAsync` puts a list in place of the version's, and is dropped on a version whose list
+or schema is not the one it was worked out against, since it would undo another writer's list. A
+writer reads both from the version it builds on, as it reads the index policy: an append from the
+handle's version, a job from the version it read, whatever the handle's options say. The objects
+written before keep what they hold: a lookup of an added identifier reads an object without its
+postings as a scan reads any object, and a question on a key reads it typed or from the residual as
+each object lies, so a change of either list changes what a question costs, never what it answers.
+A column renamed is indexed again once its new name is added.
+
 ## 9. The read-path budget
 
 ### 9.1 Dependent round trips, not bytes

@@ -65,7 +65,7 @@ public sealed partial class IdentifierPostingsTests
             }
 
             await using VortexDataset reopened = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
-            Assert.Equal(declared ? ["Attributes['rare'].AsInt64()"] : null, reopened.Options.ShreddedPaths);
+            Assert.Equal(declared ? ["Attributes['rare'].AsInt64()"] : [], reopened.Snapshot.Schema.ShreddedPaths);
         }
     }
 
@@ -114,6 +114,79 @@ public sealed partial class IdentifierPostingsTests
             Assert.Equal(onAppend ? 9 : 0, dataset.LevelZero.AsAppended);
             Assert.Equal(onAppend ? 0 : 3, dataset.LevelZero.Shredded);
         }
+    }
+
+    /// <summary>
+    /// The key one row in five hundred holds, declared shredded once the hour of noon is sealed and taken back once the
+    /// next is: the hour of noon keeps it in the residual, the next in a typed column, the one after in the residual again,
+    /// each job shredding the paths of the version it starts from on a handle opened before any change; a question on the
+    /// key counts what the rows hold over the three. A change worked out against paths another writer changed first is
+    /// refused, one that asks for the paths the dataset has is done, and a path that names no such key is refused.
+    /// </summary>
+    [Fact]
+    public async Task ShreddedPathsChangedLaterAreShreddedByTheJobsThatFollow()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = new DatasetOptions
+        {
+            ClusteringKey = [nameof(Visit.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+        };
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, Visit.Schema, options, Ct);
+        await using VortexDataset compactor = await VortexDataset.OpenAsync(store, options, Ct);
+        await using VortexDataset stale = await VortexDataset.OpenAsync(store, options, Ct);
+        const string Rare = "Attributes['rare'].AsInt64()";
+        List<Visit> rows = [];
+
+        // Nine parts of 400 visits a second and a quarter apart take the rows a quarter of an hour past the hour that
+        // follows, which seals the hour before.
+        async Task AppendAsync(int from, int to)
+        {
+            for (int part = from; part < to; part++)
+            {
+                Visit[] visits = [.. Enumerable.Range(0, 400).Select(i => new Visit(
+                    Noon.AddSeconds((part * 400 + i) * 1.25),
+                    (part * 400 + i) % 500 == 0
+                        ? Variant.Object(("route", Variant.From($"/r/{i % 7}")), ("rare", Variant.From((long)i)))
+                        : Variant.Object(("route", Variant.From($"/r/{i % 7}")))))];
+                await using ObjectDraft draft = writer.StartObject();
+                await draft.Writer.WriteAsync<Visit>(visits, Ct);
+                await writer.AppendAsync(draft, Ct);
+                rows.AddRange(visits);
+            }
+
+            await compactor.RefreshAsync(Ct);
+            while (await compactor.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+            {
+            }
+        }
+
+        await AppendAsync(0, 9);
+        ulong declared = await writer.SetShreddedPathsAsync([Rare], Ct);
+        Assert.Equal([Rare], writer.Snapshot.Header.ShreddedPaths);
+        Assert.Equal(DatasetFeatures.ShreddedPaths, writer.Snapshot.Header.Features & DatasetFeatures.ShreddedPaths);
+        Assert.Equal(declared, await writer.SetShreddedPathsAsync([Rare], Ct));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await stale.SetShreddedPathsAsync(["Attributes['route'].AsString()"], Ct));
+        Assert.Equal(declared, await stale.SetShreddedPathsAsync([Rare], Ct));
+        ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await writer.SetShreddedPathsAsync([nameof(Visit.At)], Ct));
+        Assert.Equal("paths", refused.ParamName);
+
+        await AppendAsync(9, 18);
+        await writer.SetShreddedPathsAsync([], Ct);
+        Assert.Empty(writer.Snapshot.Header.ShreddedPaths);
+        await AppendAsync(18, 27);
+
+        int field = Visit.Schema.IndexOf(nameof(Visit.Attributes));
+        List<PathPlace> places = [];
+        await foreach (TreeEntry leaf in compactor.Levels[PeriodLevels.Periods].EnumerateAsync(compactor.Pages, Ct))
+        {
+            VariantDirectory directory = (await compactor.ReadPathDirectoryAsync(ObjectEntry.FromBytes(leaf.Value.Span), field, Ct))!;
+            places.Add(Assert.Single(directory.Of(["rare"]).ToArray(), entry => entry.Class == PathClass.Integer).Place);
+        }
+
+        Assert.Equal([PathPlace.Residual, PathPlace.Typed, PathPlace.Residual], places);
+        await writer.RefreshAsync(Ct);
+        Assert.Equal(rows.Count(r => r.Attributes["rare"] is not null), await writer.Scan<Visit>().Where(r => r.Attributes["rare"].AsInt64() >= 0).CountAsync(Ct));
     }
 
     [Theory]

@@ -314,8 +314,9 @@ public sealed record DatasetOptions
     /// object indexes by value so that a lookup reads the objects that hold the value and no other.
     /// An identifier may also be a key of a variant column read as a string or an integer, written as a
     /// filter writes it, <c>Attributes['user'].AsString()</c>: a job then shreds that key wherever a
-    /// row holds it in that class, and indexes it. Null, the default, names none. Fixed when the
-    /// dataset is created and carried by every commit.
+    /// row holds it in that class, and indexes it. Null, the default, names none. Read when the dataset
+    /// is created and carried by every commit; <see cref="VortexDataset.AddIdentifiersAsync"/> adds
+    /// others later, and a handle opened on an existing dataset follows its commits, whatever this says.
     /// </summary>
     public IReadOnlyList<string>? Identifiers { get; init; }
 
@@ -324,8 +325,9 @@ public sealed record DatasetOptions
     /// filter reads them, <c>Attributes['http.status_code'].AsInt64()</c>: shredded whatever the rows a job counts, so
     /// that a question on the key reads that column rather than parse the variant, and the object's synopsis counts its
     /// values. A key read as a string, an integer, a double or a boolean (<c>AsString</c>, <c>AsInt64</c>,
-    /// <c>AsDouble</c>, <c>AsBool</c>). Null, the default, names none. Fixed when the dataset is created and carried by
-    /// every commit.
+    /// <c>AsDouble</c>, <c>AsBool</c>). Null, the default, names none. Read when the dataset is created and carried by
+    /// every commit; <see cref="VortexDataset.SetShreddedPathsAsync"/> changes them later, and a handle opened on an
+    /// existing dataset follows its commits, whatever this says.
     /// </summary>
     public IReadOnlyList<string>? ShreddedPaths { get; init; }
 
@@ -437,8 +439,6 @@ public sealed record DatasetOptions
             LockedStore = false,
             ErasureDelay = header.ErasureDelay,
             Periods = PeriodsOf(header, Periods),
-            Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
-            ShreddedPaths = header.ShreddedPaths.Count > 0 ? header.ShreddedPaths : null,
         }
         : this with
         {
@@ -446,8 +446,6 @@ public sealed record DatasetOptions
             LockedStore = true,
             ErasureDelay = null,
             Periods = PeriodsOf(header, Periods),
-            Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
-            ShreddedPaths = header.ShreddedPaths.Count > 0 ? header.ShreddedPaths : null,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,

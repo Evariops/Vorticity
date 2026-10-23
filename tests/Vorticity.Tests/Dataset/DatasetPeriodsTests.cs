@@ -44,13 +44,13 @@ public sealed partial class DatasetPeriodsTests
 
         await using VortexDataset reopened = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
         Assert.Equal(TimeSpan.FromHours(1), reopened.Options.Periods!.Lateness);
-        Assert.Equal([nameof(Request.RequestId)], reopened.Options.Identifiers);
+        Assert.Equal([nameof(Request.RequestId)], reopened.Snapshot.Schema.Identifiers);
 
         // A dataset without periods states none, and its header names no such feature.
         await using MemoryObjectStore plain = new MemoryObjectStore();
         await using VortexDataset leveled = await VortexDataset.CreateAsync(plain, Request.Schema, new DatasetOptions { ClusteringKey = [nameof(Request.At)] }, Ct);
         Assert.Null(leveled.Options.Periods);
-        Assert.Null(leveled.Options.Identifiers);
+        Assert.Empty(leveled.Snapshot.Schema.Identifiers);
         (_, CommitObject? first) = await DatasetCommitter.LatestAsync(plain, Ct);
         Assert.Null(first!.Header.Lateness);
         Assert.Equal(DatasetFeatures.None, first.Header.Features);

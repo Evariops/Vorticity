@@ -36,11 +36,14 @@ internal sealed class DatasetSchema
     private readonly ConditionalWeakTable<DTypeArena, Mapped> _mapped = new ConditionalWeakTable<DTypeArena, Mapped>();
 
     private DatasetSchema(
-        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy, int partitionColumns)
+        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy, int partitionColumns,
+        IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths)
     {
         Bytes = bytes;
         Retired = retired;
         PolicyBytes = policy;
+        Identifiers = identifiers;
+        ShreddedPaths = shreddedPaths;
         IndexPolicy = Indexes.IndexDirectory.PolicyOf(policy.Span);
         IndexedColumns = new HashSet<string>(IndexPolicy.Columns.Keys, StringComparer.Ordinal);
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
@@ -87,14 +90,28 @@ internal sealed class DatasetSchema
     internal IReadOnlySet<string> IndexedColumns { get; }
 
     /// <summary>
+    /// The identifiers every writer indexes at this version (<see cref="DatasetOptions.Identifiers"/>), as the header
+    /// records them: those the dataset was created with and those <see cref="VortexDataset.AddIdentifiersAsync"/> added.
+    /// </summary>
+    internal IReadOnlyList<string> Identifiers { get; }
+
+    /// <summary>
+    /// The keys of variant columns every job shreds at this version (<see cref="DatasetOptions.ShreddedPaths"/>), as the
+    /// header records them, which <see cref="VortexDataset.SetShreddedPathsAsync"/> changes.
+    /// </summary>
+    internal IReadOnlyList<string> ShreddedPaths { get; }
+
+    /// <summary>
     /// The schema a header names, <paramref name="previous"/> itself when the header names the same
     /// one: parsed once, and a record bound to it stays bound.
     /// </summary>
     internal static DatasetSchema Of(CommitHeader header, DatasetSchema? previous) =>
         previous is not null && previous.Bytes.Span.SequenceEqual(header.Schema.Span) && Same(previous.Retired, header.Retired)
             && previous.PolicyBytes.Span.SequenceEqual(header.WritePolicy.Span)
+            && Same(previous.Identifiers, header.Identifiers) && Same(previous.ShreddedPaths, header.ShreddedPaths)
             ? previous
-            : new DatasetSchema(header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.PartitionColumns);
+            : new DatasetSchema(
+                header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.PartitionColumns, header.Identifiers, header.ShreddedPaths);
 
     /// <summary>
     /// How an object of this dtype answers for these columns: null when it holds exactly them, the
@@ -298,7 +315,8 @@ internal sealed class DatasetSchema
         retired.Add(new RetiredColumn(name, current));
     }
 
-    private static bool Same(IReadOnlyList<RetiredColumn> left, IReadOnlyList<RetiredColumn> right)
+    private static bool Same<T>(IReadOnlyList<T> left, IReadOnlyList<T> right)
+        where T : IEquatable<T>
     {
         if (left.Count != right.Count)
         {
@@ -307,7 +325,7 @@ internal sealed class DatasetSchema
 
         for (int i = 0; i < left.Count; i++)
         {
-            if (left[i] != right[i])
+            if (!left[i].Equals(right[i]))
             {
                 return false;
             }

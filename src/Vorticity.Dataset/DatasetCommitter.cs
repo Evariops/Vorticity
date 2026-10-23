@@ -282,6 +282,8 @@ internal static class DatasetCommitter
                 WritePolicy = template.WritePolicy,
                 PeriodLength = template.PeriodLength,
                 PeriodChanges = template.PeriodChanges,
+                Identifiers = template.Identifiers,
+                ShreddedPaths = template.ShreddedPaths,
             };
             (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes, Relocation repack) =
                 await ApplyAsync(levels, operations, pages, builder, schema, options.InlineVectorBytes, cancellationToken).ConfigureAwait(false);
@@ -363,10 +365,12 @@ internal static class DatasetCommitter
                 Retired = schema.Retired,
                 WritePolicy = schema.WritePolicy,
                 PeriodChanges = schema.PeriodChanges,
+                Identifiers = schema.Identifiers,
+                ShreddedPaths = schema.ShreddedPaths,
                 LastDataChange = ChangesRows(options.Kind, outcomes) ? version : LastDataChangeOf(template, parent),
                 Sources = sources,
                 Starts = starts,
-                Features = template.Features | FeaturesOf(operations),
+                Features = template.Features | FeaturesOf(operations) | schema.Declared,
             };
             header = Fitted(WithoutHeld(header));
             if (header.ByPeriods != header.Lateness.HasValue)
@@ -1129,6 +1133,57 @@ internal static class DatasetCommitter
                     break;
                 }
 
+                case DatasetOperation.AddIdentifiers add:
+                {
+                    // Joined to those of the version it lands on, as two policies are, so that two writers adding one each
+                    // keep both; dropped under another schema, where a column they name may be gone.
+                    List<string>? joined = null;
+                    foreach (string identifier in add.Identifiers)
+                    {
+                        if (IndexOf(joined ?? schema.Identifiers, identifier) < 0)
+                        {
+                            (joined ??= [.. schema.Identifiers]).Add(identifier);
+                        }
+                    }
+
+                    if (joined is null)
+                    {
+                        outcomes.Add(OperationOutcome.AlreadyThere);
+                    }
+                    else if (!schema.Schema.Span.SequenceEqual(add.Schema.Span))
+                    {
+                        outcomes.Add(OperationOutcome.Dropped);
+                    }
+                    else
+                    {
+                        schema.Identifiers = joined;
+                        outcomes.Add(OperationOutcome.Applied);
+                    }
+
+                    break;
+                }
+
+                case DatasetOperation.ChangeShreddedPaths change:
+                {
+                    // A list of paths takes the place of another, so a change worked out against paths another writer
+                    // changed first would undo theirs: dropped, as under another schema.
+                    if (SameNames(schema.ShreddedPaths, change.To))
+                    {
+                        outcomes.Add(OperationOutcome.AlreadyThere);
+                    }
+                    else if (!SameNames(schema.ShreddedPaths, change.From) || !schema.Schema.Span.SequenceEqual(change.Schema.Span))
+                    {
+                        outcomes.Add(OperationOutcome.Dropped);
+                    }
+                    else
+                    {
+                        schema.ShreddedPaths = change.To;
+                        outcomes.Add(OperationOutcome.Applied);
+                    }
+
+                    break;
+                }
+
                 default:
                     throw new ArgumentException(
                         $"An operation of type {operation.GetType().Name} is not one a commit knows.", nameof(operations));
@@ -1365,6 +1420,50 @@ internal static class DatasetCommitter
 
         /// <summary>The changes of the period length, as the header records them.</summary>
         internal IReadOnlyList<PeriodChange> PeriodChanges { get; set; } = [];
+
+        /// <summary>The identifiers, as the header records them.</summary>
+        internal IReadOnlyList<string> Identifiers { get; set; } = [];
+
+        /// <summary>The shredded paths, as the header records them.</summary>
+        internal IReadOnlyList<string> ShreddedPaths { get; set; } = [];
+
+        /// <summary>The features of format 4 the identifiers and the shredded paths name, once there are any.</summary>
+        internal DatasetFeatures Declared =>
+            (Identifiers.Count > 0 ? DatasetFeatures.Identifiers : DatasetFeatures.None)
+            | (ShreddedPaths.Count > 0 ? DatasetFeatures.ShreddedPaths : DatasetFeatures.None);
+    }
+
+    /// <summary>Where <paramref name="name"/> stands in <paramref name="names"/>; -1 when it does not.</summary>
+    private static int IndexOf(IReadOnlyList<string> names, string name)
+    {
+        for (int i = 0; i < names.Count; i++)
+        {
+            if (string.Equals(names[i], name, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>Whether two lists name the same names in the same order.</summary>
+    internal static bool SameNames(IReadOnlyList<string> a, IReadOnlyList<string> b)
+    {
+        if (a.Count != b.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < a.Count; i++)
+        {
+            if (!string.Equals(a[i], b[i], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private sealed class Relocation

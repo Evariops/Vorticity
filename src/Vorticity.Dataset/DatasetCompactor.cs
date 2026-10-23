@@ -254,7 +254,7 @@ internal static class DatasetCompactor
             Plans = planner?.Plans(),
             Streamed = planner is not null ? null : new StreamPlan(
                 calendar,
-                SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers),
+                SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers),
                 dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows,
                 period.ExpectedRows),
             InstantPath = key.InstantPath,
@@ -421,7 +421,7 @@ internal static class DatasetCompactor
             {
                 // A seal's one object holds every row the job reads; the objects of another share them out.
                 streamed = new StreamPlan(
-                    cut.Calendar, SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers), target, cut.Slices ? job.Rows : 0);
+                    cut.Calendar, SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers), target, cut.Slices ? job.Rows : 0);
             }
         }
 
@@ -929,7 +929,7 @@ internal static class DatasetCompactor
             _instant = key.InstantPath;
             _unit = unit;
             _target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
-            _candidates = SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers);
+            _candidates = SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers);
             _variants = VariantColumns(schema.DType);
             _textBound = dataset.Options.Write.StringBoundBytes;
             _candidatesRead = fields is null ? _candidates : [.. _candidates.Select(field => Array.BinarySearch(fields, field))];
@@ -942,7 +942,7 @@ internal static class DatasetCompactor
         /// </summary>
         internal static int[]? Counted(VortexDataset dataset, DatasetSchema schema, ClusteringKey key)
         {
-            SortedSet<int> fields = [.. SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers), .. VariantColumns(schema.DType)];
+            SortedSet<int> fields = [.. SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers), .. VariantColumns(schema.DType)];
             foreach (string path in key.Paths)
             {
                 int field = schema.DType.IndexOfField(path);
@@ -1006,7 +1006,7 @@ internal static class DatasetCompactor
                 for (int v = 0; v < _variants.Length; v++)
                 {
                     string name = _schema.DType.GetFieldName(_variants[v]);
-                    VariantShredding? chosen = ShreddingChoice.Choose(paths[v], required: IdentifierKeys(_dataset, _schema.DType, _variants[v]));
+                    VariantShredding? chosen = ShreddingChoice.Choose(paths[v], required: IdentifierKeys(_schema, _variants[v]));
                     if (chosen is not null)
                     {
                         shredded = shredded.SetItem(name, chosen);
@@ -1115,20 +1115,20 @@ internal static class DatasetCompactor
     /// each with the class it is read in, which every object shreds wherever a row holds one; null for none. A key
     /// declared both ways keeps its identifier's class, the one its index holds.
     /// </summary>
-    private static Dictionary<string, VariantClass>? IdentifierKeys(VortexDataset dataset, Vorticity.Types.DType schema, int field)
+    private static Dictionary<string, VariantClass>? IdentifierKeys(DatasetSchema schema, int field)
     {
         Dictionary<string, VariantClass>? keys = null;
-        foreach (string declared in dataset.Options.ShreddedPaths ?? [])
+        foreach (string declared in schema.ShreddedPaths)
         {
-            if (VortexDataset.ShreddedPath(declared, schema) is { } path && path.Field == field)
+            if (VortexDataset.ShreddedPath(declared, schema.DType) is { } path && path.Field == field)
             {
                 (keys ??= new Dictionary<string, VariantClass>(StringComparer.Ordinal))[path.Key] = path.Class;
             }
         }
 
-        foreach (string identifier in dataset.Options.Identifiers ?? [])
+        foreach (string identifier in schema.Identifiers)
         {
-            if (VortexDataset.IdentifierPath(identifier, schema) is { } path && path.Field == field)
+            if (VortexDataset.IdentifierPath(identifier, schema.DType) is { } path && path.Field == field)
             {
                 (keys ??= new Dictionary<string, VariantClass>(StringComparer.Ordinal))[path.Key] = path.Class;
             }

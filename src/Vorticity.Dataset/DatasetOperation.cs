@@ -109,6 +109,25 @@ internal abstract record DatasetOperation
     public sealed record AddIndexPolicy(ReadOnlyMemory<byte> Policy) : DatasetOperation;
 
     /// <summary>
+    /// Adds identifiers to those every writer of the dataset indexes (<see cref="DatasetOptions.Identifiers"/>): joined to
+    /// those of the version the commit lands on, and dropped on a version whose schema is not the one they were checked
+    /// against, where a column they name may be gone.
+    /// </summary>
+    /// <param name="Schema">The schema the identifiers were checked against, as a header records it.</param>
+    /// <param name="Identifiers">The identifiers, as a commit keeps them.</param>
+    public sealed record AddIdentifiers(ReadOnlyMemory<byte> Schema, IReadOnlyList<string> Identifiers) : DatasetOperation;
+
+    /// <summary>
+    /// Changes the keys of variant columns every job shreds (<see cref="DatasetOptions.ShreddedPaths"/>), from those the
+    /// change was worked out against: dropped on a version whose schema or whose paths are others, since what it checked
+    /// no longer holds, and the paths another writer set first would be undone.
+    /// </summary>
+    /// <param name="Schema">The schema the paths were checked against, as a header records it.</param>
+    /// <param name="From">The paths the change was worked out against.</param>
+    /// <param name="To">The paths the dataset takes, as a commit keeps them.</param>
+    public sealed record ChangeShreddedPaths(ReadOnlyMemory<byte> Schema, IReadOnlyList<string> From, IReadOnlyList<string> To) : DatasetOperation;
+
+    /// <summary>
     /// Changes the length of a dataset's periods from an instant on, as the seal that weighed the
     /// period it wrote asks: applied on the calendar it was worked out on, after <paramref name="After"/>
     /// changes, and dropped when another writer changed the calendar first.

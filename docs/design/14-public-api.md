@@ -371,9 +371,10 @@ VX1011 accompanies the compiler's own error, to name the fix.
   one, so the first batch only waits for the first object and no object boundary stalls the stream.
   Every query of [16-queries.md](16-queries.md) runs over it, with an object as a range of a parallel
   aggregation. `DeleteAsync` and `UpdateAsync` take the same lambda as `Where`, and
-  `EvolveSchemaAsync` takes a `VortexSchema` and the renamed columns. The store interface, the
-  maintenance calls, what each costs and how a change of rows or of schema commits are described in
-  [13-dataset.md](13-dataset.md).
+  `EvolveSchemaAsync` takes a `VortexSchema` and the renamed columns, `AddIdentifiersAsync` and
+  `SetShreddedPathsAsync` the columns and keys of variant columns written as a filter reads them. The
+  store interface, the maintenance calls, what each costs and how a change of rows or of schema
+  commits are described in [13-dataset.md](13-dataset.md).
 - `Vorticity.RowEncoding`: `RowEncoder`, `RowSortField`, `RowKeys` and `RowKeyEncoder`
   ([06-row-encoding.md](06-row-encoding.md)). `[Experimental]` is set on the assembly of both
   experimental packages, so every type reports its diagnostic to a caller, and the packages' own code

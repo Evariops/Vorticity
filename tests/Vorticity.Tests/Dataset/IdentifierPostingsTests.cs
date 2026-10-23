@@ -434,9 +434,9 @@ public sealed partial class IdentifierPostingsTests
     }
 
     /// <summary>
-    /// An identifier whose column a change of the schema renames, then drops: the appends that follow are written, every
-    /// id is found in the objects of before and after the rename, and once the column is dropped, appends are written
-    /// still.
+    /// An identifier whose column a change of the schema renames, then drops: the appends that follow are written, the
+    /// column carries no postings under its new name until that name is added as an identifier, and every id is found in
+    /// the objects of before and after the rename; once the column is dropped, appends are written still.
     /// </summary>
     [Fact]
     public async Task AnIdentifierWhoseColumnIsRenamedOrDroppedLeavesTheWritesAlone()
@@ -455,13 +455,29 @@ public sealed partial class IdentifierPostingsTests
         }
 
         await dataset.EvolveSchemaAsync(Renamed.Schema, new Dictionary<string, string> { [nameof(Renamed.Id)] = nameof(Request.RequestId) }, Ct);
+        Renamed[] after = [.. Enumerable.Range(100, 100).Select(i => new Renamed(Noon.AddSeconds(i), $"r{i:D3}", 200))];
         await using (ObjectDraft draft = dataset.StartObject())
         {
-            await draft.Writer.WriteAsync<Renamed>([.. Enumerable.Range(100, 100).Select(i => new Renamed(Noon.AddSeconds(i), $"r{i:D3}", 200))], Ct);
+            await draft.Writer.WriteAsync<Renamed>(after[..50], Ct);
             await dataset.AppendAsync(draft, Ct);
         }
 
-        foreach (string id in new[] { "r007", "r170" })
+        await dataset.AddIdentifiersAsync([nameof(Renamed.Id)], Ct);
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Renamed>(after[50..], Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        List<(bool OnRequestId, bool OnId)> postings = [];
+        await foreach (TreeEntry leaf in dataset.Levels[0].EnumerateAsync(dataset.Pages, Ct))
+        {
+            ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
+            postings.Add((await PostingsAsync(dataset, entry, nameof(Request.RequestId)), await PostingsAsync(dataset, entry, nameof(Renamed.Id))));
+        }
+
+        Assert.Equal([(true, false), (false, false), (false, true)], postings);
+        foreach (string id in new[] { "r007", "r120", "r170" })
         {
             Assert.Equal([id], (await dataset.Scan<Renamed>().Where(r => r.Id == id).ToRecordsAsync(Ct).ToListAsync(Ct)).Select(r => r.Id));
         }

@@ -269,8 +269,8 @@ A compaction then shreds the key wherever a row holds a string there, and indexe
 `r.Attributes["user"].AsString() == id` finds its rows as `r.RequestId == id` does. Objects written by
 appends shred nothing and carry no index on the key, until a compaction rewrites them. A name that is
 neither a column nor such a key, or a key read in another class, is refused when the dataset is
-created. An identifier whose column a schema change drops or renames is left out of the writes that
-follow.
+created, or the identifier added. An identifier whose column a schema change drops or renames is left
+out of the writes that follow.
 
 A key that questions filter or group by, but look up no value of, is declared shredded instead, in the
 class it is read in:
@@ -289,6 +289,28 @@ rewritten yet, still parses them once per query node. A handle opened with `Shre
 shreds the declared keys in each append too, and its questions then read those objects by the keys as
 they lie. The append pays for it: on 100,000 rows of eight keys, 65 ms against 23 ms, for an object
 5 % smaller.
+
+### Changing them on a dataset that exists
+
+Both lists change later, each in one commit that rewrites nothing:
+
+```csharp
+await dataset.AddIdentifiersAsync(["SpanId", "Attributes['http.route'].AsString()"]);
+await dataset.SetShreddedPathsAsync(["Attributes['http.response.status_code'].AsInt64()", "Attributes['db.system'].AsString()"]);
+```
+
+`AddIdentifiersAsync` adds to the identifiers the dataset has; there is no way to take one back.
+`SetShreddedPathsAsync` replaces the list, so an empty one shreds nothing more. Every object written
+from then on follows the new lists, the appends of every handle and the compactions of every loop,
+handles opened before the change included. The objects already written stay as they are: a lookup of
+an added identifier reads the rows of an object written before as a scan does, and finds them all the
+same, only slower, until a compaction rewrites that object. A period already sealed is not rewritten
+again, so its objects keep being read that way until the retention lets them go.
+
+Each call is checked against the dataset's schema and refused, before anything is committed, with the
+messages a creation gives. It throws `InvalidOperationException` when another writer changed the schema
+first, or, for the shredded paths, the list: refresh the handle, and ask again against what the dataset
+has now. A column renamed is indexed again once its new name is added.
 
 ## Watch out
 
