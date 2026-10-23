@@ -240,7 +240,12 @@ by slice folds the whole slices of a bucket the window cuts, and the slices the 
 are read as rows, through the chunk directories, without the footer
 ([the rows of a time slice](#51-the-rows-of-a-time-slice-without-the-footer)). An object that no table
 answers, or whose every row lies at an edge, is read as rows. The predicates on keys run once per table
-row. A table's chunk is decoded for the fields its batches are read by alone: the bucket, the count, the
+row, first, before anything else is made of a chunk's rows. Where they hold for fewer than an eighth of
+them, those rows alone go on, gathered, their instants made from them alone: a question of one value of
+a column, whose table of values lies in the order of the hour, then of the value, keeps a row in a few
+hundred, and one host per minute over ten days of the design's requests answers warm in 10.7 ms, where
+taking every row of each chunk through took 40.8 (`vortex-queries --micro paths --design --only "one
+host per minute"`). A table's chunk is decoded for the fields its batches are read by alone: the bucket, the count, the
 columns of the keys and of the filter, and the states of the measures the question folds, so that a count
 by service decodes 3 of a table's 16 columns. A table a delete or an identifier corrects is decoded whole,
 since a row comes out of it by every key and state. The keys among the fields decoded stay as they lie, a
