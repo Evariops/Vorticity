@@ -287,7 +287,7 @@ internal sealed class SliceGather : IFanWork
 
                 if (bytes > 0)
                 {
-                    item.Room = arena.AllocateUninitialized(checked((int)bytes + Slack), 1, out _);
+                    item.Room = arena.AllocateUninitialized(SliceFill.LaidBytes(bytes + Slack), 1, out _);
                     item.Heap = item.Room.Slice(0, (int)bytes);
                 }
             }
@@ -313,7 +313,7 @@ internal sealed class SliceGather : IFanWork
     private static VortexBuffer Into(CanonicalArena arena, in Item item, int rows) =>
         rows == 0 ? VortexBuffer.Empty
         : item.Codes is not null ? item.Source.Slice(0, rows * item.Width)
-        : arena.AllocateUninitialized(rows * item.Width, Math.Max(item.Width, 1), out _);
+        : arena.AllocateUninitialized(checked(SliceFill.Laid(rows) * item.Width), Math.Max(item.Width, 1), out _).Slice(0, rows * item.Width);
 
     /// <summary>
     /// The values of field <paramref name="field"/>, rows of <paramref name="width"/> bytes of <paramref name="source"/>, by

@@ -26,6 +26,9 @@ internal sealed class SliceFill
     /// <summary>The bytes past a block of strings' last a copy of sixteen bytes at a time may write over.</summary>
     private const int Slack = 16;
 
+    /// <summary>The rows a slice's columns are laid out for are a multiple of this (<see cref="Laid"/>).</summary>
+    private const int LaidRows = 1 << 16;
+
     private Column[] _columns = [];
     private DType _schema;
     private int _rows;
@@ -67,14 +70,29 @@ internal sealed class SliceFill
     }
 
     /// <summary>
+    /// The rows a column of a slice of <paramref name="rows"/> rows is laid out for: past 65,536, the next multiple of it. The
+    /// slices after it, a few rows more or fewer, then ask their arena for blocks of the sizes it holds, which it gives again:
+    /// a block past the pool's classes is found again only at its exact size, and one that is not stays with the arena a slice
+    /// longer, beside the new one. A smaller slice's blocks fall in the pool's classes, found again as they are.
+    /// </summary>
+    internal static int Laid(int rows) =>
+        rows <= LaidRows ? rows : (int)Math.Min(int.MaxValue, ((long)rows + LaidRows - 1) / LaidRows * LaidRows);
+
+    /// <summary>The bytes a block of a slice of <paramref name="bytes"/> bytes is laid out for, for the same reason: past a mebibyte, the next one.</summary>
+    internal static int LaidBytes(long bytes) =>
+        bytes <= 1 << 20 ? checked((int)bytes) : checked((int)((bytes + (1 << 20) - 1) >> 20 << 20));
+
+    /// <summary>
     /// Lays a slice of <paramref name="rows"/> rows of <paramref name="schema"/> out in <paramref name="arena"/>; when the slice's
-    /// rows are not known, not <paramref name="exact"/>, <paramref name="rows"/> is what its columns are laid out for first,
-    /// laid out again twice as large when its rows outgrow them, and the slice holds the rows it was handed.
+    /// rows are not known, not <paramref name="exact"/>, <paramref name="rows"/> is what its columns are laid out for first, as
+    /// many as <see cref="Laid"/> gives, laid out again twice as large when its rows outgrow them, and the slice holds the rows
+    /// it was handed. A slice whose rows are known holds them in blocks laid out alike.
     /// </summary>
     internal void Begin(CanonicalArena arena, DType schema, int rows, bool exact = true)
     {
+        int laid = Laid(rows);
         _schema = schema;
-        _rows = rows;
+        _rows = exact ? rows : laid;
         _exact = exact;
         _filled = 0;
         _whole = schema.Kind != DTypeKind.Struct || schema.IsNullable;
@@ -119,15 +137,19 @@ internal sealed class SliceFill
             {
                 column.PType = values.PType;
                 column.Width = values.PType.ByteWidth();
-                column.Into = rows == 0 ? VortexBuffer.Empty : arena.AllocateUninitialized(rows * column.Width, Math.Max(column.Width, 1), out _);
+                column.Into = rows == 0 ? VortexBuffer.Empty : Block(arena, laid, _rows, column.Width, Math.Max(column.Width, 1));
             }
             else if (column.Form == Form.Views)
             {
                 column.Width = ViewSize;
-                column.Into = rows == 0 ? VortexBuffer.Empty : arena.AllocateUninitialized(rows * ViewSize, ViewSize, out _);
+                column.Into = rows == 0 ? VortexBuffer.Empty : Block(arena, laid, _rows, ViewSize, ViewSize);
             }
         }
     }
+
+    /// <summary>A buffer of <paramref name="rows"/> rows of <paramref name="width"/> bytes, in a block of <paramref name="laid"/> rows.</summary>
+    private static VortexBuffer Block(CanonicalArena arena, int laid, int rows, int width, int alignment) =>
+        arena.AllocateUninitialized(checked(laid * width), alignment, out _).Slice(0, rows * width);
 
     /// <summary>
     /// Copies the <paramref name="count"/> rows of the struct <paramref name="root"/> of <paramref name="source"/>, the next of
@@ -221,9 +243,10 @@ internal sealed class SliceFill
         return arena.AddStruct(_schema, _rows, Validity.NonNullable, fields);
     }
 
-    /// <summary>Lays the columns out again for <paramref name="rows"/> rows, the rows they hold copied over: a slice whose rows outgrew them.</summary>
+    /// <summary>Lays the columns out again for <paramref name="rows"/> rows, as many as <see cref="Laid"/> gives, the rows they hold copied over: a slice whose rows outgrew them.</summary>
     private void Grow(CanonicalArena arena, int rows)
     {
+        rows = Laid(rows);
         for (int f = 0; !_whole && f < _schema.FieldCount; f++)
         {
             Column column = _columns[f];
