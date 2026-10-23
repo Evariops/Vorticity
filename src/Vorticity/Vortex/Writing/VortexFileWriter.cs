@@ -540,7 +540,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         /// <summary>
         /// Writes the tables declared after the columns, each an array blob in the file's encodings, those
-        /// the choice keeps only (<see cref="SynopsisTableInfo.Choose"/>), against the bytes of the columns
+        /// the choice keeps only (<see cref="SynopsisTableChoice.Choose"/>), against the bytes of the columns
         /// written and within the synopsis's budget, every verdict reported.
         /// </summary>
         private async ValueTask WriteTablesAsync(VortexFileWriter writer, CancellationToken cancellationToken)
@@ -568,7 +568,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // A path's values are read from its variant column, at that column's bytes at most.
             IReadOnlyList<SynopsisPath> paths = writer._slices?.Table.Paths ?? [];
             long ColumnBytes(int entry) => indexes.ColumnBytes(SynopsisPath.Names(entry) ? paths[SynopsisPath.Place(entry)].Field : entry);
-            (bool[] kept, string[] verdicts) = SynopsisTableInfo.Choose(
+            (bool[] kept, string[] verdicts) = SynopsisTableChoice.Choose(
                 sizes, ColumnBytes, writer._rowCount, indexes.SynopsisBudget(dataBytes), SynopsisPrices.Default);
             byte[] buffer = ArrayPool<byte>.Shared.Rent(Math.Max(longest, 1));
             try

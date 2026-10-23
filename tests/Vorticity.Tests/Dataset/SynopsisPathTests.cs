@@ -67,8 +67,8 @@ public sealed partial class SynopsisPathTests
         Assert.Contains(SynopsisPath.Entry(route), pathSlices.Order);
         Assert.DoesNotContain(SynopsisPath.Entry(latency), pathSlices.Order);
 
-        using SynopsisTableSet declaredTables = await SynopsisTableInfo.ReadAsync(left.File, Ct);
-        using SynopsisTableSet pathTables = await SynopsisTableInfo.ReadAsync(right.File, Ct);
+        using SynopsisTableSet declaredTables = await SynopsisTableReader.ReadAsync(left.File, Ct);
+        using SynopsisTableSet pathTables = await SynopsisTableReader.ReadAsync(right.File, Ct);
         int compared = 0;
         foreach ((SynopsisTableInfo table, TableChunk _, int node) in pathTables.Tables)
         {
@@ -146,7 +146,7 @@ public sealed partial class SynopsisPathTests
         }
 
         // The value counts of the hour, a row a value, and those of its slices, a row a value of each slice, summed.
-        using SynopsisTableSet tables = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
+        using SynopsisTableSet tables = await SynopsisTableReader.ReadAsync(lease.File, Ct);
         foreach (SynopsisBucket bucket in (SynopsisBucket[])[SynopsisBucket.Hour, SynopsisBucket.Slice])
         {
             (SynopsisTableInfo info, TableChunk _, int node) = Assert.Single(
@@ -253,7 +253,7 @@ public sealed partial class SynopsisPathTests
                     continue;
                 }
 
-                using SynopsisTableSet tables = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
+                using SynopsisTableSet tables = await SynopsisTableReader.ReadAsync(lease.File, Ct);
                 if (tables.Tables.FirstOrDefault(t => t.Table.Kind == SynopsisTableKind.Values && t.Table.Keys.SequenceEqual([SynopsisPath.Entry(flag)])) is not
                     { Table: { } info, Node: int node })
                 {

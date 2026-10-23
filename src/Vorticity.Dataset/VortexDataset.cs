@@ -774,7 +774,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         // The lists of the tables' chunks first, from the disk when it holds them: the chunks they name are regions too.
-        bool listed = entry.Uid != UInt128.Zero && Indexes.SynopsisTableInfo.LoadListsCached(cache, entry.Uid, contents, null);
+        bool listed = entry.Uid != UInt128.Zero && Indexes.SynopsisTableReader.LoadListsHeld(cache, entry.Uid, contents, null);
         List<Indexes.IndexSegment> missing = Missing(cache, entry, contents);
         if ((listed && missing.Count == 0) || entry.Uid == UInt128.Zero)
         {
@@ -793,7 +793,7 @@ public sealed class VortexDataset : IAsyncDisposable
                     bytes += table.List!.Value.Length;
                 }
 
-                await Indexes.SynopsisTableInfo.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
+                await Indexes.SynopsisTableReader.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
                 missing = Missing(cache, entry, contents);
             }
 
@@ -810,7 +810,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         static List<Indexes.IndexSegment> Missing(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents)
         {
-            List<Indexes.IndexSegment> regions = SynopsisCacheReader.Declared(contents);
+            List<Indexes.IndexSegment> regions = contents.Declared();
             regions.RemoveAll(region => cache.Holds(entry.Uid, region));
             return regions;
         }
@@ -832,8 +832,8 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             // The lists of the tables' chunks first: the chunks they name are regions it keeps too.
             ISegmentReader reader = Footerless(source, entry, contents);
-            await Indexes.SynopsisTableInfo.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
-            List<Indexes.IndexSegment> regions = SynopsisCacheReader.Declared(contents);
+            await Indexes.SynopsisTableReader.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
+            List<Indexes.IndexSegment> regions = contents.Declared();
             using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
             foreach (Indexes.IndexSegment region in regions)
             {
@@ -2440,7 +2440,7 @@ public sealed class VortexDataset : IAsyncDisposable
             }
 
             if (Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
-                && Indexes.SynopsisTableInfo.LoadListsCached(cache, entry.Uid, contents, reads))
+                && Indexes.SynopsisTableReader.LoadListsHeld(cache, entry.Uid, contents, reads))
             {
                 continue;
             }
@@ -2458,7 +2458,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
             await using (source.ConfigureAwait(false))
             {
-                await Indexes.SynopsisTableInfo.LoadListsAsync(Footerless(source, entry, contents), contents, reads, cancellationToken).ConfigureAwait(false);
+                await Indexes.SynopsisTableReader.LoadListsAsync(Footerless(source, entry, contents), contents, reads, cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -2470,7 +2470,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal Indexes.SynopsisTableSet? ReadSynopsisCached(ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted) =>
         Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
-            ? Indexes.SynopsisTableInfo.ReadCached(cache, entry.Uid, contents, wanted, null)
+            ? Indexes.SynopsisTableReader.ReadHeld(cache, entry.Uid, contents, wanted, SynopsisContexts.Shared, null)
             : null;
 
     /// <summary>
@@ -2488,8 +2488,8 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            return await Indexes.SynopsisTableInfo.ReadAsync(
-                Footerless(source, entry, contents), contents, wanted, null, cancellationToken).ConfigureAwait(false);
+            return await Indexes.SynopsisTableReader.ReadAsync(
+                Footerless(source, entry, contents), contents, wanted, SynopsisContexts.Shared, null, cancellationToken).ConfigureAwait(false);
         }
     }
 

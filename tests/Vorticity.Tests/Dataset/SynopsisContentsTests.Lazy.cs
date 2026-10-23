@@ -61,7 +61,7 @@ public sealed partial class SynopsisContentsTests
         Assert.All(contents.Tables, t => Assert.Null(((SynopsisContents.TableChunks)t.Chunks).Parsed));
         SynopsisContents walked = SynopsisContents.From(hour.Synopsis.Span)!;
         await dataset.LoadSynopsisListsAsync([(hour, walked, null)], Ct);
-        List<IndexSegment> declared = SynopsisCacheReader.Declared(walked);
+        List<IndexSegment> declared = walked.Declared();
         IReadOnlyDictionary<(ulong Offset, uint Length), IndexSegment> regions = contents.DeclaredRegions;
         Assert.Equal(declared.Select(r => (r.Offset, r.Length)).Distinct().Count(), regions.Count);
         Assert.All(contents.Tables, t => Assert.Null(((SynopsisContents.TableChunks)t.Chunks).Parsed));

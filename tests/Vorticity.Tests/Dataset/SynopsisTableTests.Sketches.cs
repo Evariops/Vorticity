@@ -28,10 +28,10 @@ public sealed partial class SynopsisTableTests
         static long Columns(int field) => field switch { 1 => 100, 3 => 10_000, _ => 0 };
         SynopsisPrices prices = new SynopsisPrices(1e-8, 1e-8);
 
-        (bool[] kept, string[] verdicts) = SynopsisTableInfo.Choose(tables, Columns, 10_000, 1_000_000, prices);
+        (bool[] kept, string[] verdicts) = SynopsisTableChoice.Choose(tables, Columns, 10_000, 1_000_000, prices);
         Assert.Equal([true, true], kept);
         Assert.Contains("over 1 questions", verdicts[1], StringComparison.Ordinal);
-        (kept, verdicts) = SynopsisTableInfo.Choose(tables, Columns, 10_000, 4_000, prices);
+        (kept, verdicts) = SynopsisTableChoice.Choose(tables, Columns, 10_000, 4_000, prices);
         Assert.Equal([true, false], kept);
         Assert.StartsWith("left out: 5000 bytes past the 3500 the budget of 4000 left", verdicts[1], StringComparison.Ordinal);
     }

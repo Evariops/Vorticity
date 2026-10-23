@@ -233,6 +233,66 @@ internal sealed class SynopsisContents(
     }
 
     /// <summary>
+    /// The regions of the object the contents declare with a checksum, which the synopsis cache may keep: its tables, its
+    /// chunk directories, its path directories, its index directory and the entries of its locating indexes in it.
+    /// </summary>
+    internal List<IndexSegment> Declared()
+    {
+        List<IndexSegment> regions = [];
+        void Declare(IndexSegment region)
+        {
+            if (region.Checksum is not null)
+            {
+                regions.Add(region);
+            }
+        }
+
+        foreach ((SynopsisTableInfo _, IReadOnlyList<TableChunk> chunks) in Tables)
+        {
+            // A table's chunks listed apart are known once their list is loaded; their list is a region of its own.
+            if (chunks is TableChunks { List: { } list } listed)
+            {
+                Declare(list);
+                if (!listed.Loaded)
+                {
+                    continue;
+                }
+            }
+
+            foreach (TableChunk chunk in chunks)
+            {
+                Declare(chunk.Region);
+                if (chunk.Distinct is { } distinct)
+                {
+                    Declare(distinct);
+                }
+            }
+        }
+
+        foreach (IndexSegment region in ChunkDirectories)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, IndexSegment region) in PathDirectories ?? [])
+        {
+            Declare(region);
+        }
+
+        if (DirectoryRegion is { } directory)
+        {
+            Declare(directory);
+        }
+
+        foreach (LocatingEntry located in Locating ?? [])
+        {
+            Declare(located.Region);
+        }
+
+        return regions;
+    }
+
+    /// <summary>
     /// The regions the contents declare with a checksum: their directories' held at once, and a table's chunks' looked for
     /// among the chunks of the tables a question parsed, the only regions of a table a read through the cache asks for, as
     /// a question learns them from its chunks; every table's parsed only when the map is walked whole.
@@ -384,7 +444,7 @@ internal sealed class SynopsisContents(
                 }
 
                 Dictionary<(ulong, uint), IndexSegment> regions = new Dictionary<(ulong, uint), IndexSegment>(_count);
-                foreach (IndexSegment region in SynopsisCacheReader.Declared(_contents))
+                foreach (IndexSegment region in _contents.Declared())
                 {
                     regions[(region.Offset, region.Length)] = region;
                 }

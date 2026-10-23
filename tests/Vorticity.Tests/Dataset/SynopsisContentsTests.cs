@@ -101,7 +101,7 @@ public sealed partial class SynopsisContentsTests
         {
             using SynopsisTableSet read = sets[i]!;
             await using ObjectLease lease = await dataset.RentAsync(periods[i], Ct);
-            using SynopsisTableSet named = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
+            using SynopsisTableSet named = await SynopsisTableReader.ReadAsync(lease.File, Ct);
             Assert.Equal(named.Tables.Select(t => t.Table), read.Tables.Select(t => t.Table), Same);
             Assert.Contains(read.Tables, t => t.Chunk.Distinct is not null);
             Assert.Equal(read.Tables.Select(t => t.Chunk.Distinct), named.Tables.Select(t => t.Chunk.Distinct));

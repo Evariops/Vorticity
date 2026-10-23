@@ -63,7 +63,7 @@ namespace Vorticity;
 /// (<c>vortex-queries --micro cachetrace</c>).
 /// </para>
 /// </remarks>
-public sealed class SynopsisCache : IDisposable
+public sealed class SynopsisCache : IDisposable, IHeldRegions
 {
     private const string LockName = ".lock";
     private const string TemporaryExtension = ".tmp";
@@ -1102,6 +1102,13 @@ public sealed class SynopsisCache : IDisposable
                 || (_pending.Count > 0 && _pending.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name));
         }
     }
+
+    bool IHeldRegions.Holds(UInt128 uid, IndexSegment region) => Holds(uid, region);
+
+    bool IHeldRegions.TryRead(UInt128 uid, IndexSegment region, out SegmentOwner owner) => TryRead(uid, region, out owner);
+
+    /// <summary>Tells <see cref="Asked"/>.</summary>
+    void IHeldRegions.Ask(UInt128 uid, IndexSegment region) => Asked?.Invoke(uid, region);
 
     /// <summary>
     /// Drops entries past the capacity, S3-FIFO's way. While the small queue holds its tenth of the capacity or
