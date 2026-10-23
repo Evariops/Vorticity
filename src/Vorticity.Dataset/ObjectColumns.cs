@@ -725,9 +725,9 @@ internal sealed class ObjectColumns
         // A value expression keeps its functions, and a variant's path its steps, over the column's name in the object.
         return field switch
         {
-            Compute.FunctionFieldExpr function => function.Over(new FieldExpr(renamed)),
-            Compute.VariantFieldExpr path => path.Over(new FieldExpr(renamed)),
-            _ => new FieldExpr(renamed),
+            Compute.FunctionFieldExpr function => function.Over(new ColumnFieldExpr(renamed)),
+            Compute.VariantFieldExpr path => path.Over(new ColumnFieldExpr(renamed)),
+            _ => new ColumnFieldExpr(renamed),
         };
     }
 

@@ -70,7 +70,7 @@ internal static class VariantMicro
 
     private static void Measure(string name, byte[] metadata, byte[][] values, VariantStep[] steps, VariantRead read, int rounds)
     {
-        VariantFieldExpr path = new(new FieldExpr("attributes"), steps, read);
+        VariantFieldExpr path = new(new ColumnFieldExpr("attributes"), steps, read);
         double best = double.MaxValue;
         long bytesPerBatch = 0;
         long present = 0;

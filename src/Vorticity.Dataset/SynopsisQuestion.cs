@@ -56,7 +56,7 @@ internal sealed class SynopsisQuestion
                 column = function.Column;
             }
 
-            if (request.Keys[k] is FunctionFieldExpr time && column.GetType() == typeof(FieldExpr) && string.Equals(column.Path, instant, StringComparison.Ordinal))
+            if (request.Keys[k] is FunctionFieldExpr time && column is ColumnFieldExpr && string.Equals(column.Path, instant, StringComparison.Ordinal))
             {
                 times.Add(time);
             }

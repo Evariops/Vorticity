@@ -96,15 +96,22 @@ internal enum ComparisonOp : byte
     GreaterOrEqual = 5,
 }
 
-/// <summary>A column reference, by dotted path.</summary>
-internal class FieldExpr : VortexExpr
+/// <summary>
+/// A value read from a column, by the column's dotted path: the column itself (<see cref="ColumnFieldExpr"/>), or a value
+/// made from it, a path into a variant, a function of the column, a result of a group by.
+/// </summary>
+/// <remarks>
+/// Only a <see cref="ColumnFieldExpr"/> holds the column's own values, so only it can be judged by the column's statistics,
+/// zone maps or partition values: its type says so where a test of another field's would forget a kind of field.
+/// </remarks>
+internal abstract class FieldExpr : VortexExpr
 {
     // An empty segment is the schema's business, not this constructor's: a field name may be
     // empty, so nothing is refused here and a path that names nothing fails at the scan, which
     // holds the schema and can say which path was unknown. A field whose name contains a dot is
     // unreachable through this grammar, as it is through a projection path, and by design: both
     // invent no escaping syntax and leave field indices as the way in.
-    internal FieldExpr(string path)
+    private protected FieldExpr(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
         Path = path;
@@ -124,7 +131,7 @@ internal class FieldExpr : VortexExpr
     }
 
     /// <summary>A column reference by its field names, one per struct level: a name may hold a dot.</summary>
-    internal FieldExpr(string[] segments)
+    private protected FieldExpr(string[] segments)
     {
         ArgumentNullException.ThrowIfNull(segments);
         Path = string.Join('.', segments);
@@ -169,6 +176,22 @@ internal class FieldExpr : VortexExpr
     {
         ArgumentNullException.ThrowIfNull(paths);
         paths.Add(Path);
+    }
+}
+
+/// <summary>A column of the schema, by its dotted path or its names: the field whose values are the column's own.</summary>
+internal sealed class ColumnFieldExpr : FieldExpr
+{
+    /// <summary>The column at <paramref name="path"/>, its names split at each dot.</summary>
+    internal ColumnFieldExpr(string path)
+        : base(path)
+    {
+    }
+
+    /// <summary>The column of these names, one per struct level: a name may hold a dot.</summary>
+    internal ColumnFieldExpr(string[] segments)
+        : base(segments)
+    {
     }
 }
 
@@ -566,7 +589,7 @@ internal static class Expr
     /// column; refusing it here would let one grammar accept what the other turns down. A path that
     /// names nothing is refused by the scan, which holds the schema and can say which path it was.
     /// </remarks>
-    public static FieldExpr Field(string path) => new FieldExpr(path);
+    public static ColumnFieldExpr Field(string path) => new ColumnFieldExpr(path);
 
     /// <summary>A constant.</summary>
     /// <param name="value">The constant.</param>

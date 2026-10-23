@@ -27,11 +27,11 @@ public readonly struct Probe<TRecord>
 
     /// <summary>The rows where this nested record is null; none for the scan's own record, which is never null.</summary>
     /// <exception cref="InvalidOperationException">The probe is a group's chosen row, whose columns are results.</exception>
-    public Predicate IsNull => _path is null ? Predicate.None : new Predicate(new NullCheckExpr(new FieldExpr(Rows()), isNull: true));
+    public Predicate IsNull => _path is null ? Predicate.None : new Predicate(new NullCheckExpr(new ColumnFieldExpr(Rows()), isNull: true));
 
     /// <summary>The rows where this nested record is present; all of them for the scan's own record.</summary>
     /// <exception cref="InvalidOperationException">The probe is a group's chosen row, whose columns are results.</exception>
-    public Predicate IsNotNull => _path is null ? Predicate.All : new Predicate(new NullCheckExpr(new FieldExpr(Rows()), isNull: false));
+    public Predicate IsNotNull => _path is null ? Predicate.All : new Predicate(new NullCheckExpr(new ColumnFieldExpr(Rows()), isNull: false));
 
     /// <summary>The column of member <paramref name="index"/>.</summary>
     /// <typeparam name="T">The member's .NET type.</typeparam>
@@ -43,7 +43,7 @@ public readonly struct Probe<TRecord>
         RecordBinding binding = Bound();
         binding.Require<T>(index);
         ColumnSym column = new ColumnSym(
-            new FieldExpr(binding.Paths[index]), binding.TypeOf(index), binding.Extensions, binding, index, binding.IndexPaths[index]);
+            new ColumnFieldExpr(binding.Paths[index]), binding.TypeOf(index), binding.Extensions, binding, index, binding.IndexPaths[index]);
 
         // A column of a chosen row is that row's value of it, a result of the group.
         return _chosen is null ? new Sym<T>(column) : new Sym<T>(new Aggregating.ChosenColumnNode<T>(_chosen, column));

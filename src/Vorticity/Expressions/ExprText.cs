@@ -523,7 +523,7 @@ internal static class ExprText
             at++;
         }
 
-        FieldExpr column = new FieldExpr([.. names]);
+        FieldExpr column = new ColumnFieldExpr([.. names]);
         List<VariantStep> steps = [];
         while (IsSymbol(tokens, at, "["))
         {

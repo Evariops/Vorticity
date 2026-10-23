@@ -482,7 +482,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return null;
         }
 
-        string text = new Compute.VariantFieldExpr(new Expressions.FieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
+        string text = new Compute.VariantFieldExpr(new Expressions.ColumnFieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
         return (field, key, @class.Value, text);
     }
 
@@ -506,7 +506,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return null;
         }
 
-        string text = new Compute.VariantFieldExpr(new Expressions.FieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
+        string text = new Compute.VariantFieldExpr(new Expressions.ColumnFieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
         Types.Variants.VariantClass @class = read == Compute.VariantRead.AsString ? Types.Variants.VariantClass.String : Types.Variants.VariantClass.Integer;
         return (field, key, @class, text);
     }

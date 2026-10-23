@@ -63,13 +63,13 @@ internal sealed class StateRequest
     internal static FieldExpr KeyField(FieldExpr key)
     {
         FieldExpr column = ColumnOf(key);
-        return column.GetType() == typeof(FieldExpr) && Reserved(column.Path) ? Renamed.GetValue(key, Rename) : key;
+        return column is ColumnFieldExpr && Reserved(column.Path) ? Renamed.GetValue(key, Rename) : key;
     }
 
     /// <summary>The key <paramref name="key"/> over its column renamed by <see cref="KeyColumn"/>.</summary>
     private static FieldExpr Rename(FieldExpr key)
     {
-        FieldExpr named = new FieldExpr([KeyColumn(ColumnOf(key).Path)]);
+        FieldExpr named = new ColumnFieldExpr([KeyColumn(ColumnOf(key).Path)]);
         return key is FunctionFieldExpr functions ? functions.Over(named) : named;
     }
 
@@ -245,7 +245,7 @@ internal sealed class StateRequest
                     // for each of its values in a group, and the count folds those values, the rows' own. A column only
                     // approximate counts fold may come instead as the sketch of its values a table of sketches holds.
                     bool approximately = aggregate.Kind == AggregateKind.ApproximateCountDistinct;
-                    int at = keys.FindIndex(key => key.GetType() == typeof(FieldExpr) && string.Equals(key.Path, distinct.Field.Path, System.StringComparison.Ordinal));
+                    int at = keys.FindIndex(key => key is ColumnFieldExpr && string.Equals(key.Path, distinct.Field.Path, System.StringComparison.Ordinal));
                     if (at < 0)
                     {
                         keys.Add(distinct.Field);
@@ -308,7 +308,7 @@ internal sealed class StateRequest
 
     /// <summary>A top-level column, read as it is.</summary>
     private static bool Column(FieldExpr field) =>
-        field.GetType() == typeof(FieldExpr) && !field.Path.Contains('.', System.StringComparison.Ordinal);
+        field is ColumnFieldExpr && !field.Path.Contains('.', System.StringComparison.Ordinal);
 
     /// <summary>The numbers a synopsis keeps states of: integers, and floats of 32 and 64 bits.</summary>
     private static bool Numeric(PType ptype) =>

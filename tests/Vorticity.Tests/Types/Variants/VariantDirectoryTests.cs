@@ -351,7 +351,7 @@ public sealed class VariantDirectoryTests
         Dictionary<string, VariantDirectory> complete = new() { ["Attributes"] = whole };
         Dictionary<string, VariantDirectory> partial = new() { ["Attributes"] = trimmed };
         VortexExpr text = Path(VariantRead.AsString, ComparisonOp.Equal, FilterLiteral.From("x"), "code");
-        VortexExpr present = VariantFilterExpr.Of(new NullCheckExpr(new VariantFieldExpr(new FieldExpr("Attributes"), [VariantStep.Of("code")], VariantRead.AsString), isNull: false));
+        VortexExpr present = VariantFilterExpr.Of(new NullCheckExpr(new VariantFieldExpr(new ColumnFieldExpr("Attributes"), [VariantStep.Of("code")], VariantRead.AsString), isNull: false));
         foreach (int slice in new[] { -1, 3 })
         {
             Assert.True(VariantDirectory.MayMatch(text, complete, slice));
@@ -475,5 +475,5 @@ public sealed class VariantDirectoryTests
 
     private static VortexExpr Path(VariantRead read, ComparisonOp op, FilterLiteral value, params string[] keys) =>
         VariantFilterExpr.Of(new ComparisonExpr(
-            new VariantFieldExpr(new FieldExpr("Attributes"), [.. keys.Select(VariantStep.Of)], read), op, value));
+            new VariantFieldExpr(new ColumnFieldExpr("Attributes"), [.. keys.Select(VariantStep.Of)], read), op, value));
 }

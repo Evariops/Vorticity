@@ -140,7 +140,7 @@ internal sealed class VariantFieldExpr : FieldExpr
     /// path of doubles answers it only in an object that holds no float there (<c>SynopsisPath.Floats</c>).
     /// </summary>
     internal VariantClass? CountedClass =>
-        Steps is [{ IsKey: true }] && Column.GetType() == typeof(FieldExpr) && !Column.Path.Contains('.', StringComparison.Ordinal)
+        Steps is [{ IsKey: true }] && Column is ColumnFieldExpr && !Column.Path.Contains('.', StringComparison.Ordinal)
             ? Read switch
             {
                 VariantRead.AsInt64 => VariantClass.Integer,

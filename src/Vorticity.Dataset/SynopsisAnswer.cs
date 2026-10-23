@@ -366,7 +366,7 @@ internal sealed record SynopsisAnswer(
         for (int k = 0; k < request.Keys.Count; k++)
         {
             FieldExpr key = request.Keys[k];
-            if (key.GetType() == typeof(FieldExpr) && partition is not null && partition.TryGetValue(key.Path, out FilterLiteral constant))
+            if (key is ColumnFieldExpr && partition is not null && partition.TryGetValue(key.Path, out FilterLiteral constant))
             {
                 (constants ??= []).Add((key.Path, constant));
                 continue;
@@ -400,7 +400,7 @@ internal sealed record SynopsisAnswer(
             }
 
             int field = schema.IndexOfField(column.Path);
-            if (field >= 0 && request.DistinctColumn(k) is not null && key.GetType() == typeof(FieldExpr) && !keyed.Fields.Contains(field)
+            if (field >= 0 && request.DistinctColumn(k) is not null && key is ColumnFieldExpr && !keyed.Fields.Contains(field)
                 && !sketchable.Add(field))
             {
                 return null;
@@ -895,7 +895,7 @@ internal sealed record SynopsisAnswer(
 
             other = a as ComparisonExpr;
             if (b is not NullCheckExpr { IsNull: true } missing || other is null
-                || missing.Field.GetType() != typeof(FieldExpr) || !string.Equals(other.Field.Path, missing.Field.Path, StringComparison.Ordinal))
+                || missing.Field is not ColumnFieldExpr || !string.Equals(other.Field.Path, missing.Field.Path, StringComparison.Ordinal))
             {
                 return null;
             }
@@ -911,7 +911,7 @@ internal sealed record SynopsisAnswer(
             }
         }
 
-        if (other is { Op: ComparisonOp.NotEqual } && other.Value.Kind != FilterLiteralKind.Null && other.Field.GetType() == typeof(FieldExpr))
+        if (other is { Op: ComparisonOp.NotEqual } && other.Value.Kind != FilterLiteralKind.Null && other.Field is ColumnFieldExpr)
         {
             foreach (string identifier in identifiers)
             {
@@ -1862,7 +1862,7 @@ internal sealed record SynopsisAnswer(
     internal static bool Bound(VortexExpr conjunct, string instant, ref long low, ref long high)
     {
         if (conjunct is not ComparisonExpr { Value.Kind: FilterLiteralKind.Signed } comparison
-            || comparison.Field.GetType() != typeof(FieldExpr) || !string.Equals(comparison.Field.Path, instant, StringComparison.Ordinal))
+            || comparison.Field is not ColumnFieldExpr || !string.Equals(comparison.Field.Path, instant, StringComparison.Ordinal))
         {
             return false;
         }

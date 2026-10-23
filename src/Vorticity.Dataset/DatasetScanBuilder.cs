@@ -558,7 +558,7 @@ internal sealed class DatasetScanBuilder
                 InExpr inList when inList.Values.Count > 0 && !HoldsNull(inList.Literals) => inList.Field,
                 _ => null,
             };
-            if (field is not null && field.GetType() == typeof(FieldExpr))
+            if (field is ColumnFieldExpr)
             {
                 foreach (string identifier in identifiers)
                 {

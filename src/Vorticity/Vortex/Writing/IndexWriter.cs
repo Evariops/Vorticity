@@ -143,7 +143,7 @@ internal sealed class IndexWriter : IDisposable
             int slot = fieldCount + keys + (nested?.Count ?? 0) + p;
             (int field, string key, Types.Variants.PathClass @class) = variantKeys![p];
             string name = schema.GetFieldName(field);
-            Compute.VariantFieldExpr path = new Compute.VariantFieldExpr(new FieldExpr(name), [Compute.VariantStep.Of(key)], ReadOf(@class));
+            Compute.VariantFieldExpr path = new Compute.VariantFieldExpr(new ColumnFieldExpr(name), [Compute.VariantStep.Of(key)], ReadOf(@class));
             IndexSpec column = policy.Columns.TryGetValue(path.Text, out IndexSpec own) ? own : policy.Of(name);
             DType dtype = ClassType(classTypes ??= new DTypeArena(), @class);
             _paths[slot] = path.Text;

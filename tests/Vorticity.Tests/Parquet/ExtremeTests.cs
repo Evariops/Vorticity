@@ -103,7 +103,7 @@ public sealed partial class ExtremeTests : IDisposable
                         continue;
                     }
 
-                    FieldExpr field = new(column.DottedPath);
+                    ColumnFieldExpr field = new(column.DottedPath);
                     foreach (bool min in (bool[])[true, false])
                     {
                         FilterLiteral footer;

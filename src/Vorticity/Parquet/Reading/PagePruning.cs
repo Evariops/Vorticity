@@ -63,7 +63,7 @@ internal sealed class FilterColumns
             {
                 if (column.MaxRepetitionLevel == 0 && column.Form != LeafForm.Null && string.Equals(column.DottedPath, path.Path, StringComparison.Ordinal))
                 {
-                    fields.Add(new FieldExpr(path.Path));
+                    fields.Add(new ColumnFieldExpr(path.Path));
                     columns.Add(column.Ordinal);
                     break;
                 }

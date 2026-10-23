@@ -132,7 +132,7 @@ internal sealed class BloomPruner
                     continue;
                 }
 
-                path = new Compute.VariantFieldExpr(new FieldExpr(path), [Compute.VariantStep.Of(variantKey)], Writing.IndexWriter.ReadOf(@class)).Key;
+                path = new Compute.VariantFieldExpr(new ColumnFieldExpr(path), [Compute.VariantStep.Of(variantKey)], Writing.IndexWriter.ReadOf(@class)).Key;
                 dtype = Writing.IndexWriter.ClassType(classTypes ??= new DTypeArena(), @class);
             }
 
