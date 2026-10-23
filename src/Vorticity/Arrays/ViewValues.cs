@@ -50,7 +50,7 @@ internal readonly ref struct ViewValues
         uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
         if (_oneHeap && buffer == 0)
         {
-            return _heap.Slice((int)offset, (int)size);
+            return Within(_heap, row, offset, size);
         }
 
         if (buffer >= (uint)_buffers.Length)
@@ -58,6 +58,33 @@ internal readonly ref struct ViewValues
             return ArraysThrow.BufferIndex((int)buffer, _buffers.Length).Span;
         }
 
-        return _buffers[(int)buffer].Span.Slice((int)offset, (int)size);
+        return Within(_buffers[(int)buffer].Span, row, offset, size);
     }
+
+    /// <summary>
+    /// The bytes of row <paramref name="row"/> of <paramref name="node"/>, a varbinview node, read once rather than through a
+    /// reader made for the node: inline in its view, or in a data buffer. A view naming a buffer the node lacks, or bytes past
+    /// its buffer, is the file's fault, whichever reader meets it.
+    /// </summary>
+    /// <param name="node">The node.</param>
+    /// <param name="row">The row, within the node.</param>
+    internal static ReadOnlySpan<byte> At(CanonicalNode node, int row)
+    {
+        ReadOnlySpan<byte> view = node.Views.Span.Slice(row * ViewSize, ViewSize);
+        uint size = BinaryPrimitives.ReadUInt32LittleEndian(view);
+        if (size <= InlineBytes)
+        {
+            return view.Slice(4, (int)size);
+        }
+
+        // GetDataBuffer bounds-checks the index, a negative one included.
+        int buffer = (int)BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
+        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
+        return Within(node.GetDataBuffer(buffer).Span, row, offset, size);
+    }
+
+    /// <summary>The <paramref name="size"/> bytes at <paramref name="offset"/> of <paramref name="data"/>, which row <paramref name="row"/>'s view names.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ReadOnlySpan<byte> Within(ReadOnlySpan<byte> data, int row, uint offset, uint size) =>
+        (ulong)offset + size <= (ulong)(uint)data.Length ? data.Slice((int)offset, (int)size) : ArraysThrow.ViewPast(row, offset, size, data.Length);
 }

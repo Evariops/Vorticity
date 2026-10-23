@@ -18,9 +18,6 @@ namespace Vorticity.Compute;
 /// </summary>
 internal static class LiteralReader
 {
-    private const int ViewSize = 16;
-    private const int MaxInlineLength = 12;
-
     /// <summary>
     /// Reads row <paramref name="row"/> of <paramref name="nodeIndex"/> as a literal.
     /// </summary>
@@ -267,20 +264,8 @@ internal static class LiteralReader
         return false;
     }
 
-    /// <summary>Resolves one 16-byte view, inline or by reference.</summary>
+    /// <summary>Resolves one 16-byte view, inline or by reference (<see cref="ViewValues.At(CanonicalNode, int)"/>).</summary>
     /// <param name="node">A <c>VarBinView</c> node.</param>
     /// <param name="row">The row.</param>
-    internal static ReadOnlySpan<byte> ViewAt(CanonicalNode node, int row)
-    {
-        ReadOnlySpan<byte> view = node.Views.Span.Slice(row * ViewSize, ViewSize);
-        int size = BinaryPrimitives.ReadInt32LittleEndian(view);
-        if (size <= MaxInlineLength)
-        {
-            return view.Slice(4, size);
-        }
-
-        int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
-        int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
-        return node.GetDataBuffer(buffer).Span.Slice(offset, size);
-    }
+    internal static ReadOnlySpan<byte> ViewAt(CanonicalNode node, int row) => ViewValues.At(node, row);
 }

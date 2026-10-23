@@ -2,7 +2,6 @@ using System;
 using System.Buffers.Binary;
 using System.Text;
 using Vorticity.Arrays;
-using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Columns;
@@ -19,7 +18,6 @@ namespace Vorticity.Columns;
 internal readonly ref struct BinaryColumn
 {
     private const int ViewSize = 16;
-    private const int MaxInlineLength = 12;
 
     private readonly RecordBatch _batch;
     private readonly int _node;
@@ -61,30 +59,9 @@ internal readonly ref struct BinaryColumn
             return default;
         }
 
-        ReadOnlySpan<byte> view = View(node, index);
-        uint size = BinaryPrimitives.ReadUInt32LittleEndian(view);
-        if (size <= MaxInlineLength)
-        {
-            return view.Slice(4, (int)size);
-        }
-
-        uint bufferIndex = BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
-        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
-        if (bufferIndex > int.MaxValue)
-        {
-            ColumnsThrow.Format($"Row {index} names data buffer {bufferIndex}.");
-        }
-
-        // GetDataBuffer bounds-checks the index and throws VortexFormatException.
-        VortexBuffer data = node.GetDataBuffer((int)bufferIndex);
-        if ((ulong)offset + size > (ulong)(uint)data.Length)
-        {
-            ColumnsThrow.Format(
-                $"Row {index} spans [{offset}, {(ulong)offset + size}) of a data buffer holding " +
-                $"{data.Length} bytes.");
-        }
-
-        return data.Span.Slice((int)offset, (int)size);
+        // The views checked to hold the row's, then the view read as every reader of the library reads one.
+        _ = View(node, index);
+        return ViewValues.At(node, index);
     }
 
     /// <summary>
