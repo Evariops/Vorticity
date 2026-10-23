@@ -44,7 +44,7 @@ internal struct WideKeyTable<TValue>
     /// <summary>
     /// The tenths of its slots a table holds before it doubles: four. Six full, as a table whose slots hold
     /// their keys, a quarter of the keys lay past their home slot, and every row of theirs paid the search.
-    /// Against five and six tenths, measured on 2026-10-09 at one lane: a sum by 10⁵ short texts over 10⁷
+    /// Against five and six tenths, measured at one lane: a sum by 10⁵ short texts over 10⁷
     /// rows ×1.135 and ×1.267 the time, a sum and a mean by them ×1.094 and ×1.183, 10⁶ UUIDs ×1.00 and
     /// ×1.105, 10⁶ names ×0.98 and ×1.00, for 9 % and 15 % less state; at fourteen lanes, ×0.95 to ×1.06.
     /// </summary>
@@ -141,7 +141,7 @@ internal struct WideKeyTable<TValue>
     /// (<see cref="LaneRetirement"/>). Over 50 000 short texts, the shared table sat at its four tenths, a
     /// lane brought it a few hundred keys and a thousand for its sketch's error, and the doubling that
     /// asked for did not fit: the shared table went to the scratch, five times over 14 lanes under four
-    /// times what one holds, where the same lanes over bytes wrote nothing (2026-10-09).
+    /// times what one holds, where the same lanes over bytes wrote nothing.
     /// </remarks>
     internal bool Squeeze(int more)
     {
@@ -247,7 +247,7 @@ internal struct WideKeyTable<TValue>
             // Every row's slot first, its group where the hash agrees, then every candidate's key: two
             // loops, no read of a key waiting on its row's read of a slot. In one loop, a count by a
             // million UUIDs at one lane took 1.06 times as long as slots that hold their keys; in two,
-            // 0.86 of one loop's time, measured on 2026-10-08. Each hash kept for the keys missed, where
+            // 0.86 of one loop's time. Each hash kept for the keys missed, where
             // the caller has room for them.
             bool keep = hashes.Length >= keys.Length;
             for (int i = 0; i < keys.Length; i++)

@@ -138,7 +138,7 @@ internal readonly struct NarrowSignedSum<TValue> : IValueOp<TValue, SumState<lon
     public SumState<long> Seed() => default;
 
     // Inlined by hand: two statements and the conversion's checks of its type, the native compiler left
-    // the add a call a row, 19 % of the cycles of db-benchmark's q4 at one lane (2026-10-09).
+    // the add a call a row, 19 % of the cycles of db-benchmark's q4 at one lane.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Add(ref SumState<long> state, TValue value)
     {

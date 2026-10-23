@@ -76,10 +76,10 @@ internal sealed class ZoneFinality
 
     /// <summary>
     /// Whether the pass blocks on several lanes and leaves the zones to one lane, a window and a budget
-    /// under pressure: measured on 2026-10-08 after the stream lets its ranges absorb what they leave open,
-    /// the stream took 2.2 times the blocking pass's time at fourteen lanes on 4M rows of a key late by
-    /// 2 500 (13.0 ms against 5.9), past the quarter more that decision F of the plan held the zones to;
-    /// at one lane, 0.84 of it (30.7 against 36.4), its first batch 1.3 ms after the start against 34.
+    /// under pressure: measured with the stream's ranges absorbing what they leave open, the stream took
+    /// 2.2 times the blocking pass's time at fourteen lanes on 4M rows of a key late by 2 500 (13.0 ms
+    /// against 5.9), past the quarter more a pass by zones is allowed over a blocking one; at one lane,
+    /// 0.84 of it (30.7 against 36.4), its first batch 1.3 ms after the start against 34.
     /// </summary>
     private static int Degree(AggregationQuery query)
     {

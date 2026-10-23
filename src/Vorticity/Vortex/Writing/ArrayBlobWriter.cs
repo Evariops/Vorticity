@@ -1121,7 +1121,7 @@ internal static class ArrayBlobWriter
 
             // The integers live in the arena from here on, so the pool can have its array back
             // before writing them rents anything. Every float column is priced with ALP, and one
-            // that loses now costs the pool a rental instead of the heap a column.
+            // that loses costs the pool a rental rather than the heap a column.
             plan.ReturnEncoded();
             encodedBack = true;
             int encodedNode = arena.AddPrimitive(

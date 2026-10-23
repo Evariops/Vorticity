@@ -29,7 +29,7 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
     /// <remarks>
     /// Both words at once, with no branch: the first passes of the key tables compare a row's word with a
     /// slot's and take the group or none by a mask, and a <c>&amp;&amp;</c> compiled to a branch on the low
-    /// word, mispredicted at every key that is not in its home slot (2026-10-09, the disassembly of
+    /// word, mispredicted at every key that is not in its home slot (the disassembly of
     /// <see cref="KeyTable{TValue}.FindAtHome"/>).
     /// </remarks>
     public bool Equals(TextWord other) => ((Low ^ other.Low) | (High ^ other.High)) == 0;
@@ -45,14 +45,13 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
     /// bits, under the <paramref name="seed"/> a table takes after a long chain, 0 until then. A short
     /// text's low half is its length and its first bytes, the same for many keys, and the table's fold of
     /// two words, made for integers, homed db-benchmark's ids of 12 bytes, 10⁵ of them that differ in their
-    /// last digits alone, so badly that a group by took 639 ms where a table of bytes took 191 (2026-10-08,
-    /// one lane).
+    /// last digits alone, so badly that a group by took 639 ms where a table of bytes took 191 (one lane).
     /// </summary>
     /// <remarks>
     /// <para>
     /// CRC32C, an instruction a half, homed those ids faster, by the luck of their digits: against it,
     /// rapidhash took ×0.96 to ×1.13 at one lane (q1 to 2·10⁶ names, <c>id3</c> ×1.10), ×1.00 to ×1.06 at
-    /// 14, and XXH3 of System.IO.Hashing ×1.13 to ×1.55, its call the cost (2026-10-09). But a CRC is
+    /// 14, and XXH3 of System.IO.Hashing ×1.13 to ×1.55, its call the cost. But a CRC is
     /// linear: a seed moves every word's home by one mask, so that words built to share a CRC share their
     /// home whatever the seed and chain past any seed a table takes. SMHasher fails CRC32C on its bias, its
     /// collisions and its distribution, and passes rapidhash, at 22 cycles a small key where xxh3 takes 29.
@@ -68,7 +67,7 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
     /// <summary>
     /// <see cref="Home"/> of a seed already prepared by <see cref="Prepared"/>: a table's first pass prepares
     /// it once a batch, where preparing it at every row cost a test and four instructions of the constant a
-    /// row, in the loop the native compiler left it in (2026-10-09).
+    /// row, in the loop the native compiler left it in.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static uint HomePrepared(ulong low, ulong high, ulong prepared)
@@ -111,19 +110,19 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
 /// </summary>
 /// <remarks>
 /// <para>
-/// Measured on 2026-10-08 (M4 Pro), db-benchmark's rows, 10⁷ of them, against the table of bytes: a sum by
+/// Measured on an M4 Pro, db-benchmark's rows, 10⁷ of them, against the table of bytes: a sum by
 /// <c>id1</c>, 100 texts of 5 bytes, ×0.69 at one lane and ×0.84 at fourteen; by <c>id1</c> and
 /// <c>id2</c>, ×0.71 and ×0.70.
 /// </para>
 /// <para>
-/// Words were bounded to 4 096 groups while a slot held its word, 24 bytes, the word kept twice: twice the
+/// Words bounded to 4 096 groups, a slot holding its word, 24 bytes, the word kept twice, took twice the
 /// memory of bytes at 10⁶ keys, and by <c>id3</c>, 10⁵ texts of 12 bytes, ×1.26 the time of bytes at
 /// fourteen lanes. Unbounded, in slots of a hash and a group past 4 096 groups, against the bytes a lane
-/// turned into there (2026-10-09): by <c>id3</c> ×0.603 the time at one lane and ×0.765 at fourteen, q3
-/// ×0.690 and ×0.814, 10⁶ names ×0.753 and ×0.924, q10 ×0.948 and ×0.971; the state by <c>id3</c> ×0.66
-/// and ×0.71, by 10⁶ names ×1.54 at one lane, whose first rows, all new, foretold twice as many, and
-/// ×1.01 at fourteen. Such a lane now reserves the keys for half its rows: the names' state ×1.00 of the
-/// bytes' at one lane (<see cref="GroupKeys.ReserveAllNew"/>).
+/// would turn into there: by <c>id3</c> ×0.603 the time at one lane and ×0.765 at fourteen, q3 ×0.690 and
+/// ×0.814, 10⁶ names ×0.753 and ×0.924, q10 ×0.948 and ×0.971; the state by <c>id3</c> ×0.66 and ×0.71,
+/// by 10⁶ names ×1.54 at one lane, whose first rows, all new, foretold twice as many, and ×1.01 at
+/// fourteen. A lane whose first rows are all new reserves the keys for half its rows, which brings the
+/// names' state to ×1.00 of the bytes' at one lane (<see cref="GroupKeys.ReserveAllNew"/>).
 /// </para>
 /// <para>
 /// Kept to the lanes' tables: the core, which holds a key's entries apart from any lane, stays with the

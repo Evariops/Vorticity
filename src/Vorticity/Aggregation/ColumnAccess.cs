@@ -387,7 +387,7 @@ internal readonly ref struct BytesBlock
     /// <see cref="TryWords"/> would copy them: when this library's kernels wrote the views, each inline value
     /// zero past its bytes, and every value is twelve bytes or fewer, which a pass over the lengths alone
     /// tells. Copying views that already are words took a tenth of the cycles of a sum by two columns of a
-    /// hundred short texts (q2 at fourteen lanes, 2026-10-10).
+    /// hundred short texts (db-benchmark's q2 at fourteen lanes).
     /// </summary>
     internal bool TryWordsInPlace(int start, int count, out ReadOnlySpan<TextWord> words)
     {
@@ -488,8 +488,8 @@ internal readonly ref struct BytesBlock
     /// <remarks>
     /// No branch on a row: the longest length is kept and judged once. Row by row through
     /// <see cref="TryWord"/>, two branches a row and the validity's test took a sixth of the cycles of a sum
-    /// by a hundred short texts (2026-10-09). A view a vector, its mask made of the two halves read from
-    /// the tables, ran 5 % slower than these two words a view (`--micro words`, the same day).
+    /// by a hundred short texts. A view a vector, its mask made of the two halves read from the tables, ran
+    /// 5 % slower than these two words a view (<c>vortex-queries --micro words</c>).
     /// </remarks>
     internal bool TryWords(int start, Span<TextWord> words)
     {

@@ -365,7 +365,7 @@ internal static class VariantShredder
                 }
                 else
                 {
-                    // An id out of the dictionary: its read refuses it, as before.
+                    // An id out of the dictionary: its read refuses it.
                     key = _plan.IndexOf(dictionary[id]);
                 }
 

@@ -58,7 +58,7 @@ internal sealed class SortedSlices : IDisposable, IAsyncDisposable
     /// others sort and write, held a period's load a slice ahead of its writes, which only a lone period whose writes
     /// hold it gains from: five periods loaded at once, their lanes all taken, held 18.3 GB and took 485-495 s of the
     /// processors with three, 13.3 GB and 455-460 s with two, in the same 25.2-25.5 s; a lone day took 17.1-17.2 s with
-    /// three and 17.7-18.0 s with two.
+    /// three and 17.7-18.0 s with two (<c>vortex-queries --micro load --periods 5</c>, then <c>--periods 1</c>).
     /// </summary>
     internal const int InFlight = 2;
 

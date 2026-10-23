@@ -14,8 +14,8 @@ namespace Vorticity.Types.Variants;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The constants were measured on one chunk of 100 000 rows (<c>vortex-queries --micro shredcost</c>,
-/// 2026-10-19), a hundred paths held by every row and by the first half of the rows. A shredded path
+/// The constants were measured on one chunk of 100 000 rows (<c>vortex-queries --micro shredcost</c>),
+/// a hundred paths held by every row and by the first half of the rows. A shredded path
 /// held by one row adds 154 to 217 bytes to its chunk: its typed column, its validity, their encodings
 /// and its name in the tree's dtype, and 4 to 10 tables to the chunk's encoding tree. An occurrence in
 /// the residual takes, once compressed, 3.6 bytes for an integer, 3.2 for a double, 2.7 for a text and

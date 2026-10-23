@@ -344,7 +344,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>
     /// What a split the consumer runs may cost before the lanes take the splits after it: about what
     /// the lanes add to a split of a projection, their hand-offs and the scan's lanes made and woken
-    /// (measured on 2026-10-11, a Ryzen 9 7950X: a 64 KiB column split from the page cache, 11 µs,
+    /// (measured on a Ryzen 9 7950X: a 64 KiB column split from the page cache, 11 µs,
     /// runs a fifth faster here than on 32 lanes, and a taxi trips split of 43 µs 2.5 times slower).
     /// </summary>
     private static readonly long InlineSplitTicks = Stopwatch.Frequency * 25 / 1_000_000;
@@ -418,15 +418,15 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// The splits a scan of one lane reads ahead of the one it decodes, over a source whose read is a
-    /// round trip, when its budget grants them: two. Measured on 2026-10-06 at fourteen lanes and 20 ms a
-    /// request, four read no faster and held 10 to 28 MiB more: what is left is each range's first read.
+    /// round trip, when its budget grants them: two. Measured at fourteen lanes and 20 ms a request, four
+    /// read no faster and held 10 to 28 MiB more: what is left is each range's first read.
     /// </summary>
     internal const int ReadAheadSplits = 2;
 
     /// <summary>
     /// The most bytes a segment of a split ahead may take for a batch to read it along with its own: what a chunk of a few
     /// thousand rows of a column coded in runs takes, a few dozen bytes, which every split of a log object's 8 192 rows
-    /// asked for alone over a store 5 ms away, 440 requests an object for its service names (2026-10-21).
+    /// would otherwise ask for alone: over a store 5 ms away, 440 requests an object for its service names.
     /// </summary>
     internal const int AlongSegmentBytes = 4 << 10;
 

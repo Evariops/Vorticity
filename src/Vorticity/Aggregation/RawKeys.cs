@@ -110,7 +110,7 @@ internal sealed class RawLayout
 /// drawn once a process (<see cref="MergeHash.Seed"/>), in a table at most half full whose slot of
 /// four bytes holds a group number plus one in its low bits, as many as the slots', and the hash's
 /// bits below the home's in the rest; the words are kept once, by group. A slot of four bytes rather
-/// than one holding the word: measured on 2026-10-06, a pair of ints at 1.8M groups, nine rows in ten
+/// than one holding the word: measured on a pair of ints at 1.8M groups, nine rows in ten
 /// a new one, ran 1.75 times as long in the engine's own table, whose slot of sixteen bytes made the
 /// table 74 MB where this one takes 16.
 /// </para>

@@ -30,7 +30,7 @@ namespace Vorticity.Indexes;
 /// </para>
 /// <para>
 /// A column is read this way only when every chunk holds every key asked in its map, and the key's
-/// typed column wears one dtype across them; otherwise its chunks are read whole, as before.
+/// typed column wears one dtype across them; otherwise its chunks are read whole.
 /// </para>
 /// <para>
 /// A column asked for keys no chunk shreds has each chunk its map knows read for its residual, where those

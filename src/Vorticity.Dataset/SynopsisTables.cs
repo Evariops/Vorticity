@@ -1234,8 +1234,8 @@ internal sealed partial class SynopsisTables : IDisposable
             }
 
             // The distinct sketches apart from the rest of the rows, which a question that counts no distinct value does
-            // not read: a question of percentiles read twice its bytes cold, 6.1 MB against 3.1 at 32 lanes, once the
-            // chunks held them.
+            // not read: in the same chunks, a question of percentiles would read twice its bytes cold, 6.1 MB against 3.1
+            // at 32 lanes.
             int sketches = -1;
             if (table.Apart is { } apart)
             {

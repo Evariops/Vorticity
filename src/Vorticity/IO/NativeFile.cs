@@ -19,7 +19,7 @@ namespace Vorticity.IO;
 /// takes with <c>flock</c> the shared lock its <see cref="FileShare"/> stands for, which it drops
 /// with another <c>flock</c> before it closes the file; the reader then asks the file's length with
 /// another <c>fstat</c>. Here the lock is taken the same way and <c>close</c> drops it, so a writer
-/// that opens the file without sharing it is kept out as before, and one <c>fstat</c> answers both
+/// that opens the file without sharing it is kept out all the same, and one <c>fstat</c> answers both
 /// questions: two system calls fewer, a microsecond and a half of an open and a close on macOS.
 /// The lock is not taken by <c>open</c> itself, O_SHLOCK, which would have to be told not to wait
 /// for it with O_NONBLOCK: the framework takes a descriptor that has it for a pipe, and reads it

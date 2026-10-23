@@ -26,8 +26,9 @@ namespace Vorticity.Dataset;
 /// </summary>
 /// <remarks>
 /// The eleven columns of the design's requests took 0.3 s a slice of three million rows one after the other, the bytes of
-/// its request ids 0.08 s of it; on lanes of their own, the slice takes its longest column. Under five periods loaded at
-/// once, the views of its six names gathered through the permutation took 9 % of the processors, and its status 1 %.
+/// its request ids 0.08 s of it (<c>vortex-queries --micro slicesort</c>); on lanes of their own, the slice takes its
+/// longest column. Under five periods loaded at once (<c>--micro load --periods 5</c>), the views of its six names
+/// gathered through the permutation took 9 % of the processors, and its status 1 %.
 /// </remarks>
 internal sealed class SliceGather : IFanWork
 {

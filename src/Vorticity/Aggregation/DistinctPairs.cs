@@ -305,7 +305,7 @@ internal sealed class DistinctPairs<TValue>
         // bytes stay those of the most pairs held at once. The pairs move into the arrays the Keep before
         // moved them out of, and leave theirs to the next: arrays new at every batch cost those 365 days
         // 850 MiB of the large object heap and 77 full collections a query at one lane, and a fifth of
-        // its time (232 ms against 185, measured on 2026-10-08).
+        // its time (232 ms against 185).
         int[] slots = _slots;
         byte[] tags = _tags;
         int length = (int)Math.Max(Math.Max(32, System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(2 * kept + 1))), slots.Length);

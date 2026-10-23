@@ -700,9 +700,9 @@ internal static class DatasetCompactor
     /// The entries a key-ordered read of an input walks at once: an append holds its rows mostly in time order, some of
     /// them a few seconds late, which a window of the file's zones reads ahead of itself split after split, once for
     /// each window that holds a few of them. On 3 × 10⁷ requests at the design's rate, two in a hundred a few seconds
-    /// late and one in ten thousand up to an hour, a window of 2^18 entries reads them in 6.8 s instead of 13.6 s
-    /// (2.8 s without late rows); 2^20 reads the objects of sorted slices half again slower, its windows past their
-    /// slices.
+    /// late and one in ten thousand up to an hour, a window of 2^18 entries reads them in 6.8 s, one of the zones'
+    /// 8 192 in 13.6 s (2.8 s without late rows); 2^20 reads the objects of sorted slices half again slower, its
+    /// windows past their slices (<c>vortex-queries --micro lifecycle</c>).
     /// </summary>
     private const int KeyWindowRows = 1 << 18;
 

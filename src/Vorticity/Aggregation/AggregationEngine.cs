@@ -216,10 +216,10 @@ internal sealed class AggregationPlan
     internal int ProbeAhead { get; set; } = DefaultProbeAhead;
 
     /// <summary>
-    /// The setting of <see cref="ProbeAhead"/>: two passes, no slot read ahead. Measured on 2026-10-06
-    /// at degree 1, a read 16 to 64 rows ahead took 6 to 10 % off ten million keys in no order and off
-    /// a key a row, nothing off a million, and added 2 to 8 % to keys in a row, at a stride, hot keys
-    /// and ten rows a key.
+    /// The setting of <see cref="ProbeAhead"/>: two passes, no slot read ahead. Measured at degree 1, a
+    /// read 16 to 64 rows ahead took 6 to 10 % off ten million keys in no order and off a key a row,
+    /// nothing off a million, and added 2 to 8 % to keys in a row, at a stride, hot keys and ten rows a
+    /// key (<c>vortex-queries --matrix small --switch probe:0:16</c>).
     /// </summary>
     internal const int DefaultProbeAhead = 0;
 
@@ -233,12 +233,12 @@ internal sealed class AggregationPlan
 
     /// <summary>
     /// The rows ahead a lane's table read its slots once it outgrew <see cref="ReadAheadBytes"/>. Measured
-    /// on 2026-10-10 on the Mac at fourteen lanes, every table read ahead: 16 rows took ×0.929 off q3
+    /// on an M4 Pro at fourteen lanes, every table read ahead: 16 rows took ×0.929 off db-benchmark's q3
     /// (10⁵ short texts, a lane's table of 2.4 MB) and nothing off q2 nor 10⁶ hashed keys, 32 rows
-    /// ×0.939; keys in a row, at a stride or hot gave back 2 to 8 % at one lane on 2026-10-06, their
-    /// tables in cache, which the size spares. Read ahead past the size alone: q3 ×0.963 and q7 ×0.947
-    /// at fourteen lanes, the rest flat; never the tuples of several columns, whose slot read ahead
-    /// still leaves their 64 bytes to compare: q10 ×1.015 at one lane.
+    /// ×0.939; keys in a row, at a stride or hot gave back 2 to 8 % at one lane, their tables in cache,
+    /// which the size spares. Read ahead past the size alone: q3 ×0.963 and q7 ×0.947 at fourteen lanes,
+    /// the rest flat; never the tuples of several columns, whose slot read ahead still leaves their 64
+    /// bytes to compare: q10 ×1.015 at one lane.
     /// </summary>
     internal const int ReadAhead = 16;
 
@@ -300,8 +300,9 @@ internal sealed class AggregationPlan
     internal bool Fan { get; set; } = true;
 
     /// <summary>
-    /// The span of values from which a key its first batch shows scattered takes the core: measured on
-    /// 2026-10-07 at fourteen lanes, the core ×0.72 at 10⁶ random keys and ×0.52 at 10⁷, ×2.47 at 10⁵.
+    /// The span of values from which a key its first batch shows scattered takes the core: measured at
+    /// fourteen lanes, the core ×0.72 at 10⁶ random keys and ×0.52 at 10⁷, ×2.47 at 10⁵
+    /// (<c>vortex-queries --matrix small --switch core</c>).
     /// </summary>
     internal const long ScatteredSpan = 1_000_000;
 
@@ -814,7 +815,7 @@ internal sealed class AggregationPartition
     /// The bytes of records past which a state of more than 16 bytes no longer carries the count in its
     /// pass: the count then folds first, alone, and the heavy pass finds its records in cache. Carried,
     /// the heavy pass reaches each record first, a miss to memory at the head of a long chain, and holds
-    /// few rows in flight. Measured on 2026-10-07, 2e7 rows at one lane: a count and a float's mean ×0.78
+    /// few rows in flight. Measured on 2e7 rows at one lane: a count and a float's mean ×0.78
     /// at 10⁶ groups (records of 40 MB) and ×0.84 at 10⁷, a count and its deviation ×0.68 at 10⁶; but
     /// ×1.07 to ×1.09 to 10⁵ (4 to 7 MB of records), which a large last level of cache holds.
     /// </summary>
@@ -1432,8 +1433,8 @@ internal sealed class AggregationPartition
     /// lane turns to the core with its table nearly empty, those groups' states still empty. Folded first,
     /// the batch grew each lane's table to its rows, nearly all new, its arrays doubled some fourteen times,
     /// then emptied into the core and dropped: 400 of the 490 MB a hashed key of 3.3M values over 4M rows
-    /// allocated a query at fourteen lanes (2026-10-09). A key of fewer values keeps its table, the batch's
-    /// rows finding there the groups the sample made, and is judged on its first rows as before. 8 192 rows
+    /// allocated a query at fourteen lanes. A key of fewer values keeps its table, the batch's rows finding
+    /// there the groups the sample made, and is judged on its first rows like any other. 8 192 rows
     /// tell 10⁵ values from 10⁶: about 335 repeats against 34.
     /// </summary>
     private void JudgeSample(RecordBatch batch)
@@ -1497,8 +1498,8 @@ internal sealed class AggregationPartition
     /// The groups, nulls included, the statistics bound the key of a streaming group by to at most for
     /// its slots to take the shape of few groups (<see cref="AggregateSlot.FewGroups"/>): a distinct
     /// count's set by group, which costs an object and 32 slots a group where pairs cost none, and which
-    /// the groups a batch closes leave to those it opens. Measured on 2026-10-08, the distinct users of
-    /// each of 365 days over 20M visits took 155 ms in sets at one lane, 221 in pairs. A group by that
+    /// the groups a batch closes leave to those it opens. Measured at one lane, the distinct users of each
+    /// of 365 days over 20M visits took 155 ms in sets, 221 in pairs. A group by that
     /// waits for the end of its pass keeps pairs: on a key of 10³ values over 4M rows, a thousand sets a
     /// lane, each doubling from 32 slots, took ×1.05 the pairs' time at one lane and ×2.2 at fourteen,
     /// their arrays a third of a gigabyte a query.
@@ -1534,8 +1535,8 @@ internal sealed class AggregationPartition
     /// <summary>
     /// The rows a lane must have in hand, the source's shared among the lanes, for its key to be judged:
     /// with fewer, its table stays small and its merge cheap, which the core's fixed costs do not repay.
-    /// Measured on 2026-10-07 at fourteen lanes: 286 000 rows a lane of a million uuids took the core
-    /// 0.55 times the lanes' tables, 143 000 of 1.8M pairs of integers 2.97 times.
+    /// Measured at fourteen lanes: 286 000 rows a lane of a million uuids took the core 0.55 times the
+    /// lanes' tables, 143 000 of 1.8M pairs of integers 2.97 times (<c>vortex-queries --switch core</c>).
     /// </summary>
     internal const long LaneRows = 200_000;
 
@@ -1591,8 +1592,8 @@ internal sealed class AggregationPartition
     /// at each step, a sixth of a group by of 1.8M pairs of integers. First rows all new reserve the index
     /// for every row new and the keys and their states for half (<see cref="GroupKeys.ReserveAllNew"/>):
     /// at one lane, 10⁶ names over 2M rows, each once then all again, held 66.6 MB rather than 101.9, the
-    /// bytes' 66.3, and db-benchmark's q10, every row new, 899 MB rather than 989, both in the same time
-    /// (2026-10-09). With no key, each slot foretells its own (<see cref="AggregateSlot.Foretell"/>).
+    /// bytes' 66.3, and db-benchmark's q10, every row new, 899 MB rather than 989, both in the same time.
+    /// With no key, each slot foretells its own (<see cref="AggregateSlot.Foretell"/>).
     /// </summary>
     private void Foretell()
     {
@@ -1632,7 +1633,7 @@ internal sealed class AggregationPartition
         // What the partition takes a group now, its slack included, times the groups foretold and an eighth,
         // on every lane: a few groups past an estimate that held them all doubled the keys and their states
         // at the end of the pass. Without the eighth when the budget does not hold it on every lane, and
-        // past what it grants them all, the table grows as before: four lanes that each checked their own
+        // past what it grants them all, the table grows by doubling: four lanes that each checked their own
         // room took it together, and the last overdrew the budget.
         long perGroup = Footprint / keys.Count;
         long room = groups + (groups / 8);
@@ -4169,18 +4170,19 @@ internal static class AggregationEngine
 
     /// <summary>
     /// The splits the lanes of a pass read ahead together, over a store whose read is a round trip: sixteen, what
-    /// eight lanes reading two each keep in flight, where fourteen lanes read no faster at four each than at two on
-    /// 2026-10-06. One lane alone, two splits in flight, took 50 s to read 4.6 GB from a store of 5 ms over a link
-    /// of 10 Gb/s, its decode 15 s of them; at sixteen, 9.7 s.
+    /// eight lanes reading two each keep in flight, where fourteen lanes read no faster at four each than at two. One
+    /// lane alone, two splits in flight, took 50 s to read 4.6 GB from a store of 5 ms over a link of 10 Gb/s, its
+    /// decode 15 s of them; at sixteen, 9.7 s.
     /// </summary>
     internal const int ReadAheadTotal = 16;
 
     /// <summary>
     /// The bytes the lanes of a pass keep in flight together over a store whose read is a round trip: a link's bandwidth
     /// times its latency, with a margin, 10 Gb/s by 5 ms being 6.25 MB. Splits of 120 KB then keep sixty-four reads in
-    /// flight where sixteen left the latency to bound a scan of rows: the rows holding a flag of the logs, over a store
-    /// 5 ms away, waited 2.4 s on 5,472 reads at sixteen; at sixty-four, with as many reads let in flight, a percentile
-    /// over 540 M rows fell from 5.5 s to 1.9 s, against 1.6 s for the link alone (2026-10-19).
+    /// flight where sixteen leave the latency to bound a scan of rows: the rows holding a flag of the logs, over a store
+    /// 5 ms away, waited 2.4 s on 5,472 reads at sixteen; a percentile over 540 M rows took 5.5 s at sixteen and 1.9 s
+    /// at sixty-four, with as many reads let in flight, against 1.6 s for the link alone
+    /// (<c>vortex-queries --micro paths --design --profile s3</c>).
     /// </summary>
     internal const long ReadAheadTarget = 16L << 20;
 
