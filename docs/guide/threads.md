@@ -67,6 +67,37 @@ cache held 1 431 KiB: the data segments of the 1.5 MB file except the six that l
 the open, which the file serves itself. The concurrent scans miss more often than a single scan
 would, because two scans asking for the same segment at the same moment both miss it.
 
+## The memory the pool keeps
+
+Every block a scan, a read or a write gives back is parked in the process-wide pool for the next rent,
+in size classes of powers of two from 4 KiB to 32 MiB. At rest a class keeps a few blocks. Under
+demand a class up to 8 MiB keeps up to 64 MiB per processor, as long as every class together parks
+less than 256 MiB per processor: up to 8 GiB on a machine of 32 processors. A class above 8 MiB keeps
+16 MiB per processor, and one block of up to 256 MiB is kept on its own.
+
+At each full collection, the pool frees what a class keeps once no rent has asked for it for a minute,
+and everything it keeps when the machine's memory load is high. In a container, the runtime measures
+that load against the container's memory limit.
+
+It keeps that much because 32 questions at once each hold dozens of blocks of the same few classes.
+With 1 GiB parked in all, one block in four was freed as it came back, and the next rent took it from
+the system again, every page faulted anew: the declared spans and logs at a tenth of the design's
+rate answered about half as many questions a second as once the blocks were kept. Sealing an hour
+at the design's rate peaks at 9.8 GB instead of 8.8.
+
+The blocks parked are native memory: they count in the process's private bytes, not in the managed
+heap's counters, and a heap dump does not show them. To bound what a session's batches, builders and
+decodes keep, give it a pool of its own:
+
+```csharp
+await using VortexSession session = VortexSession.Create(o =>
+    o.MemoryPool = new AlignedMemoryPool(maxRetainedBytes: 512L * 1024 * 1024));
+```
+
+The reads of the library's own sources, its files, its object stores and its caches, still go through
+the process-wide pool, whose budgets grow with `Environment.ProcessorCount`, which a container's CPU
+limit lowers.
+
 ## What is safe to share
 
 | type | contract |
