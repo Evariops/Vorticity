@@ -989,10 +989,15 @@ public sealed class VortexDataset : IAsyncDisposable
         // Each declared identifier's hashed postings, required and spared by the budget as the clustering
         // key's run is: a lookup of one value reads the objects that hold it and almost no other, one
         // segment of about 64 KiB an object, at about four bytes a (value, block) pair. A Bloom filter,
-        // which a tree of them loses past what one filter holds, is never tried on it.
+        // which a tree of them loses past what one filter holds, is never tried on it. An identifier whose
+        // column a change of the schema dropped or renamed names nothing the write holds, and is left out
+        // rather than required.
         foreach (string identifier in Snapshot.Header.Identifiers)
         {
-            write = write.WithIndexes(write.WritePolicy.For(identifier, Indexes.IndexSpec.HashedPostings.AsRequired())) with { BudgetSparesRequired = true };
+            if (schema.DType.IndexOfField(identifier) >= 0 || IdentifierPath(identifier, schema.DType) is not null)
+            {
+                write = write.WithIndexes(write.WritePolicy.For(identifier, Indexes.IndexSpec.HashedPostings.AsRequired())) with { BudgetSparesRequired = true };
+            }
         }
 
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };

@@ -269,7 +269,8 @@ A compaction then shreds the key wherever a row holds a string there, and indexe
 `r.Attributes["user"].AsString() == id` finds its rows as `r.RequestId == id` does. Objects written by
 appends shred nothing and carry no index on the key, until a compaction rewrites them. A name that is
 neither a column nor such a key, or a key read in another class, is refused when the dataset is
-created.
+created. An identifier whose column a schema change drops or renames is left out of the writes that
+follow.
 
 A key that questions filter or group by, but look up no value of, is declared shredded instead, in the
 class it is read in:

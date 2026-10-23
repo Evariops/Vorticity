@@ -683,7 +683,9 @@ the dataset held is kept, in the late level, and sealed into its period with the
 the dataset counts it (`vortex.dataset.rows_past_horizon`). A handle created with
 `PeriodOptions.RefuseLateRows` refuses an append that holds one instead, before anything is written.
 Identifier columns (`DatasetOptions.Identifiers`) name the
-columns whose values questions look up one at a time; each names a column of the schema, once. A key
+columns whose values questions look up one at a time; each names a column of the schema, once. An
+identifier whose column a change of the schema drops or renames names nothing the writers hold any
+more, and they leave it out rather than fail. A key
 that leads with a timestamp is encoded as the timestamp's storage, its seek keys too
 ([06-row-encoding.md](06-row-encoding.md#6-unsupported-types)).
 Shredded paths (`DatasetOptions.ShreddedPaths`) name keys of variant columns, each read in one class as a
