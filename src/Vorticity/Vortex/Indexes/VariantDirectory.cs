@@ -320,13 +320,14 @@ internal sealed class VariantDirectory
     /// <param name="filter">The scan's predicate.</param>
     /// <param name="directories">The directory of each variant column, by its name; a column without one may match anything.</param>
     /// <param name="slice">The one slice of the object asked about, by the bits its paths carry; -1 for the whole object.</param>
-    internal static bool MayMatch(VortexExpr filter, IReadOnlyDictionary<string, VariantDirectory> directories, int slice = -1) => filter switch
+    internal static bool MayMatch(VortexExpr filter, IReadOnlyDictionary<string, VariantDirectory> directories, int slice = -1) =>
+        VariantFilters.MayMatch(filter, new FencedJudge(directories, slice));
+
+    /// <summary>The directories' answer for one fenced predicate.</summary>
+    private readonly struct FencedJudge(IReadOnlyDictionary<string, VariantDirectory> directories, int slice) : IFencedJudge
     {
-        LogicalExpr { IsAnd: true } both => MayMatch(both.Left, directories, slice) && MayMatch(both.Right, directories, slice),
-        LogicalExpr either => MayMatch(either.Left, directories, slice) || MayMatch(either.Right, directories, slice),
-        VariantFilterExpr fence => MayMatchFenced(fence.Inner, directories, slice),
-        _ => true,
-    };
+        public bool MayMatch(VortexExpr predicate) => MayMatchFenced(predicate, directories, slice);
+    }
 
     private static bool MayMatchFenced(VortexExpr predicate, IReadOnlyDictionary<string, VariantDirectory> directories, int slice)
     {

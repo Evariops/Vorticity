@@ -173,17 +173,9 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
-            // A path's entry holds the values of one class: it answers the read of that class alone,
-            // under that read's name, never the variant column's.
-            if (entry.VariantPath is not null)
+            if (entry.VariantPath is not null && !TryResolveVariant(entry, trigrams, ref path, ref dtype, ref classTypes))
             {
-                if (trigrams || entry.VariantPath is not [string variantKey] || entry.VariantClass is not { } @class)
-                {
-                    continue;
-                }
-
-                path = new Compute.VariantFieldExpr(new ColumnFieldExpr(path), [Compute.VariantStep.Of(variantKey)], Writing.IndexWriter.ReadOf(@class)).Key;
-                dtype = Writing.IndexWriter.ClassType(classTypes ??= new DTypeArena(), @class);
+                continue;
             }
 
             string key = trigrams ? TrigramKey(path) : path;
@@ -594,6 +586,28 @@ internal sealed class KeyIndexPruner
                 list.Add(value);
             }
         }
+    }
+
+    /// <summary>
+    /// The name and the type an index entry of a variant's path answers under: an entry holds the values of one class, so
+    /// it answers the read of that class alone, under that read's name, never the variant column's. False for an entry no
+    /// predicate of a path asks: a text index's, or one of several keys.
+    /// </summary>
+    /// <param name="entry">The entry, of a variant's path.</param>
+    /// <param name="trigrams">Whether the entry is a text index's.</param>
+    /// <param name="path">The variant column's dotted path, replaced by the read's name.</param>
+    /// <param name="dtype">The variant column's dtype, replaced by the class's.</param>
+    /// <param name="classTypes">The arena the class's dtype is made in, made at the first.</param>
+    internal static bool TryResolveVariant(IndexEntry entry, bool trigrams, ref string path, ref DType dtype, ref DTypeArena? classTypes)
+    {
+        if (trigrams || entry.VariantPath is not [string variantKey] || entry.VariantClass is not { } @class)
+        {
+            return false;
+        }
+
+        path = new Compute.VariantFieldExpr(new ColumnFieldExpr(path), [Compute.VariantStep.Of(variantKey)], Writing.IndexWriter.ReadOf(@class)).Key;
+        dtype = Writing.IndexWriter.ClassType(classTypes ??= new DTypeArena(), @class);
+        return true;
     }
 
     /// <summary>The dotted path and dtype an entry's field indices name, or false when they name nothing.</summary>

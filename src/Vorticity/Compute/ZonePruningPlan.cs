@@ -215,39 +215,22 @@ internal static class ZonePruningPlan
     /// <summary>The variant columns the fenced predicates of <paramref name="filter"/> read paths of, by name; null for none.</summary>
     private static List<string>? VariantColumns(VortexExpr filter)
     {
-        List<string>? columns = null;
-        Collect(filter, ref columns);
-        return columns;
+        ColumnsRead visitor = default;
+        VariantFilters.Visit(filter, ref visitor);
+        return visitor.Columns;
+    }
 
-        static void Collect(VortexExpr expr, ref List<string>? columns)
-        {
-            switch (expr)
-            {
-                case LogicalExpr logical:
-                    Collect(logical.Left, ref columns);
-                    Collect(logical.Right, ref columns);
-                    return;
-                case VariantFilterExpr { Inner: ComparisonExpr { Field: VariantFieldExpr path } }:
-                    Add(path, ref columns);
-                    return;
-                case VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } }:
-                    Add(path, ref columns);
-                    return;
-                case VariantFilterExpr { Inner: NullCheckExpr { Field: VariantFieldExpr path } }:
-                    Add(path, ref columns);
-                    return;
-                case VariantFilterExpr { Inner: StringMatchExpr { Field: VariantFieldExpr path } }:
-                    Add(path, ref columns);
-                    return;
-            }
-        }
+    /// <summary>The variant columns the paths shown read, each once, made at the first.</summary>
+    private struct ColumnsRead : IFencedVisitor
+    {
+        internal List<string>? Columns;
 
-        static void Add(VariantFieldExpr path, ref List<string>? columns)
+        public void Visit(VortexExpr predicate, VariantFieldExpr path)
         {
-            columns ??= [];
-            if (!columns.Contains(path.Column.Path))
+            Columns ??= [];
+            if (!Columns.Contains(path.Column.Path))
             {
-                columns.Add(path.Column.Path);
+                Columns.Add(path.Column.Path);
             }
         }
     }
@@ -259,53 +242,40 @@ internal static class ZonePruningPlan
     /// </summary>
     private static List<byte[][]> PathsOf(VortexExpr filter, string column)
     {
-        List<byte[][]> paths = [];
-        Collect(filter, column, paths);
-        return paths;
+        PathsRead visitor = new PathsRead(column);
+        VariantFilters.Visit(filter, ref visitor);
+        return visitor.Paths;
+    }
 
-        static void Collect(VortexExpr expr, string column, List<byte[][]> paths)
+    /// <summary>The keys of the paths of one variant column the paths shown read.</summary>
+    private struct PathsRead(string column) : IFencedVisitor
+    {
+        internal List<byte[][]> Paths = [];
+
+        public readonly void Visit(VortexExpr predicate, VariantFieldExpr path)
         {
-            switch (expr)
+            if (string.Equals(path.Column.Path, column, StringComparison.Ordinal) && KeysOf(path) is { } keys)
             {
-                case LogicalExpr logical:
-                    Collect(logical.Left, column, paths);
-                    Collect(logical.Right, column, paths);
-                    return;
-                case VariantFilterExpr { Inner: ComparisonExpr { Field: VariantFieldExpr path } }:
-                    Add(path, column, paths);
-                    return;
-                case VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } }:
-                    Add(path, column, paths);
-                    return;
-                case VariantFilterExpr { Inner: NullCheckExpr { Field: VariantFieldExpr path } }:
-                    Add(path, column, paths);
-                    return;
-                case VariantFilterExpr { Inner: StringMatchExpr { Field: VariantFieldExpr path } }:
-                    Add(path, column, paths);
-                    return;
+                Paths.Add(keys);
             }
         }
+    }
 
-        static void Add(VariantFieldExpr path, string column, List<byte[][]> paths)
+    /// <summary>The keys of <paramref name="path"/> in UTF-8; null for a path through an element of an array.</summary>
+    private static byte[][]? KeysOf(VariantFieldExpr path)
+    {
+        byte[][] keys = new byte[path.Steps.Length][];
+        for (int i = 0; i < keys.Length; i++)
         {
-            if (!string.Equals(path.Column.Path, column, StringComparison.Ordinal))
+            if (path.Steps[i].KeyUtf8 is not { } key)
             {
-                return;
+                return null;
             }
 
-            byte[][] keys = new byte[path.Steps.Length][];
-            for (int i = 0; i < keys.Length; i++)
-            {
-                if (path.Steps[i].KeyUtf8 is not { } key)
-                {
-                    return;
-                }
-
-                keys[i] = key;
-            }
-
-            paths.Add(keys);
+            keys[i] = key;
         }
+
+        return keys;
     }
 
     /// <summary>
@@ -393,40 +363,32 @@ internal static class ZonePruningPlan
     /// </summary>
     private static Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? KeysRead(VortexExpr filter)
     {
-        Dictionary<string, List<(string, Types.Variants.PathClass)>>? keys = null;
-        Collect(filter, ref keys);
-        return keys;
+        StatisticsKeys visitor = default;
+        VariantFilters.Visit(filter, ref visitor);
+        return visitor.Keys;
+    }
 
-        static void Collect(VortexExpr expr, ref Dictionary<string, List<(string, Types.Variants.PathClass)>>? keys)
+    /// <summary>The keys block statistics can answer that the comparisons, memberships and presences shown read, by column.</summary>
+    private struct StatisticsKeys : IFencedVisitor
+    {
+        internal Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? Keys;
+
+        public void Visit(VortexExpr predicate, VariantFieldExpr path)
         {
-            switch (expr)
+            if (predicate is not (ComparisonExpr or InExpr or NullCheckExpr { IsNull: false }) || KeyOf(path) is not { } key)
             {
-                case LogicalExpr logical:
-                    Collect(logical.Left, ref keys);
-                    Collect(logical.Right, ref keys);
-                    return;
-                case VariantFilterExpr fence when fence.Inner switch
-                {
-                    ComparisonExpr { Field: VariantFieldExpr compared } => compared,
-                    InExpr { Field: VariantFieldExpr member } => member,
-                    NullCheckExpr { Field: VariantFieldExpr held, IsNull: false } => held,
-                    _ => null,
-                } is { } path:
-                    if (KeyOf(path) is { } key)
-                    {
-                        keys ??= new Dictionary<string, List<(string, Types.Variants.PathClass)>>(StringComparer.Ordinal);
-                        if (!keys.TryGetValue(path.Column.Path, out List<(string, Types.Variants.PathClass)>? list))
-                        {
-                            keys[path.Column.Path] = list = [];
-                        }
+                return;
+            }
 
-                        if (!list.Contains(key))
-                        {
-                            list.Add(key);
-                        }
-                    }
+            Keys ??= new Dictionary<string, List<(string, Types.Variants.PathClass)>>(StringComparer.Ordinal);
+            if (!Keys.TryGetValue(path.Column.Path, out List<(string, Types.Variants.PathClass)>? list))
+            {
+                Keys[path.Column.Path] = list = [];
+            }
 
-                    return;
+            if (!list.Contains(key))
+            {
+                list.Add(key);
             }
         }
     }
@@ -503,18 +465,26 @@ internal static class ZonePruningPlan
     /// no value of its class there.
     /// </summary>
     private static bool BlockMayMatch(
-        VortexExpr filter, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats, int block)
+        VortexExpr filter, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats, int block) =>
+        VariantFilters.MayMatch(filter, new BlockJudge(stats, block));
+
+    /// <summary>The block statistics' answer for one fenced predicate in one block.</summary>
+    private readonly struct BlockJudge(
+        Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats, int block) : IFencedJudge
     {
-        switch (filter)
+        public bool MayMatch(VortexExpr predicate) => BlockMayMatchFenced(predicate, stats, block);
+    }
+
+    /// <summary>Whether block <paramref name="block"/> may hold a row matching the fenced <paramref name="predicate"/>, by <paramref name="stats"/>.</summary>
+    private static bool BlockMayMatchFenced(
+        VortexExpr predicate, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats, int block)
+    {
+        switch (predicate)
         {
-            case LogicalExpr { IsAnd: true } both:
-                return BlockMayMatch(both.Left, stats, block) && BlockMayMatch(both.Right, stats, block);
-            case LogicalExpr either:
-                return BlockMayMatch(either.Left, stats, block) || BlockMayMatch(either.Right, stats, block);
-            case VariantFilterExpr { Inner: ComparisonExpr { Field: VariantFieldExpr path } comparison }:
+            case ComparisonExpr { Field: VariantFieldExpr path } comparison:
                 return Entry(path, stats, block, out Indexes.PathEntry? entry) is not true
                     || (entry is not null && Indexes.VariantDirectory.Within(entry, comparison.Op, comparison.Value));
-            case VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } membership }:
+            case InExpr { Field: VariantFieldExpr path } membership:
             {
                 if (Entry(path, stats, block, out Indexes.PathEntry? member) is not true)
                 {
@@ -532,7 +502,7 @@ internal static class ZonePruningPlan
                 return false;
             }
 
-            case VariantFilterExpr { Inner: NullCheckExpr { Field: VariantFieldExpr path, IsNull: false } }:
+            case NullCheckExpr { Field: VariantFieldExpr path, IsNull: false }:
                 return Entry(path, stats, block, out Indexes.PathEntry? held) is not true || held is not null;
             default:
                 return true;

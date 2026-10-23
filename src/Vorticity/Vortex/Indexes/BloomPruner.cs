@@ -123,17 +123,9 @@ internal sealed class BloomPruner
                 continue;
             }
 
-            // A path's entry holds the values of one class: it answers the read of that class alone,
-            // under that read's name, never the variant column's.
-            if (entry.VariantPath is not null)
+            if (entry.VariantPath is not null && !KeyIndexPruner.TryResolveVariant(entry, trigrams, ref path, ref dtype, ref classTypes))
             {
-                if (trigrams || entry.VariantPath is not [string variantKey] || entry.VariantClass is not { } @class)
-                {
-                    continue;
-                }
-
-                path = new Compute.VariantFieldExpr(new ColumnFieldExpr(path), [Compute.VariantStep.Of(variantKey)], Writing.IndexWriter.ReadOf(@class)).Key;
-                dtype = Writing.IndexWriter.ClassType(classTypes ??= new DTypeArena(), @class);
+                continue;
             }
 
             if (!(trigrams ? matches : equalities).Contains(path) || !BloomIndexOptions.TryParse(entry.Options, out BloomIndexOptions? options))
