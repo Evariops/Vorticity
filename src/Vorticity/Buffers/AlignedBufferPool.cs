@@ -82,20 +82,22 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
 
     /// <summary>
     /// Bytes one class of the graded pool may keep parked when the demand it meets asks for more
-    /// than its base retention: a wide batch holds a block of each of its columns at once. 8 MiB a
+    /// than its base retention: a wide batch holds a block of each of its columns at once, and the
+    /// questions of a node each hold hundreds of blocks of the classes of its segments. 64 MiB a
     /// processor, 64 MiB at least.
     /// </summary>
-    private static readonly long DemandClassBudget = Math.Max(64L << 20, Processors * (8L << 20));
+    private static readonly long DemandClassBudget = Math.Max(64L << 20, Processors * (64L << 20));
 
     /// <summary>Blocks a class widened to its demand keeps at most, however small they are: 256 a processor, 4 096 at least.</summary>
     private static readonly int DemandBlocks = (int)Math.Max(4_096, Processors * 256);
 
     /// <summary>
     /// Bytes parked across every class, base retention included, under which a class may keep more
-    /// than its base retention: what the base retention of every class of the shared pool comes to,
-    /// 32 MiB a processor, 256 MiB at least.
+    /// than its base retention: 256 MiB a processor, 256 MiB at least. Thirty-two questions at once
+    /// give back more blocks of 512 KiB and 1 MiB than an eighth of this keeps: freed, they are taken
+    /// anew from the system at the next rent, every page faulted again.
     /// </summary>
-    private static readonly long DemandBudget = Math.Max(256L << 20, Processors * (32L << 20));
+    private static readonly long DemandBudget = Math.Max(256L << 20, Processors * (256L << 20));
 
     /// <summary>
     /// How long a class goes without a rent before a sweep frees what it keeps parked: the minute

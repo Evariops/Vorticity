@@ -714,12 +714,12 @@ public sealed class AlignedBufferPoolTests
         // A budget of 2 MiB parks sixteen of these, the eight of the floor among them.
         AlignedBufferPool tight = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 2L * 1024 * 1024);
 
-        // 4 MiB blocks keep their class's ceiling at most, 8 MiB a processor and 64 MiB at least: sixteen blocks on
-        // eight processors or fewer, the blocks past it given back freed.
+        // 4 MiB blocks keep their class's ceiling at most, 64 MiB a processor and 64 MiB at least: sixteen blocks a
+        // processor, the blocks past it given back freed.
         AlignedBufferPool wide = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 1L << 40);
         const int big = 4 * 1024 * 1024;
         int ceiling = (int)(wide.ClassCeilingBytes(big) / big);
-        Assert.Equal(Math.Max(16, 2 * Environment.ProcessorCount), ceiling);
+        Assert.Equal(16 * Environment.ProcessorCount, ceiling);
         try
         {
             ReturnAll(tight, RentAll(tight, block, 40));
