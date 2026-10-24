@@ -109,7 +109,7 @@ A program that learns its columns at run time groups the tool scan by names and 
 as text: `file.Scan().Where(text).GroupBy("Service").Select("Service", "count()", "sum(Bytes)")`,
 and `Aggregate(results)` for a whole scan. A result is a column of the key, or one of `count()`,
 `count_distinct(c)`, `sum(c)`, `min(c)`, `max(c)` and `avg(c)`. The engine builds the nodes the typed
-path's lambdas build, so the plan is the same, synopses and indexes included, and the result is a
+path's lambdas build, so the plan is the same, indexes included, and the result is a
 tool scan of the groups whose columns the texts name. A sum takes the widest type of its kind, a long,
 an unsigned long or a double, and a minimum, a maximum and a key keep their column's .NET type,
 chosen by a switch over the storage rather than by reflection, which Native AOT would refuse. The
@@ -349,8 +349,6 @@ of the other keys, and a key left in the residual is parsed from the rows of the
 A key no chunk of the object shreds is parsed from each chunk's residual alone, the keys the chunk
 shreds neither decoded nor put back into its rows: a question over such a key of 36 000 log records
 took 6.6 ms of a core, two thirds of it putting the shredded keys back, against 2.2.
-A dataset's synopsis counts a shredded path as a column, so a question that groups or filters by it
-answers from the tables ([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
 The keys a window holds, with their counts, are the union of its objects' path directories.
 
 ## 4. Keys
@@ -858,32 +856,16 @@ of as many rows holding each column's minimum and, on its last row, its maximum,
 streams and the groups come in the order they would have. A dataset's objects do not settle, because
 their files still count the rows a deletion removed.
 
-A dataset of periods answers part of a pass with states instead
-([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
-When every aggregate is a count of the rows, a sum, a minimum, a maximum or a mean of a number column
-or of a variant's integer or double path, none of them filtered, and every key is a column, a function
-of one or a variant's path read strictly, the pass asks its source for states. A path's states carry
-the path's text as their name. A path read with `AsDouble()` reads floats too, which the double class
-of the tables leaves out, so an object that holds a float there, as its slice table says, answers with
-its rows. An object whose
-synopsis answers then comes as a batch of states: a row per bucket of a table and per value of its
-keys. The key columns carry the names and types the rows' have, the instant holds the bucket's start,
-and beside them are the rows the row stands for and each measure's states. A lane gives each row its
-group through the same keys and functions as rows, and each aggregate folds the row's state into it,
-an exact sum merged and an extreme compared, to the bits the rows would give. A source that keeps
-states makes the pass block rather than stream when one of its objects would answer: states come
-with their objects, not in key order. `ScanOptions.UseSynopses` turns this off, and the metrics count
-the table rows folded (`SynopsisRows`) and the rows read at the edges (`EdgeRows`).
-
-`ScanOptions.AlignWindow` grows the window on the instant to what the tables answer whole. The pass
-carries the question's keys and measures beside its states (`ScanSpec.Aligning`), set from the plan
-whether the states or the rows answer, so the source grows the same window either way: each end that
-cuts an object moves, in the object of most rows it cuts, to the nearest bound at which that object
-answers its side of the window with no row, its slice's, its hour's or its own, and no further than
-the instants it holds. The source rewrites the filter's bounds on the instant once per scan, from the
-entries alone, and the metrics give the window applied (`WindowFrom`, `WindowTo`). Another object the
-moved end cuts, a late or fresh one whose slices fall elsewhere, reads its rows there, so the answer
-is the exact one of that window.
+A pass may also take states rather than rows from its source. When every aggregate is a count of the
+rows, a sum, a minimum, a maximum or a mean of a number column or of a variant's integer or double path,
+none of them filtered, and every key is a column, a function of one or a variant's path read strictly,
+the pass asks its source for states, a row per group of keys with the rows it stands for and each
+measure's states; a lane gives each row its group through the same keys and functions as rows, and
+each aggregate folds the row's state into it, an exact sum merged and an extreme compared, to the bits
+the rows would give. A path's states carry the path's text as their name. No source of a dataset gives
+states for now: the per-column synopses will ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#5-the-synopses-all-per-column)).
+`ScanOptions.UseSynopses` and `ScanOptions.AlignWindow` choose them and the window they answer whole,
+and do nothing until then.
 
 ### 9.4 Parallelism and the merge
 
@@ -924,26 +906,10 @@ with nothing cut first, its own table homing them by the bits below the part's, 
 chosen row and a tie keep the earlier range's.
 
 On a dataset, a range is an object, and an object holding two shares of the rows or more is cut
-between its chunks, as a file's rows are, so no chunk is read by two ranges. An object whose synopsis
-answers the pass's states counts for none of the shares of rows, but for the rows its answer reads, the
-rows of its tables' chunks and of its edges' slices; whether it answers, its entry says, as its scan would
-find, so that one whose tables do not hold the question is cut as any other. Up to eight objects in a row
-that their tables alone answer, with no row read at an edge, of an identifier left out or of a delete, make
-one range while they read less than a share of tables' rows together, 2^16 at least: such an answer takes
-a tenth of a millisecond warm, where a range costs a walk of the tree to its rows and a lane's turn, so that
-a warm count over 48 hourly objects at 16 lanes took 3.8 ms and allocated 1.7 MB with a range an object,
-against 3.1 ms and 221 KB. An answer that reads two shares or more, and takes no row of an identifier left
-out or of a delete, is cut between the chunks of its tables into ranges of its slices, at a slice that no
-bucket a table folds whole straddles: a lane answers its range as the object is answered under a window
-that ends where the range does, and reads the slices of the edges it holds. A count per service and per
-12 hours over a window that cuts three hours of 540 M rows, 3.47 M rows of runs, one lane's whole when an
-answer was, took 32 ms at 16 lanes as at one; cut, 11 ms. Over several lanes, an edge of the answer of two
-edge shares of rows or more, 2^17 at least, is cut between its chunks into ranges of its rows alone, which
-read them under the window's filter as the edge was read, and the ranges answered around it end and begin
-with its neighbours' slices: a window whose edge cuts a minute of 3 M rows, one lane's to decode, took 38.7
-ms at 16 lanes as at one without latency, 83 ms over a store of 5 ms; cut, 3.3 and 39.8 ms. The objects
-that are cut are opened side by side to learn where their chunks end, and the ranges then find them
-already open.
+between its chunks, as a file's rows are, so no chunk is read by two ranges. Under a window on the
+instant, an object of time slices counts for the rows of the slices the window reaches, which its entry
+names, and is cut between their chunks alone. The objects that are cut are opened side by side to learn
+where their chunks end, and the ranges then find them already open.
 No object settles ([statistics and zone maps](#93-statistics-and-zone-maps), and see
 [13-dataset.md](13-dataset.md)). A group by that streams runs as [in parallel, in
 order](#25-in-parallel-in-order) describes, its ranges grouped side by side and followed in row order,

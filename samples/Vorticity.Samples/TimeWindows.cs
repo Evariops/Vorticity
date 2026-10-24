@@ -21,9 +21,9 @@ public partial record struct ServiceTotals(string Service, long Count, long Byte
 public partial record struct Logged(string Retention, DateTimeOffset At, string Message);
 
 /// <summary>
-/// The time-window part of the datasets page: a dataset compacted by periods, its questions answered from the
-/// synopses, a request left out, a window asked newest first, the synopsis cache, and rows of two retentions
-/// kept in a dataset each and expired on their own.
+/// The time-window part of the datasets page: a dataset compacted by periods, questions that read the rows their window
+/// reaches, a request found through its identifier, a window asked newest first, the objects' directories kept on the
+/// local disk, and rows of two retentions kept in a dataset each and expired on their own.
 /// </summary>
 internal static class TimeWindows
 {
@@ -67,25 +67,25 @@ internal static class TimeWindows
 
             DateTimeOffset from = Start;
             DateTimeOffset to = Start.AddDays(2);
-            foreach (bool synopses in new[] { true, false })
-            {
-                Aggregation question = dataset.Scan<Request>().With(new ScanOptions { UseSynopses = synopses })
-                    .Where(r => r.At >= from && r.At < to)
-                    .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)));
-                List<ServiceTotals> totals = await question.As<ServiceTotals>().ToRecordsAsync().ToListAsync();
-                Console.WriteLine(
-                    $"two days by service, synopses {(synopses ? "on" : "off")}: {string.Join(", ", totals.OrderBy(t => t.Service, StringComparer.Ordinal).Select(t => $"{t.Service} {t.Count}"))}; " +
-                    $"{question.Metrics.Rows} rows read");
-            }
+            Aggregation question = dataset.Scan<Request>()
+                .Where(r => r.At >= from && r.At < to)
+                .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)));
+            List<ServiceTotals> totals = await question.As<ServiceTotals>().ToRecordsAsync().ToListAsync();
+            Console.WriteLine(
+                $"two days by service: {string.Join(", ", totals.OrderBy(t => t.Service, StringComparer.Ordinal).Select(t => $"{t.Service} {t.Count}"))}; " +
+                $"{question.Metrics.Rows} rows read");
 
-            // One request found through its identifier's hashed postings, then left out of a count.
+            // A window inside a day reads the blocks its instants reach, and no other.
+            Aggregation quarter = dataset.Scan<Request>()
+                .Where(r => r.At >= to.AddMinutes(-15) && r.At < to)
+                .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)));
+            List<ServiceTotals> last = await quarter.As<ServiceTotals>().ToRecordsAsync().ToListAsync();
+            Console.WriteLine($"the last quarter of an hour of the second day: {last.Sum(t => t.Count)} requests; blocks decoded {quarter.Metrics.BlocksDecoded}, pruned {quarter.Metrics.BlocksPruned}");
+
+            // One request found through its identifier's hashed postings.
             Scan<Request> lookup = dataset.Scan<Request>().Where(r => r.RequestId == needle);
             List<Request> found = await lookup.ToRecordsAsync().ToListAsync();
             Console.WriteLine($"{needle}: {found.Count} row, at {found[0].At:MM-dd HH:mm:ss}, {lookup.Metrics.BlocksPruned} blocks pruned");
-
-            ScanPlan plan = await dataset.Scan<Request>().Where(r => r.At >= from && r.At < to && r.RequestId != needle)
-                .GroupBy(r => r.Service).Select(g => (g.Key, g.Count())).ExplainAsync();
-            Console.WriteLine($"leaving {needle} out, each object reads: {string.Join(", ", plan.States.GroupBy(step => step.Read).Select(kind => $"{kind.Count()} {kind.Key}"))}");
 
             // The newest day first, then the one before: each part's answer is final for its range of time.
             await foreach (WindowPart<List<ServiceTotals>> part in dataset.AskNewestFirstAsync(from, to, async (start, end, ct) =>
@@ -97,20 +97,24 @@ internal static class TimeWindows
             }
         }
 
-        // A session that keeps the tables on the local disk: the second question asks the store nothing for them.
+        // A session that keeps on the local disk the directories the objects' tables of contents declare, which a read with
+        // no open of an object, such as a lookup in a large one, then finds there.
         await using (VortexSession session = VortexSession.Create(options =>
             options.SynopsisCache = new SynopsisCache(Demo.Path("synopsis-cache"), capacityBytes: 64L << 20)))
         await using (VortexDataset cached = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }))
         {
             long warmed = await cached.WarmAsync<Request>(r => r.At >= Start);
-            store.Reset();
-            List<ServiceTotals> again = await cached.Scan<Request>().Where(r => r.At >= Start && r.At < Start.AddDays(2))
-                .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))).As<ServiceTotals>().ToRecordsAsync().ToListAsync();
-            Console.WriteLine($"warmed {warmed} bytes of tables; two days by service again: {again.Count} services, {store.Requests} requests to the store");
+            List<ServiceTotals> again = await TwoDaysAsync(cached);
+            Console.WriteLine($"warmed {warmed} bytes of directories; two days by service again: {again.Count} services");
         }
 
         await RetentionAsync();
     }
+
+    /// <summary>The count and bytes per service over the first two days.</summary>
+    private static async Task<List<ServiceTotals>> TwoDaysAsync(VortexDataset dataset) =>
+        await dataset.Scan<Request>().Where(r => r.At >= Start && r.At < Start.AddDays(2))
+            .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))).As<ServiceTotals>().ToRecordsAsync().ToListAsync();
 
     /// <summary>Rows kept for different lengths of time: a dataset per retention, each expired on its own.</summary>
     private static async Task RetentionAsync()

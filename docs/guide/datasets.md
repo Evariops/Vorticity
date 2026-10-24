@@ -126,27 +126,21 @@ queue, with large objects cut between their chunks. On the first column of the c
 function of it, a group by streams, because the dataset delivers its rows in key order. See
 [aggregates.md](aggregates.md).
 
-A dataset compacted by periods answers many aggregations from its objects' synopses instead of their
-rows. Each sealed object keeps tables of counts, exact sums and extremes per value of its
-low-cardinality columns, per slice of time and per hour. A count, a sum, a minimum, a maximum or a
-mean, grouped by such columns or by a function of the instant, under a filter on them and a window of
-time, reads a few table rows per object, and then only the rows of the slices the window cuts. The
-answer is the same bits as from the rows. On two hours and a quarter of requests, a count per service
-read 15 table rows instead of 6 400 rows. `ScanOptions.UseSynopses = false` reads the rows, to check a
-synopsis. The scan's metrics count the table rows (`SynopsisRows`) and the rows read at the window's
-edges (`EdgeRows`), and the question's `ExplainAsync()` lists in `States` what each object reads: a
-table and the buckets it folds, the slices read at the edges, or its rows and why. Such a group by
-delivers its groups once the pass has run, rather than streaming. Three days of a request every five
-seconds, by service over the first two (the `time-windows` sample):
+A dataset compacted by periods cuts the objects it seals into time slices, and a question under a
+window on the instant reads only what the window reaches: the objects whose instants it may hold, and
+in each the blocks whose instants it holds, which the object's slice table and zone maps find. Every
+aggregation reads its rows, as above. Three days of a request every five seconds, by service over the
+first two, then over the last quarter of an hour of the second (the `time-windows` sample):
 
 ```
 51840 requests over three days in 3 objects
-two days by service, synopses on: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 10 table rows, 0 rows read
-two days by service, synopses off: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 0 table rows, 34560 rows read
+two days by service: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 34560 rows read
+the last quarter of an hour of the second day: 180 requests; blocks decoded 1, pruned 2
 ```
 
-A key of a variant column counts as a column too, when it is read strictly as an integer, a double, a
-text or a boolean, and the objects shred it:
+A key of a variant column is asked as a column is, read strictly as an integer, a double, a text or a
+boolean. An object that shreds the key reads its typed column, and one that leaves it in the residual
+parses the residual of the chunks that hold it:
 
 ```csharp
 var routes = dataset.Scan<LogRow>()
@@ -155,63 +149,14 @@ var routes = dataset.Scan<LogRow>()
     .Select(g => (g.Key, g.Count()));
 ```
 
-`AsDouble()` reads floats as well as doubles, which the tables keep apart: it answers from the tables
-of every object that holds no float at the path, and reads the rows of the others. `ToInt64()` converts
-every kind of value, so it reads the rows, as a key an object leaves unshredded does, since its tables
-count only the rows that hold it.
+`AsDouble()` reads floats as well as doubles, the floats from the field's value of the rows that hold
+one, and `ToInt64()` converts every kind of value.
 
-The tables follow one order of the columns per object, fewest values first, and hold the prefixes of
-that order the budget keeps. A question over two columns the order places far apart, a route and a
-pod after a dozen facets, finds them together only in the deepest prefix, whose rows come close to the
-rows themselves. Declare the columns your questions filter and group by together, and every
-compaction keeps a table of each grouping, by hour and by object, weighed under the same budget:
-
-```csharp
-SynopsisGroupings = [["Service", "HttpStatus", "Route"], ["Route", "Pod"]],
-```
-
-Put first the column the questions pick values of: each chunk of the table says the least and the
-greatest value of it that it holds, so a question of one route reads the chunks that may hold it. A
-column of a grouping may be a key of a variant column the objects shred, written as a filter reads
-it, `Attributes['http.response.status_code'].AsInt64()`. A grouping is a setting of the handle that
-runs the compactions, and an object whose order does not hold one of its columns writes no table of it.
-
-A grouping also keeps the sketches of its measures by slice, by hour and by object, for quantiles and
-distributions. A grouping of one column keeps those alone, its values' counts being in the order's
-tables already: declare `["Service"]` and a 99th percentile per service over the last 15 minutes reads
-the sketches of the minutes its window holds whole and the rows of the one it cuts, where no prefix
-holding the service would have kept sketches by slice. The choice keeps a table of sketches by slice
-only where it costs fewer bytes than the columns it answers for, that is where a slice holds many rows
-per group: on three hours of spans at 800 rows a minute, a quantile per service over a window that
-cuts its hours read 540 rows of sketches and 800 rows at its edges, against 72,800 rows without the
-grouping.
-
-A window whose ends fall inside an hour reads the rows its tables cannot answer there: the slices it
-cuts when a table of slices holds the question's keys, the whole hour when only the hour's table does.
-A dashboard over the last N minutes has an end inside an hour every time. `ScanOptions.AlignWindow`
-lets each end move out to the nearest bound the tables answer at, the slice's, the hour's or the
-object's, and no further than the rows held, so the question reads no row. It then answers that
-window exactly, which the metrics give back: divide a count by the window applied, not the one asked.
-
-```csharp
-var question = dataset.Scan<Request>().With(new ScanOptions { AlignWindow = true })
-    .Where(r => r.At >= now.AddMinutes(-15) && r.At < now)
-    .GroupBy(r => r.Service).Select(g => (g.Key, g.Count()));
-var counts = await question.As<ServiceCount>().ToRecordsAsync().ToListAsync();
-var applied = (question.Metrics.WindowFrom, question.Metrics.WindowTo);
-```
-
-On a day of requests behind a store 30 ms away, a count per service over a window that cuts its first
-and last hours took 8 requests in 6 round trips warm, 194 ms, and aligned it took none, 4 ms
-(`vortex-queries --micro questions --only window`). The rows give the same answer under the option, so
-`UseSynopses = false` still checks it.
-
-The objects a synopsis answers are read newest first and many at once, as many as the session lets
-reads be in flight (`VortexSessionOptions.MaxConcurrentReads`), so a day of hourly objects costs the
-round trip of one hour. A filter that leaves out one value of a declared identifier,
-`r.RequestId != id || r.RequestId == null`, is answered from the tables too: the identifier's index
-finds that value's few rows, and they are taken out of the tables' counts and sums. When the
-identifier's column cannot be null, `r.RequestId != id` alone says the same and is answered alike.
+The synopses that will answer without rows the questions the rows cannot answer in time, counts and
+sketches per column and by hour among them, are designed in
+[22-on-the-fly-and-synopses.md](../design/22-on-the-fly-and-synopses.md). Until they come,
+`ScanOptions.UseSynopses` and `ScanOptions.AlignWindow` change nothing: every aggregation reads its
+rows, over the window asked.
 
 A page that shows a long window can show its newest part first. `AskNewestFirstAsync` cuts the window
 at the starts of the periods it crosses, asks your question over each part, several parts at once,
@@ -260,21 +205,24 @@ is rewritten about five times instead of under three, each hour sealed three tim
 (`vortex-queries --micro lifecycle`). The `vortex.dataset.lateness` histogram records how late the
 oldest row of each append came, to set the horizon against.
 
-The tables a question reads can stay on the local disk, so that the next question over the same
-objects asks the store nothing for them. Give the session a `SynopsisCache`, a directory and the bytes
-it may hold:
+The directories a question reads to find an object's rows can stay on the local disk, so that the next
+question over the same objects asks the store nothing for them. Give the session a `SynopsisCache`, a
+directory and the bytes it may hold:
 
 ```csharp
 await using VortexSession session = VortexSession.Create(options =>
     options.SynopsisCache = new SynopsisCache("/var/cache/vorticity", capacityBytes: 20L << 30));
 await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
 
-// Optional: read the last month's tables before the first question needs them.
+// Optional: read the last month's directories before the first question needs them.
 long warmed = await dataset.WarmAsync<Request>(r => r.At >= DateTimeOffset.UtcNow.AddDays(-30));
 ```
 
-Only what an object's table of contents declares enters the cache: its synopsis tables and the
-directories that find its rows, never its data. An object never changes, so an entry never goes stale.
+Only what an object's table of contents declares enters the cache: the directories that find its
+rows, of its chunks, its pages, its indexes and its variants' paths, never its data. A read with no
+open of an object, such as a lookup of an identifier in a large one, needs nothing else before its
+data; a read that opens the object reads its last 64 KiB from the store first. An object never
+changes, so an entry never goes stale.
 Each region is checked against its checksum whenever it is read from the disk, and one that fails is
 read again from the store. One process owns a directory at a time, and the entries outlive it: the
 next session that opens the directory finds them. A second cache on the same directory, in the same
@@ -294,7 +242,7 @@ them at each read: no key and no plain byte reaches the disk, and a frame altere
 read again from the store. A frame is 64 KiB, so a small region costs the disk more than its own bytes.
 Past its capacity, a region
 read only once leaves before one read again and again, so a question over thirteen months passes
-through without pushing out the tables of the last days. The cache reports what it does on the
+through without pushing out the directories of the last days. The cache reports what it does on the
 library's meter, under `vortex.synopsis_cache.*`.
 
 ## Versions
@@ -495,7 +443,7 @@ never lend its values to an unrelated column.
 dotnet run -c Release --project samples/Vorticity.Samples -- datasets
 ```
 
-The dataset of periods, its synopses, the window asked newest first, the cache and the retentions are
+The dataset of periods, the window asked newest first, the cache and the retentions are
 the `time-windows` sample, and the variant columns the `variants` sample:
 
 ```

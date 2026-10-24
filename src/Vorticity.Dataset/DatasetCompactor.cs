@@ -88,7 +88,7 @@ internal readonly record struct LoadedPeriod(long Period, long Rows, long Bytes,
     /// <summary>The pass that writes it, until its last row is handed to the object.</summary>
     internal TimeSpan Write { get; init; }
 
-    /// <summary>From its last row to its object put: the last slice, the indexes' merges, the tables, the footer.</summary>
+    /// <summary>From its last row to its object put: the last slice, the indexes' merges, the footer.</summary>
     internal TimeSpan Finish { get; init; }
 
     /// <summary>The commit, the wait for the commits of the periods before it included.</summary>

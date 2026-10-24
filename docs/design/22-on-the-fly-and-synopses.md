@@ -3,9 +3,8 @@
 How a dataset answers any question, over any columns, by computing it from its rows with the group-by
 engine, and the synopses it keeps beside the rows so that the questions the rows cannot answer in time
 are still answered: a fast path of per-column structures only, a single optional cluster column, and
-answers learned after a question has asked them. This document replaces the time-window design of
-[20-time-window-aggregates.md](20-time-window-aggregates.md): its composite synopsis tables give way to
-synopses per column.
+answers learned after a question has asked them. This document replaces the time-window design that
+came before it: its composite synopsis tables give way to synopses per column.
 
 Figures marked *computed* come from the cost model of section 2 and the reference table of section
 1.2. Figures marked *measured* come from the bench and from the comparison with DuckDB
@@ -421,9 +420,9 @@ directories take under 1 GB of memory *(computed)*.
 | `vorticity.partials.v1` | the local cache; beside the monthly files | learned partials |
 
 Readers skip a kind they do not know, as they do now. The kinds of the former synopsis tables are no
-longer written nor read. The leaf entry loses the former synopsis table of contents and gains the
-column sheets, and the commit format's version rises: a dataset written before is refused with a
-message that says so.
+longer written nor read. The leaf entry keeps its table of contents, at a second version that holds
+them no more, and gains the column sheets. An entry of the first version is read through its object's
+directory, so a dataset written before stays readable and the commit format's version does not rise.
 
 ### 10.4 The recommendation of the cluster column
 

@@ -2556,8 +2556,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>
     /// The path directory of variant column <paramref name="field"/> of the object <paramref name="entry"/>
     /// names, read with no open of the object: the region its entry's table of contents names, in one round
-    /// trip, none once the session's cache holds it. What a question on a path the tables do not name reads
-    /// first. Null when the entry carries no table of contents this library reads, or the column no directory.
+    /// trip, none once the session's cache holds it. Null when the entry carries no table of contents this
+    /// library reads, or the column no directory.
     /// </summary>
     internal async ValueTask<Indexes.VariantDirectory?> ReadPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
     {
@@ -2590,9 +2590,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// The variant column <paramref name="field"/> of the slices of the object <paramref name="entry"/> names
     /// that may hold a value at <paramref name="key"/>, a top-level key, read with no open of the object: its
     /// path directory and the column's chunk directory together, then those slices' chunks together, two
-    /// round trips cold, none once the session's cache holds them. What a question on a path no synopsis
-    /// table names reads. Null when the entry carries no table of contents this library reads; empty when the
-    /// object holds no value there.
+    /// round trips cold, none once the session's cache holds them. Null when the entry carries no table of
+    /// contents this library reads; empty when the object holds no value there.
     /// </summary>
     internal async ValueTask<List<RecordBatch>?> ReadPathAsync(ObjectEntry entry, int field, string key, CancellationToken cancellationToken)
     {

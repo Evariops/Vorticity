@@ -266,13 +266,15 @@ open of a dataset's object passes the length its entry records, which any store 
 the listing with heads removes vacuum's serial heads. On a dataset of a thousand commits on S3, at
 20 ms a head, that is twenty seconds of vacuum spent on heads, and none with the listing.
 
-A question a dataset answers from its synopses reads each object's tables with no open of it, in one
-request an object, and the objects side by side. With a `SynopsisCache` on the session, the second time
-reads them from the local disk and asks the store nothing, and a question whose window cuts slices asks
-it only for the chunks of those slices. `WarmAsync` reads a window's tables into the cache ahead of the
-first question. The requests a store refuses past its limits (thousands a second per prefix on S3, fewer
-on smaller services) are what this saves at a page's scale: a cold month is one request an object, a warm
-one none.
+A question a dataset answers reads the objects it needs side by side. A lookup of an identifier in a
+large object reads the object's directories with no open of it, through the table of contents its entry
+carries; a question that reads rows opens each object it reads, its last 64 KiB read from the store.
+With a `SynopsisCache` on the session, the regions a table of contents declares are read from the
+local disk the second time, and the store is asked nothing for them.
+`WarmAsync` reads a window's directories into the cache ahead of the first question. The requests a
+store refuses past its limits (thousands a second per prefix on S3, fewer on smaller services) are what
+this saves at a page's scale; what each question of the design sends the store is in
+[22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#9-what-the-store-sees).
 
 ## 6. The HTTP layer
 
@@ -642,8 +644,7 @@ be checked against the service ([Azure's checksums](#83-checksums)).
 ### 10.5 The synopsis cache on the local disk
 
 A session may keep on the local disk what questions read of a dataset's objects without their data
-(`VortexSessionOptions.SynopsisCache`): their synopsis tables, their slices' chunk directories, their
-index directories and their variant columns' path directories, and the fence pages and run segments a
+(`VortexSessionOptions.SynopsisCache`): their slices' chunk directories, their index directories and their variant columns' path directories, and the fence pages and run segments a
 lookup of an identifier reads; and the pages of the dataset's tree, by the hash of their bytes ([the
 pages a handle keeps](13-dataset.md#3-objects-and-keys)), unless the dataset is sealed. Only a region
 of an index enters it, never the data nor the footer: one
@@ -661,16 +662,16 @@ An entry is a file named by that key, in directories sharded by the uid, written
 name and then renamed, so a reader never sees half a file. It is written behind the question that read
 its region: the buffer the region was read into is held until one of two writers of the cache's own has
 written it, and a read of the region meanwhile is served from that buffer. A file costs about 1.7 ms to
-create, close and rename on Windows, which the question paid for each region it read: an unaligned
-window over 3 objects of 180 M rows, which read 104 MB of tables, took 276 ms cold against 159 written
-behind, and a count per service over 48 hourly objects 50 ms against 38 at one lane, 44 against 27 at
-sixteen. Past 256 MiB waiting, a region is written before its reader goes on, and the cache's dispose
+create, close and rename on Windows, which the question paid for each region it read: when objects still
+held the synopsis tables of the time, an unaligned window over 3 objects of 180 M rows, which read 104 MB
+of them, took 276 ms cold against 159 written behind, and a count per service over 48 hourly objects
+50 ms against 38 at one lane, 44 against 27 at sixteen. Past 256 MiB waiting, a region is written before its reader goes on, and the cache's dispose
 writes what waits. A sealed object's frames are written at once. The cache walks its directory when it opens,
 and the entries an earlier cache left are its own. One cache owns a directory, through a lock of the
 operating system. An entry's file is opened at its first read and mapped, and kept so while the cache
 keeps up to 4 096 files open: a region read from the disk is a view of the mapping, with no read of the
 system and no copy, and its batches decode from it. On Windows a read took a fifth of a warm question
-over 48 hourly objects' tables, 5.8 ms a question against 4.6 mapped; under Linux (WSL2), the warm
+over the tables of 48 hourly objects of the time, 5.8 ms a question against 4.6 mapped; under Linux (WSL2), the warm
 questions the cache serves alone take up to 12 % less mapped (QP-10, 0.095 ms against 0.105). A
 file the cache maps is one no writer changes while it does: it is whole once renamed, only its own cache
 writes its directory, and the caches that share its root read it without mapping it, so no mapping sees
@@ -690,8 +691,8 @@ fails, or a region whose plaintext fails its checksum, is dropped with its group
 store, and a trailer that does not open the object is dropped and read again too. No key reaches the disk:
 the session unwraps the data key as it does for a read from the store, from its keyring or from the keys
 it holds in memory. A frame of 64 KiB is the unit kept, so a small region costs the disk its frame. On six
-hours of sealed requests, a count per service from the synopses takes 12 requests in two round trips cold
-and none warm, where every question read them again before. Questions that miss the same frames of a
+hours of sealed requests, a count per service from the synopsis tables of the time took 12 requests in two
+round trips cold and none warm, where every question read them again before. Questions that miss the same frames of a
 sealed object at once read them each.
 
 Past its capacity it drops entries as S3-FIFO does, counting bytes. A new region waits in a small

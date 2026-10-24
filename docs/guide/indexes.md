@@ -256,7 +256,8 @@ rows share costs less, a pair per block and value. Measured on a day's objects:
 
 Random ids leave the share lower only because the object itself compresses worse, by 58 %. Declare a
 column whose values questions look up one at a time, and no other: a column they filter or group by
-is answered by the synopses, and a key of a variant column they filter on is declared shredded, below.
+is read, its blocks pruned by their zone maps, and a key of a variant column they filter on is declared
+shredded, below.
 
 An identifier may also be a key of a variant column, read as a string or an integer, written as a filter
 writes it:
@@ -281,8 +282,8 @@ ShreddedPaths = ["Attributes['http.response.status_code'].AsInt64()"],
 
 Every compaction then keeps the key in a column of its own, whatever share of the rows holds it, so that
 `r.Attributes["http.response.status_code"].AsInt64() >= 500` reads that column instead of parsing the
-attributes, and the objects' synopses count its values. The class is one of `AsString`, `AsInt64`,
-`AsDouble` and `AsBool`; values of another class at the key stay in the column's residual.
+attributes. The class is one of `AsString`, `AsInt64`, `AsDouble` and `AsBool`; values of another class
+at the key stay in the column's residual.
 
 Appends leave the attributes whole, so a question over the last minutes, which no compaction has
 rewritten yet, still parses them once per query node. A handle opened with `ShredOnAppend = true`

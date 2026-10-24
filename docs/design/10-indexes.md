@@ -146,7 +146,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#410-the-file-level-filter)).
+file-level filter](#48-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -215,22 +215,18 @@ chunk, and a chunk that is not a dictionary claims nothing.
 
 ### 4.4 `vorticity.slices.v1`: the time slices of a file
 
-A file whose rows a dataset sorts slice by slice of their instant carries its slice table: per slice,
-its bounds on the instant, its first row and its row count, in time order, covering every row once.
-Like the dictionary probe it has no payload. The entry is on the instant column, one run over every
-block, and its options hold the table behind a version byte: the instant's unit, then per slice the
-gap from the previous slice's end, its width and its rows, each a varint, a few bytes a slice, then the
-columns each slice's rows are sorted by before the instant, each zigzagged, an entry below zero standing
-for the shapes of a shredded variant column, then the paths the file's synopsis counts: per path its
-variant column, its key, and a word holding the class its values are read at, whether the file leaves
-the path in the residual (bit 8), and whether it holds 32-bit floats there, which a path of doubles
-leaves out and `AsDouble` reads (bit 9). An entry from 2²⁴ up names one of those
-paths, a key a variant column shreds whose values repeat (version 4; the three before it, which only
-the first writers of the format made and no store keeps, are not read). A synopsis table's keys and measures
-name paths the same way. A table that does not decode, or whose rows are not the file's, is not read.
-The writer that sorts the rows declares the slices before it completes the file, which checks that
-they cover its rows ([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)),
-and writes an index directory for them even when its policy asks for no index. The table is also the
+A file a dataset of periods writes in time slices carries its slice table: per slice, its bounds on the
+instant, its first row and its row count, in time order, covering every row once. Like the dictionary
+probe it has no payload. The entry is on the instant column, one run over every block, and its options
+hold the table behind a version byte: the instant's unit, then per slice the gap from the previous
+slice's end, its width and its rows, each a varint, a few bytes a slice (version 5). Version 4 followed
+the slices with the columns each slice's rows were sorted by and the paths the file's synopsis counted,
+which a reader skips, so that a file written then is still walked by its slices; the three before it,
+which only the first writers of the format made and no store keeps, are not read. A table that does
+not decode, or whose rows are not the file's, is not read. The writer declares the slices before it
+completes the file, which checks that they cover its rows ([time
+slices](11-write-strategy.md#9-time-slices-and-shredded-variants)), and writes an index directory for
+them even when its policy asks for no index. The table is also the
 instant's key source, so an object of a dataset of periods carries no sorted run on a key of its
 instant alone ([sources of order](12-index-reads.md#2-sources-of-order)). A scan of an object's rows
 under a window on the instant covers the rows of the slices the window reaches, which the table of the
@@ -281,7 +277,7 @@ drops the entry.
 ### 4.6 `vorticity.variant.directory.v1`: every path a variant holds
 
 A job of a dataset of periods counts the paths of each variant column as it cuts the object's slices
-([shredded variants](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)), and the object carries what it
+([shredded variants](11-write-strategy.md#9-time-slices-and-shredded-variants)), and the object carries what it
 counted: for every path and class of value the rows hold there (a boolean, an integer, a number, a
 text, a timestamp, an object, a list, a null, anything else), how many values, where they lie (the
 typed column a shredded path keeps, the values of other classes beside it, or the residual), and their
@@ -342,70 +338,7 @@ attributes: that key's entry is then built under that policy, a Bloom filter or 
 postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash), the only locating kind a
 path takes for now. An object that does not shred the key has no slot for it, and no entry.
 
-### 4.8 `vorticity.synopsis.columns.v1`: the synopsis part
-
-A writer told an object's synopsis columns ([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants))
-holds their chunks in a scratch store, under its memory budget and in its sealed file past it, and
-writes them together once the rest of the data is out, before the index regions: one contiguous range
-of the file, the synopsis part. A data segment is still a data segment, which the layout references
-and Rust reads, so the part changes no byte a reader sees, only where the chunks lie. The part's start
-and end are in the object's table of contents ([what a node carries](13-dataset.md#42-what-a-node-carries)),
-and its chunks are segments of their columns, which the footer and the slices' chunk directories name
-already. The directory names them no more. Until the format froze, each synopsis column had an entry
-of this kind whose payloads listed its chunks again, each with an XXH3-64 the writer computed for it
-alone: no reader asked for them, and they took 7.0 MB and 307 622 regions of a day's directory of
-11.5 MB. A reader ignores such an entry, and an append drops it.
-
-### 4.9 `vorticity.synopsis.table.v1`: the synopsis tables
-
-The tables of an object's synopsis ([what reads them](12-index-reads.md#45-aggregations-from-a-datasets-synopsis))
-follow the synopsis columns in the synopsis part, each a list of chunks, each chunk an array payload in
-the file's encodings, checksummed with XXH3-64. A table's rows are a struct: the start of its bucket,
-the values of its keys, a count of rows, then for each measure column the count of its values, its
-exact sum in the words of its persisted state (two for an integer's 128 bits, five for a float's indexed
-sum), and its least and greatest widened to 64 bits; a table of sketches ends its rows with the sketches
-of the columns whose distinct values it counts. Its measures are the object's but its own keys, so
-that a number that seldom repeats in a slice, a duration, which leaves the order when a large first slice shows it,
-keeps its states in every table, and tables of one object may name different ones. The entry sits on the root, takes no column, and
-holds in its options what the table is (run statistics per slice, a coarse table per hour or per object,
-or one column's value counts per hour or per slice), its key fields, its measure fields and its row count.
-Its run's one payload is the table's list of chunks: per chunk, its region with its checksum, its first
-and last bucket, its rows, for a table of a column's values the least and greatest value its rows
-hold, and for a table of sketches the region of its distinct sketches. The lists of all the tables lie
-side by side, after every table's chunks, so that a read of the lists reads nothing else. The run
-names no dtype: a reader of the file alone rebuilds the rows' struct from the file's schema and the
-paths of its slice table. A dataset's reader learns from the object's table of contents either the
-list's region, with its checksum and what it holds, or, for a table whose list takes 512 bytes or
-less, its chunks themselves: a question then reads that table's chunks with no round trip for its list,
-which doubled the requests of a question over hourly objects, whose tables hold a chunk or two. A day
-keeps 33 of its 44 tables so, whose lists take 3.1 KB. A day's tables listed their chunks in the directory
-before, each with a copy of its struct's dtype: 4.5 MB of it, 4.26 MB of those copies. A chunk of a
-table of sketches lays its distinct sketches in a region of their own, right after the rest of its
-rows, which a question reads only when it counts distinct values: a percentile per method read them
-for nothing. With this and the lists, it reads 0.46 MB cold at 32 lanes over the terabyte's ten days,
-where it read 5.5. A question reads only the chunks that hold a
-bucket it folds. A chunk holds 65 536 rows at most, so that no array outgrows its 32-bit lengths whatever
-the object's rows, and its first 4 096, so that the bytes a row of the table takes are known early. An
-hour's rows end a chunk when they weigh 4 MiB before encoding, about what a round trip to an object
-store costs in transfer once they are encoded: a question over an hour of an object of a day then reads
-that hour's chunk alone, while smaller tables stay whole, since a read of them costs its round trip
-whatever it holds.
-
-The writer chooses which tables to keep, greedily, as views are classically selected. The questions are
-the grains the tables hold, a bucket and keys each, weighed alike. Answering one costs its source's
-bytes at a price per byte and its rows at a price per row grouped: the columns it sums over the object's
-rows, or the cheapest table kept that answers it by merging its rows, a finer bucket with the same keys
-and more. Each round keeps the table that lowers the questions' costs the most per byte it holds, while
-it lowers them and fits the budget: the indexes' share of the data's bytes, with no floor, so that a
-small object keeps none. A table its builder gave up as it grew ([sorted time
-slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)) is weighed too, at bytes no
-budget holds, so the questions are the grains of every table and the choice keeps what it would have
-kept had each been built to the end. The tables' bytes count with the indexes in the write report,
-which also holds every table's verdict with its numbers, as it holds `Auto`'s, a table given up with
-the rows and the projection that ruled it out. An append drops the entries, since the tables do not
-count its rows.
-
-### 4.10 The file-level filter
+### 4.8 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

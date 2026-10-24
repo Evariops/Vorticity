@@ -659,7 +659,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>
     /// The nodes an arena of a result's batches starts with room for: its struct and twice its columns, a column's and
     /// its validity's or its views'. A record is a hundred bytes or so, and sixty-four of them were a sixth of what a
-    /// warm group by answered from the tables allocated; a result of more columns grows its arena once.
+    /// warm group by answered from the synopsis tables of the time allocated; a result of more columns grows its arena once.
     /// </summary>
     internal static int ResultNodes(int columns) => Math.Max(4, 1 + (2 * columns));
 

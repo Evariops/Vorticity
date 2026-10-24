@@ -16,13 +16,13 @@ namespace Vorticity;
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
 
 /// <summary>
-/// What an aggregation reads of one object of a dataset: a table of its synopsis, whose states stand for
-/// the rows of the buckets it folds; the rows of the slices a window cuts; or its rows whole, and why.
+/// What an aggregation reads of one object of a dataset whose synopses answer it: the states that stand for
+/// the rows of the buckets they fold; the rows of the slices a window cuts; or its rows whole, and why.
 /// </summary>
 /// <param name="Object">The object, by its key in the dataset.</param>
-/// <param name="Read"><c>table</c>, <c>edges</c> or <c>rows</c>.</param>
-/// <param name="Detail">The table's kind, its bucket and the columns that key it; or why the rows are read.</param>
-/// <param name="Count">The buckets the table folds, the slices read at the edges, or the object's rows.</param>
+/// <param name="Read">What it reads: states, the rows at the edges, or <c>rows</c>.</param>
+/// <param name="Detail">The synopsis, its bucket and the columns that key it; or why the rows are read.</param>
+/// <param name="Count">The buckets the synopsis folds, the slices read at the edges, or the object's rows.</param>
 public sealed record StatesStep(string Object, string Read, string Detail, long Count);
 
 /// <summary>
@@ -52,8 +52,8 @@ public sealed record ScanPlan(
     public GroupPlan? Grouping { get; init; }
 
     /// <summary>
-    /// For an aggregation over a dataset whose objects keep synopses, what each object reads: its tables'
-    /// states, the rows at a window's edges, or its rows and why; empty otherwise.
+    /// For an aggregation over a dataset whose objects keep synopses, what each object reads: its synopses'
+    /// states, the rows at a window's edges, or its rows and why; empty otherwise, as for every dataset yet.
     /// </summary>
     public ImmutableArray<StatesStep> States { get; init; } = [];
 

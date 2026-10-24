@@ -272,53 +272,36 @@ period, so its plan reads every leaf. Its jobs come in this order:
 Every job writes an object per period, so that no object spans two, and level 0's exit an object per
 level as well.
 
-Every such object is written in sorted slices. A job of a dataset with a variant column merges its
-inputs twice. The first pass reads the clustering key, the columns that may be synopsis columns and the
-variant columns alone, through a projection of each input, and counts, for each object it will write,
-its rows per second and the distinct values of the columns that may be synopsis columns, from which it
-cuts the object's slices and picks the order inside them: the columns whose values repeat twice on
-average, fewest values first
-([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)). The second
-pass gathers each slice as its rows come, in time order, codes each synopsis column's values in the
-order of the values, and sorts the slice by one stable counting sort per column, from the last to the
-first, so that rows of equal values keep their time order without a pass on the instant. The rows are
-gathered once through the permutation and written, and the slice table records the order. A slice of
-a million rows over three synopsis columns sorts in 43 ns a row (`vortex-queries --micro slicesort`),
-its rows copied, coded, sorted and gathered. The object then holds its rows in the key's order slice by
-slice only, and a dataset of periods takes no row's rank for its row above level 0. On a key of the
-instant alone it carries no sorted run on the key: its slice table is the source through which the key
-cursor and every read in key order find its rows, a job's merge of its inputs included, which reads
-each slice once ([sources of order](12-index-reads.md#2-sources-of-order)). A slice is held whole while
-it sorts: a slice past the query memory's grant, sorted in runs and merged, is not done yet.
+Every such object is written in time slices, the rows of each in the order they came ([time
+slices](11-write-strategy.md#9-time-slices-and-shredded-variants)). A job of a dataset with a variant
+column merges its inputs twice. The first pass reads the clustering key and the variant columns alone,
+through a projection of each input, and counts, for each object it will write, its rows per second and
+the paths of its variant columns, from which it cuts the object's slices and chooses what each variant
+column shreds. The second pass gathers each slice as its rows come and writes it whole, on a lane of
+the session's while the next slice fills. A dataset of periods takes no row's rank for its row above
+level 0, since a cluster column may order the rows inside each slice. On a key of the instant alone an
+object carries no sorted run on the key: its instant, ascending through the file, or its slice table is
+the source through which the key cursor and every read in key order find its rows, a job's merge of
+its inputs included ([sources of order](12-index-reads.md#2-sources-of-order)).
 
 A job of a dataset without a variant column merges its inputs once, each object written as its rows
 come, as a load writes a period: its first slice runs to the end of the unit that holds its 65 536th
-row, those rows' pace choosing the width of its slices and its order judged on that slice, and each
-slice after it is cut at that width as its rows come, a burst finer where the stream meets it
-(`SliceStream`). For rows at a steady pace,
+row, those rows' pace choosing the width of its slices, and each slice after it is cut at that width as
+its rows come, a burst finer where the stream meets it (`SliceStream`). For rows at a steady pace,
 those are the slices a count of every row cuts once a slice aims at 2²¹ rows or more, three million
-by default: a unit of the width a count chooses then holds more than the rows the order is judged
+by default: a unit of the width a count chooses then holds more than the rows the pace is judged
 from, the widths being sixty times apart at most. A dataset whose slices aim at fewer rows is merged
-twice. A seal knows the rows of its one object from its inputs, which weigh its synopsis tables as
-the first pass's count does; the objects of another job are weighed at the end. On an hour of thirty
-million requests (`vortex-queries --micro seal --ceiling 1`), level 0's exit takes 11.4 s and the seal
-9.3 s in one pass, against 18.3 and 14.0 s in two, and the sealed object is the same to the byte, its
-ten slices and its order included; the process peaks at 9.2 GB against 8.5.
+twice. A seal knows the rows of its one object from its inputs, which size its chunks and its hashed
+postings as the first pass's count does. On an hour of thirty million requests (`vortex-queries
+--micro seal --ceiling 1`), when the slices were still sorted for the synopsis tables of the time,
+level 0's exit took 11.4 s and the seal 9.3 s in one pass, against 18.3 and 14.0 s in two, and the
+sealed object was the same to the byte, its ten slices included.
 
 The first pass also counts the paths of each variant column, value by value, and the object shreds
 those its own rows pay for, each column in long chunks of its own, with a path map that lets a
-question read one key alone ([shredded variants](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)).
+question read one key alone ([shredded variants](11-write-strategy.md#9-time-slices-and-shredded-variants)).
 Counting and choosing take 181 ns a row of six to eight attributes, and the shredded write 310 ns a
 row more than the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing.
-
-The first pass chooses the synopsis columns, those that repeat, and the object's first slice settles
-their order: greedily, each place to the column that adds the fewest runs after those before it,
-measured on a sample of 16 384 of the slice's rows, which puts a column nested in another right after
-it. Once an object has chosen what a variant column shreds, the shape of each row, which shredded keys
-it holds and in which class, and whether anything is left to the residual, is one more candidate, when
-its shapes repeat twice on average in the slice. The rows of each shape then lie together inside each
-run of the columns before it. Coding the shapes takes about 100 ns a row of six to eight attributes,
-on top of the slice's sort.
 
 A period is a day at creation, and each seal weighs the load of the period it wrote and
 records the length that load calls for, from past the newest instant ([the length of a
@@ -338,7 +321,7 @@ worth measuring on jobs of minutes over gigabytes, and is not done.
 
 A seal of a day at the design's rate reads and writes some 170 GB, and a failure starts it again from
 nothing: its object is one upload, whose writer holds until the end what the end writes, the chunk
-directories, the zone maps, the postings' pages, the synopsis tables' runs, the census of the paths.
+directories, the zone maps, the postings' pages, the census of the paths.
 Three ways to lose less were weighed, none built:
 
 | | how | what it takes | what it leaves |

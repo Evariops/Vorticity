@@ -26,8 +26,8 @@ public sealed partial class DatasetPeriodsCompactionTests
         ClusteringKey = [nameof(Request.At)],
         Periods = new PeriodOptions { Lateness = lateness ?? TimeSpan.FromHours(1), Length = length },
 
-        // A synopsis budget as large as the data, so that the tables of the schedules' small objects that
-        // save anything are kept, and checked.
+        // An index budget as large as the data, so that no index of the schedules' small objects is dropped
+        // for its bytes.
         Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },
     };
 
@@ -599,7 +599,7 @@ public sealed partial class DatasetPeriodsCompactionTests
         VortexDataset dataset, List<DateTimeOffset> instants, List<DateTimeOffset> appended, List<long>? statuses = null)
     {
         // A size drawn from the instant, which seldom repeats where ids do once deletes shrink the
-        // model: a measure the synopsis tables sum, never a synopsis column.
+        // model.
         Request[] requests = [.. instants.Select((at, i) => new Request(at, $"r-{appended.Count + i}", 200 + i, at.ToUnixTimeSeconds() * 7_919L % 1_000_003))];
         await using ObjectDraft draft = dataset.StartObject();
         await draft.Writer.WriteAsync<Request>(requests, Ct);

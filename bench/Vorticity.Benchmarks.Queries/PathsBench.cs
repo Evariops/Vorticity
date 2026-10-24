@@ -214,7 +214,7 @@ internal static partial class PathsBench
             return 0;
         }
 
-        // --entries: each store's entries, and with --explain its tables, with no question asked.
+        // --entries: each store's entries and their tables of contents, with no question asked.
         if (settings.Entries)
         {
             foreach (Built? built in new[] { requests, logs, spans, logs2 })

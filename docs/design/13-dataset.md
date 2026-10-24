@@ -177,17 +177,15 @@ A leaf entry describes one data object:
   for objects of hundreds of megabytes and wide tables. This field and those like it come after the
   summaries, as a zero where a count of deleted rows would stand, which no earlier entry holds there,
   then their length and their tagged bytes, so an entry without them keeps its bytes
-- for an object of sorted slices, the table of contents of its synopsis: the object's schema, the
-  encodings its blobs name, its slice table and the region of each column's chunk directory, or of
-  its page table with the first row of each page ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)),
-  the extent of its synopsis part, each synopsis table with its chunks, or with the region of their
-  list, its checksum and what it holds for a table of many chunks ([the synopsis tables](10-indexes.md#49-vorticitysynopsistablev1-the-synopsis-tables)),
-  each variant column's path directory, the region of the object's index directory, and where in it
-  the entry of each locating index lies ([the directory](10-indexes.md#3-the-directory-and-the-runs)).
-  With no open of the object, a reader of its tables reads the lists of those that keep them apart,
-  for every object at once, then their chunks; a reader of a slice reads its columns' directories,
-  then its chunks; and a lookup by a value reads its index entries with its columns' page tables,
-  then its postings, the pages of its rows and its chunks, four round trips. It is a tagged field
+- for an object in time slices, its table of contents: the object's schema, the encodings its blobs
+  name, its slice table and the region of each column's chunk directory, or of its page table with the
+  first row of each page ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)),
+  each variant column's path directory, the region of the object's index directory, and where in it the
+  entry of each locating index lies ([the directory](10-indexes.md#3-the-directory-and-the-runs)). With
+  no open of the object, a reader of a slice reads its columns' directories, then its chunks; and a
+  lookup by a value reads its index entries with its columns' page tables, then its postings, the pages
+  of its rows and its chunks, four round trips. A table of contents of the first version, which also
+  held the synopsis tables of the time, is ignored, and its object read through its directory. It is a tagged field
   like the footer's length, about 2.2 KB for a period of an hour, and 19.7 KB for a day, where
   it took 318 KB while it held every table's chunks
 
@@ -283,11 +281,12 @@ and its outputs are sorted by construction. The run is the object's structure ra
 the index budget spares it. On a narrow table it is as large as the column it orders, and a budget of
 a tenth of the data would refuse it on every object past a mebibyte, the merge's outputs included.
 
-A dataset of periods sorts what leaves level 0. Its compaction writes every object in time slices,
-each sorted by the object's synopsis columns, then by its instant ([a dataset of
+A dataset of periods cuts what leaves level 0 in time slices. Its compaction writes every object in
+them, the rows of a slice in the order they came ([a dataset of
 periods](15-compaction.md#a-dataset-of-periods)). On a key of the instant alone such an object carries
 no run: its slice table is the key's source, which finds a key's slice and sorts the slice's instants
-when a read needs them ([sources of order](12-index-reads.md#2-sources-of-order)). A composite key
+when a read needs them, unless the instant ascends through the file, which a sorted column serves
+([sources of order](12-index-reads.md#2-sources-of-order)). A composite key
 keeps its run. Sealing the object checks that its slice table walks the key.
 
 An object whose rows come in key order carries no run when the key is a single integer column with
@@ -692,7 +691,7 @@ that leads with a timestamp is encoded as the timestamp's storage, its seek keys
 Shredded paths (`DatasetOptions.ShreddedPaths`) name keys of variant columns, each read in one class as a
 filter reads it, `Attributes['status'].AsInt64()`: every job shreds them into columns of their own, the
 keys its census counted or not, as it shreds an identifier's key, so that a question on one reads its
-column and the object's synopsis counts its values. Each names a key of a variant column of the
+column. Each names a key of a variant column of the
 schema, once, in a class among string, integer, double and boolean.
 
 Both lists change after the creation, each in a commit that rewrites no object. `AddIdentifiersAsync`
