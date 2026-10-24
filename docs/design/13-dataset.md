@@ -181,7 +181,8 @@ A leaf entry describes one data object:
   name, its slice table and the region of each column's chunk directory, or of its page table with the
   first row of each page ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)),
   each variant column's path directory, each column's sheet ([the column
-  sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)), the region of the object's index
+  sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)) and counts by hour ([the
+  counts](10-indexes.md#49-vorticitycolumncountsv1-a-columns-counts-by-hour)), the region of the object's index
   directory, and where in it the entry of each locating index lies ([the
   directory](10-indexes.md#3-the-directory-and-the-runs)). With no open of the object, a reader of a slice
   reads its columns' directories, then its chunks; a question on a value reads the sheets of its columns

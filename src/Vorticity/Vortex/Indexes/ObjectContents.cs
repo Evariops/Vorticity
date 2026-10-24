@@ -75,9 +75,20 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<(int Field, IndexSegment Region)> Sheets { get; init; } = [];
 
     /// <summary>The region of column <paramref name="field"/>'s sheet, or null when the object keeps none of it.</summary>
-    internal IndexSegment? SheetOf(int field)
+    internal IndexSegment? SheetOf(int field) => RegionOf(Sheets, field);
+
+    /// <summary>
+    /// Each top-level column's counts by hour (<see cref="ColumnCounts"/>), and its region: what a question on that column
+    /// alone reads of the object instead of its rows. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, IndexSegment Region)> Counts { get; init; } = [];
+
+    /// <summary>The region of column <paramref name="field"/>'s counts, or null when the object keeps none of it.</summary>
+    internal IndexSegment? CountsOf(int field) => RegionOf(Counts, field);
+
+    private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
-        foreach ((int column, IndexSegment region) in Sheets)
+        foreach ((int column, IndexSegment region) in regions)
         {
             if (column == field)
             {
@@ -107,6 +118,7 @@ internal sealed class ObjectContents(
             Locating = locating,
             Paging = Paging,
             Sheets = Sheets,
+            Counts = Counts,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -157,6 +169,9 @@ internal sealed class ObjectContents(
 
     // A column's sheet: its field and its region, as a path directory's.
     private const int TagSheet = 14;
+
+    // A column's counts by hour: its field and its region, as a path directory's.
+    private const int TagCounts = 15;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -239,6 +254,11 @@ internal sealed class ObjectContents(
             Declare(region);
         }
 
+        foreach ((int _, IndexSegment region) in Counts)
+        {
+            Declare(region);
+        }
+
         if (DirectoryRegion is { } directory)
         {
             Declare(directory);
@@ -308,6 +328,13 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
+            foreach ((int field, IndexSegment region) in Counts)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagCounts);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
             if (DirectoryRegion is { } directoryRegion)
             {
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
@@ -353,6 +380,7 @@ internal sealed class ObjectContents(
             List<IndexSegment> directories = [];
             List<(int, IndexSegment)> pathDirectories = [];
             List<(int, IndexSegment)> sheets = [];
+            List<(int, IndexSegment)> counts = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -400,6 +428,14 @@ internal sealed class ObjectContents(
 
                         sheets.Add(sheet);
                         break;
+                    case (TagCounts, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } counted)
+                        {
+                            return null;
+                        }
+
+                        counts.Add(counted);
+                        break;
                     case (TagLocating, ProtoWireType.LengthDelimited):
                         if (Located(reader.ReadMessage()) is not { } located)
                         {
@@ -434,6 +470,7 @@ internal sealed class ObjectContents(
                     Locating = locating,
                     Paging = paging,
                     Sheets = sheets,
+                    Counts = counts,
                 }
                 : null;
         }

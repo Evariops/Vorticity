@@ -1127,7 +1127,7 @@ internal sealed class IndexWriter : IDisposable
 
                 foreach (IndexBuilder builder in _builders[field])
                 {
-                    if (builder is ColumnSheetBuilder)
+                    if (builder is ColumnSheetBuilder or ColumnCountsBuilder)
                     {
                         continue;
                     }
@@ -1381,8 +1381,8 @@ internal sealed class IndexWriter : IDisposable
 
             foreach (IndexBuilder builder in _builders[field])
             {
-                // A sheet no budget weighs: it is what a dataset's object says of every column it holds.
-                if (builder.WrittenBytes > 0 || builder is ColumnSheetBuilder)
+                // No budget weighs a sheet nor a column's counts: they are what a dataset's object says of every column it holds.
+                if (builder.WrittenBytes > 0 || builder is ColumnSheetBuilder or ColumnCountsBuilder)
                 {
                     continue;
                 }
@@ -1819,6 +1819,70 @@ internal sealed class IndexWriter : IDisposable
         return region;
     }
 
+    /// <summary>The plan the columns' counts by hour share (<see cref="AddCounts"/>), or null when no column is counted.</summary>
+    private CountsPlan? _counts;
+
+    /// <summary>
+    /// Gives every top-level column with a sheet but <paramref name="plan"/>'s instant its counts by hour, fed right after
+    /// its sheet, which numbers its rows' values for them.
+    /// </summary>
+    internal void AddCounts(CountsPlan plan)
+    {
+        _counts = plan;
+        for (int field = 0; _isTabular && field < _fieldCount; field++)
+        {
+            if (field != plan.InstantField && SheetOf(field) is { } sheet)
+            {
+                _builders[field].Add(new ColumnCountsBuilder(sheet, plan, field));
+            }
+        }
+    }
+
+    /// <summary>Reads a batch's instants and measures once for every column's counts, before the columns are fed.</summary>
+    internal void PrepareCounts(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows) =>
+        _counts?.Prepare(arena, fieldNodes, rows);
+
+    /// <summary>
+    /// The counts builder of column <paramref name="field"/>, or null when it has none; asked once every row is in, it
+    /// settles first which number columns are counted and which are carried, so that every column's counts carry the same.
+    /// </summary>
+    internal ColumnCountsBuilder? CountsOf(int field)
+    {
+        foreach (List<IndexBuilder> builders in _builders)
+        {
+            foreach (IndexBuilder builder in builders)
+            {
+                (builder as ColumnCountsBuilder)?.Settle();
+            }
+        }
+
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            if (builder is ColumnCountsBuilder counts)
+            {
+                return counts;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Writes the counts of the top-level column <paramref name="field"/>, one region from the sink's position, and adds
+    /// the entry that names it: on the column, one run over every block of the file's <paramref name="rows"/>.
+    /// </summary>
+    internal async ValueTask<IndexSegment> AddCountsAsync(
+        ISegmentSink sink, int field, byte[] counts, long rows, int blockRows, CancellationToken cancellationToken)
+    {
+        IndexSegment region = IndexSegment.Of(sink.Position, counts, 0);
+        await sink.WriteAsync(counts, cancellationToken).ConfigureAwait(false);
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            IndexKinds.ColumnCounts, [checked((uint)field)], (ulong)length, [],
+            [new IndexRun(0, Blocks(rows, length), [region], [])]));
+        return region;
+    }
+
     /// <summary>
     /// Writes the path directory of the variant column <paramref name="field"/>, one region from the
     /// sink's position, within the index budget of the file's <paramref name="dataBytes"/>, and adds the
@@ -2053,10 +2117,11 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null, List<(IndexEntry Entry, int Start, int Length)>? located = null)
     {
-        // A file's time slices and its variant paths ride in the directory whatever the policy asks.
+        // A file's time slices, its variant paths and its columns' sheets and counts ride in the directory whatever the policy
+        // asks.
         if (!Enabled && _preserved is not { Count: > 0 }
             && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
-                or IndexKinds.VariantBlocks))
+                or IndexKinds.VariantBlocks or IndexKinds.ColumnSheet or IndexKinds.ColumnCounts))
         {
             return null;
         }

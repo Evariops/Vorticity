@@ -296,6 +296,13 @@ public sealed record VortexWriteOptions
     internal long? ColumnSheetBytes { get; init; }
 
     /// <summary>
+    /// The top-level instant column, a timestamp, by whose hours a file that keeps sheets also counts each of its columns
+    /// (<see cref="Indexes.ColumnCounts"/>); null, the default, for none. A dataset's objects in time slices name their
+    /// period's instant.
+    /// </summary>
+    internal string? CountsInstant { get; init; }
+
+    /// <summary>
     /// What each top-level variant column shreds, by its name: its chunks are written as the reference
     /// stores a shredded variant, the values the shredding names in typed columns. A column not named
     /// is written whole.

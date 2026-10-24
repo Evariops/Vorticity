@@ -201,11 +201,20 @@ sorted by value then time, in chunks of 16 KB with a directory (`vorticity.colum
 - **Sketches.** Quantile sketches (1 KB, 1 % relative error) for the columns of at most 1 000 values a
   bucket, on the measures; distinct-count sketches of the high-cardinality columns attached to the
   columns of at most 100 values.
-- **Budget.** An absolute budget per column and object; past it the most frequent values are kept,
-  with an exact `others` entry.
-- **Size.** 51 MB a day of hourly counts and sketches in the objects, 20 GB in 13 months; 2.7 MB a day
-  of daily and monthly ones in the monthly files, 1.1 GB *(computed)*. Writing costs about 8 ns a
-  column a row, sketches included.
+- **Measures.** Every top-level integer and float column of more than 64 values, its values, exact
+  sum, least and greatest in the engine's state words; a number column of 64 values or fewer, a status
+  or a code, is counted as a column and carried by none. A column whose values hardly repeat, distinct
+  values past a quarter of its rows, keeps no counts: an identifier, an instant, a measure.
+- **Budget.** An absolute budget per column and object, 2^20 entries; past it the most frequent values
+  are kept, with an exact `others` entry an hour, and a value left out stays out.
+- **Size.** An entry of an integer and a float measure takes 53 to 64 bytes, most of them the float's
+  exact sum and extremes. The reference table's 1.0 × 10⁶ entries a day make about 60 MB of hourly counts
+  in the objects *(measured on the design's requests, extrapolated)*, where this design first reckoned
+  51 MB for the counts and their sketches together; the sketches add to it. 2.7 MB a day of daily and
+  monthly ones in the monthly files, 1.1 GB *(computed)*.
+- **Writing.** 9.4 to 10.2 ns a counted column a row at 12 million rows an hour, 10.0 to 12.0 at 750 000,
+  where each entry holds fewer rows *(measured, one thread)*: a row's float is split into its bins'
+  parts once for the entries of every column it falls in.
 
 ### 5.3 Block statistics, and settling blocks
 

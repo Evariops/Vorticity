@@ -82,6 +82,13 @@ internal struct IndexedSum : IFloatSumState<IndexedSum>
     /// <summary>The values summed: every one but the NaN.</summary>
     public readonly long Count => Meta & CountMask;
 
+    /// <summary>The parts of a meta word <paramref name="meta"/>: the values it counts, its top, and the infinities met as two bits.</summary>
+    internal static (long Count, int Top, int Infinities) PartsOf(long meta) =>
+        (meta & CountMask, (int)((meta & TopMask) >>> TopShift), (int)((meta >>> 56) & 3));
+
+    /// <summary>The meta word of the parts <see cref="PartsOf"/> gives.</summary>
+    internal static long MetaOf(long count, int top, int infinities) => count | ((long)top << TopShift) | ((long)infinities << 56);
+
     /// <summary>The bin the largest value called for, the highest of the three; 0 before the first finite value.</summary>
     internal readonly int Top => (int)((Meta & TopMask) >>> TopShift);
 
@@ -207,6 +214,78 @@ internal struct IndexedSum : IFloatSumState<IndexedSum>
         }
 
         Deposit(value, top);
+    }
+
+    /// <summary>
+    /// A value split once into its parts in the bins its own top calls for, which <see cref="Add(in Split)"/> adds to any sum
+    /// whose top lies at or above that top: a bin above a value takes nothing of it, so a sum of a higher top keeps the same
+    /// parts, moved down, as <see cref="Add(double)"/> would split them. Several sums that take the same value, the groups of
+    /// several columns a row falls in, split it once.
+    /// </summary>
+    /// <param name="Value">The value.</param>
+    /// <param name="Top">The bin it calls for; 0 for a value only <see cref="Add(double)"/> takes: a NaN, an infinity, or one past the extractors.</param>
+    /// <param name="P0">Its part in bin <paramref name="Top"/>.</param>
+    /// <param name="P1">Its part in the bin below.</param>
+    /// <param name="P2">Its part in the bin below that.</param>
+    internal readonly record struct Split(double Value, int Top, long P0, long P1, long P2);
+
+    /// <summary>Splits <paramref name="value"/> into its parts in the bins its own top calls for (<see cref="Split"/>).</summary>
+    internal static Split SplitOf(double value)
+    {
+        double magnitude = Math.Abs(value);
+        if (!(magnitude < Limit[HugeTop - 1]))
+        {
+            return new Split(value, 0, 0, 0, 0);
+        }
+
+        int top = Needed(magnitude);
+        ref double sigma = ref MemoryMarshal.GetArrayDataReference(Sigma);
+        ref long bits = ref MemoryMarshal.GetArrayDataReference(SigmaBits);
+        double s = Unsafe.Add(ref sigma, top);
+        double y = s + value;
+        long p0 = BitConverter.DoubleToInt64Bits(y) - Unsafe.Add(ref bits, top);
+        double r = value - (y - s);
+        s = Unsafe.Add(ref sigma, top - 1);
+        y = s + r;
+        long p1 = BitConverter.DoubleToInt64Bits(y) - Unsafe.Add(ref bits, top - 1);
+        r -= y - s;
+        long p2 = BitConverter.DoubleToInt64Bits(Unsafe.Add(ref sigma, top - 2) + r) - Unsafe.Add(ref bits, top - 2);
+        return new Split(value, top, p0, p1, p2);
+    }
+
+    /// <summary>Folds a value split by <see cref="SplitOf"/>: its parts, moved down to the sum's top, or the value itself when the top must rise.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void Add(in Split split)
+    {
+        int top = Top;
+        if (top < split.Top || split.Top == 0)
+        {
+            Add(split.Value);
+            return;
+        }
+
+        if ((++Meta & CountMask) > Endurance)
+        {
+            throw Outgrown();
+        }
+
+        switch (top - split.Top)
+        {
+            case 0:
+                M0 += split.P0;
+                M1 += split.P1;
+                M2 += split.P2;
+                break;
+            case 1:
+                M1 += split.P0;
+                M2 += split.P1;
+                break;
+            case 2:
+                M2 += split.P0;
+                break;
+            default:
+                break;
+        }
     }
 
     /// <summary>Folds <paramref name="count"/> values equal to <paramref name="value"/>: a run, a constant, a dictionary entry.</summary>

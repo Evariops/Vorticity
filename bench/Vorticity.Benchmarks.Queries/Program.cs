@@ -59,6 +59,8 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["sketches"] = ("the grids of a distribution weighed, in buckets and speed (SketchMicro.cs)", () => Task.FromResult(SketchMicro.Run(rounds))),
     ["sheets"] = ("what a sheet of each column costs the writer, a column a row, one thread (SheetMicro.cs)", () =>
         SheetMicro.RunAsync((int)Option(args, "--rows", 3_000_000), rounds)),
+    ["counts"] = ("what each column's counts by hour cost the writer and weigh, a counted column a row, one thread (CountsMicro.cs)", () =>
+        CountsMicro.RunAsync((int)Option(args, "--rows", 3_000_000), Option(args, "--hours", 4), rounds)),
     ["load"] = ("the write path of a load of sealed periods at the design's density, a few seconds a round (LoadMicro.cs)", () =>
     {
         int periods = Option(args, "--periods", 4);

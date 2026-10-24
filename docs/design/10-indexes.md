@@ -146,7 +146,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#49-the-file-level-filter)).
+file-level filter](#410-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -363,7 +363,32 @@ side, and passes over an object whose filter lacks every value asked, under the 
 disjunctions (`DatasetScanCounters.ObjectsRefutedBySheets`). Writing the sheets costs 5.6 to 5.9 ns a
 column a row on the design's requests, eleven columns, one thread (`vortex-queries --micro sheets`).
 
-### 4.9 The file-level filter
+### 4.9 `vorticity.column.counts.v1`: a column's counts by hour
+
+The same objects keep, for each top-level column whose sheet counts its values and whose values repeat,
+its counts by the hours of the period's instant: for each value, for its nulls, and for the values its
+budget left out together, an entry an hour that holds the rows of that value in that hour and, for each
+measure column, their values, their exact sum, their least and their greatest, in the words the engine's
+states take ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#52-the-counts-of-a-column-by-bucket-of-time)).
+The measures are the top-level integer and float columns of more than 64 values; a number column of 64
+values or fewer, a status or a code, is counted as a column and carried by no other. A column whose
+distinct values pass a quarter of its valid rows keeps no counts, nor one whose sheet gave its counts up.
+
+The budget is absolute: 2^20 entries a column, fewer for a table of many number columns, whose states
+take at most 128 MiB a column while the object is written. Past it, the values whose rows are fewest so
+far are left out, their entries merged into an entry of the values left out an hour, exact, and a value
+left out stays out, so that a value kept is counted from its first row.
+
+The entry is on the column, its one run a region the object's table of contents names: a header, the
+measures, a directory of chunks of about 16 KB, each naming its first value, then the chunks. The nulls
+come first, then the values left out, then the values in the order of their bytes, and each one's
+entries in the order of their hours: an entry's rows and each measure's states as varints, a float sum
+as its three bins, the values it skipped, its top and its high part, and a float's extremes as their
+eight bytes. Entries of two objects of the same value and hour merge word for word. On the design's
+requests, two measures one of them a float, an entry takes 53 to 64 bytes, and the counts cost the
+writer 9.4 to 12.0 ns a counted column a row, one thread (`vortex-queries --micro counts`).
+
+### 4.10 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

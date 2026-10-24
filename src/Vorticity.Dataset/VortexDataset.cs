@@ -928,8 +928,10 @@ public sealed class VortexDataset : IAsyncDisposable
             GatheredGroupRows = _options.GroupRows,
 
             // An object in time slices, which a job writes, keeps a sheet of each column its table of contents names, when it
-            // is large enough for a scan to read the sheets before it.
+            // is large enough for a scan to read the sheets before it, and the counts of each column by the hours of its
+            // period's instant.
             ColumnSheetBytes = sliced ? _options.SheetObjectBytes : null,
+            CountsInstant = sliced && schema.Key is { } periodKey && !periodKey.InstantPath.Contains('.') ? periodKey.InstantPath : null,
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
@@ -2617,6 +2619,56 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         return sheets;
+    }
+
+    /// <summary>
+    /// The counts by hour of columns <paramref name="fields"/> of the object <paramref name="entry"/> names, by their
+    /// position in <paramref name="fields"/>, read with no open of the object: the regions its entry's table of contents
+    /// names, in one round trip. A column the object keeps no counts of, or an object with no table of contents this
+    /// library reads, has none.
+    /// </summary>
+    internal async ValueTask<Indexes.ColumnCounts?[]> ReadCountsAsync(ObjectEntry entry, IReadOnlyList<int> fields, CancellationToken cancellationToken)
+    {
+        Indexes.ColumnCounts?[] counts = new Indexes.ColumnCounts?[fields.Count];
+        if (entry.Contents is not { Counts.Count: > 0 } contents)
+        {
+            return counts;
+        }
+
+        int[] slots = new int[fields.Count];
+        int asked = 0;
+        for (int i = 0; i < fields.Count; i++)
+        {
+            asked += contents.CountsOf(fields[i]) is null ? 0 : 1;
+        }
+
+        if (asked == 0)
+        {
+            return counts;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            using SegmentRequestSet requests = new SegmentRequestSet(asked);
+            for (int i = 0; i < fields.Count; i++)
+            {
+                slots[i] = contents.CountsOf(fields[i]) is { } region
+                    ? requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
+                    : -1;
+            }
+
+            await Footerless(source, entry, contents).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            for (int i = 0; i < fields.Count; i++)
+            {
+                if (slots[i] >= 0 && contents.CountsOf(fields[i])!.Value.Holds(requests.GetBuffer(slots[i]).Span))
+                {
+                    counts[i] = Indexes.ColumnCounts.From(requests.GetBuffer(slots[i]).Span);
+                }
+            }
+        }
+
+        return counts;
     }
 
     /// <summary>

@@ -55,19 +55,29 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     /// <summary>The values hashed together, a fixed-width column's.</summary>
     private const int HashBatch = 64;
 
+    /// <summary>
+    /// The bits of a slot's word its rows take, some 10^12 of them; the number of its value, in the order the values were
+    /// met, lies above them.
+    /// </summary>
+    private const int IdShift = 40;
+
+    private const long RowsMask = (1L << IdShift) - 1;
+
     private readonly byte[] _ranks = new byte[ColumnSheet.Registers];
     private long _rows;
     private long _nulls;
     private long _check = FirstCheck;
 
-    // The distinct hashes, by open addressing on their mix, each beside its rows, one line of the cache a probe, and
-    // apart where its value's bytes lie in the heap, -1 when they did not fit; 0 is no hash, and the hash 0 is counted
-    // apart. Null once the counts go.
+    // The distinct hashes, by open addressing on their mix, each beside its rows and its value's number, one line of the
+    // cache a probe, and apart where its value's bytes lie in the heap, -1 when they did not fit; 0 is no hash, and the
+    // hash 0 is counted apart. Null once the counts go.
     private Slot[]? _slots = new Slot[FirstSlots];
     private int[] _offsets = new int[FirstSlots];
     private int[] _lengths = new int[FirstSlots];
     private int _distinct;
+    private int _ids;
     private long _zeroRows;
+    private int _zeroId = -1;
     private int _zeroOffset = -1;
     private int _zeroLength;
     private byte[] _heap = [];
@@ -77,14 +87,53 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     // once the counts go, 0 for none.
     private ulong[]? _views;
 
+    // The number of each row's value the last rows taken hold, -1 for a null, when the column's counts ask for them; and
+    // whether those rows' numbers are all there.
+    private int[]? _rowIds;
+    private bool _rowIdsFilled;
+
     /// <summary>Whether the builder can describe a column of <paramref name="dtype"/>: an integer, a float, a string or a binary, through any extension.</summary>
     internal static bool Supports(DType dtype) => KeyLayout.TryOf(dtype, out _);
 
+    /// <summary>
+    /// Whether the builder still counts the column's values, its distinct values within <see cref="ExactLimit"/> and not
+    /// new nine rows in ten; a column's counts by hour number its rows' values while it does.
+    /// </summary>
+    internal bool Counting => _slots is not null;
+
+    /// <summary>The rows taken, nulls included.</summary>
+    internal long Rows => _rows;
+
+    /// <summary>The nulls among the rows taken.</summary>
+    internal long Nulls => _nulls;
+
+    /// <summary>The distinct values counted, while <see cref="Counting"/>.</summary>
+    internal int Distinct => _distinct + (_zeroRows > 0 ? 1 : 0);
+
+    /// <summary>The values numbered: each distinct value counted has a number below it, in the order they were met.</summary>
+    internal int Numbered => _ids;
+
+    /// <summary>
+    /// The number of the value of each row the last <see cref="Accumulate"/> took, from its first, -1 for a null; empty
+    /// when those rows were not numbered, the counts gone or the column of a kind whose values no index keys. Asked for
+    /// with <see cref="NumberRows"/>.
+    /// </summary>
+    internal ReadOnlySpan<int> RowIds => _rowIdsFilled ? _rowIds : default;
+
+    /// <summary>Asks the builder to number each row's value as it takes it (<see cref="RowIds"/>), for the column's counts.</summary>
+    internal void NumberRows() => _rowIds ??= new int[1_024];
+
     internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
+        _rowIdsFilled = false;
         if (count <= 0)
         {
             return;
+        }
+
+        if (_rowIds is { } held && held.Length < count)
+        {
+            _rowIds = new int[Math.Max(count, held.Length * 2)];
         }
 
         _rows += count;
@@ -100,6 +149,8 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         if (own.AllInvalid || wrapper.AllInvalid)
         {
             _nulls += count;
+            _rowIds?.AsSpan(0, count).Fill(-1);
+            _rowIdsFilled = _rowIds is not null;
             return;
         }
 
@@ -119,10 +170,20 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 }
 
                 _nulls += count - valid;
+                int id = -1;
                 if (valid > 0)
                 {
                     ReadOnlySpan<byte> value = node.ConstantElement;
-                    Take(SplitBlockBloom.Hash(value, BloomHash.XxHash3), value, valid);
+                    int slot = Take(SplitBlockBloom.Hash(value, BloomHash.XxHash3), value, valid);
+                    id = slot >= 0 ? IdAt(slot) : _zeroId;
+                }
+
+                if (_rowIds is { } ids)
+                {
+                    for (int row = start; row < start + count; row++)
+                    {
+                        ids[row - start] = allValid || (own.IsValid(row) && wrapper.IsValid(row)) ? id : -1;
+                    }
                 }
 
                 break;
@@ -137,8 +198,33 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 return;
         }
 
+        _rowIdsFilled = _rowIds is not null && _slots is not null;
         Check();
     }
+
+    /// <summary>The bytes of each value counted by its number (<see cref="Numbered"/>), null for one whose bytes were not kept; while <see cref="Counting"/>.</summary>
+    internal byte[]?[] ValuesByNumber()
+    {
+        byte[]?[] values = new byte[]?[_ids];
+        Slot[] slots = _slots!;
+        for (int i = 0; i < slots.Length; i++)
+        {
+            if (slots[i].Key != 0 && _offsets[i] >= 0)
+            {
+                values[(int)(slots[i].Count >> IdShift)] = _heap.AsSpan(_offsets[i], _lengths[i]).ToArray();
+            }
+        }
+
+        if (_zeroId >= 0 && _zeroOffset >= 0)
+        {
+            values[_zeroId] = _heap.AsSpan(_zeroOffset, _zeroLength).ToArray();
+        }
+
+        return values;
+    }
+
+    /// <summary>The number of the value slot <paramref name="slot"/> holds.</summary>
+    private int IdAt(int slot) => (int)(_slots![slot].Count >> IdShift);
 
     internal override void CloseBlock()
     {
@@ -174,8 +260,11 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     private void Fixed(ReadOnlySpan<byte> values, int width, int start, int count, bool allValid, ValidityMask own, ValidityMask wrapper)
     {
         Span<ulong> hashes = stackalloc ulong[HashBatch];
+        Span<int> ids = _rowIds is { } numbered ? numbered.AsSpan(0, count) : default;
+        bool numbering = !ids.IsEmpty;
         ulong last = 0;
         int lastSlot = -1;
+        int lastId = -1;
         for (int from = start; from < start + count; from += HashBatch)
         {
             int stop = Math.Min(from + HashBatch, start + count);
@@ -196,6 +285,11 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 if (!allValid && !(own.IsValid(row) && wrapper.IsValid(row)))
                 {
                     _nulls++;
+                    if (numbering)
+                    {
+                        ids[row - start] = -1;
+                    }
+
                     continue;
                 }
 
@@ -203,11 +297,21 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 if (hash == last && lastSlot >= 0 && _slots is { } slots)
                 {
                     slots[lastSlot].Count++;
+                    if (numbering)
+                    {
+                        ids[row - start] = lastId;
+                    }
+
                     continue;
                 }
 
                 int slot = Take(hash, values.Slice(row * width, width), 1);
                 (last, lastSlot) = (hash, slot);
+                if (numbering)
+                {
+                    lastId = slot >= 0 ? IdAt(slot) : _zeroId;
+                    ids[row - start] = lastId;
+                }
             }
         }
     }
@@ -282,11 +386,18 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
         ulong[] met = _views ??= new ulong[Views * 3];
         ref byte origin = ref MemoryMarshal.GetReference(views);
+        Span<int> ids = _rowIds is { } numbered ? numbered.AsSpan(0, count) : default;
+        bool numbering = !ids.IsEmpty;
         for (int row = start; row < start + count; row++)
         {
             if (!allValid && !(own.IsValid(row) && wrapper.IsValid(row)))
             {
                 _nulls++;
+                if (numbering)
+                {
+                    ids[row - start] = -1;
+                }
+
                 continue;
             }
 
@@ -302,11 +413,20 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 ulong slot = met[entry + 2];
                 if (slot > 1)
                 {
-                    _slots![(int)(slot - 2)].Count++;
+                    ref Slot held = ref _slots![(int)(slot - 2)];
+                    held.Count++;
+                    if (numbering)
+                    {
+                        ids[row - start] = (int)(held.Count >> IdShift);
+                    }
                 }
                 else if (_slots is not null)
                 {
                     _zeroRows++;
+                    if (numbering)
+                    {
+                        ids[row - start] = _zeroId;
+                    }
                 }
 
                 continue;
@@ -314,6 +434,11 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
             ReadOnlySpan<byte> value = BloomBuilder.ValueAt(views, buffers, row);
             int at = Take(SplitBlockBloom.Hash(value, BloomHash.XxHash3), value, 1);
+            if (numbering)
+            {
+                ids[row - start] = at >= 0 ? IdAt(at) : _zeroId;
+            }
+
             if (entry >= 0)
             {
                 met[entry] = low;
@@ -367,6 +492,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             {
                 Raise(hash);
                 (_zeroOffset, _zeroLength) = Keep(value);
+                _zeroId = _ids++;
             }
 
             _zeroRows += rows;
@@ -399,7 +525,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             return -1;
         }
 
-        slots[slot] = new Slot { Key = hash, Count = rows };
+        slots[slot] = new Slot { Key = hash, Count = rows | ((long)_ids++ << IdShift) };
         (_offsets[slot], _lengths[slot]) = Keep(value);
         if (++_distinct * 2 > slots.Length)
         {
@@ -546,7 +672,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         {
             if (slots[i].Key != 0 && _offsets[i] >= 0)
             {
-                held.Add((slots[i].Count, _offsets[i], _lengths[i]));
+                held.Add((slots[i].Count & RowsMask, _offsets[i], _lengths[i]));
             }
         }
 
@@ -570,7 +696,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
         return top;
     }
-    /// <summary>A distinct hash and its rows, side by side in one entry.</summary>
+    /// <summary>A distinct hash, and its rows with its value's number above them (<see cref="IdShift"/>), side by side in one entry.</summary>
     private struct Slot
     {
         internal ulong Key;

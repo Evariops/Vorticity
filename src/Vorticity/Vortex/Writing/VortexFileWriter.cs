@@ -181,11 +181,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private ObjectContents Contents(
         SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
-        List<(int Field, IndexSegment Region)> sheets) =>
+        List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
             Sheets = sheets,
+            Counts = counts,
         };
 
     /// <summary>
@@ -814,6 +815,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             writer._indexes?.AddSheets(schema);
             writer._sheetBytes = options.ColumnSheetBytes;
+
+            // And the counts by hour of each column a sheet numbers the values of.
+            if (options.CountsInstant is { } instant && CountsPlan.For(schema, instant) is { } plan)
+            {
+                writer._indexes?.AddCounts(plan);
+            }
         }
 
         writer._chunkPageEntries = Math.Max(options.ChunkPageEntries, 1);
@@ -1489,6 +1496,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         int rows = root.Length;
+        _indexes?.PrepareCounts(arena, _fieldNodes, rows);
         if (_blockRows == 0)
         {
             // The batch is the block: repartitioning is off, so batches are the pruning unit.
@@ -2414,10 +2422,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
+            // Each column's counts by hour, for a question on that column alone, which reads no row of the file.
+            List<(int Field, IndexSegment Region)> counts = [];
+            for (int field = 0; keepsSheets && field < _fieldCount; field++)
+            {
+                if (closed.CountsOf(field)?.Finish() is { } counted)
+                {
+                    counts.Add((field, await closed.AddCountsAsync(_sink, field, counted, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                }
+            }
+
             // A sliced file's table of contents, now that every region it names is written.
             if (_slices is { } sliced)
             {
-                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets);
+                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

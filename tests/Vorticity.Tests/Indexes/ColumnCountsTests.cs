@@ -1,0 +1,188 @@
+// A column's counts by hour, built as the writer builds them.
+//
+// WHAT IS HELD: past its budget of entries, a column keeps the values whose rows are most, each exact, and counts the
+// others together an hour, exact too, so that every row is counted once; and what the counts write reads back word for
+// word: signed and unsigned extremes, sums past 64 bits, float sums and the extremes of a measure that met no value, and
+// the hour of a null instant.
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.InteropServices;
+using Vorticity.Aggregating;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
+using Vorticity.Indexes;
+using Vorticity.Types;
+using Vorticity.Writing;
+using Xunit;
+
+namespace Vorticity.Tests.Indexes;
+
+public sealed class ColumnCountsTests
+{
+    private const long MicrosPerHour = 3_600_000_000L;
+
+    [Fact]
+    public void AColumnPastItsBudgetKeepsItsMostFrequentValuesAndTheOthersTogether()
+    {
+        // Four hours; value v of forty takes 2 × (40 - v)² rows an hour, spread over it, with an amount and a price each: the
+        // most frequent apart by a hundred rows an hour or more.
+        List<(long At, long Key, long Amount, double Price)> rows = [];
+        Random random = new Random(5);
+        for (int hour = 0; hour < 4; hour++)
+        {
+            for (int v = 0; v < 40; v++)
+            {
+                for (int i = 0; i < 2 * (40 - v) * (40 - v); i++)
+                {
+                    rows.Add(((hour * MicrosPerHour) + random.NextInt64(MicrosPerHour), v, random.NextInt64(-1_000, 1_000_000), Math.Round(random.NextDouble() * 100, 2)));
+                }
+            }
+        }
+
+        random.Shuffle(CollectionsMarshal.AsSpan(rows));
+        rows.Sort((left, right) => (left.At / MicrosPerHour).CompareTo(right.At / MicrosPerHour));
+
+        // A budget of 64 entries: 160 are met, ten values an hour fill it, and the values left out go together.
+        ColumnCounts counts = Build(rows, entryLimit: 64);
+        Assert.Equal([2, 3], counts.MeasureFields);
+        CountGroup others = Assert.Single(counts.Groups, g => g.Kind == CountedValue.Others);
+        long[] kept = [.. counts.Groups.Where(g => g.Kind == CountedValue.Value).Select(g => BitConverter.ToInt64(g.Value))];
+        Assert.NotEmpty(kept);
+        Assert.True(kept.Length * 4 <= 32, $"{kept.Length} values kept");
+
+        // The values kept are the most frequent, and each is exact; the others hold the rest, exact.
+        Assert.Equal(Enumerable.Range(0, kept.Length).Select(v => (long)v), kept.Order());
+        foreach (CountGroup group in counts.Groups)
+        {
+            Assert.Equal(4, group.Entries);
+            for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
+            {
+                long hour = counts.Hours[e];
+                List<(long At, long Key, long Amount, double Price)> held = [.. rows.Where(r => r.At / MicrosPerHour == hour
+                    && (group.Kind == CountedValue.Others ? !kept.Contains(r.Key) : r.Key == BitConverter.ToInt64(group.Value)))];
+                ReadOnlySpan<long> words = counts.WordsOf(e);
+                Assert.Equal(held.Count, words[0]);
+                Assert.Equal(held.Count, words[1 + MeasureLayout.Values]);
+                Assert.Equal(held.Aggregate(Int128.Zero, (s, r) => s + r.Amount), StateWords.IntegerOf(words, 1 + MeasureLayout.Sum));
+                Assert.Equal(held.Min(r => r.Amount), words[1 + MeasureLayout.IntegerLeast]);
+                Assert.Equal(held.Max(r => r.Amount), words[1 + MeasureLayout.IntegerGreatest]);
+                int price = 1 + MeasureLayout.IntegerWords;
+                WideIndexedSum sum = default;
+                held.ForEach(r => sum.Add(r.Price));
+                Assert.Equal(sum.Value, StateWords.SumOf(words, price + MeasureLayout.Sum).Value);
+                Assert.Equal(held.Min(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatLeast]));
+                Assert.Equal(held.Max(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatGreatest]));
+            }
+        }
+
+        Assert.Equal(rows.Count, Enumerable.Range(0, counts.Entries).Sum(e => counts.WordsOf(e)[0]));
+        Assert.Equal(4, others.Entries);
+    }
+
+    [Fact]
+    public void WhatTheCountsWriteReadsBackWordForWord()
+    {
+        MeasureKind[] kinds = [MeasureKind.Signed, MeasureKind.Unsigned, MeasureKind.Float];
+        int width = StateWords.Count(kinds);
+        long[] words = new long[3 * width];
+        StateWords.Clear(words.AsSpan(0, width), kinds);
+        StateWords.Clear(words.AsSpan(width, width), kinds);
+        StateWords.Clear(words.AsSpan(2 * width, width), kinds);
+
+        // An entry whose measures hold extremes and a sum past 64 bits; one whose float measure met no value; one of a null instant.
+        Span<long> first = words.AsSpan(0, width);
+        first[0] = 5;
+        first[1 + MeasureLayout.Values] = 5;
+        StateWords.Write((Int128)long.MinValue * 5, first, 1 + MeasureLayout.Sum);
+        first[1 + MeasureLayout.IntegerLeast] = long.MinValue;
+        first[1 + MeasureLayout.IntegerGreatest] = long.MaxValue;
+        int unsigned = 1 + MeasureLayout.IntegerWords;
+        first[unsigned + MeasureLayout.Values] = 2;
+        StateWords.Write((Int128)ulong.MaxValue * 2, first, unsigned + MeasureLayout.Sum);
+        first[unsigned + MeasureLayout.IntegerLeast] = -1;
+        first[unsigned + MeasureLayout.IntegerGreatest] = -1;
+        int floats = unsigned + MeasureLayout.IntegerWords;
+        WideIndexedSum sum = default;
+        foreach (double value in (double[])[1e300, -2.5, 1e-300])
+        {
+            sum.Add(value);
+        }
+
+        first[floats + MeasureLayout.Values] = 3;
+        StateWords.Write(in sum, first, floats + MeasureLayout.Sum);
+        first[floats + MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(-2.5);
+        first[floats + MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(1e300);
+        words[width] = 7;
+        words[2 * width] = 1;
+
+        ColumnCounts counts = new ColumnCounts(
+            [4, 7, 9],
+            kinds,
+            [new CountGroup(CountedValue.Null, null, 0, 1), new CountGroup(CountedValue.Value, [1, 2, 3], 1, 2)],
+            [-3, CountsPlan.NullHour, 451_000],
+            words);
+        ColumnCounts back = ColumnCounts.From(counts.ToBytes());
+
+        Assert.Equal(counts.MeasureFields, back.MeasureFields);
+        Assert.Equal(counts.Kinds, back.Kinds);
+        Assert.Equal(counts.Groups.Select(g => (g.Kind, g.Value is null ? "" : Convert.ToHexString(g.Value), g.FirstEntry, g.Entries)),
+            back.Groups.Select(g => (g.Kind, g.Value is null ? "" : Convert.ToHexString(g.Value), g.FirstEntry, g.Entries)));
+        Assert.Equal(counts.Hours, back.Hours);
+        Assert.Equal(counts.Words, back.Words);
+        Assert.Throws<VortexFormatException>(() => ColumnCounts.From(counts.ToBytes()[..^1]));
+    }
+
+    /// <summary>
+    /// The counts of column <c>Key</c> of <paramref name="rows"/>, under a schema of an instant, the key, an amount and a
+    /// price, fed in parts as a writer feeds them.
+    /// </summary>
+    private static ColumnCounts Build(List<(long At, long Key, long Amount, double Price)> rows, int entryLimit)
+    {
+        VortexSchema schema = VortexSchema.Create([
+            new VortexField("At", VortexType.Timestamp(TimeUnit.Microseconds, "UTC")),
+            new VortexField("Key", VortexType.Int64),
+            new VortexField("Amount", VortexType.Int64),
+            new VortexField("Price", VortexType.Float64)]);
+        DTypeArena types = new DTypeArena();
+        DType dtype = VortexTypes.ToDType(schema, types);
+        CountsPlan plan = CountsPlan.For(dtype, "At")!;
+        ColumnSheetBuilder sheet = new ColumnSheetBuilder();
+        ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 1, entryLimit);
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
+        const int Part = 1_000;
+        for (int start = 0; start < rows.Count; start += Part)
+        {
+            int count = Math.Min(Part, rows.Count - start);
+            CanonicalArena arena = new CanonicalArena();
+            int[] nodes =
+            [
+                Column(arena, i64, PType.I64, rows, start, count, r => r.At),
+                Column(arena, i64, PType.I64, rows, start, count, r => r.Key),
+                Column(arena, i64, PType.I64, rows, start, count, r => r.Amount),
+                Column(arena, f64, PType.F64, rows, start, count, r => BitConverter.DoubleToInt64Bits(r.Price)),
+            ];
+            plan.Prepare(arena, nodes, count);
+            sheet.Accumulate(arena, nodes[1], 0, count);
+            counts.Accumulate(arena, nodes[1], 0, count);
+        }
+
+        counts.Settle();
+        return ColumnCounts.From(counts.Finish()!);
+    }
+
+    private static int Column(
+        CanonicalArena arena, DType dtype, PType ptype, List<(long At, long Key, long Amount, double Price)> rows, int start, int count,
+        Func<(long At, long Key, long Amount, double Price), long> bits)
+    {
+        VortexBuffer buffer = arena.Allocate(count * sizeof(long), sizeof(long), out Span<byte> bytes);
+        Span<long> values = MemoryMarshal.Cast<byte, long>(bytes);
+        for (int i = 0; i < count; i++)
+        {
+            values[i] = bits(rows[start + i]);
+        }
+
+        return arena.AddPrimitive(dtype, count, Validity.NonNullable, ptype, buffer);
+    }
+}
