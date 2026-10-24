@@ -1,5 +1,11 @@
 # Ad hoc aggregates over long time windows
 
+> **Superseded.** This design is being removed: its composite synopsis tables answered only the
+> prefixes of their order and weighed 4.7 to 8.8 % of the data. Its replacement, questions computed on
+> the fly by the group-by engine with per-column accelerators beside the rows, is
+> [22-on-the-fly-and-accelerators.md](22-on-the-fly-and-accelerators.md). This page goes when the
+> code it describes does.
+
 An application that appends events to a dataset (requests, log lines, metric points) at tens of
 thousands of rows a second asks them questions nobody wrote in advance: how many rows, under any
 filter on any columns, grouped by any of them and by slices of time, and which values come first.
