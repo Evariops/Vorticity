@@ -3164,8 +3164,22 @@ Vorticity.Dataset:     property Nullable<DateTimeOffset> NextUnlock { get; init;
 Vorticity.Dataset:     property TimeSpan Window { get; init; }
 Vorticity.Dataset:     property long PagesRead { get; init; }
 Vorticity.Dataset:     property ulong Latest { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.ValuePart<TValue, TAnswer> : IEquatable<ValuePart<TValue, TAnswer>>
+Vorticity.Dataset:     ctor ValuePart<TValue, TAnswer>(TValue, TValue, TAnswer)
+Vorticity.Dataset:     method ValuePart<TValue, TAnswer> <Clone>$()
+Vorticity.Dataset:     method bool Equals(ValuePart<TValue, TAnswer>)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(ValuePart<TValue, TAnswer>, ValuePart<TValue, TAnswer>)
+Vorticity.Dataset:     method bool op_Inequality(ValuePart<TValue, TAnswer>, ValuePart<TValue, TAnswer>)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     method void Deconstruct(out TValue, out TValue, out TAnswer)
+Vorticity.Dataset:     property TAnswer Answer { get; init; }
+Vorticity.Dataset:     property TValue From { get; init; }
+Vorticity.Dataset:     property TValue To { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.VortexDataset : IAsyncDisposable
 Vorticity.Dataset:     method IAsyncEnumerable<DataObject> ListObjectsAsync(CancellationToken = default)
+Vorticity.Dataset:     method IAsyncEnumerable<ValuePart<TValue, TAnswer>> AskByValuesAsync<TValue, TAnswer>(TValue, TValue, Func<TValue, TValue, CancellationToken, ValueTask<TAnswer>>, bool = default, CancellationToken = default)
 Vorticity.Dataset:     method IAsyncEnumerable<WindowPart<TAnswer>> AskNewestFirstAsync<TAnswer>(DateTimeOffset, DateTimeOffset, Func<DateTimeOffset, DateTimeOffset, CancellationToken, ValueTask<TAnswer>>, CancellationToken = default)
 Vorticity.Dataset:     method ObjectDraft StartObject()
 Vorticity.Dataset:     method Scan Scan(ReadOnlySpan<string>)
@@ -3185,6 +3199,8 @@ Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync(VortexExpr,
 Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync(VortexExpr, IReadOnlyList<SourceRange>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync<TRecord>(Func<Probe<TRecord>, Predicate>, IReadOnlyList<SourceRange>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> ExpireAsync(VortexExpr, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> UpdateAsync<TRecord>(Func<Probe<TRecord>, Predicate>, Func<TRecord, TRecord>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> UpdateAsync<TRecord>(Func<Probe<TRecord>, Predicate>, Func<TRecord, TRecord>, IReadOnlyList<SourceRange>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<SourceCommit> AppendAsync(IAsyncEnumerable<RecordBatch>, IReadOnlyList<SourceRange>, CancellationToken = default)

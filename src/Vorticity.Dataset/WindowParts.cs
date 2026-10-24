@@ -47,34 +47,45 @@ internal static class WindowParts
 
     /// <summary>
     /// Asks <paramref name="question"/> over each part, as many at once as <paramref name="width"/> says, and
-    /// delivers the answers newest first, each once it and every newer part are in.
+    /// delivers the answers in the parts' order, each once it and every part before it are in.
     /// </summary>
-    internal static async IAsyncEnumerable<WindowPart<TAnswer>> AskAsync<TAnswer>(
+    internal static IAsyncEnumerable<WindowPart<TAnswer>> AskAsync<TAnswer>(
         List<(DateTimeOffset From, DateTimeOffset To)> parts, int width,
         Func<DateTimeOffset, DateTimeOffset, CancellationToken, ValueTask<TAnswer>> question,
+        CancellationToken cancellationToken) =>
+        AskAsync(parts, width, question, static (from, to, answer) => new WindowPart<TAnswer>(from, to, answer), cancellationToken);
+
+    /// <summary>
+    /// <see cref="AskAsync{TAnswer}"/> over parts of any bounds, taken from <paramref name="parts"/> as they are asked, each
+    /// answer delivered as the part <paramref name="part"/> makes of it.
+    /// </summary>
+    internal static async IAsyncEnumerable<TPart> AskAsync<TBound, TAnswer, TPart>(
+        IEnumerable<(TBound From, TBound To)> parts, int width,
+        Func<TBound, TBound, CancellationToken, ValueTask<TAnswer>> question,
+        Func<TBound, TBound, TAnswer, TPart> part,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        Queue<(DateTimeOffset From, DateTimeOffset To, Task<TAnswer> Answer)> ahead = new(Math.Min(width, parts.Count));
-        int next = 0;
+        using IEnumerator<(TBound From, TBound To)> next = parts.GetEnumerator();
+        Queue<(TBound From, TBound To, Task<TAnswer> Answer)> ahead = new(width);
         try
         {
             while (true)
             {
-                while (ahead.Count < width && next < parts.Count)
+                while (ahead.Count < width && next.MoveNext())
                 {
-                    (DateTimeOffset from, DateTimeOffset to) = parts[next++];
+                    (TBound from, TBound to) = next.Current;
                     ahead.Enqueue((from, to, question(from, to, stopped.Token).AsTask()));
                 }
 
-                if (!ahead.TryDequeue(out (DateTimeOffset From, DateTimeOffset To, Task<TAnswer> Answer) turn))
+                if (!ahead.TryDequeue(out (TBound From, TBound To, Task<TAnswer> Answer) turn))
                 {
                     yield break;
                 }
 
                 // The question was asked by this walk, a few parts before.
 #pragma warning disable VSTHRD003
-                yield return new WindowPart<TAnswer>(turn.From, turn.To, await turn.Answer.ConfigureAwait(false));
+                yield return part(turn.From, turn.To, await turn.Answer.ConfigureAwait(false));
 #pragma warning restore VSTHRD003
             }
         }

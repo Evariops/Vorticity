@@ -97,18 +97,32 @@ internal static class DatasetRowChanges
         RunAsync(dataset, filter, start, null, cancellationToken);
 
     /// <summary>
+    /// Takes out of the dataset every object whose rows <paramref name="filter"/> is true for, as the bounds its entry
+    /// states prove, and no other: an expiry, which opens no object and rewrites none. The rows of an object it does
+    /// not cover whole stay.
+    /// </summary>
+    /// <param name="dataset">The dataset.</param>
+    /// <param name="filter">The rows to take, checked against the schema; null for all of them.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <exception cref="ObjectStoreException">Concurrent commits took an object first on every attempt.</exception>
+    internal static ValueTask<RowChangeResult> ExpireAsync(VortexDataset dataset, VortexExpr? filter, CancellationToken cancellationToken) =>
+        RunAsync(dataset, filter, null, null, cancellationToken, whole: true);
+
+    /// <summary>
     /// <see cref="RunAsync(VortexDataset, VortexExpr?, Func{DatasetSchema, long, ChangedRows}?, CancellationToken)"/>,
     /// for a change that takes the source ranges <paramref name="consumed"/> into account: committed
     /// even when it takes no row, so that the ranges are counted, and given up when another commit
     /// counted them first.
     /// </summary>
+    /// <remarks>With <paramref name="whole"/>, an expiry's: the objects the filter covers whole alone, none opened.</remarks>
     /// <exception cref="SourceOffsetConflictException">A range does not start where the dataset counts its source up to.</exception>
     internal static async ValueTask<RowChangeResult> RunAsync(
         VortexDataset dataset,
         VortexExpr? filter,
         Func<DatasetSchema, long, ChangedRows>? start,
         IReadOnlyList<SourceRange>? consumed,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool whole = false)
     {
         CommitKind kind = start is null ? CommitKind.Delete : CommitKind.Update;
         int attempts = Math.Max(dataset.Options.MaxAttempts, 1);
@@ -132,9 +146,11 @@ internal static class DatasetRowChanges
                 {
                     // An object whose summaries prove every row selected goes whole, unopened, when no
                     // sink wants its rows: bounds only loosen under marks, so its live rows are selected too.
-                    Change change = changed is null && pruner is not null && pruner.MustMatch(held.Entry.Summaries.Columns, held.Entry.PhysicalRows)
+                    Change change = changed is null && (pruner is null ? whole : pruner.MustMatch(held.Entry.Summaries.Columns, held.Entry.PhysicalRows))
                         ? new Change(held.Entry.Rows, null, null)
-                        : await RewriteAsync(dataset, version, held, filter, changed, doublings, cancellationToken).ConfigureAwait(false);
+                        : whole
+                            ? new Change(0, null, null)
+                            : await RewriteAsync(dataset, version, held, filter, changed, doublings, cancellationToken).ConfigureAwait(false);
                     if (change.Taken == 0)
                     {
                         continue;

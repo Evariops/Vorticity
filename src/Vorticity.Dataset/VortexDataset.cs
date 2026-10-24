@@ -704,6 +704,48 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Asks <paramref name="question"/> over the values of the clustering key's first column from <paramref name="from"/>
+    /// up to <paramref name="to"/> part by part, a part a clustering value (<see cref="ClusteringOptions.Value"/>), the last
+    /// part first unless <paramref name="descending"/> is false: each part's answer delivered once it and every part before
+    /// it are in.
+    /// </summary>
+    /// <typeparam name="TValue">The values of the key's first column: an instant, a date, an integer.</typeparam>
+    /// <typeparam name="TAnswer">What the question answers.</typeparam>
+    /// <param name="from">The range's first value.</param>
+    /// <param name="to">The value past its last.</param>
+    /// <param name="question">
+    /// The question, asked with each part's bounds, the first in the part and the second past it, which it applies to its
+    /// own filter: <c>(from, to, ct) =&gt; dataset.Scan&lt;Request&gt;().Where(r =&gt; r.At &gt;= from &amp; r.At &lt; to)…</c>.
+    /// </param>
+    /// <param name="descending">Whether the last part comes first, as a page that shows the newest of its values does; true by default.</param>
+    /// <param name="cancellationToken">Cancels the questions in flight.</param>
+    /// <returns>The parts, in the order asked, each with its bounds and its answer.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The dataset declares no clustering value, or one of a column whose next value no function tells, a text's or a
+    /// float's.
+    /// </exception>
+    /// <exception cref="ArgumentException">The range holds no value the column stores.</exception>
+    /// <remarks>
+    /// A part's answer is final for its values, so a page that shows a range part by part shows the first part asked while
+    /// the rest is read. Every object above level 0 holds rows of one clustering value, so a part's question reads whole
+    /// objects but at the range's ends. The parts are asked several at once, sixteen at most and no more than the session
+    /// lets reads be in flight. Answers over parts add up for counts and sums, and their extremes are the range's, but a
+    /// mean over the range is its sum over its count.
+    /// </remarks>
+    public IAsyncEnumerable<ValuePart<TValue, TAnswer>> AskByValuesAsync<TValue, TAnswer>(
+        TValue from, TValue to, Func<TValue, TValue, CancellationToken, ValueTask<TAnswer>> question, bool descending = true,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(question);
+        return WindowParts.AskAsync(
+            ValueParts.Of(Snapshot.Schema, Session.Options.Extensions, from, to, descending),
+            Math.Min(Session.Options.MaxConcurrentReads, WindowParts.Width),
+            question,
+            static (lower, upper, answer) => new ValuePart<TValue, TAnswer>(lower, upper, answer),
+            cancellationToken);
+    }
+
+    /// <summary>
     /// Reads into the session's <see cref="VortexSessionOptions.SynopsisCache"/>, before a question needs
     /// them, the directories of every object whose summaries say it may hold a row
     /// <paramref name="filter"/> selects: <c>dataset.WarmAsync&lt;Request&gt;(r =&gt; r.At &gt;= DateTime.UtcNow.AddDays(-30))</c>.
@@ -1570,6 +1612,58 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(filter);
         return DatasetRowChanges.RunAsync(this, Checked(ToolPaths.Check(Schema, filter)), null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Drops, in one commit and reading none of them, every object whose rows <paramref name="filter"/> is true for, as
+    /// the bounds its entry states prove: what a delete of those rows does to such an object, with no other opened.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
+    /// <param name="filter">A lambda over the record's columns: <c>r =&gt; r.At &lt; cutoff</c>.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <returns>
+    /// The version created and the rows dropped; <see cref="OperationOutcome.AlreadyThere"/> and the version the handle
+    /// held when the filter covers no object whole.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// The rows of an object the filter does not cover whole stay, those of an object of level 0 that straddles its bound
+    /// among them, until an expiry finds them in objects it covers; a delete takes them as well, at the price of the
+    /// objects it opens. Under a clustering value (<see cref="DatasetOptions.Clustering"/>), every object above level 0
+    /// holds rows of one value, so a filter that keeps the values from one on covers whole objects: <c>r =&gt; r.At &lt;
+    /// day</c>, on objects cut at every midnight, drops every day before <c>day</c>, and a row outlives the filter by a
+    /// value at most.
+    /// </para>
+    /// <para>
+    /// An object's bounds are those of its summaries, which a number and a time have and a text has not: a filter on a
+    /// text covers no object.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="VortexSchemaException">A literal or a column of the filter does not fit the dataset.</exception>
+    /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this expiry would drop on every attempt.</exception>
+    public ValueTask<RowChangeResult> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate> filter, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        Predicate predicate = filter(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
+        return predicate.IsNone
+            ? ValueTask.FromResult(Unchanged())
+            : DatasetRowChanges.ExpireAsync(this, Checked(predicate.Node), cancellationToken);
+    }
+
+    /// <summary>
+    /// Drops the objects <paramref name="filter"/> covers whole, for a caller without a record type; see
+    /// <see cref="ExpireAsync{TRecord}(Func{Probe{TRecord}, Predicate}, CancellationToken)"/>.
+    /// </summary>
+    /// <param name="filter">The filter, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <returns>The version created and the rows dropped.</returns>
+    /// <exception cref="VortexSchemaException">The filter names a column the dataset does not have, or compares one with a literal of a type it cannot compare to.</exception>
+    /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this expiry would drop on every attempt.</exception>
+    public ValueTask<RowChangeResult> ExpireAsync(VortexExpr filter, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        return DatasetRowChanges.ExpireAsync(this, Checked(ToolPaths.Check(Schema, filter)), cancellationToken);
     }
 
     /// <summary>

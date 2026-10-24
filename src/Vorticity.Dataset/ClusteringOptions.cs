@@ -221,6 +221,48 @@ internal sealed class ValueCut
     /// <summary>The value declared.</summary>
     internal ClusteringValue Value { get; }
 
+    /// <summary>
+    /// The integer storage of the key's first column, whose values a part of a range starts at, one clustering value
+    /// after the other: an integer's, an instant's, a date's. Null for a text, a float or a binary, whose next value no
+    /// function tells.
+    /// </summary>
+    internal PType? Integers
+    {
+        get
+        {
+            DType storage = _column;
+            while (storage.Kind == DTypeKind.Extension)
+            {
+                storage = storage.StorageType;
+            }
+
+            return storage.Kind == DTypeKind.Primitive && !storage.PType.IsFloat() ? storage.PType : null;
+        }
+    }
+
+    /// <summary>The first stored value whose clustering value is <paramref name="value"/>'s: where its part starts.</summary>
+    internal Int128 StartOf(Int128 value) =>
+        _function is not null && _function.TryLeast(ImageOf(value), out Int128 start) ? start : value;
+
+    /// <summary>
+    /// The first stored value of the clustering value after <paramref name="value"/>'s: where the next part starts; false
+    /// when no stored value has one.
+    /// </summary>
+    internal bool TryNextStart(Int128 value, out Int128 next)
+    {
+        if (_function is not null)
+        {
+            return _function.TryLeast(ImageOf(value) + 1, out next);
+        }
+
+        next = value + 1;
+        return value < ValueFunction.Integers(Integers ?? PType.I64).Max;
+    }
+
+    /// <summary>The clustering value of a stored integer, in the storage's terms.</summary>
+    private Int128 ImageOf(Int128 value) =>
+        _function!.TryMap(_function.Literal(value), out FilterLiteral image) && ValueFunction.TryInteger(image, out Int128 at) ? at : value;
+
     /// <summary>Whether two row-encoded keys of the clustering key, in ascending order, hold one clustering value.</summary>
     internal bool Same(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right)
     {
