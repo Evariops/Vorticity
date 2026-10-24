@@ -586,7 +586,7 @@ internal sealed class BloomBuilder : IndexBuilder
     }
 
     /// <summary>Row <paramref name="row"/>'s value: in its view up to twelve bytes, in its data buffer past that.</summary>
-    private static ReadOnlySpan<byte> ValueAt(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> buffers, int row)
+    internal static ReadOnlySpan<byte> ValueAt(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> buffers, int row)
     {
         ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
         int size = BinaryPrimitives.ReadInt32LittleEndian(view);

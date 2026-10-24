@@ -917,10 +917,13 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Whether the policy asks for no index: the writer holds this one only for what rides in the
-    /// directory, the time slices, and its ingest needs nothing of it.
+    /// Whether the policy asks for no index and no column keeps a sheet: the writer holds this one only for what rides
+    /// in the directory, the time slices, and its ingest needs nothing of it.
     /// </summary>
-    internal bool AsksNothing => !Asks(_policy);
+    internal bool AsksNothing => !Asks(_policy) && !_keepsSheets;
+
+    /// <summary>Whether a column keeps a sheet (<see cref="AddSheets"/>).</summary>
+    private bool _keepsSheets;
 
     /// <summary>Whether a column feeds a streaming builder, so the ingest has something to call.</summary>
     internal bool Streams
@@ -1124,6 +1127,11 @@ internal sealed class IndexWriter : IDisposable
 
                 foreach (IndexBuilder builder in _builders[field])
                 {
+                    if (builder is ColumnSheetBuilder)
+                    {
+                        continue;
+                    }
+
                     builder.Abandon(
                         $"the required indexes take {required} bytes against {dataBytes} bytes of data, over the budget of " +
                         $"{_budgetPerMille}‰; raise it with IndexPolicy.WithBudgetPerMille");
@@ -1373,7 +1381,8 @@ internal sealed class IndexWriter : IDisposable
 
             foreach (IndexBuilder builder in _builders[field])
             {
-                if (builder.WrittenBytes > 0)
+                // A sheet no budget weighs: it is what a dataset's object says of every column it holds.
+                if (builder.WrittenBytes > 0 || builder is ColumnSheetBuilder)
                 {
                     continue;
                 }
@@ -1762,6 +1771,52 @@ internal sealed class IndexWriter : IDisposable
         _entries.Add(new IndexEntry(
             IndexKinds.VariantPaths, [checked((uint)field)], (ulong)length, map.OptionBytes(),
             [new IndexRun(0, Blocks(rows, length), regions, [])]));
+    }
+
+    /// <summary>
+    /// Gives every top-level column of <paramref name="schema"/> a sheet can describe its builder, fed as the column's
+    /// indexes are, after them, so that no policy's builder moves.
+    /// </summary>
+    internal void AddSheets(DType schema)
+    {
+        for (int field = 0; _isTabular && field < _fieldCount; field++)
+        {
+            if (ColumnSheetBuilder.Supports(schema.GetField(field)))
+            {
+                _builders[field].Add(new ColumnSheetBuilder());
+                _keepsSheets = true;
+            }
+        }
+    }
+
+    /// <summary>The sheet builder of column <paramref name="field"/>, or null when it has none.</summary>
+    internal ColumnSheetBuilder? SheetOf(int field)
+    {
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            if (builder is ColumnSheetBuilder sheet)
+            {
+                return sheet;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Writes the sheet of the top-level column <paramref name="field"/>, one region from the sink's position, and adds
+    /// the entry that names it: on the column, one run over every block of the file's <paramref name="rows"/>.
+    /// </summary>
+    internal async ValueTask<IndexSegment> AddSheetAsync(
+        ISegmentSink sink, int field, byte[] sheet, long rows, int blockRows, CancellationToken cancellationToken)
+    {
+        IndexSegment region = IndexSegment.Of(sink.Position, sheet, 0);
+        await sink.WriteAsync(sheet, cancellationToken).ConfigureAwait(false);
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            IndexKinds.ColumnSheet, [checked((uint)field)], (ulong)length, [],
+            [new IndexRun(0, Blocks(rows, length), [region], [])]));
+        return region;
     }
 
     /// <summary>

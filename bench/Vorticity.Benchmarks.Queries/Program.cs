@@ -57,6 +57,8 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["floatsum"] = ("a grouped exact float sum alone, in memory (FloatSumMicro.cs)", () => Task.FromResult(FloatSumMicro.Run(rounds))),
     ["variants"] = ("a variant's path extracted alone, in memory (VariantMicro.cs)", () => Task.FromResult(VariantMicro.Run(rounds))),
     ["sketches"] = ("the grids of a distribution weighed, in buckets and speed (SketchMicro.cs)", () => Task.FromResult(SketchMicro.Run(rounds))),
+    ["sheets"] = ("what a sheet of each column costs the writer, a column a row, one thread (SheetMicro.cs)", () =>
+        SheetMicro.RunAsync((int)Option(args, "--rows", 3_000_000), rounds)),
     ["load"] = ("the write path of a load of sealed periods at the design's density, a few seconds a round (LoadMicro.cs)", () =>
     {
         int periods = Option(args, "--periods", 4);

@@ -106,6 +106,13 @@ opened, and their 13 blocks are pruned without a read. `MayMatch` answers from t
 handle already holds (the version's header and the pages it kept from earlier versions), so it reads
 nothing, and `false` is a proof.
 
+A dataset compacted by periods also keeps a sheet of each column of the objects of a megabyte or more
+it seals: its distinct values, its most frequent ones, and, when its values repeat, a filter of them. A
+question that asks a column for a value, `r.Route == "/checkout"` or a set of them, reads the sheets
+of such an object before the object, and passes over an object whose filter lacks every value asked:
+one request a few kilobytes long instead of the object's reads. A smaller object is read in the
+request its sheets would take, and keeps none.
+
 Row positions are the dataset's. A batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows object after object, in the order a scan delivers them. A key cursor over the
 clustering key merges the cursors of the objects, and its `CountAtKeyAsync` is the number of entries

@@ -180,10 +180,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// directories.
     /// </summary>
     private ObjectContents Contents(
-        SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging) =>
+        SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
+        List<(int Field, IndexSegment Region)> sheets) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
+            Sheets = sheets,
         };
 
     /// <summary>
@@ -296,6 +298,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>The rows the columns that gather took since their chunks last ended together.</summary>
     private long _groupTaken;
+
+    /// <summary>The bytes from which the file keeps the sheets it gathers, or null (<see cref="VortexWriteOptions.ColumnSheetBytes"/>).</summary>
+    private long? _sheetBytes;
 
     /// <summary>
     /// What the columns that gather hold and have not written, as the bytes it would encode to at each one's last rate:
@@ -761,7 +766,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
             options.SealScratch,
-            options.CarriesSlices || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 },
+            options.CarriesSlices || options.ColumnSheetBytes is not null || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 },
             IndexWriter.Asks(indexes) ? IndexedKeys(schema, options.ShreddedVariants) : null)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
@@ -803,6 +808,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
+
+        // A sheet of each column a sheet describes, fed as the column's indexes are.
+        if (options.ColumnSheetBytes is not null && writer._isTabular)
+        {
+            writer._indexes?.AddSheets(schema);
+            writer._sheetBytes = options.ColumnSheetBytes;
+        }
 
         writer._chunkPageEntries = Math.Max(options.ChunkPageEntries, 1);
 
@@ -2390,10 +2402,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
+            // What each column holds, for a question on a value the file lacks, which passes it unopened; a file too small
+            // for a reader to ask its sheets before it keeps none.
+            List<(int Field, IndexSegment Region)> sheets = [];
+            bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
+            for (int field = 0; keepsSheets && field < _fieldCount; field++)
+            {
+                if (closed.SheetOf(field)?.Finish() is { } sheet)
+                {
+                    sheets.Add((field, await closed.AddSheetAsync(_sink, field, sheet, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                }
+            }
+
             // A sliced file's table of contents, now that every region it names is written.
             if (_slices is { } sliced)
             {
-                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging);
+                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

@@ -146,6 +146,26 @@ internal sealed class DatasetScanSource : ScanSource
             }
         }
 
+        // An object whose column sheets prove a value the filter asks for absent is no range: the sheets of the objects
+        // read side by side, and the ranges' own walks find them read.
+        if (spec.Options.UseStatistics && spec.Filter is { } asked && SheetPruning.Asks(asked, _version.Schema.DType) && ReadsSheets(objects))
+        {
+            List<PositionedObject> held = objects.ConvertAll(static o => o.Held);
+            List<int> columns = SheetPruning.Columns(asked, _version.Schema.DType);
+            List<PositionedObject> kept = await SheetPruning.KeptAsync(_dataset, _version.Schema.DType, held, asked, columns, null, cancellationToken)
+                .ConfigureAwait(false);
+            if (kept.Count < held.Count)
+            {
+                HashSet<long> starts = [.. kept.ConvertAll(static o => o.FirstRow)];
+                objects.RemoveAll(o => !starts.Contains(o.Held.FirstRow));
+                total = 0;
+                foreach ((PositionedObject _, RowRange rows) in objects)
+                {
+                    total += rows.Length;
+                }
+            }
+        }
+
         // The objects to cut are opened side by side to read where their chunks end; the scan finds
         // them open after. Each cut gives its object back, whatever another one's open did. A lookup of an identifier
         // cuts none: it reads an object's rows by the identifier's index with no open of it, where a cut opens it, and
@@ -178,6 +198,20 @@ internal sealed class DatasetScanSource : ScanSource
         }
 
         return pieces.Count > 1 ? [.. pieces] : null;
+    }
+
+    /// <summary>Whether a scan reads the sheets of one of <paramref name="objects"/> before it (<see cref="SheetPruning.Reads"/>).</summary>
+    private bool ReadsSheets(List<(PositionedObject Held, RowRange Rows)> objects)
+    {
+        foreach ((PositionedObject held, RowRange _) in objects)
+        {
+            if (SheetPruning.Reads(held.Entry, _dataset.Options))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

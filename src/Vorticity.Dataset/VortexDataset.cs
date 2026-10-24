@@ -926,6 +926,10 @@ public sealed class VortexDataset : IAsyncDisposable
             CarriesSlices = sliced,
             GatheredChunkBytes = _options.ChunkBytes,
             GatheredGroupRows = _options.GroupRows,
+
+            // An object in time slices, which a job writes, keeps a sheet of each column its table of contents names, when it
+            // is large enough for a scan to read the sheets before it.
+            ColumnSheetBytes = sliced ? _options.SheetObjectBytes : null,
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
@@ -2557,6 +2561,62 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         return regions;
+    }
+
+    /// <summary>The column sheets this handle read, by object and column (<see cref="ReadSheetsAsync"/>).</summary>
+    private readonly SheetMemo _sheets = new SheetMemo();
+
+    /// <summary>
+    /// The sheets of columns <paramref name="fields"/> of the object <paramref name="entry"/> names, by their position in
+    /// <paramref name="fields"/>, read with no open of the object: the regions its entry's table of contents names, in
+    /// one round trip, none once the session's cache holds them, and none once this handle read them. A column the object
+    /// keeps no sheet of, or an object with no table of contents this library reads, has none.
+    /// </summary>
+    internal async ValueTask<Indexes.ColumnSheet?[]> ReadSheetsAsync(ObjectEntry entry, IReadOnlyList<int> fields, CancellationToken cancellationToken)
+    {
+        Indexes.ColumnSheet?[] sheets = new Indexes.ColumnSheet?[fields.Count];
+        if (entry.Contents is not { Sheets.Count: > 0 } contents)
+        {
+            return sheets;
+        }
+
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[fields.Count];
+        int asked = 0;
+        for (int i = 0; i < fields.Count; i++)
+        {
+            regions[i] = _sheets.TryGet(entry.Uid, fields[i], out sheets[i]) ? null : contents.SheetOf(fields[i]);
+            asked += regions[i] is null ? 0 : 1;
+        }
+
+        if (asked == 0)
+        {
+            return sheets;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            using SegmentRequestSet requests = new SegmentRequestSet(asked);
+            int[] slots = new int[fields.Count];
+            for (int i = 0; i < fields.Count; i++)
+            {
+                slots[i] = regions[i] is { } region
+                    ? requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
+                    : -1;
+            }
+
+            await Footerless(source, entry, contents).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            for (int i = 0; i < fields.Count; i++)
+            {
+                if (slots[i] >= 0 && regions[i]!.Value.Holds(requests.GetBuffer(slots[i]).Span))
+                {
+                    sheets[i] = Indexes.ColumnSheet.From(requests.GetBuffer(slots[i]).Span);
+                    _sheets.Keep(entry.Uid, fields[i], sheets[i]!, regions[i]!.Value.Length);
+                }
+            }
+        }
+
+        return sheets;
     }
 
     /// <summary>

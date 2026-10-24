@@ -170,13 +170,22 @@ object is ever rewritten to change a grain.
 
 ### 5.1 The column sheet
 
-For each column of each object, in the object's leaf entry: rows, nulls, least and greatest value, a
-distinct-count sketch of 1.5 KB, and the 128 most frequent values with their counts (Space-Saving,
-about 3 KB). Beside them, a presence filter of 9 bits per distinct value (binary fuse, 0.4 % false
-positives) lies in a region of kind `vorticity.column.sheet.v1`. A sheet weighs 4.5 KB plus 1.125 bytes
-per distinct value of the object: 79 KB a day for the reference table, 31 MB in 13 months *(computed)*.
-It drops an object whose value is absent without reading it, and the sheets of a tree's nodes merge
-as the summaries do. Writing one costs about 6 ns a column a row.
+For each column of each object, in a region of kind `vorticity.column.sheet.v1` that the object's table
+of contents names: rows, nulls, a distinct-count sketch of 1.5 KB, and the 128 most frequent values with
+their counts, about 3 KB, beside a presence filter of 9 bits per distinct value (binary fuse, 0.4 % false
+positives). The least and greatest value stay in the leaf entry's summaries, which the tree's nodes merge.
+A sheet weighs 4.5 KB plus 1.125 bytes per distinct value of the object: 79 KB a day for the reference
+table, 31 MB in 13 months *(computed)*. In a region rather than in the leaf entry, it costs a walk of the
+tree nothing: seventeen columns of 4.5 KB would have made an entry of 76 KB, read by every walk and
+written again by every commit, and a reader fetches the sheets of all its columns in one request with no
+open of the object ([10-indexes.md](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)).
+
+A column keeps frequent values and a filter only when its values repeat, its valid rows four times its
+distinct values or more: an identifier, an instant or a measure keeps its sketch alone, which is what
+held the reference table's sheets to seven columns. A sheet drops an object whose value is absent
+without reading it. An object under a mebibyte keeps none: a question reads it in the request its sheets
+would take, and its sheets, some 13 KB for an object of 42 KB, would only add to that read. Writing one
+costs 5.6 to 5.9 ns a column a row *(measured)*.
 
 ### 5.2 The counts of a column by bucket of time
 
@@ -423,7 +432,7 @@ directories take under 1 GB of memory *(computed)*.
 
 | kind | where | what |
 |---|---|---|
-| `vorticity.column.sheet.v1` | an object's index region | the presence filters of the column sheets |
+| `vorticity.column.sheet.v1` | an object's region, which its table of contents names | the column sheets |
 | `vorticity.column.counts.v1` | an object's index region, by hour; the monthly files, by day and month | counts by bucket of time and their sketches |
 | `vorticity.block.stats.v1` | an object's index region, by hour; the monthly files, merged by cluster value and day | blocks and their per-column statistics |
 | `vorticity.column.where.v1` | an object's index region | where each value lives |
@@ -431,8 +440,9 @@ directories take under 1 GB of memory *(computed)*.
 
 Readers skip a kind they do not know, as they do now. The kinds of the former synopsis tables are no
 longer written nor read. The leaf entry keeps its table of contents, at a second version that holds
-them no more, and gains the column sheets. An entry of the first version is read through its object's
-directory, so a dataset written before stays readable and the commit format's version does not rise.
+them no more and names the regions of the column sheets. An entry of the first version is read through
+its object's directory, so a dataset written before stays readable and the commit format's version does
+not rise.
 
 ### 10.4 The recommendation of the cluster column
 

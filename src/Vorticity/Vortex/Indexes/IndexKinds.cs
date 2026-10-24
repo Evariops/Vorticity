@@ -74,6 +74,13 @@ internal static class IndexKinds
     public const string VariantBlocks = "vorticity.variant.blocks.v1";
 
     /// <summary>
+    /// What a column holds, on that column: its rows and nulls, its distinct values and a sketch of them, its most
+    /// frequent values, and a filter of its values when they repeat, in one payload region that a table of contents
+    /// names, so that a question on a value an object lacks passes the object unopened (<see cref="ColumnSheet"/>).
+    /// </summary>
+    public const string ColumnSheet = "vorticity.column.sheet.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -83,7 +90,8 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks => true,
+                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks
+                or ColumnSheet => true,
             _ => false,
         };
 

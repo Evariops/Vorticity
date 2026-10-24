@@ -146,7 +146,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#48-the-file-level-filter)).
+file-level filter](#49-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -338,7 +338,32 @@ attributes: that key's entry is then built under that policy, a Bloom filter or 
 postings](#57-vorticitypostingshashedv1-value-to-blocks-through-the-hash), the only locating kind a
 path takes for now. An object that does not shred the key has no slot for it, and no entry.
 
-### 4.8 The file-level filter
+### 4.8 `vorticity.column.sheet.v1`: what a column holds
+
+A dataset's object in time slices of a mebibyte or more keeps a sheet of each top-level column an index
+keys, an integer, a float, a string or a binary through any extension: its rows and nulls, its distinct
+values, a sketch of them, its most frequent values, and a filter of its values when they repeat
+([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#51-the-column-sheet)); a smaller object,
+which a question reads in the request its sheets would take, keeps none. Each value is hashed
+as a Bloom filter hashes it, XXH3 of its bytes as the column stores them. The distinct values are counted
+exactly while there are at most 2^20 of them and estimated past that by a HyperLogLog of 2^11 registers
+of six bits, 1 536 bytes, about 2.3 % of relative error, by Ertl's estimator. A column whose valid rows
+hold at least four times its distinct values keeps its 128 most frequent values with their exact rows,
+the most first, and a binary fuse filter of 8-bit fingerprints over the distinct hashes: about 1.125
+bytes a value and a false positive in 256. A column whose values hardly repeat keeps neither, and one
+that meets a new value nine rows in ten drops its counts early, its registers going on alone.
+
+The entry is on the column, its one run a region: a version byte, the flags, the rows, the nulls and the
+distinct values as varints, the registers four in three bytes, the frequent values, each its rows, its
+error and its bytes, then the filter, its seed, its segments and its fingerprints. The object's table of
+contents names each column's region, so that a reader fetches the sheets of the columns it asks with no
+open of the object, in one request. A dataset's scan whose filter asks a column for values with an
+equality or a set reads the sheets of each object of a megabyte or more before it, sixteen objects side by
+side, and passes over an object whose filter lacks every value asked, under the filter's conjunctions and
+disjunctions (`DatasetScanCounters.ObjectsRefutedBySheets`). Writing the sheets costs 5.6 to 5.9 ns a
+column a row on the design's requests, eleven columns, one thread (`vortex-queries --micro sheets`).
+
+### 4.9 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

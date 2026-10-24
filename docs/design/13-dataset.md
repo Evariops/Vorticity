@@ -180,11 +180,14 @@ A leaf entry describes one data object:
 - for an object in time slices, its table of contents: the object's schema, the encodings its blobs
   name, its slice table and the region of each column's chunk directory, or of its page table with the
   first row of each page ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)),
-  each variant column's path directory, the region of the object's index directory, and where in it the
-  entry of each locating index lies ([the directory](10-indexes.md#3-the-directory-and-the-runs)). With
-  no open of the object, a reader of a slice reads its columns' directories, then its chunks; and a
-  lookup by a value reads its index entries with its columns' page tables, then its postings, the pages
-  of its rows and its chunks, four round trips. A table of contents of the first version, which also
+  each variant column's path directory, each column's sheet ([the column
+  sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)), the region of the object's index
+  directory, and where in it the entry of each locating index lies ([the
+  directory](10-indexes.md#3-the-directory-and-the-runs)). With no open of the object, a reader of a slice
+  reads its columns' directories, then its chunks; a question on a value reads the sheets of its columns
+  in one request, and passes the object over when they prove the value absent; and a lookup by a value
+  reads its index entries with its columns' page tables, then its postings, the pages of its rows and its
+  chunks, four round trips. A table of contents of the first version, which also
   held the synopsis tables of the time, is ignored, and its object read through its directory. It is a tagged field
   like the footer's length, about 2.2 KB for a period of an hour, and 19.7 KB for a day, where
   it took 318 KB while it held every table's chunks

@@ -29,6 +29,9 @@ internal sealed class DatasetScanCounters
     /// <summary>Objects whose own summaries refuted the predicate, so nothing was opened.</summary>
     public long ObjectsSkipped { get; internal set; }
 
+    /// <summary>Objects whose column sheets proved a value the predicate asks for absent, so nothing but the sheets was read.</summary>
+    public long ObjectsRefutedBySheets { get; internal set; }
+
     /// <summary>Objects the scan went to read. <see cref="CacheHits"/> of them cost no open.</summary>
     public long ObjectsOpened { get; internal set; }
 
@@ -1352,8 +1355,60 @@ internal sealed class DatasetScanBuilder
 
     private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? new SummaryPruner(filter) : null;
 
-    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken) =>
-        _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
+    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken)
+    {
+        IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
+        return _summaries && _filter is { } filter && SheetPruning.Asks(filter, _version.Schema.DType)
+            ? SheetPrunedAsync(walk, filter, cancellationToken)
+            : walk;
+    }
+
+    /// <summary>The objects a sheet read at once may pass over, in the walk's order.</summary>
+    private const int SheetBatch = 16;
+
+    /// <summary>
+    /// The objects of <paramref name="walk"/> their column sheets do not refute <paramref name="filter"/> by: an object
+    /// whose sheets are to be read (<see cref="SheetPruning.Reads"/>) has them read with no open of it, the objects of a
+    /// batch side by side, and one that lacks every value an equality or a set asks for there is passed over. An object
+    /// with none passes at once while no batch waits, so that a walk of small objects holds and allocates nothing.
+    /// </summary>
+    private async IAsyncEnumerable<PositionedObject> SheetPrunedAsync(
+        IAsyncEnumerable<PositionedObject> walk, VortexExpr filter, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        DType schema = _version.Schema.DType;
+        List<int>? columns = null;
+        List<PositionedObject>? batch = null;
+        await foreach (PositionedObject held in walk.ConfigureAwait(false))
+        {
+            if (batch is not { Count: > 0 } && !SheetPruning.Reads(held.Entry, _dataset.Options))
+            {
+                yield return held;
+                continue;
+            }
+
+            (batch ??= new List<PositionedObject>(SheetBatch)).Add(held);
+            if (batch.Count == SheetBatch)
+            {
+                columns ??= SheetPruning.Columns(filter, schema);
+                foreach (PositionedObject kept in await SheetPruning.KeptAsync(_dataset, schema, batch, filter, columns, _metrics, cancellationToken).ConfigureAwait(false))
+                {
+                    yield return kept;
+                }
+
+                batch.Clear();
+            }
+        }
+
+        if (batch is { Count: > 0 })
+        {
+            columns ??= SheetPruning.Columns(filter, schema);
+            foreach (PositionedObject kept in await SheetPruning.KeptAsync(_dataset, schema, batch, filter, columns, _metrics, cancellationToken).ConfigureAwait(false))
+            {
+                yield return kept;
+            }
+        }
+    }
+
 
     private void RecordOpen(ObjectLease lease, int open = 1)
     {

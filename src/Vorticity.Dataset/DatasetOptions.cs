@@ -188,6 +188,13 @@ public sealed record DatasetOptions
     internal long GroupRows { get; init; } = 1L << 22;
 
     /// <summary>
+    /// The bytes from which an object's column sheets are read before it, for a filter that asks a column for values
+    /// its sheet may prove absent: 2^20 by default, under which an open reads the object's footer, and often all of it,
+    /// in the request the sheets would take.
+    /// </summary>
+    internal long SheetObjectBytes { get; init; } = 1L << 20;
+
+    /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
     /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
     /// </summary>

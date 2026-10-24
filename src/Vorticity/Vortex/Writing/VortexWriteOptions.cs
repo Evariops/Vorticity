@@ -288,6 +288,14 @@ public sealed record VortexWriteOptions
     internal long GatheredGroupRows { get; init; }
 
     /// <summary>
+    /// The bytes from which the file keeps a sheet of each top-level column (<see cref="Indexes.ColumnSheet"/>), which a
+    /// sliced file's table of contents names, counted before its sheets; null, the default, for none. A dataset's sealed
+    /// objects keep them from the size at which its scans read an object's sheets before the object, under which a
+    /// question reads the object in the request its sheets would take.
+    /// </summary>
+    internal long? ColumnSheetBytes { get; init; }
+
+    /// <summary>
     /// What each top-level variant column shreds, by its name: its chunks are written as the reference
     /// stores a shredded variant, the values the shredding names in typed columns. A column not named
     /// is written whole.
