@@ -2100,6 +2100,19 @@ public sealed class VortexDataset : IAsyncDisposable
             features |= DatasetFeatures.Periods;
         }
 
+        if (options.Clustering is { } clustering)
+        {
+            if (options.Periods is not null)
+            {
+                throw new ArgumentException(
+                    "A dataset compacted by periods cuts its objects by them: it declares no clustering besides.", nameof(options));
+            }
+
+            // Resolved once here, so that a value the key's first column does not take is refused before anything is written.
+            _ = ValueCut.Of(clustering, key);
+            features |= DatasetFeatures.Clustering;
+        }
+
         string[] declared = [];
         if (options.Identifiers is { Count: > 0 } identifiers)
         {
@@ -2130,6 +2143,7 @@ public sealed class VortexDataset : IAsyncDisposable
             PeriodLength = options.Periods?.Length,
             Identifiers = declared,
             ShreddedPaths = shredded,
+            Clustering = options.Clustering,
             Features = features,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,

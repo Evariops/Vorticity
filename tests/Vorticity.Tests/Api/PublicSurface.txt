@@ -2768,6 +2768,30 @@ Vorticity:     property ImmutableArray<int> ChunkRows { get; init; }
 Vorticity:     property WriteBytes Bytes { get; init; }
 Vorticity:     property int BlockRows { get; init; }
 Vorticity:     property long RowCount { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.ClusteringOptions : IEquatable<ClusteringOptions>
+Vorticity.Dataset:     ctor ClusteringOptions()
+Vorticity.Dataset:     method ClusteringOptions <Clone>$()
+Vorticity.Dataset:     method bool Equals(ClusteringOptions)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(ClusteringOptions, ClusteringOptions)
+Vorticity.Dataset:     method bool op_Inequality(ClusteringOptions, ClusteringOptions)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property ClusteringValue Value { get; init; }
+Vorticity.Dataset:     property long ObjectBytes { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.ClusteringValue : IEquatable<ClusteringValue>
+Vorticity.Dataset:     method ClusteringValue <Clone>$()
+Vorticity.Dataset:     method ClusteringValue Bucket(TimeSpan)
+Vorticity.Dataset:     method ClusteringValue Bucket(double)
+Vorticity.Dataset:     method ClusteringValue Bucket(long)
+Vorticity.Dataset:     method ClusteringValue Truncate(CalendarUnit)
+Vorticity.Dataset:     method bool Equals(ClusteringValue)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(ClusteringValue, ClusteringValue)
+Vorticity.Dataset:     method bool op_Inequality(ClusteringValue, ClusteringValue)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property ClusteringValue Column { get; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.CompactionJob : IEquatable<CompactionJob>
 Vorticity.Dataset:     method CompactionJob <Clone>$()
 Vorticity.Dataset:     method bool Equals(CompactionJob)
@@ -2925,6 +2949,7 @@ Vorticity.Dataset:     method bool op_Equality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method bool op_Inequality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property ClusteringOptions Clustering { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> Identifiers { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> ShreddedPaths { get; init; }

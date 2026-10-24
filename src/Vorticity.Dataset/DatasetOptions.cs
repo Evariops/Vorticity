@@ -259,6 +259,15 @@ public sealed record DatasetOptions
     public PeriodOptions? Periods { get; init; }
 
     /// <summary>
+    /// How jobs group the rows into objects: cut where a value of the clustering key's first column changes, at the bytes
+    /// an object aims at, or both; the application chooses the value and the size, and the dataset knows nothing of what
+    /// the values mean. Null, the default, leaves objects at the compaction's sizes. Fixed when the dataset is created and
+    /// carried by every commit; a handle opened on an existing dataset follows the dataset's, whatever this says.
+    /// </summary>
+    /// <remarks>A dataset compacted by periods (<see cref="Periods"/>) cuts its objects by them, and declares no clustering.</remarks>
+    public ClusteringOptions? Clustering { get; init; }
+
+    /// <summary>
     /// The columns whose values questions look up one at a time, such as a request's id: those an
     /// object indexes by value so that a lookup reads the objects that hold the value and no other.
     /// An identifier may also be a key of a variant column read as a string or an integer, written as a
@@ -373,6 +382,7 @@ public sealed record DatasetOptions
             LockedStore = false,
             ErasureDelay = header.ErasureDelay,
             Periods = PeriodsOf(header, Periods),
+            Clustering = header.Clustering,
         }
         : this with
         {
@@ -380,6 +390,7 @@ public sealed record DatasetOptions
             LockedStore = true,
             ErasureDelay = null,
             Periods = PeriodsOf(header, Periods),
+            Clustering = header.Clustering,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,

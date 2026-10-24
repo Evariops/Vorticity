@@ -766,6 +766,7 @@ internal static class DatasetCompactor
     {
         IReadOnlyList<string> paths = key.Paths;
         KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
+        ValueCut? values = schema.Cut;
         long rows = 0;
         long pastHorizon = 0;
         List<Cut> cuts = [];
@@ -795,16 +796,24 @@ internal static class DatasetCompactor
                     continue;
                 }
 
-                if (outputs.WantsRoll && !outputs.HoldsKey(merge.FirstKey))
+                // An object holds the rows of one clustering value: a run of several is written in parts, one a value,
+                // and a part of another value than the object's seals it. A key has one value, so no part splits a key.
+                for (int at = 0, end; at < run.RowCount; at = end)
                 {
-                    // Never split a key across two objects: two outputs sharing a boundary value
-                    // would overlap, and a level wants key-disjoint objects.
-                    await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
+                    end = values is null ? run.RowCount : values.EndOfValue(merge, at, run.RowCount);
+                    if ((outputs.WantsRoll && !outputs.HoldsKey(merge.KeyAt(at)))
+                        || (values is not null && outputs.HoldsOtherValue(values, merge.KeyAt(at))))
+                    {
+                        // Never split a key across two objects: two outputs sharing a boundary value
+                        // would overlap, and a level wants key-disjoint objects.
+                        await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    outputs.Note(merge.KeyAt(end - 1));
+                    await outputs.WriteAsync(at == 0 && end == run.RowCount ? run : run.Window(at, end - at), cancellationToken).ConfigureAwait(false);
                 }
 
-                outputs.Note(merge.LastKey);
                 rows += run.RowCount;
-                await outputs.WriteAsync(run, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -1273,6 +1282,10 @@ internal static class DatasetCompactor
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
             _lastKeyLength >= 0 && key.SequenceEqual(_lastKey.AsSpan(0, _lastKeyLength));
+
+        /// <summary>Whether the object being written holds rows of another clustering value than this key's.</summary>
+        internal bool HoldsOtherValue(ValueCut values, ReadOnlySpan<byte> key) =>
+            _lastKeyLength >= 0 && !values.Same(_lastKey.AsSpan(0, _lastKeyLength), key);
 
         /// <summary>Records the last key of a run, so the next roll does not split it.</summary>
         internal void Note(ReadOnlySpan<byte> key)

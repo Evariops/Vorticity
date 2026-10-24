@@ -297,6 +297,99 @@ public static partial class RowEncoder
     }
 
     /// <summary>
+    /// The bytes the first value of an ascending row-encoded key takes, a value of <paramref name="dtype"/>: its width for
+    /// a fixed one, its sentinel and blocks for a variable one, the last block's marker the first that is no continuation.
+    /// Two keys hold the same first value when these bytes of theirs are the same.
+    /// </summary>
+    internal static int FirstValueLength(ReadOnlySpan<byte> key, DType dtype)
+    {
+        dtype = Storage(dtype);
+        switch (dtype.Kind)
+        {
+            case DTypeKind.Bool:
+                return 2;
+
+            case DTypeKind.Primitive:
+                return dtype.PType.ByteWidth() + 1;
+
+            case DTypeKind.Utf8 or DTypeKind.Binary:
+            {
+                // A null or an empty value is its sentinel alone.
+                if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
+                {
+                    return 1;
+                }
+
+                const byte Continuation = 0xFF;
+                int length = 1;
+                while (key[length + RowWidths.VarBlockData] == Continuation)
+                {
+                    length += RowWidths.VarBlockTotal;
+                }
+
+                return length + RowWidths.VarBlockTotal;
+            }
+
+            default:
+                throw Unkeyed(dtype);
+        }
+    }
+
+    /// <summary>
+    /// The first value of an ascending row-encoded key, a value of a fixed width of <paramref name="dtype"/>, as the
+    /// literal <see cref="WriteValue"/> writes it from: its bits mapped back from their order, a null as a null.
+    /// </summary>
+    internal static FilterLiteral ReadFirstValue(ReadOnlySpan<byte> key, DType dtype)
+    {
+        dtype = Storage(dtype);
+        if (dtype.Kind is not (DTypeKind.Bool or DTypeKind.Primitive))
+        {
+            throw Unkeyed(dtype);
+        }
+
+        if (key[0] != RowSentinels.FixedNonNull)
+        {
+            return FilterLiteral.Null;
+        }
+
+        if (dtype.Kind == DTypeKind.Bool)
+        {
+            return FilterLiteral.From(key[1] == 0x02);
+        }
+
+        PType ptype = dtype.PType;
+        int width = ptype.ByteWidth();
+        ulong ordered = 0;
+        for (int i = 0; i < width; i++)
+        {
+            ordered = (ordered << 8) | key[1 + i];
+        }
+
+        ulong sign = 1UL << ((8 * width) - 1);
+        ulong mask = width == sizeof(ulong) ? ulong.MaxValue : (1UL << (8 * width)) - 1;
+        if (ptype.IsFloat())
+        {
+            // A non-negative had its sign bit set, a negative every bit flipped.
+            ulong raw = (ordered & sign) != 0 ? ordered ^ sign : ~ordered & mask;
+            return FilterLiteral.From(ptype switch
+            {
+                PType.F16 => (double)BitConverter.UInt16BitsToHalf((ushort)raw),
+                PType.F32 => BitConverter.UInt32BitsToSingle((uint)raw),
+                _ => BitConverter.UInt64BitsToDouble(raw),
+            });
+        }
+
+        if (!ptype.IsSignedInteger())
+        {
+            return FilterLiteral.From(ordered);
+        }
+
+        // The sign bit flipped back, then extended from the column's width.
+        int shift = 64 - (8 * width);
+        return FilterLiteral.From((long)((ordered ^ sign) << shift) >> shift);
+    }
+
+    /// <summary>
     /// The value's bits at the column's width, mapped as <see cref="IRowOrdering{T}"/> maps them so
     /// that their unsigned order is the values' order.
     /// </summary>

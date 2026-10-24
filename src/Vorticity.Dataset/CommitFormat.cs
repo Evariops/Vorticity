@@ -134,6 +134,12 @@ internal enum DatasetFeatures : ulong
 
     // 64 named objects that joined several sealed periods, retired with the joins: a header that still names it is
     // refused, never reused.
+
+    /// <summary>
+    /// Objects cut by a clustering value or aimed at a size (<see cref="DatasetOptions.Clustering"/>): a library that does
+    /// not know it would write objects across values and past the size, against the cut every writer keeps.
+    /// </summary>
+    Clustering = 128,
 }
 
 /// <summary>

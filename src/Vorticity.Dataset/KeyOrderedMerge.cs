@@ -90,23 +90,16 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
 
     /// <summary>The run's first key, row-encoded.</summary>
-    internal ReadOnlySpan<byte> FirstKey
-    {
-        get
-        {
-            MergeInput input = Emitting();
-            return input.KeyAt(input.Row);
-        }
-    }
+    internal ReadOnlySpan<byte> FirstKey => KeyAt(0);
 
     /// <summary>The run's last key, row-encoded.</summary>
-    internal ReadOnlySpan<byte> LastKey
+    internal ReadOnlySpan<byte> LastKey => KeyAt(_count - 1);
+
+    /// <summary>The key of the run's row <paramref name="row"/>, row-encoded.</summary>
+    internal ReadOnlySpan<byte> KeyAt(int row)
     {
-        get
-        {
-            MergeInput input = Emitting();
-            return input.KeyAt(input.Row + _count - 1);
-        }
+        MergeInput input = Emitting();
+        return input.KeyAt(input.Row + row);
     }
 
     /// <summary>The most inputs held open at once.</summary>

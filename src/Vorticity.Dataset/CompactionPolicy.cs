@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Expressions;
 
 namespace Vorticity.Dataset;
 
@@ -108,6 +109,9 @@ internal static partial class CompactionPolicy
         /// <summary>Its clustering key, null when objects are kept in the order they arrived.</summary>
         internal ClusteringKey? Key => _snapshot.Schema.Key;
 
+        /// <summary>The clustering value its jobs cut their objects by; null for none.</summary>
+        internal ValueCut? Cut => _snapshot.Schema.Cut;
+
         /// <summary>The compaction settings its header carries.</summary>
         internal CompactionSettings Compaction => _snapshot.Header.Compaction;
 
@@ -158,6 +162,13 @@ internal static partial class CompactionPolicy
         }
 
         CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
+
+        // The size the dataset's objects aim at is every writer's, as its key is.
+        if (dataset.Header.Clustering is { ObjectBytes: > 0 } clustering)
+        {
+            settings = settings with { MaxObjectBytes = clustering.ObjectBytes };
+        }
+
         return dataset.LockedStore ? settings with { PurgeMarks = false } : settings;
     }
 
@@ -265,7 +276,7 @@ internal static partial class CompactionPolicy
         for (int level = 1; level < levels.Count && settings.MergeNeighbours && clustering is not null; level++)
         {
             if (!taken.Contains(level)
-                && Neighbours(levels[level].GetRange(Math.Max(0, levels[level].Count - Window(settings)), Math.Min(levels[level].Count, Window(settings))), level, settings) is { } small
+                && Neighbours(levels[level].GetRange(Math.Max(0, levels[level].Count - Window(settings)), Math.Min(levels[level].Count, Window(settings))), level, settings, dataset.Cut) is { } small
                 && Unspanned(small, Spanning(levels, level, LevelRange.Of(level, small, clustering)), level, clustering, settings) is { } alone)
             {
                 return Merged(dataset, alone, level, settings, style);
@@ -657,7 +668,7 @@ internal static partial class CompactionPolicy
                 tail.Add(new CompactionInput(level, entry.Key, ObjectEntry.FromBytes(entry.Value)));
             }
 
-            if (Neighbours(tail, level, settings) is { } small
+            if (Neighbours(tail, level, settings, dataset.Cut) is { } small
                 && Unspanned(
                         small,
                         await SpanningAsync(dataset, level, LevelRange.Of(level, small, clustering), cancellationToken).ConfigureAwait(false),
@@ -912,30 +923,82 @@ internal static partial class CompactionPolicy
     /// a byte is rewritten once a class, <c>log_F(target / size)</c> times, as the leveled merges of
     /// random keys rewrite it once a level.
     /// </summary>
-    private static List<CompactionInput>? Neighbours(List<CompactionInput> tail, int level, CompactionOptions settings)
+    /// <remarks>
+    /// Under a clustering value, a merge takes the objects of one value alone, whose rows a merge writes into one object:
+    /// the run at the end holds the last object's value. The value before it, once the last one's objects lie past it, gets
+    /// no more rows from keys in order, and its small objects at its end, of any class, are merged into one within the
+    /// target, where they would otherwise wait for a carry that keys in order never bring.
+    /// </remarks>
+    private static List<CompactionInput>? Neighbours(List<CompactionInput> tail, int level, CompactionOptions settings, ValueCut? values)
     {
         int fanout = Math.Max(settings.Fanout, 2);
         long target = settings.TargetBytes(level);
-        if (tail.Count < fanout)
+        if (tail.Count < 2)
         {
             return null;
         }
 
+        FilterLiteral last = default;
+        if (values is not null)
+        {
+            if (values.Single(tail[^1].Entry.Summaries) is not { } held)
+            {
+                return null;
+            }
+
+            last = held;
+        }
+
         int size = ClassOf(tail[^1].Entry.Bytes, target, fanout);
-        if (size == 0)
+        List<CompactionInput> run = [];
+        long bytes = 0;
+        for (int i = tail.Count - 1;
+             i >= 0 && size > 0 && ClassOf(tail[i].Entry.Bytes, target, fanout) == size && bytes + tail[i].Entry.Bytes <= target
+             && (values is null || values.HoldsOnly(tail[i].Entry.Summaries, last));
+             i--)
+        {
+            run.Add(tail[i]);
+            bytes += tail[i].Entry.Bytes;
+        }
+
+        if (run.Count >= fanout)
+        {
+            run.Reverse();
+            return run;
+        }
+
+        return values is null ? null : Closed(tail, target, fanout, values, last);
+    }
+
+    /// <summary>
+    /// The small objects of the value before the last at a level's end, <paramref name="tail"/> in key order, those of
+    /// classes above 0 at its end whose bytes stay within the target, when they are two or more; null otherwise.
+    /// </summary>
+    private static List<CompactionInput>? Closed(List<CompactionInput> tail, long target, int fanout, ValueCut values, FilterLiteral last)
+    {
+        int end = tail.Count - 1;
+        while (end >= 0 && values.HoldsOnly(tail[end].Entry.Summaries, last))
+        {
+            end--;
+        }
+
+        if (end < 1 || values.Single(tail[end].Entry.Summaries) is not { } closed)
         {
             return null;
         }
 
         List<CompactionInput> run = [];
         long bytes = 0;
-        for (int i = tail.Count - 1; i >= 0 && ClassOf(tail[i].Entry.Bytes, target, fanout) == size && bytes + tail[i].Entry.Bytes <= target; i--)
+        for (int i = end;
+             i >= 0 && ClassOf(tail[i].Entry.Bytes, target, fanout) > 0 && bytes + tail[i].Entry.Bytes <= target
+             && values.HoldsOnly(tail[i].Entry.Summaries, closed);
+             i--)
         {
             run.Add(tail[i]);
             bytes += tail[i].Entry.Bytes;
         }
 
-        if (run.Count < fanout)
+        if (run.Count < 2)
         {
             return null;
         }

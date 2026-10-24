@@ -145,7 +145,7 @@ internal sealed record CommitHeader
     /// <summary>The features this library knows: a header that names another is refused, a later library's.</summary>
     internal const DatasetFeatures KnownFeatures =
         DatasetFeatures.EntryFields | DatasetFeatures.ErasureDelay | DatasetFeatures.Periods | DatasetFeatures.Identifiers
-        | DatasetFeatures.ShreddedPaths;
+        | DatasetFeatures.ShreddedPaths | DatasetFeatures.Clustering;
 
     /// <summary>
     /// Whether the dataset is compacted by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which the lateness
@@ -191,6 +191,12 @@ internal sealed record CommitHeader
     /// </summary>
     public IReadOnlyList<string> ShreddedPaths { get; init; } = [];
 
+    /// <summary>
+    /// How the dataset's jobs cut their objects (<see cref="DatasetOptions.Clustering"/>), fixed at creation and kept by
+    /// every header; null for none. A header that carries it names <see cref="DatasetFeatures.Clustering"/>.
+    /// </summary>
+    public ClusteringOptions? Clustering { get; init; }
+
     /// <summary>The longest delay a header reads, in seconds: what a <see cref="TimeSpan"/> holds.</summary>
     private const ulong MaxDelaySeconds = (ulong)(long.MaxValue / TimeSpan.TicksPerSecond);
 
@@ -221,6 +227,7 @@ internal sealed record CommitHeader
 
         // 23 held the partition columns, retired with them: never reused.
         internal const int ShreddedPaths = 24;
+        internal const int Clustering = 25;
     }
 
     internal static class PeriodChangeField
@@ -246,6 +253,15 @@ internal sealed record CommitHeader
     {
         internal const int Name = 1;
         internal const int Current = 2;
+    }
+
+    internal static class ClusteringField
+    {
+        internal const int Function = 1;
+        internal const int Unit = 2;
+        internal const int Width = 3;
+        internal const int FloatWidth = 4;
+        internal const int ObjectBytes = 5;
     }
 
     internal static class LevelField
@@ -363,6 +379,34 @@ internal sealed record CommitHeader
             {
                 inner.Dispose();
             }
+        }
+
+        if (Clustering is { } clustering)
+        {
+            WriteClustering(ref writer, clustering);
+        }
+    }
+
+    /// <summary>The clustering declaration, written whole even when it states nothing: its presence is what says the dataset has one.</summary>
+    private static void WriteClustering(ref ProtoWriter writer, ClusteringOptions clustering)
+    {
+        ProtoWriter inner = new ProtoWriter();
+        try
+        {
+            if (clustering.Value is { } value)
+            {
+                inner.WriteUInt64Always(ClusteringField.Function, (ulong)value.Function);
+                inner.WriteUInt64(ClusteringField.Unit, (ulong)value.Unit);
+                inner.WriteSInt64(ClusteringField.Width, value.Width);
+                inner.WriteDouble(ClusteringField.FloatWidth, value.FloatWidth);
+            }
+
+            inner.WriteUInt64(ClusteringField.ObjectBytes, (ulong)clustering.ObjectBytes);
+            writer.WriteBytesAlways(Field.Clustering, inner.WrittenSpan);
+        }
+        finally
+        {
+            inner.Dispose();
         }
     }
 
@@ -548,6 +592,7 @@ internal sealed record CommitHeader
         List<string> shreddedPaths = [];
         SliceWidth? periodLength = null;
         List<PeriodChange> periodChanges = [];
+        ClusteringOptions? grouping = null;
 
         try
         {
@@ -625,6 +670,9 @@ internal sealed record CommitHeader
                     case (Field.PeriodChanges, ProtoWireType.LengthDelimited):
                         periodChanges.Add(ReadPeriodChange(reader.ReadLengthDelimited()));
                         break;
+                    case (Field.Clustering, ProtoWireType.LengthDelimited):
+                        grouping = ReadClustering(reader.ReadLengthDelimited());
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -656,6 +704,11 @@ internal sealed record CommitHeader
                 "A commit header's flag of periods, its lateness horizon and its period length disagree: each goes with the others.");
         }
 
+        if (((features & DatasetFeatures.Clustering) != 0) != grouping is not null)
+        {
+            throw new CommitFormatException("A commit header's flag of clustering and its clustering disagree: each goes with the other.");
+        }
+
         return new CommitHeader
         {
             Version = version,
@@ -681,6 +734,52 @@ internal sealed record CommitHeader
             ShreddedPaths = shreddedPaths,
             PeriodLength = periodLength,
             PeriodChanges = periodChanges,
+            Clustering = grouping,
+        };
+    }
+
+    private static ClusteringOptions ReadClustering(ReadOnlySpan<byte> bytes)
+    {
+        ulong? function = null;
+        ulong unit = 0;
+        long width = 0;
+        double floatWidth = 0;
+        ulong objectBytes = 0;
+        ProtoReader reader = new ProtoReader(bytes);
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field, wire)
+            {
+                case (ClusteringField.Function, ProtoWireType.Varint):
+                    function = reader.ReadVarint();
+                    break;
+                case (ClusteringField.Unit, ProtoWireType.Varint):
+                    unit = reader.ReadVarint();
+                    break;
+                case (ClusteringField.Width, ProtoWireType.Varint):
+                    width = reader.ReadSInt64();
+                    break;
+                case (ClusteringField.FloatWidth, ProtoWireType.Fixed64):
+                    floatWidth = reader.ReadDouble();
+                    break;
+                case (ClusteringField.ObjectBytes, ProtoWireType.Varint):
+                    objectBytes = reader.ReadVarint();
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        if (objectBytes > long.MaxValue)
+        {
+            throw new CommitFormatException($"A commit header names objects of {objectBytes} bytes, past what an object holds.");
+        }
+
+        return new ClusteringOptions
+        {
+            Value = function is { } named ? ClusteringValue.Of(named, unit, width, floatWidth) : null,
+            ObjectBytes = (long)objectBytes,
         };
     }
 

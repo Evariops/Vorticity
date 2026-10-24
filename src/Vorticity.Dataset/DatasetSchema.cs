@@ -37,7 +37,7 @@ internal sealed class DatasetSchema
 
     private DatasetSchema(
         ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy,
-        IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths)
+        IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths, ClusteringOptions? declared)
     {
         Bytes = bytes;
         Retired = retired;
@@ -49,6 +49,7 @@ internal sealed class DatasetSchema
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
         Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType);
+        Cut = ValueCut.Of(declared, Key);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);
@@ -73,6 +74,9 @@ internal sealed class DatasetSchema
 
     /// <summary>The clustering key, or null when the dataset is ordered by arrival.</summary>
     internal ClusteringKey? Key { get; }
+
+    /// <summary>The clustering value the dataset's jobs cut their objects by, over <see cref="Key"/>; null when it declares none.</summary>
+    internal ValueCut? Cut { get; }
 
     /// <summary>Every name a column of the dataset gave up, in the order they were given up.</summary>
     internal IReadOnlyList<RetiredColumn> Retired { get; }
@@ -111,7 +115,8 @@ internal sealed class DatasetSchema
             && Same(previous.Identifiers, header.Identifiers) && Same(previous.ShreddedPaths, header.ShreddedPaths)
             ? previous
             : new DatasetSchema(
-                header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.Identifiers, header.ShreddedPaths);
+                header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.Identifiers, header.ShreddedPaths,
+                header.Clustering);
 
     /// <summary>
     /// How an object of this dtype answers for these columns: null when it holds exactly them, the
