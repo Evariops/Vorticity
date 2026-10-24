@@ -1626,7 +1626,7 @@ internal sealed class DatasetScanBuilder
         DatasetScanCounters? metrics = _considers ? _metrics : null;
         await foreach (PositionedObject held in walk.ConfigureAwait(false))
         {
-            if (batch is not { Count: > 0 } && (!SheetPruning.Reads(held.Entry, _dataset.Options) || unread?.Invoke(held) == true))
+            if (batch is not { Count: > 0 } && (!SheetPruning.Reads(held.Entry, _dataset.Options, _version.Schema) || unread?.Invoke(held) == true))
             {
                 yield return held;
                 continue;
@@ -1636,7 +1636,8 @@ internal sealed class DatasetScanBuilder
             if (batch.Count == SheetBatch)
             {
                 columns ??= SheetPruning.Columns(filter, schema);
-                foreach (PositionedObject kept in await SheetPruning.KeptAsync(_dataset, schema, batch, filter, columns, metrics, unread, cancellationToken).ConfigureAwait(false))
+                foreach (PositionedObject kept in await SheetPruning.KeptAsync(
+                    _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken).ConfigureAwait(false))
                 {
                     yield return kept;
                 }
@@ -1648,7 +1649,8 @@ internal sealed class DatasetScanBuilder
         if (batch is { Count: > 0 })
         {
             columns ??= SheetPruning.Columns(filter, schema);
-            foreach (PositionedObject kept in await SheetPruning.KeptAsync(_dataset, schema, batch, filter, columns, metrics, unread, cancellationToken).ConfigureAwait(false))
+            foreach (PositionedObject kept in await SheetPruning.KeptAsync(
+                _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken).ConfigureAwait(false))
             {
                 yield return kept;
             }

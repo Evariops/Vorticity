@@ -32,11 +32,17 @@ internal sealed class CountsAnswer
 
     private readonly StateRequest _request;
 
+    // The version's columns, which an object's counts answer for when it holds them in their places.
+    private readonly DatasetSchema _schema;
+
     private CountsAnswer(
-        StateRequest request, VortexSchema columns, DType schema, string instant, long unitsPerHour, int? column, bool keyed, long low,
-        long high, bool windowed, byte[][]? values, VortexExpr? edges)
+        StateRequest request, DatasetSchema version, string instant, long unitsPerHour, int? column, bool keyed, long low, long high,
+        bool windowed, byte[][]? values, VortexExpr? edges)
     {
+        VortexSchema columns = version.Columns;
+        DType schema = version.DType;
         _request = request;
+        _schema = version;
         UnitsPerHour = unitsPerHour;
         InstantField = columns.IndexOf(instant);
         Column = column;
@@ -219,18 +225,18 @@ internal sealed class CountsAnswer
         }
 
         return new CountsAnswer(
-            request, version.Schema.Columns, schema, instant, unitsPerHour, column, keyed, low, high, windowed, values?.ToArray(),
+            request, version.Schema, instant, unitsPerHour, column, keyed, low, high, windowed, values?.ToArray(),
             EdgesOf(filter, instant, low, high, windowed, unitsPerHour));
     }
 
     /// <summary>
     /// The column whose counts answer for the object <paramref name="entry"/> names: the column asked, or for a question of
     /// time alone the one whose counts' region is least; null when its rows are read, rows a delete marked, which its
-    /// counts still hold, or no counts of the column.
+    /// counts still hold, no counts of the column, or columns of an earlier schema, which its counts name by their places.
     /// </summary>
     internal int? FieldOf(ObjectEntry entry)
     {
-        if (entry.HasDeletions || entry.Contents is not { Counts.Count: > 0 } contents)
+        if (entry.HasDeletions || entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry))
         {
             return null;
         }

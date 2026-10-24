@@ -108,6 +108,56 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         Assert.True(answered >= Questions / 2, $"seed {seed}: the counts answered {answered} questions of {Questions}");
     }
 
+    // An object written before the schema moved its columns holds its synopses by its own columns' places: its sheets and
+    // its counts answer for none of the version's columns, and it is read as rows.
+    [Fact]
+    public async Task AnObjectOfAnEarlierSchemaReadsItsRows()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, Options() with
+        {
+            ClusteringKey = [nameof(Call.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+        }, Ct);
+        Random random = new Random(87);
+        for (int part = 0; part < 24; part++)
+        {
+            Call[] rows = new Call[1_000];
+            for (int i = 0; i < rows.Length; i++)
+            {
+                int service = random.Next(Services.Length);
+                rows[i] = new Call(
+                    Noon.AddSeconds(((part * 1_000) + i) * 0.3), Services[service], $"/{Services[service]}/{random.Next(40)}",
+                    random.NextInt64(1_000, 5_000_000), Math.Round(random.NextDouble() * 100, 2));
+            }
+
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Call>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        // The route before the service: each object written before holds the service where the version holds the route.
+        static VortexField Field(string name) => Call.Schema[Call.Schema.IndexOf(name)];
+        await dataset.EvolveSchemaAsync(VortexSchema.Create([
+            Field(nameof(Call.At)), Field(nameof(Call.Route)), Field(nameof(Call.Service)), Field(nameof(Call.DurationNs)), Field(nameof(Call.Weight))]),
+            cancellationToken: Ct);
+        foreach ((string[] keys, string[] results, string? filter) in ((string[], string[], string?)[])[
+            ([nameof(Call.Service)], [nameof(Call.Service), "count()", "sum(DurationNs)"], null),
+            ([nameof(Call.Service)], [nameof(Call.Service), "count()"], "Service = 'api'"),
+            ([nameof(Call.Route)], [nameof(Call.Route), "count()"], "Route in ('/api/3', '/cart/7')")])
+        {
+            // Every object's rows, with no statistic read, against the sheets, which the rows' scan reads too, then the counts.
+            List<string> read = await AskAsync(dataset, keys, results, filter, synopses: false, statistics: false);
+            Assert.NotEmpty(read);
+            Assert.Equal(read, await AskAsync(dataset, keys, results, filter, synopses: false));
+            Assert.Equal(read, await AskAsync(dataset, keys, results, filter, synopses: true));
+        }
+    }
+
     /// <summary>A question on <paramref name="columns"/>: its key, its results, and its filter as text, null for none.</summary>
     private static (string[] Keys, string[] Results, string? Filter) Draw(Random random, DatasetCountsTests.Drawn[] columns, object?[][] rows)
     {
@@ -165,10 +215,11 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
     };
 
     /// <summary>The groups the question answers, each a line of its values, sorted.</summary>
-    private static async Task<List<string>> AskAsync(VortexDataset dataset, string[] keys, string[] results, string? filter, bool synopses)
+    private static async Task<List<string>> AskAsync(
+        VortexDataset dataset, string[] keys, string[] results, string? filter, bool synopses, bool statistics = true)
     {
         List<string> rows = [];
-        await foreach (RecordBatch batch in Ask(dataset, keys, results, filter, synopses).ToBatchesAsync(Ct))
+        await foreach (RecordBatch batch in Ask(dataset, keys, results, filter, synopses, statistics).ToBatchesAsync(Ct))
         {
             Values.DescribeRows(batch, rows);
         }
@@ -177,9 +228,9 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         return rows;
     }
 
-    private static Vorticity.Scan Ask(VortexDataset dataset, string[] keys, string[] results, string? filter, bool synopses)
+    private static Vorticity.Scan Ask(VortexDataset dataset, string[] keys, string[] results, string? filter, bool synopses, bool statistics = true)
     {
-        Vorticity.Scan scan = dataset.Scan().With(new ScanOptions { UseSynopses = synopses });
+        Vorticity.Scan scan = dataset.Scan().With(new ScanOptions { UseSynopses = synopses, UseStatistics = statistics });
         if (filter is not null)
         {
             scan.Where(VortexExpr.Parse(filter));

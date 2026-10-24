@@ -38,11 +38,12 @@ internal static class SheetPruning
 
     /// <summary>
     /// Whether a scan reads the sheets of the object <paramref name="entry"/> names before it: an object of
-    /// <see cref="DatasetOptions.SheetObjectBytes"/> or more whose table of contents names sheets. A smaller one costs no
+    /// <see cref="DatasetOptions.SheetObjectBytes"/> or more whose table of contents names sheets, and which holds the
+    /// columns of <paramref name="schema"/> in their places (<see cref="DatasetSchema.Holds"/>). A smaller one costs no
     /// more to read than its sheets, and keeps none.
     /// </summary>
-    internal static bool Reads(ObjectEntry entry, DatasetOptions options) =>
-        entry.Bytes >= options.SheetObjectBytes && entry.Contents is { Sheets.Count: > 0 };
+    internal static bool Reads(ObjectEntry entry, DatasetOptions options, DatasetSchema schema) =>
+        entry.Bytes >= options.SheetObjectBytes && entry.Contents is { Sheets.Count: > 0 } && schema.Holds(entry);
 
     /// <summary>
     /// Whether a row <paramref name="filter"/> selects may lie in an object whose sheets <paramref name="sheetOf"/> gives
@@ -65,13 +66,13 @@ internal static class SheetPruning
     /// <paramref name="columns"/> read side by side with no open of them.
     /// </summary>
     internal static async Task<List<PositionedObject>> KeptAsync(
-        VortexDataset dataset, DType schema, List<PositionedObject> batch, VortexExpr filter, List<int> columns, DatasetScanCounters? metrics,
+        VortexDataset dataset, DatasetSchema schema, List<PositionedObject> batch, VortexExpr filter, List<int> columns, DatasetScanCounters? metrics,
         System.Func<PositionedObject, bool>? unread, CancellationToken cancellationToken)
     {
         Task<ColumnSheet?[]>?[] reads = new Task<ColumnSheet?[]>?[batch.Count];
         for (int i = 0; i < batch.Count; i++)
         {
-            if (Reads(batch[i].Entry, dataset.Options) && unread?.Invoke(batch[i]) != true)
+            if (Reads(batch[i].Entry, dataset.Options, schema) && unread?.Invoke(batch[i]) != true)
             {
                 reads[i] = dataset.ReadSheetsAsync(batch[i].Entry, columns, cancellationToken).AsTask();
             }
@@ -83,7 +84,7 @@ internal static class SheetPruning
             if (reads[i] is { } read)
             {
                 ColumnSheet?[] sheets = await read.ConfigureAwait(false);
-                if (!MayMatch(filter, schema, field => columns.IndexOf(field) is int at and >= 0 ? sheets[at] : null))
+                if (!MayMatch(filter, schema.DType, field => columns.IndexOf(field) is int at and >= 0 ? sheets[at] : null))
                 {
                     if (metrics is not null)
                     {

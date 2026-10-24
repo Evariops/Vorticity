@@ -136,6 +136,13 @@ internal sealed class DatasetSchema
         return columns;
     }
 
+    /// <summary>
+    /// Whether the object <paramref name="entry"/> names holds exactly these columns, each in its place and of its type:
+    /// what its synopses take to answer for them, which name its columns by their places and hold its values as it stores
+    /// them. An object written before the schema last changed answers through its rows until a job rewrites it.
+    /// </summary>
+    internal bool Holds(ObjectEntry entry) => entry.Contents is { } contents && ColumnsOf(contents.SchemaType, entry.Key) is null;
+
     /// <summary>What <see cref="ColumnsOf"/> found for one file's dtype, at its place in its arena.</summary>
     private sealed record Mapped(int Index, int Generation, string Key, ObjectColumns? Columns);
 

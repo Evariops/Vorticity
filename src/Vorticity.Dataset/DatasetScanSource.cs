@@ -175,7 +175,7 @@ internal sealed class DatasetScanSource : ScanSource
             List<PositionedObject> held = objects.ConvertAll(static o => o.Held);
             List<int> columns = SheetPruning.Columns(asked, _version.Schema.DType);
             List<PositionedObject> kept = await SheetPruning.KeptAsync(
-                _dataset, _version.Schema.DType, held, asked, columns, null, answered.Count == 0 ? null : o => answered.Contains(o.FirstRow), cancellationToken)
+                _dataset, _version.Schema, held, asked, columns, null, answered.Count == 0 ? null : o => answered.Contains(o.FirstRow), cancellationToken)
                 .ConfigureAwait(false);
             if (kept.Count < held.Count)
             {
@@ -229,7 +229,7 @@ internal sealed class DatasetScanSource : ScanSource
     {
         foreach ((PositionedObject held, RowRange _) in objects)
         {
-            if (SheetPruning.Reads(held.Entry, _dataset.Options))
+            if (SheetPruning.Reads(held.Entry, _dataset.Options, _version.Schema))
             {
                 return true;
             }
