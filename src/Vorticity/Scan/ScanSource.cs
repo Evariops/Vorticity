@@ -43,6 +43,12 @@ internal sealed record ScanSpec
     internal bool KeepEncodings { get; init; }
 
     /// <summary>
+    /// The variant columns, by name, the consumer reads only through these top-level keys, which a
+    /// file's path map lets a scan read alone; null when it reads every variant whole.
+    /// </summary>
+    internal IReadOnlyDictionary<string, string[]>? VariantKeys { get; init; }
+
+    /// <summary>
     /// Whether the consumer reads the encoded forms itself, as an aggregation does, so that a block
     /// counts as decoded only when a column of it reached canonical form.
     /// </summary>
@@ -70,6 +76,20 @@ internal sealed record ScanSpec
 
     /// <summary>The mask of live blocks when <see cref="Pruned"/>, or null when no structure prunes anything.</summary>
     internal BlockMask? Live { get; init; }
+
+    /// <summary>
+    /// What an aggregation would take as states in place of rows, or null for rows alone: a source that
+    /// keeps states of some rows (<see cref="ScanSource.KeepsStates"/>) may answer those with batches of
+    /// states.
+    /// </summary>
+    internal Aggregating.StateRequest? States { get; init; }
+
+    /// <summary>
+    /// The keys and measures of the aggregation a window is grown for under <see cref="ScanOptions.AlignWindow"/>,
+    /// set whether the pass takes states or reads rows, so that both answer the same window; null when the scan
+    /// is no such aggregation, or aligns nothing.
+    /// </summary>
+    internal Aggregating.StateRequest? Aligning { get; init; }
 }
 
 /// <summary>
@@ -120,11 +140,33 @@ internal abstract class ScanSource
     internal virtual long RowBound => -1;
 
     /// <summary>
+    /// Whether the source may answer some of its rows as states (<see cref="ScanSpec.States"/>): a
+    /// dataset whose objects carry synopses. An aggregation then groups apart from any order the rows
+    /// stream in, the states coming with their objects.
+    /// </summary>
+    internal virtual bool KeepsStates => false;
+
+    /// <summary>
+    /// Whether a pass of <paramref name="spec"/> asking <paramref name="states"/> would take states in place
+    /// of some of its rows: a dataset one of whose objects the scan covers has a synopsis that answers. Read
+    /// from what the version's entries hold, before any data.
+    /// </summary>
+    internal virtual ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(false);
+
+    /// <summary>
     /// The most bytes one split of <paramref name="spec"/> read ahead holds (<see cref="ScanSpec.ReadAhead"/>),
     /// over a source that copies what it reads; 0 over one that reads in place, where a read is a view,
     /// and for a source that reads nothing ahead.
     /// </summary>
     internal virtual long ReadAheadBytes(ScanSpec spec) => 0;
+
+    /// <summary>
+    /// Whether a read of the source is a round trip, to an object store rather than to memory or a local file: a
+    /// pass of one lane then reads its splits ahead as a wider pass's lanes do, its reads overlapping instead of
+    /// waiting one after another.
+    /// </summary>
+    internal virtual bool ReadsRoundTrips => false;
 
     /// <summary>
     /// The ranges of rows a pass of <paramref name="degree"/> lanes reads side by side, each a range
@@ -133,6 +175,13 @@ internal abstract class ScanSource
     /// chunks.
     /// </summary>
     internal virtual ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken) => default;
+
+    /// <summary>
+    /// How many of <paramref name="ranges"/>, the pieces <see cref="PiecesAsync"/> cut, read rows from the store, and so
+    /// read their splits ahead: every one by default; a dataset's pieces its synopses answer read a few tables instead,
+    /// whose lanes leave the splits they were granted to the lanes that read rows.
+    /// </summary>
+    internal virtual int RangesReadingRows(RowRange[] ranges) => ranges.Length;
 
     /// <summary>
     /// Whether a scan that asks for the order of <paramref name="column"/> (<see cref="ScanSpec.OrderPath"/>)
@@ -289,6 +338,9 @@ internal sealed class FileScanSource : ScanSource
 
     internal override long RowBound => _file.RowCount;
 
+    /// <summary>A file read from an object store, a request a read; not one read from the local disk or memory.</summary>
+    internal override bool ReadsRoundTrips => SessionReader.Unwrap(_file.Source) is IO.ObjectStoreSource;
+
     /// <summary>The segments the largest split of the scan asks for, over a source that copies them: the layout walked once, nothing read.</summary>
     internal override long ReadAheadBytes(ScanSpec spec) =>
         _file.Source.ReadsInPlace || spec.MatchesNothing ? 0 : Builder(spec, new ScanCounters()).LargestSplitBytes();
@@ -313,7 +365,7 @@ internal sealed class FileScanSource : ScanSource
     /// <summary>The engine's builder for <paramref name="spec"/>.</summary>
     internal ScanBuilder Builder(ScanSpec spec, ScanCounters metrics)
     {
-        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics);
+        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics).WithVariantKeys(spec.VariantKeys);
         if (spec.Projection is { } mask)
         {
             builder.ProjectMask(in mask);

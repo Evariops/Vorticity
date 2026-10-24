@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -19,7 +20,7 @@ namespace Vorticity.Dataset;
 /// <summary>
 /// A data object that has reached the store, and its tree key: what orders it, then its uid.
 /// </summary>
-internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key);
+internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key, long DataBytes = 0);
 
 /// <summary>
 /// A versioned dataset over an object store: immutable Vortex files as its data objects, one commit
@@ -52,6 +53,10 @@ public sealed class VortexDataset : IAsyncDisposable
 
     // The store the handle made for a local directory it was given by location, which it disposes.
     private IObjectStore? _ownedStore;
+
+    // The newest instant this handle appended to a dataset of periods, in its column's unit; the
+    // least long before the first: what the lateness of the next append is measured against.
+    private long _newestInstant = long.MinValue;
 
     // The location the handle was opened at, as its caller named it, which tags the activities of its
     // commits, compactions and vacuums; null for a handle given a store.
@@ -345,6 +350,109 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Records how late the oldest row of an object this handle appends to a dataset of periods came,
+    /// behind the newest instant the handle appended before: zero for rows in order. Read from the
+    /// object's summary of its instant, so it costs no read.
+    /// </summary>
+    private void ObserveLateness(WrittenObject? written)
+    {
+        if (written is not { } produced || _options.Periods is null || Key is not { } key
+            || !produced.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
+            || !summary.HasMin || !summary.HasMax
+            || summary.Min.Kind != FilterLiteralKind.Signed || summary.Max.Kind != FilterLiteralKind.Signed)
+        {
+            return;
+        }
+
+        long oldest = summary.Min.SignedValue;
+        long newest = Volatile.Read(ref _newestInstant);
+        if (newest != long.MinValue)
+        {
+            DatasetTelemetry.Late(Math.Max(0, (double)newest - oldest) / UnitsPerSecond(PeriodOptions.InstantOf(key)));
+        }
+
+        long latest = summary.Max.SignedValue;
+        while (latest > newest)
+        {
+            long seen = Interlocked.CompareExchange(ref _newestInstant, latest, newest);
+            if (seen == newest)
+            {
+                break;
+            }
+
+            newest = seen;
+        }
+    }
+
+    /// <summary>How many of <paramref name="unit"/> a second holds.</summary>
+    private static double UnitsPerSecond(TimeUnit unit) => unit switch
+    {
+        TimeUnit.Nanoseconds => 1e9,
+        TimeUnit.Microseconds => 1e6,
+        TimeUnit.Milliseconds => 1e3,
+        TimeUnit.Seconds => 1,
+        _ => 1.0 / 86_400,
+    };
+
+    /// <summary>
+    /// The identifiers as a commit keeps them: a top-level column of <paramref name="schema"/>, or a key
+    /// of one of its variant columns read as a string or an integer, <c>Attributes['user'].AsString()</c>,
+    /// written as a plan writes it. Refuses any other, and one named twice.
+    /// </summary>
+    private static string[] RequireIdentifiers(IReadOnlyList<string> identifiers, DType schema)
+    {
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        string[] kept = new string[identifiers.Count];
+        for (int i = 0; i < identifiers.Count; i++)
+        {
+            string identifier = identifiers[i];
+            string? name = identifier is null || schema.Kind != DTypeKind.Struct
+                ? null
+                : schema.IndexOfField(identifier) >= 0 ? identifier : IdentifierPath(identifier, schema)?.Text;
+            if (name is null)
+            {
+                throw new ArgumentException(
+                    $"The identifier '{identifier}' names no column of the dataset's schema, nor a key of a variant column read as a string or an integer, such as Attributes['user'].AsString().",
+                    nameof(DatasetOptions.Identifiers));
+            }
+
+            if (!seen.Add(name))
+            {
+                throw new ArgumentException($"The identifier '{identifier}' is named twice.", nameof(DatasetOptions.Identifiers));
+            }
+
+            kept[i] = name;
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// The key of a variant column an identifier names, and the class its values are read in, for an
+    /// identifier written <c>Attributes['user'].AsString()</c> or <c>.AsInt64()</c>; null for any other,
+    /// a column's name among them. <c>Text</c> is the path as a plan writes it, the name a write
+    /// policy gives the key's index.
+    /// </summary>
+    internal static (int Field, string Key, Types.Variants.VariantClass Class, string Text)? IdentifierPath(string identifier, DType schema)
+    {
+        if (Expressions.ExprText.LastPath(identifier) is not ([string column], [{ Key: { } key }], { } read)
+            || read is not (Compute.VariantRead.AsString or Compute.VariantRead.AsInt64))
+        {
+            return null;
+        }
+
+        int field = schema.IndexOfField(column);
+        if (field < 0 || schema.GetField(field).Kind != DTypeKind.Variant)
+        {
+            return null;
+        }
+
+        string text = new Compute.VariantFieldExpr(new Expressions.FieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
+        Types.Variants.VariantClass @class = read == Compute.VariantRead.AsString ? Types.Variants.VariantClass.String : Types.Variants.VariantClass.Integer;
+        return (field, key, @class, text);
+    }
+
+    /// <summary>
     /// Refuses a store whose listing is not in ordinal order, as an S3 directory bucket's is not: the
     /// latest version is the first key of <c>commit/</c>, which such a listing does not give.
     /// </summary>
@@ -492,6 +600,193 @@ public sealed class VortexDataset : IAsyncDisposable
     public Scan Scan(params ReadOnlySpan<string> columns) => new Scan(new DatasetScanSource(this, Snapshot), columns);
 
     /// <summary>
+    /// Asks <paramref name="question"/> over the window from <paramref name="from"/> to <paramref name="to"/>
+    /// part by part, newest first: the window cut at the starts of the periods it crosses, each part's
+    /// answer delivered once it and every newer part are in.
+    /// </summary>
+    /// <typeparam name="TAnswer">What the question answers.</typeparam>
+    /// <param name="from">The window's first instant.</param>
+    /// <param name="to">The instant past its last.</param>
+    /// <param name="question">
+    /// The question, asked with each part's bounds, the first in the part and the second past it, which it
+    /// applies to its own filter: <c>(from, to, ct) =&gt; dataset.Scan&lt;Request&gt;().Where(r =&gt; r.At &gt;= from &amp;&amp; r.At &lt; to)…</c>.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the questions in flight.</param>
+    /// <returns>The parts, newest first, each with its bounds and its answer.</returns>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods (<see cref="DatasetOptions.Periods"/>).</exception>
+    /// <exception cref="ArgumentException">The window is empty.</exception>
+    /// <remarks>
+    /// A page that shows a month can show its newest day while the rest is read: a part's answer is final
+    /// for its range of time, so once a part is delivered the window from its start to the window's end is
+    /// answered. A question over one period reads the synopses of its sealed objects, a round trip for
+    /// them all, and the parts are asked several at once, as many as the session lets reads be in flight,
+    /// so a month asked part by part costs about the round trips of one question over it. Answers over
+    /// parts add up for counts and sums, and their extremes are the window's, but a mean over the window
+    /// is its sum over its count.
+    /// </remarks>
+    public IAsyncEnumerable<WindowPart<TAnswer>> AskNewestFirstAsync<TAnswer>(
+        DateTimeOffset from, DateTimeOffset to, Func<DateTimeOffset, DateTimeOffset, CancellationToken, ValueTask<TAnswer>> question,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(question);
+        if (to <= from)
+        {
+            throw new ArgumentException($"The window from {from:O} to {to:O} is empty.", nameof(to));
+        }
+
+        if (!Snapshot.Header.ByPeriods || Key is not { } key)
+        {
+            throw new InvalidOperationException(
+                "A window is asked part by part on the periods of a dataset, and this dataset declares none (DatasetOptions.Periods): ask its question over the whole window.");
+        }
+
+        PeriodCalendar calendar = PeriodCalendar.Of(Snapshot.Header, PeriodOptions.InstantOf(key));
+        return WindowParts.AskAsync(WindowParts.Of(calendar, from, to), Session.Options.MaxConcurrentReads, question, cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads into the session's <see cref="VortexSessionOptions.SynopsisCache"/>, before a question needs
+    /// them, the tables and directories of every object whose summaries say it may hold a row
+    /// <paramref name="filter"/> selects: <c>dataset.WarmAsync&lt;Request&gt;(r =&gt; r.At &gt;= DateTime.UtcNow.AddDays(-30))</c>.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
+    /// <param name="filter">A lambda over the record's columns.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The bytes read from the store into the cache; zero without a cache, or when it held them all.</returns>
+    /// <remarks>
+    /// Each object's regions are read in one request set, the objects side by side as many as the session
+    /// lets reads be in flight, and the regions the cache holds are not read again. Of a sealed object, the
+    /// cache keeps the trailer and the frames that hold the regions, the bytes the store holds.
+    /// </remarks>
+    public ValueTask<long> WarmAsync<TRecord>(Func<Probe<TRecord>, Predicate> filter, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        Predicate predicate = filter(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
+        return predicate.IsNone ? ValueTask.FromResult(0L) : WarmCoreAsync(Checked(predicate.Node), cancellationToken);
+    }
+
+    /// <summary>
+    /// As <see cref="WarmAsync{TRecord}(Func{Probe{TRecord}, Predicate}, CancellationToken)"/>, for a caller
+    /// without a record type.
+    /// </summary>
+    /// <param name="filter">The filter, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The bytes read from the store into the cache.</returns>
+    /// <exception cref="VortexSchemaException">The filter names a column the dataset does not have, or compares one with a literal of a type it cannot compare to.</exception>
+    public ValueTask<long> WarmAsync(VortexExpr filter, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        return WarmCoreAsync(Checked(ToolPaths.Check(Schema, filter)), cancellationToken);
+    }
+
+    private async ValueTask<long> WarmCoreAsync(VortexExpr? filter, CancellationToken cancellationToken)
+    {
+        if (Session.Options.SynopsisCache is not { } cache)
+        {
+            return 0;
+        }
+
+        List<Task<long>> reads = [];
+        await foreach (PositionedObject held in Snapshot.WalkAsync(filter is null ? null : new SummaryPruner(filter), 0, long.MaxValue, null, cancellationToken)
+            .ConfigureAwait(false))
+        {
+            if (held.Entry.Contents is { } contents)
+            {
+                reads.Add(WarmObjectAsync(cache, held.Entry, contents, cancellationToken));
+            }
+        }
+
+        long bytes = 0;
+        foreach (long read in await Task.WhenAll(reads).ConfigureAwait(false))
+        {
+            bytes += read;
+        }
+
+        return bytes;
+    }
+
+    /// <summary>Reads through the cache the regions of one object it does not hold yet: the bytes it read.</summary>
+    private async Task<long> WarmObjectAsync(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken)
+    {
+        if (_store is SealedObjectStore { Seals: true })
+        {
+            return await WarmSealedAsync(cache, entry, contents, cancellationToken).ConfigureAwait(false);
+        }
+
+        // The lists of the tables' chunks first, from the disk when it holds them: the chunks they name are regions too.
+        bool listed = entry.Uid != UInt128.Zero && Indexes.SynopsisTableInfo.LoadListsCached(cache, entry.Uid, contents, null);
+        List<Indexes.IndexSegment> missing = Missing(cache, entry, contents);
+        if ((listed && missing.Count == 0) || entry.Uid == UInt128.Zero)
+        {
+            return 0;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            ISegmentReader reader = Footerless(source, entry, contents);
+            long bytes = 0;
+            if (!listed)
+            {
+                foreach (Indexes.SynopsisContents.TableChunks table in contents.Unloaded(null) ?? [])
+                {
+                    bytes += table.List!.Value.Length;
+                }
+
+                await Indexes.SynopsisTableInfo.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
+                missing = Missing(cache, entry, contents);
+            }
+
+            using SegmentRequestSet requests = new SegmentRequestSet(missing.Count);
+            foreach (Indexes.IndexSegment region in missing)
+            {
+                requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+                bytes += region.Length;
+            }
+
+            await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            return bytes;
+        }
+
+        static List<Indexes.IndexSegment> Missing(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents)
+        {
+            List<Indexes.IndexSegment> regions = SynopsisCacheReader.Declared(contents);
+            regions.RemoveAll(region => cache.Holds(entry.Uid, region));
+            return regions;
+        }
+    }
+
+    /// <summary>
+    /// Reads the regions of one sealed object through a reader that keeps their frames, those the cache keeps
+    /// from the disk, the rest from the store: the bytes it kept, its trailer and its frames as the store holds them.
+    /// </summary>
+    private async Task<long> WarmSealedAsync(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken)
+    {
+        if (SealedSynopsisCache.Over(cache, entry.Uid, contents) is not { } kept)
+        {
+            return 0;
+        }
+
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken, kept).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            // The lists of the tables' chunks first: the chunks they name are regions it keeps too.
+            ISegmentReader reader = Footerless(source, entry, contents);
+            await Indexes.SynopsisTableInfo.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
+            List<Indexes.IndexSegment> regions = SynopsisCacheReader.Declared(contents);
+            using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
+            foreach (Indexes.IndexSegment region in regions)
+            {
+                requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+            }
+
+            await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            return kept.AdmittedBytes;
+        }
+    }
+
+    /// <summary>
     /// Whether the version this handle holds may hold a row <paramref name="filter"/> is true for,
     /// from the object and subtree summaries of the pages it holds without a request, those its
     /// header carries and those it kept from the versions before: false is a proof, true is not.
@@ -535,15 +830,44 @@ public sealed class VortexDataset : IAsyncDisposable
     /// Starts a data object under <paramref name="schema"/>: what a rewrite uses, whose rows are read
     /// as the schema of the version it read, whatever the handle has moved to since. A caller whose
     /// rows come in key order says so with <paramref name="inKeyOrder"/>, and a key whose column then
-    /// orders the object by itself takes no run.
+    /// orders the object by itself takes no run. A rewrite announces with <paramref name="byteBound"/>
+    /// the most bytes the object takes should it stream (<see cref="ObjectBound"/>).
     /// </summary>
-    internal ObjectDraft StartObjectUnder(DatasetSchema schema, bool inKeyOrder = false)
+    internal ObjectDraft StartObjectUnder(
+        DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool sliced = false,
+        IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, IReadOnlyList<string>? synopsis = null, long byteBound = -1)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
-        ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool);
-        VortexWriteOptions write = _options.Write.WithIdentity(identity);
+        ObjectSegmentSink sink = new ObjectSegmentSink(
+            _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes, byteBound);
+        VortexWriteOptions write = _options.Write.WithIdentity(identity) with { RowBound = rowBound, CarriesSlices = sliced };
+
+        // The variant columns a job shreds, each in long chunks of its own; an append shreds nothing.
+        if (shredded is { Count: > 0 })
+        {
+            write = write with
+            {
+                ShreddedVariants = shredded,
+                ColumnChunkTargetBytes = write.ColumnChunkTargetBytes.SetItems(variantChunks ?? ImmutableDictionary<string, int>.Empty),
+            };
+        }
+
+        // Every path and class of the variant columns, which a job counted from the object's rows.
+        if (directories is { Count: > 0 })
+        {
+            write = write with { VariantDirectories = directories };
+        }
+
+        // The synopsis columns lie together after the rest of the data, which a question that needs only
+        // them reads alone.
+        if (synopsis is { Count: > 0 })
+        {
+            write = write with { SynopsisColumns = synopsis };
+        }
+
         if (_store is SealedObjectStore { Seals: true })
         {
             // The runs an index of the object moves to disk hold its values: sealed as the object is.
@@ -557,16 +881,41 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             write = write.WithIndexes(write.WritePolicy.With(schema.IndexPolicy)) with { BudgetSpares = schema.IndexedColumns };
         }
+
+        // A default the dataset was given, such as every column's automatic index: each column the write meets
+        // that no override names takes it, those schema evolution added after the policy included. The budget
+        // weighs it, since no column asked for it by name.
+        if (schema.IndexPolicy.Default.Kind != Indexes.IndexPolicyKind.None)
+        {
+            write = write.WithIndexes(write.WritePolicy.WithDefault(schema.IndexPolicy.Default));
+        }
+
+        // Each declared identifier's hashed postings, required and spared by the budget as the clustering
+        // key's run is: a lookup of one value reads the objects that hold it and almost no other, one
+        // segment of about 64 KiB an object, at about four bytes a (value, block) pair. A Bloom filter,
+        // which a tree of them loses past what one filter holds, is never tried on it.
+        foreach (string identifier in Snapshot.Header.Identifiers)
+        {
+            write = write.WithIndexes(write.WritePolicy.For(identifier, Indexes.IndexSpec.HashedPostings.AsRequired())) with { BudgetSparesRequired = true };
+        }
+
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
-        if (schema.Key is { } clustering && !bySortedColumn)
+
+        // An object in sorted slices on a key of its instant alone is walked through its slice table,
+        // which finds a key's slice, and the slice's instants ranked: a run on the key would repeat
+        // them, with a row for each.
+        bool bySlices = sliced && schema.Key is { IsComposite: false };
+        if (schema.Key is { } clustering && !bySortedColumn && !bySlices)
         {
             // The mandatory sorted run on the clustering key, added to the caller's own policy.
             write = clustering.Applied(write);
         }
 
-        return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write))
+        // The session's degree and its lanes, which every writer of the session shares.
+        return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session))
         {
             BySortedColumn = bySortedColumn,
+            BySlices = bySlices,
         };
     }
 
@@ -591,11 +940,179 @@ public sealed class VortexDataset : IAsyncDisposable
     public async ValueTask<ulong> AppendAsync(ObjectDraft draft, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(draft);
+        List<WrittenObject> written = await WrittenAsync(draft, cancellationToken).ConfigureAwait(false);
+        return written.Count > 0
+            ? await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false)
+            : Version;
+    }
+
+    /// <summary>
+    /// The objects an append of <paramref name="draft"/> adds: the draft's own, completed and put; or, when the
+    /// dataset has partition columns and its rows hold several values of them, an object per value, its rows read
+    /// back and split, the draft's object left for vacuum.
+    /// </summary>
+    private async ValueTask<List<WrittenObject>> WrittenAsync(ObjectDraft draft, CancellationToken cancellationToken)
+    {
         WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
-        return written is { } produced
-            ? await ApplyAsync([new DatasetOperation.AddObject(produced.Key, produced.Entry)], CommitKind.Append, cancellationToken).ConfigureAwait(false)
-            : Version;
+        return await ObservedAsync(written is { } produced ? await PartitionedAsync(produced, cancellationToken).ConfigureAwait(false) : [], cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Notes how late the rows of an append's objects came, refuses them when they come later than the horizon and the
+    /// handle says so, and hands them on.
+    /// </summary>
+    private async ValueTask<List<WrittenObject>> ObservedAsync(List<WrittenObject> written, CancellationToken cancellationToken)
+    {
+        foreach (WrittenObject produced in written)
+        {
+            ObserveLateness(produced);
+        }
+
+        await RefuseLateAsync(written, cancellationToken).ConfigureAwait(false);
+        return written;
+    }
+
+    /// <summary>
+    /// Refuses an append whose objects hold a row later than the lateness horizon, when the handle says so
+    /// (<see cref="PeriodOptions.RefuseLateRows"/>): a row of a period the newest instant its partition holds past
+    /// level 0 and the late level has closed. Nothing is committed, and the objects are left for vacuum.
+    /// </summary>
+    /// <exception cref="ArgumentException">An object holds such a row.</exception>
+    private async ValueTask RefuseLateAsync(List<WrittenObject> written, CancellationToken cancellationToken)
+    {
+        if (_options.Periods is not { RefuseLateRows: true } || Key is not { } key || written.Count == 0)
+        {
+            return;
+        }
+
+        DatasetSnapshot version = Snapshot;
+        TimeUnit unit = PeriodOptions.InstantOf(key);
+        PeriodCalendar calendar = PeriodCalendar.Of(version.Header, unit);
+        long horizon = TimeSlicer.Units(version.Header.Lateness ?? TimeSpan.Zero, unit);
+        Dictionary<string, long> newest = new Dictionary<string, long>(StringComparer.Ordinal);
+        await foreach (PositionedObject held in version.WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        {
+            if (held.Level is not (0 or PeriodLevels.Late) && Instants(held.Entry.Summaries, key) is { } instants)
+            {
+                string partition = PartitionName(held.Entry.Summaries, key);
+                newest[partition] = Math.Max(newest.GetValueOrDefault(partition, long.MinValue), instants.Greatest);
+            }
+        }
+
+        foreach (WrittenObject produced in written)
+        {
+            if (Instants(produced.Entry.Summaries, key) is { } instants
+                && newest.TryGetValue(PartitionName(produced.Entry.Summaries, key), out long held)
+                && calendar.Next(calendar.Floor(instants.Least)) <= held - horizon)
+            {
+                throw new ArgumentException(
+                    $"The append holds rows from {TimeSlicer.TimeOf(instants.Least, unit):O}, of a period the dataset has closed: " +
+                    $"they come later than its lateness horizon of {version.Header.Lateness}, and this handle refuses such rows (PeriodOptions.RefuseLateRows).");
+            }
+        }
+    }
+
+    /// <summary>The least and the greatest instant an object's summaries state, or null.</summary>
+    private static (long Least, long Greatest)? Instants(ObjectSummaries summaries, ClusteringKey key) =>
+        summaries.TryGet(key.InstantPath, out ColumnSummary instant)
+            && instant is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
+            ? (instant.Min.SignedValue, instant.Max.SignedValue)
+            : null;
+
+    /// <summary>A name of the partition an object holds, empty without partition columns or when its summaries do not say it.</summary>
+    private static string PartitionName(ObjectSummaries summaries, ClusteringKey key) =>
+        key.PartitionOf(summaries) is { } values ? Convert.ToHexString(key.Encode(values)) : string.Empty;
+
+    /// <summary>
+    /// An object a writer of this dataset put, as the objects it stands for: itself, unless the dataset has partition
+    /// columns and its rows hold several values of them, an object per value then, its rows read back and split and
+    /// the object itself left for vacuum.
+    /// </summary>
+    internal async ValueTask<List<WrittenObject>> PartitionedAsync(WrittenObject produced, CancellationToken cancellationToken)
+    {
+        if (Key is not { PartitionColumns: > 0 } key || key.PartitionOf(produced.Entry.Summaries) is not null)
+        {
+            return [produced];
+        }
+
+        PartitionedAppend split = new PartitionedAppend(this, key, _options.MaxPartitionValues);
+        await using (split.ConfigureAwait(false))
+        {
+            ObjectLease lease = await RentAsync(produced.Entry, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                await foreach (RecordBatch batch in lease.File.ScanBuilder().ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    await split.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            return await WrittenAsync(split, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The objects of a split append completed and put, an object per partition value its rows hold.</summary>
+    private async ValueTask<List<WrittenObject>> WrittenAsync(PartitionedAppend split, CancellationToken cancellationToken)
+    {
+        long end = await EndAsync(cancellationToken).ConfigureAwait(false);
+        List<WrittenObject> written = [];
+        foreach (ObjectDraft draft in split.Drafts)
+        {
+            if (await CompleteAsync(draft, end, cancellationToken).ConfigureAwait(false) is { } produced)
+            {
+                written.Add(produced);
+            }
+        }
+
+        return written;
+    }
+
+    /// <summary>The batches of an append, as one object, or one per partition value when the dataset has partition columns.</summary>
+    private async ValueTask<List<WrittenObject>> WrittenAsync(IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken)
+    {
+        if (Key is { PartitionColumns: > 0 } key)
+        {
+            PartitionedAppend split = new PartitionedAppend(this, key, _options.MaxPartitionValues);
+            await using (split.ConfigureAwait(false))
+            {
+                await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    await split.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                }
+
+                return await ObservedAsync(await WrittenAsync(split, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        ObjectDraft draft = StartObject();
+        try
+        {
+            await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                await draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            await draft.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        return await WrittenAsync(draft, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The additions of written objects, one commit's operations.</summary>
+    private static DatasetOperation[] Added(List<WrittenObject> written)
+    {
+        DatasetOperation[] operations = new DatasetOperation[written.Count];
+        for (int i = 0; i < operations.Length; i++)
+        {
+            operations[i] = new DatasetOperation.AddObject(written[i].Key, written[i].Entry);
+        }
+
+        return operations;
     }
 
     /// <summary>
@@ -611,21 +1128,10 @@ public sealed class VortexDataset : IAsyncDisposable
         IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(batches);
-        ObjectDraft draft = StartObject();
-        try
-        {
-            await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
-            {
-                await draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch
-        {
-            await draft.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-
-        return await AppendAsync(draft, cancellationToken).ConfigureAwait(false);
+        List<WrittenObject> written = await WrittenAsync(batches, cancellationToken).ConfigureAwait(false);
+        return written.Count > 0
+            ? await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false)
+            : Version;
     }
 
     /// <summary>
@@ -677,10 +1183,13 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(draft);
         SourceTable.Check(consumed, nameof(consumed));
-        WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
-            .ConfigureAwait(false);
-        DatasetOperation[] operations = written is { } produced ? [new DatasetOperation.AddObject(produced.Key, produced.Entry)] : [];
-        CommitResult commit = await CommitAsync(operations, CommitKind.Append, consumed, null, cancellationToken).ConfigureAwait(false);
+        return await CountedAsync(await WrittenAsync(draft, cancellationToken).ConfigureAwait(false), consumed, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Commits written objects with the source ranges they take into account, as one commit.</summary>
+    private async ValueTask<SourceCommit> CountedAsync(List<WrittenObject> written, IReadOnlyList<SourceRange> consumed, CancellationToken cancellationToken)
+    {
+        CommitResult commit = await CommitAsync(Added(written), CommitKind.Append, consumed, null, cancellationToken).ConfigureAwait(false);
         if (commit.Created)
         {
             await CompactInlineAsync(cancellationToken).ConfigureAwait(false);
@@ -708,21 +1217,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(batches);
         SourceTable.Check(consumed, nameof(consumed));
-        ObjectDraft draft = StartObject();
-        try
-        {
-            await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
-            {
-                await draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch
-        {
-            await draft.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-
-        return await AppendAsync(draft, consumed, cancellationToken).ConfigureAwait(false);
+        return await CountedAsync(await WrittenAsync(batches, cancellationToken).ConfigureAwait(false), consumed, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -819,7 +1314,8 @@ public sealed class VortexDataset : IAsyncDisposable
                 }
 
                 entry = new ObjectEntry(
-                    objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file));
+                    objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file))
+                    .WithFooterBytes(file.TailBytes);
                 treeKey = await TreeKeyAsync(file, entry, end, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -1031,6 +1527,62 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(filter);
         return DatasetRowChanges.RunAsync(this, Checked(ToolPaths.Check(Schema, filter)), null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Drops, in one commit and reading none of them, every object of a dataset of periods whose rows
+    /// all lie before <paramref name="before"/>, aligned down to the start of the period holding it.
+    /// </summary>
+    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <returns>The cutoff applied: the start of the period holding <paramref name="before"/>.</returns>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods (<see cref="DatasetOptions.Periods"/>).</exception>
+    /// <remarks>
+    /// A row may outlive the cutoff by up to a period, the one that holds it, and an object of level 0
+    /// that straddles it stays until compaction cuts it by period. What drops a row exactly is
+    /// <see cref="DeleteAsync(VortexExpr, CancellationToken)"/>, which opens the objects it touches.
+    /// </remarks>
+    public ValueTask<DateTimeOffset> ExpireAsync(DateTimeOffset before, CancellationToken cancellationToken = default) =>
+        DatasetExpiry.RunAsync(this, null, before, cancellationToken);
+
+    /// <summary>
+    /// Drops, in one commit and reading none of them, every object of the partitions <paramref name="partition"/> keeps
+    /// whose rows all lie before <paramref name="before"/>, aligned down to the start of the period holding it:
+    /// <c>dataset.ExpireAsync&lt;Logged&gt;(r =&gt; r.Retention == "debug", now - TimeSpan.FromDays(7))</c>.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
+    /// <param name="partition">A filter on the partition columns alone, each compared with values.</param>
+    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <returns>The cutoff applied: the start of the period holding <paramref name="before"/>.</returns>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods, or no partition columns (<see cref="DatasetOptions.PartitionColumns"/>).</exception>
+    /// <exception cref="ArgumentException">The filter reads another column, or reads the partition columns otherwise than compared with values: a delete, not an expiry.</exception>
+    /// <remarks>
+    /// Each partition holds its own periods, so the objects of the partitions the filter keeps hold no row of another,
+    /// and their entries say which partition they hold: nothing is read but the version's pages.
+    /// </remarks>
+    public ValueTask<DateTimeOffset> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate> partition, DateTimeOffset before, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        Predicate predicate = partition(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
+        return DatasetExpiry.RunAsync(this, predicate.IsAll || predicate.IsNone ? null : Checked(predicate.Node), before, cancellationToken, removes: !predicate.IsNone);
+    }
+
+    /// <summary>
+    /// As <see cref="ExpireAsync{TRecord}(Func{Probe{TRecord}, Predicate}, DateTimeOffset, CancellationToken)"/>, for a
+    /// caller without a record type.
+    /// </summary>
+    /// <param name="partition">A filter on the partition columns alone, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
+    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <returns>The cutoff applied.</returns>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods, or no partition columns.</exception>
+    /// <exception cref="ArgumentException">The filter is not one of the partition columns compared with values.</exception>
+    public ValueTask<DateTimeOffset> ExpireAsync(VortexExpr partition, DateTimeOffset before, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        return DatasetExpiry.RunAsync(this, Checked(ToolPaths.Check(Schema, partition)), before, cancellationToken);
     }
 
     /// <summary>
@@ -1352,6 +1904,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>A task that completes when every object is closed.</returns>
     public async ValueTask DisposeAsync()
     {
+        await LevelZero.DisposeAsync().ConfigureAwait(false);
         await _objects.DisposeAsync().ConfigureAwait(false);
         if (_store is SealedObjectStore sealedStore)
         {
@@ -1437,6 +1990,13 @@ public sealed class VortexDataset : IAsyncDisposable
                 "(ObjectStoreCapabilities.KeepsLocks): its objects would be deleted while it believes them kept.");
         }
 
+        if (options.LockedStore && options.ErasureDelay is not null)
+        {
+            throw new ArgumentException(
+                "A dataset on a locked store keeps every byte it writes for the lock's term, so it cannot erase deleted rows within a delay.",
+                nameof(options));
+        }
+
         // Encrypted when asked, and when the session seals what it writes or refuses plaintext, whose
         // own open would refuse a plain dataset.
         bool encrypted = options.Encrypted || options.Session.Seals || options.Session.Options.RefusePlaintext;
@@ -1452,7 +2012,32 @@ public sealed class VortexDataset : IAsyncDisposable
             await ((SealedObjectStore)store).StartSealedAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        _ = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
+        if (options.PartitionColumns > 0 && options.Periods is null)
+        {
+            throw new ArgumentException(
+                "Partition columns split a dataset compacted by periods, each partition growing its own: declare DatasetOptions.Periods with them.",
+                nameof(options));
+        }
+
+        ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey, options.PartitionColumns);
+        DatasetFeatures features = options.ErasureDelay is null ? DatasetFeatures.None : DatasetFeatures.ErasureDelay;
+        if (options.Periods is not null)
+        {
+            _ = PeriodOptions.InstantOf(key);
+            features |= DatasetFeatures.Periods;
+        }
+
+        if (options.PartitionColumns > 0)
+        {
+            features |= DatasetFeatures.Partitions;
+        }
+
+        string[] declared = [];
+        if (options.Identifiers is { Count: > 0 } identifiers)
+        {
+            declared = RequireIdentifiers(identifiers, schema);
+            features |= DatasetFeatures.Identifiers;
+        }
 
         CommitHeader template = new CommitHeader
         {
@@ -1465,6 +2050,12 @@ public sealed class VortexDataset : IAsyncDisposable
                 ? options.Compaction with { Fanout = DatasetOptions.LockedFanout }
                 : options.Compaction,
             LockedStore = options.LockedStore,
+            ErasureDelay = options.ErasureDelay,
+            Lateness = options.Periods?.Lateness,
+            PeriodLength = options.Periods?.Length,
+            PartitionColumns = options.PartitionColumns,
+            Identifiers = declared,
+            Features = features,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,
@@ -1665,6 +2256,480 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken) =>
         Snapshot.RentAsync(entry, cancellationToken);
 
+    /// <summary>The objects of level 0 this node read through keys of their variant columns, shredded in memory once.</summary>
+    internal LevelZeroMemo LevelZero { get; } = new LevelZeroMemo();
+
+    /// <summary>
+    /// The chunks of the synopsis tables of the object <paramref name="entry"/> names that <paramref name="wanted"/>
+    /// keeps, every one when it is null, read with no open of the object: the regions its entry's table of
+    /// contents names, in one round trip. Null when the entry carries no table of contents this library reads.
+    /// </summary>
+    internal async ValueTask<Indexes.SynopsisTableSet?> ReadSynopsisAsync(
+        ObjectEntry entry, Indexes.ISynopsisReads? wanted, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { } contents)
+        {
+            return null;
+        }
+
+        return await ReadSynopsisAsync(entry, contents, wanted, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The store's reader of an object read with no open of it, which the caller disposes: a sealed object's
+    /// keeps its trailer and the frames of the regions its table of contents declares in the session's synopsis
+    /// cache, the bytes the store holds.
+    /// </summary>
+    private ValueTask<ISegmentReader> OpenFooterlessAsync(ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken) =>
+        SealedObjectStore.OpenDataAsync(
+            _store, entry.Key, entry.Uid, entry.Bytes, cancellationToken,
+            _store is SealedObjectStore { Seals: true } ? SealedSynopsisCache.Over(Session.Options.SynopsisCache, entry.Uid, contents) : null);
+
+    /// <summary>
+    /// The reader of an object read with no open of it, from the store's reader <paramref name="source"/>: the
+    /// session's, through the session's synopsis cache for the regions the object's table of contents declares
+    /// when the object is plain. A sealed object's reader decrypts what its cache keeps, which holds no plaintext.
+    /// </summary>
+    private ISegmentReader Footerless(ISegmentReader source, ObjectEntry entry, Indexes.SynopsisContents contents) =>
+        SessionReader.Wrap(
+            source is ObjectStoreSource ? SynopsisCacheReader.Over(source, Session.Options.SynopsisCache, entry.Uid, contents) : source,
+            Session);
+
+    /// <summary>
+    /// Loads, for each object of <paramref name="answered"/>, the lists of the chunks of the tables its answer reads, every
+    /// table without one, that its entry names apart (<see cref="Indexes.SynopsisContents.TableChunks.List"/>): from the
+    /// session's synopsis cache when it holds them, the others from the store, an object's in one round trip and the objects
+    /// side by side, as many as the session lets reads be in flight. A question weighs and cuts its answers by their chunks,
+    /// before it reads one.
+    /// </summary>
+    internal async ValueTask LoadSynopsisListsAsync(
+        IReadOnlyList<(ObjectEntry Entry, Indexes.SynopsisContents Contents, Indexes.ISynopsisReads? Reads)> answered, CancellationToken cancellationToken)
+    {
+        List<Task>? loads = null;
+        foreach ((ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? reads) in answered)
+        {
+            // Lists another question loaded since the answer was made are news to it as well.
+            if (!contents.HasUnloaded(reads))
+            {
+                reads?.Loaded(contents);
+                continue;
+            }
+
+            if (Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
+                && Indexes.SynopsisTableInfo.LoadListsCached(cache, entry.Uid, contents, reads))
+            {
+                continue;
+            }
+
+            (loads ??= []).Add(LoadAsync(entry, contents, reads));
+        }
+
+        if (loads is not null)
+        {
+            await Task.WhenAll(loads).ConfigureAwait(false);
+        }
+
+        async Task LoadAsync(ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? reads)
+        {
+            ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+            await using (source.ConfigureAwait(false))
+            {
+                await Indexes.SynopsisTableInfo.LoadListsAsync(Footerless(source, entry, contents), contents, reads, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The chunks <see cref="ReadSynopsisAsync(ObjectEntry, Indexes.SynopsisContents, Indexes.ISynopsisReads?, CancellationToken)"/>
+    /// reads, when the session's synopsis cache holds every one of a plain object: read from the disk on the spot, with no
+    /// reader opened; null when one is not there, or the object is sealed.
+    /// </summary>
+    internal Indexes.SynopsisTableSet? ReadSynopsisCached(ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted) =>
+        Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
+            ? Indexes.SynopsisTableInfo.ReadCached(cache, entry.Uid, contents, wanted, null)
+            : null;
+
+    /// <summary>
+    /// As <see cref="ReadSynopsisAsync(ObjectEntry, Indexes.ISynopsisReads?, CancellationToken)"/>, with the entry's
+    /// table of contents already read: <paramref name="wanted"/> is asked of its tables, and of the fields of their rows.
+    /// </summary>
+    internal async ValueTask<Indexes.SynopsisTableSet> ReadSynopsisAsync(
+        ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted, CancellationToken cancellationToken)
+    {
+        if (ReadSynopsisCached(entry, contents, wanted) is { } cached)
+        {
+            return cached;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            return await Indexes.SynopsisTableInfo.ReadAsync(
+                Footerless(source, entry, contents), contents, wanted, null, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Whether an index on the column of a field of <paramref name="schema"/>'s root is one <paramref name="filter"/> may
+    /// read, by the columns it names, their first field from the root; none on the root itself, the synopsis tables and the
+    /// slices' chunks, whose runs a lookup parsed at every question for nothing; null, every one, when a name is none of
+    /// the schema's or past the 64th field.
+    /// </summary>
+    private static Func<uint, bool>? ColumnsOf(VortexExpr filter, DType schema)
+    {
+        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
+        filter.CollectFields(named);
+        ulong roots = 0;
+        foreach (string path in named)
+        {
+            int field = schema.IndexOfField(path);
+            if (field < 0 && path.IndexOf('.', StringComparison.Ordinal) is int dot and > 0)
+            {
+                field = schema.IndexOfField(path[..dot]);
+            }
+
+            if (field is < 0 or >= 64)
+            {
+                return null;
+            }
+
+            roots |= 1UL << field;
+        }
+
+        return column => column < 64 && ((roots >> (int)column) & 1) != 0;
+    }
+
+    /// <summary>
+    /// The rows of the object <paramref name="entry"/> names that its locating indexes, its identifiers'
+    /// runs among them, leave for <paramref name="filter"/>, read with no open of the object: its index
+    /// directory beside every column's chunk directory, then the runs' segments that may hold the values,
+    /// then the chunks of the blocks left, three round trips cold. The rows of a block a run could not rule
+    /// out are all returned: the caller keeps those the filter holds for. Null when the entry carries no
+    /// table of contents this library reads, or the object no locating index the filter asks.
+    /// </summary>
+    /// <param name="entry">The object.</param>
+    /// <param name="filter">What the rows are found for.</param>
+    /// <param name="columns">The fields of the object's schema the rows are read for, the filter's among them; null for every one.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal async ValueTask<List<RecordBatch>?> LookupAsync(ObjectEntry entry, VortexExpr filter, int[]? columns, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { DirectoryRegion: { } region } contents)
+        {
+            return null;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            ISegmentReader reader = Footerless(source, entry, contents);
+            if (Indexes.SliceReader.Open(reader, null, contents) is not { } opened)
+            {
+                return null;
+            }
+
+            using Indexes.SliceReader slices = opened;
+
+            // The directory's entries on the columns the filter reads alone: its runs' segments were a list each, every
+            // index of the object parsed at every lookup, three fifths of what a question that leaves an identifier out
+            // allocated. Read alone, those of the locating indexes, when the contents name them apart: the whole directory
+            // of a day's object, every chunk of its synopsis tables in it, was 11.5 MB a lookup read for a few runs.
+            DType schema = contents.SchemaType;
+            Func<uint, bool>? indexed = ColumnsOf(filter, schema);
+            List<Indexes.IndexSegment>? named = Named(contents, indexed);
+            if (named is { Count: 0 })
+            {
+                return null;
+            }
+
+            // The first round trip: those entries, or the directory, beside every column's chunk directory.
+            Task<Indexes.IndexDirectory?> read = named is null ? WholeAsync() : EntriesAsync(named);
+
+            // The chunk directories of the columns the rows are read for: each read and parsed for every column, at every
+            // lookup, was a fifth of what a question that leaves an identifier out allocated.
+            Task[] chunks = new Task[columns?.Length ?? schema.FieldCount];
+            for (int c = 0; c < chunks.Length; c++)
+            {
+                chunks[c] = slices.LoadDirectoryAsync(columns?[c] ?? c, cancellationToken).AsTask();
+            }
+
+            Indexes.IndexDirectory? directory;
+            try
+            {
+                directory = await read.ConfigureAwait(false);
+            }
+            catch
+            {
+                // The chunk directories are read into the slice reader the method lets go on its way out: they end first.
+                await ((Task)Task.WhenAll(chunks)).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                throw;
+            }
+
+            await Task.WhenAll(chunks).ConfigureAwait(false);
+            if (directory is null)
+            {
+                return null;
+            }
+
+            // The second: the runs' segments that may hold a value the filter asks.
+            Indexes.IndexEntry? located = null;
+            foreach (Indexes.IndexEntry index in directory!.Entries)
+            {
+                if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks or Indexes.IndexKinds.PostingsHashed)
+                {
+                    located = index;
+                    break;
+                }
+            }
+
+            Indexes.FooterlessIndexes host = new Indexes.FooterlessIndexes(reader, schema, directory, [.. contents.Encodings]);
+            long blockRows = (long)(located?.BlockLength ?? 0);
+            if (blockRows <= 0
+                || await Indexes.KeyIndexPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false) is not { } pruner)
+            {
+                return null;
+            }
+
+            Compute.BlockMask live = new Compute.BlockMask(host.RowCount, blockRows);
+            await pruner.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
+
+            // The third: every run of blocks left, their chunks together, a chunk two runs share read once.
+            List<Indexes.TimeSlice> ranges = [];
+            ReadOnlySpan<ulong> words = live.Words;
+            int block = 0;
+            while (block < live.BlockCount)
+            {
+                if (((words[block >> 6] >> (block & 63)) & 1) == 0)
+                {
+                    block++;
+                    continue;
+                }
+
+                int first = block;
+                while (block < live.BlockCount && ((words[block >> 6] >> (block & 63)) & 1) != 0)
+                {
+                    block++;
+                }
+
+                long start = first * blockRows;
+                long end = Math.Min(block * blockRows, host.RowCount);
+                ranges.Add(new Indexes.TimeSlice(0, 1, start, end - start));
+            }
+
+            return [.. await slices.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
+
+            // The whole directory, its entries on the filter's columns kept.
+            async Task<Indexes.IndexDirectory?> WholeAsync()
+            {
+                using Buffers.SegmentOwner bytes = await reader.ReadAsync(
+                    new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken).ConfigureAwait(false);
+                return region.Holds(bytes.Buffer.Span)
+                    && Indexes.IndexDirectory.TryParse(bytes.Buffer.Span, Indexes.IndexDirectory.UnknownRows, region.Offset, indexed, out Indexes.IndexDirectory? whole, out _)
+                    ? whole
+                    : null;
+            }
+
+            // The entries alone, a directory of them over the object's rows: each checked against its own checksum, one that
+            // fails costing itself, as in a directory read whole.
+            async Task<Indexes.IndexDirectory?> EntriesAsync(List<Indexes.IndexSegment> regions)
+            {
+                using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
+                int[] slots = new int[regions.Count];
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    slots[i] = requests.Add(new Serialization.Schemas.SegmentSpec(regions[i].Offset, regions[i].Length, regions[i].AlignmentExponent, 0, 0));
+                }
+
+                await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                List<Indexes.IndexEntry> kept = new List<Indexes.IndexEntry>(regions.Count);
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
+                    if (regions[i].Holds(bytes) && Indexes.IndexDirectory.TryParseEntry(bytes, region.Offset, out Indexes.IndexEntry? index))
+                    {
+                        kept.Add(index);
+                    }
+                }
+
+                return new Indexes.IndexDirectory((ulong)entry.PhysicalRows, 0, Indexes.WritePolicy.None, kept);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The regions of the entries of the locating indexes on the columns <paramref name="indexed"/> keeps, every one when it
+    /// is null, that <paramref name="contents"/> name (<see cref="Indexes.SynopsisContents.Locating"/>); null when they name
+    /// none, and a lookup reads the whole directory.
+    /// </summary>
+    private static List<Indexes.IndexSegment>? Named(Indexes.SynopsisContents contents, Func<uint, bool>? indexed)
+    {
+        if (contents.Locating is not { Count: > 0 } locating)
+        {
+            return null;
+        }
+
+        List<Indexes.IndexSegment> regions = [];
+        for (int i = 0; i < locating.Count; i++)
+        {
+            if (indexed is null || indexed(locating[i].Column))
+            {
+                regions.Add(locating[i].Region);
+            }
+        }
+
+        return regions;
+    }
+
+    /// <summary>
+    /// The path directory of variant column <paramref name="field"/> of the object <paramref name="entry"/>
+    /// names, read with no open of the object: the region its entry's table of contents names, in one round
+    /// trip, none once the session's cache holds it. What a question on a path the tables do not name reads
+    /// first. Null when the entry carries no table of contents this library reads, or the column no directory.
+    /// </summary>
+    internal async ValueTask<Indexes.VariantDirectory?> ReadPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { } contents)
+        {
+            return null;
+        }
+
+        foreach ((int column, Indexes.IndexSegment region) in contents.PathDirectories ?? [])
+        {
+            if (column != field)
+            {
+                continue;
+            }
+
+            ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+            await using (source.ConfigureAwait(false))
+            {
+                using Buffers.SegmentOwner bytes = await Footerless(source, entry, contents)
+                    .ReadAsync(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken)
+                    .ConfigureAwait(false);
+                return region.Holds(bytes.Buffer.Span) ? Indexes.VariantDirectory.From(bytes.Buffer.Span) : null;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The variant column <paramref name="field"/> of the slices of the object <paramref name="entry"/> names
+    /// that may hold a value at <paramref name="key"/>, a top-level key, read with no open of the object: its
+    /// path directory and the column's chunk directory together, then those slices' chunks together, two
+    /// round trips cold, none once the session's cache holds them. What a question on a path no synopsis
+    /// table names reads. Null when the entry carries no table of contents this library reads; empty when the
+    /// object holds no value there.
+    /// </summary>
+    internal async ValueTask<List<RecordBatch>?> ReadPathAsync(ObjectEntry entry, int field, string key, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { } contents)
+        {
+            return null;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            ISegmentReader reader = Footerless(source, entry, contents);
+            if (Indexes.SliceReader.Open(reader, null, contents) is not { } opened)
+            {
+                return null;
+            }
+
+            using Indexes.SliceReader slices = opened;
+
+            // The first round trip: the path directory beside the column's chunk directory.
+            ValueTask<Indexes.VariantDirectory?> directory = ReadPathDirectoryAsync(entry, field, cancellationToken);
+            Task chunks = slices.LoadDirectoryAsync(field, cancellationToken).AsTask();
+            Indexes.VariantDirectory? paths;
+            try
+            {
+                paths = await directory.ConfigureAwait(false);
+            }
+            catch
+            {
+                // The chunk directory is read into the slice reader the method lets go on its way out: it ends first.
+                await ((Task)chunks).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                throw;
+            }
+
+            await chunks.ConfigureAwait(false);
+            if (paths is null)
+            {
+                return null;
+            }
+
+            // The second: every slice the path may hold a value in, at once.
+            ReadOnlySpan<Indexes.PathEntry> held = paths.Of([key]);
+            List<int> wanted = [];
+            for (int slice = 0; slice < slices.Slices.Slices.Count; slice++)
+            {
+                foreach (Indexes.PathEntry path in held)
+                {
+                    if (path.In(slice))
+                    {
+                        wanted.Add(slice);
+                        break;
+                    }
+                }
+            }
+
+            Indexes.TimeSlice[] spans = new Indexes.TimeSlice[wanted.Count];
+            for (int i = 0; i < spans.Length; i++)
+            {
+                spans[i] = slices.Slices.Slices[wanted[i]];
+            }
+
+            return [.. await slices.ReadSpansAsync(spans, [field], cancellationToken).ConfigureAwait(false)];
+        }
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="slices"/> of the object <paramref name="entry"/> names, read with no open of
+    /// the object through its table of contents <paramref name="contents"/>: per slice, in order, a batch of
+    /// <paramref name="columns"/>, every column when null, counted from the object's first row, which the
+    /// caller disposes. The columns' chunk directories, then every slice's chunks together, a chunk two
+    /// slices share read once: two round trips cold, however many slices.
+    /// </summary>
+    internal async ValueTask<RecordBatch[]> ReadSlicesAsync(
+        ObjectEntry entry, Indexes.SynopsisContents contents, IReadOnlyList<Indexes.TimeSlice> slices, int[]? columns,
+        CancellationToken cancellationToken)
+    {
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            using Indexes.SliceReader reader = Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents)
+                ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
+            return await reader.ReadSpansAsync(slices, columns, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The rows of slice <paramref name="slice"/> of the object <paramref name="entry"/> names, of every column
+    /// or of <paramref name="columns"/>, read with no open of the object: the chunk directories its entry's
+    /// table of contents names, then the slice's chunks, in two round trips. Null when the entry carries no
+    /// table of contents this library reads.
+    /// </summary>
+    internal async ValueTask<RecordBatch?> ReadSliceAsync(ObjectEntry entry, int slice, int[]? columns, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { } contents)
+        {
+            return null;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            if (Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents) is not { } opened)
+            {
+                return null;
+            }
+
+            using Indexes.SliceReader reader = opened;
+            return await reader.ReadSliceAsync(slice, columns, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     /// <summary>
     /// The bytes of one of this version's index fragments, checked against the reference an
     /// object's leaf entry carries.
@@ -1688,18 +2753,48 @@ public sealed class VortexDataset : IAsyncDisposable
         UInt128 hash = draft.Sink.ContentHash;
 
         // Read out of the chunks the sink still holds, before the put: the entry's bounds and the
-        // smallest key its leaf is ordered by then cost no request at all.
-        (ObjectSummaries summaries, byte[] prefix) =
-            await DescribeAsync(draft.Sink.Content(), firstRow, draft.BySortedColumn, cancellationToken).ConfigureAwait(false);
-        if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
+        // smallest key its leaf is ordered by then cost no request at all. An object that went to the
+        // store as it was written is read from there once put, its footer in a request or two: an object
+        // past the part threshold took a request a part anyway. Should that read fail, the object is
+        // left unnamed, as an abandoned job's are, for a vacuum to take.
+        ObjectSummaries summaries;
+        byte[] prefix;
+        bool streamed = draft.Sink.IsStreamed;
+        try
         {
-            throw new ObjectStoreException($"'{draft.Key}' was taken, which a fresh uid cannot be.");
+            if (!streamed)
+            {
+                SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true, _options.Session.Options.EnginePool);
+                (summaries, prefix) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                (summaries, prefix) = (ObjectSummaries.Empty, []);
+            }
+
+            if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
+            {
+                throw new ObjectStoreException($"'{draft.Key}' was taken, which a fresh uid cannot be.");
+            }
+        }
+        catch
+        {
+            // Not put: the chunks the sink holds go back to their pool, and an upload it streams is given up.
+            draft.Sink.Discard();
+            throw;
         }
 
         // What the store holds, sealed bytes included: what a head reports, and verification checks.
         long bytes = draft.Sink.StoredLength;
-        ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries);
-        return new WrittenObject(entry, KeyOf(prefix, entry));
+        if (streamed)
+        {
+            ISegmentReader stored = await SealedObjectStore.OpenDataAsync(_store, draft.Key, Uid(draft.Identity), bytes, cancellationToken).ConfigureAwait(false);
+            (summaries, prefix) = await DescribeAsync(stored, firstRow, draft, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
+        }
+        ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
+            .WithFooterBytes(draft.Writer.TailBytes)
+            .WithSynopsis(draft.Writer.SynopsisContents);
+        return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes);
     }
 
     /// <summary>
@@ -1793,14 +2888,21 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// A page source for one version, holding what the read that opened it brought back, and reading
-    /// through the pages this handle kept from the versions before.
+    /// through the pages this handle kept from the versions before, then through the disk of the
+    /// session's synopsis cache, where a handle opened earlier left the pages it read.
     /// </summary>
     private CommitPageSource PagesOf(ulong version, CommitObject commit)
     {
-        CommitPageSource pages = new CommitPageSource(_store, _pageCache) { Reading = version };
+        CommitPageSource pages = new CommitPageSource(_store, _pageCache, PageDisk) { Reading = version };
         pages.Open(version, commit);
         return pages;
     }
+
+    /// <summary>
+    /// The session's synopsis cache, which keeps the tree pages the handle reads on the disk: null for none, and for a
+    /// sealed dataset, whose pages stay off the disk, which holds no plaintext of it.
+    /// </summary>
+    private SynopsisCache? PageDisk => _store is SealedObjectStore { Seals: true } ? null : Session.Options.SynopsisCache;
 
     /// <summary>
     /// Completes a caller's draft and puts it in the store, keyed after <paramref name="firstRow"/>
@@ -1847,7 +2949,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// an object with no cursor has no minimum to fall back on, and a scan cannot prune on the
     /// column a reader is most likely to filter by.
     /// </summary>
-    private ObjectSummaries Summaries(VortexFile file)
+    /// <param name="file">The object, open.</param>
+    /// <param name="partition">The one value of each partition column its writer knows it holds, an exact bound of each; null for none.</param>
+    private ObjectSummaries Summaries(VortexFile file, Expressions.FilterLiteral[]? partition = null)
     {
         IReadOnlyList<ColumnSummary> columns = _options.SummaryColumns is { } declared
             ? ColumnSummaries.Of(file, declared)
@@ -1857,11 +2961,24 @@ public sealed class VortexDataset : IAsyncDisposable
             return ObjectSummaries.From(columns);
         }
 
-        List<ColumnSummary> all = [.. columns];
+        // The partition first: its exact value stands for whatever bounds the file states, or does not.
+        List<ColumnSummary> all = [];
         HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        if (partition is not null && partition.Length == clustering.PartitionColumns)
+        {
+            for (int i = 0; i < partition.Length; i++)
+            {
+                all.Add(new ColumnSummary(clustering.PartitionPaths[i], partition[i], true, partition[i], true, true, 0, true));
+                seen.Add(clustering.PartitionPaths[i]);
+            }
+        }
+
         foreach (ColumnSummary column in columns)
         {
-            seen.Add(column.Path);
+            if (seen.Add(column.Path))
+            {
+                all.Add(column);
+            }
         }
 
         foreach (ColumnSummary column in ColumnSummaries.Of(file, clustering.Paths))
@@ -1880,20 +2997,31 @@ public sealed class VortexDataset : IAsyncDisposable
     /// has reached the store: the object's bounds and the key its leaf sits at. Only the ranges the
     /// open and the first key ask for are read, where they lie.
     /// </summary>
+    /// <param name="source">The object's bytes, held or in the store; the file opened over it owns it.</param>
+    /// <param name="firstRow">The position of its first row, for a dataset without a clustering key.</param>
+    /// <param name="draft">The object's draft, which says what walks it by key without a run: its rows in key order, or its slices, which is checked.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <param name="tailBytes">The bytes of its footer when they pass an open's first read, so that the open reads them at once; 0 otherwise.</param>
     private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix)> DescribeAsync(
-        ISegmentSource bytes, long firstRow, bool bySortedColumn, CancellationToken cancellationToken)
+        ISegmentReader source, long firstRow, ObjectDraft draft, CancellationToken cancellationToken, long tailBytes = 0)
     {
-        SourceReader source = new SourceReader(bytes, ownsSource: true, _options.Session.Options.EnginePool);
+        VortexOpenOptions options = tailBytes > ObjectEntry.FirstReadBytes
+            ? ObjectCache.OpenOptions with { InitialReadBytes = (int)Math.Min(tailBytes, int.MaxValue) }
+            : ObjectCache.OpenOptions;
         VortexFile file = await VortexFile
-            .OpenAsync(source, ObjectCache.OpenOptions, cancellationToken).ConfigureAwait(false);
+            .OpenAsync(source, options, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
-            if (bySortedColumn)
+            if (draft.BySortedColumn)
             {
                 await CheckSortedAsync(file, cancellationToken).ConfigureAwait(false);
             }
+            else if (draft.BySlices)
+            {
+                await CheckSlicedAsync(file, cancellationToken).ConfigureAwait(false);
+            }
 
-            ObjectSummaries summaries = Summaries(file);
+            ObjectSummaries summaries = Summaries(file, draft.Partition);
             return (summaries, await PrefixAsync(file, summaries, firstRow, cancellationToken)
                 .ConfigureAwait(false));
         }
@@ -1916,6 +3044,24 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         await cursor.DisposeAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Refuses an object written in sorted slices without a run whose slice table does not walk its
+    /// key: none, one on another column, or one that does not cover its rows. A key cursor would find
+    /// no source in it, and take it for an object without the key.
+    /// </summary>
+    private async ValueTask CheckSlicedAsync(VortexFile file, CancellationToken cancellationToken)
+    {
+        string instant = Key!.Paths[0];
+        (Keys.SlicedKeySource? source, string? reason) = await Keys.SlicedKeySource.OpenAsync(file, instant, cancellationToken).ConfigureAwait(false);
+        if (source is null)
+        {
+            throw new DatasetIntegrityException(
+                $"An object written in sorted slices carries no run on '{instant}' and no slice table that walks it: {reason}.");
+        }
+
+        await source.DisposeAsync().ConfigureAwait(false);
     }
 
     /// <summary>What orders an object's leaf: its smallest key, or its position.</summary>

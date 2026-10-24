@@ -227,7 +227,20 @@ internal sealed class ProjectionQuery : ResultQuery
             mask.Include(element.Source.FieldPath);
         }
 
-        spec = spec with { Projection = mask.Build(), KeepEncodings = keepEncodings, Options = spec.Options with { Compact = true } };
+        // A variant column every element reads through one top-level key is read by those keys alone.
+        List<FieldExpr> uses = new List<FieldExpr>(Elements.Length);
+        foreach (IProjectionElement element in Elements)
+        {
+            uses.Add(element.Source.Field);
+        }
+
+        spec = spec with
+        {
+            Projection = mask.Build(),
+            KeepEncodings = keepEncodings,
+            Options = spec.Options with { Compact = true },
+            VariantKeys = Indexes.VariantKeyReads.Of(uses, spec.Filter),
+        };
         narrowed = false;
         if ((Skip > 0 || Take != long.MaxValue) && Host.Source is FileScanSource file
             && spec.Filter is null && !spec.MatchesNothing && spec.OrderPath is null && spec.Take is null)

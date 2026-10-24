@@ -134,7 +134,7 @@ internal sealed class SpillScope : IDisposable
         {
             if (_directory is null)
             {
-                string directory = _options.ScratchDirectory ?? Path.GetTempPath();
+                string directory = ScratchDirectories.Of(_options.ScratchDirectory);
                 if (GroupCore.InMemory(directory))
                 {
                     throw new VortexMemoryException(

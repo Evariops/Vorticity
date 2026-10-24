@@ -166,9 +166,24 @@ internal sealed class AggregationQuery : ResultQuery
     /// </summary>
     internal IAsyncEnumerator<RecordBatch> Groups(CancellationToken cancellationToken) =>
         Plan.Blocking ? new GroupBatches(this, cancellationToken)
-        : StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken)
+        : States is { } states ? new StatesOrStreams(this, states, cancellationToken)
+        : Streamed(cancellationToken);
+
+    /// <summary>The groups of a pass that takes no states: as they close on a key that streams, once the pass has run otherwise.</summary>
+    internal IAsyncEnumerator<RecordBatch> Streamed(CancellationToken cancellationToken) =>
+        StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken)
         : ZoneFinality.Candidate(this) ? new ZoneDecidedGroups(this, cancellationToken)
         : new GroupBatches(this, cancellationToken);
+
+    /// <summary>
+    /// What the pass would take as states in place of rows (<see cref="StateRequest"/>), when its source
+    /// keeps states of some of its rows; null otherwise. States come with their objects rather than in the
+    /// order a key streams in, so a pass that takes them delivers its groups once it has run.
+    /// </summary>
+    private StateRequest? States =>
+        Host.Source.KeepsStates && Host.Spec().Options.UseSynopses
+            ? StateRequest.Of(Plan, new AggregateSlot?[Plan.Aggregates.Length], top: null)
+            : null;
 
     internal override GroupMetrics? Grouping => Plan.Grouped ? Plan.Metrics() : null;
 
@@ -637,9 +652,16 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         VortexSessionOptions options = _query.Host.Source.Session.Options;
         DType dtype = VortexTypes.ToDType(_query.Schema, new DTypeArena());
         _store = (StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
-        _arena = new CanonicalArena(64, options.EnginePool);
+        _arena = new CanonicalArena(ResultNodes(dtype.FieldCount), options.EnginePool);
         return _store;
     }
+
+    /// <summary>
+    /// The nodes an arena of a result's batches starts with room for: its struct and twice its columns, a column's and
+    /// its validity's or its views'. A record is a hundred bytes or so, and sixty-four of them were a sixth of what a
+    /// warm group by answered from the tables allocated; a result of more columns grows its arena once.
+    /// </summary>
+    internal static int ResultNodes(int columns) => Math.Max(4, 1 + (2 * columns));
 
     private void Release()
     {
@@ -1048,7 +1070,7 @@ internal static class GroupSelection
 
                 VortexSessionOptions options = query.Session.Options;
                 store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-                arena = new CanonicalArena(64, options.EnginePool);
+                arena = new CanonicalArena(GroupBatches.ResultNodes(built.Count), options.EnginePool);
                 for (int c = 0; c < built.Count; c++)
                 {
                     built[c].Append(outcome, store.Children[c], all);
@@ -1147,7 +1169,7 @@ internal static class GroupSelection
 
             VortexSessionOptions options = query.Session.Options;
             _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-            _arena = new CanonicalArena(64, options.EnginePool);
+            _arena = new CanonicalArena(GroupBatches.ResultNodes(fields.Length), options.EnginePool);
             _evaluator = new FilterEvaluator(filter.Predicate);
         }
 

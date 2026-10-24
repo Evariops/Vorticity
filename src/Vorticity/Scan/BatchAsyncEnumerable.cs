@@ -129,10 +129,27 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// identically.
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-        new BatchAsyncEnumerator(
+        Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead);
+            readAhead: ReadsAhead));
+
+    /// <summary>
+    /// The chunks of the variant columns the scan reads through some shredded keys alone; null when it
+    /// reads every chunk whole. Set before the scan starts.
+    /// </summary>
+    internal Indexes.VariantKeyReads? VariantKeys { get; set; }
+
+    /// <summary>The enumerator, its lanes told which chunks of variants they read by keys.</summary>
+    private BatchAsyncEnumerator Keyed(BatchAsyncEnumerator enumerator)
+    {
+        if (VariantKeys is { } keys)
+        {
+            enumerator.VariantKeys = keys;
+        }
+
+        return enumerator;
+    }
 
     /// <summary>Batches decoded ahead of the consumer, on lanes of their own; or, below zero, <see cref="ReadsAhead"/>.</summary>
     internal int Prefetch { get; init; }
@@ -187,10 +204,10 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <param name="zones">The zone maps that pass read, which prove some splits whole; or null.</param>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         BlockMask? live, CancellationToken cancellationToken, ZonePruner? zones = null) =>
-        new BatchAsyncEnumerator(
+        Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead);
+            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead));
 
     /// <summary>
     /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
@@ -209,10 +226,10 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <param name="cancellationToken">Cancels at batch boundaries.</param>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
-        new BatchAsyncEnumerator(
+        Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead);
+            readAhead: ReadsAhead));
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
     internal bool HasTake => _take is not null;
@@ -284,6 +301,19 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private SplitCursor _cursor;
     private BlockTally _decodedBlocks;
     private BlockTally _prunedBlocks;
+
+    /// <summary>
+    /// Whether the batches read the small segments of the splits ahead along with their own: over a source whose read is a
+    /// round trip, unlike a mapping or a local file, and not under a take, whose runs follow its rows.
+    /// </summary>
+    private readonly bool _readsAlong;
+
+    /// <summary>
+    /// The walk over the splits past those started whose small segments a batch reads along with its own, held by a context
+    /// the scan rents at the first batch with a live split past it; null before, when the scan reads none along, and once
+    /// it is disposed.
+    /// </summary>
+    private AlongWalk? _along;
 
     // The batch of the last step, which is current while `_held`. Once released it is kept for the
     // next step to bind again: a flag rather than a second reference, because the scan paths hold
@@ -393,6 +423,25 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// </summary>
     internal const int ReadAheadSplits = 2;
 
+    /// <summary>
+    /// The most bytes a segment of a split ahead may take for a batch to read it along with its own: what a chunk of a few
+    /// thousand rows of a column coded in runs takes, a few dozen bytes, which every split of a log object's 8 192 rows
+    /// asked for alone over a store 5 ms away, 440 requests an object for its service names (2026-10-21).
+    /// </summary>
+    internal const int AlongSegmentBytes = 4 << 10;
+
+    /// <summary>The most bytes of the splits ahead a batch reads along with its own.</summary>
+    internal const int AlongBytes = 64 << 10;
+
+    /// <summary>How many splits past it a batch reads the small segments of at most, topped up once half are spent.</summary>
+    internal const int AlongSplits = 64;
+
+    /// <summary>
+    /// The most bytes between two segments read along that one read bridges: a few chunks of other columns, cheap against a
+    /// round trip, where the source's own gap of a megabyte would read whole row blocks for a few bytes each.
+    /// </summary>
+    internal const int AlongGapBytes = 64 << 10;
+
     internal BatchAsyncEnumerator(
         VortexFile file,
         LayoutTree tree,
@@ -435,12 +484,17 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _token = cancellationToken;
         _cursor = plan.CreateCursor(reverse);
 
+        // A batch reads the small segments of the splits ahead along with its own over a source whose read is a round
+        // trip, a walk of the plan's splits whose numbers are those the scan gives them: not under a take, whose runs
+        // follow its rows.
+        _readsAlong = !file.Source.CostsNoRoundTrip && take is null && plan.BoundaryCount > 2;
+
         // A scan of one lane that asks for it, an aggregation's lane, whose decode is the caller's,
-        // reads ahead over a source whose read is a round trip, as many splits as its admission granted.
-        // Over a mapping a read is a view, and there is nothing to overlap; the file the scan reads through
-        // may be the one the open read whole, which is asked of its source.
+        // reads ahead over a source whose read is a round trip, as many splits as its admission granted,
+        // and as its plan holds. Over a mapping a read is a view, and there is nothing to overlap; the file
+        // the scan reads through may be the one the open read whole, which is asked of its source.
         _extras = readAhead > 0 && window == 1 && !file.Source.ReadsInPlace
-            ? new AheadReads(readAhead)
+            ? new AheadReads(Math.Min(readAhead, Math.Max(1, plan.BoundaryCount - 1)))
             : window > 1 ? NewWindow(file, schema, plan, window) : null;
         _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : degree);
 
@@ -504,7 +558,24 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private Lane NextLane()
     {
         ScanContext first = _lanes[0]!.Context;
-        return NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
+        Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
+        lane.Context.VariantKeys = first.VariantKeys;
+        return lane;
+    }
+
+    /// <summary>Tells the lanes which chunks of variants they read through shredded keys alone.</summary>
+    internal Indexes.VariantKeyReads? VariantKeys
+    {
+        set
+        {
+            foreach (Lane? lane in _lanes)
+            {
+                if (lane is not null)
+                {
+                    lane.Context.VariantKeys = value;
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -562,6 +633,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         lane.Rows = split;
         _currentLane = lane;
         lane.Sequence = _started++;
+        PlanAlong(lane);
         lane.Context.Batch = lane.Sequence;
 
         // A take's split is a window of its own, as on the lanes: it spans the zones holding its
@@ -581,7 +653,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             // Phase 1: register, and fill what the scan already holds. No I/O, no decoding, no
             // allocation. Alone on its lane, the batch never waits for another's read.
             Register(lane.Context, split);
-            _segments.Claim(lane.Context.Segments, lane.Sequence, waiter: null);
+            _segments.Claim(lane.Context.Segments, lane.Sequence, waiter: null, lane.Context.Along is { } along ? along.Specs : default, lane.Context.Along is { } held ? held.Batches : default);
+            lane.Context.Along?.Clear();
             read = NoteRequests(lane.Context);
         }
         catch
@@ -667,9 +740,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// a scan of one lane decodes.
     /// </summary>
     /// <remarks>
-    /// A read in flight is a <see cref="Task"/>, awaited by this step or by the dispose: a value task
-    /// kept to be awaited later is one a failure could leave unawaited. A read that fails gives up
-    /// its claims and resets its lane itself.
+    /// A read in flight is a pooled value task, awaited once, by this step or by the dispose, which
+    /// awaits every read still in flight whatever failed: none is left unawaited, and none allocates.
+    /// A read that fails gives up its claims and resets its lane itself.
     /// </remarks>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> MoveNextAheadAsync(AheadReads ahead)
@@ -680,7 +753,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return false;
         }
 
-        (Lane lane, Task read) = ahead.TakeOldest(_started);
+        (Lane lane, ValueTask read) = ahead.TakeOldest(_started);
         await read.ConfigureAwait(false);
 
         _currentLane = lane;
@@ -698,6 +771,17 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>Starts reads until <paramref name="ahead"/> has as many in flight as it reads ahead, or no split is left.</summary>
     private void FillAhead(AheadReads ahead)
     {
+        // Every lane the reads take, made at the first, so that no split read ahead makes one: a lane is made
+        // as the first's, its variant keys among what it copies, set by then.
+        if (!ahead.Made)
+        {
+            ahead.Made = true;
+            for (int slot = 0; slot < ahead.Lanes.Length; slot++)
+            {
+                ahead.Lanes[slot] ??= NextLane();
+            }
+        }
+
         while (ahead.Count < ahead.Reads.Length && !_drained)
         {
             if (!TryNextSplit(out RowRange split))
@@ -710,6 +794,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             Lane lane = ahead.Lanes[(int)(sequence % ahead.Lanes.Length)] ??= NextLane();
             lane.Rows = split;
             lane.Sequence = sequence;
+            PlanAlong(lane);
             lane.Context.Batch = sequence;
             if (_take is not null && !_filterProven)
             {
@@ -737,17 +822,22 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>
     /// A split's read, started ahead: its claims, waiting for a segment an earlier split is reading
     /// rather than reading it twice, then the read of what it claimed, published at once for the
-    /// splits after it.
+    /// splits after it. Pooled, as the scan's own steps are: a split read ahead allocates nothing.
     /// </summary>
-    private async Task ReadAheadAsync(Lane lane)
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask ReadAheadAsync(Lane lane)
     {
         try
         {
-            while (_segments.Claim(lane.Context.Segments, lane.Sequence, lane))
+            bool along = true;
+            while (_segments.Claim(lane.Context.Segments, lane.Sequence, lane, along && lane.Context.Along is { } specs ? specs.Specs : default, along && lane.Context.Along is { } batches ? batches.Batches : default))
             {
+                along = false;
                 await lane.ReadByOthersAsync().ConfigureAwait(false);
             }
 
+            // The segments read along are in the set, claimed by the first claim: what named them goes back.
+            lane.Context.Along?.Clear();
             bool read = NoteRequests(lane.Context);
             await ReadAsync(lane.Context.Segments, read).ConfigureAwait(false);
             if (read)
@@ -777,7 +867,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ReleaseCurrent();
         while (ahead.Count > 0)
         {
-            (Lane lane, Task read) = ahead.TakeOldest(_started);
+            (Lane lane, ValueTask read) = ahead.TakeOldest(_started);
             try
             {
                 await read.ConfigureAwait(false);
@@ -952,28 +1042,31 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         internal AheadReads(int depth)
         {
             Lanes = new Lane?[depth + 1];
-            Reads = new Task?[depth];
+            Reads = new ValueTask[depth];
         }
 
         internal Lane?[] Lanes { get; }
 
-        internal Task?[] Reads { get; }
+        internal ValueTask[] Reads { get; }
+
+        /// <summary>Whether every lane was made.</summary>
+        internal bool Made { get; set; }
 
         /// <summary>The reads in flight.</summary>
         internal int Count { get; private set; }
 
-        internal void Add(Task read)
+        internal void Add(ValueTask read)
         {
             Reads[(_first + Count) % Reads.Length] = read;
             Count++;
         }
 
         /// <summary>The oldest read in flight and its lane, given the number of the next split to start.</summary>
-        internal (Lane Lane, Task Read) TakeOldest(long started)
+        internal (Lane Lane, ValueTask Read) TakeOldest(long started)
         {
             Lane lane = Lanes[(int)((started - Count) % Lanes.Length)]!;
-            Task read = Reads[_first]!;
-            Reads[_first] = null;
+            ValueTask read = Reads[_first];
+            Reads[_first] = default;
             _first = (_first + 1) % Reads.Length;
             Count--;
             return (lane, read);
@@ -1008,6 +1101,219 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     // ------------------------------------------------------------------------------ the two phases
+
+    /// <summary>
+    /// Gives the batch of <paramref name="lane"/>, just started, the small segments of the splits ahead to read along with
+    /// its own, once no more than half of <see cref="AlongSplits"/> are left ahead of it: those that take
+    /// <see cref="AlongSegmentBytes"/> at most of the next splits that read nothing of their own, and that no split that
+    /// does asks for (<see cref="AlongWalk"/>), as many as <see cref="AlongBytes"/> hold, each for the batch that will ask
+    /// for it, which then finds it held. The walk ahead takes the live splits in the order the scan takes them, so that the
+    /// j-th split past the batch is batch <c>n + j</c>.
+    /// </summary>
+    private void PlanAlong(Lane lane)
+    {
+        lane.Context.Along?.Clear();
+        long batch = lane.Sequence;
+        if (_along is not { } walk)
+        {
+            if (!_readsAlong)
+            {
+                return;
+            }
+
+            // The walk is made for the first batch with a live split past it: the scan of a needle, whose split is the one
+            // it reads, rents nothing for it.
+            SplitCursor probe = _cursor;
+            if (!TryAlong(ref probe, out _))
+            {
+                return;
+            }
+
+            walk = _along = AlongWalk.Begin(ScanContexts.Shared.Rent(lane.Context.File));
+        }
+
+        if (walk.Batch <= batch)
+        {
+            walk.Cursor = _cursor;
+            walk.Batch = batch + 1;
+        }
+
+        if (walk.Batch - batch > AlongSplits / 2 || walk.Stopped)
+        {
+            return;
+        }
+
+        SegmentRequestSet ahead = walk.Context!.Segments;
+        LayoutNode root = _tree.Root;
+        long bytes = 0;
+        walk.Restart();
+        try
+        {
+            // The batch's own segments, which a segment ahead lying near one is read with: the large ones the first split
+            // ahead may share, the small ones taken.
+            RegisterAhead(ahead, lane, root, lane.Rows);
+            for (int s = 0; s < ahead.Count; s++)
+            {
+                if (!ahead.IsFilled(s))
+                {
+                    Serialization.Schemas.SegmentSpec spec = ahead.GetSpec(s);
+                    walk.AddOwn(spec.Offset, spec.Offset + spec.Length);
+                    if (spec.Length > AlongSegmentBytes)
+                    {
+                        walk.AddLarge(in spec);
+                    }
+                    else
+                    {
+                        walk.Take(in spec);
+                    }
+                }
+            }
+
+            for (int walked = 0;
+                bytes < AlongBytes && walk.Batch - batch <= AlongSplits && (walked < AlongWalk.ProbeSplits || !walk.Candidates.IsEmpty) &&
+                TryAlong(ref walk.Cursor, out RowRange split);
+                walked++)
+            {
+                // A split that reads a large segment of its own takes its small ones, and so does a split that shares one
+                // taken: the others are read along, for batches that then wait for bytes already asked (AlongWalk).
+                RegisterAhead(ahead, lane, root, split);
+                walk.NextSplit();
+                bool reads = false;
+                for (int s = 0; s < ahead.Count; s++)
+                {
+                    Serialization.Schemas.SegmentSpec spec = ahead.GetSpec(s);
+                    if (spec.Length > AlongSegmentBytes && !ahead.IsFilled(s))
+                    {
+                        reads |= walk.AddLarge(in spec);
+                    }
+                }
+
+                for (int s = 0; s < ahead.Count; s++)
+                {
+                    Serialization.Schemas.SegmentSpec spec = ahead.GetSpec(s);
+                    if (spec.Length > AlongSegmentBytes || ahead.IsFilled(s))
+                    {
+                        continue;
+                    }
+
+                    if (reads || walk.TakenBefore(in spec))
+                    {
+                        walk.Take(in spec);
+                    }
+                    else
+                    {
+                        walk.AddCandidate(in spec, walk.Batch);
+                        bytes += spec.Length;
+                    }
+                }
+
+                walk.Batch++;
+            }
+        }
+        finally
+        {
+            ahead.Release();
+            ahead.VariantKeys = null;
+        }
+
+        // In the order of the file, the segments ahead whose gaps to one another a read bridges, a chain of them read as
+        // one run: one of several splits saves a request each, and one that a segment of the batch's own lies near costs
+        // none. A segment alone, far from all, would be a request of its own, and stays its split's.
+        Span<(Serialization.Schemas.SegmentSpec Spec, long Batch)> candidates = walk.Candidates;
+        int kept = 0;
+        for (int c = 0; c < candidates.Length; c++)
+        {
+            if (candidates[c].Batch >= 0)
+            {
+                candidates[kept++] = candidates[c];
+            }
+        }
+
+        candidates = candidates[..kept];
+        candidates.Sort(static (left, right) => left.Spec.Offset.CompareTo(right.Spec.Offset));
+        bool found = false;
+        for (int first = 0; first < candidates.Length;)
+        {
+            int end = first + 1;
+            ulong reach = candidates[first].Spec.Offset + candidates[first].Spec.Length;
+            while (end < candidates.Length && candidates[end].Spec.Offset <= reach + AlongGapBytes)
+            {
+                reach = Math.Max(reach, candidates[end].Spec.Offset + candidates[end].Spec.Length);
+                end++;
+            }
+
+            if (end - first > 1 || NearOwn(walk, candidates[first].Spec.Offset, reach))
+            {
+                ScanContext.AlongSegments along = lane.Context.Along ??= new ScanContext.AlongSegments();
+                for (int c = first; c < end; c++)
+                {
+                    along.Add(in candidates[c].Spec, candidates[c].Batch);
+                }
+
+                found = true;
+            }
+
+            first = end;
+        }
+
+        // A file whose splits each read a segment of their own, or take every small one, as one of wide chunks a split,
+        // gives nothing to read along: the walk stops rather than register the splits ahead of every window again.
+        walk.Stopped = !found;
+    }
+
+    /// <summary>
+    /// The segments of <paramref name="rows"/> the scan would ask for, registered in <paramref name="ahead"/>, emptied first,
+    /// those the file's tail holds filled: no batch asks the source for them.
+    /// </summary>
+    private void RegisterAhead(SegmentRequestSet ahead, Lane lane, LayoutNode root, RowRange rows)
+    {
+        ahead.Release();
+        ahead.VariantKeys = lane.Context.VariantKeys;
+        LayoutReaderTable.Require(in root).RegisterSegments(in root, rows, in _mask, ahead);
+        VortexFile.FillFromTail(_source, ahead);
+    }
+
+    /// <summary>Whether a segment of the batch's own lies within a bridged gap of the bytes from <paramref name="start"/> to <paramref name="end"/>.</summary>
+    private static bool NearOwn(AlongWalk walk, ulong start, ulong end)
+    {
+        foreach ((ulong ownStart, ulong ownEnd) in walk.Own)
+        {
+            if (ownStart <= end + AlongGapBytes && start <= ownEnd + AlongGapBytes)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The next split past <paramref name="cursor"/>, a copy of the scan's, that the scan reads, as <see cref="TryNextSplit"/>
+    /// takes it: widened as the scan widens it, and past a dead split, on to the split of the next live block, as
+    /// <see cref="SkipDead"/> moves the scan.
+    /// </summary>
+    private bool TryAlong(ref SplitCursor cursor, out RowRange split)
+    {
+        while (cursor.TryNext(out split))
+        {
+            if (_live is null || _live.AnyLive(split))
+            {
+                if (_widenRows != 0)
+                {
+                    Widen(ref cursor, ref split, counted: false);
+                }
+
+                return true;
+            }
+
+            if (!cursor.Reverse)
+            {
+                cursor.SkipTo(NextLiveRow(split));
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Advances to the next split the mask of live blocks does not rule out.
@@ -1053,9 +1359,52 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
                 return true;
             }
+
+            if (_take is null && !_cursor.Reverse)
+            {
+                SkipDead(split);
+            }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Moves the walk past a dead split on to the split that holds the next live block, the blocks between counted as
+    /// pruned at once: every one of them is dead, and no take asks for a row of them. A forward walk only; the cursor of a
+    /// reverse one does not move.
+    /// </summary>
+    private void SkipDead(RowRange split)
+    {
+        long row = NextLiveRow(split);
+        if (row <= split.End)
+        {
+            return;
+        }
+
+        SplitPlan plan = _cursor.Plan;
+        long end = plan.BoundaryAt(plan.BoundaryCount - 1);
+        long resume = row >= end ? end : plan.SplitOf(row).Start;
+        if (resume <= split.End)
+        {
+            return;
+        }
+
+        if (_metrics is not null)
+        {
+            _metrics.AddBlocksPruned(_prunedBlocks.Add(new RowRange(split.End, resume)));
+        }
+
+        _cursor.SkipTo(row);
+    }
+
+    /// <summary>The first row of the first live block from the end of <paramref name="split"/> on, or <see cref="long.MaxValue"/> when none lives.</summary>
+    private long NextLiveRow(RowRange split)
+    {
+        BlockMask live = _live!;
+        long blockRows = live.BlockRows;
+        int next = live.NextLive((int)Math.Min((split.End + blockRows - 1) / blockRows, live.BlockCount));
+        return next >= live.BlockCount ? long.MaxValue : next * blockRows;
     }
 
     /// <summary>
@@ -1128,7 +1477,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// window bounds the run as it bounds a scan's batch, and keeps it inside its span. Each split
     /// taken in counts as proven, the unit the scan's counters are kept in.
     /// </remarks>
-    private void Widen(ref RowRange split)
+    private void Widen(ref RowRange split) => Widen(ref _cursor, ref split, counted: true);
+
+    /// <summary>
+    /// <see cref="Widen(ref RowRange)"/> on <paramref name="cursor"/>, the scan's or the walk ahead's, which widens the
+    /// splits it takes as the scan will and counts nothing.
+    /// </summary>
+    private void Widen(ref SplitCursor cursor, ref RowRange split, bool counted)
     {
         if (!_evaluator!.Zones!.MustMatch(split))
         {
@@ -1136,21 +1491,25 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         ZonePruner zones = _evaluator.Zones;
-        _cursor.Plan.WindowOf(split.Start, out int lead, out int span);
+        cursor.Plan.WindowOf(split.Start, out int lead, out int span);
         long end = Math.Min(split.Start - lead + span, split.Start + _widenRows);
         while (true)
         {
-            SplitCursor probe = _cursor;
+            SplitCursor probe = cursor;
             if (!probe.TryNext(out RowRange next) || next.Start != split.End || next.End > end ||
                 !zones.MustMatch(next))
             {
                 return;
             }
 
-            NotePruned(next);
-            _metrics?.AddSplitProven();
+            if (counted)
+            {
+                NotePruned(next);
+                _metrics?.AddSplitProven();
+            }
+
             split = new RowRange(split.Start, next.End);
-            _cursor = probe;
+            cursor = probe;
         }
     }
 
@@ -1406,14 +1765,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         else
         {
-            // The projection reads the selection in the root's row space, which is the file's.
-            int origin = (int)split.Start;
-            for (int i = 0; i < count; i++)
-            {
-                kept[i] += origin;
-            }
-
-            ScanContext.SavedSelection saved = context.ExchangeSelection(kept, count);
+            // The projection reads the selection in the root's row space, which is the file's, or the split's from its
+            // first row past 2^31.
+            long origin = SplitExecution.FileSpace(kept, count, split);
+            ScanContext.SavedSelection saved = context.ExchangeSelection(kept, count, origin);
             try
             {
                 root = SplitExecution.Execute(context, _tree, in _keep, split, null);
@@ -1842,6 +2197,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _lanes[(int)(_started % _lanes.Length)] = lane;
         lane.Rows = split;
         lane.Sequence = _started++;
+        PlanAlong(lane);
         _delivered++;
 
         long start = Stopwatch.GetTimestamp();
@@ -1950,6 +2306,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 _lanes[(int)(assigned % window)] = lane;
                 lane.Rows = split;
                 lane.Sequence = assigned;
+                PlanAlong(lane);
                 lane.Assign(this);
                 assigned++;
             }
@@ -2045,11 +2402,15 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
             // A segment another lane is reading is waited for rather than read twice; once it is
             // in, the claim fills it and the batch reads only what it claimed.
-            while (_segments.Claim(context.Segments, batch, lane))
+            bool along = true;
+            while (_segments.Claim(context.Segments, batch, lane, along && context.Along is { } specs ? specs.Specs : default, along && context.Along is { } batches ? batches.Batches : default))
             {
+                along = false;
                 await lane.ReadByOthersAsync().ConfigureAwait(false);
             }
 
+            // The segments read along are in the set, claimed by the first claim: what named them goes back.
+            context.Along?.Clear();
             bool read = NoteRequests(context);
             await ReadAsync(context.Segments, read).ConfigureAwait(false);
             if (read)
@@ -2230,6 +2591,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 }
             }
         }
+
+        if (_along?.End() is { } along)
+        {
+            ScanContexts.Shared.Return(along);
+        }
+
+        _along = null;
 
         // Once no lane runs: the held segments and the retained chunks carry references of their own,
         // and the locks they and the window were lent go back to the process.

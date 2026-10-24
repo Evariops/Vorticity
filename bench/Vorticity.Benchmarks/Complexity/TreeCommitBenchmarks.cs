@@ -110,6 +110,13 @@ public class TreeCommitBenchmarks
             Reads++;
             return new ValueTask<ReadOnlyMemory<byte>>(_pages[reference]);
         }
+
+        // None: the bench counts the reads, which a page taken in hand would not be.
+        public bool TryGetInHand(PageReference reference, out ReadOnlyMemory<byte> page)
+        {
+            page = default;
+            return false;
+        }
     }
 
     /// <summary>Names the pages a commit writes, and keeps none of them.</summary>

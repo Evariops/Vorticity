@@ -27,6 +27,10 @@ internal sealed class ArrayDecodeContext
     private bool _keepNext;
     private bool _keepHere;
 
+    // Whether the variant of the chunk a flat layout decodes now may give its residual alone; taken by that variant's
+    // decoder, so that none below it does, and cleared by the reader after the decode.
+    private bool _residualNext;
+
     internal ArrayDecodeContext(ScanContext scan)
     {
         _scan = scan;
@@ -128,6 +132,12 @@ internal sealed class ArrayDecodeContext
     /// the column itself -- an extension's storage.
     /// </summary>
     internal void KeepEncodingInChild() => _keepNext = _keepHere;
+
+    /// <summary>
+    /// Grants the next node decoded the encoding, for a struct whose field its consumer reads encoded
+    /// (<see cref="ScanContext.EncodedFields"/>).
+    /// </summary>
+    internal void KeepEncodingInNext() => _keepNext = true;
 
     /// <summary>
     /// Decodes only <paramref name="wanted"/> rows of a root node. Resets the depth budget.
@@ -590,9 +600,23 @@ internal sealed class ArrayDecodeContext
                 $"{firstValidityChildIndex + 1} children; this one has {childCount}.");
         }
 
+        return DecodeValidityChild(in node, firstValidityChildIndex, length);
+    }
+
+    /// <summary>
+    /// The validity the child at <paramref name="childIndex"/> holds, for an array that places its
+    /// validity child elsewhere than after its other children and has already counted them.
+    /// </summary>
+    /// <param name="node">The array node.</param>
+    /// <param name="childIndex">Where the validity child sits.</param>
+    /// <param name="length">The node's row count.</param>
+    /// <returns>The validity, collapsed as <see cref="DecodeValidity"/> collapses it.</returns>
+    /// <exception cref="VortexFormatException">The child is not a Bool of exactly <paramref name="length"/> rows.</exception>
+    public Validity DecodeValidityChild(in ArrayNode node, int childIndex, int length)
+    {
         // A validity child is always a non-nullable Bool of exactly the parent's length.
         DType boolType = Types.Bool(Nullability.NonNullable);
-        int decoded = DecodeChild(in node, firstValidityChildIndex, boolType, length);
+        int decoded = DecodeChild(in node, childIndex, boolType, length);
 
         CanonicalNode bits = Canonical.GetNode(decoded);
         if (bits.Kind != CanonicalKind.Bool)
@@ -650,8 +674,23 @@ internal sealed class ArrayDecodeContext
                 $"{firstValidityChildIndex + 1} children; this one has {childCount}.");
         }
 
+        return DecodeValidityChildSelected(in node, firstValidityChildIndex, length, wanted);
+    }
+
+    /// <summary>
+    /// The validity of the rows at <paramref name="wanted"/> the child at <paramref name="childIndex"/>
+    /// holds, read as <see cref="DecodeValidityChild"/> reads the whole.
+    /// </summary>
+    /// <param name="node">The array node.</param>
+    /// <param name="childIndex">Where the validity child sits.</param>
+    /// <param name="length">The node's whole row count.</param>
+    /// <param name="wanted">Row indices, strictly ascending, all in <c>[0, length)</c>.</param>
+    /// <returns>The selected rows' validity, collapsed.</returns>
+    /// <exception cref="VortexFormatException">The child is not a Bool, or selects another row count.</exception>
+    public Validity DecodeValidityChildSelected(in ArrayNode node, int childIndex, int length, ReadOnlySpan<int> wanted)
+    {
         DType boolType = Types.Bool(Nullability.NonNullable);
-        int decoded = DecodeChildSelected(in node, firstValidityChildIndex, boolType, length, wanted);
+        int decoded = DecodeChildSelected(in node, childIndex, boolType, length, wanted);
 
         CanonicalNode bits = Canonical.GetNode(decoded);
         if (bits.Kind != CanonicalKind.Bool)
@@ -879,6 +918,25 @@ internal sealed class ArrayDecodeContext
         _depth = 0;
         _keepNext = false;
         _keepHere = false;
+        _residualNext = false;
+    }
+
+    /// <summary>
+    /// Lets the variant of the chunk a flat layout decodes next give its residual alone, when its shredding holds none
+    /// of the keys the scan reads from residuals (<see cref="Indexes.VariantKeyReads.LeavesUnshredded"/>); false
+    /// clears it, which the reader does after the decode.
+    /// </summary>
+    internal bool ResidualNext
+    {
+        set => _residualNext = value;
+    }
+
+    /// <summary>Takes <see cref="ResidualNext"/>, clearing it, so that no variant decoded below the one that takes it reads its residual alone.</summary>
+    internal bool TakeResidual()
+    {
+        bool residual = _residualNext;
+        _residualNext = false;
+        return residual;
     }
 
     private int DecodeNode(in ArrayNode node, DType dtype, int length)

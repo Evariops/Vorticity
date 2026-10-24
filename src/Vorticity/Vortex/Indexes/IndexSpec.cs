@@ -27,6 +27,9 @@ internal enum IndexPolicyKind
 
     /// <summary>Trigram to blocks.</summary>
     NgramPostings = 6,
+
+    /// <summary>Value to blocks through the value's hash.</summary>
+    HashedPostings = 7,
 }
 
 /// <summary>The index policy of one column.</summary>
@@ -67,6 +70,12 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
 
     /// <summary>The default for the most entries one segment of a locating run holds.</summary>
     public const int DefaultSegmentEntries = 65_536;
+
+    /// <summary>
+    /// The default for hashed postings, whose entries weigh about four bytes: a segment of about
+    /// 64 KiB, what one probe reads.
+    /// </summary>
+    public const int DefaultHashedSegmentEntries = 16_384;
 
     private IndexSpec(
         IndexPolicyKind kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct,
@@ -114,7 +123,9 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
     }
 
     /// <summary>The most entries one segment of a locating run holds.</summary>
-    public int SegmentEntries => _segmentEntries == 0 ? DefaultSegmentEntries : _segmentEntries;
+    public int SegmentEntries => _segmentEntries != 0
+        ? _segmentEntries
+        : Kind == IndexPolicyKind.HashedPostings ? DefaultHashedSegmentEntries : DefaultSegmentEntries;
 
     /// <summary>The same policy with another segment size for its locating runs.</summary>
     /// <param name="entries">The most entries a segment holds; at least 1.</param>
@@ -168,6 +179,10 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
     /// <summary>Value to rows, exact.</summary>
     public static IndexSpec SortedRuns => new IndexSpec(
         IndexPolicyKind.SortedRuns, 0, 0, 0, -1, BloomHash.XxHash3, false);
+
+    /// <summary>Value to blocks through the value's hash, for equality and <c>IN</c> on long, rare values.</summary>
+    public static IndexSpec HashedPostings => new IndexSpec(
+        IndexPolicyKind.HashedPostings, 0, 0, 0, -1, BloomHash.XxHash3, false);
 
     /// <summary>Trigram to blocks, for <c>Like</c> and <c>Contains</c>.</summary>
     /// <param name="caseInsensitive">Whether trigrams are ASCII-lower-cased on both sides.</param>
@@ -235,7 +250,7 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
         int kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct, int hash,
         bool caseInsensitive, int segmentEntries = 0, bool required = false)
     {
-        IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.NgramPostings
+        IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.HashedPostings
             ? (IndexPolicyKind)kind
             : IndexPolicyKind.None;
         return new IndexSpec(

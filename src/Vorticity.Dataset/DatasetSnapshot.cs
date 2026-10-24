@@ -114,7 +114,7 @@ internal sealed class DatasetSnapshot
                 continue;
             }
 
-            yield return new PositionedObject(ObjectEntry.FromBytes(held.Value), firstRow) { Level = level, TreeKey = held.Key };
+            yield return new PositionedObject(_objects.Entries.Of(held.Value), firstRow) { Level = level, TreeKey = held.Key };
         }
     }
 
@@ -225,16 +225,29 @@ internal sealed class DatasetSnapshot
     /// The smallest and the largest value an integer column holds in the version, as the summaries of
     /// its levels' root pages bound them, the loosest of their entries';
     /// null when a root is not in hand, an entry says nothing of the column, or its bounds are no
-    /// integers a long holds. No page is read for it.
+    /// integers a long holds. No page is read for it. Once every root was in hand, the version keeps
+    /// what they gave the column, which a question over it asked again at each ask.
     /// </summary>
     internal Aggregating.KeyBounds? Bounds(string path)
     {
+        // The roots never change: the bounds a question over the column worked out are every next one's.
+        if (Volatile.Read(ref _bounds) is { } known && string.Equals(known.Path, path, StringComparison.Ordinal))
+        {
+            return known.Bounds;
+        }
+
         SummaryColumns wanted = new SummaryColumns([path]);
         long min = long.MaxValue;
         long max = long.MinValue;
         bool any = false;
-        foreach ((int _, DatasetTree tree) in Levels.Occupied())
+        for (int level = 0; level < Levels.Count; level++)
         {
+            DatasetTree tree = Levels[level];
+            if (tree.IsEmpty)
+            {
+                continue;
+            }
+
             ReadOnlyMemory<byte> page;
             try
             {
@@ -254,17 +267,19 @@ internal sealed class DatasetSnapshot
                 {
                     if (!Widen(ObjectSummaries.Of(ObjectEntry.SummaryOf(leaf.Value).Span, wanted), path, ref min, ref max))
                     {
-                        return null;
+                        return Known(path, null);
                     }
                 }
             }
             else
             {
-                foreach (InternalEntry child in TreePage.ReadInternal(page))
+                IReadOnlyList<InternalEntry> children = TreePage.ReadInternal(page);
+                for (int c = 0; c < children.Count; c++)
                 {
+                    InternalEntry child = children[c];
                     if (child.Summary.IsEmpty || !Widen(ObjectSummaries.Of(ObjectSummaryFold.SummariesOf(child.Summary.Span, out _), wanted), path, ref min, ref max))
                     {
-                        return null;
+                        return Known(path, null);
                     }
                 }
             }
@@ -272,8 +287,21 @@ internal sealed class DatasetSnapshot
             any = true;
         }
 
-        return any && min <= max ? new Aggregating.KeyBounds(min, max) : null;
+        return Known(path, any && min <= max ? new Aggregating.KeyBounds(min, max) : null);
     }
+
+    /// <summary>The bounds of the column <see cref="Bounds"/> worked out last, from every root in hand; null before.</summary>
+    private KnownBounds? _bounds;
+
+    /// <summary>Keeps <paramref name="bounds"/> as the column's, worked out from every root of the version, and returns them.</summary>
+    private Aggregating.KeyBounds? Known(string path, Aggregating.KeyBounds? bounds)
+    {
+        Volatile.Write(ref _bounds, new KnownBounds(path, bounds));
+        return bounds;
+    }
+
+    /// <summary>A column's bounds, as <see cref="Bounds"/> worked them out.</summary>
+    private sealed record KnownBounds(string Path, Aggregating.KeyBounds? Bounds);
 
     /// <summary>The bounds <paramref name="min"/> and <paramref name="max"/> widened to the column's summary; false when it gives none a long holds.</summary>
     private static bool Widen(ObjectSummaries summaries, string path, ref long min, ref long max)

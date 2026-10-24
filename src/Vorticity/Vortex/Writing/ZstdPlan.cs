@@ -771,7 +771,7 @@ internal readonly struct ZstdPlan
             fixed (byte* input = stream)
             fixed (byte* output = destination)
             {
-                compressed = across.Compress(workspace.Fan!, input, output, count, workspace.ZstdLevel);
+                compressed = across.Compress(workspace.Fan!, input, output, count, workspace.Level);
             }
 
             if (!compressed)
@@ -831,7 +831,7 @@ internal readonly struct ZstdPlan
     private static bool TryCompress(
         ArrayBlobWriter.Workspace? workspace, ReadOnlySpan<byte> input, Span<byte> destination, out int written)
     {
-        ZstdCompressor encoder = workspace?.Zstd ?? ZstdEncoders.Rent();
+        ZstdCompressor encoder = workspace?.ZstdOfColumn ?? ZstdEncoders.Rent();
         try
         {
             return encoder.Compress(input, destination, out _, out written) == OperationStatus.Done;

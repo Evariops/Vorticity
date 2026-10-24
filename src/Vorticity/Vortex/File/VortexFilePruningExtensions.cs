@@ -44,18 +44,20 @@ internal static class VortexFilePruningExtensions
 
     /// <summary>
     /// <see cref="MayMatch"/>, then the file-level Bloom filters the file's index directory
-    /// carries.
+    /// carries, then the path directories of the variant columns whose paths it reads.
     /// </summary>
     /// <param name="file">An open file.</param>
     /// <param name="filter">The predicate a scan would run.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>
-    /// <see langword="false"/> when the file statistics or a file-level filter prove no row matches.
+    /// <see langword="false"/> when the file statistics, a file-level filter or a path directory prove
+    /// no row matches.
     /// </returns>
     /// <remarks>
     /// The statistics are answered first and read nothing. A filter costs the directory's segment
-    /// and one segment per equality-tested column that has one; a file written without the
-    /// file-level resolution answers exactly as <see cref="MayMatch"/> does.
+    /// and one segment per equality-tested column that has one, and a path directory one segment per
+    /// variant column the filter reads a path of; a file written without either answers exactly as
+    /// <see cref="MayMatch"/> does.
     /// </remarks>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     /// <exception cref="ArgumentException">
@@ -68,6 +70,7 @@ internal static class VortexFilePruningExtensions
         ArgumentNullException.ThrowIfNull(filter);
         FilterTypeCheck.Check(file.DType, filter, nameof(filter));
         return FileStatisticsPruner.MayMatch(file, filter)
-            && await Indexes.BloomPruner.FileMayMatchAsync(file, filter, cancellationToken).ConfigureAwait(false);
+            && await Indexes.BloomPruner.FileMayMatchAsync(file, filter, cancellationToken).ConfigureAwait(false)
+            && await ZonePruningPlan.PathsMayMatchAsync(file, filter, cancellationToken).ConfigureAwait(false);
     }
 }

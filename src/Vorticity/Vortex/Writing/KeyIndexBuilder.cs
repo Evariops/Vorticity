@@ -1,6 +1,8 @@
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO.Hashing;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -30,6 +32,13 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private readonly int _segmentEntries;
     private readonly bool _trigrams;
     private readonly bool _fold;
+
+    /// <summary>Whether the keys are the values' hashes, for hashed postings.</summary>
+    private readonly bool _hashed;
+
+    /// <summary>The bytes of a fixed-width value, which a hashed builder's own keys do not share.</summary>
+    private readonly int _valueWidth;
+
     private readonly ChunkKeys _spare = new ChunkKeys();
     private readonly List<int> _lastBlock = [];
     private ChunkKeys _table;
@@ -44,6 +53,26 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _layout = layout;
         _utf8 = utf8;
         _segmentEntries = segmentEntries;
+        _valueWidth = layout.Width;
+    }
+
+    /// <summary>
+    /// A hashed postings builder: the keys are the XXH3-64 of each value's bytes in
+    /// <paramref name="values"/>, the bytes a Bloom filter hashes, so a probe hashes a literal as
+    /// both do; each distinct (hash, block) pair is an entry.
+    /// </summary>
+    internal static KeyIndexBuilder ForHashes(KeyLayout values, int segmentEntries) =>
+        new KeyIndexBuilder(values, segmentEntries);
+
+    private KeyIndexBuilder(KeyLayout values, int segmentEntries)
+    {
+        _table = new ChunkKeys();
+        _rows = false;
+        _layout = KeyRunOptions.HashedLayout;
+        _utf8 = false;
+        _segmentEntries = segmentEntries;
+        _hashed = true;
+        _valueWidth = values.Width;
     }
 
     /// <summary>
@@ -66,7 +95,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
     internal string Kind => _trigrams
         ? IndexKinds.PostingsNgram3
-        : _rows ? IndexKinds.SortedRuns : IndexKinds.PostingsBlocks;
+        : _hashed ? IndexKinds.PostingsHashed : _rows ? IndexKinds.SortedRuns : IndexKinds.PostingsBlocks;
 
     /// <summary>Whether trigrams are ASCII-lower-cased.</summary>
     internal bool CaseInsensitive => _fold;
@@ -83,7 +112,42 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The row span above which the rows are written at 64 bits; set by the index writer.</summary>
     internal long WideRowsAbove { get; set; } = uint.MaxValue;
 
+    /// <summary>The rows the file is bounded by, 0 when unknown: what hashed postings size their buckets by; set by the index writer.</summary>
+    internal long ExpectedRows { get; set; }
+
+    /// <summary>
+    /// The writer's means of writing this builder's queued payloads now, for a builder the budget never gives up: hashed
+    /// postings hand over each bucket's segments as they are cut, so their runs never wait whole in memory; null to queue
+    /// every payload for the flush after the data.
+    /// </summary>
+    internal Func<IndexBuilder, CancellationToken, ValueTask>? Stream { get; set; }
+
+    /// <summary>The session's lanes hashed postings read and sort their buckets ahead on, a bucket a lane; null to sort them one at a time.</summary>
+    internal LaneBudget? Lanes { get; set; }
+
+    /// <summary>The buckets read and sorted ahead of the one being fed, at most, each with buffers of its own.</summary>
+    private const int BucketsAhead = 4;
+
+    // A view's bytes, and the most of a value's it holds inside it.
+    private const int ViewBytes = 16;
+    private const int InlineBytes = 12;
+
     private readonly List<RawRun> _chunkRuns = [];
+
+    // Hashed postings: the pairs in buckets of their hashes' high bits (see HashedBuckets), made with the first pair; the
+    // pairs noted at the close of each block from _baseBlock on; and the chunks closed, the first's first block, the last's.
+    private HashedBuckets? _buckets;
+    private readonly List<long> _pairsAtBlockClose = [];
+    private int _baseBlock;
+    private int _chunks;
+    private int _firstChunkBlock;
+    private int _lastChunkBlock;
+    private int _lastChunkBlocks;
+
+    private HashedBuckets Buckets => _buckets ??= new HashedBuckets(ExpectedRows, BucketBits);
+
+    /// <summary>The bits of a hash the buckets are told apart by, -1 for as many as <see cref="ExpectedRows"/> calls for; set by the index writer.</summary>
+    internal int BucketBits { get; set; } = -1;
 
     /// <summary>
     /// Runs read from the file an append continues, merged in front of the chunk runs because the
@@ -145,7 +209,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
 
         bool allValid = own.AllValid && wrapper.AllValid;
-        int width = _layout.Width;
+        int width = _valueWidth;
         if (_trigrams)
         {
             if (node.Kind != CanonicalKind.VarBinView)
@@ -186,15 +250,22 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                 return;
 
             case CanonicalKind.Constant:
-                // One key for every valid row, so its id is looked up once.
+                // One key for every valid row, so its id is looked up once; a hash, once, noted in every block.
                 int constant = -1;
+                ulong constantHash = _hashed ? XxHash3.HashToUInt64(node.ConstantElement) : 0;
                 for (int row = start; row < start + count; row++)
                 {
                     if (own.IsValid(row) && wrapper.IsValid(row))
                     {
+                        if (_hashed)
+                        {
+                            Buckets.Note(constantHash, checked((uint)_block));
+                            continue;
+                        }
+
                         if (constant < 0)
                         {
-                            constant = _table.Intern(node.ConstantElement);
+                            constant = Intern(node.ConstantElement);
                         }
 
                         NoteId(constant, first + row - start);
@@ -204,15 +275,32 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                 return;
 
             case CanonicalKind.VarBinView:
+            {
+                // The views and a lone data buffer read once for the rows, as LiteralReader.ViewAt reads a row's value,
+                // where a row's went through the node's records for both.
+                ReadOnlySpan<byte> views = node.Views.Span;
+                ReadOnlySpan<byte> lone = node.DataBufferCount == 1 ? node.GetDataBuffer(0).Span : default;
                 for (int row = start; row < start + count; row++)
                 {
                     if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
                     {
-                        Note(LiteralReader.ViewAt(node, row), first + row - start);
+                        ReadOnlySpan<byte> view = views.Slice(row * ViewBytes, ViewBytes);
+                        int size = BinaryPrimitives.ReadInt32LittleEndian(view);
+                        if (size <= InlineBytes)
+                        {
+                            Note(view.Slice(4, size), first + row - start);
+                            continue;
+                        }
+
+                        int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..]);
+                        int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..]);
+                        ReadOnlySpan<byte> data = buffer == 0 && node.DataBufferCount == 1 ? lone : node.GetDataBuffer(buffer).Span;
+                        Note(data.Slice(offset, size), first + row - start);
                     }
                 }
 
                 return;
+            }
 
             default:
                 Abandon($"a locating index does not key a {node.Kind} column");
@@ -245,7 +333,20 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>Counts rows that feed nothing, so the next rows keep their numbers.</summary>
     internal void Skip(int count) => _row += count;
 
-    private void Note(ReadOnlySpan<byte> key, long row) => NoteId(_table.Intern(key), row);
+    private void Note(ReadOnlySpan<byte> key, long row)
+    {
+        // Hashed postings place a value's hash at its block, once a block, in its bucket.
+        if (_hashed)
+        {
+            Buckets.Note(XxHash3.HashToUInt64(key), checked((uint)_block));
+            return;
+        }
+
+        NoteId(Intern(key), row);
+    }
+
+    /// <summary>The id of a value's key, its bytes: hashed postings place hashes in their buckets and intern none.</summary>
+    private int Intern(ReadOnlySpan<byte> key) => _table.Intern(key);
 
     private void NoteId(int id, long row)
     {
@@ -267,12 +368,24 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
     }
 
-    internal override void CloseBlock() => _block++;
+    internal override void CloseBlock()
+    {
+        _block++;
+        if (_hashed)
+        {
+            HashedBuckets buckets = Buckets;
+            buckets.CloseBlock();
+            _pairsAtBlockClose.Add(buckets.Pairs);
+        }
+    }
 
     internal override void Start(int block, long row)
     {
         _block = block;
         _row = row;
+        _baseBlock = block;
+        _pairsAtBlockClose.Clear();
+        _buckets?.CloseBlock();
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
@@ -281,6 +394,17 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     {
         if (Abandoned is not null)
         {
+            return;
+        }
+
+        if (_hashed)
+        {
+            // A chunk's full pages go to the scratch; what the end needs of the chunks is where the first and the last lie.
+            RunScratch hashScratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
+            await Buckets.SpillAsync(hashScratch, cancellationToken).ConfigureAwait(false);
+            _firstChunkBlock = _chunks++ == 0 ? firstBlock : _firstChunkBlock;
+            _lastChunkBlock = firstBlock;
+            _lastChunkBlocks = blocks;
             return;
         }
 
@@ -321,6 +445,12 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// </summary>
     internal override async ValueTask EndOfDataAsync(CancellationToken cancellationToken)
     {
+        if (_hashed)
+        {
+            await EndHashedAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         if (Abandoned is not null || (_chunkRuns.Count == 0 && Absorbed is not { Count: > 0 }))
         {
             return;
@@ -350,13 +480,201 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         Absorbed = null;
     }
 
-    private void Emit(KeyRun run)
+    /// <summary>
+    /// The hashed postings' runs, from the buckets, a bucket sorted at a time in the hashes' order: the run of every chunk but
+    /// the last, and the last's of its own when the data ends inside a block, which an append re-opens, as the merge of the
+    /// chunks' runs cuts them. A hash's blocks go to the run whose chunks hold them.
+    /// </summary>
+    private async ValueTask EndHashedAsync(CancellationToken cancellationToken)
+    {
+        if (Abandoned is not null || _chunks == 0 || _buckets is not { } buckets)
+        {
+            return;
+        }
+
+        RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
+        await buckets.SpillAsync(scratch, cancellationToken).ConfigureAwait(false);
+        bool tail = BlockRows > 0 && _row % BlockRows != 0;
+        long tailPairs = tail ? buckets.Pairs - PairsBefore(_lastChunkBlock) : 0;
+        int mainEnd = tail ? _lastChunkBlock : _lastChunkBlock + _lastChunkBlocks;
+        HashedRunSink? main = !tail || _chunks > 1
+            ? new HashedRunSink(_segmentEntries, _firstChunkBlock, mainEnd - _firstChunkBlock, buckets.Pairs - tailPairs)
+            : null;
+        HashedRunSink? last = tail ? new HashedRunSink(_segmentEntries, _lastChunkBlock, _lastChunkBlocks, tailPairs) : null;
+        uint split = tail ? (uint)_lastChunkBlock : uint.MaxValue;
+        int mainSent = 0;
+        int lastSent = 0;
+
+        // The buckets after the one being fed are read back and sorted meanwhile, a bucket a lane of the session's, and fed
+        // in their order. A sealed scratch is read a bucket at a time: its frames are opened by one cipher.
+        int ahead = Lanes is { } lanes && !scratch.SealsFile ? Math.Clamp(lanes.Lanes, 1, BucketsAhead) : 1;
+        BucketBuffers[] buffers = new BucketBuffers[ahead];
+        Task<int>?[] sorting = new Task<int>?[ahead];
+        int largest = buckets.Largest;
+        try
+        {
+            for (int slot = 0; slot < ahead && slot < buckets.Buckets; slot++)
+            {
+                // Made once for the largest bucket, so that no bucket's sort grows them.
+                buffers[slot] = new BucketBuffers();
+                buffers[slot].Reserve(largest);
+                sorting[slot] = SortAheadAsync(buckets, slot, scratch, buffers[slot], ahead > 1, cancellationToken);
+            }
+
+            for (int bucket = 0; bucket < buckets.Buckets; bucket++)
+            {
+                int slot = bucket % ahead;
+                int count = await sorting[slot]!.ConfigureAwait(false);
+                Feed(buffers[slot], count, split, main, last);
+                if (bucket + ahead < buckets.Buckets)
+                {
+                    sorting[slot] = SortAheadAsync(buckets, bucket + ahead, scratch, buffers[slot], ahead > 1, cancellationToken);
+                }
+
+                // The segments the bucket closed go out at once, where the writer can take them.
+                if (Stream is { } stream)
+                {
+                    mainSent = Send(main, mainSent);
+                    lastSent = Send(last, lastSent);
+                    await stream(this, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        catch
+        {
+            // The buckets sorted ahead read the scratch the writer lets go once this fails: they end first, and what they
+            // threw is this failure's.
+            foreach (Task<int>? sort in sorting)
+            {
+                if (sort is not null)
+                {
+                    await ((Task)sort).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                }
+            }
+
+            throw;
+        }
+
+        if (main is not null)
+        {
+            Emit(main.Finish(), mainSent);
+        }
+
+        if (last is not null)
+        {
+            Emit(last.Finish(), lastSent);
+        }
+
+        buckets.Dispose();
+        _buckets = null;
+        _chunks = 0;
+        _pairsAtBlockClose.Clear();
+    }
+
+    /// <summary>
+    /// Bucket <paramref name="bucket"/> read back and sorted into <paramref name="buffers"/>, on a lane of the session's of
+    /// its own when <paramref name="aside"/>, on the caller's thread otherwise.
+    /// </summary>
+    private Task<int> SortAheadAsync(
+        HashedBuckets buckets, int bucket, RunScratch scratch, BucketBuffers buffers, bool aside, CancellationToken cancellationToken)
+    {
+        if (!aside)
+        {
+            return buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).AsTask();
+        }
+
+        LaneBudget lanes = Lanes!;
+        return Task.Run(
+            async () =>
+            {
+                long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    return await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    lanes.Exit(entered);
+                }
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// A sorted bucket's pairs into the runs, a hash at a time: its blocks before <paramref name="split"/> into
+    /// <paramref name="main"/>, the others into <paramref name="last"/>.
+    /// </summary>
+    private static void Feed(BucketBuffers buffers, int count, uint split, HashedRunSink? main, HashedRunSink? last)
+    {
+        Span<byte> key = stackalloc byte[sizeof(ulong)];
+        ulong[] hashes = buffers.Hashes;
+        uint[] blocks = buffers.Blocks;
+        for (int at = 0; at < count;)
+        {
+            ulong hash = hashes[at];
+            int end = at + 1;
+            while (end < count && hashes[end] == hash)
+            {
+                end++;
+            }
+
+            // The blocks of a hash come in their order: those of the main run first.
+            int cut = at;
+            while (cut < end && blocks[cut] < split)
+            {
+                cut++;
+            }
+
+            BucketBuffers.Key(hash, key);
+            if (cut > at)
+            {
+                main!.BeginKey(key);
+                main.AddBlocks(blocks.AsSpan(at, cut - at));
+                main.EndKey();
+            }
+
+            if (end > cut)
+            {
+                last!.BeginKey(key);
+                last.AddBlocks(blocks.AsSpan(cut, end - cut));
+                last.EndKey();
+            }
+
+            at = end;
+        }
+    }
+
+    /// <summary>The pairs noted before block <paramref name="block"/>, at or past the first block of the write.</summary>
+    private long PairsBefore(int block)
+    {
+        int closed = block - _baseBlock;
+        return closed <= 0 ? 0 : _pairsAtBlockClose[Math.Min(closed, _pairsAtBlockClose.Count) - 1];
+    }
+
+    private void Emit(KeyRun run, int sent = 0)
     {
         Runs.Add(run);
-        foreach (PendingPayload payload in run.Payloads)
+        for (int i = sent; i < run.Payloads.Count; i++)
         {
-            Enqueue(payload);
+            Enqueue(run.Payloads[i]);
         }
+    }
+
+    /// <summary>Queues the payloads <paramref name="sink"/> cut past the first <paramref name="sent"/>, and says how many it has cut.</summary>
+    private int Send(HashedRunSink? sink, int sent)
+    {
+        if (sink is null)
+        {
+            return sent;
+        }
+
+        IReadOnlyList<PendingPayload> cut = sink.CutPayloads;
+        for (int i = sent; i < cut.Count; i++)
+        {
+            Enqueue(cut[i]);
+        }
+
+        return cut.Count;
     }
 
     /// <summary>
@@ -434,6 +752,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         new RunCursor(
             run.Held ? new HeldWindowSource(run) : new RawWindowSource(scratch, run), _layout, _rows, ordinal);
 
+    /// <summary>The cursors merged once into the run's payloads.</summary>
     private async ValueTask<KeyRun> FinalAsync(
         List<RunCursor> cursors, int firstBlock, int blockCount, CancellationToken cancellationToken)
     {
@@ -704,5 +1023,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     {
         _table.Dispose();
         _spare.Dispose();
+        _buckets?.Dispose();
+        _buckets = null;
     }
 }

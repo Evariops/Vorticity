@@ -219,7 +219,8 @@ internal abstract class LayoutReader
         in LayoutNode child, RowRange rows, in FieldMask fields, ScanContext context) =>
         LayoutReaderTable.Require(in child).Execute(in child, rows, in fields, context);
 
-    private static SegmentSpec SpecOf(in LayoutNode node, int which)
+    /// <summary>The spec of segment <paramref name="which"/> of <paramref name="node"/>, as the footer declares it.</summary>
+    protected static SegmentSpec SpecOf(in LayoutNode node, int which)
     {
         ReadOnlySpan<uint> ids = node.Segments;
         if ((uint)which >= (uint)ids.Length)

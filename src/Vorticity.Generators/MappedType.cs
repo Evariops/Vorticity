@@ -38,6 +38,9 @@ internal enum ScalarKind : byte
 
     /// <summary>A <see cref="System.Numerics.BigInteger"/>, a decimal of scale 0.</summary>
     BigInteger,
+
+    /// <summary>A <c>Vorticity.Variant</c>, a variant column.</summary>
+    Variant,
 }
 
 /// <summary>The .NET container of a list, or of the bytes of a binary value.</summary>
@@ -154,6 +157,7 @@ internal sealed class MappedType
             : KnownSymbols.Is(core, known.TimeOnly) ? ScalarKind.Time
             : KnownSymbols.Is(core, known.DateTimeOffset) ? ScalarKind.ZonedTimestamp
             : KnownSymbols.Is(core, known.Guid) ? ScalarKind.Uuid
+            : KnownSymbols.Is(core, known.Variant) ? ScalarKind.Variant
             : KnownSymbols.Is(core, known.VortexDecimal) ? ScalarKind.WideDecimal
             : KnownSymbols.Is(core, known.TimeSpan) ? ScalarKind.Duration
             : KnownSymbols.Is(core, known.Int128) ? ScalarKind.Int128

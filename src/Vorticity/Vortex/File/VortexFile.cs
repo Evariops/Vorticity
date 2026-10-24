@@ -1178,6 +1178,23 @@ public sealed partial class VortexFile : IAsyncDisposable
     internal long FileLength { get; }
 
     /// <summary>
+    /// The bytes from the first structure an open reads to the end of the file, its dtype included:
+    /// what an open asking for that many (<see cref="VortexOpenOptions.InitialReadBytes"/>) reads in
+    /// one request.
+    /// </summary>
+    /// <remarks>Parsed again from the retained tail on every call, so a file that is never asked costs nothing for it.</remarks>
+    /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
+    internal long TailBytes
+    {
+        get
+        {
+            ThrowIfDisposed();
+            PostscriptInfo postscript = ParsePostscript(_tail.Buffer.Span, _tailOffset, FileLength, VortexOpenOptions.Default);
+            return FileLength - RequiredOffset(in postscript, FileLength);
+        }
+    }
+
+    /// <summary>
     /// The identity of this version of the file's bytes, or null when the file carries none.
     /// </summary>
     /// <remarks>
@@ -1271,6 +1288,9 @@ public sealed partial class VortexFile : IAsyncDisposable
         /// </summary>
         /// <remarks>One field for both, so that a file filtered on a handful of columns holds no more than the list.</remarks>
         internal object? Zones;
+
+        /// <summary>The first of the zone maps scans decode now, each the next's, read and written under the lock of the structures.</summary>
+        internal ZoneFlight? Flights;
     }
 
     /// <summary>One decoded zone map: the zoned node it belongs to, and its bounds.</summary>
@@ -1387,6 +1407,100 @@ public sealed partial class VortexFile : IAsyncDisposable
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// The zone map of zoned node <paramref name="node"/> when the file keeps it; otherwise null, with
+    /// <paramref name="flight"/> the decoding of it another scan does now, to await, or, when
+    /// <paramref name="claimed"/>, none: the decoding is the caller's, to land with <see cref="LandZones"/>.
+    /// </summary>
+    /// <param name="node">The zoned layout node's index.</param>
+    /// <param name="flight">Another scan's decoding of the map, or null.</param>
+    /// <param name="claimed">Whether the decoding is the caller's.</param>
+    /// <remarks>
+    /// The lanes of a question are as many scans of a file, which start together and miss the kept
+    /// maps together: each decoding them read every map once a lane. A day of 4.32 G rows holds
+    /// ~50 MB of maps for the four columns of one filter, read 32 times over 32 lanes (one service
+    /// per minute under a predicate, 1.72 GB read cold where one lane reads 178 MB, 2026-10-21).
+    /// </remarks>
+    internal Compute.ZoneColumn? ClaimZones(int node, out Task<Compute.ZoneColumn?>? flight, out bool claimed)
+    {
+        claimed = false;
+        flight = null;
+        if (DecodedZones(node) is { } kept)
+        {
+            return kept;
+        }
+
+        // Under the structures' lock, which a landing takes after keeping its map: a map landed
+        // since the look above is kept now, and a decoding under way has not landed yet.
+        DecodedStructures decoded = Decoded;
+        lock (decoded)
+        {
+            if (DecodedZones(node) is { } landed)
+            {
+                return landed;
+            }
+
+            for (ZoneFlight? under = decoded.Flights; under is not null; under = under.Next)
+            {
+                if (under.Node == node)
+                {
+                    flight = (under.Waiters ??= new TaskCompletionSource<Compute.ZoneColumn?>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+                    return null;
+                }
+            }
+
+            decoded.Flights = new ZoneFlight(node) { Next = decoded.Flights };
+            claimed = true;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Ends the decoding of zoned node <paramref name="node"/>'s zone map that <see cref="ClaimZones"/>
+    /// gave the caller: the map is kept before the decoding ends, so a scan coming after finds it, and
+    /// the scans awaiting it get it, or null when the decoding failed, for each of them to look again
+    /// and one to decode it.
+    /// </summary>
+    /// <param name="node">The zoned layout node's index.</param>
+    /// <param name="column">The decoded map, or null when the decoding failed.</param>
+    internal void LandZones(int node, Compute.ZoneColumn? column)
+    {
+        if (column is not null)
+        {
+            KeepZones(node, column);
+        }
+
+        DecodedStructures decoded = Decoded;
+        TaskCompletionSource<Compute.ZoneColumn?>? waiters = null;
+        lock (decoded)
+        {
+            for (ref ZoneFlight? under = ref decoded.Flights; under is not null; under = ref under.Next)
+            {
+                if (under.Node == node)
+                {
+                    waiters = under.Waiters;
+                    under = under.Next;
+                    break;
+                }
+            }
+        }
+
+        waiters?.TrySetResult(column);
+    }
+
+    /// <summary>
+    /// A zone map a scan decodes now: its node, what the scans waiting for it await, made by the first
+    /// of them, so that a decoding nobody waits for costs this alone, and the next decoding under way.
+    /// </summary>
+    private sealed class ZoneFlight(int node)
+    {
+        internal int Node { get; } = node;
+
+        internal TaskCompletionSource<Compute.ZoneColumn?>? Waiters;
+
+        internal ZoneFlight? Next;
     }
 
     private int _largestArrayTree;

@@ -216,7 +216,7 @@ internal sealed class StringBounds
         int end = start + count;
         for (int row = start; row < end; row++)
         {
-            row = Settled(views, heap, bits, mask.BitOffset, row, end);
+            row = Settled(views, heap, bits, mask.BitOffset, row, end, start);
             if (row == end)
             {
                 break;
@@ -328,12 +328,14 @@ internal sealed class StringBounds
     [MethodImpl(MethodImplOptions.NoInlining)]
     private int Settled(
         ReadOnlySpan<byte> views, ReadOnlySpan<byte> heap, ReadOnlySpan<byte> bits, int bitOffset,
-        int row, int end)
+        int row, int end, int from)
     {
         if (_minLength < 0)
         {
             return row;
         }
+
+        ref byte viewAt = ref MemoryMarshal.GetReference(views);
 
         int cap = Math.Min(_limit + 1, Unsettled);
         ulong minKey = _minKey;
@@ -384,6 +386,15 @@ internal sealed class StringBounds
             }
 
             if (!bits.IsEmpty && !CanonicalSupport.BitAt(bits, bitOffset + row))
+            {
+                continue;
+            }
+
+            // A row whose view is the valid row's before it holds that row's value, which the bounds hold already: the
+            // rows of a sorted column, which runs of one value make, pass two words a row.
+            if (row > from
+                && Unsafe.ReadUnaligned<Int128>(ref Unsafe.Add(ref viewAt, row * 16)) == Unsafe.ReadUnaligned<Int128>(ref Unsafe.Add(ref viewAt, (row - 1) * 16))
+                && (bits.IsEmpty || CanonicalSupport.BitAt(bits, bitOffset + row - 1)))
             {
                 continue;
             }

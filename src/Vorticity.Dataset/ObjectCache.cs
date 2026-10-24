@@ -40,6 +40,9 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// </summary>
     internal static VortexOpenOptions OpenOptions { get; } = new VortexOpenOptions { TornTail = VortexTornTailPolicy.Refuse };
 
+    /// <summary>The entries the handle's walks parsed, shared by every version that holds their pages.</summary>
+    internal EntryMemo Entries { get; } = new EntryMemo();
+
     /// <summary>How many objects are open, leased or idle.</summary>
     internal int Count => _open.Count;
 
@@ -55,6 +58,18 @@ internal sealed class ObjectCache : IAsyncDisposable
         fragments.Count == 0
             ? OpenOptions
             : OpenOptions with { Read = new VortexReadOptions { IndexFragments = fragments, IndexFragmentsAuthenticated = true } };
+
+    /// <summary>
+    /// <see cref="OpenOptionsWith"/>, with the footer's length when the entry records one: the open
+    /// then reads the object's footer in one request where it would take two.
+    /// </summary>
+    internal static VortexOpenOptions OpenOptionsOf(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments)
+    {
+        VortexOpenOptions options = OpenOptionsWith(fragments);
+        return entry.FooterBytes > 0
+            ? options with { InitialReadBytes = (int)Math.Min(entry.FooterBytes, int.MaxValue) }
+            : options;
+    }
 
     /// <summary>How many rents were answered without opening anything.</summary>
     internal long Hits { get; private set; }
@@ -205,10 +220,16 @@ internal sealed class ObjectCache : IAsyncDisposable
         // Through the session, so the store sees at most its reads in flight and a segment read once
         // is served from its cache to every scan that asks again. An encrypted dataset's object is
         // opened through a sealed reader, its object id checked against the entry's uid.
+        // A plain object's regions of indexes, those its table of contents declares and the pages and segments its lookups
+        // name, come from the session's synopsis cache as they do with no open: a lookup through an open object asked the
+        // store for its fence page and segments at every question.
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         try
         {
-            VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(source, _session), OpenOptionsWith(fragments), cancellationToken).ConfigureAwait(false);
+            ISegmentReader read = source is ObjectStoreSource && entry.Contents is { } contents
+                ? SynopsisCacheReader.Over(source, _session.Options.SynopsisCache, entry.Uid, contents)
+                : source;
+            VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(read, _session), OpenOptionsOf(entry, fragments), cancellationToken).ConfigureAwait(false);
             file.Session = _session;
             return new Held(file, source) { Leases = 1, FragmentRefusals = refused };
         }
@@ -344,15 +365,30 @@ internal sealed class ObjectCache : IAsyncDisposable
 }
 
 /// <summary>One borrowing of an open data object.</summary>
-internal sealed class ObjectLease(ObjectCache cache, string key, VortexFile file, bool cached) : IAsyncDisposable
+internal sealed class ObjectLease : IAsyncDisposable
 {
+    private readonly Func<ValueTask> _giveBack;
     private bool _returned;
 
+    /// <summary>A lease of the object <paramref name="key"/> names, open as <paramref name="file"/>, which disposing gives back to <paramref name="cache"/>.</summary>
+    internal ObjectLease(ObjectCache cache, string key, VortexFile file, bool cached)
+        : this(file, cached, () => cache.ReturnAsync(key))
+    {
+    }
+
+    /// <summary>A lease of <paramref name="file"/>, which disposing gives back through <paramref name="giveBack"/>.</summary>
+    internal ObjectLease(VortexFile file, bool cached, Func<ValueTask> giveBack)
+    {
+        File = file;
+        WasCached = cached;
+        _giveBack = giveBack;
+    }
+
     /// <summary>The open file. Valid until this lease is disposed.</summary>
-    internal VortexFile File => file;
+    internal VortexFile File { get; }
 
     /// <summary>Whether the object was already open, so the lease cost no request.</summary>
-    internal bool WasCached => cached;
+    internal bool WasCached { get; }
 
     /// <summary>
     /// The fragments left out because their bytes are not what their references say; the file's own
@@ -368,6 +404,6 @@ internal sealed class ObjectLease(ObjectCache cache, string key, VortexFile file
         }
 
         _returned = true;
-        return cache.ReturnAsync(key);
+        return _giveBack();
     }
 }

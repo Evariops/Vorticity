@@ -53,6 +53,17 @@ this library claims to read, or the build fails. What no Rust writer can produce
 patching bytes, in `forged/`: the legacy `vortex.stats` layout, and the unknown ids of the
 [negative tests](#6-negative-and-forward-compatibility-tests).
 
+Shredded variants have files of their own, in `tests/Vorticity.Tests/Data/shredded-variants`, written
+by `examples/gen_shredded_variants.rs`. The sidecar would record a variant as the reference reads it,
+and the reference reads a shredded key a row lacks as a key holding null, which the format leaves out
+([90-registry.md](90-registry.md#1-array-encodings)). So each case is written
+three times instead: unshredded, shredded by the reference's own shredder and pipeline, which store the
+reference's tree, and shredded but written verbatim, which keeps the Parquet layout the reference reads
+and never stores on its own. The test reads all three and requires the same values. The cases cover
+objects with a residual, nested objects, lists, primitives, and one column whose three chunks shred
+three ways. The generator also reads each file back through the reference and prints where its reads
+differ.
+
 ## 4. The cross-check: Rust reads what we write
 
 Golden files prove that we read what Rust wrote. They do not prove that Rust reads what we write,

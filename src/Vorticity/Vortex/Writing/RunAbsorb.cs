@@ -38,7 +38,7 @@ internal static class RunAbsorb
         foreach (IndexEntry entry in entries)
         {
             int stride = KeyRunOptions.StrideOf(entry.Kind);
-            if (stride == 0)
+            if (!KeyRunOptions.Absorbs(entry.Kind))
             {
                 continue;
             }

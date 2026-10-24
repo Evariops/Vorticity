@@ -10,6 +10,7 @@ that each one is not deduced differently at each call site.
 | `VortexSession` | thread-safe, and meant to be shared by every request of a process. Its options are frozen when `Create` returns, and `VortexSession.Default` is immutable. Disposing it while a file it opened is still open throws `InvalidOperationException` naming the file |
 | `VortexFile` | thread-safe. Concurrent scans of one open file are expected, and its footer, layout tree, index directory and the runs it caches are immutable or published once |
 | `ISegmentSource` | implementations must be thread-safe, and the built-in ones are |
+| `SynopsisCache` | thread-safe, shared by every scan of its session. One cache owns its directory through a lock of the operating system, so a second one on the same directory, in the process or another, throws `InvalidOperationException`. Its entries survive it: the next cache that opens the directory finds them. A region read from the disk is checked against its checksum every time, a page of a dataset's tree against its hash, and a torn one is read again from the store |
 | `Scan<TRecord>`, `Scan` | single use, one thread. Composition returns the same builder, so build it on one thread, then run one sink. A second sink throws `InvalidOperationException`. `ExplainAsync` may be called before the sink |
 | `GroupedScan<TRecord, TKey>`, `Aggregation<T>`, `Aggregation`, `Projection<T>`, `Projection`, the `Scan<TRecord>` of a result | single use, one thread, like the scan they are built on. Enumerating one runs its query once, and a second sink throws `InvalidOperationException` |
 | the scan's enumerator | one consumer, as the language requires |
@@ -120,12 +121,20 @@ so a listener that enables one only pays for that one:
 | `vortex.scan.requests`, `vortex.scan.bytes_requested` | what the scans asked their sources for, which shows read amplification against the plan's `BytesToRead` |
 | `vortex.scan.blocks_decoded`, `vortex.scan.blocks_pruned` | whether pruning works at all |
 | `vortex.cache.hits`, `vortex.cache.misses` | whether the session's segment cache does anything |
+| `vortex.synopsis_cache.hits`, `vortex.synopsis_cache.misses` | how often the synopsis caches on the local disk answer for the store |
+| `vortex.synopsis_cache.bytes_from_disk`, `vortex.synopsis_cache.bytes_from_store` | the bytes they served, and the bytes the store sent them |
+| `vortex.synopsis_cache.evictions`, `vortex.synopsis_cache.refused` | the regions dropped past their capacity, and those larger than it |
+| `vortex.synopsis_cache.corrupt` | regions whose file failed its checksum, dropped and read again |
+| `vortex.synopsis_cache.held` | the bytes they hold on the disk |
+| `vortex.synopsis_tables.corrupt` | chunks of synopsis tables that failed their checksum or did not decode, the question answered from the rows instead |
 | `vortex.write.bytes` | bytes the writers handed to their sinks |
 | `vortex.dataset.commits`, by `vortex.operation` and `vortex.outcome` | how the commits of datasets end: applied, nothing to do, lost, cancelled or failed |
 | `vortex.dataset.commit_attempts`, by `vortex.operation` | the conditional creations commits sent, whose excess over the applied commits is the rebases, the measure of contention |
 | `vortex.dataset.compactions`, by `vortex.trigger` and `vortex.outcome` | how often compaction runs, and how often a job is abandoned, the measure of competing compactions |
 | `vortex.dataset.compaction.bytes_read`, `vortex.dataset.compaction.bytes_written`, by `vortex.trigger` | what compaction reads and rewrites, abandoned jobs included, which is the write amplification of the datasets |
 | `vortex.dataset.vacuum.objects_deleted` | what vacuums deleted, a dry run's nothing |
+| `vortex.dataset.rows_past_horizon` | rows a dataset by periods took later than its lateness horizon, kept in the late level beside their period: a horizon too short shows here |
+| `vortex.dataset.partitions` | the values of its partition columns a dataset holds rows of, at each plan of its compaction: what one append's bound does not see pile up over a dataset's life |
 
 A scan is one activity, `vortex.scan.typed` or `vortex.scan.tool`, tagged when it ends with its rows,
 batches, requests, bytes requested, and blocks decoded and pruned. A write is one activity,

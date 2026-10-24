@@ -434,6 +434,10 @@ internal sealed class FilterEvaluator
                 EvaluateLogical((LogicalExpr)filter, arena, rootIndex, rows, selection, destination, depth);
                 return;
 
+            case ExprKind.VariantPath:
+                Evaluate(((VariantFilterExpr)filter).Inner, arena, rootIndex, rows, selection, destination, depth + 1);
+                return;
+
             default:
                 // A bare field or literal is not a predicate. The expression factories make this
                 // unreachable from the public API; the throw keeps another node kind from being
@@ -724,11 +728,30 @@ internal sealed class FilterEvaluator
                     $"'{field.Path}' has {arena.GetNode(only).Length} rows in a batch of {rows}.", nameof(field));
             }
 
-            return field is FunctionFieldExpr alone ? alone.Apply(arena, only) : only;
+            return field switch
+            {
+                FunctionFieldExpr alone => alone.Apply(arena, only),
+                VariantFieldExpr path => path.Apply(arena, only),
+                _ => only,
+            };
         }
 
         int current = rootIndex;
         byte[][] segments = field.SegmentsUtf8;
+
+        // A batch of states carries a path's values as a column of their own, under the path's text: read as
+        // they are, with nothing left to extract.
+        if (field is VariantFieldExpr carried && arena.GetNode(rootIndex) is { Kind: CanonicalKind.Struct } states
+            && states.DType.IndexOfField(carried.TextUtf8) is >= 0 and int place)
+        {
+            int values = MaskedBy(arena, states.GetFieldIndex(place), states.Validity);
+            if (arena.GetNode(values).Length != rows)
+            {
+                throw new ArgumentException($"'{carried.Text}' has {arena.GetNode(values).Length} rows in a batch of {rows}.", nameof(field));
+            }
+
+            return values;
+        }
 
         for (int i = 0; i < segments.Length; i++)
         {
@@ -770,8 +793,14 @@ internal sealed class FilterEvaluator
                 $"'{field.Path}' has {column.Length} rows in a batch of {rows}.", nameof(field));
         }
 
-        // A value expression reads the column through its function, applied where the block lies.
-        return field is FunctionFieldExpr function ? function.Apply(arena, current) : current;
+        // A value expression reads the column through its function, applied where the block lies,
+        // and a variant's path through its extraction.
+        return field switch
+        {
+            FunctionFieldExpr function => function.Apply(arena, current),
+            VariantFieldExpr path => path.Apply(arena, current),
+            _ => current,
+        };
     }
 
     /// <summary>The dtype of the validity bitmaps made here; a bitmap's own dtype is never read.</summary>

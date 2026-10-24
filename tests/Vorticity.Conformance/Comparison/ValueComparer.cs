@@ -26,7 +26,7 @@ using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.Conformance.Sidecar;
 using Vorticity.Types;
-using Vorticity.Types.Variant;
+using Vorticity.Types.Variants;
 using Vorticity.Types.Numerics;
 
 namespace Vorticity.Conformance.Comparison;

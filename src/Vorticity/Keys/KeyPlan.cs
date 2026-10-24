@@ -26,6 +26,12 @@ public enum KeySourceKind : byte
 
     /// <summary>A query's result: its column's values, read and sorted in memory when the cursor opens.</summary>
     InMemory = 5,
+
+    /// <summary>
+    /// A <c>vorticity.slices.v1</c> table on an instant column, whose rows are sorted slice by slice: the
+    /// table finds a key's slice, and the slice's instants are read and ranked when first needed.
+    /// </summary>
+    Slices = 6,
 }
 
 /// <summary>What a cursor over one column would be served by.</summary>

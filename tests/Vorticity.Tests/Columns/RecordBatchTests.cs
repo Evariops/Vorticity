@@ -335,6 +335,30 @@ public sealed class RecordBatchTests
     }
 
     [Fact]
+    public void AWindowOfPaddedViewsIsPadded()
+    {
+        // Views this library's kernels wrote, zero past every inline value's bytes, are so in a window too, which a
+        // reader of views whole relies on, a sort's coding among them; views from elsewhere are not said to be.
+        using ColumnFixture f = new ColumnFixture();
+        DType utf8 = f.Types.Utf8(Nullability.NonNullable);
+        foreach (bool padded in new[] { true, false })
+        {
+            VortexBuffer views = f.Arena.Allocate(3 * 16, 16, out Span<byte> bytes);
+            for (int i = 0; i < 3; i++)
+            {
+                bytes[i * 16] = 1;
+                bytes[(i * 16) + 4] = (byte)('a' + i);
+            }
+
+            RecordBatch batch = f.Batch(f.Arena.AddVarBinView(utf8, 3, Validity.NonNullable, views, [], padded));
+            using RecordBatch window = batch.Window(1, 2);
+            Assert.Equal(padded, window.Arena.RecordRef(window.RootIndex).PaddedViews);
+            BinaryColumn names = window.Column(0).AsBinary();
+            Assert.Equal(["b", "c"], [Encoding.UTF8.GetString(names.GetSpan(0)), Encoding.UTF8.GetString(names.GetSpan(1))]);
+        }
+    }
+
+    [Fact]
     public void AStreamOfWindowsBindsOneObjectAgain()
     {
         // A merge emits a window per run: the previous window, disposed, carries the next one, cut

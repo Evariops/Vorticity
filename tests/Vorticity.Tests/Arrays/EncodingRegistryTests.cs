@@ -53,9 +53,8 @@ public sealed class EncodingRegistryTests
     /// THERE ARE NO DEFERRED ARRAY IDS LEFT, which is what this test asserts.
     /// </summary>
     /// <remarks>
-    /// Every array id the frozen editions declare resolves. A file carrying a shredded variant is
-    /// still refused, but by the DECODER, with a message naming the child rather than a table entry
-    /// naming the id.
+    /// Every array id the frozen editions declare resolves, and both variant ids read their shredded
+    /// children too.
     /// </remarks>
     [Fact]
     public void NoArrayIdIsDeferredAnyMore()

@@ -268,7 +268,7 @@ internal sealed partial class GroupCore
             return _scratch;
         }
 
-        string directory = _source?.Session.Options.ScratchDirectory ?? Path.GetTempPath();
+        string directory = ScratchDirectories.Of(_source?.Session.Options.ScratchDirectory);
         if (InMemory(directory))
         {
             throw new VortexMemoryException(

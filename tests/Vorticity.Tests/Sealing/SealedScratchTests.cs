@@ -2,8 +2,8 @@
 //
 // WHAT IS HELD: a sealed scratch reads back every byte appended, across frames, from the frames on
 // disk and from the frame still being filled, by several readers at once, and while the writer moves
-// on to the next frame; its file holds none of the
-// plaintext, where a plain scratch's does; and a query whose budget forces its lanes to spill gives
+// on to the next frame, as a plain one does across its pages written and the one being filled; its
+// file holds none of the plaintext, where a plain scratch's does; and a query whose budget forces its lanes to spill gives
 // the same answer in a session that seals.
 using System;
 using System.IO;
@@ -17,12 +17,15 @@ namespace Vorticity.Tests.Sealing;
 
 public sealed class SealedScratchTests
 {
-    [Fact]
-    public async Task ASealedScratchReadsBackWhatWasAppended()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AScratchOnDiskReadsBackWhatWasAppended(bool sealFile)
     {
+        // Past three of a plain store's pages, so that reads cross the pages written and the one being filled.
         CancellationToken ct = TestContext.Current.CancellationToken;
-        byte[] expected = SealedObjects.Pattern(1_000_003);
-        using RunScratch scratch = new RunScratch(memoryBudget: 100_000, directory: null, sealFile: true);
+        byte[] expected = SealedObjects.Pattern(3_000_003);
+        using RunScratch scratch = new RunScratch(memoryBudget: 100_000, directory: null, sealFile);
         int[] pieces = [1_000, 70_000, 3, 200_000, 65_536, 1, 131_072, 400_000];
         int at = 0;
         foreach (int piece in pieces)
@@ -36,11 +39,12 @@ public sealed class SealedScratchTests
         Assert.True(scratch.OnDisk);
         Assert.Equal(expected.Length, scratch.Length);
 
-        // Reads across frames, inside the frame being filled, and through both, several at once.
+        // Reads across frames and pages, inside the frame or the page being filled, and through both, several at once.
         (long Offset, int Length)[] reads =
         [
             (0, 10), (65_530, 20), (0, expected.Length), (expected.Length - 5_000, 5_000),
             (expected.Length - 70_000, 69_999), (123_456, 654_321), (999_999, 4),
+            (RunScratch.PageBytes - 6, 20), ((2 * RunScratch.PageBytes) - 1_000, 2_000), (2 * RunScratch.PageBytes, 900_000),
         ];
         Task[] all = new Task[reads.Length];
         for (int i = 0; i < reads.Length; i++)
@@ -59,15 +63,17 @@ public sealed class SealedScratchTests
         await Task.WhenAll(all);
     }
 
-    [Fact]
-    public async Task ReadersOfTheFrameBeingFilledGetItsBytesWhileTheWriterMovesOn()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ReadersOfTheFrameBeingFilledGetItsBytesWhileTheWriterMovesOn(bool sealFile)
     {
         // The writer appends while readers read what it just appended, which lies in the frame being
         // filled until the frame is full: a reader must never be served the next frame's bytes as the
         // writer seals one frame and starts the next in the same buffer.
         CancellationToken ct = TestContext.Current.CancellationToken;
         byte[] expected = SealedObjects.Pattern(4 << 20);
-        using RunScratch scratch = new RunScratch(memoryBudget: 0, directory: null, sealFile: true);
+        using RunScratch scratch = new RunScratch(memoryBudget: 0, directory: null, sealFile);
         long published = 0;
         bool done = false;
         Task writer = Task.Run(
@@ -118,7 +124,7 @@ public sealed class SealedScratchTests
     public async Task ASealedScratchFileHoldsNoPlaintext(bool sealFile)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        byte[] secret = Encoding.ASCII.GetBytes(string.Concat(System.Linq.Enumerable.Repeat("SECRET-ROW-", 50_000)));
+        byte[] secret = Encoding.ASCII.GetBytes(string.Concat(System.Linq.Enumerable.Repeat("SECRET-ROW-", 200_000)));
         using RunScratch scratch = new RunScratch(memoryBudget: 0, directory: null, sealFile);
         await scratch.AppendAsync(secret, ct);
         Assert.True(scratch.OnDisk);

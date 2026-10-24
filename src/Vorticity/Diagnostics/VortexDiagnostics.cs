@@ -53,6 +53,15 @@ internal static class VortexTelemetry
     private static readonly Counter<long> CacheHits = Meter.CreateCounter<long>("vortex.cache.hits", "{segment}", "Segments served by a session's cache.");
     private static readonly Counter<long> CacheMisses = Meter.CreateCounter<long>("vortex.cache.misses", "{segment}", "Segments a session's cache did not hold.");
     private static readonly Counter<long> WriteBytes = Meter.CreateCounter<long>("vortex.write.bytes", "By", "Bytes written by writers.");
+    private static readonly Counter<long> SynopsisHits = Meter.CreateCounter<long>("vortex.synopsis_cache.hits", "{region}", "Regions a synopsis cache served from the local disk.");
+    private static readonly Counter<long> SynopsisMisses = Meter.CreateCounter<long>("vortex.synopsis_cache.misses", "{region}", "Regions a synopsis cache did not hold.");
+    private static readonly Counter<long> SynopsisDiskBytes = Meter.CreateCounter<long>("vortex.synopsis_cache.bytes_from_disk", "By", "Bytes a synopsis cache served from the local disk.");
+    private static readonly Counter<long> SynopsisStoreBytes = Meter.CreateCounter<long>("vortex.synopsis_cache.bytes_from_store", "By", "Bytes of regions a synopsis cache was handed from the store.");
+    private static readonly Counter<long> SynopsisEvictions = Meter.CreateCounter<long>("vortex.synopsis_cache.evictions", "{region}", "Regions a synopsis cache dropped past its capacity.");
+    private static readonly Counter<long> SynopsisRefused = Meter.CreateCounter<long>("vortex.synopsis_cache.refused", "{region}", "Regions a synopsis cache refused, larger than its capacity.");
+    private static readonly Counter<long> SynopsisCorrupt = Meter.CreateCounter<long>("vortex.synopsis_cache.corrupt", "{region}", "Regions whose file on the disk failed its checksum, dropped and read again.");
+    private static readonly UpDownCounter<long> SynopsisHeld = Meter.CreateUpDownCounter<long>("vortex.synopsis_cache.held", "By", "Bytes the synopsis caches hold on the local disk.");
+    private static readonly Counter<long> SynopsisTablesCorrupt = Meter.CreateCounter<long>("vortex.synopsis_tables.corrupt", "{chunk}", "Chunks of synopsis tables that failed their checksum or did not decode, the question answered from the rows instead.");
 
     /// <summary>Starts the activity of one scan, or returns null when nothing listens.</summary>
     /// <remarks>
@@ -103,6 +112,30 @@ internal static class VortexTelemetry
     internal static void CacheMiss() => CacheMisses.Add(1);
 
     internal static void Written(long bytes) => WriteBytes.Add(bytes);
+
+    /// <summary>A region a synopsis cache served from the disk.</summary>
+    internal static void SynopsisHit(long bytes)
+    {
+        SynopsisHits.Add(1);
+        SynopsisDiskBytes.Add(bytes);
+    }
+
+    internal static void SynopsisMiss() => SynopsisMisses.Add(1);
+
+    /// <summary>A region the store sent a synopsis cache.</summary>
+    internal static void SynopsisFetched(long bytes) => SynopsisStoreBytes.Add(bytes);
+
+    internal static void SynopsisEvicted() => SynopsisEvictions.Add(1);
+
+    internal static void SynopsisRefusal() => SynopsisRefused.Add(1);
+
+    internal static void SynopsisCorruption() => SynopsisCorrupt.Add(1);
+
+    /// <summary>Bytes a synopsis cache came to hold, or no longer holds when negative.</summary>
+    internal static void SynopsisHolds(long bytes) => SynopsisHeld.Add(bytes);
+
+    /// <summary>A chunk of a synopsis table that failed its checksum or did not decode: its object read as rows instead.</summary>
+    internal static void SynopsisTableCorruption() => SynopsisTablesCorrupt.Add(1);
 
     /// <summary>Starts the activity of one write, or returns null when nothing listens.</summary>
     internal static Activity? StartWrite() => Start("vortex.write");

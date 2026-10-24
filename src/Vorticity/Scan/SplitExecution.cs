@@ -63,6 +63,7 @@ internal static class SplitExecution
     {
         LayoutNode root = tree.Root;
         SegmentRequestSet segments = context.Segments;
+        segments.VariantKeys = context.VariantKeys;
         segments.WantedShare = take is null ? Half.One : (Half)Math.Min(1.0, (double)take.CountIn(split) / Math.Max(split.Length, 1));
         try
         {
@@ -116,13 +117,10 @@ internal static class SplitExecution
             }
 
             // LocalIndices produces split-relative rows; the root's row space is the file's, which
-            // is what `split` is expressed in.
-            for (int i = 0; i < count; i++)
-            {
-                indices[i] += (int)split.Start;
-            }
-
-            ScanContext.SavedSelection saved = context.ExchangeSelection(indices, count);
+            // is what `split` is expressed in: past 2^31, the rows of a file of billions, they stay
+            // the split's, counted from its first row (ScanContext.SelectionBase).
+            long origin = FileSpace(indices, count, split);
+            ScanContext.SavedSelection saved = context.ExchangeSelection(indices, count, origin);
             try
             {
                 return reader.Execute(in root, split, in mask, context);
@@ -136,5 +134,26 @@ internal static class SplitExecution
         {
             ArrayPool<int>.Shared.Return(indices);
         }
+    }
+
+    /// <summary>
+    /// Moves the split-relative rows <paramref name="indices"/> into the file's row space, the root's, and returns 0, where
+    /// the split ends within an int; leaves them the split's otherwise and returns the split's first row, which they then
+    /// count from (<see cref="ScanContext.SelectionBase"/>): an int cast of a row past 2^31 named rows no chunk held.
+    /// </summary>
+    internal static long FileSpace(int[] indices, int count, RowRange split)
+    {
+        if (split.End > int.MaxValue)
+        {
+            return split.Start;
+        }
+
+        int origin = (int)split.Start;
+        for (int i = 0; i < count; i++)
+        {
+            indices[i] += origin;
+        }
+
+        return 0;
     }
 }

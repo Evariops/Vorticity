@@ -349,7 +349,7 @@ internal static class RecordEmitter
         value.Kind == ValueKind.Scalar
         && value.Scalar is ScalarKind.Bool or ScalarKind.Utf8 or ScalarKind.Decimal or ScalarKind.WideDecimal
             or ScalarKind.Date or ScalarKind.Time or ScalarKind.Timestamp or ScalarKind.ZonedTimestamp or ScalarKind.Uuid
-            or ScalarKind.Duration or ScalarKind.Int128 or ScalarKind.UInt128 or ScalarKind.BigInteger;
+            or ScalarKind.Variant or ScalarKind.Duration or ScalarKind.Int128 or ScalarKind.UInt128 or ScalarKind.BigInteger;
 
     /// <summary>
     /// Reads member <paramref name="k"/>'s nested record into a rented temporary, then copies it to

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
@@ -188,6 +189,58 @@ public sealed class LayoutExecutionTests
         }
 
         Assert.True(expected.ToArray().AsSpan().SequenceEqual(actual), "the selected rows differ from the rows read one by one.");
+    }
+
+    /// <summary>
+    /// The same chunks read from row 150 under a selection counted from that row, as a split past 2^31 sets it, an int
+    /// short of naming its rows: each chunk takes its own run of it, moved by the base, and the rows are those it names.
+    /// </summary>
+    [Fact]
+    public async Task ASelectionCountedFromItsSplitReadsTheRowsItNames()
+    {
+        await using VortexFile file = await LayoutExecutor.OpenAsync("containers/chunked_stream_3");
+        LayoutTree tree = LayoutTree.Parse(file);
+        using ScanContext context = new ScanContext(file);
+        int[] rows = [150, 151, 199, 200, 250, 299];
+
+        List<byte> expected = [];
+        foreach (int row in rows)
+        {
+            expected.AddRange(await DigestAsync(file, tree, context, new RowRange(row, row + 1)));
+        }
+
+        int[] selection = [.. rows.Select(row => row - 150)];
+        ScanContext.SavedSelection saved = context.ExchangeSelection(selection, selection.Length, selectionBase: 150);
+        byte[] actual;
+        try
+        {
+            int root = await LayoutExecutor.ReadAsync(
+                file, tree, context, new RowRange(150, file.RowCount), FieldMask.All, TestContext.Current.CancellationToken);
+            Assert.Equal(rows.Length, context.Canonical.GetNode(root).Length);
+            actual = CanonicalDigest.Of(context, root);
+        }
+        finally
+        {
+            context.RestoreSelection(in saved);
+            context.ResetBatch();
+        }
+
+        Assert.Equal(0, context.SelectionBase);
+        Assert.True(expected.ToArray().AsSpan().SequenceEqual(actual), "the selected rows differ from the rows read one by one.");
+    }
+
+    /// <summary>A split's rows move into the file's space where it ends within an int, and stay the split's, counted from its first row, past it.</summary>
+    [Fact]
+    public void ASplitPastAnIntKeepsItsRowsCountedFromItsStart()
+    {
+        int[] near = [0, 5, 9];
+        Assert.Equal(0, Vorticity.Scanning.SplitExecution.FileSpace(near, near.Length, new RowRange(1_000, 1_010)));
+        Assert.Equal([1_000, 1_005, 1_009], near);
+
+        int[] far = [0, 5, 9];
+        long start = (long)int.MaxValue + 7;
+        Assert.Equal(start, Vorticity.Scanning.SplitExecution.FileSpace(far, far.Length, new RowRange(start, start + 10)));
+        Assert.Equal([0, 5, 9], far);
     }
 
     [Fact]

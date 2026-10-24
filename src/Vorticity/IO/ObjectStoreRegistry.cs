@@ -287,6 +287,9 @@ internal sealed class PrefixedObjectStore(IObjectStore inner, string prefix) : I
     public ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>
         inner.PutAsync(prefix + key, content, length, condition, cancellationToken);
 
+    public ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, long maxLength, PutCondition condition, CancellationToken cancellationToken) =>
+        inner.PutAsync(prefix + key, content, length, maxLength, condition, cancellationToken);
+
     public ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken) =>
         inner.PutAsync(prefix + key, content, condition, cancellationToken);
 

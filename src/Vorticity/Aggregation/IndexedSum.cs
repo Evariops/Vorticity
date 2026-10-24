@@ -26,14 +26,16 @@ namespace Vorticity.Aggregating;
 /// <para>
 /// A part is at most 2^26 units, so a sum takes 2^36 values, some 69 billion, in one group or one
 /// scan, and throws <see cref="OverflowException"/> past them rather than lose its exactness.
-/// Thirty-two bytes a group: three bins and a word for the count, the top and the infinities met.
+/// Thirty-two bytes a group: three bins and a word for the count, the top and the infinities met. The
+/// engine takes it where a source proves its rows within those values, and
+/// <see cref="WideIndexedSum"/>, which settles the bins into high parts kept apart, elsewhere.
 /// </para>
 /// <para>
 /// A NaN is skipped, as the statistics skip it; an infinity is counted and marks the sum, which is
 /// that infinity, or NaN when both are met, as IEEE 754 gives.
 /// </para>
 /// </remarks>
-internal struct IndexedSum
+internal struct IndexedSum : IFloatSumState<IndexedSum>
 {
     /// <summary>The values a chunk of a dense span is checked and split by at once.</summary>
     internal const int Chunk = 2048;
@@ -46,6 +48,9 @@ internal struct IndexedSum
     // From this top up an extractor passes the doubles: the values are split scaled down by
     // 2^(-27 · 4), four bins lower, where the parts are the same integers.
     private const int HugeTop = 76;
+
+    /// <summary>The top from which values are split scaled, past the doubles' extractors.</summary>
+    internal const int SplitScaledTop = HugeTop;
     private const int HugeBins = 4;
 
     private const int TopShift = 48;
@@ -55,7 +60,7 @@ internal struct IndexedSum
     private const long NegativeInfinity = 1L << 57;
 
     /// <summary>The values a sum takes: each adds a part of at most 2^26 to a bin, which stays a long, times a weight.</summary>
-    private const long Endurance = 1L << 36;
+    internal const long Endurance = 1L << 36;
 
     private static readonly double HugeScale = Math.ScaleB(1.0, -Width * HugeBins);
 
@@ -75,12 +80,13 @@ internal struct IndexedSum
     internal long Meta;
 
     /// <summary>The values summed: every one but the NaN.</summary>
-    internal readonly long Count => Meta & CountMask;
+    public readonly long Count => Meta & CountMask;
 
-    private readonly int Top => (int)((Meta & TopMask) >>> TopShift);
+    /// <summary>The bin the largest value called for, the highest of the three; 0 before the first finite value.</summary>
+    internal readonly int Top => (int)((Meta & TopMask) >>> TopShift);
 
     /// <summary>The sum, rounded once from the bins' exact total.</summary>
-    internal readonly double Value
+    public readonly double Value
     {
         get
         {
@@ -104,6 +110,25 @@ internal struct IndexedSum
             Add(ref high, ref low, (ulong)(M2 >> 63), (ulong)M2);
             return Round(high, low, (Width * (top - 2)) + Lowest);
         }
+    }
+
+    /// <summary>
+    /// The sum with the high parts <see cref="WideIndexedSum"/> keeps apart added back to the bins, each a
+    /// count of 2^56 units of its bin, the top bin's first: rounded once from the exact total, which stays
+    /// within 2^126 while each bin's stays within 2^72.
+    /// </summary>
+    internal readonly double ValueWith(long high0, long high1, long high2)
+    {
+        int top = Top;
+        if ((Meta & (PositiveInfinity | NegativeInfinity)) != 0 || top == 0)
+        {
+            return Value;
+        }
+
+        Int128 b0 = ((Int128)high0 << 56) + M0;
+        Int128 b1 = ((Int128)high1 << 56) + M1;
+        Int128 b2 = ((Int128)high2 << 56) + M2;
+        return Round((b0 << (2 * Width)) + (b1 << Width) + b2, (Width * (top - 2)) + Lowest);
     }
 
     /// <summary>Adds the word pair (<paramref name="addHigh"/>, <paramref name="addLow"/>) to (<paramref name="high"/>, <paramref name="low"/>), the low word's carry into the high.</summary>
@@ -167,7 +192,7 @@ internal struct IndexedSum
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void Add(double value)
+    public void Add(double value)
     {
         int top = Top;
         if (!(Math.Abs(value) < Limit[top]))
@@ -185,7 +210,7 @@ internal struct IndexedSum
     }
 
     /// <summary>Folds <paramref name="count"/> values equal to <paramref name="value"/>: a run, a constant, a dictionary entry.</summary>
-    internal void AddWeighted(double value, long count)
+    public void AddWeighted(double value, long count)
     {
         if (double.IsNaN(value))
         {
@@ -225,7 +250,7 @@ internal struct IndexedSum
     /// values are split in vector lanes with the top's extractors; a chunk holding a NaN or an
     /// infinity is folded a value at a time. The parts are the ones a value at a time gives.
     /// </summary>
-    internal void AddSpan(ReadOnlySpan<double> values)
+    public void AddSpan(ReadOnlySpan<double> values)
     {
         for (int start = 0; start < values.Length; start += Chunk)
         {
@@ -260,7 +285,7 @@ internal struct IndexedSum
     internal void Uncount(long count) => Meta -= count;
 
     /// <summary>Folds another sum: the higher top for both, the bins added.</summary>
-    internal void Merge(in IndexedSum other)
+    public void Merge(in IndexedSum other)
     {
         // An empty sum takes the other whole: its count, its top, its infinities and its bins are what the
         // fold would give, with no shift. Nearly every group of db-benchmark's q10 merges into an empty
@@ -644,6 +669,30 @@ internal struct IndexedSum
     }
 }
 
+/// <summary>
+/// An exact float sum's state, <see cref="IndexedSum"/> or <see cref="WideIndexedSum"/>, for an aggregate
+/// built on such sums, as a variance is on two: the same folds, the narrow or the wide chosen as the run
+/// starts.
+/// </summary>
+internal interface IFloatSumState<TSelf>
+    where TSelf : struct, IFloatSumState<TSelf>
+{
+    /// <summary>The values summed: every one but the NaN.</summary>
+    long Count { get; }
+
+    /// <summary>The sum, rounded once from its exact total.</summary>
+    double Value { get; }
+
+    void Add(double value);
+
+    /// <summary>Folds <paramref name="count"/> values equal to <paramref name="value"/>.</summary>
+    void AddWeighted(double value, long count);
+
+    void AddSpan(ReadOnlySpan<double> values);
+
+    void Merge(in TSelf other);
+}
+
 /// <summary>A sum of floating-point values in an <see cref="IndexedSum"/>: the same bits in any order and under any cut.</summary>
 internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
     where TValue : unmanaged, INumberBase<TValue>
@@ -682,6 +731,23 @@ internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
     public void Merge(ref IndexedSum into, in IndexedSum other) => into.Merge(in other);
 
     public double? Mean(in IndexedSum state) => state.Count == 0 ? null : state.Value / state.Count;
+
+    /// <remarks>
+    /// A persisted sum is a <see cref="WideIndexedSum"/>, which settles nothing below an epoch of values:
+    /// its sum inside is then the whole of it, and merges as the narrow sum's would. One past an epoch is
+    /// past what a source of the narrow sum's rows holds.
+    /// </remarks>
+    public bool FoldState(ref IndexedSum state, in StateInput input, int row)
+    {
+        WideIndexedSum persisted = input.FloatSum(row);
+        if (persisted.High != 0)
+        {
+            throw new OverflowException("A persisted float sum past an epoch of values folds into a wide sum only.");
+        }
+
+        state.Merge(in persisted.Sum);
+        return true;
+    }
 
     /// <remarks>The rows left out read as zero, which no bin takes anything of, and come off the count.</remarks>
     [SkipLocalsInit]

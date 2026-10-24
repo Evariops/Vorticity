@@ -7,7 +7,7 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Parquet.Schema;
 using Vorticity.Types;
-using Vorticity.Types.Variant;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Parquet.Reading;
 

@@ -188,12 +188,23 @@ internal sealed class RecordingSegmentSource : ISegmentReader
 /// <see cref="TaskCompletionSource"/> the test releases. It drives the enumerator's asynchronous
 /// path - the ManualResetValueTaskSourceCore branch - which a memory-mapped file never reaches.
 /// </summary>
+/// <remarks>
+/// A file opened over it serves the segments its open read from the tail, all of a small file's
+/// by default; a smaller <c>tailReadSize</c> leaves the segments before the footer to the source.
+/// </remarks>
 internal sealed class GatedSegmentSource : ISegmentReader
 {
     private readonly ISegmentReader _inner;
+    private readonly int _tailReadSize;
     private readonly List<TaskCompletionSource> _gates = new List<TaskCompletionSource>();
 
-    internal GatedSegmentSource(ISegmentReader inner) => _inner = inner;
+    internal GatedSegmentSource(ISegmentReader inner, int tailReadSize = Vorticity.File.VortexFileFormat.InitialReadSize)
+    {
+        _inner = inner;
+        _tailReadSize = tailReadSize;
+    }
+
+    int ISegmentReader.TailReadSize => _tailReadSize;
 
     /// <summary>Releases every read parked so far.</summary>
     internal void ReleaseAll()

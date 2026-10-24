@@ -18,6 +18,7 @@ public sealed class VortexSessionOptions
 {
     private MemoryPool<byte> _memoryPool = AlignedMemoryPool.Shared;
     private SegmentCache? _segmentCache;
+    private SynopsisCache? _synopsisCache;
     private int _maxConcurrentReads = 16;
     private int _maxDegreeOfParallelism = 1;
     private long _indexCacheBytes = 64L * 1024 * 1024;
@@ -67,6 +68,23 @@ public sealed class VortexSessionOptions
         set => _segmentCache = Set(value);
     }
 
+    /// <summary>
+    /// The local disk's copy of what questions read of a dataset's objects without the rest of their data,
+    /// their synopses' tables and directories, across the processes that open it in turn; null keeps none.
+    /// The session owns it, and releases its directory when it is disposed.
+    /// </summary>
+    /// <remarks>
+    /// Only the regions an object's table of contents declares with a checksum enter it, checked on every
+    /// read from the disk. Of a sealed object it keeps the bytes the store holds, its trailer and the frames
+    /// around those regions, which the reader decrypts and authenticates at each read: no key and no
+    /// plaintext reach the disk.
+    /// </remarks>
+    public SynopsisCache? SynopsisCache
+    {
+        get => _synopsisCache;
+        set => _synopsisCache = Set(value);
+    }
+
     /// <summary>The most reads in flight across every scan of every file of the session whose reads do I/O.</summary>
     /// <remarks>
     /// As for <see cref="SegmentCache"/>: a file opened from an <see cref="ISegmentSource"/> that
@@ -86,8 +104,10 @@ public sealed class VortexSessionOptions
 
     /// <summary>
     /// How many chunks a scan of the session decodes and aggregates at once, unless its
-    /// <see cref="ScanOptions.DegreeOfParallelism"/> says otherwise, and how many threads a writer of
-    /// the session works on, unless its <see cref="VortexWriteOptions.DegreeOfParallelism"/> does.
+    /// <see cref="ScanOptions.DegreeOfParallelism"/> says otherwise, and how many threads the writes
+    /// of the session compute on at once, all of them together: the lanes every writer of the
+    /// session shares, whose helpers join a piece of work only on a lane free. A writer spreads its
+    /// work over as many of them as its <see cref="VortexWriteOptions.DegreeOfParallelism"/> asks.
     /// 1 by default: a library does not take a host's cores without being asked.
     /// </summary>
     /// <remarks>
@@ -180,11 +200,13 @@ public sealed class VortexSessionOptions
 
     /// <summary>
     /// Where a group by its memory budget cannot hold writes the groups it spills: a local directory,
-    /// never an object store. Null, the default, is the system's temporary directory.
+    /// never an object store. Null, the default, is the system's temporary directory, or, when that lies
+    /// on a file system in memory as <c>/tmp</c> does on recent Linux, the user's cache's on a disk:
+    /// <c>$XDG_CACHE_HOME/vorticity</c>, or <c>~/.cache/vorticity</c>.
     /// </summary>
     /// <remarks>
-    /// A directory on a file system in memory (<c>tmpfs</c>) is refused: spilling there would take the
-    /// memory it gives back. The process's spills together take at most 90 % of the directory's free
+    /// A directory named on a file system in memory (<c>tmpfs</c>) is refused: spilling there would take
+    /// the memory it gives back. The process's spills together take at most 90 % of the directory's free
     /// space; past it, the query fails with a <see cref="VortexMemoryException"/>. A spill's file has
     /// no name once open, outside Windows, which deletes it on close: none is left behind.
     /// </remarks>
@@ -307,6 +329,7 @@ public sealed class VortexSession : IAsyncDisposable
     {
         Options = options;
         ReadGate = new SemaphoreSlim(options.MaxConcurrentReads, options.MaxConcurrentReads);
+        WriteLanes = new Writing.LaneBudget(options.MaxDegreeOfParallelism);
         Mappings = options.MapFiles && options.MappedFileCacheCount > 0 && FileInode.IsSupported
             ? new MappedFileCache(options.MappedFileCacheCount)
             : null;
@@ -324,6 +347,12 @@ public sealed class VortexSession : IAsyncDisposable
 
     /// <summary>The bound on reads in flight across the session.</summary>
     internal SemaphoreSlim ReadGate { get; }
+
+    /// <summary>
+    /// The lanes every write of the session computes on, <see cref="VortexSessionOptions.MaxDegreeOfParallelism"/> of
+    /// them, shared by all its writers: the bound reads in flight have in <see cref="ReadGate"/>, on the processors.
+    /// </summary>
+    internal Writing.LaneBudget WriteLanes { get; }
 
     /// <summary>The files kept mapped once closed, or null when the session keeps none.</summary>
     internal MappedFileCache? Mappings { get; }
@@ -723,6 +752,7 @@ public sealed class VortexSession : IAsyncDisposable
         }
 
         Options.SegmentCache?.Clear();
+        Options.SynopsisCache?.Dispose();
         Mappings?.Clear();
         Keys?.Dispose();
         if (Options.MemoryPool is AlignedMemoryPool aligned && !ReferenceEquals(aligned, AlignedMemoryPool.Shared))

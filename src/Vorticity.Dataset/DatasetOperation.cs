@@ -107,6 +107,15 @@ internal abstract record DatasetOperation
     /// </summary>
     /// <param name="Policy">The indexes, in the bytes an index directory stores a policy in.</param>
     public sealed record AddIndexPolicy(ReadOnlyMemory<byte> Policy) : DatasetOperation;
+
+    /// <summary>
+    /// Changes the length of a dataset's periods from an instant on, as the seal that weighed the
+    /// period it wrote asks: applied on the calendar it was worked out on, after <paramref name="After"/>
+    /// changes, and dropped when another writer changed the calendar first.
+    /// </summary>
+    /// <param name="Change">The change.</param>
+    /// <param name="After">How many changes the calendar held when the change was worked out.</param>
+    public sealed record ChangePeriodLength(PeriodChange Change, int After) : DatasetOperation;
 }
 
 /// <summary>What a commit made of one change, once re-applied to the version it landed on.</summary>

@@ -65,7 +65,7 @@ file controls:
 |---|---|
 | `MaxArrayDepth`, `MaxDTypeDepth`, `MaxLayoutDepth` | 64 each: how deep an encoding tree, a type or a layout tree may nest |
 | `MaxFlatBufferDepth` | 128 |
-| `MaxFlatBufferTables` | 1 000 000 tables visited per traversal, the bound the reference verifiers use |
+| `MaxFlatBufferTables` | 1 000 000 tables visited per traversal, the bound the reference verifiers use; a dataset's compaction sizes its chunks so that an object's footer stays within half of it ([blocks and chunks](blocks-and-chunks.md)) |
 | `MaxMetadataSegments` | 16 |
 | `MaxMetadataKeyLength` | 64 bytes |
 | `MaxCompressionSpecs` | 8 |

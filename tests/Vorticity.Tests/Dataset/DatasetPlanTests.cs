@@ -27,6 +27,10 @@ public sealed class DatasetPlanTests
 {
     private const ulong Seed = 0x91A5_5EED;
 
+    // A clock no test moves, and the erasure delay a fifth of the shapes declare.
+    private static readonly ManualClock Clock = new ManualClock(new DateTimeOffset(2026, 10, 18, 0, 0, 0, TimeSpan.Zero));
+    private static readonly TimeSpan Delay = TimeSpan.FromHours(4);
+
     [Fact]
     public async Task ADescentChoosesTheJobAFullReadChooses()
     {
@@ -38,8 +42,10 @@ public sealed class DatasetPlanTests
             Random random = new Random(seed);
             await using MemoryObjectStore store = new MemoryObjectStore();
             IBoundaryRule rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024);
-            List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> shape = Shape(random);
-            await using VortexDataset dataset = await PointAsync(store, rule, await CreateAsync(store, rule, shape, ct), shape, random, clustered: true, ct);
+            List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> shape = Shape(random, banded: seed % 4 == 3);
+            bool erasure = seed % 5 == 4;
+            shape = erasure ? Aged(shape, seed) : shape;
+            await using VortexDataset dataset = await PointAsync(store, rule, await CreateAsync(store, rule, shape, ct, erasure: erasure), shape, random, clustered: true, ct);
             CompactionOptions options = new CompactionOptions
             {
                 LevelZeroCeiling = random.Next(2, 9),
@@ -71,7 +77,9 @@ public sealed class DatasetPlanTests
             await using MemoryObjectStore store = new MemoryObjectStore();
             IBoundaryRule rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024);
             List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> shape = Arrivals(random, most: seed % 3 == 0 ? 16 : 140);
-            await using VortexDataset dataset = await PointAsync(store, rule, await CreateAsync(store, rule, shape, ct, clustered: false), shape, random, clustered: false, ct);
+            bool erasure = seed % 5 == 4;
+            shape = erasure ? Aged(shape, seed) : shape;
+            await using VortexDataset dataset = await PointAsync(store, rule, await CreateAsync(store, rule, shape, ct, clustered: false, erasure: erasure), shape, random, clustered: false, ct);
             CompactionOptions options = new CompactionOptions
             {
                 LevelZeroCeiling = random.Next(2, 9),
@@ -91,7 +99,8 @@ public sealed class DatasetPlanTests
             }
         }
 
-        Met(met, ranks);
+        // A tiered level's concatenations grow its objects, and neighbours merge under the leveled style alone.
+        Met(met, ranks, CompactionTrigger.Neighbours);
         Assert.True(longest >= 4, $"no run was longer than {longest} objects, so a run's end is untested");
     }
 
@@ -466,6 +475,12 @@ public sealed class DatasetPlanTests
         for (int rank = 0; rank < readRanked.Jobs.Length; rank++)
         {
             Same(readRanked with { Job = readRanked.Jobs[rank] }, descendedRanked with { Job = descendedRanked.Jobs[rank] }, seed);
+            if (rank > 0)
+            {
+                // A trigger met only behind another job is met too: a purge ranks after the levels' jobs.
+                met[readRanked.Jobs[rank].Trigger] = met.GetValueOrDefault(readRanked.Jobs[rank].Trigger) + 1;
+            }
+
             HashSet<int> levels = [readRanked.Jobs[rank].FromLevel, readRanked.Jobs[rank].ToLevel, .. readRanked.Jobs[rank].Inputs.Select(input => input.Level)];
             Assert.False(taken.Overlaps(levels), $"seed {seed}: job {rank} touches a level a job ranked before it took");
             taken.UnionWith(levels);
@@ -475,11 +490,22 @@ public sealed class DatasetPlanTests
     }
 
     /// <summary>Fails unless every trigger was met and some shape ranked three jobs.</summary>
-    private static void Met(Dictionary<CompactionTrigger, int> met, int ranks)
+    private static void Met(Dictionary<CompactionTrigger, int> met, int ranks, CompactionTrigger? never = null)
     {
+        // A dataset of periods plans by reading every leaf, so its own triggers have no descent to hold
+        // to the full read (DatasetPeriodsCompactionTests meets them).
         foreach (CompactionTrigger trigger in Enum.GetValues<CompactionTrigger>())
         {
-            Assert.True(met.GetValueOrDefault(trigger) > 0, $"no shape met {trigger}, so the test proves nothing of it");
+            if (trigger == never)
+            {
+                Assert.Equal(0, met.GetValueOrDefault(trigger));
+                continue;
+            }
+
+            Assert.True(
+                trigger is CompactionTrigger.LateCeiling or CompactionTrigger.FreshMerge or CompactionTrigger.Seal
+                    || met.GetValueOrDefault(trigger) > 0,
+                $"no shape met {trigger}, so the test proves nothing of it");
         }
 
         Assert.True(ranks >= 3, $"no shape ranked more than {ranks} jobs, so the ranking is untested past them");
@@ -544,17 +570,21 @@ public sealed class DatasetPlanTests
     /// ties, fragments up to six, and some objects with rows marked: a few, or runs enough that the
     /// vector alone makes them due.
     /// </summary>
-    private static List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Shape(Random random)
+    private static List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Shape(Random random, bool banded = false)
     {
         List<(int, ReadOnlyMemory<byte>, ObjectEntry)> objects = [];
         int levels = random.Next(1, 6);
         for (int level = 0; level < levels; level++)
         {
+            // Banded, as keys in order leave the levels: each level a band of keys of its own, level 0
+            // the newest and the deepest the oldest, so that neighbours at a level's end have nothing of
+            // another level between them.
+            long band = banded ? (level == 0 ? levels : levels - level) * 1_000_000L : 0;
             int count = level == 0 ? random.Next(0, 14) : random.Next(0, 90);
-            long at = random.Next(0, 50);
+            long at = band + random.Next(0, 50);
             for (int i = 0; i < count; i++)
             {
-                long low = level == 0 ? random.Next(0, 5_000) : at + random.Next(0, 3) * 17;
+                long low = level == 0 ? band + random.Next(0, 5_000) : at + random.Next(0, 3) * 17;
                 long high = low + random.Next(0, 60);
                 at = high + 1 + random.Next(0, 40);
                 objects.Add(Entry(
@@ -564,7 +594,7 @@ public sealed class DatasetPlanTests
                     1_000L * random.Next(1, 5),
                     random.Next(10) == 0 ? random.Next(1, 7) : 0,
                     random.Next(8) == 0 ? random.Next(1, 20) : random.Next(30) == 0 ? random.Next(150, 400) : 0,
-                    keyed: random.Next(25) != 0));
+                    keyed: random.Next(25) != 0 || banded));
             }
         }
 
@@ -660,7 +690,8 @@ public sealed class DatasetPlanTests
         IBoundaryRule? rule,
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> objects,
         CancellationToken ct,
-        bool clustered = true)
+        bool clustered = true,
+        bool erasure = false)
     {
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -668,7 +699,7 @@ public sealed class DatasetPlanTests
             ["key", "measure"],
             [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
             Nullability.NonNullable);
-        await using (VortexDataset created = await VortexDataset.CreateAsync(store, schema, Options(rule, clustered), ct))
+        await using (VortexDataset created = await VortexDataset.CreateAsync(store, schema, Options(rule, clustered, erasure), ct))
         {
         }
 
@@ -682,12 +713,27 @@ public sealed class DatasetPlanTests
         return await VortexDataset.OpenAsync(store, Options(rule, clustered), ct);
     }
 
-    private static DatasetOptions Options(IBoundaryRule? rule, bool clustered = true) => new DatasetOptions
+    private static DatasetOptions Options(IBoundaryRule? rule, bool clustered = true, bool erasure = false) => new DatasetOptions
     {
         Seed = Seed,
         ClusteringKey = clustered ? ["key"] : null,
         Rule = rule,
+        TimeProvider = Clock,
+        ErasureDelay = erasure ? Delay : null,
     };
+
+    /// <summary>
+    /// The shape under an erasure delay: each object with marked rows says they were made at a time
+    /// drawn over two delays before the clock's, so that some are due by their age and some are not.
+    /// </summary>
+    private static List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Aged(List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> shape, int seed)
+    {
+        Random random = new Random(seed ^ 0x5EED);
+        long now = Clock.GetUtcNow().ToUnixTimeSeconds();
+        return [.. shape.Select(o => o.Entry.HasDeletions
+            ? (o.Level, o.Key, o.Entry.WithMarkedAt(now - random.NextInt64(1, 2 * (long)Delay.TotalSeconds)))
+            : o)];
+    }
 
     private static void Same(CompactionPlan expected, CompactionPlan actual, int seed)
     {

@@ -733,7 +733,14 @@ internal static class CanonicalConcat
                 bufferBase += chunk.DataBufferCount;
             }
 
-            return arena.AddVarBinView(dtype, length, validity, views, buffers);
+            // Views copied as they lay, rebased past their own bytes: padded where every chunk's were.
+            bool padded = true;
+            for (int i = 0; i < chunks.Length; i++)
+            {
+                padded &= arena.RecordRef(chunks[i]).PaddedViews;
+            }
+
+            return arena.AddVarBinView(dtype, length, validity, views, buffers, padded);
         }
         finally
         {

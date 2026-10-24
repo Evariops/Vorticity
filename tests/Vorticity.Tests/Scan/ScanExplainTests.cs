@@ -162,6 +162,92 @@ public sealed class ScanExplainTests
     }
 
     /// <summary>
+    /// Scans of one file started together, as the lanes of a question are, read its zone map once:
+    /// the first to miss it decodes it, and the others await that decoding rather than each read the
+    /// map again.
+    /// </summary>
+    [Fact]
+    public async Task ScansStartedTogetherReadAZoneMapOnce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        const int Scans = 8;
+        VortexExpr narrow = Expr.And(
+            Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_000L))),
+            Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_300L))));
+
+        GatedSegmentSource gated = new GatedSegmentSource(MemoryMappedSegmentSource.Open(Corpus.Path(Zoned)), tailReadSize: 8 * 1024);
+        await using VortexFile file = await VortexFile.OpenAsync(gated, new VortexOpenOptions(), ct);
+        Task<ScanExplanation>[] plans = new Task<ScanExplanation>[Scans];
+        for (int s = 0; s < Scans; s++)
+        {
+            plans[s] = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(ct), ct);
+        }
+
+        // The first read parked, then time for the other scans to miss the map too: a scan decoding
+        // it again would park a read of its own.
+        await ParkedAsync(gated, 1, ct);
+        await Task.Delay(200, ct);
+        int parked = gated.Parked;
+        gated.ReleaseAll();
+        Assert.Equal(1, parked);
+
+        int reading = 0;
+        ScanExplanation first = await plans[0];
+        foreach (Task<ScanExplanation> plan in plans)
+        {
+            ScanExplanation explained = await plan;
+            Assert.Equal("zone map", explained.Pruning[0].Structure);
+            Assert.Equal(first.LiveBlocks, explained.LiveBlocks);
+            reading += explained.Pruning[0].SegmentsRead > 0 ? 1 : 0;
+        }
+
+        Assert.Equal(1, reading);
+    }
+
+    /// <summary>
+    /// A scan awaiting another's decoding of a zone map decodes it itself when that decoding fails:
+    /// the scan that read first is cancelled, and the one waiting on it reads the map and prunes.
+    /// </summary>
+    [Fact]
+    public async Task AZoneMapWhoseDecodingFailsIsDecodedByTheScanAwaitingIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        VortexExpr narrow = Expr.And(
+            Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_000L))),
+            Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_300L))));
+
+        GatedSegmentSource gated = new GatedSegmentSource(MemoryMappedSegmentSource.Open(Corpus.Path(Zoned)), tailReadSize: 8 * 1024);
+        await using VortexFile file = await VortexFile.OpenAsync(gated, new VortexOpenOptions(), ct);
+        using CancellationTokenSource cancelled = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Task<ScanExplanation> first = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(cancelled.Token), ct);
+        await ParkedAsync(gated, 1, ct);
+        Task<ScanExplanation> second = Task.Run(async () => await file.ScanBuilder().Project("monotone").Where(narrow).ExplainAsync(ct), ct);
+        await Task.Delay(200, ct);
+        Assert.Equal(1, gated.Parked);
+
+        // The first scan's read cancelled, its gate stays counted, and the second scan parks its own.
+        await cancelled.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+        await ParkedAsync(gated, 2, ct);
+        gated.ReleaseAll();
+        ScanExplanation plan = await second;
+        Assert.True(plan.Pruning[0].SegmentsRead > 0, "the scan awaiting the failed decoding reads the map itself");
+        Assert.True(plan.LiveBlocks > 0 && plan.LiveBlocks * 4 < plan.Blocks, $"{plan.LiveBlocks} live blocks of {plan.Blocks}");
+    }
+
+    /// <summary>Waits, ten seconds at most, for <paramref name="count"/> reads parked on <paramref name="gated"/>.</summary>
+    private static async Task ParkedAsync(GatedSegmentSource gated, int count, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (gated.Parked < count && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(1, ct);
+        }
+    }
+
+    /// <summary>
     /// Scans keeping zone maps at once, across the short list's move to the map by node, lose
     /// none: each node is kept by one thread alone, so a keep lost to a race is a node missing,
     /// and every node is found afterwards with its thread's map.

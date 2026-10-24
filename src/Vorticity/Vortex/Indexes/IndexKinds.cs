@@ -32,6 +32,61 @@ internal static class IndexKinds
     public const string PostingsNgram3 = "vorticity.postings.ngram3.v1";
 
     /// <summary>
+    /// Value to blocks through the value's hash, a superset at block granularity: each run holds its
+    /// (hash, block) pairs sorted by hash, the hashes cut to as many bits as its pairs need plus ten,
+    /// per segment as gaps beside the blocks (<see cref="KeyRunOptions.HashShift"/>).
+    /// </summary>
+    public const string PostingsHashed = "vorticity.postings.hashed.v1";
+
+    /// <summary>
+    /// The time slices of a file, on its instant column: per slice its bounds, its first row and its
+    /// row count, held in the entry's options with no payload (<see cref="SliceTable"/>).
+    /// </summary>
+    public const string Slices = "vorticity.slices.v1";
+
+    /// <summary>
+    /// Where the chunks of every top-level column lie and the array encodings their trees name, on
+    /// the root, the encodings in its options and a payload region per column: what reads a slice's
+    /// rows without the footer (<see cref="Indexes.SliceChunks"/>).
+    /// </summary>
+    public const string SliceChunks = "vorticity.slices.chunks.v1";
+
+    /// <summary>
+    /// Where each shredded key of a variant column lies, chunk by chunk, on that column: the
+    /// encodings and the keys in its options, and a payload region per key holding the range of its
+    /// buffers and its tree in each chunk, so a read of one key fetches its bytes alone
+    /// (<see cref="VariantPathMap"/>).
+    /// </summary>
+    public const string VariantPaths = "vorticity.variant.paths.v1";
+
+    /// <summary>
+    /// Every path and class a variant column's rows hold in the file, on that column: each its count,
+    /// its bounds and where it lies, in one payload region, so that a question on a path the file
+    /// lacks, or outside its bounds, refutes the file (<see cref="VariantDirectory"/>).
+    /// </summary>
+    public const string VariantDirectory = "vorticity.variant.directory.v1";
+
+    /// <summary>
+    /// The block statistics of a variant column's shredded keys, on that column: per key and class, for
+    /// each block that holds a value of it, their count and bounds, the keys and classes in its options
+    /// and a payload region each (<see cref="VariantBlockStats"/>).
+    /// </summary>
+    public const string VariantBlocks = "vorticity.variant.blocks.v1";
+
+    /// <summary>
+    /// Where a synopsis column's chunks lie in the synopsis part, on that column: its run's payload
+    /// regions are the chunks' segments, each with its checksum, and its options the part's extent, so
+    /// that a reader of the part alone needs no footer.
+    /// </summary>
+    public const string SynopsisColumns = "vorticity.synopsis.columns.v1";
+
+    /// <summary>
+    /// One table of an object's synopsis, on the root: its kind, bucket, keys, measures and rows in its
+    /// options, its rows an array payload of its one run (<see cref="SynopsisTableInfo"/>).
+    /// </summary>
+    public const string SynopsisTable = "vorticity.synopsis.table.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -41,18 +96,33 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 => true,
+                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks or SynopsisColumns
+                or SynopsisTable => true,
             _ => false,
         };
 
     /// <summary>
-    /// Whether the kind carries payload segments. <see cref="DictProbe"/> is the one that does
-    /// not: its whole content is the statement that the column's chunks are dictionary-encoded.
+    /// Whether the kind carries payload segments. <see cref="DictProbe"/> does not, its whole content
+    /// being the statement that the column's chunks are dictionary-encoded, and neither does
+    /// <see cref="Slices"/>, whose table fits in its options.
     /// </summary>
     /// <param name="kind">The name.</param>
     /// <returns>Whether a run of this kind must carry at least one payload segment.</returns>
     public static bool HasPayload(string kind) =>
-        !string.Equals(kind, DictProbe, StringComparison.Ordinal);
+        kind switch
+        {
+            DictProbe or Slices => false,
+            _ => true,
+        };
+
+    /// <summary>
+    /// Whether the kind locates the blocks that hold a column's values, which a lookup of rows by a value reads with no open
+    /// of the file (<c>KeyIndexPruner</c>): sorted runs, postings of blocks, hashed postings, postings of trigrams, and the
+    /// dictionary probe where none of them answers.
+    /// </summary>
+    /// <param name="kind">The name.</param>
+    /// <returns>Whether a lookup reads it.</returns>
+    internal static bool Locates(string kind) => kind is SortedRuns or PostingsBlocks or PostingsHashed or PostingsNgram3 or DictProbe;
 
     /// <summary>The kind a policy of <paramref name="policy"/> builds, or null for a policy that names none.</summary>
     /// <param name="policy">The policy's kind.</param>
@@ -65,6 +135,7 @@ internal static class IndexKinds
             IndexPolicyKind.Postings => PostingsBlocks,
             IndexPolicyKind.SortedRuns => SortedRuns,
             IndexPolicyKind.NgramPostings => PostingsNgram3,
+            IndexPolicyKind.HashedPostings => PostingsHashed,
             _ => null,
         };
 }

@@ -144,20 +144,20 @@ internal sealed class FenceTreeWriter
     {
         byte[] min = [];
         byte[] max = [];
-        foreach (KeySegment fence in page.Bounds)
+        for (int i = 0; i < page.Count; i++)
         {
-            if (fence.Entries > 0)
+            if (page.EntriesOf(i) > 0)
             {
-                min = fence.Min;
+                min = page.BoundsOf(i).Min;
                 break;
             }
         }
 
         for (int i = page.Count - 1; i >= 0; i--)
         {
-            if (page.Bounds[i].Entries > 0)
+            if (page.EntriesOf(i) > 0)
             {
-                max = page.Bounds[i].Max;
+                max = page.BoundsOf(i).Max;
                 break;
             }
         }

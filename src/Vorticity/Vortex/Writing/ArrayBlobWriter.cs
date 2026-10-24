@@ -1980,9 +1980,11 @@ internal static class ArrayBlobWriter
     /// written against the file's dictionary from the start. A node two parents name is rewritten
     /// once.
     /// </remarks>
-    internal static void Renumber(in BlobLease blob, ReadOnlySpan<ushort> map)
+    internal static void Renumber(in BlobLease blob, ReadOnlySpan<ushort> map) => Renumber(blob.Bytes, map);
+
+    /// <summary><see cref="Renumber(in BlobLease, ReadOnlySpan{ushort})"/> over a blob's bytes read back from where they waited.</summary>
+    internal static void Renumber(Span<byte> bytes, ReadOnlySpan<ushort> map)
     {
-        Span<byte> bytes = blob.Bytes;
         int flatLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes[^sizeof(uint)..]);
         Span<byte> flat = bytes.Slice(bytes.Length - sizeof(uint) - flatLength, flatLength);
         int budget = VortexLimits.MaxFlatBufferTables;
@@ -2483,11 +2485,16 @@ internal static class ArrayBlobWriter
         Workspace blob, CanonicalArena arena, CanonicalNode node, EncodingDictionary encodings,
         bool compress, ChunkStats stats = default)
     {
+        if (node.FieldCount == 3)
+        {
+            return WriteShreddedVariant(blob, arena, node, encodings, compress);
+        }
+
         if (node.FieldCount != 2)
         {
             throw new InvalidOperationException(
-                $"A variant column is a two-field struct of {{metadata, value}}; this one has " +
-                $"{node.FieldCount} fields.");
+                $"A variant column is a two-field struct of {{metadata, value}}, or a shredded one of " +
+                $"{{metadata, residual, tree}}; this one has {node.FieldCount} fields.");
         }
 
         CanonicalNode valueNode = arena.GetNode(arena.GetNode(node.Index).GetFieldIndex(1));
@@ -2513,6 +2520,61 @@ internal static class ArrayBlobWriter
         return Node(
             blob, encodings, "vortex.parquet.variant"u8, ParquetVariantBytes(blob, valueNullable),
             children[..(validityCount + 2)], []);
+    }
+
+    /// <summary>
+    /// Writes a variant the shredder split (<see cref="VariantShredder"/>) as the reference stores one:
+    /// a <c>vortex.variant</c> whose core storage is the <c>vortex.parquet.variant</c> of the rows'
+    /// metadata and residual, and whose second child is the shredded tree, its dtype in the metadata. A
+    /// key of the tree that kept values of its own is a variant of the same form, written here again.
+    /// </summary>
+    private static int WriteShreddedVariant(
+        Workspace blob, CanonicalArena arena, CanonicalNode node, EncodingDictionary encodings, bool compress)
+    {
+        CanonicalNode shredded = arena.GetNode(node.Index);
+        int metadata = shredded.GetFieldIndex(0);
+        int residual = shredded.GetFieldIndex(1);
+        int tree = shredded.GetFieldIndex(2);
+
+        // The core storage's children in the reader's order: the rows' validity when they carry one,
+        // then the metadata, then the residual.
+        Span<int> core = stackalloc int[3];
+        Span<int> validity = stackalloc int[1];
+        int validityCount = Validity(blob, arena, node, encodings, validity);
+        if (validityCount == 1)
+        {
+            core[0] = validity[0];
+        }
+
+        core[validityCount] = WriteChild(blob, arena, metadata, encodings, compress);
+        core[validityCount + 1] = WriteChild(blob, arena, residual, encodings, compress);
+        bool residualNullable = arena.GetNode(residual).DType.Nullability == Nullability.Nullable;
+        Span<int> children = stackalloc int[2];
+        children[0] = Node(
+            blob, encodings, "vortex.parquet.variant"u8, ParquetVariantBytes(blob, residualNullable),
+            core[..(validityCount + 2)], []);
+        bool encodes = blob.EncodesValidity;
+        blob.EncodesValidity = compress;
+        try
+        {
+            children[1] = WriteChild(blob, arena, tree, encodings, compress);
+        }
+        finally
+        {
+            blob.EncodesValidity = encodes;
+        }
+
+        return Node(
+            blob, encodings, "vortex.variant"u8, VariantBytes(blob, DTypeProtobuf.Serialize(arena.GetNode(tree).DType)),
+            children, []);
+    }
+
+    private static ReadOnlySpan<byte> VariantBytes(Workspace blob, byte[] shreddedDType)
+    {
+        ref ProtoWriter writer = ref blob.Metadata();
+        VariantMetadata value = new VariantMetadata(shreddedDType);
+        VariantMetadata.Write(ref writer, in value);
+        return writer.WrittenSpan;
     }
 
     private static ReadOnlySpan<byte> ParquetVariantBytes(Workspace blob, bool valueNullable)
@@ -2711,9 +2773,12 @@ internal static class ArrayBlobWriter
             }
 
             default:
-                // Never compressed: a validity bitmap is index machinery, and it is small.
-                destination[0] = WriteNode(
-                    blob, arena, node.Validity.CanonicalNodeIndex, encodings, compress: false);
+                // Never compressed: a validity bitmap is index machinery, and it is small. A shredded
+                // tree's is not: a path its rows hold in stretches would pay a bit a row, so its
+                // validity is a column the compressor writes as runs where they pay.
+                destination[0] = blob.EncodesValidity
+                    ? WriteCompressed(blob, arena, node.Validity.CanonicalNodeIndex, encodings)
+                    : WriteNode(blob, arena, node.Validity.CanonicalNodeIndex, encodings, compress: false);
                 return 1;
         }
     }
@@ -2938,11 +3003,18 @@ internal static class ArrayBlobWriter
         private BufferSpec[] _specs = [];
         private ProtoWriter _metadata;
         private ZstdCompressor? _zstd;
+        private ZstdCompressor? _columnZstd;
         private Workspace? _measure;
         private EncodingDictionary? _measureEncodings;
 
         /// <summary>The builder, cleared by each blob as it starts.</summary>
         internal FlatBufferBuilder Builder { get; } = new FlatBufferBuilder();
+
+        /// <summary>
+        /// Whether the validities written now are a shredded tree's, which the compressor encodes as
+        /// any column, runs where its rows hold a path in stretches, rather than a bit a row.
+        /// </summary>
+        internal bool EncodesValidity { get; set; }
 
         private readonly DTypeArena? _types;
 
@@ -2970,6 +3042,43 @@ internal static class ArrayBlobWriter
 
         /// <summary>The zstd level the workspace's trials and frames compress at; 0 for the default.</summary>
         internal int ZstdLevel { get; init; }
+
+        /// <summary>
+        /// The zstd level of the column being written, which its writer's options set for it, for every frame of its chunk
+        /// and the trials that price them; 0 for <see cref="ZstdLevel"/>. Set by the writer around a column's write.
+        /// </summary>
+        internal int ColumnLevel { get; set; }
+
+        /// <summary>The level the column being written compresses its zstd frames at.</summary>
+        internal int Level => ColumnLevel != 0 ? ColumnLevel : ZstdLevel;
+
+        /// <summary>
+        /// The compressor the column being written compresses in, at <see cref="Level"/>: the workspace's own at its level,
+        /// another at another, kept for the next column at that level and given back with the workspace's.
+        /// </summary>
+        internal ZstdCompressor ZstdOfColumn
+        {
+            get
+            {
+                int level = Level == 0 ? ZstdCompressor.DefaultLevel : Level;
+                if (level == (ZstdLevel == 0 ? ZstdCompressor.DefaultLevel : ZstdLevel))
+                {
+                    return Zstd;
+                }
+
+                if (_columnZstd is { } kept)
+                {
+                    if (kept.Level == level)
+                    {
+                        return kept;
+                    }
+
+                    ZstdEncoders.Return(kept);
+                }
+
+                return _columnZstd = ZstdEncoders.Rent(level);
+            }
+        }
 
         /// <summary>
         /// The rows a zstd frame holds the values of, the writer's block; 0 for one frame a column.
@@ -3037,6 +3146,7 @@ internal static class ArrayBlobWriter
         {
             // Never size first: what it measures is the plan every other profile writes.
             _measure ??= new Workspace { FrameRows = FrameRows, Fan = Fan, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel };
+            _measure.ColumnLevel = ColumnLevel;
             if (_measureEncodings is null || _measureEncodings.Target != target)
             {
                 _measureEncodings = new EncodingDictionary(ComponentKind.Array, target);
@@ -3071,6 +3181,12 @@ internal static class ArrayBlobWriter
             {
                 _zstd = null;
                 ZstdEncoders.Return(zstd);
+            }
+
+            if (_columnZstd is { } column)
+            {
+                _columnZstd = null;
+                ZstdEncoders.Return(column);
             }
 
             _measure?.ReturnCompressors();

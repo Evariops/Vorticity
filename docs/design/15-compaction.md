@@ -53,6 +53,36 @@ that takes it out of level 0. Measured on 96 appends of 100 rows over five level
 churn bench, a thousand appends of 2 000 rows at the tail, 22.0 MiB against 42.8 MiB. With keys that
 arrive at random, a move is rare and the bytes barely move: 770 620 against 796 300.
 
+A move keeps the object's size, so with keys in order objects stayed the size they left level 0 at,
+whatever their level's target. `CompactionTrigger.Neighbours` makes them grow. An object's size class
+in its level is how many times the fan-out `F` fits between its bytes and the level's target, 0 within
+`F` of the target. When the objects at a level's end hold a run of at least `F` adjacent objects of one
+class above 0, those whose bytes stay within the target are merged into one, in their level, which is
+of the class above and joins the run before it, as a carry does. A byte is rewritten once a class,
+`log_F(target / size)` times, as the leveled merges of random keys rewrite it once a level, never once
+per append, and the objects end within `F` of their level's target. The plan reads the last `F²`
+entries of each level for it, a page or two down the tree's right edge, and ranks it after the purges
+of marks. On the 96 appends above, at `F = 3`, it halved the objects above level 0, from 32 to 16,
+level 4's growing from 6 KB to 23 KB, for 9 600 more rows rewritten.
+
+Such a merge takes only neighbours that nothing of another level sits between. Its output covers the
+holes between its inputs, and an object of another level in one of them would overlap it: that
+object's later move into this level, or this one's move into the object's level, would read and
+rewrite it, and every move after that again. The plan cuts the run at the newest such object and merges
+what is left past it when that still makes `F`. Merges of neighbours belong to the leveled style alone:
+a tiered level grows its objects by concatenating them already, and a merge across another level's
+object would change the order a dataset without a clustering key answers in.
+
+Keys in order keep the merges' runs whole as long as each level holds one band of the key space, the
+oldest at the bottom, which the pick of the object a full level gives up decides
+([the pointer](#the-pointer-and-the-tiered-plan)). On the lifecycle bench, 48 hours of requests in
+order (`vortex-queries --micro lifecycle --style leveled --late off --writers 1 --deletes off`), merges
+across other levels' objects rewrote a row 5.9 times, every move into their range reading them again.
+With the bands kept and the merges held to them, a row is rewritten 2.2 times, once out of level 0 and
+1.2 times as its objects grow, every job out of a level above 0 is a move, the dataset holds 108
+objects instead of 139, and its store took 195 bytes a row instead of 332. Without the merges a row is
+written once, and the dataset holds 330 objects.
+
 Three costs remain, and this document is about them:
 
 1. Who pays, and when. On demand, whoever calls `CompactAsync` pays, when they call it. Until then a
@@ -183,6 +213,17 @@ robin then writes 6 % more in compaction (2 149 and 2 146 MiB against 2 032 and 
 in the objects the updates and deletes write themselves. The third seed takes the same jobs
 throughout. So a leveled dataset keeps the largest-first pick by default (`CompactionPick.Auto`).
 
+The default asks one thing first: whether the level's first object moves up whole, overlapping nothing
+in the level above. Keys in order make every object do so, and any pick then moves rather than merges,
+but the largest scatters the level's band, since objects of one size class differ by a few kilobytes,
+where the first keeps the band whole for the merges of neighbours at the level's end. Keys at random
+make the first object overlap the level above as much as any, and the largest goes, as before: the churn
+bench at random keys takes the same jobs and writes the same bytes either way. The question costs a
+walk of the level above that skips what lies outside the first object's range. Under late rows and
+four writers, where levels interleave anyway, the lifecycle bench rewrites a row 10.2 times under the
+default and 9.8 times under the largest alone, a cost such a dataset avoids with periods
+([a dataset of periods](#a-dataset-of-periods)).
+
 A tiered job concatenates a run of one level's objects with nothing else between them, and where the
 runs are depends on every level's order. The longest run can only be found by reading every leaf. The
 run that starts past the pointer needs much less: it ends before the first object another level holds
@@ -192,6 +233,90 @@ run itself. A plan over 100 000 objects by arrival, with levels interleaved obje
 store for one page, where reading every leaf would ask for 71. A dataset ordered by arrival keeps each
 level's objects together, a run of level 0 moving up whole and the next landing past it, so the two
 picks take the same runs there, and the round robin is a tiered dataset's default.
+
+### A dataset of periods
+
+A dataset that declares periods is compacted by them (`CompactionStyle.Periods`), which its plan
+picks and no option overrides, since its levels are laid out for them ([the levels of a dataset of
+periods](13-dataset.md#52-the-invariant)). It holds few objects, a few per level and one per sealed
+period, so its plan reads every leaf. Its jobs come in this order:
+
+- Level 0 past its ceiling empties. Each row past the newest instant the fresh levels and the sealed
+  periods hold goes to the first fresh level, where it follows every object, and every other row goes
+  to the late level, so that a late row rewrites neither a fresh object nor a period. The commit checks
+  that nothing came into the first fresh level past that instant meanwhile.
+- A period is sealed once the newest instant the dataset holds is past its end by the lateness
+  horizon, which is how late a row may come behind the newest. The seal reads the period's fresh
+  objects, its late rows and its earlier object if it has one, and writes one object into the periods
+  level, with its time slices ([the slice
+  table](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)), counted per second as the
+  rows stream past, so that a day costs 1.4 MB of counts rather than its instants. From then on, level
+  0's exit sends that period's rows to the late level, since they lie before the newest fresh instant,
+  so a late row never abandons a seal. Late rows of a sealed period wait in the late level, and when
+  the late level is past its ceiling a second seal folds them into the period's object. Time here is
+  the data's, partition by partition, never a clock's, so a seal is the same whoever plans it and
+  whenever. A partition that receives nothing more keeps its last period in its fresh objects, which
+  answer exactly at a few requests more. A clock would seal a partition behind the others too early,
+  its rows then late, and a seal a caller asks for is the way left should one need it. Rows later than
+  the horizon cost seals: periods of an hour under a tail of rows an hour late seal each hour three
+  times, a row rewritten 5.1 times against 2.7 in order (`vortex-queries --micro lifecycle`), so the
+  horizon is to cover the tail, or the period to outlast it.
+- The late level past level 0's ceiling merges the objects of each period it holds several of into
+  one, in place. When it holds more open periods than its ceiling, only their seals lower it.
+- `F` adjacent objects of one open period in a fresh level merge into one object of the next fresh
+  level, where they follow every object, since only the first fresh level takes new rows. A closed
+  period's objects wait for its seal instead. `F` is the fan-out until the cost model that weighs the
+  objects a question over the recent hours reads against the rewrites per row gives it.
+- Purges and fragments, as for any dataset.
+
+Every job writes an object per period, so that no object spans two, and level 0's exit an object per
+level as well.
+
+Every such object is written in sorted slices. A job merges its inputs twice. The first pass counts,
+for each object it will write, its rows per second and the distinct values of the columns that may be
+synopsis columns, from which it cuts the object's slices and picks the order inside them: the
+columns whose values repeat twice on average, fewest values first
+([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)). The second
+pass gathers each slice as its rows come, in time order, codes each synopsis column's values in the
+order of the values, and sorts the slice by one stable counting sort per column, from the last to the
+first, so that rows of equal values keep their time order without a pass on the instant. The rows are
+gathered once through the permutation and written, and the slice table records the order. A slice of
+a million rows over three synopsis columns sorts in 43 ns a row (`vortex-queries --micro slicesort`),
+its rows copied, coded, sorted and gathered. The object then holds its rows in the key's order slice by
+slice only, and a dataset of periods takes no row's rank for its row above level 0. On a key of the
+instant alone it carries no sorted run on the key: its slice table is the source through which the key
+cursor and every read in key order find its rows, a job's merge of its inputs included, which reads
+each slice once ([sources of order](12-index-reads.md#2-sources-of-order)). A slice is held whole while
+it sorts: a slice past the query memory's grant, sorted in runs and merged, is not done yet.
+
+The first pass also counts the paths of each variant column, value by value, and the object shreds
+those its own rows pay for, each column in long chunks of its own, with a path map that lets a
+question read one key alone ([shredded variants](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)).
+Counting and choosing take 181 ns a row of six to eight attributes, and the shredded write 310 ns a
+row more than the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing.
+
+The first pass chooses the synopsis columns, those that repeat, and the object's first slice settles
+their order: greedily, each place to the column that adds the fewest runs after those before it,
+measured on a sample of 16 384 of the slice's rows, which puts a column nested in another right after
+it. Once an object has chosen what a variant column shreds, the shape of each row, which shredded keys
+it holds and in which class, and whether anything is left to the residual, is one more candidate, when
+its shapes repeat twice on average in the slice. The rows of each shape then lie together inside each
+run of the columns before it. Coding the shapes takes about 100 ns a row of six to eight attributes,
+on top of the slice's sort.
+
+A period is a day at creation, and each seal weighs the load of the period it wrote and
+records the length that load calls for, from past the newest instant ([the length of a
+period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so that every writer cuts
+the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
+appends, one row in a hundred late by up to half an hour, deletes now and then, and hours sealed ten
+minutes past their end. After each round it checks that every level but 0 and the late one is
+key-disjoint, that no object spans two periods, and that the key cursor and a key-ordered scan give
+back the rows appended and not deleted. A seed runs about 75 exits, 34 fresh merges and 7 seals,
+none abandoned.
+
+A seal is a compaction for its commit: a delete that marks one of its inputs while it runs abandons
+it, and its outputs are left for vacuum. Carrying the marks over to the period's object instead is
+worth measuring on jobs of minutes over gigabytes, and is not done.
 
 ## 4. Folding marks where no merge goes
 
@@ -219,6 +344,11 @@ than the cap would let them grow.
 
 `CompactionTrigger.Marks` implements it, at half a delete's limits, ranked by how due an object is:
 its marked share or its vector size, relative to half its limit, whichever is further along. The
+vector's limit grows with its object, a thousandth of its bytes and never under 1 KiB. Under an
+erasure delay (`DatasetOptions.ErasureDelay`), the age of the object's oldest mark relative to half
+the delay takes the place of the vector's size, and a purge it makes due is
+`CompactionTrigger.Erasure`: the delay is a bound the application owes, the vector's bytes no
+longer trigger anything there, and the tallies then lead the plan to every object with marks. The
 tallies carry the largest share and the largest vector under every page, so the plan only walks to
 objects that may be due. On the churn bench the purges move the rewrites more than they remove them.
 Once the vectors have filled, a commit writes about 56 KiB rather than 77, compaction about 83 KiB

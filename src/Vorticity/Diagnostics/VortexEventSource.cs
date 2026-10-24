@@ -127,6 +127,13 @@ internal sealed class VortexEventSource : EventSource
         }
     }
 
+    /// <summary>
+    /// The system's temporary directory lies on a file system in memory, and the scratch of the sessions that name none
+    /// goes to <paramref name="directory"/>, on a disk, instead: said once for the process.
+    /// </summary>
+    [Event(1, Level = EventLevel.Informational, Message = "The temporary directory {0} lies on a file system in memory: the scratch goes to {1}.")]
+    public void ScratchMoved(string temporary, string directory) => WriteEvent(1, temporary, directory);
+
     /// <inheritdoc/>
     protected override void OnEventCommand(EventCommandEventArgs command)
     {

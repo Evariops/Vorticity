@@ -20,6 +20,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using Vorticity.ObjectStorage;
 using Vorticity.ObjectStorage.Credentials;
 using Vorticity.ObjectStorage.Http;
 
@@ -72,6 +73,132 @@ internal sealed class S3Emulator : HttpMessageHandler
 
     /// <summary>The least a part but the last holds, which a completion checks: 0, none, unless a test sets it.</summary>
     internal int MinimumPartSize { get; set; }
+
+    /// <summary>The highest part number an upload takes: 10 000 on S3, 1 000 on Scaleway.</summary>
+    internal int MaxParts { get; set; } = 10_000;
+
+    /// <summary>Whether every part but the last must be of one size, the last no larger, as R2 asks of a completion.</summary>
+    internal bool EqualParts { get; set; }
+
+    /// <summary>The largest object a completion makes: 5 TiB on S3.</summary>
+    internal long MaxObjectBytes { get; set; } = 5L << 40;
+
+    /// <summary>The largest part, and the largest object one put makes: 5 GiB on S3.</summary>
+    internal long MaxPartBytes { get; set; } = 5L << 30;
+
+    /// <summary>
+    /// The reads a second, gets and heads, the bucket serves, past which it answers 503 SlowDown, as S3 does per
+    /// prefix and OVHcloud per bucket; 0 for no limit. A second's worth may come at once.
+    /// </summary>
+    internal double ReadsPerSecond
+    {
+        get => _reads.PerSecond;
+        set => _reads.PerSecond = value;
+    }
+
+    /// <summary>The writes a second, puts, posts and deletes, the bucket serves, as <see cref="ReadsPerSecond"/>.</summary>
+    internal double WritesPerSecond
+    {
+        get => _writes.PerSecond;
+        set => _writes.PerSecond = value;
+    }
+
+    /// <summary>How long each request waits before it is served: a round trip to the service.</summary>
+    internal TimeSpan Latency { get; set; }
+
+    /// <summary>The requests refused for going past <see cref="ReadsPerSecond"/> or <see cref="WritesPerSecond"/>.</summary>
+    internal int SlowedDown => _slowedDown;
+
+    private readonly Rate _reads = new Rate();
+    private readonly Rate _writes = new Rate();
+    private int _slowedDown;
+
+    /// <summary>
+    /// An emulator under a service's rules as its documentation states them: the parts it takes, of one size on R2,
+    /// a thousand on Scaleway; its largest object; its requests a second, 5 500 reads and 3 500 writes a prefix on
+    /// S3, 900 reads and 300 writes a bucket on OVHcloud. Parts of 64 KiB at least, a test's scale, the store's own
+    /// minimum then set alike.
+    /// </summary>
+    internal static S3Emulator For(S3Profile profile) => new S3Emulator
+    {
+        Region = profile == S3Profile.R2 ? "auto" : "eu-west-3",
+        MinimumPartSize = 64 << 10,
+        MaxParts = profile == S3Profile.Scaleway ? 1_000 : 10_000,
+        EqualParts = profile == S3Profile.R2,
+        ReadsPerSecond = profile switch
+        {
+            S3Profile.Amazon => 5_500,
+            S3Profile.Ovhcloud => 900,
+            _ => 0,
+        },
+        WritesPerSecond = profile switch
+        {
+            S3Profile.Amazon => 3_500,
+            S3Profile.Ovhcloud => 300,
+            _ => 0,
+        },
+    };
+
+    /// <summary>
+    /// Why the service refuses an object of parts of <paramref name="sizes"/> bytes, in order, or null when it takes
+    /// it: more parts than it takes, a part past its largest, one but the last under its least, parts of unequal sizes
+    /// where it wants them of one, or an object past its largest. A completion asks it of the parts it holds, and a
+    /// test of the parts a store would send, which then need no byte.
+    /// </summary>
+    internal (string Code, string Message)? Refusal(IReadOnlyList<long> sizes)
+    {
+        if (sizes.Count > MaxParts)
+        {
+            return ("InvalidArgument", $"Part number must be an integer between 1 and {MaxParts}, inclusive.");
+        }
+
+        long total = 0;
+        for (int i = 0; i < sizes.Count; i++)
+        {
+            bool last = i == sizes.Count - 1;
+            if (sizes[i] > MaxPartBytes)
+            {
+                return ("EntityTooLarge", $"Part {i + 1} is {sizes[i]} bytes, past the maximum allowed size.");
+            }
+
+            if (!last && sizes[i] < MinimumPartSize)
+            {
+                return ("EntityTooSmall", $"Part {i + 1} is {sizes[i]} bytes, below the minimum allowed size.");
+            }
+
+            if (EqualParts && i > 0 && (last ? sizes[i] > sizes[0] : sizes[i] != sizes[0]))
+            {
+                return ("InvalidPart", "All non-trailing parts must have the same length.");
+            }
+
+            total += sizes[i];
+        }
+
+        return total > MaxObjectBytes
+            ? ("EntityTooLarge", "Your proposed upload exceeds the maximum allowed size.")
+            : null;
+    }
+
+    /// <summary>Whether <paramref name="request"/> may be served now under its rate, a token taken if so.</summary>
+    private bool Admitted(HttpRequestMessage request)
+    {
+        Rate rate = request.Method == HttpMethod.Get || request.Method == HttpMethod.Head ? _reads : _writes;
+        if (rate.PerSecond <= 0)
+        {
+            return true;
+        }
+
+        lock (_gate)
+        {
+            if (rate.TryTake(System.Diagnostics.Stopwatch.GetTimestamp()))
+            {
+                return true;
+            }
+
+            _slowedDown++;
+            return false;
+        }
+    }
 
     /// <summary>Every request received, in order: its method, path and query, and the range it asked.</summary>
     internal ConcurrentQueue<string> Log { get; } = new ConcurrentQueue<string>();
@@ -143,6 +270,18 @@ internal sealed class S3Emulator : HttpMessageHandler
         if (Hold is { } hold)
         {
             await hold(request, index, cancellationToken);
+        }
+
+        if (Latency > TimeSpan.Zero)
+        {
+            await Task.Delay(Latency, cancellationToken);
+        }
+
+        if (!Admitted(request))
+        {
+            HttpResponseMessage slow = Error(HttpStatusCode.ServiceUnavailable, "SlowDown", "Please reduce your request rate.");
+            slow.RequestMessage = request;
+            return slow;
         }
 
         if (Intercept?.Invoke(request, index) is { } intercepted)
@@ -251,6 +390,11 @@ internal sealed class S3Emulator : HttpMessageHandler
             return (damaged, false);
         }
 
+        if (body.Length > MaxPartBytes)
+        {
+            return (Error(HttpStatusCode.BadRequest, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed size."), false);
+        }
+
         lock (_gate)
         {
             SortedDictionary<string, StoredObject> objects = Bucket(bucket);
@@ -287,6 +431,16 @@ internal sealed class S3Emulator : HttpMessageHandler
             return (damaged, false);
         }
 
+        if (number < 1 || number > MaxParts)
+        {
+            return (Error(HttpStatusCode.BadRequest, "InvalidArgument", $"Part number must be an integer between 1 and {MaxParts}, inclusive."), false);
+        }
+
+        if (body.Length > MaxPartBytes)
+        {
+            return (Error(HttpStatusCode.BadRequest, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed size."), false);
+        }
+
         lock (_gate)
         {
             if (!_uploads.TryGetValue(uploadId, out Upload? upload))
@@ -319,6 +473,7 @@ internal sealed class S3Emulator : HttpMessageHandler
             }
 
             List<byte> whole = [];
+            long[] sizes = new long[asked.Count];
             for (int i = 0; i < asked.Count; i++)
             {
                 (int number, string etag) = asked[i];
@@ -327,12 +482,17 @@ internal sealed class S3Emulator : HttpMessageHandler
                     return (Error(HttpStatusCode.BadRequest, "InvalidPart", $"Part {number} is not the one uploaded."), false);
                 }
 
-                if (i < asked.Count - 1 && part.Bytes.Length < MinimumPartSize)
-                {
-                    return (Error(HttpStatusCode.BadRequest, "EntityTooSmall", $"Part {number} is {part.Bytes.Length} bytes, below the minimum allowed size."), false);
-                }
+                sizes[i] = part.Bytes.Length;
+            }
 
-                whole.AddRange(part.Bytes);
+            if (Refusal(sizes) is { } refusal)
+            {
+                return (Error(HttpStatusCode.BadRequest, refusal.Code, refusal.Message), false);
+            }
+
+            foreach ((int number, _) in asked)
+            {
+                whole.AddRange(upload.Parts[number].Bytes);
             }
 
             byte[] bytes = [.. whole];
@@ -760,6 +920,32 @@ internal sealed class S3Emulator : HttpMessageHandler
     private readonly record struct StoredObject(byte[] Bytes, string ETag, DateTimeOffset Modified, DateTimeOffset? RetainUntil, bool LegalHold, Dictionary<string, string> Metadata);
 
     private sealed record Upload(string Bucket, string Key, Dictionary<string, string> Metadata, string? Algorithm, SortedDictionary<int, (byte[] Bytes, string ETag)> Parts);
+
+    /// <summary>A rate as a token bucket: a second's worth of tokens at most, refilled as time goes.</summary>
+    private sealed class Rate
+    {
+        private double _tokens = double.NaN;
+        private long _filledAt;
+
+        /// <summary>The requests a second served, 0 for no limit.</summary>
+        internal double PerSecond { get; set; }
+
+        /// <summary>Takes a token at <paramref name="now"/>, a timestamp, or says none is left.</summary>
+        internal bool TryTake(long now)
+        {
+            _tokens = double.IsNaN(_tokens)
+                ? PerSecond
+                : Math.Min(PerSecond, _tokens + (System.Diagnostics.Stopwatch.GetElapsedTime(_filledAt, now).TotalSeconds * PerSecond));
+            _filledAt = now;
+            if (_tokens < 1)
+            {
+                return false;
+            }
+
+            _tokens--;
+            return true;
+        }
+    }
 }
 
 /// <summary>A body that sends some bytes, then stops: short, or stalled until cancelled.</summary>

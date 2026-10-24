@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -32,7 +33,7 @@ internal sealed class ScanContext : IDisposable
 {
     private VortexFile? _file;
     private ArrayEncodingId[] _arrayEncodings;
-    private readonly string[] _arrayEncodingIds;
+    private string[] _arrayEncodingIds;
     private bool _disposed;
 
     /// <summary>The arena capacity a context that will decode batches starts from.</summary>
@@ -158,6 +159,24 @@ internal sealed class ScanContext : IDisposable
         _batchCanonical = new CanonicalArena();
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
+    }
+
+    /// <summary>The encodings <paramref name="ids"/> name, resolved once, for the detached contexts that read several files written alike.</summary>
+    /// <exception cref="ArgumentNullException">An entry of <paramref name="ids"/> is null.</exception>
+    internal static ArrayEncodingId[] Resolve(IReadOnlyList<string> ids)
+    {
+        ArrayEncodingId[] resolved = ids.Count == 0 ? [] : new ArrayEncodingId[ids.Count];
+        Span<byte> scratch = stackalloc byte[64];
+        for (int i = 0; i < resolved.Length; i++)
+        {
+            string id = ids[i] ?? throw new ArgumentNullException(nameof(ids));
+            int byteCount = Encoding.UTF8.GetByteCount(id);
+            Span<byte> utf8 = byteCount <= scratch.Length ? scratch : new byte[byteCount];
+            int written = Encoding.UTF8.GetBytes(id, utf8);
+            resolved[i] = EncodingRegistry.ResolveArray(utf8[..written]);
+        }
+
+        return resolved;
     }
 
     /// <summary><see langword="true"/> when this context was built over a <see cref="VortexFile"/>.</summary>
@@ -386,6 +405,16 @@ internal sealed class ScanContext : IDisposable
     /// <summary>Whether a selection is in force for this batch.</summary>
     internal bool HasSelection => _selection is not null;
 
+    /// <summary>
+    /// The row of the selection's sibling space its entries count from: 0, an entry naming its row itself, but at the root
+    /// of a split whose rows lie past 2^31, the rows of a file of billions, whose entries count from the split's first
+    /// row, an int short of naming them. Only a reader that re-bases the selection per child reads it, which is the one
+    /// a node of so many rows is (<c>vortex.chunked</c>).
+    /// </summary>
+    internal long SelectionBase => _selectionBase;
+
+    private long _selectionBase;
+
     /// <summary>How many rows the selection names, without writing out a selection set as a range.</summary>
     internal int SelectionCount => _selectionCount;
 
@@ -499,17 +528,102 @@ internal sealed class ScanContext : IDisposable
     internal bool KeepEncodings { get; set; }
 
     /// <summary>
+    /// The chunks of the variant columns the scan reads through some shredded keys alone, per scan
+    /// like <see cref="Metrics"/>; null when it reads every chunk whole.
+    /// </summary>
+    internal Indexes.VariantKeyReads? VariantKeys { get; set; }
+
+    /// <summary>
+    /// The small segments of the splits ahead the batch reads along with its own, which a scan over a source whose read is
+    /// a round trip gives the batch; made at the first, and held with the context across the scans it serves.
+    /// </summary>
+    internal AlongSegments? Along { get; set; }
+
+    /// <summary>
+    /// The segments of the splits ahead a batch reads along with its own, and the batch that asks for each; and, for a
+    /// context a scan rents to plan them in rather than to run a batch on, the scan's walk over those splits.
+    /// </summary>
+    /// <remarks>
+    /// The arrays are the process's pool's, taken at the first segment and given back once the segments are claimed or
+    /// forgotten: a context the scan draws from a pool other scans churn need not have read along before for its batch
+    /// to read along without allocating.
+    /// </remarks>
+    internal sealed class AlongSegments
+    {
+        private Serialization.Schemas.SegmentSpec[]? _specs;
+        private long[]? _batches;
+        private int _count;
+
+        /// <summary>
+        /// The walk of a scan that rented the context to register the segments ahead in; made at the first, and kept with
+        /// the context for the next scan that does. One field of the context for both, as a context the pool does not hold,
+        /// such as the one that decodes zone maps, is allocated with every field it has.
+        /// </summary>
+        internal Scanning.AlongWalk? Walk { get; set; }
+
+        internal ReadOnlySpan<Serialization.Schemas.SegmentSpec> Specs => _specs.AsSpan(0, _count);
+
+        /// <summary>The batch that asks for each of <see cref="Specs"/>.</summary>
+        internal ReadOnlySpan<long> Batches => _batches.AsSpan(0, _count);
+
+        /// <summary>Adds a segment for the batch to read along, for batch <paramref name="batch"/>.</summary>
+        internal void Add(in Serialization.Schemas.SegmentSpec spec, long batch)
+        {
+            if (_specs is null || _batches is null || _count == Math.Min(_specs.Length, _batches.Length))
+            {
+                Grow();
+            }
+
+            _specs![_count] = spec;
+            _batches![_count] = batch;
+            _count++;
+        }
+
+        /// <summary>Forgets the segments, claimed or none for the next batch, and gives the arrays back.</summary>
+        internal void Clear()
+        {
+            _count = 0;
+            if (_specs is { } specs)
+            {
+                _specs = null;
+                System.Buffers.ArrayPool<Serialization.Schemas.SegmentSpec>.Shared.Return(specs);
+            }
+
+            if (_batches is { } batches)
+            {
+                _batches = null;
+                System.Buffers.ArrayPool<long>.Shared.Return(batches);
+            }
+        }
+
+        /// <summary>Takes arrays twice as long, or the first, and moves the segments into them.</summary>
+        private void Grow()
+        {
+            int length = _count == 0 ? 16 : _count * 2;
+            Serialization.Schemas.SegmentSpec[] specs = System.Buffers.ArrayPool<Serialization.Schemas.SegmentSpec>.Shared.Rent(length);
+            long[] batches = System.Buffers.ArrayPool<long>.Shared.Rent(length);
+            Specs.CopyTo(specs);
+            Batches.CopyTo(batches);
+            int count = _count;
+            Clear();
+            (_specs, _batches, _count) = (specs, batches, count);
+        }
+    }
+
+    /// <summary>
     /// Replaces the selection and returns what was there, for a reader that re-bases it per child.
     /// </summary>
     /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>
     /// <param name="count">How many entries of <paramref name="rows"/> are live.</param>
+    /// <param name="selectionBase">The row its entries count from (<see cref="SelectionBase"/>).</param>
     /// <returns>The previous selection, to be restored by the caller with <see cref="RestoreSelection"/>.</returns>
-    internal SavedSelection ExchangeSelection(int[]? rows, int count)
+    internal SavedSelection ExchangeSelection(int[]? rows, int count, long selectionBase = 0)
     {
-        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart);
+        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart, _selectionBase);
         _selection = rows;
         _selectionCount = rows is null ? 0 : count;
         _selectionStart = -1;
+        _selectionBase = rows is null ? 0 : selectionBase;
         return previous;
     }
 
@@ -523,10 +637,11 @@ internal sealed class ScanContext : IDisposable
     /// <returns>The previous selection, to be restored by the caller with <see cref="RestoreSelection"/>.</returns>
     internal SavedSelection ExchangeSelectionRange(int[] buffer, int start, int count)
     {
-        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart);
+        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart, _selectionBase);
         _selection = buffer;
         _selectionCount = count;
         _selectionStart = start;
+        _selectionBase = 0;
         return previous;
     }
 
@@ -537,16 +652,21 @@ internal sealed class ScanContext : IDisposable
         _selection = saved.Buffer;
         _selectionCount = saved.Count;
         _selectionStart = saved.Start;
+        _selectionBase = saved.Base;
     }
 
-    /// <summary>A selection an exchange displaced: its buffer, its count, and its first row while it is a range not yet written out.</summary>
+    /// <summary>
+    /// A selection an exchange displaced: its buffer, its count, its first row while it is a range not yet written out,
+    /// and the row its entries count from.
+    /// </summary>
     internal readonly struct SavedSelection
     {
-        internal SavedSelection(int[]? buffer, int count, int start)
+        internal SavedSelection(int[]? buffer, int count, int start, long selectionBase)
         {
             Buffer = buffer;
             Count = count;
             Start = start;
+            Base = selectionBase;
         }
 
         internal int[]? Buffer { get; }
@@ -554,6 +674,8 @@ internal sealed class ScanContext : IDisposable
         internal int Count { get; }
 
         internal int Start { get; }
+
+        internal long Base { get; }
     }
 
     /// <summary>The pushed comparison, held behind one reference rather than in three fields.</summary>
@@ -573,6 +695,7 @@ internal sealed class ScanContext : IDisposable
         internal bool Prefix;
         internal Layouts.FieldMask Fields;
         internal bool FieldsHonoured;
+        internal ulong EncodedFields;
     }
 
     private Pushed? _pushed;
@@ -651,6 +774,31 @@ internal sealed class ScanContext : IDisposable
         Pushed held = _pushed ??= new Pushed();
         Layouts.FieldMask previous = held.Fields;
         held.Fields = fields;
+        return previous;
+    }
+
+    /// <summary>
+    /// The fields of the next struct decoded, a bit each below 64, whose own nodes may stay a dictionary or run-end
+    /// node rather than be decoded to canonical form, as <see cref="KeepEncodings"/> lets a column's: those its
+    /// consumer reads encoded. A struct stored as one array node has no column of its own a layout reader grants,
+    /// so a table's keys came out canonical, their values gathered at every row for a group by that reads codes.
+    /// Taken and cleared by the struct, as its projection is; none by default.
+    /// </summary>
+    internal ulong EncodedFields => _pushed?.EncodedFields ?? 0;
+
+    /// <summary>Replaces <see cref="EncodedFields"/> and returns what was there, for the caller to restore.</summary>
+    /// <param name="fields">The fields, a bit each; 0 to clear them.</param>
+    /// <returns>The previous fields.</returns>
+    internal ulong ExchangeEncodedFields(ulong fields)
+    {
+        if (_pushed is null && fields == 0)
+        {
+            return 0;
+        }
+
+        Pushed held = _pushed ??= new Pushed();
+        ulong previous = held.EncodedFields;
+        held.EncodedFields = fields;
         return previous;
     }
 
@@ -1422,6 +1570,7 @@ internal sealed class ScanContext : IDisposable
         {
             _pushed.Field = null;
             _pushed.Fields = Layouts.FieldMask.All;
+            _pushed.EncodedFields = 0;
 
             // FieldsHonoured is NOT cleared here, and that is the point: a scan has one projection
             // from beginning to end, so whether the struct decodes take it is a fact about the
@@ -1480,14 +1629,38 @@ internal sealed class ScanContext : IDisposable
     /// a context made over an explicit encoding table, which a reader of another format decodes into.
     /// </summary>
     /// <param name="options">The read options the next scan decodes under.</param>
-    internal void RebindDetached(VortexReadOptions options)
+    /// <param name="keepTypes">
+    /// Whether the context's arena of dtypes is kept for the next scan, up to <see cref="KeptTypeNodes"/>: a pool whose
+    /// scans hold none of its dtypes once they give the context back (<see cref="ScanContexts.KeepsTypes"/>).
+    /// </param>
+    internal void RebindDetached(VortexReadOptions options, bool keepTypes = false)
     {
         Options = options;
-        if (_types is { NodeCount: not 0 } types)
+        if (_types is { NodeCount: var nodes } types && nodes > (keepTypes ? KeptTypeNodes : 0))
         {
             _typesShape = types.Shape;
             _types = null;
         }
+    }
+
+    /// <summary>The dtypes past which an arena kept from scan to scan is let go, and another made at its shape.</summary>
+    private const int KeptTypeNodes = 1 << 10;
+
+    /// <summary>
+    /// As <see cref="RebindDetached(VortexReadOptions, bool)"/>, over the encoding table <paramref name="encodings"/>, resolved
+    /// from <paramref name="ids"/>: a detached context that reads one file's regions after another's, files whose tables
+    /// may differ. The table is copied, and the ids are kept for the messages that name one.
+    /// </summary>
+    internal void RebindDetached(VortexReadOptions options, ReadOnlySpan<ArrayEncodingId> encodings, string[] ids, bool keepTypes = false)
+    {
+        RebindDetached(options, keepTypes);
+        if (_arrayEncodings.Length != encodings.Length)
+        {
+            _arrayEncodings = encodings.Length == 0 ? [] : new ArrayEncodingId[encodings.Length];
+        }
+
+        encodings.CopyTo(_arrayEncodings);
+        _arrayEncodingIds = ids;
     }
 
     /// <summary>
@@ -1510,6 +1683,8 @@ internal sealed class ScanContext : IDisposable
         _ownsRetained = true;
         _building = null;
         _child = null;
+        VariantKeys = null;
+        Along?.Clear();
         if (_memory is { } memory)
         {
             memory.Checks = default;

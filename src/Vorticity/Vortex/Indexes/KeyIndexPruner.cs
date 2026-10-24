@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -84,12 +85,12 @@ internal sealed class KeyIndexPruner
     /// The pruner for <paramref name="filter"/>, or <see langword="null"/> when no column it tests
     /// for equality carries a usable locating entry.
     /// </summary>
-    /// <param name="file">The open file.</param>
+    /// <param name="file">The file's indexes: the open file, or what a read with no open has of it.</param>
     /// <param name="filter">The scan's predicate.</param>
     /// <param name="blockRows">The scan's block length; an entry at another length is ignored.</param>
     /// <param name="cancellationToken">Cancels the directory read.</param>
     internal static async ValueTask<KeyIndexPruner?> BuildAsync(
-        VortexFile file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
+        IIndexHost file, VortexExpr filter, long blockRows, CancellationToken cancellationToken)
     {
         // A file without a directory pays nothing, not even the collectors.
         if (!file.HasIndexDirectory)
@@ -113,15 +114,30 @@ internal sealed class KeyIndexPruner
 
         int blocks = checked((int)((file.RowCount + blockRows - 1) / blockRows));
         Dictionary<string, Column> columns = new Dictionary<string, Column>(StringComparer.Ordinal);
+        DTypeArena? classTypes = null;
         foreach (IndexEntry entry in directory.Entries)
         {
             int stride = KeyRunOptions.StrideOf(entry.Kind);
             bool trigrams = entry.Kind == IndexKinds.PostingsNgram3;
+            bool hashed = entry.Kind == IndexKinds.PostingsHashed;
             if (stride == 0 || entry.BlockLength != (ulong)blockRows
                 || !TryResolve(file.DType, entry.ColumnPath, out string path, out DType dtype)
                 || !KeyRunOptions.TryParseEntry(entry.Options, out _, out bool fold))
             {
                 continue;
+            }
+
+            // A path's entry holds the values of one class: it answers the read of that class alone,
+            // under that read's name, never the variant column's.
+            if (entry.VariantPath is not null)
+            {
+                if (trigrams || entry.VariantPath is not [string variantKey] || entry.VariantClass is not { } @class)
+                {
+                    continue;
+                }
+
+                path = new Compute.VariantFieldExpr(new FieldExpr(path), [Compute.VariantStep.Of(variantKey)], Writing.IndexWriter.ReadOf(@class)).Key;
+                dtype = Writing.IndexWriter.ClassType(classTypes ??= new DTypeArena(), @class);
             }
 
             string key = trigrams ? TrigramKey(path) : path;
@@ -153,7 +169,7 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
-            Asked asked = prepared.For(key, layout, fold, predicates);
+            Asked asked = prepared.For(key, layout, fold, predicates, hashed);
             if (asked.Literals == 0)
             {
                 continue;
@@ -162,7 +178,7 @@ internal sealed class KeyIndexPruner
             List<Run> runs = [];
             foreach (IndexRun run in entry.Runs)
             {
-                if (FenceTable.TryOpen(run, stride, layout, out FenceTable? table, out _)
+                if (FenceTable.TryOpen(run, stride, asked.Layout, out FenceTable? table, out _)
                     && run.EndBlock <= (ulong)blocks)
                 {
                     runs.Add(new Run(run, table!));
@@ -171,7 +187,9 @@ internal sealed class KeyIndexPruner
 
             if (runs.Count > 0)
             {
-                columns[key] = new Column(entry.Kind == IndexKinds.SortedRuns, asked, storage, runs, blocks);
+                columns[key] = new Column(
+                    hashed ? Placing.Hashes : entry.Kind == IndexKinds.SortedRuns ? Placing.Rows : Placing.Blocks,
+                    asked, storage, runs, blocks);
             }
         }
 
@@ -190,10 +208,10 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
-            Asked asked = prepared.For(path, layout, fold: false, predicates: null);
+            Asked asked = prepared.For(path, layout, fold: false, predicates: null, hashed: false);
             if (asked.Literals > 0)
             {
-                columns[path] = new Column(rows: false, asked, Storage(dtype), [], blocks)
+                columns[path] = new Column(Placing.Blocks, asked, Storage(dtype), [], blocks)
                 {
                     DictionaryPath = path,
                 };
@@ -214,10 +232,23 @@ internal sealed class KeyIndexPruner
     }
 
     /// <summary>Refines <paramref name="live"/>, reading the segments that can hold the filter's keys.</summary>
-    /// <param name="file">The open file.</param>
+    /// <param name="file">The file's indexes: the open file, or what a read with no open has of it.</param>
     /// <param name="live">The mask, which only loses blocks.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
-    internal async ValueTask RefineAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
+    internal ValueTask RefineAsync(IIndexHost file, BlockMask live, CancellationToken cancellationToken) =>
+        RefineAsync(file, live, scope: null, cancellationToken);
+
+    /// <summary>
+    /// Refines <paramref name="live"/> within <paramref name="scope"/>, the blocks a scan's rows reach, reading the segments
+    /// that can hold the filter's keys there: a run or a chunk none of whose live blocks the scope holds is not read, and
+    /// its blocks stay live, which the scan never reads. A scan of one part of a file then reads its part's structures,
+    /// not the file's.
+    /// </summary>
+    /// <param name="file">The file's indexes: the open file, or what a read with no open has of it.</param>
+    /// <param name="live">The mask, which only loses blocks.</param>
+    /// <param name="scope">A mask over the same blocks, live where the scan's rows reach; null for the whole file.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal async ValueTask RefineAsync(IIndexHost file, BlockMask live, BlockMask? scope, CancellationToken cancellationToken)
     {
         foreach (Column column in _columns.Values)
         {
@@ -226,7 +257,7 @@ internal sealed class KeyIndexPruner
 
         try
         {
-            await ClaimAsync(file, live, cancellationToken).ConfigureAwait(false);
+            await ClaimAsync(file, live, scope, cancellationToken).ConfigureAwait(false);
             Kill(live);
         }
         finally
@@ -238,21 +269,26 @@ internal sealed class KeyIndexPruner
         }
     }
 
-    /// <summary>Reads the runs and the dictionaries, and records what they claim.</summary>
-    private async ValueTask ClaimAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
+    /// <summary>Reads the runs and the dictionaries the scope reaches, and records what they claim.</summary>
+    private async ValueTask ClaimAsync(IIndexHost file, BlockMask live, BlockMask? scope, CancellationToken cancellationToken)
     {
         using IndexBatches<(Column Column, Run Run, Fence Fence, int Low, int High, int[] Slots)> batches = new();
         foreach (Column column in _columns.Values)
         {
+            // A dictionary is read from the chunks of an open file: a read with no open claims nothing by it.
             if (column.DictionaryPath is { } dictionary)
             {
-                await ProbeAsync(file, column, dictionary, live, cancellationToken).ConfigureAwait(false);
+                if (file is VortexFile open)
+                {
+                    await ProbeAsync(open, column, dictionary, live, scope, cancellationToken).ConfigureAwait(false);
+                }
+
                 continue;
             }
 
             foreach (Run run in column.Runs)
             {
-                if (!AnyLive(live, run.Meta))
+                if (!AnyLive(live, run.Meta) || (scope is not null && !AnyLive(scope, run.Meta)))
                 {
                     continue;
                 }
@@ -263,7 +299,7 @@ internal sealed class KeyIndexPruner
                 int pagesBefore = run.Table.PagesRead;
                 try
                 {
-                    fences = await column.CandidatesAsync(file.IndexSourceOf(run.Meta), run.Table, cancellationToken).ConfigureAwait(false);
+                    fences = await column.CandidatesAsync(file.IndexSourceOf(run.Meta.Origin), run.Table, cancellationToken).ConfigureAwait(false);
                 }
                 catch (VortexFormatException)
                 {
@@ -280,9 +316,7 @@ internal sealed class KeyIndexPruner
                     int[] slots = new int[column.Stride];
                     for (int array = 0; array < column.Stride; array++)
                     {
-                        IndexSegment payload = fence.Regions[array];
-                        slots[array] = batch.Requests.Add(
-                            new SegmentSpec(payload.Offset, payload.Length, payload.AlignmentExponent, 0, 0));
+                        slots[array] = batch.Add(fence.Regions[array]);
                     }
 
                     batch.Wanted.Add((column, run, fence, low, high, slots));
@@ -302,10 +336,11 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
+            // The runs' segments named, which the session's synopsis cache keeps as it keeps the directory.
             ISegmentReader reader = file.IndexSourceOf(origin);
             Segments += Scanning.ScanCounters.Unread(requests, reader, out long bytes);
             Bytes += bytes;
-            await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            await reader.ReadRegionsAsync(requests, batch.Regions, cancellationToken).ConfigureAwait(false);
             using ScanContext context = file.CreateIndexContext(origin);
             foreach ((Column column, Run run, Fence fence, int low, int high, int[] slots) in batch.Wanted)
             {
@@ -402,37 +437,43 @@ internal sealed class KeyIndexPruner
     }
 
     /// <summary>
-    /// Fills a dictionary-backed column's claims: opens the column's chunks' dictionaries and asks
-    /// each one whether it holds the filter's literals.
+    /// Fills a dictionary-backed column's claims: reads the dictionaries of the column's chunks that hold a live block
+    /// inside the scope, together, and asks each one which of the filter's literals it holds.
     /// </summary>
     /// <param name="file">The open file.</param>
     /// <param name="column">The column, whose claims are empty until this runs.</param>
     /// <param name="path">Its path.</param>
     /// <param name="live">The mask as the earlier structures left it.</param>
+    /// <param name="scope">The blocks the scan's rows reach, or null for the whole file.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <remarks>
-    /// A source that refuses claims nothing: a chunk the entry claims and that is not a dictionary
-    /// makes the source refuse whole, and the column then proves no literal absent anywhere --
-    /// which is what an index that cannot be read must do.
+    /// A chunk that is not a dictionary claims nothing, and neither does a file whose probe leaves blocks uncovered: the
+    /// column then proves no literal absent there -- which is what an index that cannot be read must do.
     /// </remarks>
     private async ValueTask ProbeAsync(
-        VortexFile file, Column column, string path, BlockMask live, CancellationToken cancellationToken)
+        VortexFile file, Column column, string path, BlockMask live, BlockMask? scope, CancellationToken cancellationToken)
     {
-        (Keys.SortedRunsSource? source, _) = await Keys.SortedRunsSource
-            .OpenAsync(file, path, KeySourceKind.Dictionary, cancellationToken).ConfigureAwait(false);
-        if (source is null)
+        bool Wanted(long start, long rows)
+        {
+            RowRange chunk = new RowRange(start, start + rows);
+            return live.AnyLive(chunk) && (scope is null || scope.AnyLive(chunk));
+        }
+
+        // A literal's key, then each float zero's other, which the dictionary may hold instead.
+        int literals = column.Asked.Literals;
+        byte[]?[] keys = new byte[]?[2 * literals];
+        column.Asked.Keys.CopyTo(keys, 0);
+        column.Asked.OtherZeros.CopyTo(keys, literals);
+        if (await Keys.SortedRunsSource.ClaimDictionariesAsync(file, path, keys, Wanted, cancellationToken).ConfigureAwait(false) is not { } claims)
         {
             return;
         }
 
-        await using (source.ConfigureAwait(false))
+        Segments += claims.Read;
+        Bytes += claims.Bytes;
+        for (int chunk = 0; chunk < claims.Count; chunk++)
         {
-            Segments += source.DictionariesRead;
-            Bytes += source.DictionaryBytes;
-            for (int chunk = 0; chunk < source.Dictionaries; chunk++)
-            {
-                column.Dictionary(source, chunk, live.BlockRows);
-            }
+            column.Dictionary(claims, chunk, live.BlockRows);
         }
     }
 
@@ -468,6 +509,18 @@ internal sealed class KeyIndexPruner
                 }
 
                 list.Add(match);
+                break;
+
+            // A path's equality is asked of the entry of its read's class, by the read's name.
+            case Compute.VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.Equal, Field: Compute.VariantFieldExpr path } equal }:
+                Add(into, seen, path.Key, equal.Value);
+                break;
+            case Compute.VariantFilterExpr { Inner: InExpr { Field: Compute.VariantFieldExpr path } members }:
+                foreach (FilterLiteral value in members.Values)
+                {
+                    Add(into, seen, path.Key, value);
+                }
+
                 break;
             default:
                 break;
@@ -532,6 +585,19 @@ internal sealed class KeyIndexPruner
 
     private sealed record Run(IndexRun Meta, FenceTable Table);
 
+    /// <summary>Where a column's runs place a key.</summary>
+    private enum Placing
+    {
+        /// <summary>At the blocks it occurs in, as postings do.</summary>
+        Blocks,
+
+        /// <summary>At its rows, as sorted runs do.</summary>
+        Rows,
+
+        /// <summary>At the blocks its hash occurs in, as hashed postings do: a superset, a false block now and then.</summary>
+        Hashes,
+    }
+
     /// <summary>A question of the filter a column answers: its presence sets, <paramref name="Sets"/> from <paramref name="First"/>.</summary>
     private readonly record struct Leaf(Column Column, int First, int Sets);
 
@@ -548,7 +614,7 @@ internal sealed class KeyIndexPruner
     private sealed class Prepared
     {
         private readonly VortexExpr _filter;
-        private readonly Dictionary<(string Key, KeyLayout Layout, bool Fold), Asked> _asked = [];
+        private readonly Dictionary<(string Key, KeyLayout Layout, bool Fold, bool Hashed), Asked> _asked = [];
 
         internal Prepared(VortexExpr filter)
         {
@@ -570,9 +636,10 @@ internal sealed class KeyIndexPruner
         /// <param name="layout">How the column's index orders its keys.</param>
         /// <param name="fold">For a text index, whether its trigrams were folded.</param>
         /// <param name="predicates">For a text index, the matches whose trigrams it is asked for; null for values.</param>
-        internal Asked For(string key, KeyLayout layout, bool fold, List<StringMatchExpr>? predicates)
+        /// <param name="hashed">Whether the index holds the keys' hashes rather than the keys.</param>
+        internal Asked For(string key, KeyLayout layout, bool fold, List<StringMatchExpr>? predicates, bool hashed)
         {
-            (string, KeyLayout, bool) id = (key, layout, fold);
+            (string, KeyLayout, bool, bool) id = (key, layout, fold, hashed);
             lock (_asked)
             {
                 if (_asked.TryGetValue(id, out Asked? known))
@@ -581,7 +648,7 @@ internal sealed class KeyIndexPruner
                 }
             }
 
-            Asked built = new Asked(_filter, key, layout, fold, predicates is null ? Equalities[key] : TrigramsOf(predicates, fold));
+            Asked built = new Asked(_filter, key, layout, fold, predicates is null ? Equalities[key] : TrigramsOf(predicates, fold), hashed);
             lock (_asked)
             {
                 return _asked.TryAdd(id, built) ? built : _asked[id];
@@ -636,9 +703,13 @@ internal sealed class KeyIndexPruner
         /// <summary>Per presence set, whether it can prove absence: its question names keys, and every one encodes.</summary>
         private readonly List<bool> _keyed = [];
 
-        internal Asked(VortexExpr filter, string key, KeyLayout layout, bool fold, List<FilterLiteral> literals)
+        /// <remarks>
+        /// For hashed postings each key is the XXH3-64 of the literal's bytes in the column's layout,
+        /// the bytes the writer hashed, as eight bytes in the order of the runs' keys.
+        /// </remarks>
+        internal Asked(VortexExpr filter, string key, KeyLayout layout, bool fold, List<FilterLiteral> literals, bool hashed)
         {
-            Layout = layout;
+            Layout = hashed ? KeyRunOptions.HashedLayout : layout;
             Fold = fold;
             _slots = new Dictionary<FilterLiteral, int>(literals.Count);
             Keys = new byte[]?[literals.Count];
@@ -652,8 +723,8 @@ internal sealed class KeyIndexPruner
                 _slots.TryAdd(literals[i], i);
                 if (layout.TryEncode(literals[i], scratch, out ReadOnlySpan<byte> encoded, zero, out bool hasOtherZero))
                 {
-                    Keys[i] = encoded.ToArray();
-                    OtherZeros[i] = hasOtherZero ? zero[..layout.Width].ToArray() : null;
+                    Keys[i] = hashed ? Hashed(encoded) : encoded.ToArray();
+                    OtherZeros[i] = !hasOtherZero ? null : hashed ? Hashed(zero[..layout.Width]) : zero[..layout.Width].ToArray();
                 }
             }
 
@@ -662,6 +733,14 @@ internal sealed class KeyIndexPruner
             FeedSet = [.. _feedSet];
             NextFeed = [.. _nextFeed];
             Sorted = Sort();
+        }
+
+        /// <summary>A key of hashed postings: the hash of a value's bytes, eight bytes little-endian.</summary>
+        private static byte[] Hashed(ReadOnlySpan<byte> value)
+        {
+            byte[] key = new byte[sizeof(ulong)];
+            BinaryPrimitives.WriteUInt64LittleEndian(key, System.IO.Hashing.XxHash3.HashToUInt64(value));
+            return key;
         }
 
         /// <summary>How the index orders its keys.</summary>
@@ -725,6 +804,15 @@ internal sealed class KeyIndexPruner
 
                 case InExpr { Field: not Compute.FunctionFieldExpr } @in when @in.Field.Path == key:
                     Questions[expr] = (Ask(@in.Values), 1);
+                    break;
+
+                // The fence is the question: the walk over the filter stops at it as at a leaf.
+                case Compute.VariantFilterExpr { Inner: ComparisonExpr { Op: ComparisonOp.Equal, Field: Compute.VariantFieldExpr path } equal } when path.Key == key:
+                    Questions[expr] = (Ask(equal.Value), 1);
+                    break;
+
+                case Compute.VariantFilterExpr { Inner: InExpr { Field: Compute.VariantFieldExpr path } members } when path.Key == key:
+                    Questions[expr] = (Ask(members.Values), 1);
                     break;
 
                 case StringMatchExpr match when TrigramKey(match.Field.Path) == key:
@@ -844,6 +932,7 @@ internal sealed class KeyIndexPruner
     private sealed class Column
     {
         private readonly bool _rows;
+        private readonly bool _hashes;
         private readonly KeyLayout _layout;
 
         /// <summary>The dtypes a segment's arrays decode as: its keys, and its offsets, block lists or rows.</summary>
@@ -864,10 +953,11 @@ internal sealed class KeyIndexPruner
         /// <summary>Whether the runs place each key at its rows, as sorted runs do, rather than at its blocks.</summary>
         internal bool Rows => _rows;
 
-        internal Column(bool rows, Asked asked, DType storage, List<Run> runs, int blocks)
+        internal Column(Placing placing, Asked asked, DType storage, List<Run> runs, int blocks)
         {
             Asked = asked;
-            _rows = rows;
+            _rows = placing == Placing.Rows;
+            _hashes = placing == Placing.Hashes;
             _layout = asked.Layout;
             DTypeArena types = new DTypeArena();
             _keyType = storage.Kind == DTypeKind.Primitive
@@ -893,7 +983,9 @@ internal sealed class KeyIndexPruner
         /// </summary>
         internal string? DictionaryPath { get; init; }
 
-        internal int Stride => _rows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
+        internal int Stride => _hashes
+            ? KeyRunOptions.HashedStride
+            : _rows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
 
         /// <summary>
         /// The segments of <paramref name="table"/> whose range may hold one of the column's keys,
@@ -1009,8 +1101,8 @@ internal sealed class KeyIndexPruner
         /// Claims one chunk's blocks from its dictionary: a literal the chunk's values do not hold
         /// is absent from every block the chunk covers whole.
         /// </summary>
-        /// <param name="source">The column's dictionary source, open over the claimed chunks.</param>
-        /// <param name="chunk">The chunk, under the source's count.</param>
+        /// <param name="claims">What the column's dictionaries the probe read hold: each literal's key, then each float zero's other.</param>
+        /// <param name="chunk">The chunk, under the claims' count.</param>
         /// <param name="blockRows">Rows per block.</param>
         /// <remarks>
         /// Only the blocks the chunk covers whole are claimed. A dictionary says what its own rows
@@ -1018,9 +1110,9 @@ internal sealed class KeyIndexPruner
         /// neighbour is left live -- the writer aligns chunks to blocks, so this costs nothing
         /// there and stays right on a file whose chunks are not aligned.
         /// </remarks>
-        internal void Dictionary(Keys.SortedRunsSource source, int chunk, long blockRows)
+        internal void Dictionary(Keys.DictionaryClaims claims, int chunk, long blockRows)
         {
-            (long firstRow, long rows) = source.DictionaryExtent(chunk);
+            (long firstRow, long rows) = claims.Extent(chunk);
             long last = firstRow + rows;
             ulong first = (ulong)((firstRow + blockRows - 1) / blockRows);
 
@@ -1033,22 +1125,15 @@ internal sealed class KeyIndexPruner
             }
 
             Fill(Covered, first, end, true);
-            byte[]?[] keys = Asked.Keys;
-            for (int i = 0; i < keys.Length; i++)
-            {
-                if (keys[i] is not { } key)
-                {
-                    continue;
-                }
 
-                // The two zeros of a float are one literal, and a dictionary may hold either.
-                if (source.DictionaryHolds(chunk, key)
-                    || (Asked.OtherZeros[i] is { } other && source.DictionaryHolds(chunk, other)))
+            // The two zeros of a float are one literal, and a dictionary may hold either.
+            int literals = Asked.Literals;
+            foreach (int key in claims.HeldBy(chunk))
+            {
+                int literal = key < literals ? key : key - literals;
+                for (int feed = Asked.FirstFeed[literal]; feed >= 0; feed = Asked.NextFeed[feed])
                 {
-                    for (int feed = Asked.FirstFeed[i]; feed >= 0; feed = Asked.NextFeed[feed])
-                    {
-                        Fill(Set(Asked.FeedSet[feed]), first, end, true);
-                    }
+                    Fill(Set(Asked.FeedSet[feed]), first, end, true);
                 }
             }
         }
@@ -1120,6 +1205,11 @@ internal sealed class KeyIndexPruner
             int entries = (int)expected;
             try
             {
+                if (_hashes)
+                {
+                    return LookupHashes(context, requests, slots, run, fence, low, high, entries);
+                }
+
                 int keys = Decode(context, requests.GetBuffer(slots[0]), _keyType, entries);
                 CanonicalNode keyNode = context.Canonical.GetNode(keys);
                 if (!Fits(keyNode, entries))
@@ -1187,6 +1277,56 @@ internal sealed class KeyIndexPruner
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Decodes one segment of hashed postings and marks, for every literal, the blocks of the
+        /// pairs whose cut hash is the literal's: the gaps summed from the segment's first hash, cut
+        /// as the run's pair count says, walked beside the literals in hash order.
+        /// </summary>
+        /// <returns>Whether the segment made sense.</returns>
+        private bool LookupHashes(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, Fence fence, int low, int high, int entries)
+        {
+            if (fence.Bounds.Min.Length != sizeof(ulong))
+            {
+                return false;
+            }
+
+            CanonicalNode gapArray = context.Canonical.GetNode(Decode(context, requests.GetBuffer(slots[0]), _u32, entries));
+            if (gapArray.Kind != CanonicalKind.Primitive || gapArray.PType != PType.U32 || gapArray.Length != entries)
+            {
+                return false;
+            }
+
+            CanonicalNode blockArray = context.Canonical.GetNode(Decode(context, requests.GetBuffer(slots[1]), _u32, entries));
+            if (blockArray.Kind != CanonicalKind.Primitive || blockArray.PType != PType.U32 || blockArray.Length != entries)
+            {
+                return false;
+            }
+
+            ReadOnlySpan<uint> gaps = gapArray.Values.Cast<uint>();
+            ReadOnlySpan<uint> blocks = blockArray.Values.Cast<uint>();
+            ReadOnlySpan<(int Literal, byte[] Key, ulong Sort)> wanted = Asked.Sorted.AsSpan(low, high - low);
+            int shift = KeyRunOptions.HashShift(run.Meta.EntryCount);
+            ulong firstBlock = run.Meta.FirstBlock;
+            ulong cut = BinaryPrimitives.ReadUInt64LittleEndian(fence.Bounds.Min) >> shift;
+            int pair = 0;
+            for (int entry = 0; entry < entries && pair < wanted.Length; entry++)
+            {
+                cut += gaps[entry];
+                while (pair < wanted.Length && (wanted[pair].Sort >> shift) < cut)
+                {
+                    pair++;
+                }
+
+                // Every literal cut to this entry's hash: the one asked, or one that shares its bits.
+                for (int next = pair; next < wanted.Length && (wanted[next].Sort >> shift) == cut; next++)
+                {
+                    Present(wanted[next].Literal, firstBlock + blocks[entry]);
+                }
+            }
+
+            return true;
         }
 
         private bool Fits(CanonicalNode keys, int entries) =>

@@ -90,6 +90,38 @@ internal static class Aggregates
             Console.WriteLine(line);
         }
 
+        await BestOfThreeAsync("GroupBy(City), quantiles", async () =>
+        {
+            lines = new string[Demo.Cities.Length];
+            int line = 0;
+            await foreach (CityQuantiles city in file.Scan<Reading>()
+                .GroupBy(r => r.City)
+                .Select(g => (
+                    g.Key,
+                    g.Quantile(r => r.Celsius, 0.5),
+                    g.Quantile(r => r.Celsius, 0.99),
+                    g.ApproximateCountDistinct(r => r.Day),
+                    g.CountDistinct(r => r.Day)))
+                .As<CityQuantiles>()
+                .ToRecordsAsync())
+            {
+                lines[line++] = $"  {city.City,-10} median {city.Median:F2}, 99th percentile {city.P99:F2}, about {city.Days} days of {city.ExactDays}";
+            }
+
+            return $"{line} groups";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
+        }
+
+        await BestOfThreeAsync("Distribution(Celsius)", async () =>
+        {
+            Distribution? d = await file.Scan<Reading>().AggregateAsync(a => a.Distribution(r => r.Celsius));
+            return $"{d!.Count} values, median {d.Median:F2}, {d.Histogram.Count} buckets, within {d.RelativeError:P2}";
+        });
+
         await BestOfThreeAsync("Welford(Celsius), encoded", async () =>
         {
             Scan<Reading> scan = file.Scan<Reading>();
@@ -363,6 +395,8 @@ public partial record struct CityHottest(string City, double? First, double? Hot
 [VortexRecord]
 public partial record struct CityHeat(string City, long Rows, long Hot, double? HotMean, bool AnyTop, bool AllWarm);
 
+[VortexRecord]
+public partial record struct CityQuantiles(string City, double? Median, double? P99, long Days, long ExactDays);
 /// <summary>An hour of visits: its start, how many began in it, and their mean duration.</summary>
 [VortexRecord]
 public partial record struct VisitHour(DateTime Hour, long Visits, double? MeanMs);

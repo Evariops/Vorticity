@@ -17,8 +17,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// </summary>
 /// <remarks>
 /// The shapes are db-benchmark's: q4's mean of <c>v3</c> by a hundred groups, q3's by a hundred thousand,
-/// q10's sum where every row opens its group; and a hundred groups whose values lie in ranges of their
-/// own. Run it with <c>DOTNET_TieredCompilation=0</c>, so that every pass runs the code at its last tier.
+/// q10's sum where every row opens its group; a million groups, whose states pass the caches; and a
+/// hundred groups whose values lie in ranges of their own. Run it with <c>DOTNET_TieredCompilation=0</c>, so that every pass runs the code at its last tier.
 /// </remarks>
 internal static class FloatSumMicro
 {
@@ -30,13 +30,20 @@ internal static class FloatSumMicro
         Console.WriteLine($"{"float sum",-32} {"rows",11} {"groups",10} {"best ms",10} {"ns/row",8} {"ns/group out",13} {"checksum",18}");
         Measure("1e2 groups, one range (q4)", 10_000_000, 100, mixed: false, rounds);
         Measure("1e5 groups, one range (q3)", 10_000_000, 100_000, mixed: false, rounds);
+        Measure("1e6 groups, one range", 10_000_000, 1_000_000, mixed: false, rounds);
         Measure("1e2 groups, ranges of their own", 10_000_000, 100, mixed: true, rounds);
         Measure("a group a row (q10)", 2_000_000, 0, mixed: false, rounds);
+        Measure("1e2 groups, wide state", 10_000_000, 100, mixed: false, rounds, wide: true);
+        Measure("1e6 groups, wide state", 10_000_000, 1_000_000, mixed: false, rounds, wide: true);
         return 0;
     }
 
-    /// <summary>The best of <paramref name="rounds"/> passes; <paramref name="groups"/> 0 for a group a row, each row its own in order.</summary>
-    private static void Measure(string name, int rows, int groups, bool mixed, int rounds)
+    /// <summary>
+    /// The best of <paramref name="rounds"/> passes; <paramref name="groups"/> 0 for a group a row, each row its
+    /// own in order. <paramref name="wide"/> folds into the state a source takes when it does not prove its
+    /// rows within the narrow sum's, <see cref="WideIndexedSum"/>.
+    /// </summary>
+    private static void Measure(string name, int rows, int groups, bool mixed, int rounds, bool wide = false)
     {
         double[] values = new double[rows];
         int[] rowGroups = new int[rows];
@@ -55,7 +62,9 @@ internal static class FloatSumMicro
         int count = groups == 0 ? rows : groups;
         for (int round = 0; round < rounds; round++)
         {
-            (double ms, double outMs, long sum) = Pass(values, rowGroups, count);
+            (double ms, double outMs, long sum) = wide
+                ? Pass(values, rowGroups, count, new FixedSlot<double, WideIndexedSum, WideIndexedFloatSum<double>, double>(StorageKind.Primitive, static s => s.Value))
+                : Pass(values, rowGroups, count, new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, double>(StorageKind.Primitive, static s => s.Value));
             best = Math.Min(best, ms);
             bestOut = Math.Min(bestOut, outMs);
             checksum = sum;
@@ -67,13 +76,11 @@ internal static class FloatSumMicro
     }
 
     /// <summary>One pass: every batch's values a canonical node of an arena, folded into their groups' sums; then every group's sum read out.</summary>
-    private static (double Ms, double OutMs, long Checksum) Pass(double[] values, int[] rowGroups, int groups)
+    private static (double Ms, double OutMs, long Checksum) Pass(double[] values, int[] rowGroups, int groups, AggregateSlot<double> slot)
     {
         GC.Collect();
         RetainingArena arena = new RetainingArena();
         DType dtype = new DTypeArena().Primitive(PType.F64, Nullability.NonNullable);
-        FixedSlot<double, IndexedSum, IndexedFloatSum<double>, double> slot =
-            new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, double>(StorageKind.Primitive, static s => s.Value);
         slot.EnsureGroups(groups);
         long start = Stopwatch.GetTimestamp();
         long batch = 0;

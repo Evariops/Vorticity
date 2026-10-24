@@ -7,8 +7,13 @@
 // header, done again after another writer changed one object, asks the store for what changed and
 // nothing else -- and hold the cache to being what saves the reads, since a handle given none
 // reads the tree again. The objects are entries only: a walk reads the tree, never an object.
+//
+// The session's synopsis cache keeps the pages on the disk, by their hash, for the handles opened later: a
+// restart walks the tree with no request, a page the disk holds torn is read again from the store, and a
+// sealed dataset's pages stay off the disk.
 using System;
 using System.Collections.Generic;
+using System.IO.Hashing;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -431,6 +436,125 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
+    public async Task AHandleOfASessionOpenedLaterReadsTheTreeFromTheDisk()
+    {
+        // The pages a walk reads from the store enter the session's synopsis cache too, each named by the hash
+        // of its bytes: a handle of a session opened after a restart on the same directory, whose own pages
+        // start empty, walks the tree with no request.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string directory = CacheDirectory();
+        try
+        {
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            await using (VortexSession session = Cached(directory))
+            await using (VortexDataset dataset = await CreateAsync(store, new DatasetOptions { Session = session }, ct))
+            {
+                store.Reset();
+                Assert.Equal(Objects, await CountAsync(dataset, ct));
+                Assert.True(store.Requests > 10, $"the walk asked for {store.Requests} pages: the tree should outgrow its header");
+            }
+
+            string[] pages = PagesIn(directory);
+            Assert.NotEmpty(pages);
+            Assert.All(pages, file =>
+            {
+                byte[] bytes = System.IO.File.ReadAllBytes(file);
+                Assert.Equal(SynopsisCache.PageNameOf(XxHash128.HashToUInt128(bytes), bytes.Length), System.IO.Path.GetFileName(file));
+            });
+
+            await using (VortexSession session = Cached(directory))
+            await using (VortexDataset reopened = await OpenAsync(store, session, ct))
+            {
+                store.Reset();
+                Assert.Equal(Objects, await CountAsync(reopened, ct));
+                Assert.Equal(0, store.Requests);
+            }
+        }
+        finally
+        {
+            System.IO.Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task APageTheDiskHoldsTornIsDroppedAndReadFromTheStore()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string directory = CacheDirectory();
+        try
+        {
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            await using (VortexSession session = Cached(directory))
+            await using (VortexDataset dataset = await CreateAsync(store, new DatasetOptions { Session = session }, ct))
+            {
+                Assert.Equal(Objects, await CountAsync(dataset, ct));
+            }
+
+            // One byte flipped: the page keeps its length, and fails its hash.
+            string file = PagesIn(directory)[0];
+            byte[] bytes = System.IO.File.ReadAllBytes(file);
+            bytes[^1] ^= 0xFF;
+            System.IO.File.WriteAllBytes(file, bytes);
+
+            await using (VortexSession session = Cached(directory))
+            await using (VortexDataset reopened = await OpenAsync(store, session, ct))
+            {
+                store.Reset();
+                Assert.Equal(Objects, await CountAsync(reopened, ct));
+                Assert.Equal(1, store.Requests);
+            }
+
+            // Kept again as the store holds it.
+            bytes = System.IO.File.ReadAllBytes(file);
+            Assert.Equal(SynopsisCache.PageNameOf(XxHash128.HashToUInt128(bytes), bytes.Length), System.IO.Path.GetFileName(file));
+        }
+        finally
+        {
+            System.IO.Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ASealedDatasetLeavesNoPageOfItsTreeOnTheDisk()
+    {
+        // Its pages are plaintext of its commit objects: a walk that reads them from the store keeps them in its
+        // handle alone.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string directory = CacheDirectory();
+        try
+        {
+            using VortexKeyring keyring = Sealing.SealedObjects.Keyring();
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.Keyring = keyring;
+                options.SynopsisCache = new SynopsisCache(directory, 64 << 20);
+            });
+            Decoders.EnsureRegistered();
+            DatasetOptions options = new DatasetOptions { Session = session, Seed = Seed, ClusteringKey = ["key"], Encrypted = true };
+            await using (VortexDataset created = await VortexDataset.CreateAsync(store, Schema(), options, ct))
+            {
+                Assert.True(created.IsEncrypted);
+                await created.CommitAsync([.. Enumerable.Range(0, Objects).Select(i => Add(2L * i))], ct);
+            }
+
+            await using VortexDataset reader = await VortexDataset.OpenAsync(store, options, ct);
+            store.Reset();
+            Assert.Equal(Objects, await CountAsync(reader, ct));
+            Assert.True(store.Requests > 10, $"the walk asked for {store.Requests} pages: the tree should outgrow its header");
+            session.Options.SynopsisCache!.Flush();
+            Assert.Empty(PagesIn(directory));
+        }
+        finally
+        {
+            System.IO.Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ABatchThatFindsNothingToDoAsksOnlyWhetherItsVersionIsStillTheLatest()
     {
         // Built on the version held, the batch finds nothing to do and asks whether a later one
@@ -739,13 +863,8 @@ public sealed class DatasetPageCacheTests
     private static async Task<VortexDataset> CreateAsync(IObjectStore store, DatasetOptions options, int objects, CancellationToken ct)
     {
         Decoders.EnsureRegistered();
-        DTypeArena types = new DTypeArena();
-        DType schema = types.Struct(
-            ["key", "measure"],
-            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
-            Nullability.NonNullable);
         options = options with { Seed = Seed, ClusteringKey = ["key"] };
-        await using (VortexDataset created = await VortexDataset.CreateAsync(store, schema, options, ct))
+        await using (VortexDataset created = await VortexDataset.CreateAsync(store, Schema(), options, ct))
         {
         }
 
@@ -753,6 +872,31 @@ public sealed class DatasetPageCacheTests
         await DatasetCommitter.CommitAsync(store, operations, new CommitOptions { Seed = Seed }, ct);
         return await VortexDataset.OpenAsync(store, options, ct);
     }
+
+    /// <summary>A handle in <paramref name="session"/> on the dataset <see cref="CreateAsync(IObjectStore, DatasetOptions, CancellationToken)"/> made.</summary>
+    private static ValueTask<VortexDataset> OpenAsync(IObjectStore store, VortexSession session, CancellationToken ct) =>
+        VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, Seed = Seed, ClusteringKey = ["key"] }, ct);
+
+    /// <summary>The datasets' schema: a key, and a measure.</summary>
+    private static DType Schema()
+    {
+        DTypeArena types = new DTypeArena();
+        return types.Struct(
+            ["key", "measure"],
+            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+    }
+
+    /// <summary>A session with a synopsis cache in <paramref name="directory"/>.</summary>
+    private static VortexSession Cached(string directory) =>
+        VortexSession.Create(options => options.SynopsisCache = new SynopsisCache(directory, 64 << 20));
+
+    /// <summary>A directory of its own for a synopsis cache.</summary>
+    private static string CacheDirectory() => System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vorticity-page-cache-" + Guid.NewGuid().ToString("N"));
+
+    /// <summary>The files of the tree pages the cache in <paramref name="directory"/> keeps.</summary>
+    private static string[] PagesIn(string directory) =>
+        System.IO.Directory.GetFiles(directory, "*-page", System.IO.SearchOption.AllDirectories);
 
     /// <summary>Another writer's commit of one object whose key falls between those of <paramref name="at"/> and the next.</summary>
     private static async Task AddAsync(IObjectStore store, int at, CancellationToken ct)

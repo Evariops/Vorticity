@@ -116,6 +116,19 @@ internal sealed class ScanBuilder
         return this;
     }
 
+    /// <summary>
+    /// Says that the variant columns of <paramref name="keys"/>, by name, are read only through those
+    /// top-level keys: where the file's path map holds them, each chunk reads the keys' ranges alone
+    /// and decodes them as columns (<see cref="Indexes.VariantKeyReads"/>), never the variant whole.
+    /// </summary>
+    internal ScanBuilder WithVariantKeys(IReadOnlyDictionary<string, string[]>? keys)
+    {
+        _variantKeys = keys;
+        return this;
+    }
+
+    private IReadOnlyDictionary<string, string[]>? _variantKeys;
+
     internal ScanBuilder(VortexFile file)
     {
         ArgumentNullException.ThrowIfNull(file);
@@ -424,6 +437,22 @@ internal sealed class ScanBuilder
         return this;
     }
 
+    /// <summary>
+    /// Walks the key order in windows of about <paramref name="rows"/> entries rather than the file's zone length, for
+    /// a reader of the whole file in key order, such as a compaction: a window reads every split its rows lie in, so on
+    /// rows mostly in key order, some of them a few seconds late, small windows read the splits ahead of them again and
+    /// again for the few late rows each holds, where a wide one finds them among its own. The window is a power of two,
+    /// <paramref name="rows"/> rounded down to one, its exponent held in a byte so that no scan grows.
+    /// </summary>
+    internal ScanBuilder WithKeyWindow(int rows)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(rows);
+        _keyWindowShift = (byte)System.Numerics.BitOperations.Log2((uint)rows);
+        return this;
+    }
+
+    private byte _keyWindowShift;
+
     private void ThrowIfOrdered(string method)
     {
         if (_orderPath is not null)
@@ -555,6 +584,31 @@ internal sealed class ScanBuilder
 
     private IAsyncEnumerable<RecordBatch> BatchesAsync(IRowExclusion? excluded)
     {
+        IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded, out BatchAsyncEnumerable batches);
+        return _variantKeys is { } keys ? new KeyedBatches(scan, batches, _file, keys) : scan;
+    }
+
+    /// <summary>
+    /// A scan whose variant columns are read through some shredded keys alone: the file's path maps
+    /// are read once, before its first batch, and the lanes told which chunks they read by keys.
+    /// </summary>
+    private sealed class KeyedBatches(
+        IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file, IReadOnlyDictionary<string, string[]> keys)
+        : IAsyncEnumerable<RecordBatch>
+    {
+        public async IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, cancellationToken).ConfigureAwait(false);
+            await foreach (RecordBatch batch in scan.WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+        }
+    }
+
+    /// <summary>The scan's batches, its variants read whole until <see cref="KeyedBatches"/> says otherwise; <paramref name="batches"/> the split reader under them.</summary>
+    private IAsyncEnumerable<RecordBatch> WholeAsync(IRowExclusion? excluded, out BatchAsyncEnumerable batches)
+    {
         // Parsed at most once per open file rather than once per scan: the tree is a function of
         // the file's bytes and nothing else.
         LayoutTree tree = _file.LayoutTree;
@@ -566,7 +620,7 @@ internal sealed class ScanBuilder
         (RowRange rows, long natural, long cap) = Frame(tree);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
-        BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
+        batches = new BatchAsyncEnumerable(
             _file, tree, read, keep, plan, _reverse ? 1 : _degree, _filter, _take, _metrics, _reverse && _orderPath is null)
         {
             Prefetch = _prefetch,
@@ -901,7 +955,12 @@ internal sealed class ScanBuilder
             return (null, null, null);
         }
 
-        string structure = cover.Kind == KeySourceKind.SortedColumn ? "sorted column" : "sorted runs";
+        string structure = cover.Kind switch
+        {
+            KeySourceKind.SortedColumn => "sorted column",
+            KeySourceKind.Slices => "time slices",
+            _ => "sorted runs",
+        };
         long[]? proven;
         try
         {
@@ -1132,6 +1191,13 @@ internal sealed class ScanBuilder
         }
 
         long batch = _filter is null && _take is null && _orderPath is null ? WindowBatch(natural) : natural;
+
+        // A reader of the whole object in key order walks windows of its own size, as many zones as fit.
+        if (_orderPath is not null && _take is null && _keyWindowShift > 0 && (1L << _keyWindowShift) > natural)
+        {
+            batch = (1L << _keyWindowShift) / natural * natural;
+        }
+
         return (rows, natural, Capped(batch));
     }
 
@@ -1161,8 +1227,12 @@ internal sealed class ScanBuilder
                 "Rows left out serve a count of the file's rows, never of rows taken by their places: the caller maps a take past them.");
         }
 
+        // A count reads the filter's variant columns through their keys, as a scan does; an extreme reads its own column whole.
+        IReadOnlyDictionary<string, string[]>? keys = extraPath is null && _filter is not null
+            ? _variantKeys ?? Indexes.VariantKeyReads.Of([], _filter)
+            : null;
         return new TerminalScan(
-            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded);
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys);
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>
@@ -1341,6 +1411,8 @@ internal sealed class ScanBuilder
                 return VisitFields(negation.Operand, ref visitor);
             case LogicalExpr logical:
                 return VisitFields(logical.Left, ref visitor) && VisitFields(logical.Right, ref visitor);
+            case Compute.VariantFilterExpr fence:
+                return VisitFields(fence.Inner, ref visitor);
             default:
                 return true;
         }

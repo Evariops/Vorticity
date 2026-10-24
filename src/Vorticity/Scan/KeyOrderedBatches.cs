@@ -34,6 +34,13 @@ namespace Vorticity.Scanning;
 /// over an uncorrelated column a window of n entries can touch n splits -- and the metrics sink
 /// counts the windows and the splits they touched so a caller can tell which case it is in.
 /// </para>
+/// <para>
+/// A batch is the enumerator's, valid until the next <c>MoveNextAsync</c>, which disposes it and binds
+/// the next window into the same object. Over a source of time slices, a window's batch references the
+/// records of its slice, decoded whole for every window of it, which the decode of the next slice
+/// resets: the batch of a window never outlives it, so the next slice is decoded only once it is
+/// released.
+/// </para>
 /// </remarks>
 internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
 {
@@ -119,6 +126,18 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         private RecordBatch? _current;
         private bool _hasCurrent;
         private IAsyncEnumerator<RecordBatch>? _tail;
+
+        // A source of time slices: the slice the window lies in, the slice of the window before, and
+        // the one decoded whole in file order, with the filter's verdicts on it, which every window
+        // of it after the first gathers from.
+        private SlicedKeySource? _sliced;
+        private int _windowSlice = -1;
+        private int _servedSlice = -1;
+        private int _decodedSlice = -1;
+        private int _decodedRoot;
+        private long _decodedFirst;
+        private byte[]? _verdicts;
+        private ScanContext? _sliceContext;
 
         internal Enumerator(KeyOrderedBatches owner, CancellationToken token)
         {
@@ -248,6 +267,12 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             }
 
             _context.Dispose();
+            _sliceContext?.Dispose();
+            if (_verdicts is not null)
+            {
+                ArrayPool<byte>.Shared.Return(_verdicts);
+            }
+
             if (_lanes is not null)
             {
                 foreach (ScanContext lane in _lanes)
@@ -328,6 +353,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                     "nor indexed with IndexPolicy.SortedRuns, and ordering an unindexed column would mean " +
                     "holding the whole column in memory.");
                 source.Share(_held, _retained);
+                _sliced = source as SlicedKeySource;
                 _slices = await ExactCover.RangeAsync(_owner._filter, source, _owner._path, _token).ConfigureAwait(false);
             }
 
@@ -375,6 +401,18 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                         $"The key source of '{_owner._path}' names row {row} of a {rowCount}-row file.");
                 }
 
+                // A window of time slices lies in one slice, the one decoded for it: the entry of
+                // the next stays current for the next window.
+                if (_sliced is { } sliced)
+                {
+                    if (count > 0 && sliced.Slice != _windowSlice)
+                    {
+                        break;
+                    }
+
+                    _windowSlice = sliced.Slice;
+                }
+
                 if ((_live is null || _live.IsLive((int)(row / _live.BlockRows)))
                     && (_owner.Excluded is not { } excluded || !excluded.Excludes(row)))
                 {
@@ -406,11 +444,145 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         /// </summary>
         private async ValueTask<(int Root, long First)> ExecuteAsync(int count)
         {
+            // The first window of a slice reads the splits its rows lie in, as any window does: a page
+            // wants no more. A second one reads about every split of the slice again, so the slice is
+            // decoded whole, once, for it and the windows after it.
+            if (_sliced is not null)
+            {
+                bool again = _windowSlice == _servedSlice;
+                _servedSlice = _windowSlice;
+                if (again || _decodedSlice == _windowSlice)
+                {
+                    return await ExecuteSlicedAsync(count).ConfigureAwait(false);
+                }
+            }
+
             int distinct = Plan(count);
             _selection.Reset(distinct);
             int root = await DecodeAsync(_selection).ConfigureAwait(false);
             NoteDecoded(distinct);
             return (Arrange(root, count, distinct), _sorted[0]);
+        }
+
+        /// <summary>
+        /// The window's rows, all of one time slice, gathered in key order out of the slice decoded
+        /// whole. Rows are in key order slice by slice only, so a window touches about every split of
+        /// its slice, which a read per window would execute again, window after window.
+        /// </summary>
+        private async ValueTask<(int Root, long First)> ExecuteSlicedAsync(int count)
+        {
+            if (_decodedSlice != _windowSlice)
+            {
+                await DecodeSliceAsync(_windowSlice).ConfigureAwait(false);
+            }
+
+            int[] permutation = ArrayPool<int>.Shared.Rent(count);
+            try
+            {
+                int kept = 0;
+                long first = long.MaxValue;
+                foreach (long row in _rows.AsSpan(0, count))
+                {
+                    int at = (int)(row - _decodedFirst);
+                    first = Math.Min(first, row);
+                    if (_verdicts is null || _verdicts[at] == Trilean.True)
+                    {
+                        permutation[kept++] = at;
+                    }
+                }
+
+                // Records, not bytes: the slice's context keeps the storage until the next slice,
+                // which no window decodes before this one's batch is released.
+                CanonicalArena arena = _context.Canonical;
+                int root = arena.ReferenceFrom(_sliceContext!.Canonical, _decodedRoot);
+                root = CanonicalFilter.Apply(arena, root, permutation.AsSpan(0, kept));
+                return (ProjectionTrim.Apply(arena, root, in _read, in _keep, _scan.Schema), first);
+            }
+            finally
+            {
+                ArrayPool<int>.Shared.Return(permutation);
+            }
+        }
+
+        /// <summary>
+        /// Decodes the splits that hold time slice <paramref name="slice"/>, whole and in file order,
+        /// in a context of their own, and evaluates the filter on them once.
+        /// </summary>
+        private async ValueTask DecodeSliceAsync(int slice)
+        {
+            // The batch of the window before references the slice before's records, which the reset below lets go.
+            System.Diagnostics.Debug.Assert(!_hasCurrent, "A slice is decoded while a window's batch still references the one before.");
+            TimeSlice span = _sliced!.SliceAt(slice);
+            ScanContext context = _sliceContext ??= new ScanContext(_scan.File) { Metrics = _scan.Metrics };
+            context.ResetBatch();
+            _decodedSlice = -1;
+
+            _splits.Clear();
+            SplitPlan plan = _scan.Plan;
+            for (long row = span.FirstRow; row < span.FirstRow + span.Rows; row = _splits[^1].End)
+            {
+                _splits.Add(plan.SplitOf(row));
+            }
+
+            _scan.Metrics?.AddWindow(_splits.Count);
+            LayoutTree tree = _scan.Tree;
+            foreach (RowRange split in _splits)
+            {
+                SplitExecution.Register(context, tree, in _read, split);
+            }
+
+            VortexFile.FillFromTail(_scan.File.Segments, context.Segments);
+            if (ScanCounters.Note(_scan.Metrics, context.Segments))
+            {
+                await _scan.File.Segments.ReadManyAsync(context.Segments, _token).ConfigureAwait(false);
+            }
+            else
+            {
+                context.Segments.Complete();
+            }
+
+            ScanCounters.Served(_scan.Metrics, context.Segments);
+            _token.ThrowIfCancellationRequested();
+            int[] parts = ArrayPool<int>.Shared.Rent(_splits.Count);
+            try
+            {
+                for (int i = 0; i < _splits.Count; i++)
+                {
+                    SplitExecution.Window(context, plan, _splits[i]);
+                    parts[i] = SplitExecution.Execute(context, tree, in _read, _splits[i], null);
+                }
+
+                _decodedRoot = Concat(context, parts.AsSpan(0, _splits.Count));
+            }
+            finally
+            {
+                ArrayPool<int>.Shared.Return(parts);
+            }
+
+            _decodedFirst = _splits[0].Start;
+            int length = context.Canonical.GetNode(_decodedRoot).Length;
+            if (_owner._filter is not null)
+            {
+                if (_verdicts is null || _verdicts.Length < length)
+                {
+                    if (_verdicts is not null)
+                    {
+                        ArrayPool<byte>.Shared.Return(_verdicts);
+                    }
+
+                    _verdicts = ArrayPool<byte>.Shared.Rent(length);
+                }
+
+                _owner._evaluator!.Evaluate(context.Canonical, _decodedRoot, length, _verdicts.AsSpan(0, length));
+            }
+
+            if (_scan.Metrics is { } metrics)
+            {
+                long blockRows = Math.Max(_live?.BlockRows ?? SplitPlan.NaturalBatchRows(tree), 1);
+                metrics.AddBlocksDecoded(((_splits[^1].End - 1) / blockRows) - (_decodedFirst / blockRows) + 1);
+            }
+
+            _decodedSlice = slice;
         }
 
         /// <summary>

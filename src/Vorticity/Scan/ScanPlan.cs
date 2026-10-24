@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using Vorticity.Scanning;
@@ -13,6 +14,16 @@ namespace Vorticity;
 /// <param name="SegmentsRead">Segments read to consult it.</param>
 /// <param name="BytesRead">Their bytes.</param>
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
+
+/// <summary>
+/// What an aggregation reads of one object of a dataset: a table of its synopsis, whose states stand for
+/// the rows of the buckets it folds; the rows of the slices a window cuts; or its rows whole, and why.
+/// </summary>
+/// <param name="Object">The object, by its key in the dataset.</param>
+/// <param name="Read"><c>table</c>, <c>edges</c> or <c>rows</c>.</param>
+/// <param name="Detail">The table's kind, its bucket and the columns that key it; or why the rows are read.</param>
+/// <param name="Count">The buckets the table folds, the slices read at the edges, or the object's rows.</param>
+public sealed record StatesStep(string Object, string Read, string Detail, long Count);
 
 /// <summary>
 /// What a scan will do, worked out from statistics, zone maps and indexes before a data segment is
@@ -39,6 +50,12 @@ public sealed record ScanPlan(
 {
     /// <summary>What a group by will do with the rows; null without a group by.</summary>
     public GroupPlan? Grouping { get; init; }
+
+    /// <summary>
+    /// For an aggregation over a dataset whose objects keep synopses, what each object reads: its tables'
+    /// states, the rows at a window's edges, or its rows and why; empty otherwise.
+    /// </summary>
+    public ImmutableArray<StatesStep> States { get; init; } = [];
 
     /// <summary>The engine's own explanation, with its splits, for the tests that hold the plan to the execution.</summary>
     internal ScanExplanation? Detail { get; init; }
@@ -94,8 +111,32 @@ public readonly record struct ScanMetrics(
     /// <summary>What a group by did with the rows; null without a group by, or before it ran.</summary>
     public GroupMetrics? Grouping { get; init; }
 
+    /// <summary>Rows of a dataset's synopsis tables an aggregation folded as states, in place of the rows they stand for.</summary>
+    public long SynopsisRows { get; init; }
+
+    /// <summary>Rows of the slices at a window's edges, read beside their objects' states: part of <see cref="Rows"/>.</summary>
+    public long EdgeRows { get; init; }
+
+    /// <summary>
+    /// The first instant of the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>,
+    /// at or before the one asked; null for a scan that aligned no window, or one with no lower bound.
+    /// </summary>
+    public DateTimeOffset? WindowFrom { get; init; }
+
+    /// <summary>
+    /// The instant past the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>, at
+    /// or after the one asked; null for a scan that aligned no window, or one with no upper bound.
+    /// </summary>
+    public DateTimeOffset? WindowTo { get; init; }
+
     internal static ScanMetrics From(ScanCounters counters) => new ScanMetrics(
-        counters.Rows, counters.Batches, counters.SegmentRequests, counters.BytesRequested, counters.BlocksDecoded, counters.BlocksPruned, counters.CacheHits);
+        counters.Rows, counters.Batches, counters.SegmentRequests, counters.BytesRequested, counters.BlocksDecoded, counters.BlocksPruned, counters.CacheHits)
+    {
+        SynopsisRows = counters.SynopsisRows,
+        EdgeRows = counters.EdgeRows,
+        WindowFrom = counters.WindowFrom,
+        WindowTo = counters.WindowTo,
+    };
 }
 
 /// <summary>

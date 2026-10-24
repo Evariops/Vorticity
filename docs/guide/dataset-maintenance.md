@@ -71,7 +71,8 @@ Level 0 goes to the first level large enough to hold it. The ten appends here, 1
 1, which holds ten objects of 128 KiB, while a load of gigabytes skips the levels it would only
 overflow and is written once. A dataset that takes many small commits therefore pays for each one a
 merge into a level a few times its size, never a merge into the levels that hold most of its rows.
-An output object is at most `MaxObjectBytes`, 4 MiB by default.
+An output object is at most `MaxObjectBytes`, 64 MiB by default, reached at level 4 and above with the
+default target of level 1.
 
 When a level above 0 grows past its size, it gives up one object, which is merged into the next
 level with the objects there whose keys it overlaps. By default it picks the largest object, the one
@@ -93,9 +94,27 @@ thousand appends at the tail, compaction wrote half the bytes it wrote without t
 
 Compaction writes only the live rows. Rows a delete marked in an input object disappear with it, and
 the outputs carry no marks. An object whose marks reach half a delete's limits (a sixteenth of its
-rows or half a kilobyte of positions) is rewritten alone in its level by a job whose `Trigger` is
-`Marks`. Those jobs come after the level limits and before the fragments, the most marked object
-first. A compaction that read an object before a delete marked rows in it finds the object's entry
+rows, or half of its vector's bound, a thousandth of its bytes and at least a kilobyte) is
+rewritten alone in its level by a job whose `Trigger` is `Marks`. Those jobs come after the level
+limits and before the fragments, the most marked object first.
+
+When the application owes the erasure of deleted rows within a delay, it declares the delay when it
+creates the dataset:
+
+```csharp
+await using VortexDataset events = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
+{
+    ClusteringKey = ["At"],
+    ErasureDelay = TimeSpan.FromDays(30),
+});
+```
+
+An object is then rewritten without its deleted rows once its oldest mark is fifteen days old, by a
+job whose `Trigger` is `Erasure`, and its vector's size alone no longer triggers anything. The old
+object stays readable by the versions the retention keeps, and a vacuum deletes it after them: the
+rows are gone from the store within the delay plus the retention. Every commit of such a dataset is
+written in commit format 4, which earlier releases refuse to open, and a dataset on a locked store
+refuses a delay. A compaction that read an object before a delete marked rows in it finds the object's entry
 changed when it commits, and ends `Abandoned` rather than bringing those rows back.
 
 ## Verify
@@ -234,6 +253,20 @@ object written by another writer carries no identity to bind a fragment to, and 
 it until a compaction rewrites it with the index. The indexes are on one column each: a composite key
 is refused, since its encoder lives in a handle's options.
 
+## Expiry
+
+A dataset that declares periods drops old data a period at a time, without reading it:
+
+```csharp
+DateTimeOffset applied = await dataset.ExpireAsync(DateTimeOffset.UtcNow - TimeSpan.FromDays(30), ct);
+```
+
+The cutoff is aligned down to the start of the period holding the instant you give, and returned. Every
+object whose rows all lie before it goes in one commit, decided from the dataset's tree, with no data
+object read. A row may therefore outlive the instant you gave by up to a period. To drop rows exactly,
+delete them (`DeleteAsync`), which opens the objects that straddle the cutoff and marks their rows.
+Expiry, like a delete, leaves the bytes to vacuum.
+
 ## What each costs
 
 Measured above with `CountingObjectStore`, on a dataset of one object after compaction:
@@ -266,6 +299,11 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
   every commit then throws `TornCommitException`, which names the version.
   `VortexDataset.RemoveTornCommitAsync(store)` removes it once no writer holds it, and the dataset
   reads as the version before.
+* A compaction that dies leaves what it wrote, which no version names, and vacuum deletes it like any
+  other object. An upload in parts it had started is aborted when the job fails, and one the abort
+  could not reach, because the process died, stays in the bucket as parts no object shows. Give the
+  bucket a lifecycle rule that aborts incomplete uploads after a day. The seal of a dataset of periods
+  writes a period's object, gigabytes, in one upload, which makes the rule worth its line.
 * None of this changes the data. After all three operations, the same rows read back.
 
 ## Run it

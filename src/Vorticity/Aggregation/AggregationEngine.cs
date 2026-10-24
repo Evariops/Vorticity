@@ -783,6 +783,9 @@ internal sealed class AggregationPartition
     private readonly int _keyCount;
     private readonly int[] _nodes;
 
+    // The column of distinct sketches of each distinct count's column a batch of states may hold, named at the first.
+    private string?[]? _distinctColumns;
+
     // The filter of each aggregate, or -1, and the selection of each filter over the batch.
     private readonly int[] _filterOf;
     private readonly FilterMasks? _masks;
@@ -2501,6 +2504,12 @@ internal sealed class AggregationPartition
 
     internal void Process(RecordBatch batch)
     {
+        if (batch.CarriesStates)
+        {
+            ProcessStates(batch);
+            return;
+        }
+
         if (_settling is not null)
         {
             FoldSettled(batch.StartRow);
@@ -2526,6 +2535,208 @@ internal sealed class AggregationPartition
         {
             Account(memory);
         }
+    }
+
+    /// <summary>
+    /// Folds a batch of states (<see cref="RecordBatch.CarriesStates"/>), which only a pass that asked
+    /// for them (<see cref="StateRequest"/>) is sent: its key columns, read through the functions the rows'
+    /// are, by the names a batch of states gives them (<see cref="StateRequest.KeyField"/>), give each row
+    /// its group, and each slot folds its aggregate's states, a row standing for the rows of the data it
+    /// counts, to the bits those rows would have given.
+    /// </summary>
+    private void ProcessStates(RecordBatch batch)
+    {
+        int rows = batch.RowCount;
+        if (rows == 0 || batch.SelectedRows == 0)
+        {
+            return;
+        }
+
+        if (_componentKeys is not null || _settling is not null || Top is not null || _masks is not null)
+        {
+            throw new InvalidOperationException("A batch of states reached a pass that streams, settles, takes a top or filters an aggregate, which asks for none.");
+        }
+
+        // The key table numbers its groups as they come: numbering them by value is judged on a first
+        // batch of rows, which this pass may never see first.
+        _wholeJudged = true;
+        CanonicalArena arena = batch.Arena;
+        int root = batch.RootIndex;
+        ReadOnlySpan<ulong> selection = batch.SelectionWords;
+        int before = Keys?.Count ?? 0;
+        if (_rowGroups.Length < rows)
+        {
+            RentRowGroups(rows);
+        }
+
+        Span<int> groups = _rowGroups.AsSpan(0, rows);
+        if (Keys is null)
+        {
+            groups.Clear();
+        }
+        else
+        {
+            for (int c = 0; c < _keyCount; c++)
+            {
+                int node = FilterEvaluator.Resolve(arena, root, StateRequest.KeyField(_columns[c].Field), rows);
+                while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+                {
+                    node = arena.GetNode(node).StorageIndex;
+                }
+
+                _nodes[c] = node;
+            }
+
+            _ranges.Clear();
+            if (Keys.Assign(arena, _nodes.AsSpan(0, _keyCount), rows, selection, _rowGroups, _ranges))
+            {
+                for (int r = 0; r < _ranges.Count; r++)
+                {
+                    groups[_ranges.StartAt(r).._ranges.EndAt(r)].Fill(_ranges.GroupAt(r));
+                }
+            }
+        }
+
+        int count = Keys?.Count ?? 1;
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            Slots[i].EnsureGroups(count);
+        }
+
+        ReadOnlySpan<long> stood = StateColumn(arena, root, StateRequest.RowsColumn);
+        long number = 0;
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            if (_inputs[i] == Settled)
+            {
+                continue;
+            }
+
+            if (StateRequest.FoldsValues(_plan.Aggregates[i].Kind))
+            {
+                // A table of sketches holds the sketch of the column's values in each row, in place of the column, which
+                // an approximate count merges.
+                int column = _inputs[i];
+                _distinctColumns ??= new string?[Slots.Length];
+                string sketches = _distinctColumns[i] ??= StateRequest.DistinctOf(StateRequest.NameOf(_columns[column].Field));
+                if (Sketched(arena, root, sketches, stood, out StateInput distinct))
+                {
+                    if (_plan.Aggregates[i].Kind != AggregateKind.ApproximateCountDistinct || !Slots[i].StepStates(in distinct, selection, groups))
+                    {
+                        throw new InvalidOperationException($"A batch of distinct sketches reached the aggregate {_plan.Aggregates[i].Kind}, which folds none.");
+                    }
+
+                    continue;
+                }
+
+                // A distinct count folds the column the states are keyed by, a value a row of states: the values the
+                // rows hold, each met once or more, which a distinct count does not tell apart.
+                int node = FilterEvaluator.Resolve(arena, root, StateRequest.KeyField(_columns[column].Field), rows);
+                while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+                {
+                    node = arena.GetNode(node).StorageIndex;
+                }
+
+                _nodes[column] = node;
+                _startRow = batch.StartRow;
+                number = number == 0 ? ++_batch : number;
+                Slots[i].StepRows(Input(number, arena, i, rows, selection), groups);
+                continue;
+            }
+
+            StateInput input = StatesOf(
+                arena, root, _plan.Aggregates[i].Input is { } measured ? StateRequest.NameOf(measured.Field) : null, stood,
+                sketched: _plan.Aggregates[i].Kind is AggregateKind.Distribution or AggregateKind.Quantile);
+            if (!Slots[i].StepStates(in input, selection, groups))
+            {
+                throw new InvalidOperationException($"A batch of states reached the aggregate {_plan.Aggregates[i].Kind}, which folds none.");
+            }
+        }
+
+        _rowsFolded += rows;
+        Core?.Fold(this, batch.SelectedRows, before);
+        if (Memory is { } memory)
+        {
+            Account(memory);
+        }
+    }
+
+    /// <summary>
+    /// The states of <paramref name="column"/>'s aggregate in a batch of states, and with <paramref name="sketched"/>, a
+    /// distribution's, its sketches; the rows alone for a count of rows.
+    /// </summary>
+    private static StateInput StatesOf(CanonicalArena arena, int root, string? column, ReadOnlySpan<long> rows, bool sketched)
+    {
+        if (column is null)
+        {
+            return new StateInput { Rows = rows };
+        }
+
+        CanonicalNode batch = arena.GetNode(root);
+        bool floats = batch.DType.IndexOfField(StateRequest.SumWord(column, "m0")) >= 0;
+
+        // A table of sketches holds each measure's besides its states, a binary column of them, which a distribution alone
+        // looks for: its name is made for the batch.
+        StateInput sketches = default;
+        bool sketch = sketched && Sketched(arena, root, StateRequest.SketchOf(column), rows, out sketches);
+        return new StateInput
+        {
+            Rows = rows,
+            Values = StateColumn(arena, root, StateRequest.ValuesOf(column)),
+            Sum0 = StateColumn(arena, root, StateRequest.SumWord(column, floats ? "m0" : "low")),
+            Sum1 = StateColumn(arena, root, StateRequest.SumWord(column, floats ? "m1" : "high")),
+            Sum2 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, "m2")) : default,
+            Sum3 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, "meta")) : default,
+            Sum4 = floats ? StateColumn(arena, root, StateRequest.SumWord(column, "high")) : default,
+            Least = StateColumn(arena, root, StateRequest.LeastOf(column)),
+            Greatest = StateColumn(arena, root, StateRequest.GreatestOf(column)),
+            Floats = floats,
+            SketchViews = sketch ? sketches.SketchViews : default,
+            SketchData = sketch ? sketches.SketchData : default,
+        };
+    }
+
+    /// <summary>
+    /// The sketches of the binary column <paramref name="name"/> of a batch of states, beside the rows each row of states
+    /// stands for, when the batch holds the column.
+    /// </summary>
+    private static bool Sketched(CanonicalArena arena, int root, string name, ReadOnlySpan<long> rows, out StateInput sketches)
+    {
+        CanonicalNode batch = arena.GetNode(root);
+        int field = batch.DType.IndexOfField(name);
+        if (field < 0)
+        {
+            sketches = default;
+            return false;
+        }
+
+        CanonicalNode column = arena.GetNode(EncodedForms.Canonical(arena, batch.GetFieldIndex(field)));
+        if (column.Kind != CanonicalKind.VarBinView)
+        {
+            throw new InvalidOperationException($"The column '{name}' of a batch of states is not binary.");
+        }
+
+        sketches = new StateInput { Rows = rows, SketchViews = column.Views.Span, SketchData = column.DataBuffers };
+        return true;
+    }
+
+    /// <summary>The 64-bit integers of the field <paramref name="name"/> of a batch of states.</summary>
+    private static ReadOnlySpan<long> StateColumn(CanonicalArena arena, int root, string name)
+    {
+        CanonicalNode batch = arena.GetNode(root);
+        int field = batch.DType.IndexOfField(name);
+        if (field < 0)
+        {
+            throw new InvalidOperationException($"A batch of states holds no column '{name}'.");
+        }
+
+        CanonicalNode column = arena.GetNode(batch.GetFieldIndex(field));
+        if (column.Kind != CanonicalKind.Primitive || column.PType != PType.I64)
+        {
+            throw new InvalidOperationException($"The column '{name}' of a batch of states is not 64-bit integers.");
+        }
+
+        return column.Values.Cast<long>();
     }
 
     /// <summary>Reserves what the partition's groups grew to through a merge into it.</summary>
@@ -3285,8 +3496,17 @@ internal abstract class AggregationHost
     /// <summary>The plan of the pass the aggregation would run, before the statistics settle any of it.</summary>
     internal ValueTask<ScanPlan> ExplainAsync(AggregationPlan plan, CancellationToken cancellationToken, VortexExpr? rows = null)
     {
-        (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
-        return Source.ExplainAsync(AggregationEngine.PassSpec(Spec(rows), columns, plan, Source.Schema), cancellationToken);
+        AggregateSlot?[] settled = new AggregateSlot?[plan.Aggregates.Length];
+        (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, settled);
+        ScanSpec pass = AggregationEngine.PassSpec(Spec(rows), columns, plan, Source.Schema);
+
+        // The states the pass would ask for, so that a source that keeps them says per object what it reads.
+        if (pass.Options.UseSynopses && Source.KeepsStates && StateRequest.Of(plan, settled, top: null) is { } states)
+        {
+            pass = pass with { States = states };
+        }
+
+        return Source.ExplainAsync(pass, cancellationToken);
     }
 
     /// <summary>The scan's spec, its filter joined with <paramref name="rows"/>: the conjuncts on a group's key, which filter rows.</summary>
@@ -3362,6 +3582,14 @@ internal static class AggregationEngine
             pass = settling.Pass(pass);
         }
 
+        // A source that keeps states of some of its rows, a dataset's synopses, answers those as states,
+        // for a pass whose every aggregate and key a state answers whole: asked before the rows are cut, so
+        // that the cut leaves whole what states answer.
+        else if (pass.Options.UseSynopses && source.KeepsStates && StateRequest.Of(plan, settled, top) is { } states)
+        {
+            pass = pass with { States = states };
+        }
+
         // On several lanes the structures are read once, before the rows are cut, so that the cut
         // shares the live blocks, not the file's: a filter that keeps a few contiguous blocks keeps
         // every lane busy, rather than the one whose rows hold them. The settling read them already.
@@ -3404,8 +3632,11 @@ internal static class AggregationEngine
             pass = Batched(pass, memory, asked, spilledRow);
 
             // Lanes that read ahead over a source that copies its reads hold their splits in flight beside
-            // their working memory, admitted with it: the largest split of the layout, so many a lane.
-            long splitBytes = ranges is null ? 0 : source.ReadAheadBytes(pass);
+            // their working memory, admitted with it: the largest split of the layout, so many a lane. A pass on
+            // one lane reads ahead too over a store whose read is a round trip, its decode then the caller's, as
+            // many splits as the lanes of a wide pass read together: each of its reads waited on the one before.
+            bool readsAhead = ranges is not null || source.ReadsRoundTrips;
+            long splitBytes = readsAhead ? source.ReadAheadBytes(pass) : 0;
             int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, out int ahead);
 
             // A lane's table reads its slots ahead once past its share of a cache: one lane alone has its
@@ -3453,9 +3684,14 @@ internal static class AggregationEngine
 
                 partitions = [only];
                 plan.Watch?.Invoke(partitions);
-                await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
+                await RunPartitionAsync(source, readsAhead ? pass with { ReadAhead = ahead } : pass, metrics, only, cancellationToken)
+                    .ConfigureAwait(false);
                 only.DropUnmet();
                 only.FoldsNoMore();
+                if (splitBytes > 0)
+                {
+                    memory.LetGo(ahead * splitBytes);
+                }
             }
             else
             {
@@ -3857,16 +4093,16 @@ internal static class AggregationEngine
 
     /// <summary>
     /// <see cref="Admit(QueryMemory, int, int, int)"/>, each lane reading <paramref name="ahead"/> splits
-    /// ahead of <paramref name="splitBytes"/> bytes at most, over a source that copies its reads: two,
-    /// reserved with its working memory; under a budget short of them, one, then none, before the lanes
-    /// are halved, the lanes left reading two again as far as they fit. A lane without reads ahead waits
-    /// on each of its reads. Nothing is reserved for a source that reads in place, whose lanes read two
-    /// ahead.
+    /// ahead of <paramref name="splitBytes"/> bytes at most, over a source that copies its reads: its share of
+    /// <see cref="ReadAheadTotal"/>, two at least, reserved with its working memory; under a budget short of
+    /// them, one fewer at a time down to none, before the lanes are halved, the lanes left reading their share
+    /// again as far as they fit. A lane without reads ahead waits on each of its reads. Nothing is reserved
+    /// for a source that reads in place, whose lanes read their share ahead.
     /// </summary>
     internal static int Admit(QueryMemory memory, int lanes, int batchRows, int spilledRow, long splitBytes, out int ahead)
     {
         long working = Working(batchRows);
-        ahead = BatchAsyncEnumerator.ReadAheadSplits;
+        ahead = AheadOf(lanes);
         long laneBytes = working + (splitBytes * ahead);
 
         // Their working memory a quarter of the ceiling at most: past it, their tables share the rest so
@@ -3882,10 +4118,11 @@ internal static class AggregationEngine
             }
 
             lanes = Math.Max(1, lanes / 2);
-            ahead = BatchAsyncEnumerator.ReadAheadSplits;
+            ahead = AheadOf(lanes);
             laneBytes = working + (splitBytes * ahead);
         }
 
+        TrimAlone(lanes, working, splitBytes, memory.Ceiling, ref ahead, ref laneBytes);
         while (!memory.TryGrow(lanes * laneBytes))
         {
             if (splitBytes > 0 && ahead > 0)
@@ -3900,13 +4137,37 @@ internal static class AggregationEngine
             }
 
             lanes = Math.Max(1, lanes / 2);
-            ahead = BatchAsyncEnumerator.ReadAheadSplits;
+            ahead = AheadOf(lanes);
             laneBytes = working + (splitBytes * ahead);
+            TrimAlone(lanes, working, splitBytes, memory.Ceiling, ref ahead, ref laneBytes);
         }
 
         memory.Measure(lanes * laneBytes);
         return lanes;
     }
+
+    /// <summary>
+    /// A lane alone reads ahead past its two as far as a quarter of the ceiling, as lanes together keep their working
+    /// memory to it, so that its table keeps the rest: <paramref name="ahead"/> cut until it does.
+    /// </summary>
+    private static void TrimAlone(int lanes, long working, long splitBytes, long ceiling, ref int ahead, ref long laneBytes)
+    {
+        while (lanes == 1 && splitBytes > 0 && ahead > BatchAsyncEnumerator.ReadAheadSplits && 4 * laneBytes > ceiling)
+        {
+            laneBytes = working + (splitBytes * --ahead);
+        }
+    }
+
+    /// <summary>
+    /// The splits the lanes of a pass read ahead together, over a store whose read is a round trip: sixteen, what
+    /// eight lanes reading two each keep in flight, where fourteen lanes read no faster at four each than at two on
+    /// 2026-10-06. One lane alone, two splits in flight, took 50 s to read 4.6 GB from a store of 5 ms over a link
+    /// of 10 Gb/s, its decode 15 s of them; at sixteen, 9.7 s.
+    /// </summary>
+    internal const int ReadAheadTotal = 16;
+
+    /// <summary>The splits each of <paramref name="lanes"/> lanes reads ahead: its share of <see cref="ReadAheadTotal"/>, two at least.</summary>
+    private static int AheadOf(int lanes) => Math.Max(BatchAsyncEnumerator.ReadAheadSplits, ReadAheadTotal / Math.Max(lanes, 1));
 
     /// <summary>Gives back the working memory of <paramref name="lanes"/> lanes <see cref="Admit(QueryMemory, int, int, int)"/> admitted, their batches of <paramref name="batchRows"/> rows.</summary>
     internal static void Dismiss(QueryMemory memory, int lanes, int batchRows) => memory.LetGo(lanes * Working(batchRows));
@@ -4418,13 +4679,23 @@ internal static class AggregationEngine
         }
 
         // The columns the filters of filtered groups read, evaluated on each batch of the pass.
+        List<FieldExpr> uses = new List<FieldExpr>(columns.Length);
         foreach (FieldExpr field in plan.Filters.Fields())
         {
             mask.Include(ToolPaths.Resolve(schema, field.Segments ?? field.Path.Split('.'), field.Path));
+            uses.Add(field);
+        }
+
+        // A variant column every key, input and filter reads through one top-level key is read by
+        // those keys alone.
+        foreach (ColumnShape column in columns)
+        {
+            uses.Add(column.Field);
         }
 
         return spec with
         {
+            VariantKeys = Indexes.VariantKeyReads.Of(uses, spec.Filter),
             Projection = mask.Build(),
             KeepEncodings = true,
             SinkDecodes = true,
@@ -4434,6 +4705,9 @@ internal static class AggregationEngine
             OrderPath = null,
             Descending = false,
             Options = spec.Options with { Compact = false },
+
+            // The window a dataset grows for the question, the same whether its states or its rows answer.
+            Aligning = spec.Options.AlignWindow ? StateRequest.Of(plan, new AggregateSlot?[plan.Aggregates.Length], top: null) : null,
         };
     }
 
@@ -4523,7 +4797,8 @@ internal static class AggregationEngine
     /// <summary>Whether the statistics say the key column is sorted, so that its rows come in runs of one key.</summary>
     internal static bool IsSorted(ScanSource source, ColumnShape key)
     {
-        if (source is not FileScanSource file || !file.File.HasFileStatistics || key.Column.FieldPath.Length != 1 || !file.File.Schema.RootIsStruct)
+        if (source is not FileScanSource file || !file.File.HasFileStatistics || key.Column.FieldPath.Length != 1 || !file.File.Schema.RootIsStruct
+            || key.Field is VariantFieldExpr)
         {
             return false;
         }
@@ -4542,7 +4817,7 @@ internal static class AggregationEngine
         {
             sorted[k] = IsSorted(source, keys[k]);
             ColumnShape key = keys[k];
-            bounds[k] = key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1
+            bounds[k] = key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 || key.Field is VariantFieldExpr
                 ? null
                 : await source.BoundsAsync(key, cancellationToken).ConfigureAwait(false);
         }
@@ -4569,13 +4844,14 @@ internal static class AggregationEngine
     /// without a read: a file's statistics, a dataset's summaries in hand; what bounds a table of its
     /// groups (<see cref="FixedKeys{TValue}"/>).
     /// </summary>
+    /// <remarks>A variant's path has none: the variant column's statistics describe the column, not a path in it.</remarks>
     internal static KeyBounds? Bounds(ScanSource source, ColumnShape key) =>
-        key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 ? null : source.Bounds(key);
+        key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 || key.Field is VariantFieldExpr ? null : source.Bounds(key);
 
     /// <summary>The smallest and the largest value of an integer column of a key, when <paramref name="file"/>'s statistics hold them exactly.</summary>
     internal static KeyBounds? FileBounds(VortexFile file, ColumnShape key)
     {
-        if (key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || !file.HasFileStatistics
+        if (key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || !file.HasFileStatistics || key.Field is VariantFieldExpr
             || key.Column.FieldPath.Length != 1 || !file.Schema.RootIsStruct || key.Column.FieldPath[0] >= file.Statistics.Count)
         {
             return null;
@@ -4802,7 +5078,12 @@ internal static class AggregationEngine
         // The degree is the parallelism: a partition already runs on the pool, and decoding ahead
         // inside each one would put twice the degree's lanes on it. Its reads go ahead of its decode
         // instead, on a source whose read is a round trip: the splits its admission granted.
-        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = ahead };
+        // The splits the lanes were granted together go to those that read rows: lanes that answer a dataset's objects
+        // from their synopses read none, and two lanes left reading rows among sixteen waited on each of their reads.
+        // As many in flight as the lanes were granted, ReadAheadTotal a lane at most.
+        int readers = Math.Clamp(source.RangesReadingRows(ranges), 1, partitions.Length);
+        int shared = ahead > 0 ? Math.Max(ahead, Math.Min(ReadAheadTotal, ahead * partitions.Length / readers)) : ahead;
+        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = shared };
         int[] next = [-1];
 
         // The ranges the fan's first ranges took, each its lane's before any lane starts, which the queue

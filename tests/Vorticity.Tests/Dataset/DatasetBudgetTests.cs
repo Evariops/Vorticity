@@ -384,6 +384,130 @@ public sealed class DatasetBudgetTests
         return (store.Requests, metrics.ObjectsOpened);
     }
 
+    [Fact]
+    public async Task AnObjectWhoseFooterPassesTheFirstReadOpensInOneRequest()
+    {
+        // A table of 1,500 columns: their dtype, layouts and statistics put the footer past the 64 KiB
+        // an open reads first. The entry records the footer's length and an open reads it in one
+        // request; the same entry without it takes two. The commit that adds such an entry is
+        // written in format 4.
+        Decoders.EnsureRegistered();
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const int rows = 256;
+        const int columns = 1_500;
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        string[] names = [.. Enumerable.Range(0, columns).Select(column => column == 0 ? "key" : FormattableString.Invariant($"c{column:D4}"))];
+        DType schema = types.Struct(names, [.. names.Select(_ => i64)], Nullability.NonNullable);
+        DatasetOptions options = new DatasetOptions { Seed = Seed, ClusteringKey = ["key"] };
+
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using (VortexDataset writer = await VortexDataset.CreateAsync(store, schema, options, ct))
+        {
+            await writer.AppendAsync(WideBatch(schema, i64, columns, rows), ct);
+        }
+
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options, ct);
+        List<ObjectEntry> entries = [];
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, ct))
+        {
+            entries.Add(held.Entry);
+        }
+
+        ObjectEntry entry = Assert.Single(entries);
+        Assert.InRange(entry.FooterBytes, ObjectEntry.FirstReadBytes + 1, entry.Bytes);
+        (ulong _, CommitObject? latest) = await DatasetCommitter.LatestAsync(store, ct);
+        Assert.Equal(DatasetFeatures.EntryFields, Assert.IsType<CommitObject>(latest).Header.Features);
+
+        store.Reset();
+        await using (ObjectLease lease = await dataset.RentAsync(entry, ct))
+        {
+            Assert.Equal(rows, lease.File.RowCount);
+        }
+
+        long described = store.Requests;
+        ObjectEntry silent = new ObjectEntry(entry.Key, entry.Uid, entry.Rows, entry.Bytes, entry.Hash, entry.Fragments, entry.Summaries);
+        await using VortexDataset other = await VortexDataset.OpenAsync(store, options, ct);
+        store.Reset();
+        await using (ObjectLease lease = await other.RentAsync(silent, ct))
+        {
+            Assert.Equal(rows, lease.File.RowCount);
+        }
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET BUDGET, OPEN: a footer of {entry.FooterBytes} bytes opened in {described} request(s) with its length in the entry, {store.Requests} without.\n"));
+        Assert.Equal(1, described);
+        Assert.Equal(2, store.Requests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnObjectSentAsItIsWrittenIsDescribedAsOneHeldWhole(bool encrypted)
+    {
+        // The same rows, an object of most of a mebibyte: held whole and described from memory, or past
+        // a threshold of 64 KiB sent to the store as it is written and described from there once put.
+        // The entries say the same of their objects, their leaves sit at the same keys, and the rows
+        // read back the same.
+        Decoders.EnsureRegistered();
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using VortexKeyring? keyring = encrypted ? Sealing.SealedObjects.Keyring() : null;
+        await using VortexSession session = VortexSession.Create(o => o.Keyring = keyring);
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType schema = types.Struct(["key", "measure"], [i64, i64], Nullability.NonNullable);
+        Random draw = new Random(0x57_4EA);
+        long[] keys = [.. Enumerable.Range(0, 60_000).Select(row => (long)((row * 7919) % 60_000))];
+        long[] measures = [.. keys.Select(_ => draw.NextInt64())];
+        List<(ObjectEntry Entry, ReadOnlyMemory<byte> TreeKey)> described = [];
+        List<long> sums = [];
+        foreach (long streamedFrom in new long[] { ObjectSegmentSink.DefaultStreamedFromBytes, 64 << 10 })
+        {
+            DatasetOptions options = new DatasetOptions
+            {
+                Seed = Seed,
+                ClusteringKey = ["key"],
+                Session = session,
+                Encrypted = encrypted,
+                StreamedObjectBytes = streamedFrom,
+            };
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
+            await dataset.AppendAsync(OneBatch(types, schema, keys, measures), ct);
+            await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, ct))
+            {
+                described.Add((held.Entry, held.TreeKey));
+            }
+
+            sums.Add(await dataset.ScanBuilder().Where(Expr.Gt(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(0L)))).CountAsync(ct));
+        }
+
+        Assert.Equal(2, described.Count);
+        (ObjectEntry held0, ReadOnlyMemory<byte> heldKey) = described[0];
+        (ObjectEntry streamed, ReadOnlyMemory<byte> streamedKey) = described[1];
+        Assert.True(held0.Bytes > 64 << 10, $"an object of {held0.Bytes} bytes does not pass the threshold");
+        Assert.Equal((held0.Rows, held0.Summaries), (streamed.Rows, streamed.Summaries));
+        Assert.Equal(heldKey[..^VortexDataset.UidBytes].ToArray(), streamedKey[..^VortexDataset.UidBytes].ToArray());
+        Assert.Equal(sums[0], sums[1]);
+    }
+
+    /// <summary>One batch of <paramref name="columns"/> long columns, the first the key, the others the row times the column.</summary>
+    private static async IAsyncEnumerable<RecordBatch> WideBatch(DType schema, DType i64, int columns, int rows)
+    {
+        await Task.Yield();
+        CanonicalArena arena = new CanonicalArena();
+        int[] children = new int[columns];
+        for (int column = 0; column < columns; column++)
+        {
+            long[] values = [.. Enumerable.Range(0, rows).Select(row => (long)row * (column + 1))];
+            children[column] = arena.AddPrimitive(i64, rows, Validity.NonNullable, PType.I64, Buffer(arena, values));
+        }
+
+        int root = arena.AddStruct(schema, rows, Validity.NonNullable, children);
+        yield return new RecordBatch(arena, root, 0);
+    }
+
     private static async IAsyncEnumerable<RecordBatch> OneBatch(
         DTypeArena types, DType schema, long[] keys, long[] measures)
     {

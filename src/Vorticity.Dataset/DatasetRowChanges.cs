@@ -112,6 +112,7 @@ internal static class DatasetRowChanges
     {
         CommitKind kind = start is null ? CommitKind.Delete : CommitKind.Update;
         int attempts = Math.Max(dataset.Options.MaxAttempts, 1);
+        int doublings = 0;
         for (int attempt = 1; attempt <= attempts; attempt++)
         {
             DatasetSnapshot version = dataset.Snapshot;
@@ -129,8 +130,11 @@ internal static class DatasetRowChanges
                 await foreach (PositionedObject held in version
                     .WalkAsync(pruner, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
                 {
-                    Change change = await RewriteAsync(dataset, version, held, filter, changed, cancellationToken)
-                        .ConfigureAwait(false);
+                    // An object whose summaries prove every row selected goes whole, unopened, when no
+                    // sink wants its rows: bounds only loosen under marks, so its live rows are selected too.
+                    Change change = changed is null && pruner is not null && pruner.MustMatch(held.Entry.Summaries.Columns, held.Entry.PhysicalRows)
+                        ? new Change(held.Entry.Rows, null, null)
+                        : await RewriteAsync(dataset, version, held, filter, changed, doublings, cancellationToken).ConfigureAwait(false);
                     if (change.Taken == 0)
                     {
                         continue;
@@ -164,6 +168,19 @@ internal static class DatasetRowChanges
                         bytesOut += written.Entry.Bytes;
                     }
                 }
+            }
+            catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
+            {
+                // An object kept ran past the bound its put announced: the change starts again under one twice
+                // as large, which no other writer caused, so it takes no attempt. What it wrote is left for vacuum.
+                if (changed is not null)
+                {
+                    await changed.AbandonAsync().ConfigureAwait(false);
+                }
+
+                doublings++;
+                attempt--;
+                continue;
             }
             catch
             {
@@ -246,6 +263,7 @@ internal static class DatasetRowChanges
         PositionedObject held,
         VortexExpr? filter,
         ChangedRows? changed,
+        int doublings,
         CancellationToken cancellationToken)
     {
         ObjectLease lease = await version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
@@ -266,7 +284,7 @@ internal static class DatasetRowChanges
                 // only then handed to the sink, which a rewrite would hand them to instead.
                 bool fits = FitsAtWorst(dataset.Options, held.Entry, matched);
                 DeletionVector deletions = await MarkAsync(file, held, columns, filter, fits ? changed : null, cancellationToken).ConfigureAwait(false);
-                if (fits || deletions.EncodedBytes <= dataset.Options.MarkedVectorBytes)
+                if (fits || deletions.EncodedBytes <= dataset.Options.MarkedVectorBytesOf(held.Entry.Bytes))
                 {
                     if (!fits && changed is not null)
                     {
@@ -280,14 +298,30 @@ internal static class DatasetRowChanges
                             "a delete that loses or doubles rows is the one failure it must not have.");
                     }
 
-                    return new Change(matched, null, held.Entry.WithDeletions(deletions));
+                    // Under an erasure delay the entry says when its oldest mark was made, which the
+                    // planner purges it by.
+                    ObjectEntry marked = held.Entry.WithDeletions(deletions);
+                    return new Change(
+                        matched,
+                        null,
+                        dataset.Options.ErasureDelay is null ? marked : marked.WithMarkedAt(dataset.Options.TimeProvider.GetUtcNow().ToUnixTimeSeconds()));
                 }
             }
 
             // Written in the version's schema, which an object of an earlier one is read as. The rows
             // kept are the object's own in its own order, and an object above level 0 is a
-            // compaction's, whose rows come in key order.
-            ObjectDraft? draft = matched < held.Entry.Rows ? dataset.StartObjectUnder(version.Schema, inKeyOrder: DatasetLevels.InKeyOrder(held.Level)) : null;
+            // compaction's, whose rows come in key order, or in sorted slices for a dataset of periods.
+            // They are some of its rows, which bound what the store sizes the parts of the object from.
+            ObjectDraft? draft = matched < held.Entry.Rows
+                ? dataset.StartObjectUnder(
+                    version.Schema, inKeyOrder: version.Levels.RowsInKeyOrder(held.Level), byteBound: ObjectBound.Of(held.Entry.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                : null;
+            if (draft is not null && version.Schema.Key is { } rewritten)
+            {
+                // The rows kept are the object's own: its one partition value, if it has one.
+                draft.Partition = rewritten.PartitionOf(held.Entry.Summaries);
+            }
+
             try
             {
                 long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, changed, cancellationToken).ConfigureAwait(false);
@@ -346,7 +380,7 @@ internal static class DatasetRowChanges
     {
         int varint = TreePage.VarintBytes((ulong)entry.PhysicalRows);
         long held = entry.VectorBytes;
-        return held + (matched * 2 * varint) <= options.MarkedVectorBytes;
+        return held + (matched * 2 * varint) <= options.MarkedVectorBytesOf(entry.Bytes);
     }
 
     /// <summary>
@@ -755,7 +789,8 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
 
         if (await _dataset.SealAsync(draft, _draftRows, _firstRow, cancellationToken).ConfigureAwait(false) is { } written)
         {
-            _written.Add(written);
+            // A changed row may carry another partition value: an object per value, as an append writes.
+            _written.AddRange(await _dataset.PartitionedAsync(written, cancellationToken).ConfigureAwait(false));
         }
 
         _firstRow += _draftRows;

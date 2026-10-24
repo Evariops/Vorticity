@@ -104,13 +104,24 @@ public readonly struct Group<TRecord, TKey>
     public Sym<long> CountDistinct<T>(Func<Probe<TRecord>, Sym<T>> column) =>
         Aggregators.Filtered(Aggregators.CountDistinct(Aggregators.Input(_binding, column)), _filter);
 
+    /// <summary>
+    /// About the number of distinct non-null values of <paramref name="column"/> in the group: exact up
+    /// to 64 values, about 0.8 % off past them, in at most 16 KiB a group whatever the values, and the
+    /// same count however the scan is cut.
+    /// </summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the estimate.</returns>
+    public Sym<long> ApproximateCountDistinct<T>(Func<Probe<TRecord>, Sym<T>> column) =>
+        Aggregators.Filtered(Aggregators.ApproximateCountDistinct(Aggregators.Input(_binding, column)), _filter);
+
     /// <summary>The sum of <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the sum; reading it throws <see cref="OverflowException"/> when the sum does not fit <typeparamref name="T"/>.</returns>
     public Sym<T> Sum<T>(Func<Probe<TRecord>, Sym<T>> column)
         where T : INumber<T> =>
-        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.Input(_binding, column)), _filter);
+        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.SumInput(_binding, column)), _filter);
 
     /// <summary>The sum of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type, without its nullability.</typeparam>
@@ -118,7 +129,7 @@ public readonly struct Group<TRecord, TKey>
     /// <returns>The symbol of the sum.</returns>
     public Sym<T> Sum<T>(Func<Probe<TRecord>, Sym<T?>> column)
         where T : struct, INumber<T> =>
-        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.Input(_binding, column)), _filter);
+        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.SumInput(_binding, column)), _filter);
 
     /// <summary>The sum of <paramref name="column"/> in the group, as a long, which no sum of narrower integers overflows on the way.</summary>
     /// <param name="column">The column.</param>
@@ -203,6 +214,53 @@ public readonly struct Group<TRecord, TKey>
     public Sym<double?> Average<T>(Func<Probe<TRecord>, Sym<T?>> column)
         where T : struct, INumber<T> =>
         Aggregators.Filtered(Aggregators.Average(Aggregators.Input(_binding, column)), _filter);
+
+    /// <summary>
+    /// The value at share <paramref name="q"/> of the group's values of <paramref name="column"/> in
+    /// ascending order, within <paramref name="relativeError"/>: 0.5 the median, 0.99 the 99th percentile.
+    /// </summary>
+    /// <typeparam name="T">The column's numeric type.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <param name="q">The share, within [0, 1].</param>
+    /// <param name="relativeError">The largest error of the answer relatively to a value at that rank, in (0, 1); 1 % by default.</param>
+    /// <returns>The symbol of the quantile; null when no row of the group holds a value.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="q"/> or <paramref name="relativeError"/> is out of range.</exception>
+    public Sym<double?> Quantile<T>(Func<Probe<TRecord>, Sym<T>> column, double q, double relativeError = 0.01)
+        where T : INumber<T> =>
+        Aggregators.Filtered(Aggregators.Quantile(Aggregators.Input(_binding, column), q, relativeError), _filter);
+
+    /// <summary>The quantile of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
+    /// <typeparam name="T">The column's numeric type, without its nullability.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <param name="q">The share, within [0, 1].</param>
+    /// <param name="relativeError">The largest relative error of the answer; 1 % by default.</param>
+    /// <returns>The symbol of the quantile; null when no row of the group holds a value.</returns>
+    public Sym<double?> Quantile<T>(Func<Probe<TRecord>, Sym<T?>> column, double q, double relativeError = 0.01)
+        where T : struct, INumber<T> =>
+        Aggregators.Filtered(Aggregators.Quantile(Aggregators.Input(_binding, column), q, relativeError), _filter);
+
+    /// <summary>
+    /// The distribution of the group's values of <paramref name="column"/>: its quantiles and its
+    /// histogram, within <paramref name="relativeError"/>. A distribution is no column, so a selection of
+    /// groups takes a <see cref="Quantile{T}(Func{Probe{TRecord}, Sym{T}}, double, double)"/>, and an
+    /// answer over a whole scan the distribution itself.
+    /// </summary>
+    /// <typeparam name="T">The column's numeric type.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <param name="relativeError">The largest relative error of a quantile; 1 % by default.</param>
+    /// <returns>The symbol of the distribution; null when no row holds a value.</returns>
+    public Sym<Distribution?> Distribution<T>(Func<Probe<TRecord>, Sym<T>> column, double relativeError = 0.01)
+        where T : INumber<T> =>
+        Aggregators.Filtered(Aggregators.Distribution(Aggregators.Input(_binding, column), relativeError), _filter);
+
+    /// <summary>The distribution of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
+    /// <typeparam name="T">The column's numeric type, without its nullability.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <param name="relativeError">The largest relative error of a quantile; 1 % by default.</param>
+    /// <returns>The symbol of the distribution; null when no row holds a value.</returns>
+    public Sym<Distribution?> Distribution<T>(Func<Probe<TRecord>, Sym<T?>> column, double relativeError = 0.01)
+        where T : struct, INumber<T> =>
+        Aggregators.Filtered(Aggregators.Distribution(Aggregators.Input(_binding, column), relativeError), _filter);
 
     /// <summary>The sample variance of <paramref name="column"/> in the group, over <c>n − 1</c>.</summary>
     /// <typeparam name="T">The column's type.</typeparam>

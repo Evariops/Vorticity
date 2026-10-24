@@ -70,6 +70,7 @@ at a time is worth writing with smaller chunks, through `ChunkTargetBytes`
 | `Postings(column)` | value to blocks, exact | equality and `In` on a column of few values |
 | `ForKey([column], IndexKind.NgramPostings)` | trigrams to blocks, exact | `Contains` and `Like` on a text column, larger than the n-gram filter |
 | `SortedRuns(column)` | value to rows, sorted | equality, ranges, and the key cursor over an unsorted column |
+| `HashedPostings(column)` | value to blocks through its hash, about 3 bytes a row | equality and `In` on a long, rare value such as an identifier, a probe reading about 44 KiB |
 | `ForKey(columns, kind, encoder)` | sorted runs over a tuple's row encoding | a composite key |
 
 The locating kinds, measured on the same rows:
@@ -161,6 +162,24 @@ An abandoned index leaves no bytes behind. The file was 90 bytes larger than one
 policy, which is the index directory. The budget only drops an index that has not written anything
 yet, so an index whose filters are already in the file is kept even past the budget.
 
+## Keys of a variant column
+
+A variant column holds a document per row, and its keys are not columns, so a policy that names the
+column indexes the keys a shredded object keeps in typed columns, each in the class of its values:
+
+```csharp
+Indexes = IndexPolicy.None.Bloom("Attributes"),
+```
+
+The report and `file.GetIndexesAsync()` name each such index as the question that probes it, here
+`Attributes['status'].AsInt64()`. `Attributes["status"].AsInt64() == 502` and its `IN` lists ask that
+filter, and skip the blocks it rules out. `Attributes["status"].AsString() == "502"` never asks it,
+since the text `"502"` is another value than the integer, written apart, so neither question ever
+finds the other's rows. `IndexPolicy.Auto` tries the same filter on every such key, judged against the
+bytes the key's own values take. A Bloom filter indexes a key, and so do hashed postings for a
+dataset's identifier among the attributes (see [identifiers of a dataset](#identifiers-of-a-dataset)).
+Objects written by appends shred nothing, and carry no index on their keys.
+
 ## Required
 
 ```
@@ -200,6 +219,43 @@ compactions in other processes included, whatever their options and their budget
 written before takes a fragment that holds it. [dataset-maintenance.md](dataset-maintenance.md) shows
 what it costs and what it buys, and the design is in
 [13-dataset.md](../design/13-dataset.md#64-fragments-in-commit-objects-transient).
+
+`dataset.IndexAsync(IndexPolicy.Auto)` gives every column its automatic indexes instead, the columns
+you add later with `EvolveSchemaAsync` included. Writers apply it from the next object they write,
+within the budget, and the objects already there take it when compaction rewrites them.
+
+## Identifiers of a dataset
+
+A column whose values a question looks up one at a time, a request's id or a trace's, is declared when
+the dataset is created:
+
+```csharp
+DatasetOptions options = new DatasetOptions
+{
+    ClusteringKey = ["At"],
+    Identifiers = ["RequestId"],
+};
+```
+
+Every object the dataset writes then carries hashed postings on the column, appends and compactions
+alike, exempt from the index budget as the clustering key's run is. A lookup of one id reads one segment
+of about 44 KiB per object, then only the blocks that hold it, and about one probe in a thousand keeps a
+block that does not. On ids of 32 hexadecimal digits the postings take under 3 bytes a row, where a
+sorted run took 19.5. No Bloom filter is tried on an identifier: its values are as many as its rows,
+and a tree of filters loses its upper nodes past what one filter holds.
+
+An identifier may also be a key of a variant column, read as a string or an integer, written as a filter
+writes it:
+
+```csharp
+Identifiers = ["Attributes['user'].AsString()"],
+```
+
+A compaction then shreds the key wherever a row holds a string there, and indexes it the same way, so
+`r.Attributes["user"].AsString() == id` finds its rows as `r.RequestId == id` does. Objects written by
+appends shred nothing and carry no index on the key, until a compaction rewrites them. A name that is
+neither a column nor such a key, or a key read in another class, is refused when the dataset is
+created.
 
 ## Watch out
 

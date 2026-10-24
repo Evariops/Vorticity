@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO.Hashing;
 using System.Text;
 using Vorticity.IO;
@@ -90,7 +91,19 @@ internal sealed record IndexEntry(
     IReadOnlyList<uint> ColumnPath,
     ulong BlockLength,
     byte[] Options,
-    IReadOnlyList<IndexRun> Runs);
+    IReadOnlyList<IndexRun> Runs)
+{
+    /// <summary>
+    /// The keys of the path into the variant column <see cref="ColumnPath"/> names that the entry
+    /// indexes, its values read as <see cref="VariantClass"/>; null for an entry on a column. A reader
+    /// older than paths skips both fields, and sees an entry on a variant column, which no kind
+    /// supports, so it uses none.
+    /// </summary>
+    internal IReadOnlyList<string>? VariantPath { get; init; }
+
+    /// <summary>The class the path's values are read as, one entry per class; null for an entry on a column.</summary>
+    internal Types.Variants.PathClass? VariantClass { get; init; }
+}
 
 /// <summary>
 /// The index directory of one file: a single postscript metadata entry whose segment is this
@@ -119,6 +132,9 @@ internal sealed record IndexDirectory(
 {
     /// <summary>The postscript metadata key the directory is stored under.</summary>
     public const string MetadataKey = "vorticity.index";
+
+    /// <summary>A file row count a reader that opens no footer does not know: the directory's own stands.</summary>
+    internal const ulong UnknownRows = ulong.MaxValue;
 
     /// <summary>The version this library writes and reads: checksummed.</summary>
     internal const byte FormatVersion = 2;
@@ -182,6 +198,8 @@ internal sealed record IndexDirectory(
     private const int EntryBlockLen = 3;
     private const int EntryOptions = 4;
     private const int EntryRuns = 5;
+    private const int EntryVariantPath = 6;
+    private const int EntryVariantClass = 7;
     private const int RunFirstBlock = 1;
     private const int RunBlockCount = 2;
     private const int RunPayload = 3;
@@ -219,7 +237,17 @@ internal sealed record IndexDirectory(
 
     /// <summary>Serializes the directory: the version byte, then the message.</summary>
     /// <returns>The segment's bytes.</returns>
-    public byte[] ToBytes()
+    public byte[] ToBytes() => ToBytes(null);
+
+    /// <summary>
+    /// <see cref="ToBytes()"/>, noting in <paramref name="located"/>, when it is given, where the message of each entry of a
+    /// locating index lies in the bytes (<see cref="IndexKinds.Locates"/>): what a table of contents names, so that a lookup
+    /// reads the entries on its columns alone (<see cref="TryParseEntry"/>), where the whole directory of a day's object held
+    /// every chunk of its synopsis tables.
+    /// </summary>
+    /// <param name="located">Where each such entry's message lies: its start in the bytes, and its length.</param>
+    /// <returns>The segment's bytes, the same with or without <paramref name="located"/>.</returns>
+    internal byte[] ToBytes(List<(IndexEntry Entry, int Start, int Length)>? located)
     {
         ProtoWriter writer = new ProtoWriter();
         try
@@ -235,6 +263,16 @@ internal sealed record IndexDirectory(
 
             foreach (IndexEntry entry in Entries)
             {
+                // A locating index's entry written whole first, its place then known: no message is open, so none of the
+                // bytes written moves after.
+                if (located is not null && IndexKinds.Locates(entry.Kind))
+                {
+                    byte[] message = EntryBytes(entry);
+                    writer.WriteBytesAlways(DirEntries, message);
+                    located.Add((entry, writer.WrittenSpan.Length - message.Length, message.Length));
+                    continue;
+                }
+
                 using ProtoWriter.MessageScope scope = writer.BeginMessage(DirEntries);
                 WriteEntry(ref writer, entry);
             }
@@ -385,6 +423,21 @@ internal sealed record IndexDirectory(
         }
     }
 
+    /// <summary>The message of <paramref name="entry"/> alone, as a directory holds it.</summary>
+    private static byte[] EntryBytes(IndexEntry entry)
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            WriteEntry(ref writer, entry);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     private static void WriteEntry(ref ProtoWriter writer, IndexEntry entry)
     {
         writer.WriteString(EntryKind, entry.Kind);
@@ -395,6 +448,16 @@ internal sealed record IndexDirectory(
 
         writer.WriteUInt64Always(EntryBlockLen, entry.BlockLength);
         writer.WriteBytes(EntryOptions, entry.Options);
+        foreach (string key in entry.VariantPath ?? [])
+        {
+            writer.WriteBytesAlways(EntryVariantPath, Encoding.UTF8.GetBytes(key));
+        }
+
+        if (entry.VariantClass is { } @class)
+        {
+            writer.WriteUInt32Always(EntryVariantClass, (uint)@class);
+        }
+
         foreach (IndexRun run in entry.Runs)
         {
             using ProtoWriter.MessageScope scope = writer.BeginMessage(EntryRuns);
@@ -420,7 +483,10 @@ internal sealed record IndexDirectory(
     /// and an entry that does not hold up is dropped on its own.
     /// </summary>
     /// <param name="bytes">The metadata segment.</param>
-    /// <param name="fileRowCount">The file's own row count.</param>
+    /// <param name="fileRowCount">
+    /// The file's own row count, or <see cref="UnknownRows"/> for a reader that opens no footer and
+    /// reads an object no one appends to, whose directory's own count then stands.
+    /// </param>
     /// <param name="dataEnd">
     /// The first byte a run may not reach: the footer's start. A run segment lies inside the file
     /// and before the footer, or its entry is ignored.
@@ -433,6 +499,24 @@ internal sealed record IndexDirectory(
     /// </returns>
     public static bool TryParse(
         ReadOnlySpan<byte> bytes, ulong fileRowCount, ulong dataEnd,
+        out IndexDirectory? directory, out string? reason) =>
+        TryParse(bytes, fileRowCount, dataEnd, null, out directory, out reason);
+
+    /// <summary>
+    /// <see cref="TryParse(ReadOnlySpan{byte}, ulong, ulong, out IndexDirectory?, out string?)"/>, keeping only the entries on
+    /// the columns <paramref name="columns"/> says yes of, by the first field of their path from the root, those on the root
+    /// itself by <see cref="RootColumn"/>, every one when it is null: an entry on another column is passed over before its
+    /// runs are read.
+    /// </summary>
+    /// <param name="bytes">The metadata segment.</param>
+    /// <param name="fileRowCount">The file's own row count, or <see cref="UnknownRows"/>.</param>
+    /// <param name="dataEnd">The first byte a run may not reach: the footer's start.</param>
+    /// <param name="columns">Whether an entry on the column of this field of the root, or on the root, is kept; null for every entry.</param>
+    /// <param name="directory">The directory, holding only the entries that passed.</param>
+    /// <param name="reason">Why the whole directory was refused, when it was.</param>
+    /// <returns>Whether the directory is usable.</returns>
+    public static bool TryParse(
+        ReadOnlySpan<byte> bytes, ulong fileRowCount, ulong dataEnd, Func<uint, bool>? columns,
         out IndexDirectory? directory, out string? reason)
     {
         directory = null;
@@ -455,7 +539,7 @@ internal sealed record IndexDirectory(
 
         try
         {
-            return TryParseBody(bytes[1..^ChecksumSize], FormatVersion, fileRowCount, dataEnd, out directory, out reason);
+            return TryParseBody(bytes[1..^ChecksumSize], FormatVersion, fileRowCount, dataEnd, columns, out directory, out reason);
         }
         catch (VortexFormatException e)
         {
@@ -468,7 +552,7 @@ internal sealed record IndexDirectory(
     }
 
     private static bool TryParseBody(
-        ReadOnlySpan<byte> body, byte expectedVersion, ulong fileRowCount, ulong dataEnd,
+        ReadOnlySpan<byte> body, byte expectedVersion, ulong fileRowCount, ulong dataEnd, Func<uint, bool>? columns,
         out IndexDirectory? directory, out string? reason)
     {
         directory = null;
@@ -521,7 +605,7 @@ internal sealed record IndexDirectory(
                     policy = ReadPolicy(reader.ReadMessage());
                     break;
                 case DirEntries when wire == ProtoWireType.LengthDelimited:
-                    if (TryReadEntry(reader.ReadMessage(), out IndexEntry? entry))
+                    if (TryReadEntry(reader.ReadMessage(), columns, out IndexEntry? entry))
                     {
                         entries.Add(entry!);
                     }
@@ -539,7 +623,7 @@ internal sealed record IndexDirectory(
             return false;
         }
 
-        if (rowCount != fileRowCount)
+        if (fileRowCount != UnknownRows && rowCount != fileRowCount)
         {
             reason = $"the directory was written for {rowCount} rows and the file has {fileRowCount}: " +
                 "a stale directory after a failed append proves nothing";
@@ -610,20 +694,60 @@ internal sealed record IndexDirectory(
         return true;
     }
 
-    private static bool TryReadEntry(ProtoReader reader, out IndexEntry? entry)
+    /// <summary>
+    /// The entry the message <paramref name="bytes"/> holds, as a directory read whole keeps it (<see cref="ToBytes(List{ValueTuple{IndexEntry, int, int}}?)"/>):
+    /// false when it does not parse, is of a kind this library does not know, or has runs that are not sound before
+    /// <paramref name="dataEnd"/>, which costs the entry alone, never the file.
+    /// </summary>
+    internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, ulong dataEnd, [NotNullWhen(true)] out IndexEntry? entry)
+    {
+        try
+        {
+            if (TryReadEntry(new ProtoReader(bytes), null, out IndexEntry? read) && read is not null && RunsAreSound(read, dataEnd))
+            {
+                entry = read;
+                return true;
+            }
+        }
+        catch (VortexFormatException)
+        {
+        }
+
+        entry = null;
+        return false;
+    }
+
+    private static bool TryReadEntry(ProtoReader reader, Func<uint, bool>? columns, out IndexEntry? entry)
     {
         entry = null;
+
+        // An entry on a column its reader asks nothing of is passed over before its runs are read: a lookup of one
+        // column's values parsed every index of the object, a list of segments a run, the most a question that leaves
+        // an identifier out allocated.
+        if (columns is not null && !OnColumn(reader, columns))
+        {
+            return false;
+        }
+
         string? kind = null;
         List<uint> path = [];
         ulong blockLength = 0;
         byte[] options = [];
         List<IndexRun> runs = [];
+        List<string>? variantPath = null;
+        uint? variantClass = null;
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field)
             {
                 case EntryKind when wire == ProtoWireType.LengthDelimited:
                     kind = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case EntryVariantPath when wire == ProtoWireType.LengthDelimited:
+                    (variantPath ??= []).Add(Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
+                    break;
+                case EntryVariantClass when wire == ProtoWireType.Varint:
+                    variantClass = reader.ReadVarint32();
                     break;
                 case EntryColumnPath when wire == ProtoWireType.Varint:
                     path.Add(reader.ReadVarint32());
@@ -659,8 +783,45 @@ internal sealed record IndexDirectory(
             return false;
         }
 
-        entry = new IndexEntry(kind, path, blockLength, options, runs);
+        // A path names its class, and a class its path: one without the other is no entry this library wrote.
+        if ((variantPath is null) != (variantClass is null) || variantClass > (uint)Types.Variants.PathClass.Other)
+        {
+            return false;
+        }
+
+        entry = new IndexEntry(kind, path, blockLength, options, runs)
+        {
+            VariantPath = variantPath,
+            VariantClass = (Types.Variants.PathClass?)variantClass,
+        };
         return true;
+    }
+
+    /// <summary>
+    /// The column <c>TryParse</c> asks its predicate of for an entry on the root itself, a table of a synopsis or a slice's
+    /// chunks: a reader that asks only of some columns says whether it wants them too.
+    /// </summary>
+    internal const uint RootColumn = uint.MaxValue;
+
+    /// <summary>Whether the entry the message holds lies on a column <paramref name="columns"/> keeps, by the first field of its path, or on the root.</summary>
+    private static bool OnColumn(ProtoReader reader, Func<uint, bool> columns)
+    {
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field)
+            {
+                case EntryColumnPath when wire == ProtoWireType.Varint:
+                    return columns(reader.ReadVarint32());
+                case EntryColumnPath when wire == ProtoWireType.LengthDelimited:
+                    ProtoReader packed = reader.ReadMessage();
+                    return columns(packed.End ? RootColumn : packed.ReadVarint32());
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return columns(RootColumn);
     }
 
     private static IndexRun ReadRun(ProtoReader reader)

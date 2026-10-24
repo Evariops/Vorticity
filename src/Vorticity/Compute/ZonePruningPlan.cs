@@ -77,7 +77,8 @@ internal static class ZonePruningPlan
     /// <param name="indexes">Whether the file's index directory takes part.</param>
     /// <param name="scope">
     /// The blocks the scan's rows reach, over blocks of the natural batch size, when they are not
-    /// the whole file: a step counts only the blocks it pruned among them.
+    /// the whole file: a step counts only the blocks it pruned among them, and the mask leaves the
+    /// others dead, which no structure asks about.
     /// </param>
     internal static async ValueTask<PruningPlan> PlanAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
@@ -92,18 +93,53 @@ internal static class ZonePruningPlan
         Scanning.ScanCounters.Note(metrics, segments, bytes);
 
         long blockRows = Scanning.SplitPlan.NaturalBatchRows(tree);
+
+        // The path directories first among the indexes: one small read refutes the whole file, or the
+        // slices that hold no path the filter asks for.
+        List<RowRange>? pathRanges = null;
+        int pathSegments = 0;
+        long pathBytes = 0;
+        if (indexes && blockRows > 0 && VariantColumns(filter) is { } variants)
+        {
+            (bool refuted, pathRanges, pathSegments, pathBytes) = await RefutedByPathsAsync(file, filter, variants, cancellationToken).ConfigureAwait(false);
+            Scanning.ScanCounters.Note(metrics, pathSegments, pathBytes);
+            if (refuted)
+            {
+                BlockMask none = new BlockMask(tree.Root.RowCount, blockRows);
+                int all = Counted(none, scope);
+                none.KillAll();
+                steps?.Add(new PruningStep("path directory", all, pathSegments, pathBytes));
+                Diagnostics.VortexEventSource.Pruned(none.BlockCount, none.BlockCount);
+                return new PruningPlan(none, zones);
+            }
+        }
+
         Indexes.BloomPruner? blooms = indexes && blockRows > 0
             ? await Indexes.BloomPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
             : null;
         Indexes.KeyIndexPruner? locating = indexes && blockRows > 0
             ? await Indexes.KeyIndexPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
             : null;
-        if (zones is null && blooms is null && locating is null)
+        Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? keysRead = indexes && blockRows > 0 ? KeysRead(filter) : null;
+        if (zones is null && blooms is null && locating is null && pathRanges is null && keysRead is null)
         {
+            if (pathSegments > 0)
+            {
+                steps?.Add(new PruningStep("path directory", 0, pathSegments, pathBytes));
+            }
+
             return default;
         }
 
+        // The blocks the scan's rows do not reach are dead before any structure runs, which asks only
+        // live blocks: a lane's piece of a day of 4.32 G rows asked a filter on a text column of every
+        // block of the file, 527 k comparisons a lane where its rows reach a few hundred blocks.
         BlockMask live = new BlockMask(tree.Root.RowCount, blockRows);
+        if (scope is not null && scope.BlockRows == blockRows && scope.BlockCount == live.BlockCount)
+        {
+            live.Keep(scope.Words);
+        }
+
         int before = Counted(live, scope);
         if (zones is not null)
         {
@@ -113,6 +149,29 @@ internal static class ZonePruningPlan
             // credited only with what the earlier ones left it -- against the segments read for
             // it.
             steps?.Add(new PruningStep("zone map", before - Counted(live, scope), segments, bytes));
+        }
+
+        if (pathSegments > 0)
+        {
+            before = Counted(live, scope);
+            foreach (RowRange range in pathRanges ?? [])
+            {
+                KillWithin(live, range);
+            }
+
+            steps?.Add(new PruningStep("path directory", before - Counted(live, scope), pathSegments, pathBytes));
+        }
+
+        // The block statistics of the shredded keys the filter reads in one class, as a zone map's.
+        if (keysRead is not null && !live.IsEmpty)
+        {
+            before = Counted(live, scope);
+            (int read, long readBytes) = await RefineByKeysAsync(file, filter, keysRead, live, cancellationToken).ConfigureAwait(false);
+            Scanning.ScanCounters.Note(metrics, read, readBytes);
+            if (read > 0)
+            {
+                steps?.Add(new PruningStep("path statistics", before - Counted(live, scope), read, readBytes));
+            }
         }
 
         if (blooms is not null && !live.IsEmpty)
@@ -129,7 +188,7 @@ internal static class ZonePruningPlan
         if (locating is not null && !live.IsEmpty)
         {
             before = Counted(live, scope);
-            await locating.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
+            await locating.RefineAsync(file, live, scope, cancellationToken).ConfigureAwait(false);
             Scanning.ScanCounters.Note(metrics, locating.Segments, locating.Bytes);
             Diagnostics.VortexEventSource.RunsRead(locating.Segments);
             steps?.Add(new PruningStep("locating index", before - Counted(live, scope), locating.Segments, locating.Bytes));
@@ -138,6 +197,393 @@ internal static class ZonePruningPlan
 
         Diagnostics.VortexEventSource.Pruned(live.BlockCount - live.LiveCount, live.BlockCount);
         return new PruningPlan(live, zones, located);
+    }
+
+    /// <summary>
+    /// Whether the path directories of <paramref name="file"/> leave a row that may match
+    /// <paramref name="filter"/>: true unless the filter's fenced predicates on paths ask what no
+    /// directory holds. A file without directories, or a filter on no path, may match.
+    /// </summary>
+    internal static async ValueTask<bool> PathsMayMatchAsync(VortexFile file, VortexExpr filter, CancellationToken cancellationToken) =>
+        VariantColumns(filter) is not { } columns
+        || !(await RefutedByPathsAsync(file, filter, columns, cancellationToken).ConfigureAwait(false)).Refuted;
+
+    /// <summary>The variant columns the fenced predicates of <paramref name="filter"/> read paths of, by name; null for none.</summary>
+    private static List<string>? VariantColumns(VortexExpr filter)
+    {
+        List<string>? columns = null;
+        Collect(filter, ref columns);
+        return columns;
+
+        static void Collect(VortexExpr expr, ref List<string>? columns)
+        {
+            switch (expr)
+            {
+                case LogicalExpr logical:
+                    Collect(logical.Left, ref columns);
+                    Collect(logical.Right, ref columns);
+                    return;
+                case VariantFilterExpr { Inner: ComparisonExpr { Field: VariantFieldExpr path } }:
+                    Add(path, ref columns);
+                    return;
+                case VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } }:
+                    Add(path, ref columns);
+                    return;
+                case VariantFilterExpr { Inner: NullCheckExpr { Field: VariantFieldExpr path } }:
+                    Add(path, ref columns);
+                    return;
+                case VariantFilterExpr { Inner: StringMatchExpr { Field: VariantFieldExpr path } }:
+                    Add(path, ref columns);
+                    return;
+            }
+        }
+
+        static void Add(VariantFieldExpr path, ref List<string>? columns)
+        {
+            columns ??= [];
+            if (!columns.Contains(path.Column.Path))
+            {
+                columns.Add(path.Column.Path);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The paths of <paramref name="column"/> the fenced predicates of <paramref name="filter"/> read, the predicates
+    /// <see cref="Indexes.VariantDirectory.MayMatch(VortexExpr, IReadOnlyDictionary{string, Indexes.VariantDirectory}, int)"/> asks a directory about, each its keys in UTF-8; a path through an
+    /// element of an array, which no directory answers for, is none of them.
+    /// </summary>
+    private static List<byte[][]> PathsOf(VortexExpr filter, string column)
+    {
+        List<byte[][]> paths = [];
+        Collect(filter, column, paths);
+        return paths;
+
+        static void Collect(VortexExpr expr, string column, List<byte[][]> paths)
+        {
+            switch (expr)
+            {
+                case LogicalExpr logical:
+                    Collect(logical.Left, column, paths);
+                    Collect(logical.Right, column, paths);
+                    return;
+                case VariantFilterExpr { Inner: ComparisonExpr { Field: VariantFieldExpr path } }:
+                    Add(path, column, paths);
+                    return;
+                case VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } }:
+                    Add(path, column, paths);
+                    return;
+                case VariantFilterExpr { Inner: NullCheckExpr { Field: VariantFieldExpr path } }:
+                    Add(path, column, paths);
+                    return;
+                case VariantFilterExpr { Inner: StringMatchExpr { Field: VariantFieldExpr path } }:
+                    Add(path, column, paths);
+                    return;
+            }
+        }
+
+        static void Add(VariantFieldExpr path, string column, List<byte[][]> paths)
+        {
+            if (!string.Equals(path.Column.Path, column, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            byte[][] keys = new byte[path.Steps.Length][];
+            for (int i = 0; i < keys.Length; i++)
+            {
+                if (path.Steps[i].KeyUtf8 is not { } key)
+                {
+                    return;
+                }
+
+                keys[i] = key;
+            }
+
+            paths.Add(keys);
+        }
+    }
+
+    /// <summary>
+    /// Whether the path directories of <paramref name="columns"/> prove that no row of
+    /// <paramref name="file"/> matches <paramref name="filter"/>; when they do not, the rows of the runs
+    /// of slices they prove hold none, or null; and the segments and bytes read for them.
+    /// </summary>
+    private static async ValueTask<(bool Refuted, List<RowRange>? Ranges, int Segments, long Bytes)> RefutedByPathsAsync(
+        VortexFile file, VortexExpr filter, List<string> columns, CancellationToken cancellationToken)
+    {
+        Dictionary<string, Indexes.VariantDirectory>? directories = null;
+        int segments = 0;
+        long bytes = 0;
+        foreach (string column in columns)
+        {
+            int field = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(column) : -1;
+            if (field < 0)
+            {
+                continue;
+            }
+
+            // The directory holds the entries of the filter's paths alone, all its predicates ask of it.
+            (Indexes.VariantDirectory? directory, int read, long readBytes) =
+                await Indexes.VariantDirectory.ReadAsync(file, field, PathsOf(filter, column), cancellationToken).ConfigureAwait(false);
+            segments += read;
+            bytes += readBytes;
+            if (directory is not null)
+            {
+                (directories ??= new Dictionary<string, Indexes.VariantDirectory>(StringComparer.Ordinal))[column] = directory;
+            }
+        }
+
+        if (directories is null)
+        {
+            return (false, null, segments, bytes);
+        }
+
+        if (!Indexes.VariantDirectory.MayMatch(filter, directories))
+        {
+            return (true, null, segments, bytes);
+        }
+
+        // Slice by slice, when every directory names the file's slices.
+        int slices = -1;
+        foreach (Indexes.VariantDirectory directory in directories.Values)
+        {
+            slices = slices < 0 || slices == directory.SliceCount ? directory.SliceCount : 0;
+        }
+
+        if (slices <= 0 || await Indexes.SliceTable.ReadAsync(file, cancellationToken).ConfigureAwait(false) is not { } table
+            || table.Slices.Count != slices)
+        {
+            return (false, null, segments, bytes);
+        }
+
+        List<RowRange>? ranges = null;
+        long start = -1;
+        long end = -1;
+        for (int slice = 0; slice < slices; slice++)
+        {
+            Indexes.TimeSlice cut = table.Slices[slice];
+            if (Indexes.VariantDirectory.MayMatch(filter, directories, slice))
+            {
+                continue;
+            }
+
+            // Neighbouring slices refuted make one run, so that a block astride them dies too.
+            if (start >= 0 && end == cut.FirstRow)
+            {
+                end = cut.FirstRow + cut.Rows;
+                ranges![^1] = new RowRange(start, end);
+                continue;
+            }
+
+            (start, end) = (cut.FirstRow, cut.FirstRow + cut.Rows);
+            (ranges ??= []).Add(new RowRange(start, end));
+        }
+
+        return (false, ranges, segments, bytes);
+    }
+
+    /// <summary>
+    /// The keys the fenced predicates of <paramref name="filter"/> read one step deep and in one class
+    /// whose typed column holds every value of it, an integer, a text or a boolean, by column; null for none.
+    /// </summary>
+    private static Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? KeysRead(VortexExpr filter)
+    {
+        Dictionary<string, List<(string, Types.Variants.PathClass)>>? keys = null;
+        Collect(filter, ref keys);
+        return keys;
+
+        static void Collect(VortexExpr expr, ref Dictionary<string, List<(string, Types.Variants.PathClass)>>? keys)
+        {
+            switch (expr)
+            {
+                case LogicalExpr logical:
+                    Collect(logical.Left, ref keys);
+                    Collect(logical.Right, ref keys);
+                    return;
+                case VariantFilterExpr fence when fence.Inner switch
+                {
+                    ComparisonExpr { Field: VariantFieldExpr compared } => compared,
+                    InExpr { Field: VariantFieldExpr member } => member,
+                    NullCheckExpr { Field: VariantFieldExpr held, IsNull: false } => held,
+                    _ => null,
+                } is { } path:
+                    if (KeyOf(path) is { } key)
+                    {
+                        keys ??= new Dictionary<string, List<(string, Types.Variants.PathClass)>>(StringComparer.Ordinal);
+                        if (!keys.TryGetValue(path.Column.Path, out List<(string, Types.Variants.PathClass)>? list))
+                        {
+                            keys[path.Column.Path] = list = [];
+                        }
+
+                        if (!list.Contains(key))
+                        {
+                            list.Add(key);
+                        }
+                    }
+
+                    return;
+            }
+        }
+    }
+
+    /// <summary>The one key and the class <paramref name="path"/> reads, when block statistics can answer it; null otherwise.</summary>
+    private static (string Key, Types.Variants.PathClass Class)? KeyOf(VariantFieldExpr path) =>
+        path.Steps is [{ IsKey: true } step] && path.Read switch
+        {
+            VariantRead.AsInt64 => Types.Variants.PathClass.Integer,
+            VariantRead.AsString => Types.Variants.PathClass.String,
+            VariantRead.AsBool => Types.Variants.PathClass.Boolean,
+            _ => (Types.Variants.PathClass?)null,
+        } is { } @class
+            ? (step.Key!, @class)
+            : null;
+
+    /// <summary>
+    /// Kills the live blocks of <paramref name="live"/> that the block statistics of the keys in
+    /// <paramref name="keys"/> prove hold no row matching <paramref name="filter"/>, and returns the
+    /// segments and bytes read for them.
+    /// </summary>
+    private static async ValueTask<(int Segments, long Bytes)> RefineByKeysAsync(
+        VortexFile file, VortexExpr filter, Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>> keys, BlockMask live,
+        CancellationToken cancellationToken)
+    {
+        Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]>? stats = null;
+        int segments = 0;
+        long bytes = 0;
+        foreach ((string column, List<(string Key, Types.Variants.PathClass Class)> wanted) in keys)
+        {
+            int field = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(column) : -1;
+            if (field < 0)
+            {
+                continue;
+            }
+
+            (Indexes.VariantBlockStats? read, int count, long readBytes) =
+                await Indexes.VariantBlockStats.ReadAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+            segments += count;
+            bytes += readBytes;
+            if (read is null)
+            {
+                continue;
+            }
+
+            foreach ((string key, Types.Variants.PathClass @class) in wanted)
+            {
+                if (read.IndexOf(key, @class) is int at and >= 0)
+                {
+                    (stats ??= [])[(column, key, @class)] = read.Blocks[at];
+                }
+            }
+        }
+
+        if (stats is null)
+        {
+            return (segments, bytes);
+        }
+
+        for (int block = 0; block < live.BlockCount; block++)
+        {
+            if (live.IsLive(block) && !BlockMayMatch(filter, stats, block))
+            {
+                live.Kill(block);
+            }
+        }
+
+        return (segments, bytes);
+    }
+
+    /// <summary>
+    /// Whether block <paramref name="block"/> may hold a row matching <paramref name="filter"/>, by the
+    /// block statistics in <paramref name="stats"/>: a key they cover with no entry for the block holds
+    /// no value of its class there.
+    /// </summary>
+    private static bool BlockMayMatch(
+        VortexExpr filter, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats, int block)
+    {
+        switch (filter)
+        {
+            case LogicalExpr { IsAnd: true } both:
+                return BlockMayMatch(both.Left, stats, block) && BlockMayMatch(both.Right, stats, block);
+            case LogicalExpr either:
+                return BlockMayMatch(either.Left, stats, block) || BlockMayMatch(either.Right, stats, block);
+            case VariantFilterExpr { Inner: ComparisonExpr { Field: VariantFieldExpr path } comparison }:
+                return Entry(path, stats, block, out Indexes.PathEntry? entry) is not true
+                    || (entry is not null && Indexes.VariantDirectory.Within(entry, comparison.Op, comparison.Value));
+            case VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } membership }:
+            {
+                if (Entry(path, stats, block, out Indexes.PathEntry? member) is not true)
+                {
+                    return true;
+                }
+
+                foreach (FilterLiteral literal in membership.Literals)
+                {
+                    if (member is not null && Indexes.VariantDirectory.Within(member, ComparisonOp.Equal, literal))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            case VariantFilterExpr { Inner: NullCheckExpr { Field: VariantFieldExpr path, IsNull: false } }:
+                return Entry(path, stats, block, out Indexes.PathEntry? held) is not true || held is not null;
+            default:
+                return true;
+        }
+    }
+
+    /// <summary>Whether the statistics cover <paramref name="path"/>, and its entry for <paramref name="block"/>, null when the block holds none of its values.</summary>
+    private static bool Entry(
+        VariantFieldExpr path, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats,
+        int block, out Indexes.PathEntry? entry)
+    {
+        entry = null;
+        if (KeyOf(path) is not { } key || !stats.TryGetValue((path.Column.Path, key.Key, key.Class), out (int Block, Indexes.PathEntry Entry)[]? blocks))
+        {
+            return false;
+        }
+
+        int low = 0;
+        int high = blocks.Length - 1;
+        while (low <= high)
+        {
+            int middle = (low + high) >>> 1;
+            int at = blocks[middle].Block;
+            if (at == block)
+            {
+                entry = blocks[middle].Entry;
+                break;
+            }
+
+            if (at < block)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Kills the blocks of <paramref name="live"/> that lie wholly inside <paramref name="rows"/>.</summary>
+    private static void KillWithin(BlockMask live, RowRange rows)
+    {
+        long blockRows = live.BlockRows;
+        for (long block = (rows.Start + blockRows - 1) / blockRows; block < live.BlockCount; block++)
+        {
+            if (Math.Min((block + 1) * blockRows, live.RowCount) > rows.End)
+            {
+                return;
+            }
+
+            live.Kill((int)block);
+        }
     }
 
     /// <summary>The live blocks of <paramref name="live"/>, among those of <paramref name="scope"/> when there is one.</summary>
@@ -163,7 +609,7 @@ internal static class ZonePruningPlan
         }
 
         ZoneColumn[] columns = new ZoneColumn[1];
-        (int segments, long bytes) = await DecodeAsync(file, [new Candidate(field, node, map)], columns, metrics, cancellationToken).ConfigureAwait(false);
+        (int segments, long bytes) = await SettleAsync(file, [new Candidate(field, node, map)], columns, metrics, cancellationToken).ConfigureAwait(false);
         Scanning.ScanCounters.Note(metrics, segments, bytes);
         return columns[0];
     }
@@ -215,39 +661,87 @@ internal static class ZonePruningPlan
             return (null, 0, 0);
         }
 
-        // A zone map a scan of this file has decoded is the file's, and is not read again.
+        // A zone map a scan of this file has decoded, or decodes now, is the file's, and is not read again.
         ZoneColumn[] columns = new ZoneColumn[candidates.Count];
-        int missing = 0;
-        for (int i = 0; i < candidates.Count; i++)
-        {
-            if (file.DecodedZones(candidates[i].Node.Index) is { } decoded)
-            {
-                columns[i] = decoded;
-            }
-            else
-            {
-                missing++;
-            }
-        }
-
-        int segments = 0;
-        long bytes = 0;
-        if (missing > 0)
-        {
-            (segments, bytes) = await DecodeAsync(file, candidates, columns, metrics, cancellationToken).ConfigureAwait(false);
-        }
-
+        (int segments, long bytes) = await SettleAsync(file, candidates, columns, metrics, cancellationToken).ConfigureAwait(false);
         ZonePruner pruner = new ZonePruner(filter, columns);
         return (pruner.IsUseful ? pruner : null, segments, bytes);
     }
 
     /// <summary>
-    /// Reads and decodes the zone maps of the candidates <paramref name="columns"/> lacks, fills
-    /// them in and keeps them on the file; returns the segments and bytes asked for.
+    /// Fills in the zone maps of the candidates <paramref name="columns"/> lacks: a map the file keeps
+    /// is taken, one another scan decodes now awaited, and the others decoded here, in one read, and
+    /// kept on the file. Returns the segments and bytes this scan asked for.
     /// </summary>
-    private static async ValueTask<(int Segments, long Bytes)> DecodeAsync(
+    private static async ValueTask<(int Segments, long Bytes)> SettleAsync(
         VortexFile file, List<Candidate> candidates, ZoneColumn[] columns, Scanning.ScanCounters? metrics,
         CancellationToken cancellationToken)
+    {
+        int segments = 0;
+        long bytes = 0;
+        while (true)
+        {
+            Claims claims = default;
+            Task<ZoneColumn?>? other = null;
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (columns[i] is not null)
+                {
+                    continue;
+                }
+
+                if (file.ClaimZones(candidates[i].Node.Index, out Task<ZoneColumn?>? flight, out bool claimed) is { } kept)
+                {
+                    columns[i] = kept;
+                }
+                else if (claimed)
+                {
+                    claims.Add(i, candidates.Count);
+                }
+                else
+                {
+                    other ??= flight;
+                }
+            }
+
+            if (!claims.IsEmpty)
+            {
+                try
+                {
+                    (int read, long asked) = await DecodeAsync(file, candidates, columns, claims, metrics, cancellationToken).ConfigureAwait(false);
+                    segments += read;
+                    bytes += asked;
+                }
+                finally
+                {
+                    // Landed, or given back to the scans awaiting it when the decoding failed.
+                    for (int i = 0; i < candidates.Count; i++)
+                    {
+                        if (claims.Has(i))
+                        {
+                            file.LandZones(candidates[i].Node.Index, columns[i]);
+                        }
+                    }
+                }
+            }
+
+            if (other is null)
+            {
+                return (segments, bytes);
+            }
+
+            // Then a look again: the map is kept, or its decoding failed and this scan claims it.
+            await other.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Reads and decodes the zone maps of the candidates this scan <paramref name="claims"/>, and fills
+    /// them in; returns the segments and bytes asked for.
+    /// </summary>
+    private static async ValueTask<(int Segments, long Bytes)> DecodeAsync(
+        VortexFile file, List<Candidate> candidates, ZoneColumn[] columns, Claims claims,
+        Scanning.ScanCounters? metrics, CancellationToken cancellationToken)
     {
         // Sized for metadata rather than for a batch, and that choice is most of what pruning
         // costs: this context reads one zone map per filtered column -- a struct of a few
@@ -263,7 +757,7 @@ internal static class ZonePruningPlan
         // five columns to one round trip rather than five.
         for (int i = 0; i < candidates.Count; i++)
         {
-            if (columns[i] is not null)
+            if (!claims.Has(i))
             {
                 continue;
             }
@@ -282,7 +776,7 @@ internal static class ZonePruningPlan
 
         for (int i = 0; i < candidates.Count; i++)
         {
-            if (columns[i] is not null)
+            if (!claims.Has(i))
             {
                 continue;
             }
@@ -294,7 +788,6 @@ internal static class ZonePruningPlan
                 .Execute(in zones, new RowRange(0, zones.RowCount), in all, context);
 
             columns[i] = Extract(context, root, candidate, candidate.Node.RowCount);
-            file.KeepZones(candidate.Node.Index, columns[i]);
         }
 
         return (segments, bytes);
@@ -619,5 +1112,30 @@ internal static class ZonePruningPlan
         internal LayoutNode Node { get; }
 
         internal ZoneMap Map { get; }
+    }
+
+    /// <summary>The candidates whose decoding a scan claimed: a word of the first 64, a flag each past them.</summary>
+    private struct Claims
+    {
+        private ulong _first;
+        private bool[]? _more;
+
+        internal readonly bool IsEmpty => _first == 0 && _more is null;
+
+        /// <summary>Claims candidate <paramref name="candidate"/> of <paramref name="count"/>.</summary>
+        internal void Add(int candidate, int count)
+        {
+            if (candidate < 64)
+            {
+                _first |= 1UL << candidate;
+            }
+            else
+            {
+                (_more ??= new bool[count - 64])[candidate - 64] = true;
+            }
+        }
+
+        internal readonly bool Has(int candidate) =>
+            candidate < 64 ? (_first & (1UL << candidate)) != 0 : _more is { } more && more[candidate - 64];
     }
 }

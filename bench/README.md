@@ -58,7 +58,7 @@ there. Publish the Native AOT runner first, since the report times the one it fi
 | a Parquet read or write | `-- --format-cost [--file <x.parquet>]` | 1 to 4 min | the report's actions on the same rows as Parquet and as Vortex, through the same scan, on one thread and on all of them, or at the degrees `--degrees` lists, with `--actions` to narrow them: time, ratio and allocations. `--vortex <x.vortex>` keeps the Vortex rewrite of a given file there and reads it again rather than writing it at every run, and `--batch-rows N` caps a scan's batches. `--zstd-level N` and `--column-chunk-bytes N` set the Vortex writes' zstd level and every column's chunk target, the rewrite of a given file included, and the action `take:N` takes N rows spread over the file. `--loop <format> <action> [seconds]` times one action alone, for a profiler or an A/B of two builds, after `--warm <seconds>` of it untimed, and prints its mean and median call |
 | a Parquet codec | `-- --page-codecs <x.parquet>` | 10 s | every compressed page of a file decompressed by the package, and by .NET's `GZipStream` where the file is GZIP's, the outputs compared: GB/s for the file and its largest columns |
 | every file we write, read by Rust | `bench/crosscheck.sh` | 80 s | 854 files compared scalar by scalar, 2 538 751 rows. Needs cargo, and `gate.sh --crosscheck` folds it in |
-| anything, before you push | `bench/gate.sh` | 68 s | the ten ratchets, `--ffi-check` and `--ratio-check`, exiting 1 if one is red. `--throughput` adds the full axis (92 s) |
+| anything, before you push | `bench/gate.sh` | 68 s | the eleven ratchets, `--ffi-check` and `--ratio-check`, exiting 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, with a ratio per round |
 | a dataset's write path, its compaction policy, anything a long-lived dataset pays for | `dotnet run -c Release --project bench/Vorticity.Benchmarks.Churn -- --rows 1000000 --ops 2000` | 45 s, or 3 min for ten million rows and ten thousand commits | a dataset loaded, then thousands of small commits (appends, updates and deletes of ten rows, with `--mix` and `--batch` to change them), with the caller's compaction and vacuum in between. Per window of commits it reports each kind's latency, requests, bytes written and allocated, and the compaction it made due. Per checkpoint it runs eleven reads, from a point lookup and seeks both ways to a full scan, with their requests, and reports the heap. A cost that grows with the commits shows as a slope. `--compact none` shows what a caller who never compacts pays, `--keys tail` gives a time series, `--marks off` a dataset that rewrites every object a delete or an update touches, `--purge off` one whose compaction leaves marks to the deletes, `--moves off` one whose compaction rewrites an object it could move up whole (`--mix 1:0:0 --keys tail --batch 2000` writes keys in order, where the moves halve what compaction writes), and `--probe-rounds 5` keeps each probe's fastest round on a machine that runs other work |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
@@ -73,7 +73,7 @@ there. Publish the Native AOT runner first, since the report times the one it fi
 | a change to the engine, against the last change to the same part | `bench/runners.sh keep <commit>` once, then `bench/runners.sh alt <kept> HEAD --threads 1,14 [--warm] group-<aggregates>-<key>[@file] …` | 1 min for three scenarios at one lane | see [runners](#comparing-two-runners) |
 | our group bys against DuckDB's | `bench/duckdb.sh [--set hc\|db\|all] [--only <rows>] [--rows N] [--threads 1,14] [--bases both\|warm\|cold]`, then `bench/duckdb.sh --publish <session> <session>` | 15 to 25 min per session for both sets at 1 and 14 threads, files included, or 30 s for `--only db-q4,db-q10 --threads 14` | see [the DuckDB page](../docs/guide/benchmarks-duckdb.md), which describes the method. Everything is kept under `bench/.runs/duckdb-<date>/`, and `--publish` builds the page's tables from two sessions taken at different hours, a row being published when they agree within 10 %. `hc` is the high-cardinality table (keys of 10³ to 10⁷ values) and `db` db-benchmark's group by. `--only db-q4,total-k7` keeps the rows named by the runner's scenario without `group-`. It needs `duckdb` and its vortex extension, and informs without gating anything |
 | the runner, its file kept mapped, and what a round cost | `VORTICITY_RUNNER_WARM=1 Vorticity.Benchmarks.Runner --scenario … --repeat N` | | by default each round maps its file anew, as the reference maps it at each call. `VORTICITY_RUNNER_WARM=1` keeps the session's default of 64 mappings, with the file already in memory, which is what a comparison against a table loaded beforehand needs. Each round line carries `cpu_us`, `instructions` and `cycles`, the process's on every thread, read with `proc_pid_rusage` as a user (macOS, zero elsewhere), so a time that moves while the cycles do not was moved by the machine |
-| a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the ten allocation, count, budget and work ratchets |
+| a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the eleven allocation, count, budget and work ratchets |
 | a change, and only the tests it can affect | `dotnet run -c Release --project tools/testimpact -- run` (after `-- map` once) | seconds | the test classes that ran a method the working tree changed against `HEAD` (`--base REF` for another), from a map of what each class runs, built by running every class in a process of its own with inlining off and recording the JIT's list of compiled methods (35 s). A constant, a build file or the source generator runs everything, a new class runs, and a comment or a `using` runs nothing |
 
 ### The report
@@ -357,6 +357,67 @@ together, the three throughput tables before the fingerprint.
 A red gate is not believed on the first run. The spread from run to run reaches a fifth on some axes,
 and a run can come out red with no byte changed. Replay it three times: two reds out of three is a
 regression, and anything else is noise.
+
+## The benches of datasets by periods
+
+The query bench (`bench/Vorticity.Benchmarks.Queries`, the `vortex-queries` runner) holds the benches
+that measure a dataset compacted by periods, on generated data at a fraction of the design's example
+([20-time-window-aggregates.md](../docs/design/20-time-window-aggregates.md)). Each counts requests,
+round trips and rows rather than relying on time alone, since the counts are what holds from one
+machine to another. Run each with `DOTNET_TieredCompilation=0`.
+
+| mode | what it measures | a run |
+|---|---|---|
+| `--micro generator` | a minute of generated requests, and the runs of each synopsis column against the design's figures | seconds |
+| `--micro questions [--hours 24] [--rate 20] [--latency 30] [--budget 100] [--only TEXT] [--sealed]` | the design's example questions over generated requests and logs, cold and warm, from the synopses and from the rows, with each one's plan, and the window an aligned question applied; `--only` asks the questions whose name holds the text, and `--sealed` seals the datasets, whose caches then keep sealed bytes | about 10 minutes at the defaults, nearly all of it waiting for the rows; about a minute for `--only window` |
+| `--micro facets` | the worst case of many facets, spans with a dozen repeating columns and a route under them | under a minute |
+| `--micro lifecycle [--style periods\|leveled] [--period-hours 1] [--fanout F] [--writers 4] [--late on\|off] [--deletes N\|off] [--neighbours on\|off] [--max-object-mib N] [--pick largest\|roundrobin] [--trace-overlaps N]` | the rows and bytes each row's jobs rewrite, the seals, the jobs abandoned, the most bytes a job wrote for each byte it read (the constant of the bound a rewrite announces to the store), the objects a window covers and each level's objects at the end; the leveled knobs turn off the merges of neighbours, cap an object and choose the object a full level gives up, and the trace prints the first jobs that rewrite rather than move, with what the other levels hold inside their range | 15 seconds to two minutes |
+| `--micro cachetrace` | the regions a run of questions asks of the synopsis cache, replayed through three eviction policies, then the reads a question sends to the store at several capacities | about 25 seconds |
+| `--micro sparsecost [--rows 1000000]` | a column of integers, of doubles and of short texts, nulls at random places on half to 99 % of the rows, written sparse, dense and as the writer chooses: each one's bytes and decode time a row, which put the price of nine nulls in ten at about a third of a nanosecond of decode for each byte sparse saves | about a minute |
+| `--micro slicecost [--rows 2000000]` | two of the prices a slice's target trades: the bytes and time of a row read at a window's edge, and the bytes of a row of a table of slices, from their regions; 2.3 edge rows a table row, the constant of a target per object that the questions bench then dropped (the rows a slice sorts together weigh more) | a few seconds |
+| `--micro splitplan --file F` | the plan of splits a filtered scan of a file's every row draws before its first read, of every column and of one: microseconds and bytes a plan; 285 us for the eleven columns of an hour of the design's requests, 5 494 chunks each | a second |
+| `--micro load [--periods 4] [--period-hours 1] [--minutes 3] [--parallel N] [--rate 50000] [--rounds 3] [--write-degree N] [--budget 100] [--store DIR] [--disk]` | the write path of a load of sealed periods at the design's density: `--periods` hours of `--minutes` minutes of requests each, or days of `--period-hours` such hours, `--parallel` of them at once, each minute a part drawn straight into columns by a generator of its own, into a fresh store under `--store` (`E:/vorticity-load-micro`) each round. Each round's rows and bytes a second, processor time, the share of the session's lanes held, bytes allocated, collections and the time they paused the threads, and peak private bytes; each period's plan, write, finish and commit; the stages of the slices summed (the rows drawn, copied, joined, sorted, the wait for the slice before, the synopsis and the write) and of the periods' finishes (the last slice, the synopsis finished, the writer completed); `--disk` first measures what the store's disk takes in a second | 25 seconds at the defaults |
+| `--micro paths [--store DIR] [--hours 24] [--rate 1000] [--design [--incremental] [--parallel-periods 4]] [--latency 5] [--gbps 10] [--mbps N] [--degrees 1,N] [--only A\|B] [--paths synopses\|rows] [--temperatures cold\|warm] [--verify] [--tsv FILE] [--trace-reads FILE] [--loop S] [--loop-cold S] [--no-digest] [--max-reads N] [--keep-handles] [--warm 3] [--explain] [--build-only]` | every query path of a dataset of periods at scale, over a store on the local disk that answers each request 5 ms after it is sent and carries the reads' bytes over one link of 10 Gb/s: requests and log records written once under `--store` (`VORTICITY_PATHS_STORE`, `E:/vorticity-queries` by default) and kept, `--design` at the design's own rate and slices (5 × 10⁴ rows a second, 240 hours, over a terabyte), its days loaded as sealed periods, `--parallel-periods` at once, or with `--incremental` appended and compacted hour by hour. Each question by its synopses and by its rows, cold and warm, at each degree: time, processor time, bytes allocated, requests, dependent round trips, bytes, states and rows; `--verify` holds each answer from the synopses to its rows' digest, and the synopsis cache sits on the same disk without the wait. `--trace-reads FILE` writes down the store's reads of the cold round and of the first warm one; `--loop S` asks each question warm for S seconds, and `--loop-cold S` cold, by a handle and an empty cache of its own each time, for a profiler, and prints the mean; `--no-digest` takes the batches without a digest, which otherwise runs while the scan decodes its next split; `--max-reads N` lets each session keep N reads in flight rather than its default of 16; `--warm S` asks each question untimed for S seconds before its warm rounds (3 by default), so that they time its code compiled past the JIT's first tier; `--keep-handles` keeps each object the store reads open, a read then a positional read of its handle, where the store opens and closes its file on the reading thread at every read; `--explain` lists each object's tables and what each object reads | a few minutes once written; the 48 hours of the default take 11 minutes to write |
+
+## Choosing the synopsis cache's eviction policy
+
+The synopsis cache keeps on the local disk the regions a question reads of a dataset's objects without
+their data. Which of them it drops past its capacity was chosen by replaying what questions ask of it:
+
+```
+DOTNET_TieredCompilation=0 dotnet run -c Release --project bench/Vorticity.Benchmarks.Queries -- \
+    --micro cachetrace [--hours 48] [--rate 20] [--questions 2000] [--seed 29]
+```
+
+It writes 48 hours of generated requests in periods of an hour, with their synopsis tables, then asks
+2 000 questions of six kinds, the first asked most, over windows that end at a "now" moving through the
+data: a quarter of an hour, an hour, six hours, a day, and one time in twenty everything up to now, a
+sweep. The cache records each region it is asked for, held or not, and the replay sends that trace
+through SIEVE, S3-FIFO and Window TinyLFU, each counting bytes, at capacities from a hundredth of what
+the distinct regions weigh to half of it. A run takes about 25 seconds.
+
+The share of the bytes asked that each served from what it held, averaged over seeds 29, 7 and 101:
+
+| capacity | SIEVE | S3-FIFO | Window TinyLFU |
+|---|---|---|---|
+| 5 % | 10.6 % | 14.5 % | 14.3 % |
+| 10 % | 19.4 % | 26.7 % | 24.0 % |
+| 20 % | 43.9 % | 48.9 % | 40.0 % |
+| 50 % | 82.5 % | 83.3 % | 76.1 % |
+
+S3-FIFO is ahead or level at every capacity, and varies least from seed to seed: at half the bytes,
+SIEVE ranged from 72 % to 89 %. The cache uses it since 2026-10-19. Its one constant, the small
+queue's share of the capacity, is swept too: a twentieth serves 0.1 to 1.4 points more than a tenth,
+a fifth up to 2 points less, so the cache keeps the tenth S3-FIFO's authors chose. The trace is small, about 230
+distinct regions, since the bench's hours keep a dozen tables each; replay it on a larger dataset
+before reading a gap under two points as a difference.
+
+The same run then asks its questions again through the cache itself, at no cache, a twentieth, a fifth
+and all of the regions' bytes, over a store that counts, and prints the reads each question sends to
+the store and the questions a second that keep a bucket under its limit: 5 500 reads a second per
+prefix on S3, 900 per bucket on OVHcloud. On seed 29, 9.7 reads a question without the cache (569 and
+93 questions a second), 7.5 at a twentieth, 6.9 at a fifth, 5.7 with every region held (972 and 159).
+The reads left are data, which the cache never holds.
 
 ## Where the figures live
 

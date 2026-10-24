@@ -1,18 +1,27 @@
 using System;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using Vorticity.Aggregating;
 using Xunit;
 
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The indexed sum against the exact sum: the same bits in every order, under every cut, by every
-/// path a value takes in, and those of the exact total rounded once wherever every value's bits
-/// lie within its bins.
+/// The indexed sum, narrow and wide, against the exact sum: the same bits in every order, under every
+/// cut, by every path a value takes in, and those of the exact total rounded once wherever every
+/// value's bits lie within its bins; the wide one past the narrow one's values, settled epoch after
+/// epoch.
 /// </summary>
 public sealed class IndexedSumTests
 {
+    // A value whose top part is the largest a bin takes: just below its top's limit, 2^32, its part 2^26
+    // units of 2^6.
+    private static readonly double Largest = 1 - Math.ScaleB(1.0, 32);
+
+    // The three high parts of a wide sum's high word, below its count of epochs.
+    private const long HighParts = (1L << 54) - 1;
+
     // The top a magnitude calls for, its binade read off its bits, against Math.ILogB's: every binade of
     // the normal doubles at both ends of its mantissas, every bit a subnormal may hold highest, and zero.
     [Fact]
@@ -223,6 +232,204 @@ public sealed class IndexedSumTests
         Assert.Throws<OverflowException>(() => other.Merge(in full));
     }
 
+    // The narrow and the wide sum of the same values, by every path: the same bits.
+    [Theory]
+    [InlineData(21, 0)]
+    [InlineData(22, 40)]
+    [InlineData(23, 900)]
+    public void TheWideSumIsTheNarrowOnesBits(int seed, int spread)
+    {
+        double[] values = Values(seed, 30_000, spread);
+        IndexedSum narrow = default;
+        narrow.AddSpan(values);
+        WideIndexedSum byValue = default;
+        foreach (double value in values)
+        {
+            byValue.Add(value);
+        }
+
+        WideIndexedSum bySpan = default;
+        bySpan.AddSpan(values);
+        WideIndexedSum merged = default;
+        for (int start = 0; start < values.Length; start += 7_000)
+        {
+            WideIndexedSum part = default;
+            part.AddSpan(values.AsSpan(start, Math.Min(7_000, values.Length - start)));
+            merged.Merge(in part);
+        }
+
+        foreach (WideIndexedSum wide in (WideIndexedSum[])[byValue, bySpan, merged])
+        {
+            Assert.Equal(narrow.Count, wide.Count);
+            Assert.Equal(BitConverter.DoubleToInt64Bits(narrow.Value), BitConverter.DoubleToInt64Bits(wide.Value));
+        }
+    }
+
+    // Weights of 2^30 to 2^40 a value, tens of epochs in all: the bins settle many times over, and the sum
+    // is the exact total's bits, whole or cut and merged in any order.
+    [Theory]
+    [InlineData(31, 0)]
+    [InlineData(32, 12)]
+    [InlineData(33, 40)]
+    public void ASumPastItsEpochsIsItsExactTotalInEveryOrderOfMerges(int seed, int spread)
+    {
+        Random random = new Random(seed);
+        double[] values = Values(seed, 40, spread);
+        values[0] = Largest;
+        values[1] = -Largest / 3;
+        long[] weights = Array.ConvertAll(values, _ => random.NextInt64(1L << 30, 1L << 40));
+        WideIndexedSum whole = default;
+        for (int i = 0; i < values.Length; i++)
+        {
+            whole.AddWeighted(values[i], weights[i]);
+        }
+
+        Assert.Equal(weights.Sum(), whole.Count);
+        Assert.NotEqual(0, whole.High & HighParts);
+        Assert.Equal(BitConverter.DoubleToInt64Bits(ExactWeighted(values, weights)), BitConverter.DoubleToInt64Bits(whole.Value));
+
+        for (int round = 0; round < 6; round++)
+        {
+            int parts = random.Next(2, 12);
+            WideIndexedSum[] partial = new WideIndexedSum[parts];
+            foreach (int i in Enumerable.Range(0, values.Length).OrderBy(_ => random.Next()))
+            {
+                partial[random.Next(parts)].AddWeighted(values[i], weights[i]);
+            }
+
+            WideIndexedSum merged = default;
+            foreach (int p in Enumerable.Range(0, parts).OrderBy(_ => random.Next()))
+            {
+                merged.Merge(in partial[p]);
+            }
+
+            Assert.Equal(BitConverter.DoubleToInt64Bits(whole.Value), BitConverter.DoubleToInt64Bits(merged.Value));
+            Assert.Equal(whole.Count, merged.Count);
+        }
+    }
+
+    // A sum a few values short of an epoch's end, its bins near 2^61, then values across that end: a value at
+    // a time, as a span, a weight at a time and a run of words at a time, the same bits, the exact total's.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(7)]
+    public void AnEpochEndsOnEveryPathWithTheSameBits(int missing)
+    {
+        double[] values = Values(41 + missing, (2 * missing) + 5, 10);
+        WideIndexedSum start = default;
+        start.AddWeighted(Largest, WideIndexedSum.Epoch - missing);
+        Assert.Equal(0, start.High);
+
+        WideIndexedSum byValue = start;
+        foreach (double value in values)
+        {
+            byValue.Add(value);
+        }
+
+        WideIndexedSum bySpan = start;
+        bySpan.AddSpan(values);
+        WideIndexedSum byWeight = start;
+        foreach (double value in values)
+        {
+            byWeight.AddWeighted(value, 1);
+        }
+
+        // Every other row selected out of a block twice as long: the rows left out are not counted.
+        double[] block = [.. values.SelectMany(value => (double[])[value, double.MaxValue])];
+        ulong[] words = new ulong[(block.Length + 63) / 64];
+        for (int row = 0; row < block.Length; row += 2)
+        {
+            words[row / 64] |= 1UL << (row % 64);
+        }
+
+        WideIndexedSum byWords = start;
+        default(WideIndexedFloatSum<double>).AddWords(ref byWords, block, words);
+
+        double[] all = [Largest, .. values];
+        long[] weights = [WideIndexedSum.Epoch - missing, .. values.Select(_ => 1L)];
+        long expected = BitConverter.DoubleToInt64Bits(ExactWeighted(all, weights));
+        foreach (WideIndexedSum sum in (WideIndexedSum[])[byValue, bySpan, byWeight, byWords])
+        {
+            Assert.NotEqual(0, sum.High & HighParts);
+            Assert.Equal(start.Count + values.Length, sum.Count);
+            Assert.Equal(expected, BitConverter.DoubleToInt64Bits(sum.Value));
+        }
+    }
+
+    // Bins settled into their high parts, then a value that moves the top up one, two or three bins, folded or
+    // merged: the high parts move with their bins, the bits those of the large value folded first.
+    [Theory]
+    [InlineData(30)]
+    [InlineData(57)]
+    [InlineData(84)]
+    public void AHighPartMovesWithItsBin(int exponent)
+    {
+        double large = Math.ScaleB(1.0, exponent);
+        WideIndexedSum small = default;
+        small.AddWeighted(1.5, 1L << 40);
+        Assert.NotEqual(0, small.High & HighParts);
+        WideIndexedSum smallFirst = small;
+        smallFirst.Add(large);
+
+        WideIndexedSum largeFirst = default;
+        largeFirst.Add(large);
+        largeFirst.AddWeighted(1.5, 1L << 40);
+
+        WideIndexedSum alone = default;
+        alone.Add(large);
+        WideIndexedSum mergedUp = small;
+        mergedUp.Merge(in alone);
+        WideIndexedSum mergedDown = alone;
+        mergedDown.Merge(in small);
+
+        long expected = BitConverter.DoubleToInt64Bits(largeFirst.Value);
+        foreach (WideIndexedSum sum in (WideIndexedSum[])[smallFirst, mergedUp, mergedDown])
+        {
+            Assert.Equal(expected, BitConverter.DoubleToInt64Bits(sum.Value));
+            Assert.Equal((1L << 40) + 1, sum.Count);
+        }
+
+        if (exponent < 84)
+        {
+            Assert.Equal(BitConverter.DoubleToInt64Bits(ExactWeighted([1.5, large], [1L << 40, 1])), expected);
+        }
+    }
+
+    [Fact]
+    public void AWideSumPastItsCapacityThrowsRatherThanLoseItsExactness()
+    {
+        // The capacity's values, each the largest part a bin takes: still exact.
+        WideIndexedSum full = default;
+        full.AddWeighted(Largest, WideIndexedSum.Capacity);
+        Assert.Equal(WideIndexedSum.Capacity, full.Count);
+        Assert.Equal(BitConverter.DoubleToInt64Bits(ExactWeighted([Largest], [WideIndexedSum.Capacity])), BitConverter.DoubleToInt64Bits(full.Value));
+
+        WideIndexedSum one = full;
+        Assert.Throws<OverflowException>(() => one.Add(1.0));
+        one = full;
+        Assert.Throws<OverflowException>(() => one.AddSpan([1.0]));
+        one = full;
+        Assert.Throws<OverflowException>(() => one.AddWeighted(1.0, 1));
+        WideIndexedSum other = default;
+        other.Add(1.0);
+        Assert.Throws<OverflowException>(() => other.Merge(in full));
+
+        // One short, a value at a time: the last value the capacity takes, then the one past it.
+        WideIndexedSum almost = default;
+        almost.AddWeighted(Largest, WideIndexedSum.Capacity - 1);
+        almost.Add(1.0);
+        Assert.Equal(WideIndexedSum.Capacity, almost.Count);
+        Assert.Throws<OverflowException>(() => almost.Add(1.0));
+    }
+
+    [Fact]
+    public void ANarrowGroupHoldsThirtyTwoBytesAndAWideForty()
+    {
+        Assert.Equal(32, Unsafe.SizeOf<IndexedSum>());
+        Assert.Equal(40, Unsafe.SizeOf<WideIndexedSum>());
+    }
+
     [Fact]
     public void ATotalIsRoundedToTheNearestDoubleTiesToEven()
     {
@@ -284,19 +491,37 @@ public sealed class IndexedSumTests
         BigInteger total = BigInteger.Zero;
         foreach (double value in values)
         {
-            long bits = BitConverter.DoubleToInt64Bits(value);
-            int biased = (int)((bits >> 52) & 0x7FF);
-            long mantissa = bits & 0xF_FFFF_FFFF_FFFF;
-            if (biased != 0)
-            {
-                mantissa |= 1L << 52;
-            }
-
-            BigInteger scaled = new BigInteger(mantissa) << Math.Max(biased - 1, 0);
-            total += bits < 0 ? -scaled : scaled;
+            total += Units(value);
         }
 
         return Reference(total, -1074);
+    }
+
+    /// <summary>The exact sum of finite values, each times its weight, rounded once to the nearest double.</summary>
+    private static double ExactWeighted(double[] values, long[] weights)
+    {
+        BigInteger total = BigInteger.Zero;
+        for (int i = 0; i < values.Length; i++)
+        {
+            total += Units(values[i]) * weights[i];
+        }
+
+        return Reference(total, -1074);
+    }
+
+    /// <summary>A finite value in units of 2^-1074, exactly.</summary>
+    private static BigInteger Units(double value)
+    {
+        long bits = BitConverter.DoubleToInt64Bits(value);
+        int biased = (int)((bits >> 52) & 0x7FF);
+        long mantissa = bits & 0xF_FFFF_FFFF_FFFF;
+        if (biased != 0)
+        {
+            mantissa |= 1L << 52;
+        }
+
+        BigInteger scaled = new BigInteger(mantissa) << Math.Max(biased - 1, 0);
+        return bits < 0 ? -scaled : scaled;
     }
 
     /// <summary><paramref name="total"/> times 2^<paramref name="exponent"/>, rounded to the nearest double, ties to even.</summary>

@@ -210,6 +210,89 @@ public sealed class SplitPlanTests
             Splits(tree, new RowRange(0, 300), 8192, Mask(0, 1)));
     }
 
+    /// <summary>
+    /// Fields chunked alike plan as one of them does, a field's run dropped where it repeats the run before it; fields
+    /// chunked apart in turn, a run repeated only past another, still plan the union of every field's boundaries, over
+    /// the whole and over a range that starts and ends inside chunks.
+    /// </summary>
+    [Fact]
+    public void FieldsChunkedAlikePlanAsOneAndFieldsApartInTurnAsTheirUnion()
+    {
+        LayoutSpecNode At100() => Node(Chunked, 300, children: [Node(Flat, 100, segments: [0]), Node(Flat, 200, segments: [1])]);
+        LayoutSpecNode At150() => Node(Chunked, 300, children: [Node(Flat, 150, segments: [2]), Node(Flat, 150, segments: [3])]);
+        LayoutTree alike = Tree(Node(Struct, 300, children: [At100(), At100(), At100()]), StructOf(3));
+        LayoutTree apart = Tree(Node(Struct, 300, children: [At100(), At150(), At100()]), StructOf(3));
+
+        Assert.Equal([new RowRange(0, 100), new RowRange(100, 300)], Splits(alike, new RowRange(0, 300), 8192));
+        Assert.Equal([new RowRange(50, 100), new RowRange(100, 250)], Splits(alike, new RowRange(50, 250), 8192));
+        Assert.Equal(
+            [new RowRange(0, 100), new RowRange(100, 150), new RowRange(150, 300)],
+            Splits(apart, new RowRange(0, 300), 8192));
+        Assert.Equal(
+            [new RowRange(120, 150), new RowRange(150, 160)],
+            Splits(apart, new RowRange(120, 160), 8192));
+        Assert.Equal(
+            [new RowRange(0, 100), new RowRange(100, 150), new RowRange(150, 300)],
+            Splits(apart, new RowRange(0, 300), 8192, Mask(1, 2)));
+    }
+
+    /// <summary>
+    /// A walk moved on to the split holding a row goes on with the splits the whole walk gives from that split, chunks of
+    /// any length cut under a cap or not, a row before the walk's next one leaving it where it is and a row past the end
+    /// ending it; a reverse walk does not move.
+    /// </summary>
+    [Fact]
+    public void AWalkMovedOnToARowGoesOnAsTheWholeWalkFromItsSplit()
+    {
+        Random random = new Random(29);
+        for (int trial = 0; trial < 200; trial++)
+        {
+            LayoutSpecNode[] chunks = new LayoutSpecNode[random.Next(1, 12)];
+            ulong total = 0;
+            for (int c = 0; c < chunks.Length; c++)
+            {
+                ulong rows = (ulong)random.Next(1, 400);
+                chunks[c] = Node(Flat, rows, segments: [(uint)c]);
+                total += rows;
+            }
+
+            LayoutTree tree = Tree(Node(Chunked, total, children: chunks), I64());
+            SplitPlan plan = SplitPlan.Compute(tree, new RowRange(0, (long)total), FieldMask.All, random.Next(2) == 0 ? 8192 : random.Next(1, 120));
+            List<RowRange> whole = [];
+            SplitCursor walk = plan.CreateCursor();
+            while (walk.TryNext(out RowRange split))
+            {
+                whole.Add(split);
+            }
+
+            int before = random.Next(0, whole.Count);
+            long row = random.NextInt64(0, (long)total + 50);
+            SplitCursor moved = plan.CreateCursor();
+            for (int i = 0; i <= before; i++)
+            {
+                Assert.True(moved.TryNext(out _));
+            }
+
+            moved.SkipTo(row);
+            List<RowRange> rest = [];
+            while (moved.TryNext(out RowRange split))
+            {
+                rest.Add(split);
+            }
+
+            int holding = whole.FindIndex(split => split.Start <= row && row < split.End);
+            int from = holding < 0 ? whole.Count : Math.Max(holding, before + 1);
+            Assert.Equal(whole.GetRange(from, whole.Count - from), rest);
+        }
+
+        LayoutTree three = Tree(Node(Chunked, 300, children: [Node(Flat, 100, segments: [0]), Node(Flat, 100, segments: [1]), Node(Flat, 100, segments: [2])]), I64());
+        SplitCursor reverse = SplitPlan.Compute(three, new RowRange(0, 300), FieldMask.All, 8192).CreateCursor(reverse: true);
+        Assert.True(reverse.TryNext(out RowRange last));
+        reverse.SkipTo(50);
+        Assert.True(reverse.TryNext(out RowRange next));
+        Assert.Equal((new RowRange(200, 300), new RowRange(100, 200)), (last, next));
+    }
+
     [Fact]
     public void AStructWithNoFieldSelectedStillCoversItsRows()
     {
@@ -343,6 +426,21 @@ public sealed class SplitPlanTests
         DTypeArena arena = new DTypeArena();
         DType i64 = arena.Primitive(PType.I64, Nullability.NonNullable);
         return arena.Struct(["a", "b"], [i64, i64], Nullability.NonNullable);
+    }
+
+    private static DType StructOf(int fields)
+    {
+        DTypeArena arena = new DTypeArena();
+        DType i64 = arena.Primitive(PType.I64, Nullability.NonNullable);
+        string[] names = new string[fields];
+        DType[] types = new DType[fields];
+        for (int i = 0; i < fields; i++)
+        {
+            names[i] = ((char)('a' + i)).ToString();
+            types[i] = i64;
+        }
+
+        return arena.Struct(names, types, Nullability.NonNullable);
     }
 
     private static LayoutTree Tree(LayoutSpecNode root, DType schema)

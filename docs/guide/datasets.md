@@ -126,6 +126,161 @@ queue, with large objects cut between their chunks. On the first column of the c
 function of it, a group by streams, because the dataset delivers its rows in key order. See
 [aggregates.md](aggregates.md).
 
+A dataset compacted by periods answers many aggregations from its objects' synopses instead of their
+rows. Each sealed object keeps tables of counts, exact sums and extremes per value of its
+low-cardinality columns, per slice of time and per hour. A count, a sum, a minimum, a maximum or a
+mean, grouped by such columns or by a function of the instant, under a filter on them and a window of
+time, reads a few table rows per object, and then only the rows of the slices the window cuts. The
+answer is the same bits as from the rows. On two hours and a quarter of requests, a count per service
+read 15 table rows instead of 6 400 rows. `ScanOptions.UseSynopses = false` reads the rows, to check a
+synopsis. The scan's metrics count the table rows (`SynopsisRows`) and the rows read at the window's
+edges (`EdgeRows`), and the question's `ExplainAsync()` lists in `States` what each object reads: a
+table and the buckets it folds, the slices read at the edges, or its rows and why. Such a group by
+delivers its groups once the pass has run, rather than streaming. Three days of a request every five
+seconds, by service over the first two (the `time-windows` sample):
+
+```
+51840 requests over three days in 3 objects
+two days by service, synopses on: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 10 table rows, 0 rows read
+two days by service, synopses off: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 0 table rows, 34560 rows read
+```
+
+A key of a variant column counts as a column too, when it is read strictly as an integer, a double, a
+text or a boolean, and the objects shred it:
+
+```csharp
+var routes = dataset.Scan<LogRow>()
+    .Where(r => r.Attributes["http.response.status_code"].AsInt64() >= 500)
+    .GroupBy(r => r.Attributes["http.route"].AsString())
+    .Select(g => (g.Key, g.Count()));
+```
+
+`AsDouble()` reads floats as well as doubles, which the tables keep apart: it answers from the tables
+of every object that holds no float at the path, and reads the rows of the others. `ToInt64()` converts
+every kind of value, so it reads the rows, as a key an object leaves unshredded does, since its tables
+count only the rows that hold it.
+
+A window whose ends fall inside an hour reads the rows its tables cannot answer there: the slices it
+cuts when a table of slices holds the question's keys, the whole hour when only the hour's table does.
+A dashboard over the last N minutes has an end inside an hour every time. `ScanOptions.AlignWindow`
+lets each end move out to the nearest bound the tables answer at, the slice's, the hour's or the
+object's, and no further than the rows held, so the question reads no row. It then answers that
+window exactly, which the metrics give back: divide a count by the window applied, not the one asked.
+
+```csharp
+var question = dataset.Scan<Request>().With(new ScanOptions { AlignWindow = true })
+    .Where(r => r.At >= now.AddMinutes(-15) && r.At < now)
+    .GroupBy(r => r.Service).Select(g => (g.Key, g.Count()));
+var counts = await question.As<ServiceCount>().ToRecordsAsync().ToListAsync();
+var applied = (question.Metrics.WindowFrom, question.Metrics.WindowTo);
+```
+
+On a day of requests behind a store 30 ms away, a count per service over a window that cuts its first
+and last hours took 8 requests in 6 round trips warm, 194 ms, and aligned it took none, 4 ms
+(`vortex-queries --micro questions --only window`). The rows give the same answer under the option, so
+`UseSynopses = false` still checks it.
+
+The objects a synopsis answers are read newest first and many at once, as many as the session lets
+reads be in flight (`VortexSessionOptions.MaxConcurrentReads`), so a day of hourly objects costs the
+round trip of one hour. A filter that leaves out one value of a declared identifier,
+`r.RequestId != id || r.RequestId == null`, is answered from the tables too: the identifier's index
+finds that value's few rows, and they are taken out of the tables' counts and sums. When the
+identifier's column cannot be null, `r.RequestId != id` alone says the same and is answered alike.
+
+A page that shows a long window can show its newest part first. `AskNewestFirstAsync` cuts the window
+at the starts of the periods it crosses, asks your question over each part, several parts at once,
+and delivers each part's answer newest first, once it and every newer part are in:
+
+```csharp
+await foreach (WindowPart<List<ServiceTotals>> part in dataset.AskNewestFirstAsync(from, to, async (start, end, ct) =>
+    await dataset.Scan<Request>().Where(r => r.At >= start && r.At < end)
+        .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)))
+        .As<ServiceTotals>().ToRecordsAsync(ct).ToListAsync(ct)))
+{
+    Show(part.From, part.To, part.Answer);
+}
+```
+
+Each part's answer is final for its range of time, so once a part arrives, the window from its start
+to the window's end is answered. Counts and sums over the parts add up, and so do minimums and
+maximums. A mean over the whole window is the sum of the parts' sums over the sum of their counts.
+
+Rows kept for different lengths of time can share a dataset by periods. Lead the clustering key with
+the column that says how long a row lives, and declare it a partition column:
+
+```csharp
+DatasetOptions options = new DatasetOptions
+{
+    ClusteringKey = [nameof(Logged.Retention), nameof(Logged.At)],
+    PartitionColumns = 1,
+    Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+};
+```
+
+Every object then holds one retention value. An append is split into an object per value, and each
+value grows its own periods, so a period never mixes rows that expire at different times. Partition
+columns should have a few values: an append that holds more than `MaxPartitionValues` of them, 64 by
+default, is refused. That bound is per append, and nothing bounds the values a dataset gathers over
+time, each of which grows periods of its own: `PlanCompactionAsync` says how many the dataset holds
+(`CompactionPlan.Partitions`), and so does the `vortex.dataset.partitions` metric. A question filtered or
+grouped on the partition column is still answered from the synopses, since each object holds a single
+value of it.
+
+Each partition then expires on its own schedule, reading no data:
+
+```csharp
+await dataset.ExpireAsync<Logged>(r => r.Retention == "debug", DateTimeOffset.UtcNow.AddDays(-7));
+await dataset.ExpireAsync<Logged>(r => r.Retention == "info", DateTimeOffset.UtcNow.AddDays(-90));
+```
+
+The filter compares partition columns with values, nothing else: a filter on any other column is a
+delete, and `DeleteAsync` is the call for it.
+
+A row that arrives after its period has closed, later than the lateness horizon, is kept beside its
+period in a small object of its own, and every question reads it with the period. Its period is not
+rewritten for it, and it expires with its partition. The dataset counts such rows on its meter, as
+`vortex.dataset.rows_past_horizon`. A handle created with `PeriodOptions.RefuseLateRows = true`
+refuses an append that holds one instead.
+
+A period closes on the data's own time, never the clock's: once the dataset holds a row past the
+period's end and the lateness horizon, partition by partition. A partition that stops receiving rows
+keeps its last period open, in the small objects its last appends left. Questions over it are just as
+exact and cost a few more requests than over a sealed period, and it expires with its partition all
+the same.
+
+Declare a horizon that covers how late your rows come, or periods longer than that. Rows that keep
+coming later than the horizon fill the small objects beside their period, and the period is sealed
+again with them: on periods of an hour, under a few rows up to an hour late among four writers, a row
+is rewritten about five times instead of under three, each hour sealed three times over
+(`vortex-queries --micro lifecycle`). The `vortex.dataset.lateness` histogram records how late the
+oldest row of each append came, to set the horizon against.
+
+The tables a question reads can stay on the local disk, so that the next question over the same
+objects asks the store nothing for them. Give the session a `SynopsisCache`, a directory and the bytes
+it may hold:
+
+```csharp
+await using VortexSession session = VortexSession.Create(options =>
+    options.SynopsisCache = new SynopsisCache("/var/cache/vorticity", capacityBytes: 20L << 30));
+await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
+
+// Optional: read the last month's tables before the first question needs them.
+long warmed = await dataset.WarmAsync<Request>(r => r.At >= DateTimeOffset.UtcNow.AddDays(-30));
+```
+
+Only what an object's table of contents declares enters the cache: its synopsis tables and the
+directories that find its rows, never its data. An object never changes, so an entry never goes stale.
+Each region is checked against its checksum whenever it is read from the disk, and one that fails is
+read again from the store. One process owns a directory at a time, and the entries outlive it: the
+next session that opens the directory finds them. Of an encrypted dataset, the cache keeps the
+encrypted bytes the store holds, the frames around each region and the object's trailer, and decrypts
+them at each read: no key and no plain byte reaches the disk, and a frame altered there is refused and
+read again from the store. A frame is 64 KiB, so a small region costs the disk more than its own bytes.
+Past its capacity, a region
+read only once leaves before one read again and again, so a question over thirteen months passes
+through without pushing out the tables of the last days. The cache reports what it does on the
+library's meter, under `vortex.synopsis_cache.*`.
+
 ## Versions
 
 ```csharp
@@ -287,6 +442,10 @@ never lend its values to an unrelated column.
 
 * The dataset format is experimental and specific to this project. Pin the package version, and do
   not expect another Vortex implementation to read the commit tree.
+* A dataset written in commit format 4 is refused by earlier releases, which would otherwise misread
+  it. A dataset takes format 4 once it declares periods, partition columns, identifiers or an erasure
+  delay, or once one of its objects has a footer past the first 64 KiB an open reads. Upgrade every
+  process that writes or reads such a dataset before any of them uses one of those.
 * Marked rows keep their bytes until compaction. A delete that marks rows frees no space, since the
   object holds them (up to an eighth of its rows) until compaction rewrites it or a later delete
   passes that share. An object under a mebibyte is rewritten by every delete that touches it, so
@@ -304,6 +463,13 @@ never lend its values to an unrelated column.
   [dataset-maintenance.md](dataset-maintenance.md).
 * An object is created before the commit that names it, so a crash between the two leaves an object
   no version references. Vacuum collects it once it is older than the window.
+* An object past 32 MiB goes to the store as it is written. A compaction tells the store how large it
+  can grow, so the parts fit every service, but an append cannot, and an append past what a service
+  reaches without that fails at its end: 168 GB on Cloudflare R2 and 106 GB on Scaleway (about a
+  terabyte on Amazon S3). Append in smaller pieces, or give the store a spool directory
+  (`StoreTransportOptions.SpoolDirectory`) there. The parts of a large object are in flight four at a
+  time: a period of a day at a few thousand rows a second sends parts of about 180 MB on Scaleway,
+  where periods of an hour keep the default parts of 16 MiB.
 * `DatasetOptions.Session` is the session whose pool, cache and parallelism the dataset's scans use,
   and `DatasetOptions.TimeProvider` is the clock a commit reads its creation time from.
 
@@ -311,4 +477,11 @@ never lend its values to an unrelated column.
 
 ```
 dotnet run -c Release --project samples/Vorticity.Samples -- datasets
+```
+
+The dataset of periods, its synopses, the window asked newest first, the cache and the retentions are
+the `time-windows` sample, and the variant columns the `variants` sample:
+
+```
+dotnet run -c Release --project samples/Vorticity.Samples -- time-windows variants
 ```

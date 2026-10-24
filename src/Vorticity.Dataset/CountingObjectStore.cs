@@ -190,8 +190,13 @@ public sealed class CountingObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
+    public ValueTask<PutOutcome> PutAsync(
+        string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>
+        PutAsync(key, content, length, -1, condition, cancellationToken);
+
+    /// <inheritdoc/>
     public async ValueTask<PutOutcome> PutAsync(
-        string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
+        string key, PipeReader content, long length, long maxLength, PutCondition condition, CancellationToken cancellationToken)
     {
         Enter(ObjectOperation.Put);
         lock (_gate)
@@ -204,7 +209,7 @@ public sealed class CountingObjectStore : IObjectStore
         CountingReader? counted = length < 0 ? new CountingReader(content) : null;
         try
         {
-            return await _inner.PutAsync(key, counted ?? content, length, condition, cancellationToken).ConfigureAwait(false);
+            return await _inner.PutAsync(key, counted ?? content, length, maxLength, condition, cancellationToken).ConfigureAwait(false);
         }
         finally
         {

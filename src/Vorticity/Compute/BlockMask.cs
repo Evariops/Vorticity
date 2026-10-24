@@ -115,6 +115,30 @@ internal sealed class BlockMask
     internal bool IsLive(int block) =>
         (uint)block < (uint)BlockCount && (_bits[block >> 6] & (1UL << (block & 63))) != 0;
 
+    /// <summary>The first live block at or after <paramref name="block"/>, a word at a time; <see cref="BlockCount"/> when none is.</summary>
+    /// <param name="block">A block index, at or past <see cref="BlockCount"/> for none.</param>
+    internal int NextLive(int block)
+    {
+        if ((uint)block >= (uint)BlockCount)
+        {
+            return BlockCount;
+        }
+
+        int word = block >> 6;
+        ulong bits = _bits[word] & (ulong.MaxValue << (block & 63));
+        while (bits == 0)
+        {
+            if (++word >= _bits.Length)
+            {
+                return BlockCount;
+            }
+
+            bits = _bits[word];
+        }
+
+        return (word << 6) + BitOperations.TrailingZeroCount(bits);
+    }
+
     /// <summary>Marks block <paramref name="block"/> as proven to hold no matching row.</summary>
     /// <param name="block">A block index below <see cref="BlockCount"/>.</param>
     internal void Kill(int block)
@@ -124,6 +148,9 @@ internal sealed class BlockMask
             _bits[block >> 6] &= ~(1UL << (block & 63));
         }
     }
+
+    /// <summary>Marks every block as proven to hold no matching row: what a structure that refutes the whole file says.</summary>
+    internal void KillAll() => _bits.AsSpan().Clear();
 
     /// <summary>
     /// Leaves live exactly the blocks <paramref name="rows"/> overlaps, whatever was live before.

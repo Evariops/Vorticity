@@ -227,12 +227,15 @@ jobs:
           done
 
       # The filters are words, their wildcards xunit's own: the shell expands no file name. Every
-      # step below writes an xunit report of each test's time, which the last one keeps.
+      # step below writes an xunit report of each test's time, which the last one keeps. The tests'
+      # temporary files go to the runner's disk: Ubuntu 26.04 mounts /tmp in memory, where a spill
+      # refuses to write the runs that are to give its memory back.
       - name: Test
         if: ${{ !matrix.scalar-pass && !matrix.runs-alone }}
         env:
           PROJECTS: ${{ matrix.projects }}
           FILTERS: ${{ matrix.filters }}
+          TMPDIR: ${{ runner.temp }}
         run: |
           set -f
           status=0
@@ -246,10 +249,14 @@ jobs:
 
       - name: Test the classes that run alone
         if: ${{ matrix.runs-alone }}
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: bash tests/runs-alone.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports"
 
       - name: Test the scalar fallbacks
         if: ${{ matrix.scalar-pass }}
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: bash tests/scalar-pass.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports"
 
       # Where the time goes, test by test, kept a fortnight: what the next split of the runners is
@@ -440,11 +447,14 @@ jobs:
       - name: Publish pqdump as Native AOT
         run: dotnet publish tools/pqdump -c Release -r linux-x64
 
-      # Exit 3 (unsupported) and 4 (malformed) are expected answers for eighteen of these files: six
+      # Exit 3 (unsupported) and 4 (malformed) are expected answers for twenty of these files: six
       # use what this build does not read, the deprecated LZ4 among them and two variants shredded to
-      # types the standard does not shred to, and twelve are malformed on purpose, four of them
-      # variants the suite says are errors. A verify that finds something exits 1, which four files, the
-      # suite's checksum cases, do by design.
+      # types the standard does not shred to, and fourteen are malformed on purpose, six of them
+      # variants: four the suite says are errors, and two that hold a field both shredded and in the
+      # variant's value, which the suite lets a reader refuse or read, and this build refuses. A verify
+      # that finds something exits 1, which five files do: the suite's four checksum cases, by design,
+      # and a shredded variant with a null row, whose metadata column's statistics count a null its
+      # rows do not hold.
       - name: Scan and verify every Parquet test file with the AOT pqdump
         run: |
           BIN=tools/pqdump/bin/Release/net11.0/linux-x64/publish/pqdump
@@ -467,8 +477,8 @@ jobs:
           done < <(find "$RUNNER_TEMP/parquet-testing" -name '*.parquet')
           echo "AOT pqdump: $scanned scanned ($clean true to their footers, $found not), $refused refused, $crashed crashed"
           test "$crashed" = 0
-          test "$refused" -le 18
-          test "$scanned" -ge 222
+          test "$refused" -le 20
+          test "$scanned" -ge 220
 
   crosscheck:
     name: cross-check with the reference

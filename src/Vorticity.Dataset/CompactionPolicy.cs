@@ -24,7 +24,7 @@ namespace Vorticity.Dataset;
 /// tallies. Both choose the same job.
 /// </para>
 /// </remarks>
-internal static class CompactionPolicy
+internal static partial class CompactionPolicy
 {
     /// <summary>
     /// Plans the compaction due on a dataset's current version; the plan's job is null when nothing
@@ -51,8 +51,16 @@ internal static class CompactionPolicy
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(jobs);
         PlannedVersion version = new PlannedVersion(dataset);
         CompactionOptions settings = SettingsFor(version, options);
-        CompactionStyle style = settings.StyleFor(version.Key is not null);
-        bool descends = style == CompactionStyle.Leveled ? version.Key is not null : settings.PickFor(style) == CompactionPick.RoundRobin;
+        CompactionStyle style = settings.StyleFor(version.Key is not null, version.Levels.ByPeriods);
+
+        // A dataset of periods holds few objects, a few per level and one per sealed period, so its
+        // plan reads them all.
+        bool descends = style switch
+        {
+            CompactionStyle.Periods => false,
+            CompactionStyle.Leveled => version.Key is not null,
+            _ => settings.PickFor(style) == CompactionPick.RoundRobin,
+        };
         if (descends && await TalliesAsync(version, cancellationToken).ConfigureAwait(false) is { } tallies)
         {
             return await DescendAsync(version, settings, style, tallies, jobs, cancellationToken).ConfigureAwait(false);
@@ -71,7 +79,8 @@ internal static class CompactionPolicy
         ArgumentNullException.ThrowIfNull(dataset);
         PlannedVersion version = new PlannedVersion(dataset);
         CompactionOptions settings = SettingsFor(version, options);
-        return await ReadEveryLeafAsync(version, settings, settings.StyleFor(version.Key is not null), jobs, cancellationToken)
+        return await ReadEveryLeafAsync(
+                version, settings, settings.StyleFor(version.Key is not null, version.Levels.ByPeriods), jobs, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -105,6 +114,12 @@ internal static class CompactionPolicy
         /// <summary>Whether its header says the store locks what it keeps.</summary>
         internal bool LockedStore => _snapshot.Header.LockedStore;
 
+        /// <summary>The erasure delay its header carries; null for none.</summary>
+        internal TimeSpan? ErasureDelay => _snapshot.Header.ErasureDelay;
+
+        /// <summary>Its header.</summary>
+        internal CommitHeader Header => _snapshot.Header;
+
         /// <summary>The handle's options, which no version changes.</summary>
         internal DatasetOptions Options { get; } = dataset.Options;
     }
@@ -116,6 +131,22 @@ internal static class CompactionPolicy
     /// <exception cref="ArgumentException">The options ask for tiered levels on a dataset with a clustering key.</exception>
     private static CompactionOptions SettingsFor(PlannedVersion dataset, CompactionOptions? options)
     {
+        // The periods are written in the dataset, so the style they imply is every writer's.
+        if (options is { Style: CompactionStyle.Leveled or CompactionStyle.Tiered } && dataset.Levels.ByPeriods)
+        {
+            throw new ArgumentException(
+                "A dataset that declares periods compacts by periods: its late level and its fresh levels are laid out for them, " +
+                "and another style would merge across them.",
+                nameof(options));
+        }
+
+        if (options is { Style: CompactionStyle.Periods } && !dataset.Levels.ByPeriods)
+        {
+            throw new ArgumentException(
+                "Compacting by periods takes a dataset that declares them at creation (DatasetOptions.Periods).",
+                nameof(options));
+        }
+
         if (options is { Style: CompactionStyle.Tiered } && dataset.Key is not null)
         {
             // The style is not written in the dataset, so two writers could compact it under two;
@@ -160,6 +191,13 @@ internal static class CompactionPolicy
             jobs.Add(job);
         }
 
+        // A dataset of periods is planned from every leaf, so the partitions it holds cost no read.
+        int partitions = dataset.Key is { PartitionColumns: > 0 } partitioned ? PartitionsOf(levels, partitioned) : 0;
+        if (partitions > 0)
+        {
+            DatasetTelemetry.PartitionsHeld(partitions);
+        }
+
         return new CompactionPlan
         {
             Version = dataset.Version,
@@ -171,6 +209,7 @@ internal static class CompactionPolicy
             Job = jobs.Count > 0 ? jobs[0] : null,
             Jobs = [.. jobs],
             FragmentedObjects = fragmented,
+            Partitions = partitions,
         };
     }
 
@@ -195,6 +234,11 @@ internal static class CompactionPolicy
         CompactionStyle style,
         HashSet<int> taken)
     {
+        if (style == CompactionStyle.Periods)
+        {
+            return ChoosePeriods(dataset, levels, settings, taken);
+        }
+
         if (levels.Count > 0 && objects[0] > settings.LevelZeroCeiling && !taken.Contains(0)
             && Build(dataset, levels, 0, settings, style, CompactionTrigger.LevelZeroCeiling) is { } drained
             && !taken.Contains(drained.ToLevel))
@@ -218,9 +262,22 @@ internal static class CompactionPolicy
 
         // An object whose marks are due next: rewriting it alone costs its bytes, so the one with the
         // most marked goes first.
-        if (settings.PurgeMarks && MostMarked(levels, Marking.Of(dataset.Options), taken) is { } marked)
+        if (settings.PurgeMarks && MostMarked(levels, Marking.Of(dataset), taken) is { } marked)
         {
-            return Purge(marked, settings, style, FirstRow(dataset, marked));
+            return Purge(marked, Marking.Of(dataset), settings, style, FirstRow(dataset, marked));
+        }
+
+        // Small neighbours at a level's end, which keys in order leave there: under the leveled style
+        // alone, since a tiered level's concatenations grow its objects already.
+        ClusteringKey? clustering = style == CompactionStyle.Leveled ? dataset.Key : null;
+        for (int level = 1; level < levels.Count && settings.MergeNeighbours && clustering is not null; level++)
+        {
+            if (!taken.Contains(level)
+                && Neighbours(levels[level].GetRange(Math.Max(0, levels[level].Count - Window(settings)), Math.Min(levels[level].Count, Window(settings))), level, settings) is { } small
+                && Unspanned(small, Spanning(levels, level, LevelRange.Of(level, small, clustering)), level, clustering, settings) is { } alone)
+            {
+                return Merged(dataset, alone, level, settings, style);
+            }
         }
 
         // Fragments last: this rewrites no row, and a trigger that moves data would drop the
@@ -245,8 +302,17 @@ internal static class CompactionPolicy
 
     /// <summary>
     /// The job that empties a level into one above it: the next, or for level 0 under the leveled
-    /// style, the first whose capacity holds it.
+    /// style, the first whose capacity holds it. A leveled level above 0 gives up its first object when
+    /// that one moves up whole, as it does whenever keys arrive in order.
     /// </summary>
+    /// <remarks>
+    /// Keys in order leave each level a band of the key space, the oldest at the bottom, where every
+    /// object overlaps nothing above it: any pick moves rather than merges. The largest scatters the
+    /// band, though, since objects of one size class differ by a few kilobytes, and a merge of the small
+    /// neighbours a level's end holds then spans what the levels around it hold, which every later move
+    /// into it rewrites: 5.9 rewrites a row instead of 2.2 on the lifecycle bench. The first object keeps
+    /// the bands whole. Keys at random overlap the first object as much as any, and the largest goes.
+    /// </remarks>
     private static CompactionJob? Build(
         PlannedVersion dataset,
         List<List<CompactionInput>> levels,
@@ -257,14 +323,29 @@ internal static class CompactionPolicy
     {
         CompactionPick pick = settings.PickFor(style);
         ReadOnlySpan<byte> pointer = dataset.Levels.PointerOf(from).Span;
+        if (style == CompactionStyle.Leveled && from > 0 && settings.MovesFirst(style) && levels[from].Count > 1
+            && Build(dataset, levels, from, [levels[from][0]], pick, settings, style, trigger) is { Moves: true } moved)
+        {
+            return moved;
+        }
+
         List<CompactionInput> sources = style == CompactionStyle.Leveled
             ? Leveled(levels[from], from, pick, pointer)
             : Contiguous(levels, from, pick, pointer);
-        if (sources.Count == 0)
-        {
-            return null;
-        }
+        return sources.Count == 0 ? null : Build(dataset, levels, from, sources, pick, settings, style, trigger);
+    }
 
+    /// <summary>The job that empties <paramref name="sources"/> out of level <paramref name="from"/>, with what it overlaps where it goes.</summary>
+    private static CompactionJob Build(
+        PlannedVersion dataset,
+        List<List<CompactionInput>> levels,
+        int from,
+        List<CompactionInput> sources,
+        CompactionPick pick,
+        CompactionOptions settings,
+        CompactionStyle style,
+        CompactionTrigger trigger)
+    {
         int to = from + 1;
         if (style == CompactionStyle.Leveled && from == 0)
         {
@@ -543,8 +624,20 @@ internal static class CompactionPolicy
                 }
 
                 bool roundRobin = settings.PickFor(style) == CompactionPick.RoundRobin;
+                if (settings.MovesFirst(style))
+                {
+                    CompactionJob first = await LeveledAsync(
+                            dataset, [await NextAsync(dataset, level, default, cancellationToken).ConfigureAwait(false)], level, level + 1, settings,
+                            CompactionTrigger.LevelSize, default, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (first.Moves)
+                    {
+                        return first;
+                    }
+                }
+
                 CompactionInput source = roundRobin
-                    ? await NextAsync(dataset, level, cancellationToken).ConfigureAwait(false)
+                    ? await NextAsync(dataset, level, dataset.Levels.PointerOf(level), cancellationToken).ConfigureAwait(false)
                     : await LargestAsync(dataset, level, cancellationToken).ConfigureAwait(false);
                 return await LeveledAsync(
                         dataset, [source], level, level + 1, settings, CompactionTrigger.LevelSize, roundRobin ? source.Key : default, cancellationToken)
@@ -553,9 +646,35 @@ internal static class CompactionPolicy
         }
 
         if (settings.PurgeMarks
-            && await MostMarkedAsync(dataset, tallies, Marking.Of(dataset.Options), taken, cancellationToken).ConfigureAwait(false) is { } marked)
+            && await MostMarkedAsync(dataset, tallies, Marking.Of(dataset), taken, cancellationToken).ConfigureAwait(false) is { } marked)
         {
-            return Purge(marked, settings, style, FirstRow(dataset, marked));
+            return Purge(marked, Marking.Of(dataset), settings, style, FirstRow(dataset, marked));
+        }
+
+        ClusteringKey? clustering = leveled ? dataset.Key : null;
+        for (int level = 1; level < levels && settings.MergeNeighbours && clustering is not null; level++)
+        {
+            if (taken.Contains(level) || objects[level] < Math.Max(settings.Fanout, 2))
+            {
+                continue;
+            }
+
+            List<CompactionInput> tail = [];
+            foreach (TreeEntry entry in await dataset.Levels[level].LastAsync(dataset.Pages, Window(settings), cancellationToken).ConfigureAwait(false))
+            {
+                tail.Add(new CompactionInput(level, entry.Key, ObjectEntry.FromBytes(entry.Value)));
+            }
+
+            if (Neighbours(tail, level, settings) is { } small
+                && Unspanned(
+                        small,
+                        await SpanningAsync(dataset, level, LevelRange.Of(level, small, clustering), cancellationToken).ConfigureAwait(false),
+                        level,
+                        clustering,
+                        settings) is { } alone)
+            {
+                return Merged(dataset, alone, level, settings, style);
+            }
         }
 
         List<CompactionInput> untaken = fragmented.FindAll(input => !taken.Contains(input.Level));
@@ -630,13 +749,14 @@ internal static class CompactionPolicy
     }
 
     /// <summary>
-    /// The object a round robin takes next from a level: the first past its pointer, or its first,
-    /// at the end of one descent.
+    /// The object a round robin takes next from a level: the first past <paramref name="pointer"/>,
+    /// or its first, at the end of one descent. An empty pointer gives the level's first object.
     /// </summary>
-    private static async ValueTask<CompactionInput> NextAsync(PlannedVersion dataset, int level, CancellationToken cancellationToken)
+    private static async ValueTask<CompactionInput> NextAsync(
+        PlannedVersion dataset, int level, ReadOnlyMemory<byte> pointer, CancellationToken cancellationToken)
     {
         TreeEntry next = await dataset.Levels[level]
-            .NextAsync(dataset.Levels.PointerOf(level), wrap: true, dataset.Pages, cancellationToken).ConfigureAwait(false)
+            .NextAsync(pointer, wrap: true, dataset.Pages, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("A level over its bound holds an object.");
         return new CompactionInput(level, next.Key, ObjectEntry.FromBytes(next.Value));
     }
@@ -759,15 +879,155 @@ internal static class CompactionPolicy
     /// keys lie inside its old range, so a level stays key-disjoint, and it is written as one object
     /// whatever its level's target, so that a purge of level 0 does not put it over its ceiling.
     /// </summary>
-    private static CompactionJob Purge(CompactionInput marked, CompactionOptions settings, CompactionStyle style, long firstRow) =>
+    private static CompactionJob Purge(CompactionInput marked, Marking marking, CompactionOptions settings, CompactionStyle style, long firstRow) =>
         new CompactionJob(
             marked.Level,
             marked.Level,
             style,
-            CompactionTrigger.Marks,
+            marking.Erases(marked.Entry) ? CompactionTrigger.Erasure : CompactionTrigger.Marks,
             [marked],
             Math.Max(settings.TargetBytes(marked.Level), marked.Entry.Bytes),
             firstRow);
+
+    /// <summary>
+    /// The objects at a level's end a neighbours job reads: the last <c>F²</c>, which hold the groups of
+    /// small ones a run of appends in key order leaves there, at most <c>F − 1</c> a size class.
+    /// </summary>
+    private static int Window(CompactionOptions settings) => Math.Max(settings.Fanout, 2) * Math.Max(settings.Fanout, 2);
+
+    /// <summary>
+    /// The size class of an object in a level: how many times <c>F</c> fits between its bytes and the
+    /// level's target, 0 for an object within <c>F</c> of the target, which is grown enough.
+    /// </summary>
+    private static int ClassOf(long bytes, long target, int fanout)
+    {
+        int size = 0;
+        long grown = Math.Max(bytes, 1);
+        while (grown <= target / fanout)
+        {
+            grown *= fanout;
+            size++;
+        }
+
+        return size;
+    }
+
+    /// <summary>
+    /// The neighbours due among the objects at a level's end, <paramref name="tail"/> in key order: the
+    /// run at the very end of objects of one size class under the target, when it holds at least
+    /// <c>F</c>, its last ones whose bytes stay within the target; null otherwise. Merged, <c>F</c>
+    /// objects of a class make one of the class above, which joins the run before it as a carry does, so
+    /// a byte is rewritten once a class, <c>log_F(target / size)</c> times, as the leveled merges of
+    /// random keys rewrite it once a level.
+    /// </summary>
+    private static List<CompactionInput>? Neighbours(List<CompactionInput> tail, int level, CompactionOptions settings)
+    {
+        int fanout = Math.Max(settings.Fanout, 2);
+        long target = settings.TargetBytes(level);
+        if (tail.Count < fanout)
+        {
+            return null;
+        }
+
+        int size = ClassOf(tail[^1].Entry.Bytes, target, fanout);
+        if (size == 0)
+        {
+            return null;
+        }
+
+        List<CompactionInput> run = [];
+        long bytes = 0;
+        for (int i = tail.Count - 1; i >= 0 && ClassOf(tail[i].Entry.Bytes, target, fanout) == size && bytes + tail[i].Entry.Bytes <= target; i--)
+        {
+            run.Add(tail[i]);
+            bytes += tail[i].Entry.Bytes;
+        }
+
+        if (run.Count < fanout)
+        {
+            return null;
+        }
+
+        run.Reverse();
+        return run;
+    }
+
+    /// <summary>
+    /// The neighbours a merge may take out of <paramref name="run"/>: the longest run at its end whose
+    /// range holds no object of <paramref name="others"/>, when that still makes <c>F</c>; null otherwise.
+    /// A merge across an object of another level writes one that the object's later move into this
+    /// level, or this one's move into the object's, has to rewrite, and every such move after it again.
+    /// </summary>
+    private static List<CompactionInput>? Unspanned(
+        List<CompactionInput> run, List<ObjectSummaries> others, int level, ClusteringKey key, CompactionOptions settings)
+    {
+        if (others.Count == 0)
+        {
+            return run;
+        }
+
+        int start = run.Count;
+        while (start > 0 && !others.Exists(LevelRange.Of(level, run.GetRange(start - 1, run.Count - start + 1), key).Overlaps))
+        {
+            start--;
+        }
+
+        return run.Count - start >= Math.Max(settings.Fanout, 2) ? run.GetRange(start, run.Count - start) : null;
+    }
+
+    /// <summary>The summaries of the objects outside <paramref name="level"/> that may hold a key inside <paramref name="range"/>.</summary>
+    private static List<ObjectSummaries> Spanning(List<List<CompactionInput>> levels, int level, LevelRange range)
+    {
+        List<ObjectSummaries> found = [];
+        for (int other = 0; other < levels.Count; other++)
+        {
+            if (other == level)
+            {
+                continue;
+            }
+
+            foreach (CompactionInput input in levels[other])
+            {
+                if (range.Overlaps(input.Entry.Summaries))
+                {
+                    found.Add(input.Entry.Summaries);
+                }
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary><see cref="Spanning"/> by walks that skip every subtree whose summary puts it outside the range.</summary>
+    private static async ValueTask<List<ObjectSummaries>> SpanningAsync(
+        PlannedVersion dataset, int level, LevelRange range, CancellationToken cancellationToken)
+    {
+        List<ObjectSummaries> found = [];
+        for (int other = 0; other < dataset.Levels.Count; other++)
+        {
+            if (other == level)
+            {
+                continue;
+            }
+
+            await foreach (PositionedEntry held in dataset.Levels[other]
+                .WalkAsync(dataset.Pages, 0, long.MaxValue, range.MayOverlap, cancellationToken)
+                .ConfigureAwait(false))
+            {
+                if (range.Overlaps(held.Entry.Value))
+                {
+                    found.Add(ObjectEntry.FromBytes(held.Entry.Value).Summaries);
+                }
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>The job that merges small neighbours into one object, in their own level.</summary>
+    private static CompactionJob Merged(
+        PlannedVersion dataset, List<CompactionInput> neighbours, int level, CompactionOptions settings, CompactionStyle style) =>
+        new CompactionJob(level, level, style, CompactionTrigger.Neighbours, neighbours, settings.TargetBytes(level), FirstRow(dataset, neighbours[0]));
 
     /// <summary>
     /// The object whose marks are the most due outside the levels <paramref name="taken"/>, the first
@@ -833,31 +1093,62 @@ internal static class CompactionPolicy
 
     /// <summary>
     /// When an object's marks are due for a purge: at half the share of its rows, or half the bytes of
-    /// vector, past which a delete rewrites the object itself.
+    /// vector, past which a delete rewrites the object itself. Under an erasure delay, at half the
+    /// delay since its oldest mark instead of by its vector's bytes, so that the purge has the other
+    /// half to run and the vector alone triggers none.
     /// </summary>
     /// <param name="Share">The divisor of a delete's share, <see cref="DatasetOptions.MarkedShare"/>.</param>
-    /// <param name="VectorBytes">A delete's bound on a vector, <see cref="DatasetOptions.MarkedVectorBytes"/>.</param>
-    private readonly record struct Marking(int Share, int VectorBytes)
+    /// <param name="Options">The handle's options, whose bound on a vector grows with the object.</param>
+    /// <param name="ErasureSeconds">The erasure delay in seconds; 0 for none.</param>
+    /// <param name="NowSeconds">The time the plan is made, in seconds since the Unix epoch.</param>
+    private readonly record struct Marking(int Share, DatasetOptions Options, long ErasureSeconds, long NowSeconds)
     {
-        public static Marking Of(DatasetOptions options) =>
-            new Marking(Math.Max(options.MarkedShare, 1), Math.Max(options.MarkedVectorBytes, 1));
+        public static Marking Of(PlannedVersion dataset) =>
+            new Marking(
+                Math.Max(dataset.Options.MarkedShare, 1),
+                dataset.Options,
+                dataset.ErasureDelay is { } delay ? Math.Max((long)delay.TotalSeconds, 1) : 0,
+                dataset.Options.TimeProvider.GetUtcNow().ToUnixTimeSeconds());
 
         /// <summary>
         /// How due an object's marks are: its share of marked rows, or its vector's bytes, over half of
-        /// a delete's bound, whichever is further; due from 1.
+        /// a delete's bound, or under an erasure delay the age of its oldest mark over half the delay,
+        /// whichever is further; due from 1. A mark of no known age is due.
         /// </summary>
-        public double Load(ObjectEntry entry) => !entry.HasDeletions
-            ? 0
-            : Math.Max(
-                (double)entry.DeletedRows * 2 * Share / entry.PhysicalRows,
-                (double)entry.VectorBytes * 2 / VectorBytes);
+        public double Load(ObjectEntry entry)
+        {
+            if (!entry.HasDeletions)
+            {
+                return 0;
+            }
+
+            double share = (double)entry.DeletedRows * 2 * Share / entry.PhysicalRows;
+            if (ErasureSeconds > 0)
+            {
+                double age = entry.MarkedAt > 0 ? (double)(NowSeconds - entry.MarkedAt) * 2 / ErasureSeconds : 1;
+                return Math.Max(share, age);
+            }
+
+            return Math.Max(share, (double)entry.VectorBytes * 2 / Options.MarkedVectorBytesOf(entry.Bytes));
+        }
+
+        /// <summary>
+        /// Whether the purge <see cref="Load"/> calls due erases rows a delay owes: the age of the
+        /// marks, and not their share, made it due.
+        /// </summary>
+        public bool Erases(ObjectEntry entry) =>
+            ErasureSeconds > 0 && entry.HasDeletions
+            && (double)entry.DeletedRows * 2 * Share / entry.PhysicalRows < 1;
 
         /// <summary>
         /// Whether an object under a tally may be due: a share rounded down past the due share rounded
-        /// down, or a vector at half the bound. A tally never rules out an object that is due.
+        /// down, or a vector at half the least bound; under an erasure delay, any mark. A tally never
+        /// rules out an object that is due.
         /// </summary>
         public bool MayBeDue(ObjectTally tally) =>
-            tally.MostMarked >= ObjectTally.Whole / (2L * Share) || tally.LargestVector * 2 >= VectorBytes;
+            ErasureSeconds > 0
+                ? tally.DeletedRows > 0
+                : tally.MostMarked >= ObjectTally.Whole / (2L * Share) || tally.LargestVector * 2 >= Math.Max(Options.MarkedVectorBytes, 1);
     }
 
     /// <summary>

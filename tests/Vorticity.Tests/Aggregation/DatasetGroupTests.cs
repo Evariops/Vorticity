@@ -227,14 +227,16 @@ public sealed partial class DatasetGroupTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>
-    /// Chunks of two blocks of a thousand rows, so an object holds many; deleted rows marked in the
-    /// object's entry, however small the object, rather than rewritten out of it.
+    /// Chunks of two blocks of a thousand rows, so an object holds many, and a pass on several lanes cuts
+    /// an object into ranges of eight of them; deleted rows marked in the object's entry, however small
+    /// the object, rather than rewritten out of it.
     /// </summary>
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 11,
         MarkedObjectBytes = 0,
         MarkedVectorBytes = 1 << 20,
+        LeastPieceRows = 8_192,
         Write = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 16 << 10 },
     };
 

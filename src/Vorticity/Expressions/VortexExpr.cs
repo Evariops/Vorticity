@@ -47,6 +47,12 @@ internal enum ExprKind : byte
     /// <see cref="In"/> when it takes the filter.
     /// </summary>
     TypedIn = 10,
+
+    /// <summary>
+    /// A predicate over paths of variant columns, fenced from every pruner: evaluated, and its
+    /// columns read, but never ruled on by a statistic of the variant column.
+    /// </summary>
+    VariantPath = 11,
 }
 
 /// <summary>The three byte-pattern predicates a filter can apply to a column.</summary>

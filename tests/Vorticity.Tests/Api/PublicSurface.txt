@@ -4,8 +4,12 @@ Vorticity:     method Probe<TRecord> First()
 Vorticity:     method Probe<TRecord> Last()
 Vorticity:     method Probe<TRecord> MaxBy<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Probe<TRecord> MinBy<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Distribution> Distribution<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, double = default)
+Vorticity:     method Sym<Distribution> Distribution<T>(Func<Probe<TRecord>, Sym<T>>, double = default)
 Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
 Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Nullable<double>> Quantile<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, double, double = default)
+Vorticity:     method Sym<Nullable<double>> Quantile<T>(Func<Probe<TRecord>, Sym<T>>, double, double = default)
 Vorticity:     method Sym<Nullable<double>> StandardDeviation<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
 Vorticity:     method Sym<Nullable<double>> StandardDeviation<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<Nullable<double>> Variance<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
@@ -22,6 +26,7 @@ Vorticity:     method Sym<double> Sum(Func<Probe<TRecord>, Sym<Half>>)
 Vorticity:     method Sym<double> Sum(Func<Probe<TRecord>, Sym<Nullable<Half>>>)
 Vorticity:     method Sym<double> Sum(Func<Probe<TRecord>, Sym<Nullable<float>>>)
 Vorticity:     method Sym<double> Sum(Func<Probe<TRecord>, Sym<float>>)
+Vorticity:     method Sym<long> ApproximateCountDistinct<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<long> Count()
 Vorticity:     method Sym<long> Count(Func<Probe<TRecord>, Predicate>)
 Vorticity:     method Sym<long> CountDistinct<T>(Func<Probe<TRecord>, Sym<T>>)
@@ -134,6 +139,7 @@ Vorticity:     method void Append(ColumnBuilder<Nullable<UInt128>>, Nullable<UIn
 Vorticity:     method void Append(ColumnBuilder<Nullable<UInt128>>, ReadOnlySpan<UInt128>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<UInt128>>, ReadOnlySpan<UInt128>, ReadOnlySpan<ulong>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<UInt128>>, UInt128)
+Vorticity:     method void Append(ColumnBuilder<Nullable<Variant>>, Nullable<Variant>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<VortexDecimal>>, Nullable<VortexDecimal>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<bool>>, Nullable<bool>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<decimal>>, Nullable<decimal>)
@@ -144,6 +150,8 @@ Vorticity:     method void Append(ColumnBuilder<TimeSpan>, ReadOnlySpan<TimeSpan
 Vorticity:     method void Append(ColumnBuilder<TimeSpan>, TimeSpan)
 Vorticity:     method void Append(ColumnBuilder<UInt128>, ReadOnlySpan<UInt128>)
 Vorticity:     method void Append(ColumnBuilder<UInt128>, UInt128)
+Vorticity:     method void Append(ColumnBuilder<Variant>, ReadOnlySpan<Variant>)
+Vorticity:     method void Append(ColumnBuilder<Variant>, Variant)
 Vorticity:     method void Append(ColumnBuilder<VortexDecimal>, ReadOnlySpan<VortexDecimal>)
 Vorticity:     method void Append(ColumnBuilder<VortexDecimal>, VortexDecimal)
 Vorticity:     method void Append(ColumnBuilder<bool>, ReadOnlySpan<bool>)
@@ -166,6 +174,7 @@ Vorticity:     method void AppendNull(ColumnBuilder<Nullable<Guid>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<ReadOnlyMemory<byte>>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<TimeOnly>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<TimeSpan>>)
+Vorticity:     method void AppendNull(ColumnBuilder<Nullable<Variant>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<VortexDecimal>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<bool>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<decimal>>)
@@ -281,6 +290,11 @@ Vorticity:     method void Append($T0)
 Vorticity:     method void Append(ReadOnlySpan<$T0>)
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$86DF8C334542E54C799950C596CFC7BF<$T0>.<M>$E95369BD63F13762FC613AB71B7E9831<T>
 Vorticity:     method void <Extension>$(ColumnBuilder<T>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$88F39B212C04147EC4DE3593B4C96A62
+Vorticity:     method void Append(Nullable<Variant>)
+Vorticity:     method void AppendNull()
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$88F39B212C04147EC4DE3593B4C96A62.<M>$BCA1776E833CB5C0FBB2F625203C2A88
+Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<Variant>>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$8CD5B06F2F923EA4AA5E3D5BCB218ABF
 Vorticity:     method void Append(BigInteger)
 Vorticity:     method void Append(ReadOnlySpan<BigInteger>)
@@ -299,6 +313,11 @@ Vorticity:     method void Append(Nullable<decimal>)
 Vorticity:     method void AppendNull()
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$A756BD9B35676B15144E1A3461047E6A.<M>$73E1C7CD0D9EB804557650CDD5320EF9
 Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<decimal>>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$ADE22893E2B0B93929E1FA9B5E432EB0
+Vorticity:     method void Append(ReadOnlySpan<Variant>)
+Vorticity:     method void Append(Variant)
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$ADE22893E2B0B93929E1FA9B5E432EB0.<M>$DF26B8E7D4EB367E76D57B03804A7016
+Vorticity:     method void <Extension>$(ColumnBuilder<Variant>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$B27D19EFA85729A463BDE2CD77C9DE86
 Vorticity:     method void Append(ReadOnlySpan<bool>)
 Vorticity:     method void Append(bool)
@@ -401,6 +420,7 @@ Vorticity:     method Nullable<T> get_Item<T>(Column<Nullable<T>>, int)
 Vorticity:     method Nullable<TimeOnly> get_Item(Column<Nullable<TimeOnly>>, int)
 Vorticity:     method Nullable<TimeSpan> get_Item(Column<Nullable<TimeSpan>>, int)
 Vorticity:     method Nullable<UInt128> get_Item(Column<Nullable<UInt128>>, int)
+Vorticity:     method Nullable<Variant> get_Item(Column<Nullable<Variant>>, int)
 Vorticity:     method Nullable<VortexDecimal> get_Item(Column<Nullable<VortexDecimal>>, int)
 Vorticity:     method Nullable<bool> get_Item(Column<Nullable<bool>>, int)
 Vorticity:     method Nullable<decimal> get_Item(Column<Nullable<decimal>>, int)
@@ -411,6 +431,10 @@ Vorticity:     method ReadOnlySpan<T> get_Values<T>(Column<Nullable<T>>)
 Vorticity:     method ReadOnlySpan<T> get_Values<T>(Column<T>)
 Vorticity:     method ReadOnlySpan<UInt128> get_Values(Column<Nullable<UInt128>>)
 Vorticity:     method ReadOnlySpan<UInt128> get_Values(Column<UInt128>)
+Vorticity:     method ReadOnlySpan<byte> GetMetadata(Column<Nullable<Variant>>, int)
+Vorticity:     method ReadOnlySpan<byte> GetMetadata(Column<Variant>, int)
+Vorticity:     method ReadOnlySpan<byte> GetValue(Column<Nullable<Variant>>, int)
+Vorticity:     method ReadOnlySpan<byte> GetValue(Column<Variant>, int)
 Vorticity:     method ReadOnlySpan<byte> get_Item(Column<Nullable<ReadOnlyMemory<byte>>>, int)
 Vorticity:     method ReadOnlySpan<byte> get_Item(Column<ReadOnlyMemory<byte>>, int)
 Vorticity:     method ReadOnlySpan<ulong> get_Bits(Column<Nullable<bool>>)
@@ -428,6 +452,7 @@ Vorticity:     method TimeUnit get_Unit(Column<TimeOnly>)
 Vorticity:     method TimeZoneInfo get_TimeZone(Column<DateTimeOffset>)
 Vorticity:     method TimeZoneInfo get_TimeZone(Column<Nullable<DateTimeOffset>>)
 Vorticity:     method UInt128 get_Item(Column<UInt128>, int)
+Vorticity:     method Variant get_Item(Column<Variant>, int)
 Vorticity:     method VortexDecimal get_Item(Column<VortexDecimal>, int)
 Vorticity:     method bool get_Item(Column<bool>, int)
 Vorticity:     method decimal get_Item(Column<decimal>, int)
@@ -448,12 +473,14 @@ Vorticity:     method void CopyTo(Column<Nullable<Int128>>, Span<Nullable<Int128
 Vorticity:     method void CopyTo(Column<Nullable<TimeOnly>>, Span<Nullable<TimeOnly>>)
 Vorticity:     method void CopyTo(Column<Nullable<TimeSpan>>, Span<Nullable<TimeSpan>>)
 Vorticity:     method void CopyTo(Column<Nullable<UInt128>>, Span<Nullable<UInt128>>)
+Vorticity:     method void CopyTo(Column<Nullable<Variant>>, Span<Nullable<Variant>>)
 Vorticity:     method void CopyTo(Column<Nullable<VortexDecimal>>, Span<Nullable<VortexDecimal>>)
 Vorticity:     method void CopyTo(Column<Nullable<bool>>, Span<Nullable<bool>>)
 Vorticity:     method void CopyTo(Column<Nullable<decimal>>, Span<Nullable<decimal>>)
 Vorticity:     method void CopyTo(Column<TimeOnly>, Span<TimeOnly>)
 Vorticity:     method void CopyTo(Column<TimeSpan>, Span<TimeSpan>)
 Vorticity:     method void CopyTo(Column<UInt128>, Span<UInt128>)
+Vorticity:     method void CopyTo(Column<Variant>, Span<Variant>)
 Vorticity:     method void CopyTo(Column<VortexDecimal>, Span<VortexDecimal>)
 Vorticity:     method void CopyTo(Column<bool>, Span<bool>)
 Vorticity:     method void CopyTo(Column<decimal>, Span<decimal>)
@@ -488,6 +515,13 @@ Vorticity:     property TimeUnit Unit { get; }
 Vorticity:     property TimeZoneInfo TimeZone { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$26B50BB7193039853C110A7B53B50037.<M>$26932BA2993FD5DDAD0753C06A211C67
 Vorticity:     method void <Extension>$(Column<DateTimeOffset>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$2E6D80685C1F4C1FC770843E8F4E6F55
+Vorticity:     method ReadOnlySpan<byte> GetMetadata(int)
+Vorticity:     method ReadOnlySpan<byte> GetValue(int)
+Vorticity:     method void CopyTo(Span<Nullable<Variant>>)
+Vorticity:     property Nullable<Variant> Item[int] { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$2E6D80685C1F4C1FC770843E8F4E6F55.<M>$2F152CD29440E4FD67E2047ACFFCB25F
+Vorticity:     method void <Extension>$(Column<Nullable<Variant>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$44BC987BBD0F9B92D66B2B7903A6EDE2
 Vorticity:     method void CopyTo(Span<Nullable<UInt128>>)
 Vorticity:     property Nullable<UInt128> Item[int] { get; }
@@ -560,6 +594,13 @@ Vorticity:     property Nullable<DateTime> Item[int] { get; }
 Vorticity:     property TimeUnit Unit { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$7FFF222DD38BFECFF8FBB10F27326BD4.<M>$23C3BB20829EA3B0410FDDB57A64B910
 Vorticity:     method void <Extension>$(Column<Nullable<DateTime>>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$806A8DBB306ACD4069FEF29A36F390C1
+Vorticity:     method ReadOnlySpan<byte> GetMetadata(int)
+Vorticity:     method ReadOnlySpan<byte> GetValue(int)
+Vorticity:     method void CopyTo(Span<Variant>)
+Vorticity:     property Variant Item[int] { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$806A8DBB306ACD4069FEF29A36F390C1.<M>$A38625A1B1BD7BB30BEBB019086C8D9B
+Vorticity:     method void <Extension>$(Column<Variant>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$8F60AB3A3B8DB97391BCB982E98D1533
 Vorticity:     method Column<TStorage> AsStorage<TStorage>()
 Vorticity:     method void CopyTo(Span<DateOnly>)
@@ -776,6 +817,25 @@ Vorticity: ref struct Vorticity.DictionaryView<T>
 Vorticity:     property Column<T> Values { get; }
 Vorticity:     property ReadOnlySpan<uint> Codes { get; }
 Vorticity:     property int Cardinality { get; }
+Vorticity: sealed class Vorticity.Distribution
+Vorticity:     method Nullable<double> Quantile(double)
+Vorticity:     method string ToString()
+Vorticity:     property IReadOnlyList<DistributionBucket> Histogram { get; }
+Vorticity:     property Nullable<double> Median { get; }
+Vorticity:     property double RelativeError { get; }
+Vorticity:     property long Count { get; }
+Vorticity: struct Vorticity.DistributionBucket : IEquatable<DistributionBucket>
+Vorticity:     ctor DistributionBucket(double, double, long)
+Vorticity:     method bool Equals(DistributionBucket)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(DistributionBucket, DistributionBucket)
+Vorticity:     method bool op_Inequality(DistributionBucket, DistributionBucket)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out double, out double, out long)
+Vorticity:     property double Lower { get; init; }
+Vorticity:     property double Upper { get; init; }
+Vorticity:     property long Count { get; init; }
 Vorticity: sealed class Vorticity.EncodingAdvice : IEquatable<EncodingAdvice>
 Vorticity:     ctor EncodingAdvice(EncodingGoal, long, long, ImmutableArray<ColumnEncodingAdvice>)
 Vorticity:     method EncodingAdvice <Clone>$()
@@ -879,8 +939,12 @@ Vorticity:     method Probe<TRecord> First()
 Vorticity:     method Probe<TRecord> Last()
 Vorticity:     method Probe<TRecord> MaxBy<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Probe<TRecord> MinBy<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Distribution> Distribution<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, double = default)
+Vorticity:     method Sym<Distribution> Distribution<T>(Func<Probe<TRecord>, Sym<T>>, double = default)
 Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
 Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Nullable<double>> Quantile<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, double, double = default)
+Vorticity:     method Sym<Nullable<double>> Quantile<T>(Func<Probe<TRecord>, Sym<T>>, double, double = default)
 Vorticity:     method Sym<Nullable<double>> StandardDeviation<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
 Vorticity:     method Sym<Nullable<double>> StandardDeviation<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<Nullable<double>> Variance<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
@@ -897,6 +961,7 @@ Vorticity:     method Sym<double> Sum(Func<Probe<TRecord>, Sym<Half>>)
 Vorticity:     method Sym<double> Sum(Func<Probe<TRecord>, Sym<Nullable<Half>>>)
 Vorticity:     method Sym<double> Sum(Func<Probe<TRecord>, Sym<Nullable<float>>>)
 Vorticity:     method Sym<double> Sum(Func<Probe<TRecord>, Sym<float>>)
+Vorticity:     method Sym<long> ApproximateCountDistinct<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<long> Count()
 Vorticity:     method Sym<long> Count(Func<Probe<TRecord>, Predicate>)
 Vorticity:     method Sym<long> CountDistinct<T>(Func<Probe<TRecord>, Sym<T>>)
@@ -995,6 +1060,8 @@ Vorticity:     property int ChosenRows { get; init; }
 Vorticity:     property int Degree { get; init; }
 Vorticity:     property string NotStreaming { get; init; }
 Vorticity:     property string RowFilter { get; init; }
+Vorticity: sealed class Vorticity.GroupedScan
+Vorticity:     method Scan Select(ReadOnlySpan<string>)
 Vorticity: sealed class Vorticity.GroupedScan<TRecord, TKey>
 Vorticity:     method Aggregation Select(Func<Group<TRecord, TKey>, ITuple>)
 Vorticity:     method Aggregation<T> Select<T>(Func<Group<TRecord, TKey>, Sym<T>>)
@@ -1033,6 +1100,7 @@ Vorticity:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, Cancella
 Vorticity:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
 Vorticity:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
 Vorticity:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
+Vorticity:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
 Vorticity:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity: interface Vorticity.IO.ISegmentSource : IAsyncDisposable
@@ -1184,6 +1252,7 @@ Vorticity:     property IReadOnlyList<IndexWriteReport> Reports { get; init; }
 Vorticity:     property ReadOnlyMemory<byte> Bytes { get; init; }
 Vorticity: enum Vorticity.IndexKind
 Vorticity:     const IndexKind Bloom = 0
+Vorticity:     const IndexKind HashedPostings = 5
 Vorticity:     const IndexKind NgramBloom = 1
 Vorticity:     const IndexKind NgramPostings = 3
 Vorticity:     const IndexKind Postings = 2
@@ -1197,6 +1266,7 @@ Vorticity: sealed class Vorticity.IndexPolicy
 Vorticity:     method IndexPolicy Bloom(string, double = default, bool = default)
 Vorticity:     method IndexPolicy ForKey(ReadOnlySpan<string>, IndexKind, IKeyEncoder, bool = default)
 Vorticity:     method IndexPolicy ForKey(ReadOnlySpan<string>, IndexKind, bool = default)
+Vorticity:     method IndexPolicy HashedPostings(string, bool = default)
 Vorticity:     method IndexPolicy NgramBloom(string, int = default, bool = default)
 Vorticity:     method IndexPolicy Postings(string, bool = default)
 Vorticity:     method IndexPolicy SortedRuns(string, bool = default)
@@ -1259,6 +1329,7 @@ Vorticity:     const KeySourceKind Dictionary = 4
 Vorticity:     const KeySourceKind InMemory = 5
 Vorticity:     const KeySourceKind None = 0
 Vorticity:     const KeySourceKind Postings = 3
+Vorticity:     const KeySourceKind Slices = 6
 Vorticity:     const KeySourceKind SortedColumn = 1
 Vorticity:     const KeySourceKind SortedRuns = 2
 Vorticity:     field byte value__
@@ -1751,7 +1822,9 @@ Vorticity:     property Column<T> Values { get; }
 Vorticity:     property ReadOnlySpan<uint> RunEnds { get; }
 Vorticity:     property int RunCount { get; }
 Vorticity: sealed class Vorticity.Scan
+Vorticity:     method GroupedScan GroupBy(ReadOnlySpan<string>)
 Vorticity:     method IAsyncEnumerable<RecordBatch> ToBatchesAsync(CancellationToken = default)
+Vorticity:     method Scan Aggregate(ReadOnlySpan<string>)
 Vorticity:     method Scan Rows(ReadOnlySpan<long>)
 Vorticity:     method Scan Rows(RowRange)
 Vorticity:     method Scan Where(VortexExpr)
@@ -1828,13 +1901,17 @@ Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
 Vorticity:     method void Deconstruct(out long, out long, out long, out long, out long, out long, out long)
 Vorticity:     property GroupMetrics Grouping { get; init; }
+Vorticity:     property Nullable<DateTimeOffset> WindowFrom { get; init; }
+Vorticity:     property Nullable<DateTimeOffset> WindowTo { get; init; }
 Vorticity:     property long Batches { get; init; }
 Vorticity:     property long BlocksDecoded { get; init; }
 Vorticity:     property long BlocksPruned { get; init; }
 Vorticity:     property long BytesRequested { get; init; }
 Vorticity:     property long CacheHits { get; init; }
+Vorticity:     property long EdgeRows { get; init; }
 Vorticity:     property long Requests { get; init; }
 Vorticity:     property long Rows { get; init; }
+Vorticity:     property long SynopsisRows { get; init; }
 Vorticity: sealed class Vorticity.ScanOptions : IEquatable<ScanOptions>
 Vorticity:     ctor ScanOptions()
 Vorticity:     method ScanOptions <Clone>$()
@@ -1844,9 +1921,11 @@ Vorticity:     method bool op_Equality(ScanOptions, ScanOptions)
 Vorticity:     method bool op_Inequality(ScanOptions, ScanOptions)
 Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
+Vorticity:     property bool AlignWindow { get; init; }
 Vorticity:     property bool Compact { get; init; }
 Vorticity:     property bool UseIndexes { get; init; }
 Vorticity:     property bool UseStatistics { get; init; }
+Vorticity:     property bool UseSynopses { get; init; }
 Vorticity:     property int BatchRows { get; init; }
 Vorticity:     property int DegreeOfParallelism { get; init; }
 Vorticity:     property int Prefetch { get; init; }
@@ -1863,6 +1942,7 @@ Vorticity:     method void Deconstruct(out long, out int, out int, out int, out 
 Vorticity:     property CountPlan Count { get; init; }
 Vorticity:     property GroupPlan Grouping { get; init; }
 Vorticity:     property ImmutableArray<PruningStep> Pruning { get; init; }
+Vorticity:     property ImmutableArray<StatesStep> States { get; init; }
 Vorticity:     property OrderPlan Order { get; init; }
 Vorticity:     property bool MayMatch { get; init; }
 Vorticity:     property int Blocks { get; init; }
@@ -1897,6 +1977,20 @@ Vorticity:     property int Count { get; }
 Vorticity: ref struct Vorticity.Selection.Enumerator
 Vorticity:     method bool MoveNext()
 Vorticity:     property int Current { get; }
+Vorticity: sealed class Vorticity.StatesStep : IEquatable<StatesStep>
+Vorticity:     ctor StatesStep(string, string, string, long)
+Vorticity:     method StatesStep <Clone>$()
+Vorticity:     method bool Equals(StatesStep)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(StatesStep, StatesStep)
+Vorticity:     method bool op_Inequality(StatesStep, StatesStep)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out string, out string, out string, out long)
+Vorticity:     property long Count { get; init; }
+Vorticity:     property string Detail { get; init; }
+Vorticity:     property string Object { get; init; }
+Vorticity:     property string Read { get; init; }
 Vorticity: struct Vorticity.Sym<T>
 Vorticity:     method Predicate Between(T, T)
 Vorticity:     method Predicate In(ReadOnlySpan<T>)
@@ -1943,6 +2037,7 @@ Vorticity:     method Sym<DateTime> Truncate(Sym<DateTime>, CalendarUnit, TimeZo
 Vorticity:     method Sym<DateTimeOffset> Bucket(Sym<DateTimeOffset>, TimeSpan)
 Vorticity:     method Sym<DateTimeOffset> Truncate(Sym<DateTimeOffset>, CalendarUnit)
 Vorticity:     method Sym<DateTimeOffset> Truncate(Sym<DateTimeOffset>, CalendarUnit, TimeZoneInfo)
+Vorticity:     method Sym<Int128> AsInt128(Sym<long>)
 Vorticity:     method Sym<Nullable<DateOnly>> Truncate(Sym<Nullable<DateOnly>>, CalendarUnit)
 Vorticity:     method Sym<Nullable<DateTime>> Bucket(Sym<Nullable<DateTime>>, TimeSpan)
 Vorticity:     method Sym<Nullable<DateTime>> Truncate(Sym<Nullable<DateTime>>, CalendarUnit)
@@ -1950,8 +2045,15 @@ Vorticity:     method Sym<Nullable<DateTime>> Truncate(Sym<Nullable<DateTime>>, 
 Vorticity:     method Sym<Nullable<DateTimeOffset>> Bucket(Sym<Nullable<DateTimeOffset>>, TimeSpan)
 Vorticity:     method Sym<Nullable<DateTimeOffset>> Truncate(Sym<Nullable<DateTimeOffset>>, CalendarUnit)
 Vorticity:     method Sym<Nullable<DateTimeOffset>> Truncate(Sym<Nullable<DateTimeOffset>>, CalendarUnit, TimeZoneInfo)
+Vorticity:     method Sym<Nullable<Int128>> AsInt128(Sym<Nullable<long>>)
 Vorticity:     method Sym<Nullable<T>> Bucket<T>(Sym<Nullable<T>>, T)
+Vorticity:     method Sym<Nullable<UInt128>> AsUInt128(Sym<Nullable<ulong>>)
 Vorticity:     method Sym<T> Bucket<T>(Sym<T>, T)
+Vorticity:     method Sym<UInt128> AsUInt128(Sym<ulong>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$01DF41D9D29CD05019B5DC2C6435FB93
+Vorticity:     method Sym<UInt128> AsUInt128()
+Vorticity: static class Vorticity.SymExtensions.<G>$01DF41D9D29CD05019B5DC2C6435FB93.<M>$7815B10799D30D492102E0201CB121CC
+Vorticity:     method void <Extension>$(Sym<ulong>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$2FDA5503ABB056406F404D2C3F724432
 Vorticity:     property Predicate IsFalse { get; }
 Vorticity:     property Predicate IsTrue { get; }
@@ -1961,6 +2063,10 @@ Vorticity: sealed class Vorticity.SymExtensions.<G>$37A6A56DEBF90248B270BF9600C7
 Vorticity:     method Sym<Nullable<$T0>> Bucket($T0)
 Vorticity: static class Vorticity.SymExtensions.<G>$37A6A56DEBF90248B270BF9600C76F4F<$T0>.<M>$E8787F4DF31CF81B4F002AF712E79BE1<T>
 Vorticity:     method void <Extension>$(Sym<Nullable<T>>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$3C2BB8F25650A82C8DF1A6E96409F80B
+Vorticity:     method Sym<Nullable<UInt128>> AsUInt128()
+Vorticity: static class Vorticity.SymExtensions.<G>$3C2BB8F25650A82C8DF1A6E96409F80B.<M>$2FDA0D8FAC62BED0BB5F74E2B37C91CB
+Vorticity:     method void <Extension>$(Sym<Nullable<ulong>>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$4C7D5077080AC1A5394CB5178E1F0FF5
 Vorticity:     property Predicate IsFalse { get; }
 Vorticity:     property Predicate IsTrue { get; }
@@ -1976,6 +2082,10 @@ Vorticity: sealed class Vorticity.SymExtensions.<G>$837CA7DEF17F2A1F96954268115A
 Vorticity:     method Sym<$T0> Bucket($T0)
 Vorticity: static class Vorticity.SymExtensions.<G>$837CA7DEF17F2A1F96954268115A8702<$T0>.<M>$97A91C006A20D00A21379E1385636A2B<T>
 Vorticity:     method void <Extension>$(Sym<T>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$848CB171E543E8F4CCE2DA9EBCD79843
+Vorticity:     method Sym<Int128> AsInt128()
+Vorticity: static class Vorticity.SymExtensions.<G>$848CB171E543E8F4CCE2DA9EBCD79843.<M>$DBFF0452614E86503919C745FCB933E2
+Vorticity:     method void <Extension>$(Sym<long>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$9FD7CB55BBCFCC43139C4DC27427F569<$T0>
 Vorticity:     method Predicate Contains(string)
 Vorticity:     method Predicate Like(string, char = default)
@@ -2012,6 +2122,16 @@ Vorticity: sealed class Vorticity.SymExtensions.<G>$E4B1ED5526513B78501FC93560F5
 Vorticity:     method Sym<DateOnly> Truncate(CalendarUnit)
 Vorticity: static class Vorticity.SymExtensions.<G>$E4B1ED5526513B78501FC93560F57992.<M>$5A3764AF8CDFD5F03F3968F88BD7F5FD
 Vorticity:     method void <Extension>$(Sym<DateOnly>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$EAA1A4811C4615E6168DDA7467CFD457
+Vorticity:     method Sym<Nullable<Int128>> AsInt128()
+Vorticity: static class Vorticity.SymExtensions.<G>$EAA1A4811C4615E6168DDA7467CFD457.<M>$9CE249A2642403A1F116F7D653B92A9E
+Vorticity:     method void <Extension>$(Sym<Nullable<long>>)
+Vorticity: sealed class Vorticity.SynopsisCache : IDisposable
+Vorticity:     ctor SynopsisCache(string, long)
+Vorticity:     method void Dispose()
+Vorticity:     property long CapacityBytes { get; }
+Vorticity:     property long HeldBytes { get; }
+Vorticity:     property string Directory { get; }
 Vorticity: static class Vorticity.TextColumnBuilderExtensions
 Vorticity:     method Span<byte> GetSpan<TText>(ColumnBuilder<TText>, int = default)
 Vorticity:     method void Append<TText, TValue>(ColumnBuilder<TText>, TValue)
@@ -2049,6 +2169,130 @@ Vorticity:     const TimeUnit Milliseconds = 2
 Vorticity:     const TimeUnit Nanoseconds = 0
 Vorticity:     const TimeUnit Seconds = 3
 Vorticity:     field byte value__
+Vorticity: struct Vorticity.Variant : IEquatable<Variant>
+Vorticity:     method Nullable<DateOnly> AsDate()
+Vorticity:     method Nullable<DateTime> AsLocalTimestamp()
+Vorticity:     method Nullable<DateTimeOffset> AsTimestamp()
+Vorticity:     method Nullable<Guid> AsUuid()
+Vorticity:     method Nullable<ReadOnlyMemory<byte>> AsBinary()
+Vorticity:     method Nullable<TimeOnly> AsTime()
+Vorticity:     method Nullable<bool> AsBool()
+Vorticity:     method Nullable<bool> ToBool()
+Vorticity:     method Nullable<decimal> AsDecimal()
+Vorticity:     method Nullable<double> AsDouble()
+Vorticity:     method Nullable<double> ToDouble()
+Vorticity:     method Nullable<long> AsInt64()
+Vorticity:     method Nullable<long> ToInt64()
+Vorticity:     method Variant Array(IEnumerable<Variant>)
+Vorticity:     method Variant Array(ReadOnlySpan<Variant>)
+Vorticity:     method Variant From(DateOnly)
+Vorticity:     method Variant From(DateTime)
+Vorticity:     method Variant From(DateTimeOffset)
+Vorticity:     method Variant From(Guid)
+Vorticity:     method Variant From(ReadOnlySpan<byte>)
+Vorticity:     method Variant From(TimeOnly)
+Vorticity:     method Variant From(bool)
+Vorticity:     method Variant From(decimal)
+Vorticity:     method Variant From(double)
+Vorticity:     method Variant From(float)
+Vorticity:     method Variant From(long)
+Vorticity:     method Variant From(string)
+Vorticity:     method Variant FromBytes(ReadOnlySpan<byte>, ReadOnlySpan<byte>)
+Vorticity:     method Variant FromJson(ReadOnlySpan<byte>)
+Vorticity:     method Variant FromJson(string)
+Vorticity:     method Variant Object(IEnumerable<KeyValuePair<string, Variant>>)
+Vorticity:     method Variant Object(ReadOnlySpan<ValueTuple<string, Variant>>)
+Vorticity:     method Variant op_Implicit(bool)
+Vorticity:     method Variant op_Implicit(double)
+Vorticity:     method Variant op_Implicit(long)
+Vorticity:     method Variant op_Implicit(string)
+Vorticity:     method bool Equals(Variant)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool Has(string)
+Vorticity:     method bool op_Equality(Variant, Variant)
+Vorticity:     method bool op_Inequality(Variant, Variant)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string AsString()
+Vorticity:     method string ToJson()
+Vorticity:     method string ToString()
+Vorticity:     method string[] GetKeys()
+Vorticity:     property Nullable<Variant> Item[int] { get; }
+Vorticity:     property Nullable<Variant> Item[string] { get; }
+Vorticity:     property ReadOnlyMemory<byte> Metadata { get; }
+Vorticity:     property ReadOnlyMemory<byte> Value { get; }
+Vorticity:     property Variant Null { get; }
+Vorticity:     property VariantKind Kind { get; }
+Vorticity:     property bool IsNull { get; }
+Vorticity:     property int Count { get; }
+Vorticity: enum Vorticity.VariantKind
+Vorticity:     const VariantKind Array = 17
+Vorticity:     const VariantKind Binary = 9
+Vorticity:     const VariantKind Bool = 1
+Vorticity:     const VariantKind Date = 11
+Vorticity:     const VariantKind Decimal = 10
+Vorticity:     const VariantKind Double = 7
+Vorticity:     const VariantKind Float = 6
+Vorticity:     const VariantKind Int16 = 3
+Vorticity:     const VariantKind Int32 = 4
+Vorticity:     const VariantKind Int64 = 5
+Vorticity:     const VariantKind Int8 = 2
+Vorticity:     const VariantKind LocalTimestamp = 13
+Vorticity:     const VariantKind Null = 0
+Vorticity:     const VariantKind Object = 16
+Vorticity:     const VariantKind String = 8
+Vorticity:     const VariantKind Time = 14
+Vorticity:     const VariantKind Timestamp = 12
+Vorticity:     const VariantKind Uuid = 15
+Vorticity:     field byte value__
+Vorticity: static class Vorticity.VariantSymbols
+Vorticity:     method Predicate Has(Sym<Nullable<Variant>>, string)
+Vorticity:     method Predicate Has(Sym<Variant>, string)
+Vorticity:     method Predicate get_Exists(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> AsTimestamp(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> AsTimestamp(Sym<Variant>)
+Vorticity:     method Sym<Nullable<Variant>> get_Item(Sym<Nullable<Variant>>, int)
+Vorticity:     method Sym<Nullable<Variant>> get_Item(Sym<Nullable<Variant>>, string)
+Vorticity:     method Sym<Nullable<Variant>> get_Item(Sym<Variant>, int)
+Vorticity:     method Sym<Nullable<Variant>> get_Item(Sym<Variant>, string)
+Vorticity:     method Sym<Nullable<bool>> AsBool(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<bool>> AsBool(Sym<Variant>)
+Vorticity:     method Sym<Nullable<double>> AsDouble(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<double>> AsDouble(Sym<Variant>)
+Vorticity:     method Sym<Nullable<double>> ToDouble(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<double>> ToDouble(Sym<Variant>)
+Vorticity:     method Sym<Nullable<long>> AsInt64(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<long>> AsInt64(Sym<Variant>)
+Vorticity:     method Sym<Nullable<long>> ToInt64(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<long>> ToInt64(Sym<Variant>)
+Vorticity:     method Sym<string> AsString(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<string> AsString(Sym<Variant>)
+Vorticity: sealed class Vorticity.VariantSymbols.<G>$1A569DCED8742D8A6953D11BBE1CD7E1
+Vorticity:     method Predicate Has(string)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> AsTimestamp()
+Vorticity:     method Sym<Nullable<bool>> AsBool()
+Vorticity:     method Sym<Nullable<double>> AsDouble()
+Vorticity:     method Sym<Nullable<double>> ToDouble()
+Vorticity:     method Sym<Nullable<long>> AsInt64()
+Vorticity:     method Sym<Nullable<long>> ToInt64()
+Vorticity:     method Sym<string> AsString()
+Vorticity:     property Predicate Exists { get; }
+Vorticity:     property Sym<Nullable<Variant>> Item[int] { get; }
+Vorticity:     property Sym<Nullable<Variant>> Item[string] { get; }
+Vorticity: static class Vorticity.VariantSymbols.<G>$1A569DCED8742D8A6953D11BBE1CD7E1.<M>$5DB7C8869AB76FE5B9A2F69CA8A135CF
+Vorticity:     method void <Extension>$(Sym<Nullable<Variant>>)
+Vorticity: sealed class Vorticity.VariantSymbols.<G>$605D60C85C1CCE73E1B2B617B441846F
+Vorticity:     method Predicate Has(string)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> AsTimestamp()
+Vorticity:     method Sym<Nullable<bool>> AsBool()
+Vorticity:     method Sym<Nullable<double>> AsDouble()
+Vorticity:     method Sym<Nullable<double>> ToDouble()
+Vorticity:     method Sym<Nullable<long>> AsInt64()
+Vorticity:     method Sym<Nullable<long>> ToInt64()
+Vorticity:     method Sym<string> AsString()
+Vorticity:     property Sym<Nullable<Variant>> Item[int] { get; }
+Vorticity:     property Sym<Nullable<Variant>> Item[string] { get; }
+Vorticity: static class Vorticity.VariantSymbols.<G>$605D60C85C1CCE73E1B2B617B441846F.<M>$A8D32CB066FF2849E1A4BAB217D6AA8C
+Vorticity:     method void <Extension>$(Sym<Variant>)
 Vorticity: sealed class Vorticity.VortexColumnAttribute : Attribute
 Vorticity:     ctor VortexColumnAttribute()
 Vorticity:     ctor VortexColumnAttribute(string)
@@ -2373,6 +2617,7 @@ Vorticity:     property ObjectStoreRegistry ObjectStores { get; }
 Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }
 Vorticity:     property ScratchBudget ScratchBudget { get; set; }
 Vorticity:     property SegmentCache SegmentCache { get; set; }
+Vorticity:     property SynopsisCache SynopsisCache { get; set; }
 Vorticity:     property VortexExtensionRegistry Extensions { get; }
 Vorticity:     property VortexKeyring Keyring { get; set; }
 Vorticity:     property bool EncryptFiles { get; set; }
@@ -2441,6 +2686,7 @@ Vorticity:     property VortexType UInt64 { get; }
 Vorticity:     property VortexType UInt8 { get; }
 Vorticity:     property VortexType Utf8 { get; }
 Vorticity:     property VortexType Uuid { get; }
+Vorticity:     property VortexType Variant { get; }
 Vorticity:     property VortexTypeKind Kind { get; }
 Vorticity:     property bool IsNullable { get; }
 Vorticity:     property int FixedSize { get; }
@@ -2480,6 +2726,7 @@ Vorticity:     property CompressionProfile Compression { get; init; }
 Vorticity:     property ImmutableDictionary<string, EncodingHint> Hints { get; init; }
 Vorticity:     property ImmutableDictionary<string, ReadOnlyMemory<byte>> Metadata { get; init; }
 Vorticity:     property ImmutableDictionary<string, int> ColumnChunkTargetBytes { get; init; }
+Vorticity:     property ImmutableDictionary<string, int> ZstdLevels { get; init; }
 Vorticity:     property IndexPolicy Indexes { get; init; }
 Vorticity:     property Nullable<Guid> Identity { get; init; }
 Vorticity:     property VortexEdition TargetEdition { get; init; }
@@ -2575,6 +2822,7 @@ Vorticity.Dataset:     property ImmutableArray<long> BytesByLevel { get; init; }
 Vorticity.Dataset:     property ImmutableArray<long> ObjectsByLevel { get; init; }
 Vorticity.Dataset:     property bool HasWork { get; }
 Vorticity.Dataset:     property bool IsClustered { get; init; }
+Vorticity.Dataset:     property int Partitions { get; init; }
 Vorticity.Dataset:     property long FragmentedObjects { get; init; }
 Vorticity.Dataset:     property long Lag { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
@@ -2618,14 +2866,20 @@ Vorticity.Dataset:     property long BytesPerSecond { get; init; }
 Vorticity.Dataset: enum Vorticity.Dataset.CompactionStyle
 Vorticity.Dataset:     const CompactionStyle Auto = 0
 Vorticity.Dataset:     const CompactionStyle Leveled = 1
+Vorticity.Dataset:     const CompactionStyle Periods = 3
 Vorticity.Dataset:     const CompactionStyle Tiered = 2
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: enum Vorticity.Dataset.CompactionTrigger
+Vorticity.Dataset:     const CompactionTrigger Erasure = 5
 Vorticity.Dataset:     const CompactionTrigger Fragments = 3
+Vorticity.Dataset:     const CompactionTrigger FreshMerge = 8
+Vorticity.Dataset:     const CompactionTrigger LateCeiling = 7
 Vorticity.Dataset:     const CompactionTrigger LevelSize = 2
 Vorticity.Dataset:     const CompactionTrigger LevelZeroCeiling = 1
 Vorticity.Dataset:     const CompactionTrigger Marks = 4
+Vorticity.Dataset:     const CompactionTrigger Neighbours = 6
 Vorticity.Dataset:     const CompactionTrigger None = 0
+Vorticity.Dataset:     const CompactionTrigger Seal = 9
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: sealed class Vorticity.Dataset.CountingObjectStore : IObjectStore
 Vorticity.Dataset:     ctor CountingObjectStore(IObjectStore, bool = default)
@@ -2636,6 +2890,7 @@ Vorticity.Dataset:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, 
 Vorticity.Dataset:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
 Vorticity.Dataset:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
+Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
 Vorticity.Dataset:     method long CountOf(ObjectOperation)
 Vorticity.Dataset:     method void Reset()
@@ -2673,7 +2928,10 @@ Vorticity.Dataset:     method bool op_Inequality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; init; }
+Vorticity.Dataset:     property IReadOnlyList<string> Identifiers { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> SummaryColumns { get; init; }
+Vorticity.Dataset:     property Nullable<TimeSpan> ErasureDelay { get; init; }
+Vorticity.Dataset:     property PeriodOptions Periods { get; init; }
 Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan RetentionWindow { get; init; }
 Vorticity.Dataset:     property VortexSession Session { get; init; }
@@ -2682,6 +2940,8 @@ Vorticity.Dataset:     property bool Encrypted { get; init; }
 Vorticity.Dataset:     property bool LockedStore { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
+Vorticity.Dataset:     property int MaxPartitionValues { get; init; }
+Vorticity.Dataset:     property int PartitionColumns { get; init; }
 Vorticity.Dataset:     property int RetainedVersions { get; init; }
 Vorticity.Dataset:     property int SummaryColumnLimit { get; init; }
 Vorticity.Dataset:     property long InlineCompactionBytes { get; init; }
@@ -2777,6 +3037,17 @@ Vorticity.Dataset:     const OperationOutcome AlreadyThere = 1
 Vorticity.Dataset:     const OperationOutcome Applied = 0
 Vorticity.Dataset:     const OperationOutcome Dropped = 2
 Vorticity.Dataset:     field int value__
+Vorticity.Dataset: sealed class Vorticity.Dataset.PeriodOptions : IEquatable<PeriodOptions>
+Vorticity.Dataset:     ctor PeriodOptions()
+Vorticity.Dataset:     method PeriodOptions <Clone>$()
+Vorticity.Dataset:     method bool Equals(PeriodOptions)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(PeriodOptions, PeriodOptions)
+Vorticity.Dataset:     method bool op_Inequality(PeriodOptions, PeriodOptions)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property TimeSpan Lateness { get; init; }
+Vorticity.Dataset:     property bool RefuseLateRows { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.ReplaceResult : IEquatable<ReplaceResult>
 Vorticity.Dataset:     ctor ReplaceResult()
 Vorticity.Dataset:     method ReplaceResult <Clone>$()
@@ -2871,6 +3142,7 @@ Vorticity.Dataset:     property long PagesRead { get; init; }
 Vorticity.Dataset:     property ulong Latest { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.VortexDataset : IAsyncDisposable
 Vorticity.Dataset:     method IAsyncEnumerable<DataObject> ListObjectsAsync(CancellationToken = default)
+Vorticity.Dataset:     method IAsyncEnumerable<WindowPart<TAnswer>> AskNewestFirstAsync<TAnswer>(DateTimeOffset, DateTimeOffset, Func<DateTimeOffset, DateTimeOffset, CancellationToken, ValueTask<TAnswer>>, CancellationToken = default)
 Vorticity.Dataset:     method ObjectDraft StartObject()
 Vorticity.Dataset:     method Scan Scan(ReadOnlySpan<string>)
 Vorticity.Dataset:     method Scan<TRecord> Scan<TRecord>()
@@ -2879,6 +3151,9 @@ Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<CompactionPlan> PlanCompactionAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<CompactionResult> CompactAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<DatasetVerification> VerifyAsync(Nullable<ulong> = default, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<DateTimeOffset> ExpireAsync(DateTimeOffset, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<DateTimeOffset> ExpireAsync(VortexExpr, DateTimeOffset, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<DateTimeOffset> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate>, DateTimeOffset, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<IndexingResult> IndexAsync(IndexPolicy, IndexingOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<Nullable<ulong>> RemoveTornCommitAsync(IObjectStore, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveObjectsAsync(IReadOnlyList<DataObject>, CancellationToken = default)
@@ -2899,6 +3174,8 @@ Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(IObjectStore, D
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(IObjectStore, ulong, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, ulong, DatasetOptions = default, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<long> WarmAsync(VortexExpr, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<long> WarmAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(IAsyncEnumerable<RecordBatch>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(ObjectDraft, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, IReadOnlyDictionary<string, string> = default, CancellationToken = default)
@@ -2918,6 +3195,19 @@ Vorticity.Dataset:     property long ObjectCount { get; }
 Vorticity.Dataset:     property long RowCount { get; }
 Vorticity.Dataset:     property ulong LastDataChange { get; }
 Vorticity.Dataset:     property ulong Version { get; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.WindowPart<TAnswer> : IEquatable<WindowPart<TAnswer>>
+Vorticity.Dataset:     ctor WindowPart<TAnswer>(DateTimeOffset, DateTimeOffset, TAnswer)
+Vorticity.Dataset:     method WindowPart<TAnswer> <Clone>$()
+Vorticity.Dataset:     method bool Equals(WindowPart<TAnswer>)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(WindowPart<TAnswer>, WindowPart<TAnswer>)
+Vorticity.Dataset:     method bool op_Inequality(WindowPart<TAnswer>, WindowPart<TAnswer>)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     method void Deconstruct(out DateTimeOffset, out DateTimeOffset, out TAnswer)
+Vorticity.Dataset:     property DateTimeOffset From { get; init; }
+Vorticity.Dataset:     property DateTimeOffset To { get; init; }
+Vorticity.Dataset:     property TAnswer Answer { get; init; }
 Vorticity.RowEncoding: static class Vorticity.RowEncoding.RowEncoder
 Vorticity.RowEncoding:     const string VortexVersion = 0.86.1
 Vorticity.RowEncoding:     method RowKeys Encode(BatchView, ReadOnlySpan<RowSortField>)
@@ -2987,6 +3277,7 @@ Vorticity.ObjectStorage:     method ValueTask<Nullable<ObjectHead>> HeadAsync(st
 Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.ObjectStorage:     property string Account { get; }
@@ -3012,6 +3303,7 @@ Vorticity.ObjectStorage:     method ValueTask<Nullable<ObjectHead>> HeadAsync(st
 Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.ObjectStorage:     property string Bucket { get; }
@@ -3046,6 +3338,7 @@ Vorticity.ObjectStorage:     method ValueTask<Nullable<ObjectHead>> HeadAsync(st
 Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.ObjectStorage:     property S3Profile Profile { get; }

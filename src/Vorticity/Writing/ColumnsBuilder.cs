@@ -159,6 +159,7 @@ public class ColumnsBuilder
             ClrKind.Decimal or ClrKind.VortexDecimal => leaf is FixedStore { IsDecimal: true },
             ClrKind.DateOnly or ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset => leaf is FixedStore { IsDecimal: false },
             ClrKind.Guid => leaf is FixedListStore { Size: 16, Elements: FixedStore { Width: 1 } },
+            ClrKind.Variant => leaf is StructStore { Type.Kind: VortexTypeKind.Variant },
             ClrKind.List => leaf is ListStore or FixedListStore,
             ClrKind.TimeSpan => leaf is FixedStore { IsDecimal: false },
             ClrKind.Integer128 or ClrKind.UInteger128 or ClrKind.BigInteger => leaf is FixedStore { IsDecimal: true, Scale: 0 },
@@ -660,6 +661,40 @@ public static class ColumnBuilderExtensions
         }
     }
 
+    extension(ColumnBuilder<Variant> b)
+    {
+        /// <summary>Appends one variant: its metadata and its value, as they are.</summary>
+        public void Append(Variant value) => AppendVariant(b.Store, value);
+
+        /// <summary>Appends variants.</summary>
+        public void Append(ReadOnlySpan<Variant> values)
+        {
+            foreach (Variant value in values)
+            {
+                AppendVariant(b.Store, value);
+            }
+        }
+    }
+
+    extension(ColumnBuilder<Variant?> b)
+    {
+        /// <summary>Appends one variant, or a null row.</summary>
+        public void Append(Variant? value)
+        {
+            if (value is { } present)
+            {
+                AppendVariant(b.Store, present);
+            }
+            else
+            {
+                Variants(b.Store).AppendNull();
+            }
+        }
+
+        /// <summary>Appends a null row, which is not the variant null.</summary>
+        public void AppendNull() => Variants(b.Store).AppendNull();
+    }
+
     extension(ColumnBuilder<Guid?> b)
     {
         /// <summary>Appends one uuid or a null.</summary>
@@ -987,6 +1022,16 @@ public static class ColumnBuilderExtensions
     internal static VarBinStore Text(ColumnStore store) => (VarBinStore)store;
 
     private static FixedListStore Uuids(ColumnStore store) => (FixedListStore)store;
+
+    private static StructStore Variants(ColumnStore store) => (StructStore)store;
+
+    /// <summary>Appends a variant's metadata and value to the two children of its column's store.</summary>
+    private static void AppendVariant(ColumnStore store, Variant value)
+    {
+        StructStore variant = Variants(store);
+        Text(variant.Children[0]).Append(value.MetadataSpan);
+        Text(variant.Children[1]).Append(value.ValueSpan);
+    }
 
     private static ColumnStore ElementsOf(ColumnStore store) =>
         store is ListStore list ? list.Elements : ((FixedListStore)store).Elements;

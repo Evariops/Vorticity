@@ -362,6 +362,67 @@ public sealed class DatasetDeletionVectorTests
     }
 
     /// <summary>
+    /// Under an erasure delay, an object's marks are due at half the delay since its oldest mark, and
+    /// their vector's bytes no longer make them due: the purge is the delay's own. The delay is the
+    /// dataset's, written in commit format 4, and a handle that does not state it takes it.
+    /// </summary>
+    [Fact]
+    public async Task UnderAnErasureDelayMarksAreDueAtHalfOfIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 10, 18, 12, 0, 0, TimeSpan.Zero));
+        DatasetOptions options = Options(clustered: true, marking: true) with { ErasureDelay = TimeSpan.FromHours(2), TimeProvider = clock };
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await CreateAsync(store, options, ct);
+        await DrainAsync(dataset, ct);
+        DataObject before = Assert.Single(await dataset.ListObjectsAsync(ct).ToListAsync(ct));
+
+        // Every other row of three hundred: a vector past half a kilobyte, which without a delay is due.
+        foreach (VortexExpr delete in (VortexExpr[])[Keys(0, 200), Keys(200, 300)])
+        {
+            Assert.Equal(1, (await dataset.DeleteAsync(delete, ct)).ObjectsMarked);
+            clock.Advance(TimeSpan.FromMinutes(1));
+        }
+
+        DataObject held = Assert.Single(await dataset.ListObjectsAsync(ct).ToListAsync(ct));
+        Assert.True(held.Entry!.VectorBytes * 2 >= 1 << 10);
+        Assert.Equal(clock.Now.AddMinutes(-2).ToUnixTimeSeconds(), held.Entry.MarkedAt);
+        clock.Advance(TimeSpan.FromMinutes(57));
+        Assert.Null((await dataset.PlanCompactionAsync(null, ct)).Job);
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        CompactionJob job = Assert.IsType<CompactionJob>((await dataset.PlanCompactionAsync(null, ct)).Job);
+        Assert.Equal((CompactionTrigger.Erasure, before.Level, before.Level), (job.Trigger, job.FromLevel, job.ToLevel));
+        CompactionResult purged = Assert.IsType<CompactionResult>(await dataset.CompactAsync(null, ct));
+        Assert.Equal((OperationOutcome.Applied, CompactionTrigger.Erasure), (purged.Outcome, purged.Trigger));
+        DataObject after = Assert.Single(await dataset.ListObjectsAsync(ct).ToListAsync(ct));
+        Assert.Equal((0L, held.Rows), (after.DeletedRows, after.Rows));
+
+        (ulong _, CommitObject? latest) = await DatasetCommitter.LatestAsync(store, ct);
+        Assert.Equal(TimeSpan.FromHours(2), latest!.Header.ErasureDelay);
+        Assert.True(latest.Header.Features.HasFlag(DatasetFeatures.ErasureDelay));
+        Assert.Equal(CommitFormat.WithFeatures, CommitFormat.For(latest.Header));
+        await using VortexDataset reopened = await VortexDataset.OpenAsync(store, Options(clustered: true, marking: true), ct);
+        Assert.Equal(TimeSpan.FromHours(2), reopened.Options.ErasureDelay);
+
+        // A store that keeps every byte for a lock's term cannot erase within a delay.
+        await using MemoryObjectStore locked = new MemoryObjectStore();
+        await Assert.ThrowsAsync<ArgumentException>(
+            async () => await VortexDataset.CreateAsync(locked, ChangeRow.Schema, options with { LockedStore = true }, ct));
+    }
+
+    /// <summary>An object's marks may take a thousandth of its bytes, and never less than a kilobyte.</summary>
+    [Fact]
+    public void AnObjectsMarksMayTakeAThousandthOfItsBytes()
+    {
+        DatasetOptions options = new DatasetOptions();
+        Assert.Equal(1L << 10, options.MarkedVectorBytesOf(0));
+        Assert.Equal(1L << 10, options.MarkedVectorBytesOf(1L << 20));
+        Assert.Equal(4L << 10, options.MarkedVectorBytesOf(4L << 20));
+        Assert.Equal(64L << 10, options.MarkedVectorBytesOf(64L << 20));
+    }
+
+    /// <summary>
     /// A leaf whose objects carry marks grows with every mark: carried by every header, it would cost
     /// each commit what only those that change its level have to pay. It rides in the commit that
     /// wrote it, where the read opening that commit holds it; a later header names it, says where its

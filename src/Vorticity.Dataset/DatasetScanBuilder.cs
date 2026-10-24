@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
@@ -230,6 +232,90 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
+    /// Says that the variant columns of <paramref name="keys"/>, by name, are read only through those
+    /// top-level keys, which each object's path map lets its scan read alone.
+    /// </summary>
+    internal DatasetScanBuilder WithVariantKeys(IReadOnlyDictionary<string, string[]>? keys)
+    {
+        _variantKeys = keys;
+        return this;
+    }
+
+    private IReadOnlyDictionary<string, string[]>? _variantKeys;
+
+    /// <summary>
+    /// The states an aggregation would take in place of rows (<see cref="StateRequest"/>): an object its
+    /// synopsis answers is read as a batch of states, and the slices at the window's edges as rows.
+    /// </summary>
+    internal DatasetScanBuilder WithStates(StateRequest? states)
+    {
+        _states = states;
+        return this;
+    }
+
+    private StateRequest? _states;
+
+    /// <summary>What the answers of the objects to the states asked share, worked out at the first object's.</summary>
+    private SynopsisQuestion? _question;
+
+    /// <summary>The question of <paramref name="request"/> under the scan's filter, worked out once for every object it asks.</summary>
+    private SynopsisQuestion QuestionOf(StateRequest request, string instant) =>
+        _question is { } known && ReferenceEquals(known.Request, request) && ReferenceEquals(known.Filter, _filter)
+            ? known
+            : _question = new SynopsisQuestion(request, _filter, instant, _version.Header.Identifiers);
+
+    /// <summary>The question the answers of the scan's objects share, once one was asked; null before.</summary>
+    internal SynopsisQuestion? Question => _question;
+
+    /// <summary>The objects a plan of pieces walked, in their order, which the scan of a piece takes as they are; null to walk the tree.</summary>
+    private PositionedObject[]? _planned;
+
+    /// <summary>
+    /// Has the scan, a piece of a pass on several lanes, take the objects the plan of its pieces walked, the pass's every
+    /// one in their order, those its rows cover among them, rather than walk the tree to its rows again; and the question
+    /// their answers share, which the plan worked out (<see cref="QuestionOf"/> takes it when it is the scan's own).
+    /// </summary>
+    internal DatasetScanBuilder WithPlanned(PositionedObject[] objects, SynopsisQuestion? question)
+    {
+        _planned = objects;
+        _question ??= question;
+        return this;
+    }
+
+    /// <summary>
+    /// The splits each object's scan of one lane reads ahead of the one it decodes, over a store whose read is a round
+    /// trip (<see cref="ScanSpec.ReadAhead"/>): what an aggregation's lane is granted, which an object's scan reads as a
+    /// file's would.
+    /// </summary>
+    internal DatasetScanBuilder WithReadAhead(int splits)
+    {
+        _readAhead = splits;
+        return this;
+    }
+
+    private int _readAhead;
+
+    /// <summary>
+    /// A lease of <paramref name="held"/>: for a scan that reads keys of variant columns, an object of level 0
+    /// through the node's memo of it shredded in memory, which parses its keys once; the object itself otherwise.
+    /// </summary>
+    private async ValueTask<ObjectLease> RentAsync(PositionedObject held, CancellationToken cancellationToken)
+    {
+        // Once a scan, the memo lets go of the objects that have left level 0 since it last looked.
+        if (!_memoChecked)
+        {
+            _memoChecked = true;
+            await _dataset.LevelZero.ForgetMovedAsync(_version, cancellationToken).ConfigureAwait(false);
+        }
+
+        return held.Level == 0 && _variantKeys is { Count: > 0 } keys
+            ? await _dataset.LevelZero.RentAsync(_dataset, _version, held.Entry, keys, cancellationToken).ConfigureAwait(false)
+            : await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool _memoChecked;
+
+    /// <summary>
     /// Runs every object's scan under <paramref name="options"/>: the batch cap, zone-map pruning,
     /// the degree of parallelism, the prefetch and compaction; <paramref name="keepEncodings"/> lets
     /// the decoders deliver dictionary and run-end columns encoded, <paramref name="sinkDecodes"/>
@@ -261,6 +347,16 @@ internal sealed class DatasetScanBuilder
             await foreach (RecordBatch run in MergedAsync(paths, cancellationToken).ConfigureAwait(false))
             {
                 yield return run;
+            }
+
+            yield break;
+        }
+
+        if (_states is { } request)
+        {
+            await foreach (RecordBatch batch in StatesAsync(request, cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
             }
 
             yield break;
@@ -370,11 +466,27 @@ internal sealed class DatasetScanBuilder
         return null;
     }
 
-    /// <summary>One object's batches as the dataset's rows, its lease held until the last is read.</summary>
+    /// <summary>
+    /// One object's batches as the dataset's rows, its lease held until the last is read; for an aggregation
+    /// that takes states, the batch of states its synopsis answers with, then the rows of its edge slices.
+    /// </summary>
     private async IAsyncEnumerable<RecordBatch> ObjectAsync(
         PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+        IAsyncEnumerable<RecordBatch> batches = _states is { } request && Answer(held, request) is ({ } answer, { } contents, string instant)
+            ? AnsweredAsync(held, answer, contents, instant, open, cancellationToken)
+            : RowsAsync(held, open, cancellationToken);
+        await foreach (RecordBatch batch in batches.ConfigureAwait(false))
+        {
+            yield return batch;
+        }
+    }
+
+    /// <summary>One object's rows as the dataset's, its lease held until the last is read.</summary>
+    private async IAsyncEnumerable<RecordBatch> RowsAsync(
+        PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
             RecordOpen(lease, open);
@@ -404,6 +516,949 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
+    /// What the synopsis of an object the scan covers, of the version's schema, answers of <paramref name="request"/>:
+    /// the answer, the object's table of contents, and the dataset's instant; nothing when its rows are read. An object
+    /// covered in part, from the first row of a slice to the last of one and with no row marked, as a lane covers a part
+    /// of an object its pieces cut (<see cref="SynopsisAnswer.Cuts"/>), is answered under a window that ends where the
+    /// part does; one covered in part otherwise is read.
+    /// </summary>
+    private (SynopsisAnswer? Answer, SynopsisContents? Contents, string? Instant) Answer(in PositionedObject held, StateRequest request)
+    {
+        long covered = Covered(held);
+        if (covered == 0 || _dataset.Key is not { } key || held.Entry.Contents is not { } contents)
+        {
+            return default;
+        }
+
+        (long, long)? within = null;
+        if (covered != held.Entry.Rows)
+        {
+            if (held.Entry.HasDeletions || _take is not null
+                || Within(contents.Slices.Slices, Math.Max(_from, held.FirstRow) - held.FirstRow, covered) is not { } part)
+            {
+                return default;
+            }
+
+            within = part;
+        }
+
+        DType schema;
+        try
+        {
+            schema = contents.SchemaType;
+        }
+        catch (VortexFormatException)
+        {
+            return default;
+        }
+
+        // The instants the object's rows hold, which bound its buckets however wide its slices' unit.
+        (long, long)? instants = held.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
+            && summary is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
+            ? (summary.Min.SignedValue, summary.Max.SignedValue)
+            : null;
+        return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
+            && SynopsisAnswer.Of(QuestionOf(request, key.InstantPath), contents, schema, instants, PartitionFilter.ValuesOf(held.Entry, key), within, held.Entry.HasDeletions) is { } answer
+            ? (answer, contents, key.InstantPath)
+            : default;
+    }
+
+    /// <summary>
+    /// The instants of the slices that hold rows <paramref name="first"/> to <paramref name="first"/> +
+    /// <paramref name="count"/> of an object, the first's start to the last's end, inclusive; null when those rows do
+    /// not begin and end with slices.
+    /// </summary>
+    private static (long Low, long High)? Within(IReadOnlyList<TimeSlice> slices, long first, long count)
+    {
+        // The first slice that begins at the first row, then the last that ends at the end.
+        int low = 0;
+        int high = slices.Count;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            if (slices[middle].FirstRow < first)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        if (low == slices.Count || slices[low].FirstRow != first)
+        {
+            return null;
+        }
+
+        int start = low;
+        long end = first + count;
+        high = slices.Count;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            if (slices[middle].FirstRow + slices[middle].Rows <= end)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        int last = low - 1;
+        return last >= start && slices[last].FirstRow + slices[last].Rows == end ? (slices[start].Start, slices[last].End - 1) : null;
+    }
+
+
+    /// <summary>
+    /// Whether the synopsis of an object the scan covers answers the states it asks: what the version's
+    /// entries hold, with no read of an object.
+    /// </summary>
+    internal async ValueTask<bool> AnswersAnyAsync(CancellationToken cancellationToken)
+    {
+        if (_states is not { } request || _orderPaths is not null || _take is not null)
+        {
+            return false;
+        }
+
+        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (Answer(held, request).Answer is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether the synopsis of <paramref name="held"/> answers the states the scan asks, as its scan would
+    /// find: what its entry holds, with no read of it; and whether the answer is <paramref name="light"/>, its
+    /// tables alone, no row read beside them at its edges, of an identifier left out or of a delete.
+    /// </summary>
+    internal bool Answers(in PositionedObject held, out bool light) => AnswerOf(held, out light, out _) is not null;
+
+    /// <summary>
+    /// The answer of <paramref name="held"/>'s synopsis to the states the scan asks, as its scan would find it, and the
+    /// object's table of contents: what its entry holds, with no read of it; null when its rows are read. The answer is
+    /// <paramref name="light"/> when it reads its tables alone, no row beside them at its edges, of an identifier left out
+    /// or of a delete.
+    /// </summary>
+    internal SynopsisAnswer? AnswerOf(in PositionedObject held, out bool light, out SynopsisContents? contents)
+    {
+        (SynopsisAnswer? answer, contents, _) = _states is { } request && _orderPaths is null && _take is null ? Answer(held, request) : default;
+        light = answer is { Edges.Count: 0, Excluded.Count: 0 } && !held.Entry.HasDeletions;
+        return answer;
+    }
+
+    /// <summary>
+    /// An object answered by its synopsis, with no open of it: the batches of states of its tables' kept
+    /// buckets, the rows its deletion marked and the rows the filter leaves out by an identifier taken out
+    /// of them, then the rows of the slices at the window's edges, through its chunk directories, the marked
+    /// ones left out. When a row cannot come out of a table exactly, or an identifier's index cannot find
+    /// the rows left out, the object's rows instead.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> AnsweredAsync(
+        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, int open,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (await AnswerObjectAsync(held, answer, contents, instant, cancellationToken).ConfigureAwait(false) is { } answered)
+        {
+            foreach (RecordBatch batch in Delivered(held, answered))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
+        await foreach (RecordBatch batch in RowsAsync(held, open, cancellationToken).ConfigureAwait(false))
+        {
+            yield return batch;
+        }
+    }
+
+    /// <summary>
+    /// The objects of an aggregation that takes states, newest first: the answers of those their synopses
+    /// answer read ahead of the consumer, as many at once as the session lets reads be in flight, so that a
+    /// question over a month of objects costs the round trips of one object, not one per object; an object
+    /// read as rows is read in its turn, alone ahead of none.
+    /// </summary>
+    /// <remarks>
+    /// An answer read ahead holds its tables' states and its edges' rows until its turn: a few tables' rows
+    /// and a few slices an object, against the rows a scan of the object would hold.
+    /// </remarks>
+    private async IAsyncEnumerable<RecordBatch> StatesAsync(StateRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // The objects walked, in an array of the process's pool grown as the walk goes and given back at the end: a list
+        // of them grew for each question, five arrays for 48 objects.
+        PositionedObject[] objects = System.Buffers.ArrayPool<PositionedObject>.Shared.Rent(16);
+        int count = 0;
+        using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        int width = _dataset.Session.Options.MaxConcurrentReads;
+        bool prefetch = _options.Prefetch > 0;
+        Queue<Turn>? ahead = null;
+        int next = 0;
+        try
+        {
+            await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (Covered(held) > 0)
+                {
+                    if (count == objects.Length)
+                    {
+                        PositionedObject[] grown = System.Buffers.ArrayPool<PositionedObject>.Shared.Rent(2 * count);
+                        objects.AsSpan(0, count).CopyTo(grown);
+                        System.Buffers.ArrayPool<PositionedObject>.Shared.Return(objects, clearArray: true);
+                        objects = grown;
+                    }
+
+                    objects[count++] = held;
+                }
+            }
+
+            NewestFirst(objects.AsSpan(0, count));
+            ahead = new Queue<Turn>(Math.Min(width, count));
+            while (true)
+            {
+                while (ahead.Count < width && next < count)
+                {
+                    PositionedObject held = objects[next++];
+                    ahead.Enqueue(Answer(held, request) is not ({ } answer, { } contents, string instant) ? new Turn(held)
+                        : TryAnswerNow(held, answer, contents, instant, out AnsweredObject? done) ? new Turn(held, done)
+                        : new Turn(held, AnswerObjectAsync(held, answer, contents, instant, stopped.Token)));
+                }
+
+                if (!ahead.TryDequeue(out Turn? turn))
+                {
+                    break;
+                }
+
+                // The answer was done, or started by this walk a few turns before. Its batches go as the dataset's,
+                // each counted, then the rows its edges keep; the answer given back once the last is read, or the
+                // consumer stops.
+#pragma warning disable VSTHRD003
+                if (turn.Answers && (turn.Done ?? await turn.Answer!.ConfigureAwait(false)) is { } answered)
+#pragma warning restore VSTHRD003
+                {
+                    try
+                    {
+                        if (Covered(turn.Held) != turn.Held.Entry.Rows)
+                        {
+                            _counters?.AddAnsweredPart();
+                        }
+
+                        for (int b = 0; b < answered.States.Count; b++)
+                        {
+                            RecordBatch batch = answered.States[b];
+                            _counters?.AddSynopsisRows(batch.SelectedRows);
+                            yield return batch;
+                        }
+
+                        for (int e = 0; e < answered.Edges.Count; e++)
+                        {
+                            RecordBatch slice = answered.Edges[e];
+                            using RecordBatch rows = slice.Rebased(turn.Held.FirstRow + slice.StartRow);
+                            _counters?.AddEdgeRows(rows.SelectedRows);
+                            if (rows.SelectedRows > 0)
+                            {
+                                yield return rows;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        answered.Dispose();
+                    }
+
+                    continue;
+                }
+
+                // An object read as rows, opened ahead when it could be; the next one read as rows opens ahead
+                // while it is read, one at most, as a scan of rows opens its next object.
+#pragma warning disable VSTHRD003
+                ObjectBatches reading = await (turn.Rows ?? OpenRowsAsync(turn.Held, 1, stopped.Token)).ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+                turn.Rows = null;
+                try
+                {
+                    if (prefetch && Unanswered(ahead) is { Rows: null } following)
+                    {
+                        following.Rows = OpenRowsAsync(following.Held, 2, stopped.Token);
+                    }
+
+                    for (bool more = reading.Any; more; more = await reading.Batches.MoveNextAsync().ConfigureAwait(false))
+                    {
+                        yield return reading.Batches.Current;
+                    }
+                }
+                finally
+                {
+                    await reading.Batches.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+        }
+        finally
+        {
+            // The answers and the rows read ahead of a consumer that stopped, or of a failure, are nobody's.
+            await stopped.CancelAsync().ConfigureAwait(false);
+            foreach (Turn left in ahead ?? [])
+            {
+                await left.ReleaseAsync().ConfigureAwait(false);
+            }
+
+            System.Buffers.ArrayPool<PositionedObject>.Shared.Return(objects, clearArray: true);
+        }
+    }
+
+    /// <summary>The first object of <paramref name="ahead"/> its synopsis does not answer, which is read as rows; null for none.</summary>
+    private static Turn? Unanswered(Queue<Turn> ahead)
+    {
+        foreach (Turn turn in ahead)
+        {
+            if (!turn.Answers)
+            {
+                return turn;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>An object's rows, opened and positioned on their first batch; <paramref name="open"/> is how many objects are open with it.</summary>
+    private async Task<ObjectBatches> OpenRowsAsync(PositionedObject held, int open, CancellationToken cancellationToken)
+    {
+        IAsyncEnumerator<RecordBatch> batches = RowsAsync(held, open, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        try
+        {
+            return new ObjectBatches(batches, await batches.MoveNextAsync().ConfigureAwait(false));
+        }
+        catch
+        {
+            await batches.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// An object of a walk that takes states, in the queue of those read ahead: the answer of its synopsis, started
+    /// when it has one, and its rows, once opened ahead.
+    /// </summary>
+    private sealed class Turn
+    {
+        /// <summary>An object read as rows.</summary>
+        internal Turn(PositionedObject held) => Held = held;
+
+        /// <summary>An object its synopsis answers, its answer started.</summary>
+        internal Turn(PositionedObject held, Task<AnsweredObject?> answer)
+        {
+            Held = held;
+            Answer = answer;
+            Answers = true;
+        }
+
+        /// <summary>An object its synopsis answered on the spot: <paramref name="done"/>, or null when its rows are read after all.</summary>
+        internal Turn(PositionedObject held, AnsweredObject? done)
+        {
+            Held = held;
+            Done = done;
+            Answers = true;
+        }
+
+        internal PositionedObject Held { get; }
+
+        /// <summary>Whether its synopsis answers it: an answer done or started, which may still find its rows read.</summary>
+        internal bool Answers { get; }
+
+        /// <summary>The answer done on the spot, the walk's to deliver or to let go.</summary>
+        internal AnsweredObject? Done { get; }
+
+        internal Task<AnsweredObject?>? Answer { get; }
+
+        internal Task<ObjectBatches>? Rows { get; set; }
+
+        /// <summary>Lets go what was read ahead and never delivered: the answer's states, the rows' lease.</summary>
+        internal async ValueTask ReleaseAsync()
+        {
+            Done?.Dispose();
+            if (Answer is { } answer)
+            {
+                try
+                {
+#pragma warning disable VSTHRD003
+                    (await answer.ConfigureAwait(false))?.Dispose();
+#pragma warning restore VSTHRD003
+                }
+                catch (Exception) when (answer.IsFaulted || answer.IsCanceled)
+                {
+                }
+            }
+
+            if (Rows is { } rows)
+            {
+                try
+                {
+#pragma warning disable VSTHRD003
+                    await (await rows.ConfigureAwait(false)).Batches.DisposeAsync().ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+                }
+                catch (Exception) when (rows.IsFaulted || rows.IsCanceled)
+                {
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Orders <paramref name="objects"/> by the newest instant each holds, newest first, those whose
+    /// summary does not say last, each kind in the walk's order.
+    /// </summary>
+    private void NewestFirst(Span<PositionedObject> objects)
+    {
+        if (_dataset.Key is not { } key)
+        {
+            return;
+        }
+
+        Span<(long Newest, int At)> order = objects.Length <= 512 ? stackalloc (long, int)[objects.Length] : new (long, int)[objects.Length];
+        for (int i = 0; i < order.Length; i++)
+        {
+            long newest = objects[i].Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
+                && summary is { HasMax: true, Max.Kind: FilterLiteralKind.Signed }
+                ? summary.Max.SignedValue
+                : long.MinValue;
+            order[i] = (newest, i);
+        }
+
+        order.Sort(static (a, b) => a.Newest != b.Newest ? b.Newest.CompareTo(a.Newest) : a.At.CompareTo(b.At));
+
+        // Each place takes the object the order puts there, a cycle of places at a time, in place: a place done is
+        // marked by its source made -1.
+        for (int i = 0; i < order.Length; i++)
+        {
+            if (order[i].At < 0)
+            {
+                continue;
+            }
+
+            PositionedObject first = objects[i];
+            for (int place = i; ;)
+            {
+                int from = order[place].At;
+                order[place].At = -1;
+                if (from == i)
+                {
+                    objects[place] = first;
+                    break;
+                }
+
+                objects[place] = objects[from];
+                place = from;
+            }
+        }
+    }
+
+    /// <summary>What an object's synopsis answered: its batches of states, the tables they lie in, and the rows of its edge slices.</summary>
+    private sealed class AnsweredObject(List<RecordBatch> states, SynopsisTableSet? tables, List<RecordBatch> edges) : IDisposable
+    {
+        internal List<RecordBatch> States { get; } = states;
+
+        internal List<RecordBatch> Edges { get; } = edges;
+
+        public void Dispose()
+        {
+            foreach (RecordBatch batch in States)
+            {
+                batch.Dispose();
+            }
+
+            foreach (RecordBatch batch in Edges)
+            {
+                batch.Dispose();
+            }
+
+            tables?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The batches of an object's answer as the dataset's: its states, then the rows its edges keep, each
+    /// counted; the answer given back once the last is read, or the consumer stops.
+    /// </summary>
+    private IEnumerable<RecordBatch> Delivered(PositionedObject held, AnsweredObject answered)
+    {
+        try
+        {
+            foreach (RecordBatch batch in answered.States)
+            {
+                _counters?.AddSynopsisRows(batch.SelectedRows);
+                yield return batch;
+            }
+
+            foreach (RecordBatch slice in answered.Edges)
+            {
+                using RecordBatch rows = slice.Rebased(held.FirstRow + slice.StartRow);
+                _counters?.AddEdgeRows(rows.SelectedRows);
+                if (rows.SelectedRows > 0)
+                {
+                    yield return rows;
+                }
+            }
+        }
+        finally
+        {
+            answered.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// What an object's synopsis answers when its tables alone answer it, no row read beside them, and the session's
+    /// synopsis cache holds every chunk of them: read, decoded and folded on the spot, with no task, null when a row
+    /// cannot come out of a table exactly; false when the answer needs a read of its own, which
+    /// <see cref="AnswerObjectAsync"/> makes. A walk of a warm question over many objects answers each so, where a task an
+    /// object was the most it allocated for one.
+    /// </summary>
+    private bool TryAnswerNow(PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, out AnsweredObject? answered)
+    {
+        answered = null;
+        if (held.Entry.HasDeletions || answer.Edges.Count > 0 || answer.Excluded.Count > 0 || answer.Parts.Count == 0)
+        {
+            return false;
+        }
+
+        answer.Project(contents);
+        if (_dataset.ReadSynopsisCached(held.Entry, contents, answer) is not { } tables)
+        {
+            return false;
+        }
+
+        DType schema = contents.SchemaType;
+        List<RecordBatch> states = new List<RecordBatch>(tables.Tables.Count);
+        bool exact = true;
+        try
+        {
+            for (int p = 0; p < answer.Parts.Count && exact; p++)
+            {
+                exact = answer.TryBatches(tables, answer.Parts[p], contents, instant, held.FirstRow, states, null, schema, contents.Slices);
+            }
+        }
+        catch
+        {
+            LetGo(states, tables);
+            throw;
+        }
+
+        if (!exact)
+        {
+            LetGo(states, tables);
+            return true;
+        }
+
+        answered = new AnsweredObject(states, tables, NoRows);
+        return true;
+    }
+
+    /// <summary>The batches and tables of an answer given back.</summary>
+    private static void LetGo(List<RecordBatch> states, SynopsisTableSet tables)
+    {
+        foreach (RecordBatch batch in states)
+        {
+            batch.Dispose();
+        }
+
+        tables.Dispose();
+    }
+
+    /// <summary>
+    /// Reads what an object's synopsis answers, with no open of it, as <see cref="AnsweredAsync"/> delivers it;
+    /// null, with nothing held, when a row cannot come out of a table exactly or an identifier's index cannot
+    /// find the rows left out.
+    /// </summary>
+    private async Task<AnsweredObject?> AnswerObjectAsync(
+        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, CancellationToken cancellationToken)
+    {
+        // A deletion vector kept out of line is read before the rows it marks are.
+        if (held.Entry.HasDeletions && !held.Entry.IsResolved)
+        {
+            await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
+        }
+
+        // The slices cut and the rows marked are read beside the tables, not after them: their chunk
+        // directories and their chunks take two round trips, the tables one, so the object costs two.
+        DType schema = contents.SchemaType;
+        Task<List<RecordBatch>>? edges = answer.Edges.Count > 0
+            ? ReadSpansAsync(held, contents, answer.Edges, EdgeColumns(schema), select: true, cancellationToken)
+            : null;
+        Task<List<RecordBatch>>? marked = held.Entry.HasDeletions && answer.Parts.Count > 0
+            ? ReadSpansAsync(held, contents, MarkedSpans(held.Entry.Deletions), MeasuredColumns(answer), select: false, cancellationToken)
+            : null;
+        Task<List<RecordBatch>>? excluded = answer.Excluded.Count > 0 && answer.Parts.Count > 0
+            ? ExcludedAsync(held, answer.Excluded, ExcludedColumns(answer, schema), cancellationToken)
+            : null;
+        List<RecordBatch> states = [];
+        SynopsisTableSet? tables = null;
+        bool exact = true;
+        try
+        {
+            if (answer.Parts.Count > 0)
+            {
+                // The fields the batches of states are read by, but every one where a row comes out of a table.
+                if (!held.Entry.HasDeletions && answer.Excluded.Count == 0)
+                {
+                    answer.Project(contents);
+                }
+
+                tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer, cancellationToken).ConfigureAwait(false);
+                List<RecordBatch>? removed = marked is null ? null : await marked.ConfigureAwait(false);
+                if (excluded is not null)
+                {
+                    List<RecordBatch> left = await excluded.ConfigureAwait(false);
+                    exact = !ReferenceEquals(left, Unfound);
+                    removed = removed is null ? left : [.. removed, .. left];
+                }
+
+                foreach (SynopsisPart part in answer.Parts)
+                {
+                    if (!exact || !answer.TryBatches(tables, part, contents, instant, held.FirstRow, states, removed, schema, contents.Slices))
+                    {
+                        exact = false;
+                        break;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            await LetGoAsync(states, tables, marked, edges, excluded).ConfigureAwait(false);
+            throw;
+        }
+
+        // The rows taken out are spent once the states are corrected.
+        if (marked is not null || excluded is not null)
+        {
+            await LetGoAsync(NoRows, null, marked, excluded).ConfigureAwait(false);
+        }
+
+        if (!exact)
+        {
+            await LetGoAsync(states, tables, edges).ConfigureAwait(false);
+            return null;
+        }
+
+        try
+        {
+            return new AnsweredObject(states, tables, edges is null ? NoRows : await edges.ConfigureAwait(false));
+        }
+        catch
+        {
+            await LetGoAsync(states, tables).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>What <see cref="ExcludedAsync"/> answers when an identifier's index cannot find the rows left out.</summary>
+    private static readonly List<RecordBatch> Unfound = [];
+
+    /// <summary>No batch: the edges of an answer that cuts none, the rows of none taken out. Never added to.</summary>
+    private static readonly List<RecordBatch> NoRows = [];
+
+    /// <summary>
+    /// The rows the filter leaves out by an identifier's value, found by the identifier's index with no open
+    /// of the object, three round trips cold, beside the tables: each part's rows, those an earlier part
+    /// already left out and those a deletion marked left out too, since a row comes out of a table once.
+    /// Batches counted from the object's first physical row, which the caller disposes; <see cref="Unfound"/>
+    /// when an index cannot say.
+    /// </summary>
+    private async Task<List<RecordBatch>> ExcludedAsync(
+        PositionedObject held, IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> excluded, int[]? columns, CancellationToken cancellationToken)
+    {
+        Task<List<RecordBatch>?>[] lookups = new Task<List<RecordBatch>?>[excluded.Count];
+        for (int i = 0; i < lookups.Length; i++)
+        {
+            lookups[i] = _dataset.LookupAsync(held.Entry, excluded[i].Part, columns, cancellationToken).AsTask();
+        }
+
+        try
+        {
+            await Task.WhenAll(lookups).ConfigureAwait(false);
+        }
+        catch
+        {
+            foreach (Task<List<RecordBatch>?> lookup in lookups)
+            {
+                if (lookup.IsCompletedSuccessfully)
+                {
+                    foreach (RecordBatch batch in await lookup.ConfigureAwait(false) ?? [])
+                    {
+                        batch.Dispose();
+                    }
+                }
+            }
+
+            throw;
+        }
+
+        List<RecordBatch> rows = [];
+        bool found = true;
+        VortexExpr? earlier = null;
+        for (int i = 0; i < lookups.Length; i++)
+        {
+            List<RecordBatch>? batches = await lookups[i].ConfigureAwait(false);
+            found &= batches is not null;
+            VortexExpr part = earlier is null ? excluded[i].Part : Expr.And(excluded[i].Part, earlier);
+            foreach (RecordBatch batch in batches ?? [])
+            {
+                rows.Add(batch);
+                SelectBy(batch, part);
+                if (held.Entry.HasDeletions)
+                {
+                    LeaveOutMarked(batch, held.Entry.Deletions);
+                }
+            }
+
+            earlier = earlier is null ? excluded[i].Kept : Expr.And(earlier, excluded[i].Kept);
+        }
+
+        if (found)
+        {
+            return rows;
+        }
+
+        foreach (RecordBatch batch in rows)
+        {
+            batch.Dispose();
+        }
+
+        return Unfound;
+    }
+
+    /// <summary>The batches and tables of an answer given back, those read beside it once their reads end.</summary>
+    private static async ValueTask LetGoAsync(List<RecordBatch> states, SynopsisTableSet? tables, params Task<List<RecordBatch>>?[] reads)
+    {
+        foreach (RecordBatch batch in states)
+        {
+            batch.Dispose();
+        }
+
+        if (!ReferenceEquals(states, NoRows))
+        {
+            states.Clear();
+        }
+
+        tables?.Dispose();
+        foreach (Task<List<RecordBatch>>? read in reads)
+        {
+            if (read is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                foreach (RecordBatch batch in await read.ConfigureAwait(false))
+                {
+                    batch.Dispose();
+                }
+            }
+            catch (Exception) when (read.IsFaulted || read.IsCanceled)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows of the object read with no open of it, through its chunk directories, a batch per span of
+    /// <paramref name="columns"/>, the rows its deletion marked left out; with <paramref name="select"/>, the
+    /// rows the filter holds for alone. Batches counted from the object's first physical row, which the
+    /// caller disposes.
+    /// </summary>
+    private async Task<List<RecordBatch>> ReadSpansAsync(
+        PositionedObject held, SynopsisContents contents, IReadOnlyList<TimeSlice> spans, int[]? columns, bool select, CancellationToken cancellationToken)
+    {
+        List<RecordBatch> batches = [.. await _dataset.ReadSlicesAsync(held.Entry, contents, spans, columns, cancellationToken).ConfigureAwait(false)];
+        try
+        {
+            foreach (RecordBatch batch in batches)
+            {
+                if (select && _filter is { } filter)
+                {
+                    SelectBy(batch, filter);
+                }
+
+                if (select && held.Entry.HasDeletions)
+                {
+                    LeaveOutMarked(batch, held.Entry.Deletions);
+                }
+            }
+
+            return batches;
+        }
+        catch
+        {
+            foreach (RecordBatch batch in batches)
+            {
+                batch.Dispose();
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>The runs of rows a deletion marked, as spans of the object's physical rows.</summary>
+    private static List<TimeSlice> MarkedSpans(DeletionVector deletions)
+    {
+        List<TimeSlice> spans = new List<TimeSlice>(deletions.Runs);
+        for (int run = 0; run < deletions.Runs; run++)
+        {
+            spans.Add(new TimeSlice(0, 1, deletions.StartOf(run), deletions.EndOf(run) - deletions.StartOf(run)));
+        }
+
+        return spans;
+    }
+
+    /// <summary>The columns the answer's tables key and measure: what charges a row taken out to its table's row.</summary>
+    /// <summary>
+    /// The columns the rows an identifier's index finds are read for: the keys and the measures of the tables they come out
+    /// of, and the columns of the filters that leave them out and keep the rest; null, every one, when a filter names a
+    /// column that is none of the schema's. Every column's chunk directory was read and parsed for them, at every question.
+    /// </summary>
+    private static int[]? ExcludedColumns(SynopsisAnswer answer, DType schema)
+    {
+        SortedSet<int> fields = [.. MeasuredColumns(answer)];
+        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
+        foreach ((VortexExpr part, VortexExpr kept) in answer.Excluded)
+        {
+            part.CollectFields(named);
+            kept.CollectFields(named);
+        }
+
+        foreach (string name in named)
+        {
+            int field = schema.IndexOfField(name);
+            if (field < 0)
+            {
+                return null;
+            }
+
+            fields.Add(field);
+        }
+
+        return [.. fields];
+    }
+
+    private static int[] MeasuredColumns(SynopsisAnswer answer)
+    {
+        SortedSet<int> fields = [];
+        foreach (SynopsisPart part in answer.Parts)
+        {
+            foreach (int field in part.Table.Keys)
+            {
+                if (!SynopsisPath.Names(field))
+                {
+                    fields.Add(field);
+                }
+            }
+
+            foreach (int field in part.Table.Measures)
+            {
+                if (!SynopsisPath.Names(field))
+                {
+                    fields.Add(field);
+                }
+            }
+        }
+
+        return [.. fields];
+    }
+
+    /// <summary>Leaves the rows a deletion marked out of a batch of an object's physical rows.</summary>
+    private static void LeaveOutMarked(RecordBatch batch, DeletionVector deletions)
+    {
+        int rows = batch.RowCount;
+        int words = Math.Max((rows + 63) >> 6, 1);
+        Buffers.VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
+        Span<ulong> live = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
+        deletions.Live(batch.StartRow, rows, live);
+        ReadOnlySpan<ulong> kept = batch.SelectionWords;
+        int selected = 0;
+        for (int w = 0; w < words; w++)
+        {
+            if (!kept.IsEmpty)
+            {
+                live[w] &= kept[w];
+            }
+
+            selected += System.Numerics.BitOperations.PopCount(live[w]);
+        }
+
+        batch.Select(selection, selected);
+    }
+
+    /// <summary>
+    /// The top-level columns of <paramref name="schema"/> an edge reads: those the pass projects and those
+    /// the filter names; null for every column, the pass projecting none.
+    /// </summary>
+    private int[]? EdgeColumns(DType schema)
+    {
+        if (_mask is not { } mask)
+        {
+            return null;
+        }
+
+        SortedSet<int> fields = [];
+        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string path in PathsOf(mask, schema))
+        {
+            named.Add(path.Split('.')[0]);
+        }
+
+        _filter?.CollectFields(named);
+        foreach (string name in named)
+        {
+            int field = schema.IndexOfField(name.Split('.')[0]);
+            if (field >= 0)
+            {
+                fields.Add(field);
+            }
+        }
+
+        return [.. fields];
+    }
+
+    /// <summary>Selects the rows of <paramref name="batch"/> <paramref name="filter"/> holds for.</summary>
+    private static void SelectBy(RecordBatch batch, VortexExpr filter)
+    {
+        int rows = batch.RowCount;
+        byte[] states = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+        try
+        {
+            FilterEvaluator.Evaluate(filter, batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
+            int words = Math.Max((rows + 63) >> 6, 1);
+            Buffers.VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
+            bytes.Clear();
+            Span<ulong> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
+            int selected = 0;
+            for (int r = 0; r < rows; r++)
+            {
+                if (states[r] == Trilean.True)
+                {
+                    kept[r >> 6] |= 1UL << (r & 63);
+                    selected++;
+                }
+            }
+
+            batch.Select(selection, selected);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(states);
+        }
+    }
+
+    /// <summary>
     /// The rows the scan selects, without materialising them, cheapest proof first: an object whose
     /// covered rows are all kept is counted from its entry without being opened, which is every
     /// object when there is no filter and, under a range on the clustering key, an object whose
@@ -429,7 +1484,7 @@ internal sealed class DatasetScanBuilder
                 continue;
             }
 
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -461,7 +1516,7 @@ internal sealed class DatasetScanBuilder
                 return true;
             }
 
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -567,6 +1622,7 @@ internal sealed class DatasetScanBuilder
         List<string> sources = [];
         long runs = 0;
         long entries = 0;
+        List<StatesStep> states = [];
         KeyRange? range = CountRange();
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -576,9 +1632,18 @@ internal sealed class DatasetScanBuilder
                 continue;
             }
 
+            // What an aggregation that takes states reads of the object: its tables, then its edges' rows,
+            // or its rows and why. An object its synopsis answers is not opened, by the plan as by the pass.
+            if (_states is { } request && StatesOf(held, request, states) is not null)
+            {
+                keptRows += covered;
+                mayMatch = true;
+                continue;
+            }
+
             ScanExplanation plan;
             bool evaluated = false;
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -680,7 +1745,54 @@ internal sealed class DatasetScanBuilder
             new CountPlan(exact, exactRows, Narrow(pruned), Narrow(proven), Narrow(decoded)),
             _orderPaths is null
                 ? null
-                : new OrderPlan(sources.Count == 0 ? nameof(KeySourceKind.None) : string.Join('+', sources), Narrow(runs), entries, _descending));
+                : new OrderPlan(sources.Count == 0 ? nameof(KeySourceKind.None) : string.Join('+', sources), Narrow(runs), entries, _descending))
+        {
+            States = [.. states],
+        };
+    }
+
+    /// <summary>
+    /// Adds to <paramref name="into"/> what the object reads for an aggregation that takes states: each
+    /// table of its answer with the buckets it folds and the slices read at its edges; or its rows, and
+    /// why. The answer, or null when the rows are read whole.
+    /// </summary>
+    private SynopsisAnswer? StatesOf(in PositionedObject held, StateRequest request, List<StatesStep> into)
+    {
+        string key = held.Entry.Key.ToString();
+        (SynopsisAnswer? answer, SynopsisContents? contents, _) = Answer(held, request);
+        if (answer is null || contents is null)
+        {
+            string why = Covered(held) != held.Entry.Rows ? "a part of its rows asked"
+                : held.Entry.Synopsis.IsEmpty ? "no synopsis"
+                : "no table holds the keys, the measures and the window";
+            into.Add(new StatesStep(key, "rows", why, held.Entry.Rows));
+            return null;
+        }
+
+        if (held.Entry.HasDeletions && answer.Parts.Count > 0)
+        {
+            into.Add(new StatesStep(key, "marked", "rows a delete marked, taken out of the tables, or the object's rows if one cannot be", held.Entry.DeletedRows));
+        }
+
+        if (answer.Excluded.Count > 0 && answer.Parts.Count > 0)
+        {
+            into.Add(new StatesStep(
+                key, "excluded", "rows the filter leaves out by an identifier, found by its index and taken out of the tables", answer.Excluded.Count));
+        }
+
+        DType schema = contents.SchemaType;
+        foreach (SynopsisPart part in answer.Parts)
+        {
+            string[] keys = Array.ConvertAll(part.Table.Keys, field => SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths));
+            into.Add(new StatesStep(key, "table", $"{part.Table.Kind} by {part.Table.Bucket} on ({string.Join(", ", keys)})", part.KeptCount));
+        }
+
+        if (answer.Edges.Count > 0)
+        {
+            into.Add(new StatesStep(key, "edges", "the slices the window or a key of time cuts", answer.Edges.Count));
+        }
+
+        return answer;
     }
 
     /// <summary>
@@ -730,7 +1842,7 @@ internal sealed class DatasetScanBuilder
                 continue;
             }
 
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -858,8 +1970,8 @@ internal sealed class DatasetScanBuilder
     /// <summary>
     /// The most objects the scan will hold open at once, stated before any is read: one in the
     /// tree's order, two with a prefetch, which opens the next object ahead; key-ordered on the
-    /// clustering key, level 0's objects and one per level above it; on any other column every
-    /// object, the summaries giving no disjointness to lean on.
+    /// clustering key, level 0's objects, a late level's, and one per other level; on any other column
+    /// every object, the summaries giving no disjointness to lean on.
     /// </summary>
     private long CursorBound(long objects, List<long> keptByLevel)
     {
@@ -878,13 +1990,11 @@ internal sealed class DatasetScanBuilder
             return objects;
         }
 
+        // Level 0's objects, and a late level's, overlap: each may be open at once.
         long cursors = keptByLevel.Count > 0 ? keptByLevel[0] : 0;
         for (int level = 1; level < keptByLevel.Count; level++)
         {
-            if (keptByLevel[level] > 0)
-            {
-                cursors++;
-            }
+            cursors += _version.Levels.IsDisjoint(level) ? Math.Min(keptByLevel[level], 1) : keptByLevel[level];
         }
 
         return cursors;
@@ -902,7 +2012,69 @@ internal sealed class DatasetScanBuilder
     private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? new SummaryPruner(filter) : null;
 
     private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken) =>
-        _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
+        _planned is { } planned ? new PlannedObjects(planned, _from, _to) : _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
+
+    /// <summary>
+    /// The objects of a plan of pieces the rows <c>[from, to)</c> overlap, in their order, from the first found by its
+    /// place: what a walk of the tree over those rows gives, with no page read and no pruner made.
+    /// </summary>
+    private sealed class PlannedObjects(PositionedObject[] planned, long from, long to) : IAsyncEnumerable<PositionedObject>, IAsyncEnumerator<PositionedObject>
+    {
+        private int _next = First(planned, from);
+        private bool _taken;
+
+        public PositionedObject Current { get; private set; }
+
+        public IAsyncEnumerator<PositionedObject> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            // An enumeration of its own each time, as a walk is: the first takes this one.
+            if (_taken)
+            {
+                return new PlannedObjects(planned, from, to).GetAsyncEnumerator(cancellationToken);
+            }
+
+            _taken = true;
+            return this;
+        }
+
+        public ValueTask<bool> MoveNextAsync()
+        {
+            while (_next < planned.Length && planned[_next].FirstRow < to)
+            {
+                PositionedObject held = planned[_next++];
+                if (held.FirstRow + held.Entry.Rows > from)
+                {
+                    Current = held;
+                    return new ValueTask<bool>(true);
+                }
+            }
+
+            return new ValueTask<bool>(false);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        /// <summary>The first of <paramref name="objects"/>, in the order of their rows, that ends past <paramref name="row"/>.</summary>
+        private static int First(PositionedObject[] objects, long row)
+        {
+            int low = 0;
+            int high = objects.Length;
+            while (low < high)
+            {
+                int middle = (int)((uint)(low + high) >> 1);
+                if (objects[middle].FirstRow + objects[middle].Entry.Rows <= row)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+
+            return low;
+        }
+    }
 
     private void RecordOpen(ObjectLease lease, int open = 1)
     {
@@ -1058,11 +2230,15 @@ internal sealed class DatasetScanBuilder
         return RowEncoder.EncodeKey([bound], [dtype], [field]);
     }
 
-    /// <summary>Whether a column's summary bounds are bounds in the key order (see <see cref="SummaryBound"/>).</summary>
+    /// <summary>
+    /// Whether a column's summary bounds are bounds in the key order (see <see cref="SummaryBound"/>). An
+    /// extension's, a timestamp's say, are its storage's, which the key order encodes it as.
+    /// </summary>
     private static bool HasKeyOrderBounds(DType dtype) => dtype.Kind switch
     {
         DTypeKind.Primitive => !dtype.PType.IsFloat(),
         DTypeKind.Bool or DTypeKind.Utf8 or DTypeKind.Binary => true,
+        DTypeKind.Extension => HasKeyOrderBounds(dtype.StorageType),
         _ => false,
     };
 
@@ -1349,12 +2525,72 @@ internal sealed class DatasetScanBuilder
 
         // The range is the dataset's; the file's is the part of it that falls inside this object.
         (long lower, long upper) = PhysicalRange(held);
+
+        // An object sliced by time holds its rows slice by slice, every row's instant within its slice's bounds, so the
+        // filter's window on the instant is a range of its rows: the slices it reaches. The scan's plan, its zone maps and
+        // its walk then cover those alone, where they covered every row of the object at every question, the window's
+        // slices a day's object's 1 440 minutes for a window of an hour.
+        long low = long.MinValue;
+        long high = long.MaxValue;
+        if (held.Entry.Deletions.IsEmpty && filter is not null && _dataset.Key is { } key && Bound(filter, key.InstantPath, ref low, ref high)
+            && held.Entry.Contents is { } contents && WindowRows(contents.Slices.Slices, low, high) is { } window)
+        {
+            lower = Math.Max(lower, window.Start);
+            upper = Math.Min(upper, window.End);
+        }
+
         if (lower > 0 || upper < held.Entry.PhysicalRows)
         {
             scan.Rows(new RowRange(lower, Math.Max(upper, lower)));
         }
 
         return scan;
+    }
+
+    /// <summary>
+    /// Narrows <paramref name="low"/> and <paramref name="high"/>, inclusive, by the conjuncts of <paramref name="filter"/>
+    /// that compare <paramref name="instant"/> itself, as an answer reads its window (<see cref="SynopsisAnswer.Bound"/>);
+    /// whether one did. A walk of the conjunctions, which allocates nothing.
+    /// </summary>
+    internal static bool Bound(VortexExpr filter, string instant, ref long low, ref long high)
+    {
+        if (filter is LogicalExpr { IsAnd: true } both)
+        {
+            bool left = Bound(both.Left, instant, ref low, ref high);
+            return Bound(both.Right, instant, ref low, ref high) | left;
+        }
+
+        return SynopsisAnswer.Bound(filter, instant, ref low, ref high);
+    }
+
+    /// <summary>
+    /// The rows of the slices of <paramref name="slices"/> the window from <paramref name="low"/> to <paramref name="high"/>,
+    /// inclusive, reaches, from the first's first row to the last's last, empty when it reaches none; null when the object
+    /// has no slice.
+    /// </summary>
+    internal static RowRange? WindowRows(IReadOnlyList<Indexes.TimeSlice> slices, long low, long high)
+    {
+        if (slices.Count == 0)
+        {
+            return null;
+        }
+
+        // A slice [Start, End) the window [low, high] reaches: one that ends past its low and starts at its high or before.
+        int first = 0;
+        while (first < slices.Count && slices[first].End <= low)
+        {
+            first++;
+        }
+
+        int last = slices.Count - 1;
+        while (last >= first && slices[last].Start > high)
+        {
+            last--;
+        }
+
+        return last < first
+            ? RowRange.Empty
+            : new RowRange(slices[first].FirstRow, slices[last].FirstRow + slices[last].Rows);
     }
 
     /// <summary>
@@ -1557,6 +2793,13 @@ internal sealed class DatasetScanBuilder
             scan.Where(filter);
         }
 
+        // An object read in the dataset's own columns reads its variants by keys where its path map
+        // allows; one reshaped from an earlier schema reads them whole.
+        if (!canonical)
+        {
+            scan.WithVariantKeys(_variantKeys);
+        }
+
         if (projection is { } mask)
         {
             scan.ProjectMask(in mask);
@@ -1576,6 +2819,11 @@ internal sealed class DatasetScanBuilder
             .WithPrefetch(_options.Prefetch)
             .WithCompaction(_options.Compact)
             .WithEncodings(!canonical && _keepEncodings, !canonical && _sinkDecodes);
+        if (_readAhead > 0)
+        {
+            scan.WithReadAhead(_readAhead);
+        }
+
         return _counters is { } counters ? scan.WithMetrics(counters) : scan;
     }
 }

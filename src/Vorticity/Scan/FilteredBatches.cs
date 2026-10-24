@@ -9,6 +9,7 @@ using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Keys;
+using Vorticity.Layouts;
 
 namespace Vorticity.Scanning;
 
@@ -166,7 +167,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
                     ? new ZonePruningPlan.PruningPlan(_live, null)
                     : _prune && _filter is not null
                         ? await ZonePruningPlan
-                            .PlanAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes)
+                            .PlanAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes, Scope())
                             .ConfigureAwait(false)
                         : default;
 
@@ -189,5 +190,22 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         }
 
         public ValueTask DisposeAsync() => _inner?.DisposeAsync() ?? default;
+
+        /// <summary>
+        /// The blocks the scan's rows reach, over blocks of the natural size, when they are not the file's: a scan of one
+        /// part of a file, a lane's range of an object, reads the locating structures of its part alone.
+        /// </summary>
+        private BlockMask? Scope()
+        {
+            LayoutTree tree = _source.Tree;
+            if (_rows.Start <= 0 && _rows.End >= tree.Root.RowCount)
+            {
+                return null;
+            }
+
+            BlockMask scope = new BlockMask(tree.Root.RowCount, SplitPlan.NaturalBatchRows(tree));
+            scope.KeepOnly(_rows);
+            return scope;
+        }
     }
 }

@@ -35,6 +35,8 @@ public sealed class MaskedAccumulateTests
     {
         Run<double, IndexedSum, IndexedFloatSum<double>>(random => Number(random), Same);
         Run<float, IndexedSum, IndexedFloatSum<float>>(random => (float)Number(random), Same);
+        Run<double, WideIndexedSum, WideIndexedFloatSum<double>>(random => Number(random), SameWide);
+        Run<float, WideIndexedSum, WideIndexedFloatSum<float>>(random => (float)Number(random), SameWide);
     }
 
     [Fact]
@@ -50,6 +52,9 @@ public sealed class MaskedAccumulateTests
 
     // A float sum is the same bits whatever the path its values take.
     private static bool Same(IndexedSum a, IndexedSum b) =>
+        a.Count == b.Count && BitConverter.DoubleToInt64Bits(a.Value) == BitConverter.DoubleToInt64Bits(b.Value);
+
+    private static bool SameWide(WideIndexedSum a, WideIndexedSum b) =>
         a.Count == b.Count && BitConverter.DoubleToInt64Bits(a.Value) == BitConverter.DoubleToInt64Bits(b.Value);
 
     private static void Run<TValue, TState, TOp>(Func<Random, TValue> next, Func<TState, TState, bool> same)

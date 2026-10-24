@@ -278,6 +278,73 @@ public sealed class EncodingHintTests
         Assert.Contains("'absent'", refused.Message, StringComparison.Ordinal);
     }
 
+    // ------------------------------------------------------------------------- a column's zstd level
+
+    /// <summary>
+    /// A column zstd takes compresses its frames at its own level: at the file's default, 3, the bytes of a file that
+    /// sets none; at 1, other bytes, those of a file whose every column is at 1, the text being the one column zstd
+    /// takes; and the rows it was given either way.
+    /// </summary>
+    [Fact]
+    public async Task AColumnsZstdLevelIsItsOwn()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        Fixture fixture = new Fixture(Rows);
+        Dictionary<string, EncodingHint> zstd = new Dictionary<string, EncodingHint> { ["text"] = EncodingHint.Zstd };
+        VortexWriteOptions none = Options(zstd);
+        VortexWriteOptions[] options =
+        [
+            none,
+            none with { ZstdLevels = ImmutableDictionaryOf("text", 3) },
+            none with { ZstdLevels = ImmutableDictionaryOf("text", 1) },
+            none with { ZstdLevel = 1 },
+        ];
+        string[] paths = [.. options.Select(_ => Temp())];
+        try
+        {
+            byte[][] written = new byte[options.Length][];
+            for (int i = 0; i < options.Length; i++)
+            {
+                await using (VortexFileWriter writer = VortexFileWriter.Create(paths[i], fixture.Schema, options[i]))
+                {
+                    await fixture.WriteAsync(writer, 4_096);
+                    WriteReport report = await writer.CompleteAsync(ct);
+                    Assert.All(report.Columns.Single(c => c.Path == "text").Encodings, scheme => Assert.Equal(nameof(EncodingHint.Zstd), scheme));
+                }
+
+                written[i] = await System.IO.File.ReadAllBytesAsync(paths[i], ct);
+                Assert.Equal(fixture.Rendered, await ReadAsync(paths[i]));
+            }
+
+            Assert.Equal(written[0], written[1]);
+            Assert.NotEqual(written[0], written[2]);
+            Assert.Equal(written[3], written[2]);
+        }
+        finally
+        {
+            foreach (string path in paths)
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public void AZstdLevelNamingNoColumnOrOutOfZstdsRangeIsRefused()
+    {
+        Fixture fixture = new Fixture(16);
+        using MemoryStream stream = new MemoryStream();
+        ArgumentException absent = Assert.Throws<ArgumentException>(() => VortexFileWriter.Create(
+            new StreamSegmentSink(stream), fixture.Schema, new VortexWriteOptions { ZstdLevels = ImmutableDictionaryOf("absent", 1) }));
+        Assert.Contains("'absent'", absent.Message, StringComparison.Ordinal);
+        Assert.Throws<ArgumentOutOfRangeException>(() => VortexFileWriter.Create(
+            new StreamSegmentSink(stream), fixture.Schema, new VortexWriteOptions { ZstdLevels = ImmutableDictionaryOf("text", 99) }));
+    }
+
+    private static System.Collections.Immutable.ImmutableDictionary<string, int> ImmutableDictionaryOf(string column, int level) =>
+        System.Collections.Immutable.ImmutableDictionary<string, int>.Empty.WithComparers(StringComparer.Ordinal).Add(column, level);
+
     [Fact]
     public async Task AHintReachesANestedFieldAndTheOneColumnOfANonStructRoot()
     {

@@ -191,6 +191,16 @@ public sealed class BlockMaskTests
             }
 
             Assert.Equal(anyLiveBlock, mask.AnyLiveBlocks(first, past));
+
+            // The next live block a word at a time, as the walk over the blocks finds it.
+            int from = random.Next(0, mask.BlockCount + 3);
+            int found = from;
+            while (found < mask.BlockCount && !mask.IsLive(found))
+            {
+                found++;
+            }
+
+            Assert.Equal(Math.Min(found, mask.BlockCount), mask.NextLive(from));
         }
     }
 
@@ -239,6 +249,31 @@ public sealed class BlockMaskTests
         BlockMask? refined = await ZonePruningPlan.RefineAsync(file, tree, narrow, CancellationToken.None);
         Assert.NotNull(refined);
         Assert.Equal(mask.LiveCount, refined.LiveCount);
+    }
+
+    /// <summary>
+    /// A plan for a scan of part of a file, a lane's piece, asks its structures of the blocks its rows
+    /// reach alone: those keep the filter's verdict, every other block is dead.
+    /// </summary>
+    [Fact]
+    public async Task APlanForPartOfAFileLeavesTheBlocksOutsideItDead()
+    {
+        Decoders.EnsureRegistered();
+
+        // A text column, which no table of bounds answers: the pruner asks it block by block.
+        VortexExpr wide = Expr.Ge(Expr.Field("strs"), Expr.Literal(FilterLiteral.From("")));
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        LayoutTree tree = file.LayoutTree;
+        long blockRows = SplitPlan.NaturalBatchRows(tree);
+        BlockMask whole = (await ZonePruningPlan.PlanAsync(file, tree, wide, CancellationToken.None)).Live!;
+        BlockMask scope = new BlockMask(tree.Root.RowCount, blockRows);
+        scope.KeepOnly(new RowRange(10 * blockRows + 5, 20 * blockRows));
+        BlockMask part = (await ZonePruningPlan.PlanAsync(file, tree, wide, CancellationToken.None, scope: scope)).Live!;
+        Assert.True(whole.LiveCount > part.LiveCount, $"{whole.LiveCount} live blocks in the file, {part.LiveCount} in the part");
+        for (int block = 0; block < part.BlockCount; block++)
+        {
+            Assert.Equal(scope.IsLive(block) && whole.IsLive(block), part.IsLive(block));
+        }
     }
 
     [Theory]

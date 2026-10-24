@@ -198,6 +198,14 @@ public sealed class TransportTests
         Stopwatch watch = Stopwatch.StartNew();
         await writer.DisposeAsync();
         Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"the writer took {watch.Elapsed} to give its upload up");
+
+        // The abort goes on its own, so that the caller is not held by it: under the load of the whole
+        // suite it may land after the disposal returned, within its deadline.
+        while (emulator.OpenUploads > 0 && watch.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            await Task.Delay(10, ct);
+        }
+
         Assert.Equal(0, emulator.OpenUploads);
         Assert.Null(emulator.BytesOf(Bucket, "out/given-up.vortex"));
     }

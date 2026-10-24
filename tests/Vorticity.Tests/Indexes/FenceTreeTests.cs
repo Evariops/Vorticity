@@ -114,14 +114,16 @@ public sealed class FenceTreeTests
 
                 Assert.Equal(expected, written.Length);
 
-                FencePage back = FencePage.Read(new ProtoReader(written), stride, level, Bytes);
+                FencePage back = FencePage.Read(written, stride, level, Bytes);
                 Assert.Equal(level, back.Level);
                 Assert.Equal(page.EntryStarts, back.EntryStarts);
                 Assert.Equal(page.SegmentStarts, back.SegmentStarts);
                 for (int i = 0; i < count; i++)
                 {
-                    AssertSame(bounds[i], back.Bounds[i]);
-                    Assert.Equal(regions[i], back.Regions[i]);
+                    AssertSame(bounds[i], back.BoundsOf(i));
+                    Assert.Equal(regions[i], back.RegionsOf(i));
+                    Assert.Equal(bounds[i].Max, back.MaxOf(i).ToArray());
+                    Assert.Equal(regions[i][0], back.FirstRegionOf(i));
                 }
             }
         }
@@ -281,7 +283,7 @@ public sealed class FenceTreeTests
         List<long> sorted = [.. Enumerable.Range(0, rows).Select(K).Order()];
         (IndexSegment firstLeaf, _) = (await PagesAsync(paged)).First(p => p.Level == 0);
         int perLeaf = FencePage.Read(
-            new ProtoReader(paged.AsSpan((int)firstLeaf.Offset, (int)firstLeaf.Length)), KeyRunOptions.SortedStride, 0, Signed).Count;
+            paged.AsSpan((int)firstLeaf.Offset, (int)firstLeaf.Length), KeyRunOptions.SortedStride, 0, Signed).Count;
         Assert.InRange(perLeaf, 2, 639);
         foreach (int at in (int[])[5, ((perLeaf - 1) * 16) + 7, (300 * 16) + 7, (639 * 16) + 3])
         {
@@ -500,7 +502,7 @@ public sealed class FenceTreeTests
             }
 
             FencePage root = tree.Root!;
-            IndexSegment[] children = [.. root.Regions.Select(r => r[0])];
+            IndexSegment[] children = [.. Enumerable.Range(0, root.Count).Select(root.FirstRegionOf)];
             byte[][] dtypes = [.. Enumerable.Range(0, stride).Select(_ => DTypeFlatBuffers.Serialize(Types.Primitive(PType.U32, Nullability.NonNullable)))];
             ulong entries = 0;
             foreach (KeySegment segment in bounds)
@@ -601,11 +603,12 @@ public sealed class FenceTreeTests
                 return;
             }
 
-            foreach (IndexSegment[] child in parent.Regions)
+            for (int i = 0; i < parent.Count; i++)
             {
-                pages.Add((child[0], parent.Level - 1));
-                ReadOnlySpan<byte> region = bytes.AsSpan((int)child[0].Offset, (int)child[0].Length);
-                Collect(FencePage.Read(new ProtoReader(region), KeyRunOptions.SortedStride, parent.Level - 1, Signed));
+                IndexSegment child = parent.FirstRegionOf(i);
+                pages.Add((child, parent.Level - 1));
+                ReadOnlySpan<byte> region = bytes.AsSpan((int)child.Offset, (int)child.Length);
+                Collect(FencePage.Read(region, KeyRunOptions.SortedStride, parent.Level - 1, Signed));
             }
         }
     }

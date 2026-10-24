@@ -266,6 +266,14 @@ open of a dataset's object passes the length its entry records, which any store 
 the listing with heads removes vacuum's serial heads. On a dataset of a thousand commits on S3, at
 20 ms a head, that is twenty seconds of vacuum spent on heads, and none with the listing.
 
+A question a dataset answers from its synopses reads each object's tables with no open of it, in one
+request an object, and the objects side by side. With a `SynopsisCache` on the session, the second time
+reads them from the local disk and asks the store nothing, and a question whose window cuts slices asks
+it only for the chunks of those slices. `WarmAsync` reads a window's tables into the cache ahead of the
+first question. The requests a store refuses past its limits (thousands a second per prefix on S3, fewer
+on smaller services) are what this saves at a page's scale: a cold month is one request an object, a warm
+one none.
+
 ## 6. The HTTP layer
 
 ### 6.1 Why the platform's client
@@ -627,6 +635,77 @@ carry XXH3, the index regions carry checksums, and a file's structures are valid
 parsed. Azure's structured body would verify a read segment by segment, and waits for its layout to
 be checked against the service ([Azure's checksums](#83-checksums)).
 
+### 10.5 The synopsis cache on the local disk
+
+A session may keep on the local disk what questions read of a dataset's objects without their data
+(`VortexSessionOptions.SynopsisCache`): their synopsis tables, their slices' chunk directories, their
+index directories and their variant columns' path directories, and the fence pages and run segments a
+lookup of an identifier reads; and the pages of the dataset's tree, by the hash of their bytes ([the
+pages a handle keeps](13-dataset.md#3-objects-and-keys)), unless the dataset is sealed. Only a region
+of an index enters it, never the data nor the footer: one
+an object's table of contents declares, with a checksum, or a page or a segment of a run its reader
+names with the checksum the directory or the parent page gave. An object never changes, so an entry is
+never stale: its key is the object's uid, the region's place and length and its checksum, all known
+before the region is read. Warm, a lookup asks the store for the chunks of the blocks it found alone: a
+count per service and per 12 hours of every row but one request's, over 3 objects of 180 M rows, asked
+for 11 regions in 23 ms, a fence page and two segments of each object's postings beside the chunks of
+the block that holds the id, and asks for those 2 chunks in 12.7 ms. An object the dataset opens to
+read its rows reads the same regions through the cache: the rows of one request id over the same
+objects take 2 requests in one round trip warm, against 7 in 5, 14.6 ms against 37.4.
+
+An entry is a file named by that key, in directories sharded by the uid, written under a temporary
+name and then renamed, so a reader never sees half a file. It is written behind the question that read
+its region: the buffer the region was read into is held until one of two writers of the cache's own has
+written it, and a read of the region meanwhile is served from that buffer. A file costs about 1.7 ms to
+create, close and rename on Windows, which the question paid for each region it read: an unaligned
+window over 3 objects of 180 M rows, which read 104 MB of tables, took 276 ms cold against 159 written
+behind, and a count per service over 48 hourly objects 50 ms against 38 at one lane, 44 against 27 at
+sixteen. Past 256 MiB waiting, a region is written before its reader goes on, and the cache's dispose
+writes what waits. A sealed object's frames are written at once. The cache walks its directory when it opens,
+and the entries an earlier cache left are its own. One cache owns a directory, through a lock of the
+operating system. On Windows, an entry's file is opened at its first read and mapped, and kept so while
+the cache keeps up to 4 096 files open: a region read from the disk is a view of the mapping, with no
+read of the system and no copy, and its batches decode from it. A read took a fifth of a warm question
+over 48 hourly objects' tables, 5.8 ms a question against 4.6 mapped. A file the cache maps is one no
+other writer changes while it does, as the system refuses to write a mapped file. Elsewhere a region is
+read, a read of the system's cache costing less, and a file cut short under a mapping faulting its
+reader where a read finds it torn. Every read from the disk
+checks the checksum, and a region that fails it is dropped, its mapping let go, and read again from the
+store; a mapping checks it once, its bytes holding it for every next read of the same mapping, which
+no writer changes: a region hashed at each read, then again by the decode of its rows, took a sixth
+of a question at sixteen lanes, whose reads of the disk's cache contend for the memory's bandwidth
+(11 ms a question against 5.7 once). Questions that miss the same region at once wait for one read.
+
+A sealed object leaves no plaintext on the disk. The cache keeps the bytes the store holds: the
+object's trailer, which names its data key wrapped and its epochs, and the frames that hold a region its
+table of contents declares, each a file named by the object's uid and the frame's place. A read with no
+open of the object opens it from the trailer kept, with no request, and reads from the disk every group
+of frames the cache keeps whole. The reader decrypts them as it decrypts the store's: a frame whose tag
+fails, or a region whose plaintext fails its checksum, is dropped with its group and read again from the
+store, and a trailer that does not open the object is dropped and read again too. No key reaches the disk:
+the session unwraps the data key as it does for a read from the store, from its keyring or from the keys
+it holds in memory. A frame of 64 KiB is the unit kept, so a small region costs the disk its frame. On six
+hours of sealed requests, a count per service from the synopses takes 12 requests in two round trips cold
+and none warm, where every question read them again before. Questions that miss the same frames of a
+sealed object at once read them each.
+
+Past its capacity it drops entries as S3-FIFO does, counting bytes. A new region waits in a small
+queue of a tenth of the capacity, and only one read again there moves on to the main queue, which
+gives an entry another pass for each read it had, up to three. The names of the regions the small
+queue dropped are kept, and one asked again soon goes straight to the main queue. A sweep of thirteen
+months thus passes through without pushing out the tables of the last days. The policy was chosen by
+replaying the regions 2 000 questions asked through SIEVE, S3-FIFO and Window TinyLFU: S3-FIFO served
+the most bytes at every capacity up to half of what the regions weigh, and as many at half
+(`vortex-queries --micro cachetrace`, [bench/README.md](../../bench/README.md)).
+
+What it saves the store is what keeps a deployment under the services' limits, 5 500 reads a second
+per prefix on S3 and 900 per bucket on OVHcloud. On the same questions, a question sends 9.7 reads to
+the store without the cache and 5.7 with every region held, the rest being data, which the cache never
+holds. `WarmAsync` reads a window's regions into the cache before the first question, a sealed object's
+frames and trailer as well. The cache reports
+on the library's meter, under `vortex.synopsis_cache.*`: hits, misses, bytes from the disk and from the
+store, evictions, refused admissions, corrupt regions and bytes held.
+
 ## 11. Writing
 
 ### 11.1 A file written to a location
@@ -667,6 +746,13 @@ the head that settles a lost answer. What a put holds to send again depends on i
   that directory, mapped, and sent from the mapping as bytes in memory are, then the file is deleted.
   Its upload starts once the stream has ended, and it holds no pooled buffer, only the pages the
   system reads back as it sends them.
+- A stream whose length is unknown but bounded, the overload that takes a `maxLength`, as a
+  compaction's output is by its inputs, is sized by its bound: held whole and sent in one request
+  when the bound is under the part threshold, and otherwise sent in parts sized as an object of
+  that length's would be, of one size on R2, so that no part has to grow and no spool is needed.
+  Only a bound past what the service's parts reach goes to the spool, or is refused before a byte
+  goes when there is none, and content past its bound is refused and its upload given up. The
+  stores that only hold bytes, in memory or in a directory, take the bound as an unknown length.
 
 A completion that S3 refuses with 409 asks for the upload to be made again: the upload starts anew
 from its first part when the content can be sent again, held in memory or spooled, and the put throws
@@ -674,18 +760,37 @@ for a stream sent as it was read, its message pointing at the spool.
 
 ### 11.2 The objects of a dataset
 
-A dataset buffers each object it writes, since it reads the object's statistics and first key from
-memory before the put, which costs no request (`VortexDataset.cs`, `SealAsync`). The put goes at the
-commit, from that buffer where it lies: whole up to the part threshold, in parts past it, each part a
-slice of the buffer, and any retry sent from the same bytes, so nothing is copied on its way. A data
-object's key ends with a fresh uid and is never taken, so its put carries no condition, whole or in
-parts, on every service, and a lost answer needs no head: sent again, it writes the same bytes. A
-commit object keeps its condition everywhere.
+A dataset holds each object it writes up to the part threshold, 32 MiB, since it reads the object's
+statistics and first key from memory before the put, which costs no request (`VortexDataset.cs`,
+`SealAsync`). The put goes at the commit, from that buffer where it lies, in one request, and any
+retry is sent from the same bytes, so nothing is copied on its way.
 
-The upload could start while the writer goes on, once the buffer passes the threshold. It did for a
-while, and gained a few tens of milliseconds on a 48 MB object against an emulator, for a reader of
-the buffer written by hand and a task in the background of every large object. The gain waits for a
-measurement against a service.
+An object that passes the threshold is sent as it is written (`ObjectSegmentSink`): what was held goes
+into a pipe whose reader is the store's put of unknown length, and the rest follows as the writer
+writes it. The store sends it in parts as they fill, its parts in flight in its own buffers, and the
+writer waits on the pipe when the link is slower, so a writer holds a few mebibytes whatever the
+object's size, and the cap of 1 GiB an object once had is gone (`DatasetOptions.MaxObjectBytes` now
+bounds what the store keeps, unbounded by default). The commit completes the pipe, which completes the
+upload.
+
+A rewrite, a compaction's or a delete's that keeps some of an object's rows, announces a bound with
+that put (`ObjectBound`): what it reads, times 1.03, the most bytes a rewrite wrote for each byte it read
+on the lifecycle bench (1.024 at worst over periods of a day and of an hour and the leveled style,
+1.000 for a seal). Without it, parts sized for an unknown length reach about a terabyte on S3, but
+168 GB on R2, whose parts keep one size, and 106 GB on Scaleway, which takes a thousand parts, short of
+a period of a day at a few thousand rows a second, which would fail at its end, every time it ran. With
+it, the parts are sized for the bound from the first. Content that runs past the bound is what the
+store refuses, so the sink checks it at each write, before the put has sent the bytes past it, and the
+rewrite gives its objects up and starts again under a bound twice as large; a delete does so without
+taking one of its attempts, since no other writer caused it. An append has no inputs to bound it and
+goes with an unknown length, so an append of one object past those reaches needs the spool there. The
+parts in flight are the bound's share of the service's parts: a period of 173 GB on Scaleway sends parts
+of about 180 MB, four at a time by default, where a period of an hour, 7 GB, keeps the parts of 16 MiB. The object's statistics and first key are then read from the store, its footer in one request
+when its entry records the footer's length, which an object past the threshold takes as a few requests
+among the dozens its parts took. An object given up completes its pipe with an error, and the store
+gives its upload up. A data object's key ends with a fresh uid and is never taken, so its put carries
+no condition, whole or in parts, on every service, and a lost answer needs no head: sent again, it
+writes the same bytes. A commit object keeps its condition everywhere.
 
 ### 11.3 Checksums
 

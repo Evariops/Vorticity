@@ -43,8 +43,25 @@ public sealed record DatasetOptions
     /// <summary>How many superseded versions vacuum keeps whatever their age; none by default.</summary>
     public int RetainedVersions { get; init; }
 
-    /// <summary>The most bytes one data object may take while it is written, before the store takes it; 1 GiB by default.</summary>
+    /// <summary>
+    /// The most bytes one data object may take, refused past them as it is written; no bound by default,
+    /// where the store refuses what its parts cannot reach. An object is held in memory up to 32 MiB and
+    /// sent to the store as it is written past them, so this bounds what the store keeps, not what the
+    /// writer holds.
+    /// </summary>
     public long MaxObjectBytes { get; init; } = ObjectSegmentSink.DefaultMaxBytes;
+
+    /// <summary>
+    /// The bytes past which an object is sent to the store as it is written rather than held whole:
+    /// <see cref="ObjectSegmentSink.DefaultStreamedFromBytes"/>, the part threshold, unless a test asks for less.
+    /// </summary>
+    internal long StreamedObjectBytes { get; init; } = ObjectSegmentSink.DefaultStreamedFromBytes;
+
+    /// <summary>
+    /// The bytes a rewrite announces to the store for each byte it reads, as the bound of an object it
+    /// streams: <see cref="ObjectBound.OutPerIn"/>, unless a test asks for less to run past it.
+    /// </summary>
+    internal double BoundOutPerIn { get; init; } = ObjectBound.OutPerIn;
 
     /// <summary>The columns an object's entry summarises, or null for the first <see cref="SummaryColumnLimit"/>.</summary>
     /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the clustering key's columns are always among them.</remarks>
@@ -141,18 +158,166 @@ public sealed record DatasetOptions
     internal long MarkedObjectBytes { get; init; } = 1L << 20;
 
     /// <summary>
+    /// The rows a lane's range of an object takes at least, when a pass on several lanes cuts the object: 2^20 by
+    /// default. Each range's scan reads the structures its filter asks of the object, its path directories and its
+    /// keys' statistics among them, whatever its rows: an hour of 36 000 log records cut into four ranges of about
+    /// 9 000, at 16 lanes, read 3.18 MB where the whole object read 1.06 MB, and allocated 17.9 MB where it
+    /// allocated 4.7 MB, no faster. A test cuts its small objects with less.
+    /// </summary>
+    internal long LeastPieceRows { get; init; } = 1L << 20;
+
+    /// <summary>
+    /// The rows of an edge of a synopsis answer, a slice its window cuts, that a piece of a pass on several lanes reads at
+    /// least: 2^17 by default, four chunks of the design's requests. An edge of twice as many or more is cut between its
+    /// chunks into pieces of its rows alone, as many as the lanes but none smaller, where one lane read the whole edge
+    /// while the others waited. A test cuts its small edges with less.
+    /// </summary>
+    internal long LeastEdgePieceRows { get; init; } = 1L << 17;
+
+    /// <summary>
+    /// The objects in a row their synopses answer that one lane's piece of a pass on several lanes takes at most: 8 by
+    /// default. An answer reads a few tables and folds their rows, a tenth of a millisecond warm, where a piece costs a
+    /// walk of the tree to its rows and a lane's turn: a piece an object made a warm question over 48 hourly objects at
+    /// 16 lanes spend more of its lanes' time waiting than answering.
+    /// </summary>
+    internal int AnswersPerPiece { get; init; } = 8;
+
+    /// <summary>
+    /// The rows of synopsis tables, the states, a lane's piece of answers folds at least, when a pass on several lanes
+    /// cuts the objects their synopses answer: 2^16 by default, about a millisecond of folding, against the tenth a piece
+    /// costs. Answers in a row share a piece while they fold less together, and an answer that folds twice as many or more
+    /// is cut between the chunks of its tables into pieces of about a share each, a lane's part of the slices of its
+    /// window, where every answer was a lane's whole: a window that cuts three hours folds 3.47 M rows of runs. A test
+    /// cuts its small tables with less.
+    /// </summary>
+    internal long LeastPieceStates { get; init; } = 1L << 16;
+
+    /// <summary>
+    /// The rows of a chunk of a synopsis table and the bytes past which an hour's rows are chunks of their own, as the
+    /// compaction writes them; null for the defaults (<see cref="SynopsisTables.ChunkRows"/>). A test cuts tables of a few
+    /// rows into chunks, which an answer is cut between.
+    /// </summary>
+    internal (int Rows, long HourBytes)? SynopsisChunking { get; init; }
+
+    /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
     /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
     /// </summary>
     internal int MarkedShare { get; init; } = 8;
 
     /// <summary>
-    /// The most bytes an object's marks take in its entry, past which a delete rewrites the object
-    /// instead; 1 KiB by default, a few hundred runs. The entry lives in a leaf page, which every
-    /// commit that marks a row of any object on it writes again: the bound trades the rewrites it
-    /// saves against the bytes it adds to each of those commits.
+    /// The fewest bytes an object's marks may take in its entry, past which a delete rewrites the
+    /// object instead; 1 KiB by default, a few hundred runs. The entry lives in a leaf page, which
+    /// every commit that marks a row of any object on it writes again: the bound trades the rewrites
+    /// it saves against the bytes it adds to each of those commits. A larger object's marks may take
+    /// a part of its bytes (<see cref="MarkedVectorShare"/>).
     /// </summary>
     internal int MarkedVectorBytes { get; init; } = 1 << 10;
+
+    /// <summary>
+    /// The part of an object's bytes its marks may take, as a divisor: a vector past
+    /// <see cref="MarkedVectorBytes"/> up to <c>1/MarkedVectorShare</c>-th of its object, 1,024 by
+    /// default. A rewrite costs the object's bytes read and written; a vector out of line costs its
+    /// own bytes at each open of the object and each delete that grows it, so marks of a thousandth of
+    /// the object stay the cheaper until the object has been opened and marked some two thousand times
+    /// since. An object of 4 MiB keeps its marks to 4 KiB, one of 64 MiB to 64 KiB.
+    /// </summary>
+    internal int MarkedVectorShare { get; init; } = 1 << 10;
+
+    /// <summary>
+    /// The most time a deleted row may stay in the store's bytes after its delete: within it, the
+    /// planner rewrites every object whose marks are as old as half of it, so that the rewrite has the
+    /// other half to run, with every delete those marks gathered since. Null, the default, erases a
+    /// row when its marks pass their bounds of share and bytes. Fixed when the dataset is created and
+    /// carried by every commit, which a library that does not know the delay refuses.
+    /// </summary>
+    /// <remarks>
+    /// The rewritten object leaves the old one behind for the versions the retention keeps, and a
+    /// vacuum deletes it once they pass: the bytes are gone from the store when both are, so the delay
+    /// the application owes is this one plus the retention. A dataset on a store that locks what it
+    /// keeps cannot erase before the lock's term, and refuses a delay.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The delay is under a second.</exception>
+    public TimeSpan? ErasureDelay
+    {
+        get => _erasureDelay;
+        init
+        {
+            if (value is { } delay && delay < TimeSpan.FromSeconds(1))
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "An erasure delay is a second or more.");
+            }
+
+            _erasureDelay = value;
+        }
+    }
+
+    private readonly TimeSpan? _erasureDelay;
+
+    /// <summary>
+    /// Compacts the dataset by periods of its instant, the first column of its clustering key past its
+    /// partition columns, a timestamp in UTC: the open period's rows in fresh levels, rows later than the lateness horizon
+    /// beside them, and each period, once closed, sealed into one object. Null, the default, compacts
+    /// by levels. Fixed when the dataset is created and carried by every commit, which a library that
+    /// does not know periods refuses.
+    /// </summary>
+    public PeriodOptions? Periods { get; init; }
+
+    /// <summary>
+    /// How many leading columns of the clustering key are partition columns, such as a retention class
+    /// before the instant in a key <c>(Retention, At)</c>: 0, the default, for none. Every object holds one
+    /// partition value, an append split into an object per value, and each partition grows its own periods,
+    /// so that what dies together is written together and expires without a read. Partition columns have
+    /// few values by declaration: an append that holds more than <see cref="MaxPartitionValues"/> is refused.
+    /// The instant of a dataset by periods is the key's column after them. Fixed when the dataset is created
+    /// and carried by every commit, which a library that does not know partitions refuses.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The count is negative.</exception>
+    public int PartitionColumns
+    {
+        get => _partitionColumns;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _partitionColumns = value;
+        }
+    }
+
+    private readonly int _partitionColumns;
+
+    /// <summary>
+    /// The partition values one append may hold, at most: past it the append is refused before anything is
+    /// committed, since each value is an object of its own. 64 by default.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The bound is not positive.</exception>
+    public int MaxPartitionValues
+    {
+        get => _maxPartitionValues;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _maxPartitionValues = value;
+        }
+    }
+
+    private readonly int _maxPartitionValues = 64;
+
+    /// <summary>
+    /// The columns whose values questions look up one at a time, such as a request's id: those an
+    /// object indexes by value so that a lookup reads the objects that hold the value and no other.
+    /// An identifier may also be a key of a variant column read as a string or an integer, written as a
+    /// filter writes it, <c>Attributes['user'].AsString()</c>: a job then shreds that key wherever a
+    /// row holds it in that class, and indexes it. Null, the default, names none. Fixed when the
+    /// dataset is created and carried by every commit.
+    /// </summary>
+    public IReadOnlyList<string>? Identifiers { get; init; }
+
+    /// <summary>
+    /// The bytes an object's marks may take: <see cref="MarkedVectorBytes"/>, or a part of the
+    /// object's own (<see cref="MarkedVectorShare"/>), whichever is more.
+    /// </summary>
+    internal long MarkedVectorBytesOf(long objectBytes) =>
+        Math.Max(MarkedVectorBytes, objectBytes / Math.Max(MarkedVectorShare, 1));
 
     /// <summary>
     /// The most bytes a vector takes inside its entry; past them a commit writes it once into its own
@@ -187,6 +352,19 @@ public sealed record DatasetOptions
     /// </summary>
     internal bool AcceptsNullableKey { get; init; }
 
+    /// <summary>The periods a header records, or null for a dataset compacted by levels.</summary>
+    /// <remarks>The slice target is the handle's own, from <paramref name="asked"/>, as no header records it.</remarks>
+    private static PeriodOptions? PeriodsOf(CommitHeader header, PeriodOptions? asked) =>
+        header.Lateness is { } lateness
+            ? new PeriodOptions
+            {
+                Lateness = lateness,
+                Length = header.PeriodLength ?? throw new InvalidOperationException("A header of a dataset of periods names no period length."),
+                SliceTargetRows = asked?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows,
+                RefuseLateRows = asked?.RefuseLateRows ?? false,
+            }
+            : null;
+
     /// <summary>What vacuum keeps, as a header records it.</summary>
     internal RetentionSettings Retention => new RetentionSettings(RetainedVersions, (long)RetentionWindow.TotalSeconds);
 
@@ -199,13 +377,24 @@ public sealed record DatasetOptions
     /// the bound of a page.
     /// </summary>
     internal DatasetOptions For(CommitHeader header) => !header.LockedStore
-        ? this with { Seed = header.Seed, LockedStore = false }
+        ? this with
+        {
+            Seed = header.Seed,
+            LockedStore = false,
+            ErasureDelay = header.ErasureDelay,
+            Periods = PeriodsOf(header, Periods),
+            Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
+        }
         : this with
         {
             Seed = header.Seed,
             LockedStore = true,
+            ErasureDelay = null,
+            Periods = PeriodsOf(header, Periods),
+            Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,
+            MarkedVectorShare = int.MaxValue,
         };
 }

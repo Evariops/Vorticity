@@ -81,9 +81,11 @@ is created. It opens files from a path or from any `ISegmentSource`, creates wri
 
 The schema is a value: `VortexSchema`, a list of `VortexField(Name, VortexType)` that a collection
 expression builds, and `VortexType`, immutable and interned by value, with a factory per dtype
-(`Schema/`), `Map(key, value)` included. `Union` and `Variant` have no factory: a file may declare
-them, so the schema shows them, but no .NET type maps to them. The arena the reader decodes into is
-built once at open and never appears in the API.
+(`Schema/`), `Map(key, value)` and `Variant` included. `Union` has no factory: a file may declare it,
+so the schema shows it, but no .NET type maps to it. A variant column maps to `Variant`, a value of the
+Parquet Variant encoding that walks by key and index, and whose `As…` and `To…` follow the rules of
+[names](#11-names). The arena the reader decodes into is built once at open and never appears in the
+API.
 
 ## 4. Records: the generated contract
 
@@ -136,6 +138,7 @@ exactly what is pushed down:
 | `r.City.StartsWith("Par")`, `r.City.Like("P_r%")`, `r.Pages.Contains(42)` | text and list predicates (see [predicates on text and lists](12-index-reads.md#6-predicates-on-text-and-lists)) |
 | `r.High > r.Low` | one column against another of the same type |
 | `r.At.Truncate(CalendarUnit.Day) == day`, `r.Celsius.Bucket(5.0) >= 40.0` | a function of a column, non-decreasing, so the zone maps still prune (see [value expressions](16-queries.md#3-value-expressions)) |
+| `r.Attributes["http.route"].AsString() == "/orders"`, `r.Attributes["cart"]["items"][0].ToInt64() > 2`, `r.Attributes.Has("user.id")` | a path of a variant column: whole keys and indices, read as stored by `As…` or converted by `To…`; nothing prunes on it yet (see [variant paths](16-queries.md#36-variant-paths)) |
 | `r.Day >= "900"`, `r.Day % 2 == 0`, `Math.Abs(r.Celsius) > 1` | does not compile: a literal of the wrong type, or no pushdown |
 
 The same symbols serve every lambda: the keys of a `GroupBy`, the inputs of an aggregate, the
@@ -256,6 +259,13 @@ are strings, because there is no other way to name them. A batch is a `BatchView
 columns in the file's order. A number in a filter is the number the text wrote, scaled exactly against
 a decimal column, and text compared with a date, time, timestamp, uuid or decimal column is parsed in
 that type and refused when it does not parse ([untyped-files.md](../guide/untyped-files.md)).
+
+A path of a variant column is written as its column, each key quoted whole and each index a number,
+then what it is read as: `Attributes['http']['route'].AsString()`. A path written without a read is
+read as the literal or the hole it meets says, and `Attributes['user.id'] exists` asks whether it is
+there. The same text is how a plan prints a path, and the form any later text that names a path takes,
+an index policy included, so `'http.route'` and `['http']['route']` stay two paths wherever they
+are written.
 
 A set of values does not go through text. `VortexExpr.In(column, values)` takes a span of any size,
 copies it, and combines with `&`, `|` and `!` as a parsed filter does. It is checked against the column

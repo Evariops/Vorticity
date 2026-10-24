@@ -183,6 +183,7 @@ public static partial class RowEncoder
     /// <summary>The bytes one value of <paramref name="dtype"/> takes in a row.</summary>
     internal static int ValueLength(FilterLiteral value, DType dtype)
     {
+        dtype = Storage(dtype);
         bool isNull = IsNull(value, dtype);
         switch (dtype.Kind)
         {
@@ -231,6 +232,7 @@ public static partial class RowEncoder
     /// <returns>The bytes written.</returns>
     internal static int WriteValue(FilterLiteral value, DType dtype, RowSortField field, Span<byte> destination)
     {
+        dtype = Storage(dtype);
         bool isNull = IsNull(value, dtype);
         switch (dtype.Kind)
         {
@@ -343,6 +345,13 @@ public static partial class RowEncoder
         // Two's complement puts the negatives above the positives; flipping the sign bit moves them below.
         return ptype.IsSignedInteger() ? bits ^ sign : bits;
     }
+
+    /// <summary>
+    /// A key column's dtype as its rows are encoded: an extension at the top of the key, a date, a
+    /// time or a timestamp, as its storage, as the column encoder takes it, so that a seek key and a
+    /// row of the column are the same bytes.
+    /// </summary>
+    private static DType Storage(DType dtype) => dtype.Kind == DTypeKind.Extension ? dtype.StorageType : dtype;
 
     private static bool IsNull(FilterLiteral value, DType dtype)
     {

@@ -37,24 +37,6 @@ internal interface IFenceProbe
 /// </remarks>
 internal sealed class FencePage
 {
-    /// <summary>0 when its fences are segments; the child pages' level plus one otherwise.</summary>
-    internal required int Level { get; init; }
-
-    /// <summary>Each fence's entries and first and last key.</summary>
-    internal required KeySegment[] Bounds { get; init; }
-
-    /// <summary>Each fence's regions: a segment's arrays, or the child page.</summary>
-    internal required IndexSegment[][] Regions { get; init; }
-
-    /// <summary>Where each fence's entries start in the page's subtree, and the subtree's entries last.</summary>
-    internal required long[] EntryStarts { get; init; }
-
-    /// <summary>Where each fence's segments start in the page's subtree, and the subtree's segments last.</summary>
-    internal required long[] SegmentStarts { get; init; }
-
-    /// <summary>The page's fences.</summary>
-    internal int Count => Bounds.Length;
-
     private const int PageLevel = 1;
     private const int PageFences = 2;
     private const int FenceEntries = 1;
@@ -63,11 +45,131 @@ internal sealed class FencePage
     private const int FenceRegions = 4;
     private const int FenceSegments = 5;
 
+    /// <summary>The places a page read keeps of each fence: its message's start and length, its first key's, its last key's.</summary>
+    private const int Places = 6;
+
+    // A page a writer builds holds its fences. One read holds its bytes, copied once, and where each fence's message and keys
+    // lie in them, a fence's regions parsed when asked: a page of a thousand fences parsed whole was as many arrays of keys
+    // and of regions, half of what a question that leaves one identifier out allocated over three objects.
+    private readonly KeySegment[]? _bounds;
+    private readonly IndexSegment[][]? _regions;
+    private readonly byte[]? _bytes;
+    private readonly int[]? _places;
+    private readonly int _width;
+
+    // The fences of a page read that a caller took whole, made once each: a cursor that steps from segment to segment
+    // takes the same fences again, and made them at each step.
+    private KeySegment?[]? _boundsMade;
+    private IndexSegment[]?[]? _regionsMade;
+
+    private FencePage(
+        int level, long[] entryStarts, long[] segmentStarts, KeySegment[]? bounds, IndexSegment[][]? regions, byte[]? bytes, int[]? places, int width)
+    {
+        Level = level;
+        EntryStarts = entryStarts;
+        SegmentStarts = segmentStarts;
+        _bounds = bounds;
+        _regions = regions;
+        _bytes = bytes;
+        _places = places;
+        _width = width;
+    }
+
+    /// <summary>0 when its fences are segments; the child pages' level plus one otherwise.</summary>
+    internal int Level { get; }
+
+    /// <summary>Where each fence's entries start in the page's subtree, and the subtree's entries last.</summary>
+    internal long[] EntryStarts { get; }
+
+    /// <summary>Where each fence's segments start in the page's subtree, and the subtree's segments last.</summary>
+    internal long[] SegmentStarts { get; }
+
+    /// <summary>The page's fences.</summary>
+    internal int Count => EntryStarts.Length - 1;
+
     /// <summary>
     /// The deepest level a reader takes. The writer's levels at least halve and its root holds at
     /// least one fence, so level L needs 2^L segments: 64 covers every run a 64-bit count can.
     /// </summary>
     internal const int MaxLevel = 64;
+
+    /// <summary>The entries of fence <paramref name="fence"/>.</summary>
+    internal ulong EntriesOf(int fence) => (ulong)(EntryStarts[fence + 1] - EntryStarts[fence]);
+
+    /// <summary>The first key of fence <paramref name="fence"/>.</summary>
+    internal ReadOnlySpan<byte> MinOf(int fence) =>
+        _bounds is { } bounds ? bounds[fence].Min : _bytes.AsSpan(_places![(Places * fence) + 2], _places[(Places * fence) + 3]);
+
+    /// <summary>The last key of fence <paramref name="fence"/>.</summary>
+    internal ReadOnlySpan<byte> MaxOf(int fence) =>
+        _bounds is { } bounds ? bounds[fence].Max : _bytes.AsSpan(_places![(Places * fence) + 4], _places[(Places * fence) + 5]);
+
+    /// <summary>The entries and keys of fence <paramref name="fence"/>, its keys copied out of a page read once.</summary>
+    internal KeySegment BoundsOf(int fence)
+    {
+        if (_bounds is { } bounds)
+        {
+            return bounds[fence];
+        }
+
+        _boundsMade ??= new KeySegment?[Count];
+        return _boundsMade[fence] ??= new KeySegment(EntriesOf(fence), MinOf(fence).ToArray(), MaxOf(fence).ToArray());
+    }
+
+    /// <summary>The regions of fence <paramref name="fence"/>: a segment's arrays, or the child page; parsed once from a page read.</summary>
+    internal IndexSegment[] RegionsOf(int fence)
+    {
+        if (_regions is { } regions)
+        {
+            return regions[fence];
+        }
+
+        _regionsMade ??= new IndexSegment[]?[Count];
+        if (_regionsMade[fence] is { } made)
+        {
+            return made;
+        }
+
+        IndexSegment[] named = new IndexSegment[_width];
+        int next = 0;
+        ProtoReader reader = new ProtoReader(_bytes.AsSpan(_places![Places * fence], _places[(Places * fence) + 1]));
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            if (field == FenceRegions && wire == ProtoWireType.LengthDelimited)
+            {
+                named[next++] = IndexDirectory.ReadSegment(reader.ReadMessage());
+            }
+            else
+            {
+                reader.SkipField(wire);
+            }
+        }
+
+        _regionsMade[fence] = named;
+        return named;
+    }
+
+    /// <summary>The first region of fence <paramref name="fence"/>: the child page of a fence above level 0.</summary>
+    internal IndexSegment FirstRegionOf(int fence)
+    {
+        if (_regions is { } regions)
+        {
+            return regions[fence][0];
+        }
+
+        ProtoReader reader = new ProtoReader(_bytes.AsSpan(_places![Places * fence], _places[(Places * fence) + 1]));
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            if (field == FenceRegions && wire == ProtoWireType.LengthDelimited)
+            {
+                return IndexDirectory.ReadSegment(reader.ReadMessage());
+            }
+
+            reader.SkipField(wire);
+        }
+
+        throw Malformed($"fence {fence} names no region");
+    }
 
     /// <summary>The bytes one fence takes in a page of <paramref name="level"/>, its tag and length included.</summary>
     /// <param name="bounds">The fence's entries and keys.</param>
@@ -107,14 +209,7 @@ internal sealed class FencePage
             segmentStarts[i + 1] = checked(segmentStarts[i] + segments[i]);
         }
 
-        return new FencePage
-        {
-            Level = level,
-            Bounds = bounds,
-            Regions = regions,
-            EntryStarts = entryStarts,
-            SegmentStarts = segmentStarts,
-        };
+        return new FencePage(level, entryStarts, segmentStarts, bounds, regions, null, null, 0);
     }
 
     /// <summary>Writes the page's fields into the message <paramref name="writer"/> has open.</summary>
@@ -124,10 +219,10 @@ internal sealed class FencePage
         for (int i = 0; i < Count; i++)
         {
             using ProtoWriter.MessageScope fence = writer.BeginMessage(PageFences);
-            writer.WriteUInt64Always(FenceEntries, Bounds[i].Entries);
-            writer.WriteBytesAlways(FenceMin, Bounds[i].Min);
-            writer.WriteBytesAlways(FenceMax, Bounds[i].Max);
-            foreach (IndexSegment region in Regions[i])
+            writer.WriteUInt64Always(FenceEntries, EntriesOf(i));
+            writer.WriteBytesAlways(FenceMin, MinOf(i));
+            writer.WriteBytesAlways(FenceMax, MaxOf(i));
+            foreach (IndexSegment region in RegionsOf(i))
             {
                 IndexDirectory.WriteSegment(ref writer, FenceRegions, region);
             }
@@ -155,16 +250,19 @@ internal sealed class FencePage
     }
 
     /// <summary>
-    /// Parses a page and checks its shape: the level expected, <paramref name="stride"/> regions per
-    /// segment or one per child, and fences whose keys never go down.
+    /// Reads a page and checks its shape: the level expected, <paramref name="stride"/> regions per
+    /// segment or one per child, and fences whose keys never go down. Its bytes are copied once and its
+    /// fences found in them, each fence's regions parsed again only when asked.
     /// </summary>
     /// <exception cref="VortexFormatException">The page is not one.</exception>
-    internal static FencePage Read(ProtoReader reader, int stride, int? level, KeyLayout layout)
+    internal static FencePage Read(ReadOnlySpan<byte> page, int stride, int? level, KeyLayout layout)
     {
+        byte[] bytes = page.ToArray();
+
+        // The level, and the fences counted, for arrays of their size.
         uint read = 0;
-        List<KeySegment> bounds = [];
-        List<IndexSegment[]> regions = [];
-        List<long> segments = [];
+        int count = 0;
+        ProtoReader reader = new ProtoReader(bytes);
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field)
@@ -173,7 +271,8 @@ internal sealed class FencePage
                     read = reader.ReadVarint32();
                     break;
                 case PageFences when wire == ProtoWireType.LengthDelimited:
-                    ReadFence(reader.ReadMessage(), bounds, regions, segments);
+                    reader.ReadLengthDelimited();
+                    count++;
                     break;
                 default:
                     reader.SkipField(wire);
@@ -186,51 +285,75 @@ internal sealed class FencePage
             throw Malformed($"a page of level {read} where {level} was expected");
         }
 
-        if (bounds.Count == 0)
+        if (count == 0)
         {
             throw Malformed("a page with no fence");
         }
 
         int width = read == 0 ? stride : 1;
-        for (int i = 0; i < bounds.Count; i++)
+        int[] places = new int[Places * count];
+        long[] entryStarts = new long[count + 1];
+        long[] segmentStarts = new long[count + 1];
+        int fence = 0;
+        reader = new ProtoReader(bytes);
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
-            if (regions[i].Length != width)
+            if (field != PageFences || wire != ProtoWireType.LengthDelimited)
             {
-                throw Malformed($"fence {i} names {regions[i].Length} regions where {width} were expected");
+                reader.SkipField(wire);
+                continue;
             }
 
+            int length = reader.ReadLengthDelimited().Length;
+            int start = reader.Position - length;
+            places[Places * fence] = start;
+            places[(Places * fence) + 1] = length;
+            (ulong entries, long segments) = ReadFence(bytes, start, length, places, fence, width);
             if (read == 0)
             {
-                segments[i] = 1;
+                segments = 1;
             }
-            else if (segments[i] <= 0)
+            else if (segments <= 0)
             {
-                throw Malformed($"fence {i} covers no segment");
+                throw Malformed($"fence {fence} covers no segment");
             }
 
-            if (layout.Shape != KeyShape.Bytes && bounds[i].Entries > 0
-                && (bounds[i].Min.Length != layout.Width || bounds[i].Max.Length != layout.Width))
+            entryStarts[fence + 1] = checked(entryStarts[fence] + (long)entries);
+            segmentStarts[fence + 1] = checked(segmentStarts[fence] + segments);
+            fence++;
+        }
+
+        FencePage built = new FencePage((int)read, entryStarts, segmentStarts, null, null, bytes, places, width);
+        for (int i = 0; i < count; i++)
+        {
+            ulong entries = built.EntriesOf(i);
+            if (layout.Shape != KeyShape.Bytes && entries > 0
+                && (built.MinOf(i).Length != layout.Width || built.MaxOf(i).Length != layout.Width))
             {
                 throw Malformed($"fence {i} has bounds of the wrong width");
             }
 
-            if (i > 0 && bounds[i - 1].Entries > 0 && bounds[i].Entries > 0
-                && layout.Compare(bounds[i - 1].Max, bounds[i].Min) > 0)
+            if (i > 0 && built.EntriesOf(i - 1) > 0 && entries > 0
+                && layout.Compare(built.MaxOf(i - 1), built.MinOf(i)) > 0)
             {
                 throw Malformed($"fences {i - 1} and {i} are out of key order");
             }
         }
 
-        return Of((int)read, [.. bounds], [.. regions], [.. segments]);
+        return built;
     }
 
-    private static void ReadFence(ProtoReader reader, List<KeySegment> bounds, List<IndexSegment[]> regions, List<long> segments)
+    /// <summary>
+    /// Finds the keys of the fence at <paramref name="start"/> in <paramref name="bytes"/> and checks its regions, each
+    /// read and let go; its entries and the segments it says it covers.
+    /// </summary>
+    private static (ulong Entries, long Segments) ReadFence(byte[] bytes, int start, int length, int[] places, int fence, int width)
     {
         ulong entries = 0;
-        byte[] min = [];
-        byte[] max = [];
         ulong count = 0;
-        List<IndexSegment> named = [];
+        int regions = 0;
+        int at = Places * fence;
+        ProtoReader reader = new ProtoReader(bytes.AsSpan(start, length));
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field)
@@ -239,13 +362,24 @@ internal sealed class FencePage
                     entries = reader.ReadVarint();
                     break;
                 case FenceMin when wire == ProtoWireType.LengthDelimited:
-                    min = reader.ReadLengthDelimited().ToArray();
+                {
+                    int keyLength = reader.ReadLengthDelimited().Length;
+                    places[at + 2] = start + reader.Position - keyLength;
+                    places[at + 3] = keyLength;
                     break;
+                }
+
                 case FenceMax when wire == ProtoWireType.LengthDelimited:
-                    max = reader.ReadLengthDelimited().ToArray();
+                {
+                    int keyLength = reader.ReadLengthDelimited().Length;
+                    places[at + 4] = start + reader.Position - keyLength;
+                    places[at + 5] = keyLength;
                     break;
+                }
+
                 case FenceRegions when wire == ProtoWireType.LengthDelimited:
-                    named.Add(IndexDirectory.ReadSegment(reader.ReadMessage()));
+                    IndexDirectory.ReadSegment(reader.ReadMessage());
+                    regions++;
                     break;
                 case FenceSegments when wire == ProtoWireType.Varint:
                     count = reader.ReadVarint();
@@ -261,9 +395,12 @@ internal sealed class FencePage
             throw Malformed("a fence's counts overflow");
         }
 
-        bounds.Add(new KeySegment(entries, min, max));
-        regions.Add([.. named]);
-        segments.Add((long)count);
+        if (regions != width)
+        {
+            throw Malformed($"fence {fence} names {regions} regions where {width} were expected");
+        }
+
+        return (entries, (long)count);
     }
 
     internal static VortexFormatException Malformed(string what) =>
@@ -316,21 +453,21 @@ internal sealed class FenceTable
 
         FirstMin = [];
         LastMax = [];
-        KeySegment[] top = inline ?? root!.Bounds;
-        foreach (KeySegment bounds in top)
+        int top = inline?.Length ?? root!.Count;
+        for (int i = 0; i < top; i++)
         {
-            if (bounds.Entries > 0)
+            if ((inline?[i].Entries ?? root!.EntriesOf(i)) > 0)
             {
-                FirstMin = bounds.Min;
+                FirstMin = inline?[i].Min ?? root!.MinOf(i).ToArray();
                 break;
             }
         }
 
-        for (int i = top.Length - 1; i >= 0; i--)
+        for (int i = top - 1; i >= 0; i--)
         {
-            if (top[i].Entries > 0)
+            if ((inline?[i].Entries ?? root!.EntriesOf(i)) > 0)
             {
-                LastMax = top[i].Max;
+                LastMax = inline?[i].Max ?? root!.MaxOf(i).ToArray();
                 break;
             }
         }
@@ -392,7 +529,7 @@ internal sealed class FenceTable
             // The directory lists the root's children, and bounds-checked them: they must be the same.
             for (int i = 0; i < root.Count; i++)
             {
-                if (root.Regions[i][0] != run.Payload[i])
+                if (root.FirstRegionOf(i) != run.Payload[i])
                 {
                     reason = "its fence root names pages its payload does not list";
                     return false;
@@ -486,7 +623,7 @@ internal sealed class FenceTable
         long baseSegment = 0;
         while (true)
         {
-            int i = LowerBound(page.Bounds, probe);
+            int i = LowerBound(page, probe);
             if (i == page.Count)
             {
                 return baseSegment + page.SegmentStarts[i];
@@ -498,8 +635,30 @@ internal sealed class FenceTable
             }
 
             baseSegment += page.SegmentStarts[i];
-            page = await PageAsync(source, page.Regions[i][0], page.Level - 1, page.SegmentStarts[i + 1] - page.SegmentStarts[i], cancellationToken).ConfigureAwait(false);
+            page = await PageAsync(source, page.FirstRegionOf(i), page.Level - 1, page.SegmentStarts[i + 1] - page.SegmentStarts[i], cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>The first fence of <paramref name="page"/> whose last key the probe does not pass, its keys read where the page holds them.</summary>
+    private static int LowerBound<TProbe>(FencePage page, TProbe probe)
+        where TProbe : IFenceProbe
+    {
+        int low = 0;
+        int high = page.Count;
+        while (low < high)
+        {
+            int mid = (low + high) >>> 1;
+            if (page.EntriesOf(mid) == 0 || probe.Below(page.MaxOf(mid)))
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid;
+            }
+        }
+
+        return low;
     }
 
     private static int LowerBound<TProbe>(KeySegment[] bounds, TProbe probe)
@@ -534,13 +693,13 @@ internal sealed class FenceTable
             int i = Upper(starts, target);
             if (page.Level == 0)
             {
-                return new Fence(baseSegment + i, baseEntry + page.EntryStarts[i], page.Bounds[i], page.Regions[i]);
+                return new Fence(baseSegment + i, baseEntry + page.EntryStarts[i], page.BoundsOf(i), page.RegionsOf(i));
             }
 
             target -= starts[i];
             baseSegment += page.SegmentStarts[i];
             baseEntry += page.EntryStarts[i];
-            page = await PageAsync(source, page.Regions[i][0], page.Level - 1, page.SegmentStarts[i + 1] - page.SegmentStarts[i], cancellationToken).ConfigureAwait(false);
+            page = await PageAsync(source, page.FirstRegionOf(i), page.Level - 1, page.SegmentStarts[i + 1] - page.SegmentStarts[i], cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -599,6 +758,9 @@ internal sealed class FenceTable
 
     private IndexSegment[]?[]? _inlineRegions;
 
+    /// <summary>The region of the page a read names, which a reader that keeps index regions keeps; one for the table's reads.</summary>
+    private IndexSegment[]? _named;
+
     /// <summary>A child page, from the table's own cache or the file.</summary>
     private async ValueTask<FencePage> PageAsync(
         ISegmentReader source, IndexSegment region, int level, long segments, CancellationToken cancellationToken)
@@ -614,14 +776,16 @@ internal sealed class FenceTable
         {
             int slot = requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
             asked = Scanning.ScanCounters.Unread(requests, source, out _) > 0;
-            await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            IndexSegment[] named = _named ??= new IndexSegment[1];
+            named[0] = region;
+            await source.ReadRegionsAsync(requests, named, cancellationToken).ConfigureAwait(false);
             VortexBuffer bytes = requests.GetBuffer(slot);
             if (!region.Holds(bytes.Span))
             {
                 throw FencePage.Malformed("a page's bytes do not match its checksum");
             }
 
-            page = FencePage.Read(new ProtoReader(bytes.Span), _stride, level, _layout);
+            page = FencePage.Read(bytes.Span, _stride, level, _layout);
         }
 
         if (page.SegmentStarts[^1] != segments)

@@ -617,9 +617,11 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
             int[] columns = new int[paths.Count];
             for (int i = 0; i < paths.Count; i++)
             {
+                // A key column that is an extension, an instant, is encoded as its storage, as the
+                // runs of the key and its seek keys are.
                 int node = ColumnPath.NodeOf(batch, paths[i]);
                 columns[i] = node >= 0
-                    ? node
+                    ? RowEncoder.Storage(batch.Arena, node)
                     : throw new ArgumentException($"'{paths[i]}' names no column of the batch's schema.", nameof(paths));
             }
 

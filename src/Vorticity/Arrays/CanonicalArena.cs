@@ -2109,6 +2109,7 @@ internal partial class CanonicalArena
 
         CanonicalRecord copy = New(CanonicalKind.VarBinView, src.DType, rows, validity);
         copy.BufferA = views;
+        copy.PaddedViews = src.PaddedViews;
         int index2 = Commit(ref copy);
         if (at > 0)
         {

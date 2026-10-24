@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Dataset;
 
@@ -23,6 +24,13 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
 
     /// <summary>Where the vector lies when it is out of line, in the commit object that wrote it; none when it is in the entry.</summary>
     private readonly PageReference _vectorAt;
+
+    /// <summary>
+    /// The fields of commit format 4, as the entry carries them: tagged, so that a field a later
+    /// library adds is carried through as it was read. Null when the entry has none, so that its
+    /// bytes are those an earlier format wrote.
+    /// </summary>
+    private readonly byte[]? _fields;
 
     /// <summary>An entry with no fragment yet; null summaries means none.</summary>
     public ObjectEntry(
@@ -54,7 +62,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// </param>
     public ObjectEntry(
         string key, UInt128 uid, long rows, long bytes, UInt128 hash, IReadOnlyList<PageReference> fragments, ObjectSummaries summaries)
-        : this(key, uid, rows, bytes, hash, fragments, summaries, 0, PageReference.None, null)
+        : this(key, uid, rows, bytes, hash, fragments, summaries, 0, PageReference.None, null, null)
     {
     }
 
@@ -68,7 +76,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         ObjectSummaries summaries,
         long deletedRows,
         PageReference vectorAt,
-        Vector? vector)
+        Vector? vector,
+        byte[]? fields)
     {
         ArgumentNullException.ThrowIfNull(key);
         ArgumentNullException.ThrowIfNull(fragments);
@@ -83,6 +92,11 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         DeletedRows = deletedRows;
         _vectorAt = vectorAt;
         _vector = vector;
+        _fields = fields;
+        if (fields is not null)
+        {
+            ReadFields(fields);
+        }
     }
 
     /// <summary>Its object key in the store, e.g. <c>data/&lt;uid&gt;.vortex</c>.</summary>
@@ -105,6 +119,23 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
 
     /// <summary>Its bounded summaries.</summary>
     public ObjectSummaries Summaries { get; }
+
+    /// <summary>
+    /// The bytes an open of the object reads from its end, its statistics, index directory and footer,
+    /// when they pass what an open reads first: an open that asks for that many reads them in one
+    /// request instead of two. 0 when the entry does not say, as for an object whose footer the first
+    /// read holds.
+    /// </summary>
+    public long FooterBytes { get; private set; }
+
+    /// <summary>
+    /// When the oldest mark the entry still holds was made, in seconds since the Unix epoch, for a
+    /// dataset that erases deleted rows within a delay; 0 when the entry does not say.
+    /// </summary>
+    public long MarkedAt { get; private set; }
+
+    /// <summary>Whether the entry carries fields of commit format 4, which an earlier library cannot read.</summary>
+    public bool HasFields => _fields is not null;
 
     /// <summary>
     /// The rows a delete took out of the object without rewriting it, by their positions in the
@@ -192,7 +223,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
                 : Unresolved();
         }
 
-        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, at, _vector);
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, at, _vector, _fields);
     }
 
     /// <summary>
@@ -229,7 +260,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             || Hash != other.Hash
             || Fragments.Count != other.Fragments.Count
             || !Summaries.Equals(other.Summaries)
-            || !SameDeletions(other))
+            || !SameDeletions(other)
+            || !_fields.AsSpan().SequenceEqual(other._fields))
         {
             return false;
         }
@@ -265,6 +297,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
 
         hash.Add(Summaries);
         hash.Add(DeletedRows);
+        hash.Add(FooterBytes);
+        hash.Add(MarkedAt);
         return hash.ToHashCode();
     }
 
@@ -290,7 +324,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             Summaries.Loosened(),
             deletions.Count,
             PageReference.None,
-            deletions.IsEmpty ? null : new Vector(deletions));
+            deletions.IsEmpty ? null : new Vector(deletions),
+            _fields);
     }
 
     private static InvalidOperationException Unresolved() =>
@@ -302,7 +337,197 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
 
     /// <summary>The entry with <paramref name="fragments"/> attached in place of its own.</summary>
     public ObjectEntry WithFragments(IReadOnlyList<PageReference> fragments) =>
-        new ObjectEntry(Key, Uid, Rows, Bytes, Hash, fragments, Summaries, DeletedRows, _vectorAt, _vector);
+        new ObjectEntry(Key, Uid, Rows, Bytes, Hash, fragments, Summaries, DeletedRows, _vectorAt, _vector, _fields);
+
+    /// <summary>
+    /// The entry with <paramref name="footerBytes"/> as the bytes an open of its object reads from the
+    /// end, which it then reads in one request. Recorded only past what an open reads first, so that
+    /// the entry of an object whose footer that read holds stays in an earlier format's bytes.
+    /// </summary>
+    /// <param name="footerBytes">The bytes from the object's first footer structure to its end.</param>
+    public ObjectEntry WithFooterBytes(long footerBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(footerBytes);
+        if (footerBytes <= FirstReadBytes || footerBytes == FooterBytes)
+        {
+            return this;
+        }
+
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(footerBytes, MarkedAt, Synopsis.Span));
+    }
+
+    /// <summary>
+    /// The table of contents of the object's synopsis and slices, as its writer gave it
+    /// (<see cref="Indexes.SynopsisContents"/>): what a reader of its synopsis tables or of a few slices
+    /// needs with no open of the object. Empty when the entry carries none.
+    /// </summary>
+    public ReadOnlyMemory<byte> Synopsis { get; private set; }
+
+    /// <summary>What <see cref="Contents"/> parsed, <see cref="NoContents"/> for none; null until it is asked.</summary>
+    private object? _contents;
+
+    private static readonly object NoContents = new object();
+
+    /// <summary>
+    /// <see cref="Synopsis"/> parsed, the first time it is asked for and never again: an entry is immutable, and a
+    /// handle's walks share their entries, so a question asked again parses no table of contents. Null when the
+    /// entry carries none, or none this library reads.
+    /// </summary>
+    internal Indexes.SynopsisContents? Contents
+    {
+        get
+        {
+            object? known = Volatile.Read(ref _contents);
+            if (known is null)
+            {
+                known = (object?)Indexes.SynopsisContents.From(Synopsis) ?? NoContents;
+                known = Interlocked.CompareExchange(ref _contents, known, null) ?? known;
+            }
+
+            return known as Indexes.SynopsisContents;
+        }
+    }
+
+    /// <summary>The entry with <paramref name="contents"/> as its synopsis's table of contents; itself when there are none.</summary>
+    /// <param name="contents">The writer's table of contents, or null.</param>
+    public ObjectEntry WithSynopsis(byte[]? contents)
+    {
+        if (contents is null || contents.Length == 0 || contents.AsSpan().SequenceEqual(Synopsis.Span))
+        {
+            return this;
+        }
+
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, contents));
+    }
+
+    /// <summary>
+    /// The entry with <paramref name="seconds"/>, a time in seconds since the Unix epoch, as when its
+    /// oldest mark was made, for a dataset that erases deleted rows within a delay: the planner purges
+    /// the object before the delay passes. An entry that says so already keeps its own, the older.
+    /// </summary>
+    /// <param name="seconds">When the marks were made, positive.</param>
+    public ObjectEntry WithMarkedAt(long seconds)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(seconds);
+        return MarkedAt > 0
+            ? this
+            : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, seconds, Synopsis.Span));
+    }
+
+    /// <summary>What an open reads of an object's end before it knows its footer: past it, a second request.</summary>
+    internal const long FirstReadBytes = 65_536;
+
+    /// <summary>
+    /// The fields of format 4, tagged and in the order of their tags, those this library knows written
+    /// afresh and those it does not carried as they were read; null when there are none.
+    /// </summary>
+    private byte[]? Fields(long footerBytes, long markedAt, ReadOnlySpan<byte> synopsis)
+    {
+        ReadOnlySpan<byte> unknown = UnknownFields(_fields);
+        if (footerBytes == 0 && markedAt == 0 && synopsis.IsEmpty && unknown.IsEmpty)
+        {
+            return null;
+        }
+
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            if (footerBytes > 0)
+            {
+                writer.WriteUInt64(FieldTag.FooterBytes, (ulong)footerBytes);
+            }
+
+            if (markedAt > 0)
+            {
+                writer.WriteUInt64(FieldTag.MarkedAt, (ulong)markedAt);
+            }
+
+            if (!synopsis.IsEmpty)
+            {
+                writer.WriteBytes(FieldTag.Synopsis, synopsis);
+            }
+
+            byte[] fields = new byte[writer.WrittenSpan.Length + unknown.Length];
+            writer.WrittenSpan.CopyTo(fields);
+            unknown.CopyTo(fields.AsSpan(writer.WrittenSpan.Length));
+            return fields;
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>Reads the fields of format 4 this library knows.</summary>
+    private void ReadFields(byte[] fields)
+    {
+        if (fields.Length == 0)
+        {
+            throw new CommitFormatException("An object entry's fields of format 4 are empty, which no writer writes.");
+        }
+
+        try
+        {
+            ProtoReader reader = new ProtoReader(fields);
+            while (reader.TryReadTag(out int field, out ProtoWireType wire))
+            {
+                switch (field, wire)
+                {
+                    case (FieldTag.FooterBytes, ProtoWireType.Varint):
+                        FooterBytes = Count(reader.ReadVarint());
+                        break;
+                    case (FieldTag.MarkedAt, ProtoWireType.Varint):
+                        MarkedAt = Count(reader.ReadVarint());
+                        break;
+                    case (FieldTag.Synopsis, ProtoWireType.LengthDelimited):
+                        Synopsis = reader.ReadLengthDelimited().ToArray();
+                        break;
+                    default:
+                        reader.SkipField(wire);
+                        break;
+                }
+            }
+        }
+        catch (VortexFormatException cause)
+        {
+            throw new CommitFormatException($"An object entry's fields of format 4 do not decode: {cause.Message}", cause);
+        }
+    }
+
+    /// <summary>The fields a later library wrote that this one does not know, as they were read, in their order.</summary>
+    private static ReadOnlySpan<byte> UnknownFields(byte[]? fields)
+    {
+        if (fields is null)
+        {
+            return default;
+        }
+
+        ProtoReader reader = new ProtoReader(fields);
+        int start = -1;
+        while (true)
+        {
+            int at = reader.Position;
+            if (!reader.TryReadTag(out int field, out ProtoWireType wire))
+            {
+                return start < 0 ? default : fields.AsSpan(start);
+            }
+
+            reader.SkipField(wire);
+            if (start < 0 && field is not (FieldTag.FooterBytes or FieldTag.MarkedAt or FieldTag.Synopsis))
+            {
+                // Known fields come first, in the order of their tags, and a later library's after them.
+                start = at;
+            }
+        }
+    }
+
+    /// <summary>The tags of the fields of format 4.</summary>
+    private static class FieldTag
+    {
+        internal const int FooterBytes = 1;
+        internal const int MarkedAt = 2;
+        internal const int Synopsis = 3;
+    }
 
     /// <summary>
     /// Whether a fragment of the same content as this reference's is attached. A fragment is its
@@ -383,10 +608,11 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             }
         }
 
-        // Past the fragments and the summaries, a vector out of line ends the entry: its reference's
-        // version is its first eight bytes.
+        // Past the fragments, the summaries and the fields of format 4, a vector out of line ends the
+        // entry: its reference's version is its first eight bytes.
         Skip(value, ref at, references.Length);
         Skip(value, ref at, (long)Read(value, ref at));
+        SkipFields(value, ref at);
         if (at < value.Length)
         {
             Read(value, ref at);
@@ -431,6 +657,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             + 16 + TreePage.VarintBytes((ulong)Rows) + TreePage.VarintBytes((ulong)Bytes) + 16
             + TreePage.VarintBytes((ulong)Fragments.Count) + (Fragments.Count * PageReference.Bytes)
             + TreePage.VarintBytes((ulong)summaries.Length) + summaries.Length
+            + (_fields is null ? 0 : 1 + TreePage.VarintBytes((ulong)_fields.Length) + _fields.Length)
             + (outOfLine
                 ? TreePage.VarintBytes((ulong)DeletedRows) + 1 + PageReference.Bytes
                 : HasDeletions
@@ -454,6 +681,16 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         at = Write(at, (ulong)summaries.Length);
         summaries.CopyTo(at);
         at = at[summaries.Length..];
+
+        // The fields of format 4, when there are any: a zero where a count of deleted rows would
+        // stand, which no entry of an earlier format holds there, then their length and their bytes.
+        if (_fields is not null)
+        {
+            at = Write(at, 0);
+            at = Write(at, (ulong)_fields.Length);
+            _fields.CopyTo(at);
+            at = at[_fields.Length..];
+        }
 
         // Last, and only when there are any, so that the entry of an object whose rows are all
         // live is the bytes it always was, and a reader that knows no deletions refuses one that has.
@@ -520,6 +757,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         long fragments = (long)listed;
         Skip(value, ref at, fragments * PageReference.Bytes);
         Skip(value, ref at, (long)Read(value, ref at));
+        SkipFields(value, ref at);
         long deleted = at < value.Length ? (long)Read(value, ref at) : 0;
         long vector = at < value.Length ? (long)Read(value, ref at) : 0;
         if (deleted > 0 && vector == 0 && value.Length - at == PageReference.Bytes)
@@ -614,9 +852,10 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
 
         ObjectSummaries bounds = ObjectSummaries.FromBytes(value.Slice(at, summaries));
         at += summaries;
+        byte[]? fields = ReadFieldBytes(value, ref at);
         if (at == value.Length)
         {
-            return new ObjectEntry(key, uid, rows, bytes, hash, references, bounds);
+            return new ObjectEntry(key, uid, rows, bytes, hash, references, bounds, 0, PageReference.None, null, fields);
         }
 
         long deleted = Count(Read(value, ref at));
@@ -640,7 +879,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
                 throw new CommitFormatException("An object entry's vector out of line names no bytes.");
             }
 
-            return new ObjectEntry(key, uid, rows, bytes, hash, references, bounds, deleted, lies, new Vector());
+            return new ObjectEntry(key, uid, rows, bytes, hash, references, bounds, deleted, lies, new Vector(), fields);
         }
 
         if (at + encoded != value.Length)
@@ -649,7 +888,48 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         }
 
         ReadOnlyMemory<byte> vector = copy ? value.Slice(at, encoded).ToArray() : memory.Slice(at, encoded);
-        return new ObjectEntry(key, uid, rows, bytes, hash, references, bounds, deleted, PageReference.None, new Vector(vector));
+        return new ObjectEntry(key, uid, rows, bytes, hash, references, bounds, deleted, PageReference.None, new Vector(vector), fields);
+    }
+
+    /// <summary>
+    /// The fields of format 4 that start at <paramref name="at"/>, past the summaries, moved past; null
+    /// when the entry has none. They start with a zero, which no count of deleted rows is.
+    /// </summary>
+    private static byte[]? ReadFieldBytes(ReadOnlySpan<byte> value, ref int at)
+    {
+        if (at >= value.Length || value[at] != 0)
+        {
+            return null;
+        }
+
+        at++;
+        int length = Length(Read(value, ref at), "fields");
+        if (at + length > value.Length)
+        {
+            throw new CommitFormatException("An object entry's fields of format 4 run past its bytes.");
+        }
+
+        byte[] fields = value.Slice(at, length).ToArray();
+        at += length;
+        return fields;
+    }
+
+    /// <summary>
+    /// Moves past the fields of format 4 that start at <paramref name="at"/>, if there are any: an entry
+    /// read in place reaches its deleted rows past them.
+    /// </summary>
+    /// <returns>Whether there were fields.</returns>
+    private static bool SkipFields(ReadOnlySpan<byte> value, ref int at)
+    {
+        if (at >= value.Length || value[at] != 0)
+        {
+            return false;
+        }
+
+        at++;
+        int length = Length(Read(value, ref at), "fields");
+        Skip(value, ref at, length);
+        return true;
     }
 
     /// <summary>A length a varint states, which is not one past an int on a format this code wrote.</summary>

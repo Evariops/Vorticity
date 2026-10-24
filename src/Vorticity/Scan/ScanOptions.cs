@@ -36,6 +36,21 @@ public sealed record ScanOptions
     public bool UseIndexes { get; init; } = true;
 
     /// <summary>
+    /// Whether an aggregation over a dataset may answer from the states its objects' synopses keep, in
+    /// place of their rows; off only to check a synopsis, never to change a result.
+    /// </summary>
+    public bool UseSynopses { get; init; } = true;
+
+    /// <summary>
+    /// Whether the window on a dataset's instant that an aggregation answers from its synopses may grow so that
+    /// its edges read no rows: each end that falls inside an object moves out, in the object of most rows it
+    /// cuts, to the nearest bound its tables answer at, its time slice's, its hour's or the object's own. The
+    /// answer is then the exact answer of the window applied, which <see cref="ScanMetrics.WindowFrom"/> and
+    /// <see cref="ScanMetrics.WindowTo"/> give. False by default: the window asked, exactly.
+    /// </summary>
+    public bool AlignWindow { get; init; }
+
+    /// <summary>
     /// Whether a filtered batch is compacted to the rows that passed; false delivers whole blocks
     /// with their <c>Selection</c>, which copies nothing.
     /// </summary>

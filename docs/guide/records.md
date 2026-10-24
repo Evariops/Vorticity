@@ -188,6 +188,7 @@ a member out of the columns entirely.
 | `DateTime` | `vortex.timestamp`, naive or UTC |
 | `DateTimeOffset` | `vortex.timestamp` with a time zone |
 | `Guid` | `vortex.uuid` |
+| `Variant` | variant: per row, a value of the Parquet Variant encoding, an object of keys that are data included |
 | `ReadOnlyMemory<T>`, `Memory<T>`, `T[]`, `List<T>`, `ImmutableArray<T>`, `IReadOnlyList<T>`, `IList<T>`, `ICollection<T>`, `IReadOnlyCollection<T>`, `IEnumerable<T>` | list of `T`, records included |
 | `Dictionary<TKey, TValue>`, `IDictionary<TKey, TValue>`, `IReadOnlyDictionary<TKey, TValue>` | map of scalar keys and values |
 | another `[VortexRecord]` type | struct |
@@ -199,6 +200,28 @@ array implements, a `List<T>` filled in place, or an `ImmutableArray<T>` wrappin
 read into, without a copy. A dictionary is read back as a `Dictionary<TKey, TValue>`. A list of
 records is read and written through `ListOf<TNested>`, and a map through `MapOf<TKey, TValue>`. A
 filter compares neither.
+
+A `Variant` member holds a value whose shape the schema does not declare, such as a bag of attributes
+whose keys vary from row to row. It is built from .NET values, from fields, from elements or from JSON,
+and a `Variant?` member tells a null row from the variant null:
+
+```csharp
+[VortexRecord]
+public partial record struct Event(DateTimeOffset At, Variant Attributes, Variant? Body);
+
+Event e = new(
+    DateTimeOffset.UtcNow,
+    Variant.Object(("http.route", "/orders/{id}"), ("http.response.status_code", 502L)),
+    Variant.FromJson("""{"message": "upstream timed out", "retries": [1, 2]}"""));
+
+long? status = e.Attributes["http.response.status_code"]?.AsInt64();   // 502
+string? text = e.Body?["message"]?.AsString();                         // "upstream timed out"
+```
+
+A key is taken whole, so `"http.route"` is one key with a dot in it. `AsInt64()` and the other `As…`
+give the value as it is stored, and null when it is of another type: the text `"502"` is not the
+integer 502, and `ToInt64()` is the conversion that reads it as one. Rows read back share one copy of
+their metadata while consecutive rows have the same keys.
 
 A 128-bit integer is a decimal of scale 0, because no dtype is 128 bits wide. Thirty-eight digits
 cover every value a 128-bit decimal holds, every reader of such a decimal can read them, and a column
@@ -368,4 +391,10 @@ columns: see [scan-a-table.md](scan-a-table.md) and [read-rows.md](read-rows.md)
 
 ```
 dotnet run -c Release --project samples/Vorticity.Samples -- records
+```
+
+The variant event above, and a dataset whose objects shred its attributes, are the `variants` sample:
+
+```
+dotnet run -c Release --project samples/Vorticity.Samples -- variants
 ```

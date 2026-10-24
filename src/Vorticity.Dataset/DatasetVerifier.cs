@@ -371,7 +371,7 @@ internal static class DatasetVerifier
 
         private async ValueTask CheckFileAsync(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments)
         {
-            VortexOpenOptions options = ObjectCache.OpenOptionsWith(fragments);
+            VortexOpenOptions options = ObjectCache.OpenOptionsOf(entry, fragments);
             ISegmentReader source;
             try
             {

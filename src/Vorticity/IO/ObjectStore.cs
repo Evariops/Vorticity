@@ -89,6 +89,29 @@ public interface IObjectStore : IAsyncDisposable
     ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Writes an object from <paramref name="content"/> as
+    /// <see cref="PutAsync(string, PipeReader, long, PutCondition, CancellationToken)"/> does, its length
+    /// unknown until its end but at most <paramref name="maxLength"/>: what a writer knows of an object it
+    /// assembles from inputs of known sizes, as a compaction does. A store that sends in parts sizes them
+    /// by the bound, so that it streams an object it would otherwise hold on disk or refuse; the default
+    /// takes the length as unknown.
+    /// </summary>
+    /// <param name="key">The object's key.</param>
+    /// <param name="content">The bytes, streamed; the store completes the reader whatever the outcome.</param>
+    /// <param name="length">How many bytes <paramref name="content"/> holds, or -1 when the writer does not know it yet.</param>
+    /// <param name="maxLength">
+    /// The most bytes <paramref name="content"/> holds when <paramref name="length"/> is -1, or -1 for no
+    /// bound. Content that runs past it is refused, and nothing is written.
+    /// </param>
+    /// <param name="condition">When the put may write.</param>
+    /// <param name="cancellationToken">Cancels the put, leaving the key as it was or holding the new bytes whole.</param>
+    /// <returns>Whether the bytes were written, or which condition failed.</returns>
+    /// <exception cref="NotSupportedException">The condition is one the store cannot hold (<see cref="ObjectStoreCapabilities.ReplacesOnTokenMatch"/>).</exception>
+    /// <exception cref="ObjectStoreException">The store failed, or cannot tell whether the conditional put landed.</exception>
+    ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, long maxLength, PutCondition condition, CancellationToken cancellationToken) =>
+        PutAsync(key, content, length, condition, cancellationToken);
+
+    /// <summary>
     /// Writes an object from bytes already in memory, atomically, if <paramref name="condition"/> holds.
     /// A store that sends them sends them where they lie, and sends them again from there when it must
     /// retry, so that nothing is copied; the default streams them through

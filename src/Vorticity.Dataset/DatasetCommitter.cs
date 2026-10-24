@@ -277,7 +277,12 @@ internal static class DatasetCommitter
             // it and its entry names it there; a lost attempt throws both away.
             ulong version = parent + 1;
             CommitObjectBuilder builder = new CommitObjectBuilder(version);
-            SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired) { WritePolicy = template.WritePolicy };
+            SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired)
+            {
+                WritePolicy = template.WritePolicy,
+                PeriodLength = template.PeriodLength,
+                PeriodChanges = template.PeriodChanges,
+            };
             (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes, Relocation repack) =
                 await ApplyAsync(levels, operations, pages, builder, schema, options.InlineVectorBytes, cancellationToken).ConfigureAwait(false);
 
@@ -357,11 +362,18 @@ internal static class DatasetCommitter
                 Schema = schema.Schema,
                 Retired = schema.Retired,
                 WritePolicy = schema.WritePolicy,
+                PeriodChanges = schema.PeriodChanges,
                 LastDataChange = ChangesRows(options.Kind, outcomes) ? version : LastDataChangeOf(template, parent),
                 Sources = sources,
                 Starts = starts,
+                Features = template.Features | FeaturesOf(operations),
             };
             header = Fitted(WithoutHeld(header));
+            if (header.ByPeriods != header.Lateness.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "A commit would write a header whose flag of periods and lateness horizon disagree, which every reader refuses.");
+            }
 
             // 3. One conditional creation. Once it is in, nothing after it can exist yet.
             string key = CommitKey.For(version);
@@ -747,6 +759,34 @@ internal static class DatasetCommitter
         return header;
     }
 
+    /// <summary>
+    /// The features of format 4 the operations bring into the trees: an entry they add with fields of
+    /// format 4. An entry rebuilt from one in the trees keeps its fields, and its feature is named already.
+    /// </summary>
+    private static DatasetFeatures FeaturesOf(IReadOnlyList<DatasetOperation> operations)
+    {
+        foreach (DatasetOperation operation in operations)
+        {
+            switch (operation)
+            {
+                case DatasetOperation.AddObject { Entry.HasFields: true }:
+                    return DatasetFeatures.EntryFields;
+                case DatasetOperation.ReplaceObjects replace:
+                    foreach ((int _, ReadOnlyMemory<byte> _, ObjectEntry entry) in replace.Outputs)
+                    {
+                        if (entry.HasFields)
+                        {
+                            return DatasetFeatures.EntryFields;
+                        }
+                    }
+
+                    break;
+            }
+        }
+
+        return DatasetFeatures.None;
+    }
+
     /// <summary>The header with the inlined pages of <paramref name="omitted"/> left out.</summary>
     private static CommitHeader Without(CommitHeader header, HashSet<PageReference> omitted)
     {
@@ -1049,8 +1089,12 @@ internal static class DatasetCommitter
                 {
                     // Joined to the policy of the version it lands on, never put in its place: two
                     // indexings of two columns committed at once both keep their column.
+                    // A default that indexes, such as every column's automatic index, takes the place of none.
                     Indexes.WritePolicy current = Indexes.IndexDirectory.PolicyOf(schema.WritePolicy.Span);
-                    byte[] joined = Indexes.IndexDirectory.PolicyBytes(current.With(Indexes.IndexDirectory.PolicyOf(added.Policy.Span)));
+                    Indexes.WritePolicy adding = Indexes.IndexDirectory.PolicyOf(added.Policy.Span);
+                    Indexes.WritePolicy merged = current.With(adding);
+                    merged = adding.Default.Kind != Indexes.IndexPolicyKind.None ? merged.WithDefault(adding.Default) : merged;
+                    byte[] joined = Indexes.IndexDirectory.PolicyBytes(merged);
                     if (joined.AsSpan().SequenceEqual(Indexes.IndexDirectory.PolicyBytes(current)))
                     {
                         outcomes.Add(OperationOutcome.AlreadyThere);
@@ -1058,6 +1102,27 @@ internal static class DatasetCommitter
                     else
                     {
                         schema.WritePolicy = joined;
+                        outcomes.Add(OperationOutcome.Applied);
+                    }
+
+                    break;
+                }
+
+                case DatasetOperation.ChangePeriodLength change:
+                {
+                    // Dropped on a dataset with no periods, when worked out on a calendar another writer changed first, when it
+                    // asks for the length the calendar ends on already, or when it does not follow the calendar's last change:
+                    // the changes stay few, and in the order of their boundaries, which a calendar reads them in.
+                    IReadOnlyList<PeriodChange> held = schema.PeriodChanges;
+                    if (schema.PeriodLength is not { } first || held.Count != change.After
+                        || change.Change.Length == (held.Count > 0 ? held[^1].Length : first)
+                        || (held.Count > 0 && change.Change.From <= held[^1].From))
+                    {
+                        outcomes.Add(OperationOutcome.Dropped);
+                    }
+                    else
+                    {
+                        schema.PeriodChanges = [.. schema.PeriodChanges, change.Change];
                         outcomes.Add(OperationOutcome.Applied);
                     }
 
@@ -1294,6 +1359,12 @@ internal static class DatasetCommitter
 
         /// <summary>The indexes every writer builds, as the header records them.</summary>
         internal ReadOnlyMemory<byte> WritePolicy { get; set; }
+
+        /// <summary>The first period length, as the header records it; null for the default.</summary>
+        internal SliceWidth? PeriodLength { get; init; }
+
+        /// <summary>The changes of the period length, as the header records them.</summary>
+        internal IReadOnlyList<PeriodChange> PeriodChanges { get; set; } = [];
     }
 
     private sealed class Relocation

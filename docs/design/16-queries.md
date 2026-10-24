@@ -103,6 +103,19 @@ a symbol, and VX1010 for an `As<TRecord>` or an `AggregateAsync<TResult>` whose 
 the values. VX1011 accompanies the compiler's error of the last row and names the fix, `As<TRecord>()`
 and the record to declare.
 
+### 1.1 The tool path
+
+A program that learns its columns at run time groups the tool scan by names and writes its results
+as text: `file.Scan().Where(text).GroupBy("Service").Select("Service", "count()", "sum(Bytes)")`,
+and `Aggregate(results)` for a whole scan. A result is a column of the key, or one of `count()`,
+`count_distinct(c)`, `sum(c)`, `min(c)`, `max(c)` and `avg(c)`. The engine builds the nodes the typed
+path's lambdas build, so the plan is the same, synopses and indexes included, and the result is a
+tool scan of the groups whose columns the texts name. A sum takes the widest type of its kind, a long,
+an unsigned long or a double, and a minimum, a maximum and a key keep their column's .NET type,
+chosen by a switch over the storage rather than by reflection, which Native AOT would refuse. The
+operators on groups, a filter on their results, an order and a window, are left to the typed path for
+now.
+
 ## 2. The flow
 
 ### 2.1 Batches, pulled
@@ -188,8 +201,11 @@ sorted column that holds a NaN, which is not sorted at all (see [key order per
 dtype](12-index-reads.md#34-key-order-per-dtype)). On a dataset it only streams on the first column of
 the clustering key, or a function of it, where the dataset reads its rows in key order, merging the
 objects and opening each one once it may hold the next row (see [order beyond the
-lookup](13-dataset.md#66-order-beyond-the-lookup)). The null group of the streaming component is
-final at the end, and comes last.
+lookup](13-dataset.md#66-order-beyond-the-lookup)). An object a dataset of periods sorted slice by
+slice is read the same way, slice after slice in time order, each slice decoded once and its rows
+gathered in key order ([rows in key order](12-index-reads.md#5-rows-in-key-order)), so the groups are
+those a dataset in time order gives. The null group of the streaming component is final at the end,
+and comes last.
 
 Under a descending order of the component, a group by streams backwards when a window follows the
 order, which stops the read: `orderby g.Key descending take 7` reads the last seven days of a year,
@@ -299,6 +315,44 @@ repeated hour in autumn is two hours, with two offsets, and so two buckets.
 Other functions (date parts, text functions, a coalesce) will take the same path: a function on a
 symbol, evaluated where the block lies.
 
+### 3.6 Variant paths
+
+A variant column's symbol walks into each row's value: `r.Attributes["http.route"]` takes one whole
+key, dots included, `["cart"]["items"]` a nested key, and `[3]` an element of an array. A path is a
+value, as a map's key is, so the compiler checks the column and not the keys, which are data. It
+becomes a column of the scan through what it is read as:
+
+| member | gives |
+|---|---|
+| `AsInt64()`, `AsDouble()`, `AsString()`, `AsBool()`, `AsTimestamp()` | the value as stored when it is of that type, and null otherwise. `AsInt64()` takes an integer of any width, `AsDouble()` a float or a double |
+| `ToInt64()`, `ToDouble()` | the value converted: a number without a fraction, a boolean, text that parses. Null when it does not convert |
+| `Has(key)`, `Exists` | whether the path is present: true or false, never unknown |
+
+The text `"502"` is not the integer `502`, and only `ToInt64()` reads it as one. A path that is
+absent, of another type, or under a null row is null, so a filter on it is unknown and keeps no row
+([three-valued logic](08-semantics.md#3-three-valued-logic)). A path read as a column is valid
+wherever a value expression is: in a row filter, as a key component, as an aggregate's input and as
+an element of a projection.
+
+A batch extracts each path once, from the rows' bytes: the path's keys are looked up in the row's
+dictionary once per run of rows of the same metadata, an object's field is found by halves when the
+dictionary is sorted, a string is a view of the variant's own bytes, and the batch allocates its
+output and nothing else. The variant column's statistics describe the column, not a path in it: its
+null count says nothing of whether a path is absent. So a filter over a path is fenced from the
+pruners that read a column's own statistics, and a key over one takes no bound and no sort from them.
+The path's own structures prune it instead. An object's path directory refutes the object, and its
+slices, for a path it never holds, a class it never holds there, or values outside its bounds. A
+shredded key's block statistics kill the blocks they refute, and a Bloom filter or hashed postings on
+a key in its class probe it ([10-indexes.md, the variant's kinds](10-indexes.md#45-vorticityvariantpathsv1-where-each-shredded-key-of-a-variant-lies)).
+A key an object shreds is read from its typed column through the chunk's path map, without the bytes
+of the other keys, and a key left in the residual is parsed from the rows of the shapes that hold it.
+A key no chunk of the object shreds is parsed from each chunk's residual alone, the keys the chunk
+shreds neither decoded nor put back into its rows: a question over such a key of 36 000 log records
+took 6.6 ms of a core, two thirds of it putting the shredded keys back, against 2.2.
+A dataset's synopsis counts a shredded path as a column, so a question that groups or filters by it
+answers from the tables ([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
+The keys a window holds, with their counts, are the union of its objects' path directories.
+
 ## 4. Keys
 
 ```csharp
@@ -363,8 +417,11 @@ scan that keeps no row.
 | `Half`, `float`, `double` | `double` | reproducibly: the same bits whatever the split |
 
 A sum widens what could overflow on the way and keeps the type of what could not, and it only throws
-`OverflowException` when the exact total does not fit the type it is delivered as. A nullable column
-sums as its type without the nullability. The engine accumulates an integer sum in the narrowest
+`OverflowException` when the exact total does not fit the type it is delivered as. A `long` or `ulong`
+column whose total may pass its type is widened by name, `g.Sum(r => r.DurationNs.AsInt128())`, and
+its sum is then delivered whole as an `Int128` or a `UInt128`. The widening changes no value, so it is
+the input of a sum and of nothing else: a comparison, an order or a projection of it throws. A
+nullable column sums as its type without the nullability. The engine accumulates an integer sum in the narrowest
 integer the statistics prove cannot overflow (the rows times the largest magnitude they give): a
 64-bit state where they prove it, 128 bits where they prove nothing. The width is the engine's choice,
 and the exactness is the promise.
@@ -385,9 +442,15 @@ whose error grows with the rows.
 
 The top is each sum's own, taken from its own values, and no statistics are read, so a group of small
 values keeps its precision next to a group of large ones, a result's scan and a dataset sum exactly
-as a file does, and a filter changes no grid. A part is at most 2^26 units, so a sum takes 2^36
-values, some 69 billion, in one group or one scan, and throws `OverflowException` past that rather
-than lose its exactness. A NaN is skipped. A sum holding +∞ and not −∞ is +∞, and one holding both is
+as a file does, and a filter changes no grid. A part is at most 2^26 units, so a sum's state of 32
+bytes takes 2^36 values, some 69 billion, in one group or one scan. The engine takes it where the
+source proves its rows within those values, as a file, a Parquet file and a dataset do. Elsewhere, as
+for a query's result read again, it takes a wide state of 40 bytes, which settles each bin's multiples
+of 2^56 into a high part every 2^35 values and at every merge, and takes some 3.5 × 10¹³ values. A
+settling moves value within a bin, so the bits are the narrow state's. Past its values a state throws
+`OverflowException` rather than lose its exactness. The wide state costs 3.5 % to 15 % more on every
+group of a grouped float sum, from a hundred groups to a million, which is why the narrow one stays
+wherever the rows are proven (vortex-queries --micro floatsum). A NaN is skipped. A sum holding +∞ and not −∞ is +∞, and one holding both is
 NaN, as IEEE 754 says.
 
 An average is that sum divided by the count. A variance comes from the reproducible sums of `x − c`
@@ -474,6 +537,40 @@ answer over a whole scan delivers any state as it is.
 Two aggregates are the same when they have the same function, the same input expression and the same
 filter, so the `g.Count()` of a `where`, an `orderby` and a `select` is counted once. An average
 shares the sum and the count of its column with a sum and a count of that column.
+
+### 5.6 Distributions and quantiles
+
+`g.Quantile(r => r.Millis, 0.99)` is the value at that share of the group's values in ascending order,
+within a relative error, 1 % by default, and `Distribution(r => r.Millis)` the whole distribution,
+its quantiles and its histogram, which a selection of groups cannot hold as a column and an answer
+over a whole scan can. Both fold the values into a sketch: counts per bucket of a log-linear grid,
+each power of two split into `2^k` equal buckets, the fewest `k` whose buckets hold the error (`k = 6`
+at 1 %, which holds 0.77 %). A value's bucket is the top bits of its double, its exponent and the first
+`k` bits of its mantissa, so it is the same integer on every machine, and every count is an integer, so
+merges in any order and at any degree give the same buckets and the same bits of every quantile. A
+quantile is answered with `2LU / (L + U)` of its bucket `[L, U)`, within the error of every value of it.
+
+The grid was weighed against DDSketch's logarithmic grid and a decimal one, of buckets
+`[d · 10^e, (d + 1) · 10^e)`, on entries of a thousand latencies, log-normal around 50 ms
+(`vortex-queries --micro sketches`, 10⁷ values, 2026-10-19): 395 buckets an entry and 1.6 ns a value
+for the bits, 258 and 2.4 ns for the logarithm, which also asks each platform's logarithm for a bucket,
+and 695 and 13.2 ns for the decimal grid, which answers thresholds of three digits exactly but costs
+2.7 times the logarithm's buckets and 5.4 times its time. The bits keep 0.77 % where the logarithm keeps
+1 %, which a third of their extra buckets pays for.
+
+A group's sketch is made at its first value and grows with the buckets it meets, sorted pairs while
+few, a dense window past 32, and the query's memory counts its arrays as they grow. A lane that spills
+writes it as its buckets. A quantile of a decimal column is not taken yet.
+
+### 5.7 States kept past a scan
+
+A dataset of periods keeps aggregates past a scan, for its runs and its tables, and merges them later
+with the states of a query. What it keeps is the engine's own state, in its widest form: a count, an
+integer sum as an `Int128`, a decimal sum in its 320 bits, a float sum as the wide indexed sum, which
+takes some 35 trillion values, and an extreme with whether there is one. Each is a kind of the index
+directory ([the kinds of persisted states](10-indexes.md#56-the-kinds-of-persisted-states)) stored as
+the words the engine holds, so a state read back merges into a query's as if the query had folded the
+rows itself, and the answer is the same bits whatever the cut between what was kept and what was read.
 
 ## 6. After the group by
 
@@ -761,6 +858,33 @@ of as many rows holding each column's minimum and, on its last row, its maximum,
 streams and the groups come in the order they would have. A dataset's objects do not settle, because
 their files still count the rows a deletion removed.
 
+A dataset of periods answers part of a pass with states instead
+([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
+When every aggregate is a count of the rows, a sum, a minimum, a maximum or a mean of a number column
+or of a variant's integer or double path, none of them filtered, and every key is a column, a function
+of one or a variant's path read strictly, the pass asks its source for states. A path's states carry
+the path's text as their name. A path read with `AsDouble()` reads floats too, which the double class
+of the tables leaves out, so an object that holds a float there, as its slice table says, answers with
+its rows. An object whose
+synopsis answers then comes as a batch of states: a row per bucket of a table and per value of its
+keys. The key columns carry the names and types the rows' have, the instant holds the bucket's start,
+and beside them are the rows the row stands for and each measure's states. A lane gives each row its
+group through the same keys and functions as rows, and each aggregate folds the row's state into it,
+an exact sum merged and an extreme compared, to the bits the rows would give. A source that keeps
+states makes the pass block rather than stream when one of its objects would answer: states come
+with their objects, not in key order. `ScanOptions.UseSynopses` turns this off, and the metrics count
+the table rows folded (`SynopsisRows`) and the rows read at the edges (`EdgeRows`).
+
+`ScanOptions.AlignWindow` grows the window on the instant to what the tables answer whole. The pass
+carries the question's keys and measures beside its states (`ScanSpec.Aligning`), set from the plan
+whether the states or the rows answer, so the source grows the same window either way: each end that
+cuts an object moves, in the object of most rows it cuts, to the nearest bound at which that object
+answers its side of the window with no row, its slice's, its hour's or its own, and no further than
+the instants it holds. The source rewrites the filter's bounds on the instant once per scan, from the
+entries alone, and the metrics give the window applied (`WindowFrom`, `WindowTo`). Another object the
+moved end cuts, a late or fresh one whose slices fall elsewhere, reads its rows there, so the answer
+is the exact one of that window.
+
 ### 9.4 Parallelism and the merge
 
 At a degree above one the rows are cut into ranges that end where a chunk does, so no chunk is read
@@ -800,8 +924,26 @@ with nothing cut first, its own table homing them by the bits below the part's, 
 chosen row and a tie keep the earlier range's.
 
 On a dataset, a range is an object, and an object holding two shares of the rows or more is cut
-between its chunks, as a file's rows are, so no chunk is read by two ranges. The objects that are cut
-are opened side by side to learn where their chunks end, and the ranges then find them already open.
+between its chunks, as a file's rows are, so no chunk is read by two ranges. An object whose synopsis
+answers the pass's states counts for none of the shares of rows, but for the rows its answer reads, the
+rows of its tables' chunks and of its edges' slices; whether it answers, its entry says, as its scan would
+find, so that one whose tables do not hold the question is cut as any other. Up to eight objects in a row
+that their tables alone answer, with no row read at an edge, of an identifier left out or of a delete, make
+one range while they read less than a share of tables' rows together, 2^16 at least: such an answer takes
+a tenth of a millisecond warm, where a range costs a walk of the tree to its rows and a lane's turn, so that
+a warm count over 48 hourly objects at 16 lanes took 3.8 ms and allocated 1.7 MB with a range an object,
+against 3.1 ms and 221 KB. An answer that reads two shares or more, and takes no row of an identifier left
+out or of a delete, is cut between the chunks of its tables into ranges of its slices, at a slice that no
+bucket a table folds whole straddles: a lane answers its range as the object is answered under a window
+that ends where the range does, and reads the slices of the edges it holds. A count per service and per
+12 hours over a window that cuts three hours of 540 M rows, 3.47 M rows of runs, one lane's whole when an
+answer was, took 32 ms at 16 lanes as at one; cut, 11 ms. Over several lanes, an edge of the answer of two
+edge shares of rows or more, 2^17 at least, is cut between its chunks into ranges of its rows alone, which
+read them under the window's filter as the edge was read, and the ranges answered around it end and begin
+with its neighbours' slices: a window whose edge cuts a minute of 3 M rows, one lane's to decode, took 38.7
+ms at 16 lanes as at one without latency, 83 ms over a store of 5 ms; cut, 3.3 and 39.8 ms. The objects
+that are cut are opened side by side to learn where their chunks end, and the ranges then find them
+already open.
 No object settles ([statistics and zone maps](#93-statistics-and-zone-maps), and see
 [13-dataset.md](13-dataset.md)). A group by that streams runs as [in parallel, in
 order](#25-in-parallel-in-order) describes, its ranges grouped side by side and followed in row order,
@@ -913,11 +1055,15 @@ result and their order until they are delivered. A lane's working memory besides
 scratch and its decoding, is admitted with the query, at 16 bytes per row of its batches between
 64 KiB and a megabyte, or a megabyte when the scan sets no batch size. A query whose budget cannot
 give every lane that much starts on half as many lanes, down to one. Over a source that copies what it
-reads (a store, or positional reads), a lane's two splits read ahead of its decode are admitted with
-it, each as large as the layout's largest split, which a walk of the layout finds before the pass.
-Under a budget short of them, the lanes read one split ahead, then none, before they are halved, and
-give them back when the pass ends. A mapping reads in place, its reads being views of it, so nothing
-more is admitted. What the queries release stays in the heap until a collection, so when that memory,
+reads (a store, or positional reads), a lane's splits read ahead of its decode are admitted with it,
+each as large as the layout's largest split, which a walk of the layout finds before the pass: its
+share of sixteen for the pass, two at least, so that one lane reads sixteen ahead, two lanes eight,
+four lanes four and eight or more two each. A pass of one lane reads ahead too over an object store,
+its decode on the caller's flow, where it decoded a split ahead on a lane of its own and waited on
+each read in turn; its reads past two take a quarter of the ceiling at most. Under a budget short of
+them, the lanes read one split fewer ahead at a time, down to none, before they are halved, and give
+them back when the pass ends. A mapping reads in place, its reads being views of it, so nothing more
+is admitted. What the queries release stays in the heap until a collection, so when that memory,
 or what the collector keeps committed beyond its heap, stands between a reservation and the ceiling, a
 collection that gives it back comes first. A query that is refused fails with a
 `VortexMemoryException` naming the operator, its groups and its bytes, with everything it held given
@@ -1109,8 +1255,7 @@ early](#24-stopping-early) describes.
 | an implicit order of groups | it used to change with the writer's encodings, so an order is asked for ([order](#63-order-orderby-thenby)). Without one, the order is not defined. At one lane the groups come in the order they were first met, and at more, in the merge's order: the largest lane's, then the others' as they merged in, or part by part of the key space, the parts cut by a hash seeded once per process, so two runs of a query in one process cut them alike. The repository's tests run with an internal switch that shuffles it, the same way for a process, so no test relies on it |
 | the same bits for a custom aggregator whose merge is not associative | every native aggregate gives the same bits whatever the caches' capacity, α and the order its states merge in ([how it is tested](#13-how-it-is-tested)), its consolidation made of merges alone. A merge that is not associative depends on that order, as it already depends on the order of the merges at more than one lane |
 | a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, and a third more at a million groups, whose 32 bytes per group leave the cache. It is more accurate, and a second semantics would be a second test matrix |
-| approximate distinct counts, quantiles, grouping sets | later, as aggregates and as operators of the same pipeline |
-| aggregates on the tool path | a later API, over the same engine |
+| grouping sets | later, as operators of the same pipeline |
 
 ## 13. How it is tested
 

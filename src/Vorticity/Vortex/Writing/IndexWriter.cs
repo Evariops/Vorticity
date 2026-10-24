@@ -6,7 +6,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Expressions;
 using Vorticity.Indexes;
+using Vorticity.Layouts;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
 
@@ -47,6 +49,15 @@ internal sealed class IndexWriter : IDisposable
     /// the policy names no nested column, which is every default write.
     /// </summary>
     private readonly int[]?[]? _nested;
+
+    /// <summary>
+    /// For a path's slot, the variant column it reads and the path read in one class; null when no
+    /// variant column shreds a key, which is every write but a job's.
+    /// </summary>
+    private readonly (int Field, Compute.VariantFieldExpr Path)?[]? _variants;
+
+    // Where a path's values are read into before its builders take them, emptied after each batch.
+    private CanonicalArena? _variantRows;
     private CanonicalArena? _keySlices;
     private DTypeArena? _maskTypes;
     private bool _firstBlockClosed;
@@ -79,7 +90,8 @@ internal sealed class IndexWriter : IDisposable
     internal IndexWriter(
         WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0,
         IKeyEncoder? keyEncoder = null, string? scratchDirectory = null, long scratchMemoryBytes = DefaultScratchMemoryBytes,
-        long wideRowsAbove = uint.MaxValue, bool sealScratch = false)
+        long wideRowsAbove = uint.MaxValue, bool sealScratch = false,
+        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null)
     {
         _policy = policy;
         _isTabular = isTabular;
@@ -87,12 +99,14 @@ internal sealed class IndexWriter : IDisposable
         _fieldCount = fieldCount;
         _keyEncoder = keyEncoder;
 
-        // A composite key is one more column after the real ones, and a nested column one more after
-        // the keys, so every loop over the builders serves them with no second path; only the feed
-        // differs. An override naming nothing in the schema takes a slot too, so the report says so.
+        // A composite key is one more column after the real ones, a nested column one more after the
+        // keys, and a shredded key read in one class one more after those, so every loop over the
+        // builders serves them with no second path; only the feed differs. An override naming nothing
+        // in the schema takes a slot too, so the report says so.
         List<string>? nested = Unmatched(policy, schema, isTabular);
         int keys = policy.Keys.Count;
-        int total = fieldCount + keys + (nested?.Count ?? 0);
+        int paths = isTabular ? variantKeys?.Count ?? 0 : 0;
+        int total = fieldCount + keys + (nested?.Count ?? 0) + paths;
         _paths = new string[total];
         _columns = new IndexSpec[total];
         _builders = new List<IndexBuilder>[total];
@@ -118,6 +132,32 @@ internal sealed class IndexWriter : IDisposable
             _refusals[slot] = column.Kind == IndexPolicyKind.Auto
                 ? "Auto chooses among the top-level columns; a nested column is indexed when its override names a kind"
                 : Explicit(column, leaf, _builders[slot]);
+        }
+
+        // Each shredded key in its class is a column of its own, under the policy that names it, as
+        // Attributes['user'].AsString(), or else its variant column's: Auto's Bloom filter, an explicit
+        // one, or hashed postings for an identifier. The other locating kinds read no path yet.
+        DTypeArena? classTypes = null;
+        for (int p = 0; p < paths; p++)
+        {
+            int slot = fieldCount + keys + (nested?.Count ?? 0) + p;
+            (int field, string key, Types.Variants.PathClass @class) = variantKeys![p];
+            string name = schema.GetFieldName(field);
+            Compute.VariantFieldExpr path = new Compute.VariantFieldExpr(new FieldExpr(name), [Compute.VariantStep.Of(key)], ReadOf(@class));
+            IndexSpec column = policy.Columns.TryGetValue(path.Text, out IndexSpec own) ? own : policy.Of(name);
+            DType dtype = ClassType(classTypes ??= new DTypeArena(), @class);
+            _paths[slot] = path.Text;
+            _columns[slot] = column;
+            _builders[slot] = [];
+            (_variants ??= new (int, Compute.VariantFieldExpr)?[total])[slot] = (field, path);
+            _refusals[slot] = column.Kind switch
+            {
+                IndexPolicyKind.None => null,
+                IndexPolicyKind.Auto when BloomBuilder.Supports(dtype, out _) => AutoBloom(_builders[slot], blockRows),
+                IndexPolicyKind.Auto => null,
+                IndexPolicyKind.Bloom or IndexPolicyKind.HashedPostings => Explicit(column, dtype, _builders[slot]),
+                _ => $"a path takes a Bloom filter or hashed postings, and {column.Kind} reads no path yet",
+            };
         }
 
         for (int k = 0; k < keys; k++)
@@ -152,11 +192,7 @@ internal sealed class IndexWriter : IDisposable
                     // per chunk and postings an intern per row, so neither is ever Auto's.
                     if (BloomBuilder.Supports(dtype, out _))
                     {
-                        builders.Add(new BloomBuilder(IndexSpec.Bloom())
-                        {
-                            AutoShare = AutoBloomShare,
-                            BlockRows = blockRows,
-                        });
+                        AutoBloom(builders, blockRows);
                     }
 
                     break;
@@ -207,7 +243,7 @@ internal sealed class IndexWriter : IDisposable
         {
             IndexPolicyKind.Bloom => BloomBuilder.Supports(dtype, out reason),
             IndexPolicyKind.NgramBloom or IndexPolicyKind.NgramPostings => BloomBuilder.Supports(dtype, trigrams: true, out reason),
-            IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns => KeyIndexBuilder.Supports(dtype, out _, out _, out reason),
+            IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns or IndexPolicyKind.HashedPostings => KeyIndexBuilder.Supports(dtype, out _, out _, out reason),
             _ => true,
         };
         return supported ? null : reason;
@@ -247,12 +283,26 @@ internal sealed class IndexWriter : IDisposable
                 }
 
                 break;
+            case IndexPolicyKind.HashedPostings:
+                if (KeyIndexBuilder.Supports(dtype, out KeyLayout values, out _, out reason))
+                {
+                    builders.Add(KeyIndexBuilder.ForHashes(values, column.SegmentEntries));
+                }
+
+                break;
             default:
                 break;
         }
 
         return reason;
     }
+
+    /// <summary>Whether <paramref name="path"/> names a first-level key of a variant column of <paramref name="schema"/>, read in one class.</summary>
+    private static bool IsVariantKey(DType schema, string path) =>
+        path.Contains('[', StringComparison.Ordinal)
+        && Expressions.ExprText.LastPath(path) is ([string column], [{ Key: not null }], not null)
+        && schema.IndexOfField(column) is int field and >= 0
+        && schema.GetField(field).Kind == DTypeKind.Variant;
 
     /// <summary>
     /// The override paths that are not a top-level column, in ordinal order so that one policy
@@ -263,7 +313,9 @@ internal sealed class IndexWriter : IDisposable
         List<string>? unmatched = null;
         foreach (string path in policy.Columns.Keys)
         {
-            bool column = isTabular ? schema.IndexOfField(path) >= 0 : path.Length == 0;
+            // A key of a variant column read in one class, Attributes['user'].AsString(), is the slot
+            // of that key when the file shreds it, and no slot of its own when it does not.
+            bool column = isTabular ? schema.IndexOfField(path) >= 0 || IsVariantKey(schema, path) : path.Length == 0;
             if (!column)
             {
                 (unmatched ??= []).Add(path);
@@ -624,7 +676,11 @@ internal sealed class IndexWriter : IDisposable
 
         foreach (IndexEntry entry in entries)
         {
-            if (entry.Kind == IndexKinds.DictProbe || Kept(entry, boundary) is not { } kept)
+            // The slice kinds and the variant paths describe the file as its writer cut it, which an
+            // append changes, and the path directory counts rows the append does not parse.
+            if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.VariantPaths
+                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns or IndexKinds.SynopsisTable
+                || Kept(entry, boundary) is not { } kept)
             {
                 continue;
             }
@@ -668,7 +724,7 @@ internal sealed class IndexWriter : IDisposable
     private List<int>? _priorAbsorbed;
 
     private static bool Same(IndexEntry a, IndexEntry b) =>
-        a.Kind == b.Kind && SamePath(a.ColumnPath, b.ColumnPath) && a.Options.AsSpan().SequenceEqual(b.Options);
+        a.Kind == b.Kind && SamePath(a.ColumnPath, b.ColumnPath) && SameKey(a, b) && a.Options.AsSpan().SequenceEqual(b.Options);
 
     /// <summary>The locating builder whose entry would continue <paramref name="old"/>, or null.</summary>
     private KeyIndexBuilder? Continuing(IndexEntry old)
@@ -753,7 +809,7 @@ internal sealed class IndexWriter : IDisposable
             List<IndexEntry> all = [.. _entries];
             foreach (IndexEntry old in preserved)
             {
-                if (!_entries.Exists(e => e.Kind == old.Kind && SamePath(e.ColumnPath, old.ColumnPath)))
+                if (!_entries.Exists(e => e.Kind == old.Kind && SamePath(e.ColumnPath, old.ColumnPath) && SameKey(e, old)))
                 {
                     all.Add(old);
                 }
@@ -820,8 +876,28 @@ internal sealed class IndexWriter : IDisposable
     private static bool Continues(IndexEntry old, IndexEntry current) =>
         old.Kind == current.Kind
         && SamePath(old.ColumnPath, current.ColumnPath)
+        && SameKey(old, current)
         && old.BlockLength == current.BlockLength
         && old.Options.AsSpan().SequenceEqual(current.Options);
+
+    /// <summary>Whether two entries index the same key of a variant column in the same class, or both a whole column.</summary>
+    private static bool SameKey(IndexEntry a, IndexEntry b)
+    {
+        if (a.VariantClass != b.VariantClass || (a.VariantPath?.Count ?? 0) != (b.VariantPath?.Count ?? 0))
+        {
+            return false;
+        }
+
+        for (int i = 0; i < (a.VariantPath?.Count ?? 0); i++)
+        {
+            if (!string.Equals(a.VariantPath![i], b.VariantPath![i], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>Whether any column asked for anything: a file with no request carries no directory.</summary>
     internal bool Enabled
@@ -839,6 +915,12 @@ internal sealed class IndexWriter : IDisposable
             return false;
         }
     }
+
+    /// <summary>
+    /// Whether the policy asks for no index: the writer holds this one only for what rides in the
+    /// directory, the time slices, and its ingest needs nothing of it.
+    /// </summary>
+    internal bool AsksNothing => !Asks(_policy);
 
     /// <summary>Whether a column feeds a streaming builder, so the ingest has something to call.</summary>
     internal bool Streams
@@ -865,6 +947,98 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether a chunk's rows may feed the builders on the writer's threads, each column's builders on the thread that
+    /// ingests the column: once the first block is closed, which tells them once what the statistics say of it, and when no
+    /// builder reads several columns at once, as a composite key's, a nested column's and a variant's paths do.
+    /// </summary>
+    internal bool FeedsAcross
+    {
+        get
+        {
+            if (!_firstBlockClosed || _nested is not null || _variants is not null)
+            {
+                return false;
+            }
+
+            for (int composite = _fieldCount; composite < _builders.Length; composite++)
+            {
+                if (_builders[composite].Count > 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>Whether column <paramref name="field"/> feeds a builder.</summary>
+    internal bool Feeds(int field) => _builders[field].Count > 0;
+
+    /// <summary>The rows the file is bounded by, 0 when unknown: what a hashed postings builder sizes its buckets by.</summary>
+    internal long ExpectedRows
+    {
+        set
+        {
+            foreach (List<IndexBuilder> builders in _builders)
+            {
+                foreach (IndexBuilder builder in builders)
+                {
+                    if (builder is KeyIndexBuilder key)
+                    {
+                        key.ExpectedRows = value;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>The bits hashed postings tell their buckets apart by, -1 for as many as the expected rows call for (VortexWriteOptions.HashedBucketBits).</summary>
+    internal int BucketBits
+    {
+        set
+        {
+            foreach (List<IndexBuilder> builders in _builders)
+            {
+                foreach (IndexBuilder builder in builders)
+                {
+                    if (builder is KeyIndexBuilder key)
+                    {
+                        key.BucketBits = value;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>The session's lanes the writer computes on, which a hashed postings builder sorts its buckets ahead on; null for none.</summary>
+    internal LaneBudget? Lanes
+    {
+        set
+        {
+            foreach (List<IndexBuilder> builders in _builders)
+            {
+                foreach (IndexBuilder builder in builders)
+                {
+                    if (builder is KeyIndexBuilder key)
+                    {
+                        key.Lanes = value;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Seals the open block of column <paramref name="field"/>'s builders, past the first block of the file.</summary>
+    internal void CloseBlock(int field)
+    {
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            builder.CloseBlock();
+        }
+    }
+
     /// <summary>Seals every builder's open block, telling them once what the statistics say of it.</summary>
     internal void CloseBlock(IReadOnlyList<ColumnWriter> columns)
     {
@@ -886,6 +1060,47 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>Counts a chunk's data bytes toward its column, for `Auto`'s shares.</summary>
     internal void AddColumnBytes(int field, long bytes) => _columnBytes[field] += bytes;
+
+    /// <summary>The bytes of the chunks of column <paramref name="field"/> written so far.</summary>
+    internal long ColumnBytes(int field) => _columnBytes[field];
+
+    /// <summary>
+    /// The bytes the synopsis's tables may take over <paramref name="dataBytes"/> of data: the indexes' share,
+    /// a budget of their own, with no floor, so that a small object keeps none.
+    /// </summary>
+    internal long SynopsisBudget(long dataBytes) => dataBytes * _budgetPerMille / 1000;
+
+    /// <summary>
+    /// <see cref="SynopsisBudget"/> over the data written so far, <see cref="long.MaxValue"/> while that data is
+    /// under <see cref="EarlyChoiceFloor"/>: past it, what a table built as the data goes takes says whether it can be
+    /// worth its bytes, and one that cannot is given up before it grows further.
+    /// </summary>
+    internal long SynopsisBudgetSoFar(long dataBytes) => dataBytes < EarlyChoiceFloor ? long.MaxValue : SynopsisBudget(dataBytes);
+
+    /// <summary>
+    /// The data under which no synopsis table is given up before the end: the columns still gathered and the chunks
+    /// in flight would weigh too much of so little, and the tables cost too little for an early verdict to save
+    /// anything, so the choice at the end weighs them all, against the whole data.
+    /// </summary>
+    internal const long DefaultEarlyChoiceBytes = 64L << 20;
+
+    /// <summary>The data under which no synopsis table is given up before the end (<see cref="VortexWriteOptions.SynopsisEarlyChoiceBytes"/>).</summary>
+    internal long EarlyChoiceFloor { get; set; } = DefaultEarlyChoiceBytes;
+
+    /// <summary>Reports what became of a synopsis table, its keys fields or the paths <paramref name="paths"/> lists, and why, with the choice's numbers.</summary>
+    internal void ReportSynopsis(SynopsisTableInfo table, IReadOnlyList<SynopsisPath> paths, bool kept, string verdict, long bytes)
+    {
+        string[] keys = new string[table.Keys.Length];
+        for (int k = 0; k < keys.Length; k++)
+        {
+            keys[k] = SynopsisPath.Names(table.Keys[k]) && paths[SynopsisPath.Place(table.Keys[k])] is { } path
+                ? $"{_paths[path.Field]}[\"{path.Key}\"]"
+                : _paths[table.Keys[k]];
+        }
+
+        string grain = $"{table.Kind} per {table.Bucket} of ({string.Join(", ", keys)})";
+        _reports.Add(new IndexWriteReport(grain, IndexKinds.SynopsisTable, kept ? IndexOutcome.Built : IndexOutcome.Abandoned, verdict, kept ? bytes : 0));
+    }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
@@ -1055,6 +1270,52 @@ internal sealed class IndexWriter : IDisposable
             return false;
         }
 
+        blob = Lay(payload!, blobs, encodings);
+        return true;
+    }
+
+    /// <summary>
+    /// <see cref="TryTakePayload"/> for the payloads <paramref name="builder"/> queued alone: what a builder the budget
+    /// never gives up writes as it makes them, its payloads past the end of the data, ahead of the others'.
+    /// </summary>
+    internal bool TryTakePayloadOf(
+        IndexBuilder builder, ArrayBlobWriter.Workspace blobs, EncodingDictionary encodings, out ArrayBlobWriter.BlobLease blob,
+        out PendingPayload? payload)
+    {
+        if (!_ledger.TryTakeFrom(builder, out payload))
+        {
+            blob = default;
+            return false;
+        }
+
+        blob = Lay(payload!, blobs, encodings);
+        return true;
+    }
+
+    /// <summary>
+    /// The writer's means of writing a builder's payloads now, which a builder the budget never gives up, a required one
+    /// or one the caller spared, is given: hashed postings write theirs as each bucket's segments are cut.
+    /// </summary>
+    internal Func<IndexBuilder, CancellationToken, ValueTask>? Streamer
+    {
+        set
+        {
+            for (int slot = 0; slot < _builders.Length; slot++)
+            {
+                bool kept = slot < _columns.Length && (_columns[slot].Required || Spared?.Contains(_paths[slot]) == true);
+                foreach (IndexBuilder builder in _builders[slot])
+                {
+                    if (builder is KeyIndexBuilder key)
+                    {
+                        key.Stream = kept ? value : null;
+                    }
+                }
+            }
+        }
+    }
+
+    private ArrayBlobWriter.BlobLease Lay(PendingPayload payload, ArrayBlobWriter.Workspace blobs, EncodingDictionary encodings)
+    {
         if (_payloads is null)
         {
             _payloads = new ScanContext([]);
@@ -1062,10 +1323,9 @@ internal sealed class IndexWriter : IDisposable
         }
 
         CanonicalArena arena = _payloads.Canonical;
-        int node = payload!.Build(arena, _payloadTypes!);
+        int node = payload.Build(arena, _payloadTypes!);
         payload.DType = DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
-        blob = ArrayBlobWriter.Write(blobs, arena, node, encodings, payload.Compress);
-        return true;
+        return ArrayBlobWriter.Write(blobs, arena, node, encodings, payload.Compress);
     }
 
     /// <summary>Every byte the payloads took in the file, their alignment padding included.</summary>
@@ -1224,6 +1484,9 @@ internal sealed class IndexWriter : IDisposable
                 case IndexPolicyKind.NgramPostings:
                     Locating(field, IndexKinds.PostingsNgram3, only as KeyIndexBuilder, blockRows);
                     break;
+                case IndexPolicyKind.HashedPostings:
+                    Locating(field, IndexKinds.PostingsHashed, only as KeyIndexBuilder, blockRows);
+                    break;
                 default:
                     throw new InvalidOperationException($"Unhandled index policy {policy.Kind}.");
             }
@@ -1290,7 +1553,7 @@ internal sealed class IndexWriter : IDisposable
             policy.Resolutions >= 3 ? BloomBuilder.FileMaxBlocks : BloomBuilder.MaxBlocksOf(policy));
         IndexRun run = new IndexRun(
             (ulong)tree.FirstBlock, checked((uint)tree.Leaves), [root], [dtype], 0, BloomTreeRun.Options(tree.RootWords));
-        _entries.Add(new IndexEntry(kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), options.ToBytes(), [run]));
+        _entries.Add(EntryOf(new IndexEntry(kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), options.ToBytes(), [run]), field));
 
         string? fileNote = policy.Resolutions >= 3 ? bloom.FileAbandoned : null;
         Report(
@@ -1354,8 +1617,8 @@ internal sealed class IndexWriter : IDisposable
             return;
         }
 
-        _entries.Add(new IndexEntry(
-            kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), ExpectedOptions(field, keys), runs));
+        _entries.Add(EntryOf(new IndexEntry(
+            kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), ExpectedOptions(field, keys), runs), field));
         Report(field, kind, IndexOutcome.Built, null, bytes, 0, runs.Count);
         foreach (PagedRun pages in paged ?? [])
         {
@@ -1451,7 +1714,7 @@ internal sealed class IndexWriter : IDisposable
             IndexSegment[] children = new IndexSegment[root.Count];
             for (int i = 0; i < children.Length; i++)
             {
-                children[i] = root.Regions[i][0];
+                children[i] = root.FirstRegionOf(i);
             }
 
             int slot = pages.Runs.FindIndex(r => ReferenceEquals(r, pages.Placeholder));
@@ -1465,6 +1728,159 @@ internal sealed class IndexWriter : IDisposable
             _pagedNext++;
         }
     }
+
+    /// <summary>
+    /// Adds the file's slice table: an entry on the top-level instant column <paramref name="field"/>,
+    /// one run over every block of the file's <paramref name="rows"/>, the table in its options.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The table does not cover the file's rows.</exception>
+    internal void AddSlices(int field, SliceTable table, long rows, int blockRows)
+    {
+        if (table.Rows != rows)
+        {
+            throw new InvalidOperationException($"The slices cover {table.Rows} rows of a file of {rows}: they cover each row once.");
+        }
+
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            IndexKinds.Slices, [checked((uint)field)], (ulong)length, table.ToBytes(), [new IndexRun(0, Blocks(rows, length), [], [])]));
+    }
+
+    /// <summary>
+    /// Writes where the chunks of each column lie, a region per column from the sink's position, and
+    /// adds the entry that names them: on the root, the encodings in its options, one run over every
+    /// block of the file's <paramref name="rows"/>, each region checksummed as every payload is. The
+    /// columns <paramref name="paged"/> names lay their chunks in pages of <paramref name="pageEntries"/>
+    /// behind a table of the pages' checksums (<see cref="SliceChunks.PagedBytes"/>). The regions a table of
+    /// contents names: each column's, or a paged column's page table.
+    /// </summary>
+    internal async ValueTask<IndexSegment[]> AddSliceChunksAsync(
+        ISegmentSink sink, SliceChunks chunks, int[] paged, int pageEntries, long rows, int blockRows, CancellationToken cancellationToken)
+    {
+        IndexSegment[] regions = new IndexSegment[chunks.Columns.Count];
+        IndexSegment[] named = new IndexSegment[regions.Length];
+        for (int column = 0; column < regions.Length; column++)
+        {
+            long at = sink.Position;
+            if (Array.BinarySearch(paged, column) >= 0)
+            {
+                byte[] pages = chunks.PagedBytes(column, pageEntries, out int table);
+                regions[column] = IndexSegment.Of(at, pages, 0);
+                named[column] = IndexSegment.Of(at, pages.AsSpan(0, table), 0);
+                await sink.WriteAsync(pages, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            byte[] bytes = chunks.ColumnBytes(column);
+            regions[column] = named[column] = IndexSegment.Of(at, bytes, 0);
+            await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        }
+
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            IndexKinds.SliceChunks, [], (ulong)length, chunks.OptionBytes(),
+            [new IndexRun(0, Blocks(rows, length), regions, [])]));
+        return named;
+    }
+
+    /// <summary>
+    /// Writes where each shredded key of the variant column <paramref name="field"/> lies, a region per
+    /// key from the sink's position, and adds the entry that names them: on the column, the encodings
+    /// and the keys in its options, one run over every block of the file's <paramref name="rows"/>.
+    /// </summary>
+    internal async ValueTask AddVariantPathsAsync(
+        ISegmentSink sink, int field, VariantPathMap map, long rows, int blockRows, CancellationToken cancellationToken)
+    {
+        IndexSegment[] regions = new IndexSegment[map.Keys.Count];
+        for (int key = 0; key < regions.Length; key++)
+        {
+            byte[] bytes = map.KeyBytes(key);
+            regions[key] = IndexSegment.Of(sink.Position, bytes, 0);
+            await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        }
+
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            IndexKinds.VariantPaths, [checked((uint)field)], (ulong)length, map.OptionBytes(),
+            [new IndexRun(0, Blocks(rows, length), regions, [])]));
+    }
+
+    /// <summary>
+    /// Writes the path directory of the variant column <paramref name="field"/>, one region from the
+    /// sink's position, within the index budget of the file's <paramref name="dataBytes"/>, and adds the
+    /// entry that names it: on the column, one run over every block of the file's <paramref name="rows"/>.
+    /// </summary>
+    internal async ValueTask<IndexSegment> AddVariantDirectoryAsync(
+        ISegmentSink sink, int field, VariantDirectory directory, long rows, int blockRows, long dataBytes, CancellationToken cancellationToken)
+    {
+        byte[] bytes = directory.Within(VariantBudget(dataBytes)).ToBytes();
+        IndexSegment region = IndexSegment.Of(sink.Position, bytes, 0);
+        await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        _variantBytes += bytes.Length;
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            IndexKinds.VariantDirectory, [checked((uint)field)], (ulong)length, [],
+            [new IndexRun(0, Blocks(rows, length), [region], [])]));
+        return region;
+    }
+
+    /// <summary>
+    /// Writes the block statistics of the variant column <paramref name="field"/> that can prune, within
+    /// what the index budget of the file's <paramref name="dataBytes"/> leaves the variants' indexes, a
+    /// region per key and class from the sink's position, and adds the entry that names them; nothing
+    /// when none can.
+    /// </summary>
+    internal async ValueTask AddVariantBlocksAsync(
+        ISegmentSink sink, int field, VariantBlockStats.Builder builder, long rows, int blockRows, long dataBytes, CancellationToken cancellationToken)
+    {
+        int length = Math.Max(blockRows, 1);
+        if (builder.Build(checked((int)Blocks(rows, length)), VariantBudget(dataBytes)) is not { } stats)
+        {
+            return;
+        }
+
+        IndexSegment[] regions = new IndexSegment[stats.Keys.Count];
+        for (int key = 0; key < regions.Length; key++)
+        {
+            byte[] bytes = stats.KeyBytes(key);
+            regions[key] = IndexSegment.Of(sink.Position, bytes, 0);
+            await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+            _variantBytes += bytes.Length;
+        }
+
+        _entries.Add(new IndexEntry(
+            IndexKinds.VariantBlocks, [checked((uint)field)], (ulong)length, stats.OptionBytes(),
+            [new IndexRun(0, Blocks(rows, length), regions, [])]));
+    }
+
+    /// <summary>
+    /// Names each table of the synopsis part: an entry on the root, the table's options, its one run's payload the list of
+    /// its chunks (<see cref="SynopsisContents.TableChunks.List"/>), which names their regions and buckets, and those of the
+    /// distinct sketches a chunk lays apart. The list alone: a chunk's region and dtype each, a day's 4 759 chunks, took
+    /// 4.5 MB of the directory, which every reader of the directory read whole. A table's rows decode at the struct the
+    /// file's schema and its slices' paths give it (<see cref="SynopsisTableInfo.RowType"/>).
+    /// </summary>
+    internal void AddSynopsisTables(IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> tables, long rows, int blockRows)
+    {
+        int length = Math.Max(blockRows, 1);
+        foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) in tables)
+        {
+            if (chunks is SynopsisContents.TableChunks { List: { } list })
+            {
+                _entries.Add(new IndexEntry(
+                    IndexKinds.SynopsisTable, [], (ulong)length, table.OptionBytes(),
+                    [new IndexRun(0, Blocks(rows, length), [list], [], (ulong)table.Rows, [])]));
+            }
+        }
+    }
+
+    /// <summary>The bytes the index budget of <paramref name="dataBytes"/> leaves the variants' indexes still to write.</summary>
+    private long VariantBudget(long dataBytes) => Math.Max(0, (Math.Max(dataBytes, BudgetFloor) * _budgetPerMille / 1000) - _variantBytes);
+
+    // What the variants' path directories and block statistics took of the budget so far.
+    private long _variantBytes;
+
+    private static uint Blocks(long rows, int length) => checked((uint)((rows + length - 1) / length));
 
     /// <summary>
     /// The dictionary probe: no payload, one run per maximal range of consecutive
@@ -1517,13 +1933,116 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// A column's path: its field for a top-level column, its fields for a nested one; empty for the
-    /// root and for a composite key, whose columns are in its options.
+    /// A column's path: its field for a top-level column, its fields for a nested one, its variant
+    /// column's field for a path; empty for the root and for a composite key, whose columns are in its
+    /// options.
     /// </summary>
     private uint[] ColumnPath(int field) =>
         _nested?[field] is { } chain ? Unsigned(chain)
+        : _variants?[field] is { } path ? [checked((uint)path.Field)]
         : _isTabular && field < _fieldCount ? [checked((uint)field)]
         : [];
+
+    /// <summary>An entry on slot <paramref name="field"/>, which names its path and class when the slot is a path's.</summary>
+    private IndexEntry EntryOf(IndexEntry entry, int field) =>
+        _variants?[field] is { } path
+            ? entry with { VariantPath = [path.Path.Steps[0].Key!], VariantClass = ClassOf(path.Path.Read) }
+            : entry;
+
+    /// <summary>Auto's Bloom filter, which gives itself up past its share of the column's bytes; no refusal.</summary>
+    private static string? AutoBloom(List<IndexBuilder> builders, int blockRows)
+    {
+        builders.Add(new BloomBuilder(IndexSpec.Bloom())
+        {
+            AutoShare = AutoBloomShare,
+            BlockRows = blockRows,
+        });
+        return null;
+    }
+
+    /// <summary>The read of one class that takes the values of <paramref name="class"/>.</summary>
+    internal static Compute.VariantRead ReadOf(Types.Variants.PathClass @class) => @class switch
+    {
+        Types.Variants.PathClass.Integer => Compute.VariantRead.AsInt64,
+        Types.Variants.PathClass.Double => Compute.VariantRead.AsDouble,
+        Types.Variants.PathClass.Boolean => Compute.VariantRead.AsBool,
+        Types.Variants.PathClass.Timestamp => Compute.VariantRead.AsTimestamp,
+        _ => Compute.VariantRead.AsString,
+    };
+
+    /// <summary>The class a read of one class takes.</summary>
+    private static Types.Variants.PathClass ClassOf(Compute.VariantRead read) => read switch
+    {
+        Compute.VariantRead.AsInt64 => Types.Variants.PathClass.Integer,
+        Compute.VariantRead.AsDouble => Types.Variants.PathClass.Double,
+        Compute.VariantRead.AsBool => Types.Variants.PathClass.Boolean,
+        Compute.VariantRead.AsTimestamp => Types.Variants.PathClass.Timestamp,
+        _ => Types.Variants.PathClass.String,
+    };
+
+    /// <summary>The dtype a read of <paramref name="class"/> gives, nullable, as a path's builders see it.</summary>
+    internal static DType ClassType(DTypeArena types, Types.Variants.PathClass @class) => @class switch
+    {
+        Types.Variants.PathClass.Integer or Types.Variants.PathClass.Timestamp => types.Primitive(PType.I64, Nullability.Nullable),
+        Types.Variants.PathClass.Double => types.Primitive(PType.F64, Nullability.Nullable),
+        Types.Variants.PathClass.Boolean => types.Bool(Nullability.Nullable),
+        _ => types.Utf8(Nullability.Nullable),
+    };
+
+    /// <summary>
+    /// Credits key <paramref name="key"/> of the variant column <paramref name="field"/> with the bytes of
+    /// a chunk's range of its buffers, toward `Auto`'s share for the slots that read it.
+    /// </summary>
+    internal void AddVariantKeyBytes(int field, string key, long bytes)
+    {
+        if (_variants is not { } variants)
+        {
+            return;
+        }
+
+        for (int slot = 0; slot < variants.Length; slot++)
+        {
+            if (variants[slot] is { } path && path.Field == field && string.Equals(path.Path.Steps[0].Key, key, StringComparison.Ordinal))
+            {
+                _columnBytes[slot] += bytes;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Hands the rows <paramref name="start"/> to <paramref name="start"/> + <paramref name="count"/> of
+    /// each shredded key, read in its slot's class, to that slot's builders.
+    /// </summary>
+    internal void AccumulateVariants(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int start, int count)
+    {
+        if (_variants is not { } variants || count <= 0)
+        {
+            return;
+        }
+
+        for (int slot = 0; slot < variants.Length; slot++)
+        {
+            if (variants[slot] is not { } path || _builders[slot].Count == 0)
+            {
+                continue;
+            }
+
+            CanonicalArena rows = _variantRows ??= new CanonicalArena();
+            try
+            {
+                int variant = CanonicalSlice.SliceAcross(arena, rows, fieldNodes[path.Field], start, count);
+                int read = path.Path.Apply(rows, variant);
+                foreach (IndexBuilder builder in _builders[slot])
+                {
+                    builder.Accumulate(rows, read, 0, count);
+                }
+            }
+            finally
+            {
+                rows.Reset();
+            }
+        }
+    }
 
     /// <summary>A composite key's columns, as the entry options carry them; null for a real column.</summary>
     private List<uint[]>? KeyColumns(int field) =>
@@ -1536,11 +2055,15 @@ internal sealed class IndexWriter : IDisposable
     /// still written when the policy was the caller's own, since it carries that policy and an
     /// append reads it to index its new blocks the same way; under the default policy it would say
     /// nothing an append would not assume from its absence.
-    /// A fragment passes what binds it to the indexed file, along with the payloads' encoding table.
+    /// A fragment passes what binds it to the indexed file, along with the payloads' encoding table. Where the entry of
+    /// each locating index lies in the bytes goes to <paramref name="located"/> when it is given.
     /// </summary>
-    internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null)
+    internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null, List<(IndexEntry Entry, int Start, int Length)>? located = null)
     {
-        if (!Enabled && _preserved is not { Count: > 0 })
+        // A file's time slices and its variant paths ride in the directory whatever the policy asks.
+        if (!Enabled && _preserved is not { Count: > 0 }
+            && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
+                or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns or IndexKinds.SynopsisTable))
         {
             return null;
         }
@@ -1562,7 +2085,7 @@ internal sealed class IndexWriter : IDisposable
                 FileToken = fragment?.Token,
                 FileHash = fragment?.Hash,
                 ArrayEncodings = fragment?.Encodings,
-            }.ToBytes();
+            }.ToBytes(located);
     }
 
     /// <summary>What became of every index the policy asked for.</summary>
@@ -1582,6 +2105,8 @@ internal sealed class IndexWriter : IDisposable
         _payloads = null;
         _keySlices?.Reset();
         _keySlices = null;
+        _variantRows?.Reset();
+        _variantRows = null;
         _scratch?.Dispose();
         _adopted?.Dispose();
         _adopted = null;

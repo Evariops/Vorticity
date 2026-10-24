@@ -4,6 +4,7 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.IO;
+using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 
 namespace Vorticity.Layouts;
@@ -53,6 +54,18 @@ internal sealed class FlatLayoutReader : LayoutReader
             return;
         }
 
+        // A chunk of a variant read through some shredded keys alone: their ranges, not the segment. One read for keys
+        // its shredding does not hold reads its segment as any.
+        if (segments.VariantKeys is { } reads)
+        {
+            SegmentSpec spec = SpecOf(in node, 0);
+            if (reads.Find(spec.Offset, spec.Length) is { Residual: false } chunk)
+            {
+                chunk.Register(segments);
+                return;
+            }
+        }
+
         // How much of the segment the decode touches: the fields a projection keeps of a struct
         // stored whole, and for a take a page or two of each of them per wanted row. The segment is
         // read once for every split of its node, so a take's rows are counted over the node, at
@@ -80,9 +93,46 @@ internal sealed class FlatLayoutReader : LayoutReader
         ArgumentNullException.ThrowIfNull(context);
         CheckRange(in node, rows);
 
+        // A flat node holds an int's rows, so its selection names them itself: only a chunked node, the one a split past
+        // 2^31 reads, re-bases a selection counted from its split.
+        if (context.HasSelection && context.SelectionBase != 0)
+        {
+            throw new InvalidOperationException($"A flat node of {NodeLength(in node)} rows was given a selection counted from row {context.SelectionBase}.");
+        }
+
         int total = NodeLength(in node);
         int length = BatchLength(rows);
 
+        // A chunk of a variant read through some shredded keys alone, each decoded from its range; one read for keys its
+        // shredding does not hold, decoded as any chunk, its variant giving its residual alone.
+        if (context.VariantKeys is { } reads && !node.Bufferless)
+        {
+            SegmentSpec spec = SpecOf(in node, 0);
+            if (reads.Find(spec.Offset, spec.Length) is { } chunk && chunk.Rows == total)
+            {
+                if (!chunk.Residual)
+                {
+                    return ExecuteKeys(in node, rows, in fields, context, chunk, total, length);
+                }
+
+                context.Decode.ResidualNext = true;
+                try
+                {
+                    return ExecuteChunk(in node, rows, in fields, context, total, length);
+                }
+                finally
+                {
+                    context.Decode.ResidualNext = false;
+                }
+            }
+        }
+
+        return ExecuteChunk(in node, rows, in fields, context, total, length);
+    }
+
+    /// <summary>The batch's rows of a chunk read as an array: decoded, retained or sliced, as the batch asks.</summary>
+    private int ExecuteChunk(in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, int total, int length)
+    {
         // The blob is loaded where it is read, not on the way past. Parsing it means copying the
         // array flatbuffer into a node arena, walking the node tree and resolving every buffer spec
         // in the segment; the parse is kept for the next batch that holds the same bytes, and a
@@ -194,6 +244,43 @@ internal sealed class FlatLayoutReader : LayoutReader
 
         int sliced = CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
         return Narrowed(sliced, in fields, context);
+    }
+
+    /// <summary>
+    /// A chunk of a variant read through some shredded keys alone: each key decoded from its own range
+    /// (<see cref="Indexes.VariantKeyReads"/>), the chunk retained under a key of its own when a batch
+    /// takes part of it, then the batch's rows sliced or gathered out of it.
+    /// </summary>
+    private static int ExecuteKeys(
+        in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, Indexes.VariantKeyReads.Chunk chunk, int total, int length)
+    {
+        if (!context.HasSelection && rows.Start == 0 && length == total)
+        {
+            Decoded(context, total);
+            return chunk.Decode(context, node.DType);
+        }
+
+        // Under the complement of the segment's key, which no segment's key is: the keys' decode is
+        // not the chunk's.
+        long key = ~ScanContext.SegmentKey(node.Segments[0]);
+        if (!context.TryGetRetained(key, out CanonicalArena held, out int retained))
+        {
+            Decoded(context, total);
+            held = context.BeginRetainedDecode();
+            retained = -1;
+            try
+            {
+                retained = chunk.Decode(context, node.DType);
+            }
+            finally
+            {
+                context.EndRetainedDecode(retained);
+            }
+        }
+
+        return context.HasSelection
+            ? Gather(held, retained, in fields, context, total)
+            : CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
     }
 
     /// <summary>

@@ -21,8 +21,16 @@ internal interface IFanWork
 /// once and queued again for every piece, so a piece costs no allocation, nor a file once one has
 /// run; the calling thread claims items as well, and the helpers join only a piece that is open.
 /// The caller waits for the last item, closes the piece, then waits for every helper that joined to
-/// leave, so that a helper the pool runs late finds it closed and touches nothing, or finds the
-/// next one open, whichever writer's it is, and works for it. One piece runs at a time.
+/// leave: a helper the pool runs late finds it closed and touches nothing, or finds the next one
+/// open and works for it, and the caller never waits for one the pool has not run. A helper still
+/// queued is not queued again. One piece runs at a time.
+/// </para>
+/// <para>
+/// A helper of a fan with a <see cref="Budget"/> is queued only on a lane of the session's it takes
+/// first and gives back as it leaves: the writes of a session never compute on more threads than its
+/// degree, however many writers fan out at once, and a fan whose lanes are all taken runs its
+/// piece on its caller's alone. A helper the pool runs late holds its lane until it leaves, and
+/// works only for a piece of the lanes it took it from.
 /// </para>
 /// <para>
 /// Waiting costs the caller nothing it could have done instead: it waits only for items another
@@ -57,6 +65,12 @@ internal sealed class WorkFan
     /// <summary>The threads a piece may run on, the calling one included.</summary>
     internal int Lanes { get; private set; }
 
+    /// <summary>
+    /// The session's lanes a helper joins on, one each, or none when none is free: the calling thread runs the items no
+    /// helper takes, on the lane it holds. Null for helpers that take no lane.
+    /// </summary>
+    internal LaneBudget? Budget { get; private set; }
+
     /// <summary>What the piece running reads, as its caller passed it: an object and a number.</summary>
     internal object? State { get; private set; }
 
@@ -82,7 +96,8 @@ internal sealed class WorkFan
 
     /// <summary>A fan an earlier writer gave back, or a new one, with helpers for <paramref name="lanes"/> threads.</summary>
     /// <param name="lanes">The threads a piece may run on, the calling one included.</param>
-    internal static WorkFan Rent(int lanes)
+    /// <param name="budget">The session's lanes the helpers join on; null for helpers that take none.</param>
+    internal static WorkFan Rent(int lanes, LaneBudget? budget = null)
     {
         WorkFan? fan = null;
         lock (Gate)
@@ -96,6 +111,7 @@ internal sealed class WorkFan
 
         fan ??= new WorkFan();
         fan.Lanes = lanes;
+        fan.Budget = budget;
         int had = fan._helpers.Length;
         if (had < lanes - 1)
         {
@@ -148,10 +164,28 @@ internal sealed class WorkFan
         _finished.Reset();
         _open = true;
 
+        // A helper joins on a lane of the session's it holds alone, or not at all: the degree is the lanes at work. One
+        // the pool has not run yet for an earlier piece is not queued again: it joins this one if it comes while it is open.
         int helpers = Math.Min(Lanes - 1, count - 1);
+        LaneBudget? budget = Budget;
         for (int i = 0; i < helpers; i++)
         {
-            ThreadPool.UnsafeQueueUserWorkItem(_helpers[i], preferLocal: false);
+            Helper helper = _helpers[i];
+            if (Volatile.Read(ref helper.Queued) != 0)
+            {
+                continue;
+            }
+
+            long entered = 0;
+            if (budget is not null && !budget.TryEnter(out entered))
+            {
+                break;
+            }
+
+            helper.Budget = budget;
+            helper.Entered = entered;
+            Volatile.Write(ref helper.Queued, 1);
+            ThreadPool.UnsafeQueueUserWorkItem(helper, preferLocal: false);
         }
 
         Work();
@@ -160,7 +194,11 @@ internal sealed class WorkFan
             _finished.Wait();
         }
 
+        // Every helper that joined leaves before the piece does, each running on a thread of its own: one the pool runs late
+        // finds the piece closed and touches nothing, so the caller waits on no work the pool has yet to start. The fence
+        // keeps the close from passing the count's read: a helper either is counted here or reads the piece closed.
         _open = false;
+        Interlocked.MemoryBarrier();
         SpinWait spin = default;
         while (Volatile.Read(ref _active) != 0)
         {
@@ -176,19 +214,26 @@ internal sealed class WorkFan
         }
     }
 
-    private void Join()
+    private void Join(Helper helper)
     {
         Interlocked.Increment(ref _active);
         try
         {
-            if (_open)
+            // A helper works only for a piece of the lanes it took its own from: one the pool runs late, once the fan went
+            // to a writer of another session, leaves.
+            if (_open && ReferenceEquals(helper.Budget, Budget))
             {
                 Work();
             }
         }
         finally
         {
+            // Its lane read before it may be queued again, which sets another.
+            LaneBudget? budget = helper.Budget;
+            long entered = helper.Entered;
+            Volatile.Write(ref helper.Queued, 0);
             Interlocked.Decrement(ref _active);
+            budget?.Exit(entered);
         }
     }
 
@@ -218,6 +263,15 @@ internal sealed class WorkFan
 
     private sealed class Helper(WorkFan owner) : IThreadPoolWorkItem
     {
-        public void Execute() => owner.Join();
+        /// <summary>The lanes the helper took its own from for the piece it was queued for; null for none.</summary>
+        internal LaneBudget? Budget;
+
+        /// <summary>When it took its lane.</summary>
+        internal long Entered;
+
+        /// <summary>1 from its queueing to its leaving: a helper the pool has not run is not queued again.</summary>
+        internal int Queued;
+
+        public void Execute() => owner.Join(this);
     }
 }

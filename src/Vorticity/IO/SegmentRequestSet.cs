@@ -90,6 +90,12 @@ internal sealed class SegmentRequestSet : IDisposable
     internal Half WantedShare { get; set; } = Half.One;
 
     /// <summary>
+    /// The chunks of the variant columns the split's scan reads through some shredded keys alone,
+    /// whose flat layouts register the keys' ranges rather than their segment; null for none.
+    /// </summary>
+    internal Indexes.VariantKeyReads? VariantKeys { get; set; }
+
+    /// <summary>
     /// Registers a segment and returns its slot.
     /// </summary>
     /// <param name="spec">The locator, straight off the wire.</param>

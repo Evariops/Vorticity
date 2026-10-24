@@ -30,6 +30,7 @@ public sealed record VortexWriteOptions
     private readonly IndexPolicy _indexes = IndexPolicy.None;
     private readonly ImmutableDictionary<string, EncodingHint> _hints = ImmutableDictionary<string, EncodingHint>.Empty.WithComparers(StringComparer.Ordinal);
     private readonly ImmutableDictionary<string, int> _columnChunkTargets = ImmutableDictionary<string, int>.Empty.WithComparers(StringComparer.Ordinal);
+    private readonly ImmutableDictionary<string, int> _zstdLevels = ImmutableDictionary<string, int>.Empty.WithComparers(StringComparer.Ordinal);
     private readonly ImmutableDictionary<string, ReadOnlyMemory<byte>> _metadata = ImmutableDictionary<string, ReadOnlyMemory<byte>>.Empty.WithComparers(StringComparer.Ordinal);
     private bool _oneChunkPerWrite;
     private bool _noByteTarget;
@@ -113,6 +114,21 @@ public sealed record VortexWriteOptions
             ArgumentOutOfRangeException.ThrowIfGreaterThan(value, ManagedCompressions.Zstd.ZstdCompressor.MaxLevel);
             _zstdLevel = value;
         }
+    }
+
+    /// <summary>
+    /// The zstd level of a column's zstd frames, by top-level column name, for a column whose values a level other than
+    /// <see cref="ZstdLevel"/> serves better: random identifiers, whose matches of five bytes cost more than they save,
+    /// take level 1 smaller and faster than 3. The level holds for every zstd frame of the column's chunks, those of the
+    /// children its encodings make included, and their trials are priced at it; 0 is <see cref="ZstdLevel"/>.
+    /// </summary>
+    /// <remarks>
+    /// A name that is no top-level column, or a level out of zstd's range, throws at <c>CreateWriter</c>.
+    /// </remarks>
+    public ImmutableDictionary<string, int> ZstdLevels
+    {
+        get => _zstdLevels;
+        init => _zstdLevels = value ?? throw new ArgumentNullException(nameof(value));
     }
 
     /// <summary>
@@ -242,8 +258,69 @@ public sealed record VortexWriteOptions
     /// <summary>Whether the runs the writer moves to <see cref="ScratchDirectory"/> are sealed: set for a writer of a session that seals its files.</summary>
     internal bool SealScratch { get; init; }
 
+    /// <summary>
+    /// The most rows the file will hold, when the caller knows a bound, 0 otherwise: a compaction knows
+    /// its inputs' rows. A writer that sizes its chunks (no <see cref="ChunkTargetBytes"/>) then keeps
+    /// them long enough that the footer, a node per chunk and column, stays within half the tables a
+    /// traversal of it may visit, whatever the bytes per chunk.
+    /// </summary>
+    internal long RowBound { get; init; }
+
+    /// <summary>
+    /// Whether the writer will be given the file's time slices, which ride in its index directory: it
+    /// then keeps that directory whatever its policy builds, which may be nothing.
+    /// </summary>
+    internal bool CarriesSlices { get; init; }
+
+    /// <summary>
+    /// What each top-level variant column shreds, by its name: its chunks are written as the reference
+    /// stores a shredded variant, the values the shredding names in typed columns. A column not named
+    /// is written whole.
+    /// </summary>
+    internal IReadOnlyDictionary<string, Types.Variants.VariantShredding>? ShreddedVariants { get; init; }
+
+    /// <summary>
+    /// The path directory of each top-level variant column, by its name, counted from the rows the file
+    /// will hold: each rides in the index directory, whatever the policy builds.
+    /// </summary>
+    internal IReadOnlyDictionary<string, Indexes.VariantDirectory>? VariantDirectories { get; init; }
+
+    /// <summary>
+    /// The top-level columns whose chunks lie together after the rest of the data, the synopsis part,
+    /// each named in the index directory: the object's synopsis columns, which a question that needs
+    /// only them reads without the rest.
+    /// </summary>
+    internal IReadOnlyList<string>? SynopsisColumns { get; init; }
+
+    /// <summary>
+    /// The chunks of a page of a sliced file's chunk directories, those that hold more than a page laid in pages
+    /// (<see cref="global::Vorticity.Indexes.SliceChunks.PagedVersion"/>): <see cref="global::Vorticity.Indexes.SliceChunks.DefaultPageEntries"/>. Lowered by tests,
+    /// so that objects of a few chunks lay their directories in pages as a day's do.
+    /// </summary>
+    internal int ChunkPageEntries { get; init; } = global::Vorticity.Indexes.SliceChunks.DefaultPageEntries;
+
+    /// <summary>
+    /// The bytes of a synopsis table's list of chunks at most for the entry to keep the chunks in its place:
+    /// <see cref="global::Vorticity.Indexes.SynopsisContents.InlineListBytes"/>. Zero by tests, so that small objects list every
+    /// table apart as a day lists its large ones.
+    /// </summary>
+    internal int InlineListBytes { get; init; } = global::Vorticity.Indexes.SynopsisContents.InlineListBytes;
+
+    /// <summary>
+    /// The data under which no synopsis table is given up before the end, every one weighed by the choice against the
+    /// whole data: <see cref="IndexWriter.DefaultEarlyChoiceBytes"/>. Lowered by tests, so that objects of a few rows
+    /// meet the early verdicts that only large ones do otherwise.
+    /// </summary>
+    internal long SynopsisEarlyChoiceBytes { get; init; } = IndexWriter.DefaultEarlyChoiceBytes;
+
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
+
+    /// <summary>
+    /// The bits of a hash hashed postings tell their buckets apart by, or -1 for as many as <see cref="RowBound"/> calls for:
+    /// set by tests, to cut a few rows' pairs into many buckets without the chunks a bound sizes.
+    /// </summary>
+    internal int HashedBucketBits { get; init; } = -1;
 
     /// <summary>The row span above which a sorted run writes its rows at 64 bits.</summary>
     internal long WideRowsAbove { get; init; } = uint.MaxValue;

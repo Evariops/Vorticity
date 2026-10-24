@@ -253,6 +253,50 @@ evaluated through the function, and prune with the zone bounds mapped through it
 decimal column are not supported yet and throw `NotSupportedException`. A function has no key source
 of its own, so it cannot be the key of a scan's `OrderBy` or of `Keys`.
 
+## Quantiles and approximate distinct counts
+
+```csharp
+await foreach (CityQuantiles city in file.Scan<Reading>()
+    .GroupBy(r => r.City)
+    .Select(g => (
+        g.Key,
+        g.Quantile(r => r.Celsius, 0.5),
+        g.Quantile(r => r.Celsius, 0.99),
+        g.ApproximateCountDistinct(r => r.Day),
+        g.CountDistinct(r => r.Day)))
+    .As<CityQuantiles>()
+    .ToRecordsAsync())
+
+Distribution? d = await file.Scan<Reading>().AggregateAsync(a => a.Distribution(r => r.Celsius));
+
+[VortexRecord]
+public partial record struct CityQuantiles(string City, double? Median, double? P99, long Days, long ExactDays);
+```
+
+```
+GroupBy(City), quantiles          63.6 ms  8 groups
+  Paris      median 30.12, 99th percentile 49.75, about 1009 days of 1000
+  Lyon       median 29.87, 99th percentile 49.75, about 1009 days of 1000
+  ...
+Distribution(Celsius)              6.8 ms  980000 values, median 29.87, 148 buckets, within 0.78 %
+```
+
+`Quantile(column, q)` is the value at share `q` of the group's values in ascending order: 0.5 is the
+median, 0.99 the 99th percentile. It is within a relative error of a true value at that rank, 1 % by
+default, or the error you pass as a third argument. The values fall into buckets that split each power
+of two into equal parts, 64 of them at 1 %, and the answer is a bucket's middle, so a median of 30.12
+stands for a true median within 0.78 % of it. `Distribution(column)` keeps the whole distribution: its
+`Quantile`, its `Median` and its `Histogram`, the buckets that hold values. A distribution is no column,
+so a selection of groups takes quantiles, and an answer over a whole scan takes the distribution.
+
+`ApproximateCountDistinct(column)` counts distinct values in at most 16 KiB a group, whatever their
+number: exactly up to 64 of them, then about 0.8 % off, here 1 009 for 1 000. `CountDistinct` is
+exact and keeps every value it meets.
+
+Both are the same bits however the scan is cut and at any degree of parallelism: a bucket's count and a
+register are integers, and merging adds the counts or keeps the larger register. A NaN is skipped, and
+an approximate count takes 0.0 and -0.0, or two NaNs, as one value, as the exact count does.
+
 ## An aggregator of your own
 
 ```csharp
@@ -383,7 +427,9 @@ and run-end blocks included.
   `ushort` or `uint` column as a `ulong`, and a `Half` or `float` column as a `double`. So
   `SumAsync(v => v.DurationMs)` over the `int` column of the visits file returns a `long`. A `long`,
   a `ulong` or a `decimal` column sums as itself, exactly, and throws `OverflowException` only when
-  the exact total does not fit. Internally the engine keeps 64 bits per group when the file
+  the exact total does not fit. When that total may pass a `long`, ask for it widened:
+  `SumAsync(v => v.DurationNs.AsInt128())` returns the exact total as an `Int128`, and `AsUInt128()`
+  does the same for a `ulong`. Internally the engine keeps 64 bits per group when the file
   statistics prove the rows times the column's largest value fit, and 128 bits otherwise.
 * The file carries no sum. `MinAsync`, `MaxAsync` and `CountAsync` without a filter are answered
   from the file statistics, while `SumAsync` and `AverageAsync` read the column
@@ -393,9 +439,11 @@ and run-end blocks included.
 * A float sum gives the same bits at every degree, in every order of the rows and however the data
   is cut into files or objects, and it is closer to the exact sum than a plain loop. Each value is
   split into three integer parts on a grid of exponents, those parts are summed exactly, and the total
-  is rounded once. It accepts 2^36 values, about 69 billion, in one group or one scan, and throws
-  `OverflowException` beyond that. Grouped row by row it costs about a fifth more than a plain sum,
-  and nothing measurable over runs and sorted keys.
+  is rounded once. Over a file or a dataset, whose rows are known, it accepts 2^36 values, about 69
+  billion, in one group or one scan. Over more rows, or a source that does not know its rows, such as
+  a query's result read again, it uses a state eight bytes larger and accepts about 3.5 × 10¹³ values.
+  It throws `OverflowException` beyond them. Grouped row by row it costs about a fifth more than a
+  plain sum, and nothing measurable over runs and sorted keys.
 * Encoded steps need generic instantiation at run time. Under Native AOT, the scan calls `Step` with
   the plain form instead ([native-aot.md](native-aot.md)).
 * The first passes of a process run on code the JIT has not optimized yet. Tiered compilation starts

@@ -22,6 +22,13 @@ public enum IndexKind : byte
 
     /// <summary>Value to rows, sorted: ranges, key order and the key cursor.</summary>
     SortedRuns,
+
+    /// <summary>
+    /// Value to blocks through the value's hash: equality and membership on long, rare values such
+    /// as identifiers, at about four bytes a (value, block) pair, a false block in about a thousand
+    /// probes.
+    /// </summary>
+    HashedPostings,
 }
 
 /// <summary>The indexes a writer builds, column by column, within a budget.</summary>
@@ -101,6 +108,16 @@ public sealed class IndexPolicy
     /// <param name="required">Whether the write fails rather than abandon it.</param>
     /// <returns>The policy with the index.</returns>
     public IndexPolicy SortedRuns(string column, bool required = false) => With(column, IndexSpec.SortedRuns, required);
+
+    /// <summary>
+    /// Hashed postings, value to blocks through the value's hash, on <paramref name="column"/>: equality
+    /// and <c>IN</c> on an identifier at a fraction of a sorted run's bytes, a probe reading one segment
+    /// of about 64 KiB.
+    /// </summary>
+    /// <param name="column">The column path.</param>
+    /// <param name="required">Whether the write fails rather than abandon it.</param>
+    /// <returns>The policy with the index.</returns>
+    public IndexPolicy HashedPostings(string column, bool required = false) => With(column, IndexSpec.HashedPostings, required);
 
     /// <summary>An index of <paramref name="kind"/> on the tuple of <paramref name="columns"/>.</summary>
     /// <param name="columns">The key's columns, in key order; one column is a plain column index.</param>
@@ -182,6 +199,7 @@ public sealed class IndexPolicy
         IndexKind.Postings => IndexSpec.Postings,
         IndexKind.NgramPostings => IndexSpec.NgramPostings(),
         IndexKind.SortedRuns => IndexSpec.SortedRuns,
+        IndexKind.HashedPostings => IndexSpec.HashedPostings,
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Not a defined index kind."),
     };
 }

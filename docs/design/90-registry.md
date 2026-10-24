@@ -48,7 +48,7 @@ only the frames or chunks that hold them, while the others decode the chunk once
 | `vortex.zstd` | zstd frames | `core2025.06.0` | yes, one frame per block | selective, by frame |
 | `vortex.pco` | Pcodec: entropy-coded bins after a delta or a divisor | `core2025.06.0` | yes, under the size-first profile and a hint, for numbers of 16 bits and more | gather |
 | `vortex.zstd_buffers` | each buffer of another array compressed separately | draft `zstd2026.02.0` | no | gather |
-| `vortex.variant` | a variant over its storage | `core2026.08.3` | no, written as `vortex.parquet.variant` | selective |
+| `vortex.variant` | a variant over its storage | `core2026.08.3` | a shredded variant only, an unshredded one written as `vortex.parquet.variant` | selective |
 | `vortex.parquet.variant` | the Parquet variant binary format | `core2026.08.3` | yes | gather |
 | `vortex.patched` | patches over a patch-free child | none, only written with edition enforcement off | no | gather |
 
@@ -56,12 +56,28 @@ A patched ALP or bit-packed array written normally carries its patches in its ow
 no `vortex.patched` node. In-memory arrays with no wire id (slices, filters, shared arrays) have
 nothing to read.
 
-Two forms are refused by name. The first is the legacy two-buffer `vortex.fsst`, which keeps its codes
-as a nested `vortex.varbin` array. The arena canonicalizes that array on the way in, inlining short
-codes into views, so the contiguous code stream the decode needs no longer exists. Every writer since
-the encoding stabilized emits the three-buffer form, and the corpus generator can produce the other
-one if a file in the read-forever range ever needs it. The second is a shredded variant child, refused
-by its decoder with a message naming it.
+One form is refused by name: the legacy two-buffer `vortex.fsst`, which keeps its codes as a nested
+`vortex.varbin` array. The arena canonicalizes that array on the way in, inlining short codes into
+views, so the contiguous code stream the decode needs no longer exists. Every writer since the
+encoding stabilized emits the three-buffer form, and the corpus generator can produce the other one if
+a file in the read-forever range ever needs it.
+
+A shredded variant is read in both spellings. Rust writes the canonical one: a `vortex.variant` whose
+core storage is a `vortex.parquet.variant` of the metadata and the residual values, and whose second
+child is the shredded tree. In that tree an object is a struct by field name, an array a list, a
+primitive its typed column, and a field that kept values of its own beside its typed column a nested
+`vortex.variant`. The other spelling is a `vortex.parquet.variant` with a `typed_value` child shaped
+as the Parquet standard shreds. The decoder maps either onto the standard's groups of a value and a
+typed value and rebuilds each row as the standard's `construct_variant` does, with the plan the Parquet
+reader uses, so a row reads the same shredded or not. A key both shredded and in a row's values is
+refused, as the Arrow reader the reference relies on refuses it.
+
+A writer given a shredding for a variant column writes the canonical spelling too, the one Rust
+writes. Each chunk's rows are read once: the values the shredding names go to typed columns,
+integers of every width to one 64-bit column, a key's value of another class to that key's own
+values beside its typed column, and every other key, or a row of another shape, to the residual. A
+list is shredded only when every element fits its typed column. No shredded key is ever left in the
+residual.
 
 A selection is pushed down, not gathered up. A decoder that has nothing to say about a take decodes
 the node once and gathers. One with `DecodeSelected` receives the selection through the layout tree,
@@ -126,7 +142,9 @@ The writer's schemes are named after algorithms, and editions constrain the ids:
 
 A compression reaches every child: a list's elements, offsets and sizes, a struct's fields, an
 extension's storage, a dictionary's or a run's values, a sparse chunk's positions and values, a
-decimal's integers and a timestamp's parts. Validity bitmaps are one bit per row and stay plain. How
+decimal's integers and a timestamp's parts. Validity bitmaps are one bit per row and stay plain,
+except in a shredded variant's tree, where a path's rows often hold it in stretches: there a validity
+is compressed as any column, runs where it has few. How
 the chooser prices each scheme is described in [choosing
 encodings](11-write-strategy.md#34-choose-exact-verdicts-then-bounded-trials). Over the 876 files of
 the conformance corpus, the writer's files are smaller than the reference's, held under a ceiling by

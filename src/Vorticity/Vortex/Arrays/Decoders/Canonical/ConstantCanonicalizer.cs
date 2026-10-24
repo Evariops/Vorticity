@@ -3,7 +3,7 @@ using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
-using Vorticity.Types.Variant;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 

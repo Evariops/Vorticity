@@ -161,6 +161,38 @@ public static class SymExtensions
         public Sym<T?> Bucket(T width) => SymFunctions.Bucket(column, width);
     }
 
+    extension(Sym<long> column)
+    {
+        /// <summary>
+        /// The integers as 128-bit ones, for a sum a long would not hold: <c>g.Sum(r => r.DurationNs.AsInt128())</c>
+        /// is the exact total as an <see cref="Int128"/>, where <c>g.Sum(r => r.DurationNs)</c> throws past
+        /// <see cref="long.MaxValue"/>. The values are the same, so a sum is all it is the input of.
+        /// </summary>
+        /// <returns>The column, widened.</returns>
+        public Sym<Int128> AsInt128() => new Sym<Int128>(new WidenedSym(column.Column, "AsInt128"));
+    }
+
+    extension(Sym<long?> column)
+    {
+        /// <summary>The integers as 128-bit ones, for a sum a long would not hold; a null stays null.</summary>
+        /// <returns>The column, widened.</returns>
+        public Sym<Int128?> AsInt128() => new Sym<Int128?>(new WidenedSym(column.Column, "AsInt128"));
+    }
+
+    extension(Sym<ulong> column)
+    {
+        /// <summary>The integers as unsigned 128-bit ones, for a sum an unsigned long would not hold.</summary>
+        /// <returns>The column, widened.</returns>
+        public Sym<UInt128> AsUInt128() => new Sym<UInt128>(new WidenedSym(column.Column, "AsUInt128"));
+    }
+
+    extension(Sym<ulong?> column)
+    {
+        /// <summary>The integers as unsigned 128-bit ones, for a sum an unsigned long would not hold; a null stays null.</summary>
+        /// <returns>The column, widened.</returns>
+        public Sym<UInt128?> AsUInt128() => new Sym<UInt128?>(new WidenedSym(column.Column, "AsUInt128"));
+    }
+
     extension(Sym<bool> column)
     {
         /// <summary>The rows whose value is true.</summary>

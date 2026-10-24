@@ -1,0 +1,267 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Vorticity.Serialization.Protobuf;
+
+namespace Vorticity.Indexes;
+
+/// <summary>
+/// One time slice of a file: the rows whose instant falls in <c>[Start, End)</c>, counted in the
+/// instant column's unit, which lie at rows <c>[FirstRow, FirstRow + Rows)</c>.
+/// </summary>
+internal readonly record struct TimeSlice(long Start, long End, long FirstRow, long Rows);
+
+/// <summary>
+/// The time slices of a file: per slice its bounds on the instant, its first row and its row count,
+/// in time order, covering every row once. An entry of the index directory on the instant column,
+/// <see cref="IndexKinds.Slices"/>, whose options hold the table.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The slices follow each other: each starts at or after the end of the one before, and its rows
+/// follow the one before's. Encoded behind a version byte as the instant's unit, the slice count,
+/// and per slice the gap from the previous end, the width and the row count, each a varint: a few
+/// bytes a slice, a day of minutes in about 6 KiB.
+/// </para>
+/// <para>
+/// Like every index it is a hint: a table that does not decode, or whose rows are not the file's,
+/// is not read, and the file reads without it.
+/// </para>
+/// </remarks>
+internal sealed class SliceTable
+{
+    // The slices, the order inside them, its entries zigzagged, a variant field's shapes below zero, then the object's
+    // synopsis paths, which the order's entries from SynopsisPath.Base name. The versions before were the branch's
+    // own, which no store of a release holds.
+    private const byte Version = 4;
+
+    // A path's class word: the class, and above the classes whether the path lies in the residual and whether
+    // the object holds floats there.
+    private const uint ResidualFlag = 0x100;
+    private const uint FloatsFlag = 0x200;
+
+    /// <summary>
+    /// A table of <paramref name="slices"/> over instants counted in <paramref name="unit"/>, whose rows
+    /// are sorted inside each slice by the entries <paramref name="order"/>, then by the instant, in time
+    /// order for no order; the object's synopsis paths <paramref name="paths"/>.
+    /// </summary>
+    /// <exception cref="ArgumentException">The slices are empty, do not follow each other, or one is empty or inverted.</exception>
+    internal SliceTable(TimeUnit unit, IReadOnlyList<TimeSlice> slices, IReadOnlyList<int>? order = null, IReadOnlyList<SynopsisPath>? paths = null)
+    {
+        ArgumentNullException.ThrowIfNull(slices);
+        if (Problem(slices) is { } problem)
+        {
+            throw new ArgumentException(problem, nameof(slices));
+        }
+
+        Unit = unit;
+        Slices = slices;
+        Order = order ?? [];
+        Paths = paths ?? [];
+    }
+
+    /// <summary>
+    /// The paths of the object's variant columns its synopsis counts, which an entry of <see cref="Order"/>,
+    /// or a table's key or measure, names from <see cref="SynopsisPath.Base"/>. Empty for none.
+    /// </summary>
+    internal IReadOnlyList<SynopsisPath> Paths { get; }
+
+    /// <summary>The unit the slices' bounds are counted in: the instant column's.</summary>
+    internal TimeUnit Unit { get; }
+
+    /// <summary>
+    /// What the rows of each slice are sorted by, in that order, the instant after them: the object's
+    /// synopsis columns, a top-level field each, an entry below zero the shapes of variant field
+    /// <c>-entry - 1</c>, an entry from <see cref="SynopsisPath.Base"/> one of <see cref="Paths"/>. Empty for
+    /// rows in time order.
+    /// </summary>
+    internal IReadOnlyList<int> Order { get; }
+
+    /// <summary>The slices, in time order.</summary>
+    internal IReadOnlyList<TimeSlice> Slices { get; }
+
+    /// <summary>The rows the slices cover.</summary>
+    internal long Rows => Slices[^1].FirstRow + Slices[^1].Rows;
+
+    /// <summary>Why <paramref name="slices"/> are not a table, or null when they are.</summary>
+    private static string? Problem(IReadOnlyList<TimeSlice> slices)
+    {
+        if (slices.Count == 0)
+        {
+            return "A slice table holds at least one slice.";
+        }
+
+        long row = 0;
+        long end = long.MinValue;
+        for (int i = 0; i < slices.Count; i++)
+        {
+            TimeSlice slice = slices[i];
+            if (slice.End <= slice.Start || slice.Rows <= 0)
+            {
+                return $"Slice {i} spans [{slice.Start}, {slice.End}) with {slice.Rows} rows: a slice is a span of time that holds rows.";
+            }
+
+            if (slice.Start < end || slice.FirstRow != row)
+            {
+                return $"Slice {i} starts at {slice.Start}, row {slice.FirstRow}, where the slices before it end at {end}, row {row}: the slices follow each other.";
+            }
+
+            row += slice.Rows;
+            end = slice.End;
+        }
+
+        return null;
+    }
+
+    /// <summary>The table's bytes, the options of its directory entry.</summary>
+    internal byte[] ToBytes()
+    {
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            writer.WriteVarint(Version);
+            writer.WriteVarint((byte)Unit);
+            writer.WriteVarint((ulong)Slices.Count);
+            long end = 0;
+            for (int i = 0; i < Slices.Count; i++)
+            {
+                TimeSlice slice = Slices[i];
+
+                // The first slice's start is absolute, zigzagged; each later one's a gap, never negative.
+                writer.WriteVarint(i == 0 ? ZigZag(slice.Start) : (ulong)(slice.Start - end));
+                writer.WriteVarint((ulong)(slice.End - slice.Start));
+                writer.WriteVarint((ulong)slice.Rows);
+                end = slice.End;
+            }
+
+            writer.WriteVarint((ulong)Order.Count);
+            foreach (int entry in Order)
+            {
+                writer.WriteVarint(ZigZag(entry));
+            }
+
+            writer.WriteVarint((ulong)Paths.Count);
+            foreach (SynopsisPath path in Paths)
+            {
+                byte[] key = System.Text.Encoding.UTF8.GetBytes(path.Key);
+                writer.WriteVarint((ulong)path.Field);
+                writer.WriteVarint((ulong)key.Length);
+                writer.WriteRawBytes(key);
+
+                // The class, whether the path lies in the residual in the bit above the classes', and whether the
+                // object holds floats there in the next.
+                writer.WriteVarint((byte)path.Class | (path.Residual ? ResidualFlag : 0u) | (path.Floats ? FloatsFlag : 0u));
+            }
+
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>The table <paramref name="bytes"/> encode, or null when they do not decode as one.</summary>
+    internal static SliceTable? FromBytes(ReadOnlySpan<byte> bytes)
+    {
+        try
+        {
+            ProtoReader reader = new ProtoReader(bytes);
+            if (reader.ReadVarint() != Version)
+            {
+                return null;
+            }
+
+            ulong code = reader.ReadVarint();
+            TimeUnit unit = code <= byte.MaxValue ? (TimeUnit)code : (TimeUnit)byte.MaxValue;
+            ulong count = reader.ReadVarint();
+            if (!Enum.IsDefined(unit) || count == 0 || count > (ulong)bytes.Length)
+            {
+                return null;
+            }
+
+            TimeSlice[] slices = new TimeSlice[(int)count];
+            long end = 0;
+            long row = 0;
+            for (int i = 0; i < slices.Length; i++)
+            {
+                ulong gap = reader.ReadVarint();
+                long start = i == 0 ? UnZigZag(gap) : checked(end + (long)gap);
+                long stop = checked(start + (long)reader.ReadVarint());
+                long rows = (long)reader.ReadVarint();
+                slices[i] = new TimeSlice(start, stop, row, rows);
+                row = checked(row + rows);
+                end = stop;
+            }
+
+            ulong fields = reader.ReadVarint();
+            if (fields > (ulong)bytes.Length)
+            {
+                return null;
+            }
+
+            int[] order = new int[(int)fields];
+            for (int i = 0; i < order.Length; i++)
+            {
+                order[i] = checked((int)UnZigZag(reader.ReadVarint()));
+            }
+
+            ulong held = reader.ReadVarint();
+            if (held > (ulong)bytes.Length)
+            {
+                return null;
+            }
+
+            SynopsisPath[] paths = new SynopsisPath[(int)held];
+            for (int i = 0; i < paths.Length; i++)
+            {
+                int field = checked((int)reader.ReadVarint());
+                string key = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                ulong word = reader.ReadVarint();
+                ulong @class = word & ~(ulong)(ResidualFlag | FloatsFlag);
+                if (@class > byte.MaxValue || !Enum.IsDefined((Types.Variants.VariantClass)(byte)@class))
+                {
+                    return null;
+                }
+
+                paths[i] = new SynopsisPath(
+                    field, key, (Types.Variants.VariantClass)(byte)@class, (word & ResidualFlag) != 0, (word & FloatsFlag) != 0);
+            }
+
+            return reader.End && Problem(slices) is null ? new SliceTable(unit, slices, order, paths) : null;
+        }
+        catch (Exception malformed) when (malformed is VortexFormatException or OverflowException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The slice table of <paramref name="file"/>, read from its index directory: null when it has
+    /// none, or one that does not decode or does not cover the file's rows.
+    /// </summary>
+    internal static async ValueTask<SliceTable?> ReadAsync(VortexFile file, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false);
+        if (directory is null)
+        {
+            return null;
+        }
+
+        foreach (IndexEntry entry in directory.Entries)
+        {
+            if (entry.Kind == IndexKinds.Slices && FromBytes(entry.Options) is { } table && table.Rows == file.RowCount)
+            {
+                return table;
+            }
+        }
+
+        return null;
+    }
+
+    private static ulong ZigZag(long value) => (ulong)((value << 1) ^ (value >> 63));
+
+    private static long UnZigZag(ulong value) => (long)(value >> 1) ^ -(long)(value & 1);
+}

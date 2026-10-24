@@ -86,7 +86,7 @@ The connections themselves are the platform's: `System.Net.Http` reports the con
 their durations, and the requests and their durations, which OpenTelemetry collects as it does for
 any other client.
 
-The package Vorticity.Dataset adds six instruments to the same meter, the first time a dataset
+The package Vorticity.Dataset adds ten instruments to the same meter, the first time a dataset
 commits, compacts or vacuums:
 
 ```
@@ -96,7 +96,16 @@ instrument vortex.dataset.compactions ({compaction}): Compactions of datasets, b
 instrument vortex.dataset.compaction.bytes_read (By): Bytes the compactions that ran to their commit read, by trigger.
 instrument vortex.dataset.compaction.bytes_written (By): Bytes the compactions that ran to their commit wrote, by trigger.
 instrument vortex.dataset.vacuum.objects_deleted ({object}): Objects vacuums deleted.
+instrument vortex.dataset.lateness (s): How far behind the newest instant a handle appended the oldest row of each append to a dataset of periods came.
+instrument vortex.dataset.rows_past_horizon ({row}): Rows a dataset by periods took later than its lateness horizon, kept in the late level beside their period.
+instrument vortex.dataset.partitions ({partition}): The values of its partition columns a dataset holds rows of, at each plan of its compaction.
+instrument vortex.dataset.period.load (By/s): The bytes per second of data time of each period a seal wrote, with the period length that load calls for.
 ```
+
+The last four concern datasets of periods
+([datasets.md](datasets.md)): how late rows come against the declared horizon, the rows past it, the
+partitions a dataset holds, which no bound limits over its life, and the load each sealed period
+weighed.
 
 A commit is tagged with `vortex.operation` (`create`, `append`, `import`, `replace`, `delete`, `update`,
 `schema`, `index`, `compaction`, `repack`, `rekey`) and `vortex.outcome` (`applied`, `nothing_to_do`,

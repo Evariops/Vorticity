@@ -175,6 +175,9 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
     public static VortexType Uuid { get; } = Intern(
         new VortexType(VortexTypeKind.Extension, nullable: false, extensionId: ExtensionIds.Uuid, storage: FixedSizeList(UInt8, 16), metadata: []));
 
+    /// <summary>A non-nullable variant: per row, a value of the Parquet Variant encoding, read and written as a <see cref="Vorticity.Variant"/>.</summary>
+    public static VortexType Variant { get; } = Intern(new VortexType(VortexTypeKind.Variant, nullable: false));
+
     /// <summary>What the type is, before its parameters.</summary>
     public VortexTypeKind Kind { get; }
 
@@ -350,9 +353,6 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
 
     internal static VortexType Union(VortexField[] variants, bool nullable) =>
         Intern(new VortexType(VortexTypeKind.Union, nullable, fields: variants));
-
-    internal static VortexType Variant(bool nullable) =>
-        Intern(new VortexType(VortexTypeKind.Variant, nullable));
 
     internal static VortexType WithNullability(VortexType type, bool nullable) =>
         nullable ? type.Nullable : type.NonNullable;

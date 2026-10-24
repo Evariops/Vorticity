@@ -20,11 +20,18 @@ namespace Vorticity.Expressions;
 ///            | field "like" text [ "escape" text ]
 ///            | field "starts" "with" text
 ///            | field "contains" literal
+///            | field "exists"
 /// op        := "=" | "!=" | "&lt;&gt;" | "&lt;" | "&lt;=" | "&gt;" | "&gt;="
 /// literal   := 'text' | number | true | false | null
-/// field     := name ( "." name )*   where a name is an identifier or a "double-quoted" string
+/// field     := name ( "." name )* step* [ "." read "(" ")" ]
+///              where a name is an identifier or a "double-quoted" string
+/// step      := "[" 'key' "]" | "[" index "]"
+/// read      := AsInt64 | AsDouble | AsString | AsBool | AsTimestamp | ToInt64 | ToDouble
 /// </code>
-/// Keywords are case-insensitive; a quote inside a quoted text or name is doubled.
+/// Keywords are case-insensitive; a quote inside a quoted text or name is doubled. A step or a read
+/// makes the field a path of a variant column: its keys whole, dots included, and what its value is
+/// read as. A path with no read is read as the literal it is compared with is: an integer as
+/// <c>AsInt64</c>, a float as <c>AsDouble</c>, text as <c>AsString</c>, a boolean as <c>AsBool</c>.
 /// </summary>
 internal static class ExprText
 {
@@ -75,6 +82,14 @@ internal static class ExprText
                 text.Append("not (");
                 Append(text, negation.Operand, parentIsAnd: null);
                 text.Append(')');
+                return;
+            case VariantFilterExpr fence:
+                Append(text, fence.Inner, parentIsAnd);
+                return;
+            case ComparisonExpr { Field: VariantFieldExpr { Read: VariantRead.Has }, Op: ComparisonOp.Equal, Value.Kind: FilterLiteralKind.Bool } presence
+                when presence.Value.BoolValue:
+                AppendField(text, presence.Field);
+                text.Append(" exists");
                 return;
             case ComparisonExpr comparison:
                 AppendField(text, comparison.Field);
@@ -164,6 +179,19 @@ internal static class ExprText
 
     private static void AppendField(StringBuilder text, FieldExpr field)
     {
+        // A variant's path: its column, each key quoted whole, and what its value is read as.
+        if (field is VariantFieldExpr path)
+        {
+            AppendField(text, path.Column);
+            text.Append(string.Concat(path.Steps));
+            if (path.Read != VariantRead.Has)
+            {
+                text.Append('.').Append(path.Read).Append("()");
+            }
+
+            return;
+        }
+
         string[] names = field.Segments ?? field.Path.Split('.');
         for (int i = 0; i < names.Length; i++)
         {
@@ -373,10 +401,23 @@ internal static class ExprText
             Token operand = Next(tokens, at, "a literal or a column after the operator");
             if (operand.Kind is TokenKind.Name or TokenKind.QuotedName && !IsLiteralWord(operand))
             {
-                return new ColumnComparisonExpr(field, op, ParseField(tokens, ref at));
+                FieldExpr right = ParseField(tokens, ref at);
+                return VariantFilterExpr.Of(new ColumnComparisonExpr(Read(field, null, next.Position), op, Read(right, null, operand.Position)));
             }
 
-            return new ComparisonExpr(field, op, ParseLiteral(tokens, ref at));
+            FilterLiteral literal = ParseLiteral(tokens, ref at);
+            return VariantFilterExpr.Of(new ComparisonExpr(Read(field, literal.Kind, next.Position), op, literal));
+        }
+
+        if (IsWord(tokens, at, "exists"))
+        {
+            at++;
+            if (field is not UnreadPath unread)
+            {
+                throw new FormatException($"'exists' at position {next.Position} follows a path of a variant column, with no read: Attributes['key'] exists.");
+            }
+
+            return VariantFilterExpr.Of(new ComparisonExpr(new VariantFieldExpr(unread.Column, unread.Steps, VariantRead.Has), ComparisonOp.Equal, FilterLiteral.From(true)));
         }
 
         if (IsWord(tokens, at, "is"))
@@ -389,7 +430,7 @@ internal static class ExprText
             }
 
             ExpectWord(tokens, ref at, "null");
-            return new NullCheckExpr(field, isNull: !not);
+            return VariantFilterExpr.Of(new NullCheckExpr(Read(field, null, next.Position), isNull: !not));
         }
 
         bool negated = false;
@@ -411,7 +452,10 @@ internal static class ExprText
             }
 
             Expect(tokens, ref at, ")");
-            VortexExpr membership = Expr.In(field, [.. values]);
+            // The first value that is not null says what a path written without a read is read as.
+            FilterLiteralKind found = values.Find(value => value.Kind != FilterLiteralKind.Null).Kind;
+            FilterLiteralKind? first = found == FilterLiteralKind.Null ? null : found;
+            VortexExpr membership = VariantFilterExpr.Of(Expr.In(Read(field, first, next.Position), [.. values]));
             return negated ? Expr.Not(membership) : membership;
         }
 
@@ -432,20 +476,27 @@ internal static class ExprText
                 escape = escapeText.BytesValue[0];
             }
 
-            return Expr.Like(field, pattern, escape);
+            return VariantFilterExpr.Of(Expr.Like(Read(field, FilterLiteralKind.Bytes, next.Position), pattern, escape));
         }
 
         if (IsWord(tokens, at, "starts") && IsWord(tokens, at + 1, "with"))
         {
             at += 2;
-            return Expr.StartsWith(field, ParseLiteral(tokens, ref at));
+            return VariantFilterExpr.Of(Expr.StartsWith(Read(field, FilterLiteralKind.Bytes, next.Position), ParseLiteral(tokens, ref at)));
         }
 
         if (IsWord(tokens, at, "contains"))
         {
             at++;
             FilterLiteral value = ParseLiteral(tokens, ref at);
-            return value.Kind == FilterLiteralKind.Bytes ? Expr.Contains(field, value) : Expr.ListContains(field, value);
+            if (value.Kind == FilterLiteralKind.Bytes)
+            {
+                return VariantFilterExpr.Of(Expr.Contains(Read(field, FilterLiteralKind.Bytes, next.Position), value));
+            }
+
+            return field is UnreadPath or VariantFieldExpr
+                ? throw new FormatException($"'contains' at position {next.Position} looks for text in a path of a variant column, not for {value.Kind}.")
+                : Expr.ListContains(field, value);
         }
 
         throw new FormatException($"Expected an operator, 'is', 'in', 'like', 'starts with' or 'contains' at position {next.Position}, not '{next.Text}'.");
@@ -464,13 +515,86 @@ internal static class ExprText
 
             names.Add(name.Text);
             at++;
-            if (!IsSymbol(tokens, at, "."))
+            if (!IsSymbol(tokens, at, ".") || IsRead(tokens, at + 1))
             {
-                return new FieldExpr([.. names]);
+                break;
             }
 
             at++;
         }
+
+        FieldExpr column = new FieldExpr([.. names]);
+        List<VariantStep> steps = [];
+        while (IsSymbol(tokens, at, "["))
+        {
+            at++;
+            Token step = Next(tokens, at, "a key or an index of the path");
+            at++;
+            if (step.Kind == TokenKind.Text)
+            {
+                steps.Add(VariantStep.Of(step.Text));
+            }
+            else if (step.Kind == TokenKind.Number && int.TryParse(step.Text, NumberStyles.None, CultureInfo.InvariantCulture, out int index))
+            {
+                steps.Add(VariantStep.Of(index));
+            }
+            else
+            {
+                throw new FormatException($"Expected a 'key' or an index at position {step.Position}, not '{step.Text}'.");
+            }
+
+            Expect(tokens, ref at, "]");
+        }
+
+        if (IsSymbol(tokens, at, ".") && IsRead(tokens, at + 1))
+        {
+            VariantRead read = Enum.Parse<VariantRead>(tokens[at + 1].Text);
+            at += 4;
+            return new VariantFieldExpr(column, [.. steps], read);
+        }
+
+        return steps.Count == 0 ? column : new UnreadPath(column, [.. steps]);
+    }
+
+    /// <summary>Whether the tokens at <paramref name="at"/> are a read of a path: its name, then <c>()</c>.</summary>
+    private static bool IsRead(List<Token> tokens, int at) =>
+        at + 2 < tokens.Count && tokens[at].Kind == TokenKind.Name
+        && tokens[at].Text is "AsInt64" or "AsDouble" or "AsString" or "AsBool" or "AsTimestamp" or "ToInt64" or "ToDouble"
+        && IsSymbol(tokens, at + 1, "(") && IsSymbol(tokens, at + 2, ")");
+
+    /// <summary>
+    /// <paramref name="field"/> read as the literal it is compared with says, when it is a path written
+    /// without a read; any other field as it is.
+    /// </summary>
+    /// <exception cref="FormatException">A path without a read meets no literal that says what it is read as.</exception>
+    private static FieldExpr Read(FieldExpr field, FilterLiteralKind? literal, int position)
+    {
+        if (field is not UnreadPath path)
+        {
+            return field;
+        }
+
+        VariantRead? read = literal switch
+        {
+            FilterLiteralKind.Signed or FilterLiteralKind.Unsigned => VariantRead.AsInt64,
+            FilterLiteralKind.Float => VariantRead.AsDouble,
+            FilterLiteralKind.Bytes => VariantRead.AsString,
+            FilterLiteralKind.Bool => VariantRead.AsBool,
+            _ => null,
+        };
+
+        return read is { } chosen
+            ? new VariantFieldExpr(path.Column, path.Steps, chosen)
+            : throw new FormatException(
+                $"The path '{path.Column.Path}{string.Concat(path.Steps)}' before position {position} meets no literal that says what it is read as: write .AsInt64(), .AsString() or another read after it.");
+    }
+
+    /// <summary>A path of a variant column written without a read, until the literal it meets says which.</summary>
+    private sealed class UnreadPath(FieldExpr column, VariantStep[] steps) : FieldExpr(column.Segments ?? column.Path.Split('.'))
+    {
+        internal FieldExpr Column { get; } = column;
+
+        internal VariantStep[] Steps { get; } = steps;
     }
 
     private static FilterLiteral ParseLiteral(List<Token> tokens, ref int at)
@@ -615,7 +739,7 @@ internal static class ExprText
             string symbol = i + 1 < text.Length && text.Slice(i, 2) is "<=" or ">=" or "!=" or "<>" or "=="
                 ? text.Slice(i, 2).ToString()
                 : c.ToString();
-            if (symbol.Length == 1 && symbol is not ("=" or "<" or ">" or "(" or ")" or "," or "."))
+            if (symbol.Length == 1 && symbol is not ("=" or "<" or ">" or "(" or ")" or "," or "." or "[" or "]"))
             {
                 throw new FormatException($"Unexpected '{c}' at position {i} of the filter.");
             }
@@ -671,7 +795,7 @@ internal static class ExprText
     }
 
     private static bool IsKeyword(string name) =>
-        name.ToLowerInvariant() is "and" or "or" or "not" or "in" or "is" or "null" or "like" or "escape" or "starts" or "with" or "contains" or "true" or "false";
+        name.ToLowerInvariant() is "and" or "or" or "not" or "in" or "is" or "null" or "like" or "escape" or "starts" or "with" or "contains" or "exists" or "true" or "false";
 
     private enum TokenKind : byte
     {
@@ -687,7 +811,13 @@ internal static class ExprText
     private readonly record struct Token(TokenKind Kind, string Text, int Position, FilterLiteral Value = default);
 
     /// <summary>The column path the last predicate of <paramref name="text"/> names, for the hole that follows it.</summary>
-    internal static string[]? LastField(string text)
+    internal static string[]? LastField(string text) => LastPath(text)?.Names;
+
+    /// <summary>
+    /// The field the last predicate of <paramref name="text"/> names, for the hole that follows it: its
+    /// column path, and when it is a path of a variant column its steps and its read, null when none is written.
+    /// </summary>
+    internal static (string[] Names, VariantStep[] Steps, VariantRead? Read)? LastPath(string text)
     {
         List<Token> tokens;
         try
@@ -713,6 +843,34 @@ internal static class ExprText
             at--;
         }
 
+        // A path's read, `.AsInt64()`, then its steps, `['key']` and `[3]`, back to its column.
+        VariantRead? read = null;
+        if (at >= 3 && IsSymbol(tokens, at, ")") && IsSymbol(tokens, at - 3, ".") && IsRead(tokens, at - 2))
+        {
+            read = Enum.Parse<VariantRead>(tokens[at - 2].Text);
+            at -= 4;
+        }
+
+        List<VariantStep> steps = [];
+        while (at >= 2 && IsSymbol(tokens, at, "]") && IsSymbol(tokens, at - 2, "["))
+        {
+            Token step = tokens[at - 1];
+            if (step.Kind == TokenKind.Text)
+            {
+                steps.Insert(0, VariantStep.Of(step.Text));
+            }
+            else if (step.Kind == TokenKind.Number && int.TryParse(step.Text, NumberStyles.None, CultureInfo.InvariantCulture, out int index))
+            {
+                steps.Insert(0, VariantStep.Of(index));
+            }
+            else
+            {
+                return null;
+            }
+
+            at -= 3;
+        }
+
         if (at < 0 || tokens[at].Kind is not (TokenKind.Name or TokenKind.QuotedName))
         {
             return null;
@@ -725,6 +883,6 @@ internal static class ExprText
             at -= 2;
         }
 
-        return [.. names];
+        return ([.. names], [.. steps], read);
     }
 }

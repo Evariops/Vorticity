@@ -119,6 +119,24 @@ date, time, timestamp, uuid or decimal column is parsed in the column's type. Nu
 three-valued logic, so `not (Celsius < 40)` does not return a row whose `Celsius` is null
 ([three-valued logic](../design/08-semantics.md#3-three-valued-logic)).
 
+A variant column is walked by path. Each key is quoted whole, so `'http.route'` is one key with a dot
+in it, and an index is a number. What the path is read as follows it, or, when nothing follows, the
+literal decides: an integer reads it as `AsInt64`, a float as `AsDouble`, text as `AsString` and a
+boolean as `AsBool`. `exists` asks whether the path is there, and is never unknown:
+
+```csharp
+file.Scan().Where($"Attributes['http.response.status_code'] >= 500");          // integers only
+file.Scan().Where($"Attributes['http.response.status_code'].ToInt64() >= 500"); // "502" too
+file.Scan().Where($"Attributes['http']['route'] = {route} and Attributes['user.id'] exists");
+file.Scan().Where($"Attributes['at'].AsTimestamp() >= {since}");
+```
+
+The text `"502"` is not the integer `502`: only `ToInt64()` reads it as one. A path absent, or of
+another type than the one read, is null, so the row is not returned. A hole after a path without a
+read is read as the hole's type says, and a timestamp needs `.AsTimestamp()` written. The same
+paths, with the same rules, are the typed path's `r.Attributes["http.route"].AsString()`
+([records.md](records.md)).
+
 A set of values does not need text at all. `VortexExpr.In` takes them as they are, a few or a
 million, and combines with the other forms:
 
@@ -141,6 +159,30 @@ against the column when a scan takes the filter, as a hole is: a number goes to 
 value of another type to a column of that type, and a value the column cannot hold, or a null, matches
 no row.
 
+## Aggregates by name
+
+A group by takes its key and its results as text too, so a program can count by a column it learns
+at run time:
+
+```csharp
+Scan perService = file.Scan()
+    .Where($"Status >= {500}")
+    .GroupBy("Service")
+    .Select("Service", "count()", "sum(Bytes)", "avg(Duration)");
+await foreach (BatchView groups in perService)
+{
+    // Columns named "Service", "count()", "sum(Bytes)" and "avg(Duration)".
+}
+
+Scan totals = file.Scan().Aggregate("count()", "max(Bytes)");
+```
+
+A result is a column of the key, or one of `count()`, `count_distinct(c)`, `sum(c)`, `min(c)`,
+`max(c)` and `avg(c)`. A sum of integers is a 64-bit integer, signed or not, a sum of floats and a
+mean are doubles, and a minimum, a maximum and a key keep their column's type. Each result column is
+named by the text that asked for it. The engine and the plan are the typed path's: on a dataset by
+periods, the same question reads the same synopsis tables.
+
 ## Watch out
 
 * A non-nullable type over a nullable column is refused. `batch.Column<double>("Celsius")` throws
@@ -149,8 +191,9 @@ no row.
 * Names are matched exactly, case included, and an unknown name throws `VortexSchemaException` when
   the scan or the filter is built.
 * The tool scan is single-use, like the typed one. Its sinks are the borrowed batches,
-  `ToBatchesAsync`, `CountAsync`, `AnyAsync` and `ExplainAsync`. Rows, aggregates, `OrderBy` and the
-  key cursor need a record type.
+  `ToBatchesAsync`, `CountAsync`, `AnyAsync`, `ExplainAsync` and the group by. Rows, `OrderBy`, the
+  key cursor, and the operators on groups (a filter on their results, an order, a window) need a
+  record type.
 * The same scan exists on a dataset ([datasets.md](datasets.md)).
 
 The tool path is described in [the public API design](../design/14-public-api.md#58-the-tool-path),

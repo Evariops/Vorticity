@@ -13,8 +13,11 @@ namespace Vorticity;
 /// A file's reader as its session sees it: every request waits on the session's bound on reads in
 /// flight, and every segment passes through the session's cache.
 /// </summary>
-/// <remarks>Only a reader that does I/O is wrapped: memory and a mapping have nothing to bound or to cache.</remarks>
-internal sealed class SessionReader : ISegmentReader
+/// <remarks>
+/// Only a reader that does I/O is wrapped: memory and a mapping have nothing to bound or to cache. The regions of an
+/// index's runs its reader names go on to the reader it wraps, which may keep them.
+/// </remarks>
+internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
 {
     private readonly ISegmentReader _inner;
     private readonly SemaphoreSlim _gate;
@@ -29,12 +32,20 @@ internal sealed class SessionReader : ISegmentReader
 
     internal ISegmentReader Inner => _inner;
 
+    /// <summary>Whether a read costs no round trip: the reader's under the session's, which a scan reads ahead or along by.</summary>
+    bool ISegmentReader.CostsNoRoundTrip => _inner.CostsNoRoundTrip;
+
     internal static ISegmentReader Wrap(ISegmentReader inner, VortexSession session) =>
         inner is MemorySegmentSource or MemoryMappedSegmentSource or SessionReader
             ? inner
             : new SessionReader(inner, session.ReadGate, session.Options.SegmentCache);
 
-    internal static ISegmentReader Unwrap(ISegmentReader reader) => reader is SessionReader session ? session._inner : reader;
+    /// <summary>The store's reader under the session's, and under the synopsis cache's when there is one.</summary>
+    internal static ISegmentReader Unwrap(ISegmentReader reader)
+    {
+        ISegmentReader under = reader is SessionReader session ? session._inner : reader;
+        return under is SynopsisCacheReader cached ? cached.Inner : under;
+    }
 
     public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => _inner.GetLengthAsync(cancellationToken);
 
@@ -61,8 +72,15 @@ internal sealed class SessionReader : ISegmentReader
         return owner;
     }
 
+    public ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken) =>
+        ReadSetAsync(requests, default, cancellationToken);
+
+    public ValueTask ReadRegionsAsync(SegmentRequestSet requests, ReadOnlyMemory<Indexes.IndexSegment> regions, CancellationToken cancellationToken) =>
+        ReadSetAsync(requests, regions, cancellationToken);
+
+    /// <summary>Reads <paramref name="requests"/>, its slot <c>i</c> the index region <paramref name="regions"/>[i] where there is one.</summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
-    public async ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+    private async ValueTask ReadSetAsync(SegmentRequestSet requests, ReadOnlyMemory<Indexes.IndexSegment> regions, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(requests);
         if (requests.IsPopulated)
@@ -107,7 +125,14 @@ internal sealed class SessionReader : ISegmentReader
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                await _inner.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                if (regions.IsEmpty)
+                {
+                    await _inner.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await Indexes.IndexRegionReads.ReadRegionsAsync(_inner, requests, regions, cancellationToken).ConfigureAwait(false);
+                }
             }
             finally
             {

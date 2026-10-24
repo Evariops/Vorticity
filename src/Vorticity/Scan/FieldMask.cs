@@ -57,6 +57,12 @@ internal readonly struct FieldMask
     /// <summary><see langword="true"/> when every field is wanted, recursively.</summary>
     public bool IsAll => _kind == KindAll;
 
+    /// <summary>
+    /// Whether <paramref name="other"/> is this mask: the same kind, field and node. Two masks of the same fields built
+    /// apart are not, but those <see cref="FieldMasks.Of"/> keeps are.
+    /// </summary>
+    internal bool Is(in FieldMask other) => _kind == other._kind && _field == other._field && ReferenceEquals(_node, other._node);
+
     /// <summary><see langword="true"/> when no field is wanted.</summary>
     public bool IsEmpty => _kind == KindEmpty || (_kind == KindSubset && _node!.Count == 0);
 
@@ -194,6 +200,9 @@ internal sealed class FieldMaskNode
     }
 
     internal int Count => _fields.Length;
+
+    /// <summary>The wanted fields, ascending.</summary>
+    internal ReadOnlySpan<int> Fields => _fields;
 
     internal int FieldAt(int index)
     {
@@ -510,5 +519,60 @@ internal sealed class FieldMaskBuilder
 
             _ordered = false;
         }
+    }
+}
+
+/// <summary>
+/// Masks of whole fields of one level, kept by their fields for the process: a read that projects the same fields of
+/// every object's table takes the one mask, where one built for each object was two arrays an object.
+/// </summary>
+internal static class FieldMasks
+{
+    /// <summary>The masks kept at most; past them, a new one takes the place of the oldest.</summary>
+    private const int Kept = 64;
+
+    private static readonly object s_lock = new object();
+
+    // Copied on write: a reader takes the array in hand and searches it without a lock.
+    private static FieldMaskNode[] s_nodes = [];
+
+    // The place the next mask takes once every place is: the oldest's, so that a workload's masks take the places of those
+    // an earlier one asked for, where the first sixty-four asked kept theirs for the process. Under the lock.
+    private static int s_oldest;
+
+    /// <summary>The mask of <paramref name="fields"/>, ascending and distinct, each wanted whole.</summary>
+    internal static FieldMask Of(ReadOnlySpan<int> fields)
+    {
+        if (fields.IsEmpty)
+        {
+            return FieldMask.Empty;
+        }
+
+        FieldMaskNode[] nodes = System.Threading.Volatile.Read(ref s_nodes);
+        for (int n = 0; n < nodes.Length; n++)
+        {
+            if (nodes[n].Fields.SequenceEqual(fields))
+            {
+                return FieldMask.Subset(nodes[n]);
+            }
+        }
+
+        FieldMaskNode made = new FieldMaskNode(fields.ToArray(), null);
+        lock (s_lock)
+        {
+            if (s_nodes.Length < Kept)
+            {
+                s_nodes = [.. s_nodes, made];
+            }
+            else
+            {
+                FieldMaskNode[] next = [.. s_nodes];
+                next[s_oldest] = made;
+                s_oldest = (s_oldest + 1) % Kept;
+                s_nodes = next;
+            }
+        }
+
+        return FieldMask.Subset(made);
     }
 }

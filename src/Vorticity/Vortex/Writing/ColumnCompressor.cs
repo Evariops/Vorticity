@@ -400,7 +400,9 @@ internal static class ColumnCompressor
                 ? BitmapRuns(node.Bits.Span, node.BitOffset, length, ceiling, runStarts, runEnds)
                 : FixedRuns(in node, length, ceiling, runStarts, runEnds, out int fixedRuns)
                     ? fixedRuns
-                    : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
+                    : ViewRuns(in node, length, ceiling, runStarts, runEnds, out int viewRuns)
+                        ? viewRuns
+                        : ComparedRuns(in comparer, length, ceiling, runStarts, runEnds);
 
             if (runCount > ceiling)
             {
@@ -443,6 +445,56 @@ internal static class ColumnCompressor
         }
 
         return runCount;
+    }
+
+    /// <summary>
+    /// The same count over an all-valid column of views this library's kernels wrote, zero past every inline value's
+    /// bytes, read a view at a time: two equal views hold one value, and two whose lengths or first four bytes differ, or
+    /// that differ past them inside the view, hold two. Only two long values that agree on their length and their first
+    /// four bytes compare their bytes, as <see cref="RowComparer.Equal"/> compares every pair: a column of names, its rows
+    /// sorted into runs, is decided a word compare a row.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when this shape was handled, <paramref name="runs"/> holding the count;
+    /// <see langword="false"/> when the caller must fall back to <see cref="ComparedRuns"/>.
+    /// </returns>
+    private static bool ViewRuns(
+        in CanonicalNode node, int length, int ceiling, Span<int> starts, Span<int> ends, out int runs)
+    {
+        runs = 0;
+        if (node.Kind != CanonicalKind.VarBinView || !node.Validity.IsAllValid
+            || !node.Arena.RecordRef(node.Index).PaddedViews)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<Int128> views = MemoryMarshal.Cast<byte, Int128>(node.Views.Span)[..length];
+        ViewValues values = new ViewValues(node);
+        int runCount = 1;
+        starts[0] = 0;
+        for (int i = 1; i < views.Length; i++)
+        {
+            Int128 before = views[i - 1];
+            Int128 view = views[i];
+            if (before == view
+                || ((ulong)before == (ulong)view && (uint)(ulong)view > 12 && values.At(i - 1).SequenceEqual(values.At(i))))
+            {
+                continue;
+            }
+
+            if (runCount > ceiling)
+            {
+                runs = runCount;
+                return true;
+            }
+
+            ends[runCount - 1] = i;
+            starts[runCount] = i;
+            runCount++;
+        }
+
+        runs = runCount;
+        return true;
     }
 
     /// <summary>
@@ -1895,7 +1947,10 @@ internal static class ColumnCompressor
     /// besides. A sparse chunk pays for its valid rows only, a position each and a value, priced
     /// as a frame of reference packs them: the positions over the chunk's rows, the values over
     /// the bounds the pass took, or plain where it took none. Run-end is the one scheme that also
-    /// skips null rows, a run at a time, and is what it has to beat.
+    /// skips null rows, a run at a time, and is what it has to beat. Nine nulls in ten is a price:
+    /// sparse takes fewer bytes from half the rows null but decodes slower until nearly all are, and
+    /// at nine in ten each byte it saves costs about a third of a nanosecond of decode, for integers,
+    /// doubles and text alike (<c>vortex-queries --micro sparsecost</c>).
     /// </remarks>
     private static ColumnPlan SparseOf(
         CanonicalArena arena, in CanonicalNode node, VortexEdition target, in BlockStats stats, bool measured,

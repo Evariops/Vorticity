@@ -38,6 +38,12 @@ namespace Vorticity.Scanning;
 /// segments were live anyway, since every batch holds its own reference until it is released.
 /// </para>
 /// <para>
+/// Over a source whose read is a round trip, a batch also reads along with its own the small segments
+/// of the splits ahead, which it claims in the same step as its own and the scan holds for the batch
+/// that asks for each, as its last use: a few kilobytes in all, where each split of a column coded in
+/// runs asked for its few dozen bytes alone.
+/// </para>
+/// <para>
 /// A batch looks for each segment it lacks by the hash of its offset and length, in chains threaded
 /// through the entries themselves, so that a batch opening G segments while the scan holds E pays
 /// G steps under the lock rather than G times E.
@@ -77,11 +83,20 @@ internal sealed class ScanSegments : IDisposable
     /// <param name="requests">The batch's set, registered and not yet read.</param>
     /// <param name="batch">The batch's number in the scan, in the order the scan walks its rows.</param>
     /// <param name="waiter">The batch's waiter, or null when no other batch runs beside it.</param>
+    /// <param name="along">
+    /// Segments of the splits after the batch's that it reads along with its own, each held for the batch
+    /// <paramref name="alongBatches"/> names, which asks for it: one the scan holds or another batch reads is
+    /// held for that batch, and the others are added to the set and claimed by this batch, in the same step
+    /// as its own, so that a batch still waits only on one that claimed before it. Given at the first claim alone.
+    /// </param>
+    /// <param name="alongBatches">The batch that asks for each of <paramref name="along"/>.</param>
     /// <returns>
     /// True when another batch is reading a segment this one needs: the waiter is then parked, and
     /// the caller awaits it and claims again.
     /// </returns>
-    internal bool Claim(SegmentRequestSet requests, long batch, SegmentWaiter? waiter)
+    internal bool Claim(
+        SegmentRequestSet requests, long batch, SegmentWaiter? waiter, ReadOnlySpan<SegmentSpec> along = default,
+        ReadOnlySpan<long> alongBatches = default)
     {
         using (Enter())
         {
@@ -122,6 +137,21 @@ internal sealed class ScanSegments : IDisposable
                         Add(new Entry { Offset = spec.Offset, Length = spec.Length, Hash = hash, Claimant = batch, LastUse = batch });
                     }
                 }
+
+                for (int a = 0; a < along.Length; a++)
+                {
+                    SegmentSpec spec = along[a];
+                    int hash = SegmentRequestSet.HashOf(spec.Offset, spec.Length);
+                    int held = Find(spec.Offset, spec.Length, hash);
+                    if (held >= 0)
+                    {
+                        _entries[held].LastUse = Math.Max(_entries[held].LastUse, alongBatches[a]);
+                        continue;
+                    }
+
+                    requests.Add(in spec);
+                    Add(new Entry { Offset = spec.Offset, Length = spec.Length, Hash = hash, Claimant = batch, LastUse = alongBatches[a], Along = true });
+                }
             }
 
             if (!blocked || waiter is null || _failed)
@@ -156,8 +186,21 @@ internal sealed class ScanSegments : IDisposable
                         continue;
                     }
 
-                    entry.Owner = requests.GetOwner(slot).Retain();
-                    entry.View = requests.GetBuffer(slot);
+                    // A segment read along for a batch ahead, a view of a run of this batch's read, is copied into a block
+                    // of its own: the run then goes back with this batch, not with the last batch the segment waits for.
+                    SegmentOwner owner = requests.GetOwner(slot);
+                    VortexBuffer view = requests.GetBuffer(slot);
+                    if (entry.Along && owner.Buffer.Length > view.Length)
+                    {
+                        NativeSegmentOwner copy = SegmentCache.Copy(view);
+                        entry.Owner = copy;
+                        entry.View = copy.Buffer;
+                    }
+                    else
+                    {
+                        entry.Owner = owner.Retain();
+                        entry.View = view;
+                    }
                 }
 
                 Keep(i, ref kept);
@@ -486,6 +529,9 @@ internal sealed class ScanSegments : IDisposable
 
         /// <summary>The last batch, in the order of the walk, that asked for the segment.</summary>
         internal long LastUse;
+
+        /// <summary>Whether the claimant reads the segment along with its own, for a batch after it.</summary>
+        internal bool Along;
 
         internal SegmentOwner? Owner;
         internal VortexBuffer View;

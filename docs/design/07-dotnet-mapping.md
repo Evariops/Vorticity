@@ -29,10 +29,16 @@ What a record member and a `Column<T>` may be, and what the column exposes:
 | `vortex.time` | `TimeOnly` | an indexer, `AsStorage<TStorage>()`, `Unit` | |
 | `vortex.timestamp` | `DateTime` when naive or UTC, `DateTimeOffset` with a zone | an indexer, `AsStorage<long>()`, `Unit`, `TimeZone` | see [temporal extensions](#3-temporal-extensions-one-resolution-at-binding) |
 | `vortex.uuid` | `Guid` | an indexer | the byte order is converted explicitly, never implied |
+| `Variant` | `Variant` | an indexer, `CopyTo`, `GetMetadata(i)` and `GetValue(i)` as spans of the batch | a row read is its bytes copied, the metadata shared by consecutive rows of the same bytes; shredded or not, a row reads the same |
 | an extension registered on the session | the registered type | an indexer, `AsStorage<TStorage>()` | see [the session](14-public-api.md#2-the-session) |
 
-`Union` and `Variant` columns appear in a schema but no `T` maps to them. An `enum` member maps to
-its underlying integer.
+`Union` columns appear in a schema but no `T` maps to them. An `enum` member maps to its underlying
+integer.
+
+A `Variant` is the value of one row of a variant column: its metadata, the dictionary of the keys its
+objects use, and its value, both in the Parquet Variant encoding. It walks by whole keys and indices,
+gives each primitive as stored through `As…` and converted through `To…`, and compares under the
+encoding's equivalence classes, so an integer stored in 8 bits equals the same integer stored in 64.
 
 Nullability is carried by `T`. `Column<double?>` is a nullable column and `Column<double>` is not,
 and a non-nullable value type over a nullable column is refused when it binds

@@ -319,17 +319,19 @@ public sealed partial class QueryMemoryTests
     }
 
     [Theory]
-    [InlineData(64, 4, 2)]
+    [InlineData(64, 4, 4)]
     [InlineData(20, 4, 1)]
     [InlineData(16, 4, 0)]
-    [InlineData(15, 2, 2)]
+    [InlineData(15, 2, 3)]
     [InlineData(5, 1, 2)]
     [InlineData(1, 1, 0)]
     public void AdmissionReservesTheReadsAheadAndDropsThemBeforeTheLanes(int mebibytes, int lanes, int ahead)
     {
         // Lanes of a megabyte of working memory each, over a source that copies splits of a quarter of a
-        // megabyte: two splits ahead a lane, then one, then none, before the lanes are halved; the lanes
-        // left read two again as far as they fit. A source that reads in place reserves none and reads two.
+        // megabyte: four splits ahead each of four lanes, their share of sixteen, then one fewer at a time
+        // down to none, before the lanes are halved; the lanes left read their share again as far as they
+        // fit, two lanes three of their eight under 15 MiB, a lane alone its two past a quarter of the
+        // ceiling. A source that reads in place reserves none and reads its share.
         const long Split = 256 * 1024;
         QueryMemoryBudget budget = new QueryMemoryBudget((long)mebibytes << 20);
         using (QueryMemory memory = new QueryMemory(budget))
@@ -342,7 +344,7 @@ public sealed partial class QueryMemoryTests
         using (QueryMemory memory = new QueryMemory(new QueryMemoryBudget(64L << 20)))
         {
             Assert.Equal(4, AggregationEngine.Admit(memory, 4, 0, 0, splitBytes: 0, out int inPlace));
-            Assert.Equal(2, inPlace);
+            Assert.Equal(4, inPlace);
             Assert.Equal(4L << 20, memory.Held);
         }
 

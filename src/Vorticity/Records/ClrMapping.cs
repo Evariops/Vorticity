@@ -36,6 +36,9 @@ internal enum ClrKind : byte
 
     /// <summary>A <see cref="System.Numerics.BigInteger"/>: a decimal column of scale 0, of any precision.</summary>
     BigInteger,
+
+    /// <summary>A <see cref="Vorticity.Variant"/>: a variant column, its metadata and value per row.</summary>
+    Variant,
 }
 
 /// <summary>The shape of a .NET type a column may be read or written as.</summary>
@@ -123,6 +126,7 @@ internal sealed class ClrShape
             _ when core == typeof(Int128) => (ClrKind.Integer128, default(PType)),
             _ when core == typeof(UInt128) => (ClrKind.UInteger128, default(PType)),
             _ when core == typeof(System.Numerics.BigInteger) => (ClrKind.BigInteger, default(PType)),
+            _ when core == typeof(Variant) => (ClrKind.Variant, default(PType)),
             _ => (ClrKind.Unsupported, default(PType)),
         };
 
@@ -289,6 +293,8 @@ internal static class ClrFit
             case ClrKind.BigInteger:
                 return Expect(target.Kind == VortexTypeKind.Decimal && target.Scale == 0,
                     "a BigInteger reads a decimal column of scale 0.", out reason);
+            case ClrKind.Variant:
+                return Expect(target.Kind == VortexTypeKind.Variant, "a Variant reads a variant column.", out reason);
             case ClrKind.List:
                 if (target.Kind is not (VortexTypeKind.List or VortexTypeKind.FixedSizeList))
                 {

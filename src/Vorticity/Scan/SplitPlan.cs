@@ -320,7 +320,15 @@ internal sealed class SplitPlan
                 continue;
             }
 
+            // A flat chunk, the writer's every chunk, is indivisible: its end is the boundary, pushed here rather than
+            // by a walk of its own, a call a chunk of each column a scan reads.
             LayoutNode chunk = node.GetChild(i);
+            if (chunk.Encoding == LayoutEncodingId.Flat)
+            {
+                list.Push(rowOffset + chunkRows.End);
+                continue;
+            }
+
             Walk(
                 in chunk,
                 new RowRange(chunkRows.Start - start, chunkRows.End - start),
@@ -343,8 +351,14 @@ internal sealed class SplitPlan
             return;
         }
 
+        // A field chunked where the field before it is adds nothing to the union, and its run is dropped as soon as it
+        // is walked: a struct whose fields are chunked alike, the writer's shape, leaves its boundaries in order, and
+        // the plan sorts nothing where it sorted a run a field (60 000 boundaries over the eleven fields of an hour of
+        // requests, 1.3 ms a scan). The run kept is the last one that differed, which ends where the next one starts.
+        int kept = -1;
         if (validityChildren == 1)
         {
+            kept = list.Count;
             LayoutNode validity = node.GetChild(0);
             FieldMask all = FieldMask.All;
             Walk(in validity, local, rowOffset, in all, ref list, depth + 1);
@@ -353,9 +367,18 @@ internal sealed class SplitPlan
         int selected = mask.SelectedCount(dtype.FieldCount);
         for (int s = 0; s < selected; s++)
         {
+            int mark = list.Count;
             LayoutNode child = node.GetChild(mask.SelectedField(s) + validityChildren);
             FieldMask childMask = mask.SelectedMask(s);
             Walk(in child, local, rowOffset, in childMask, ref list, depth + 1);
+            if (kept >= 0 && list.Repeats(kept, mark))
+            {
+                list.Truncate(mark);
+            }
+            else
+            {
+                kept = mark;
+            }
         }
 
         // An empty struct - or one whose every field was projected away - still has to register the
@@ -372,11 +395,19 @@ internal sealed class SplitPlan
         internal long[] Items;
         private int _count;
 
+        // Where the first boundary below the one before it was pushed, -1 while none was: a list in order is
+        // de-duplicated without a sort.
+        private int _descent;
+
         internal BoundaryList(int capacity)
         {
             Items = ArrayPool<long>.Shared.Rent(capacity);
             _count = 0;
+            _descent = -1;
         }
+
+        /// <summary>The boundaries pushed and kept so far.</summary>
+        internal readonly int Count => _count;
 
         internal void Push(long row)
         {
@@ -388,7 +419,32 @@ internal sealed class SplitPlan
                 Items = grown;
             }
 
+            if (_descent < 0 && _count > 0 && row < Items[_count - 1])
+            {
+                _descent = _count;
+            }
+
             Items[_count++] = row;
+        }
+
+        /// <summary>
+        /// Whether the boundaries pushed from <paramref name="mark"/> on are those of
+        /// <c>[<paramref name="kept"/>, <paramref name="mark"/>)</c>, one for one.
+        /// </summary>
+        internal readonly bool Repeats(int kept, int mark)
+        {
+            int length = mark - kept;
+            return _count - mark == length && Items.AsSpan(mark, length).SequenceEqual(Items.AsSpan(kept, length));
+        }
+
+        /// <summary>Drops the boundaries pushed from <paramref name="count"/> on, and their descent with them.</summary>
+        internal void Truncate(int count)
+        {
+            _count = count;
+            if (_descent >= count)
+            {
+                _descent = -1;
+            }
         }
 
         /// <summary>Gives the rented array back.</summary>
@@ -408,7 +464,10 @@ internal sealed class SplitPlan
                 return count;
             }
 
-            SpanSort.Sort(items.AsSpan(0, count));
+            if (_descent >= 0)
+            {
+                SpanSort.Sort(items.AsSpan(0, count));
+            }
 
             int write = 1;
             for (int read = 1; read < count; read++)
@@ -463,6 +522,62 @@ internal struct SplitCursor
 
     /// <summary>The plan this cursor walks.</summary>
     internal readonly SplitPlan Plan => _plan;
+
+    /// <summary>Whether the walk goes from the last split to the first.</summary>
+    internal readonly bool Reverse => _reverse;
+
+    /// <summary>
+    /// Moves a forward walk on to the split that holds <paramref name="row"/>, cut exactly as the walk would have cut it,
+    /// past the splits before it; nothing when that split is not past the walk's next, or the walk goes backwards. A row
+    /// past the plan's end ends the walk.
+    /// </summary>
+    /// <remarks>
+    /// What a scan whose mask keeps few blocks walks to, rather than every split between: a day's object of the design's
+    /// requests holds 132 000 of them, each asked whether a block of it lives.
+    /// </remarks>
+    internal void SkipTo(long row)
+    {
+        SplitPlan plan = _plan;
+        int boundaries = plan.BoundaryCount;
+        if (_reverse || boundaries < 2)
+        {
+            return;
+        }
+
+        if (row >= plan.BoundaryAt(boundaries - 1))
+        {
+            _span = boundaries - 2;
+            _cursor = plan.BoundaryAt(boundaries - 1);
+            return;
+        }
+
+        int low = 0;
+        int high = boundaries - 2;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high + 1) >> 1);
+            if (plan.BoundaryAt(middle) <= row)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        long start = plan.BoundaryAt(low);
+        long size = SubSize(plan.BoundaryAt(low + 1) - start, plan.MaxRows);
+        long first = start + ((Math.Max(row, start) - start) / size * size);
+        if (low < _span || (low == _span && first <= _cursor))
+        {
+            return;
+        }
+
+        _span = low;
+        _subSize = size;
+        _cursor = first;
+    }
 
     /// <summary>
     /// The spans last first, and each span's sub-divisions last first, which is the forward walk

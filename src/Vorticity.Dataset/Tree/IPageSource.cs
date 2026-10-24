@@ -15,6 +15,9 @@ internal interface IPageSource
     /// <summary>Reads one page and checks it against its reference.</summary>
     /// <exception cref="CommitFormatException">The page is not there or does not hash to its reference.</exception>
     ValueTask<ReadOnlyMemory<byte>> ReadPageAsync(PageReference reference, CancellationToken cancellationToken);
+
+    /// <summary>The bytes of a page the source holds in hand, taken with no read and no wait: false when a read is needed.</summary>
+    bool TryGetInHand(PageReference reference, out ReadOnlyMemory<byte> page);
 }
 
 /// <summary>
@@ -79,6 +82,14 @@ internal sealed class MemoryPageStore : IPageSource, IPageSink
             _version, _pages.Count == 0 ? 0 : Bytes, bytes.Length, System.IO.Hashing.XxHash128.HashToUInt128(bytes));
         _pages[reference] = bytes;
         return reference;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>None: a read of this store is counted (<see cref="Reads"/>), which a page taken in hand would not be.</remarks>
+    public bool TryGetInHand(PageReference reference, out ReadOnlyMemory<byte> page)
+    {
+        page = default;
+        return false;
     }
 
     /// <inheritdoc/>
