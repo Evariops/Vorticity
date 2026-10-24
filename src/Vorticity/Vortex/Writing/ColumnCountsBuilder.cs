@@ -44,6 +44,22 @@ internal sealed class CountedMeasure(int field, MeasureKind kind, int width)
 }
 
 /// <summary>
+/// A text column of many values that repeat, whose distinct values the counts of every column of few values keep, an entry
+/// each: its sheet hashes each row of a batch for them.
+/// </summary>
+internal sealed class WideColumn(int field, ColumnSheetBuilder sheet)
+{
+    /// <summary>The top-level column.</summary>
+    internal int Field { get; } = field;
+
+    /// <summary>Its sheet, which hashes its rows.</summary>
+    internal ColumnSheetBuilder Sheet { get; } = sheet;
+
+    /// <summary>Whether the counts still keep its distinct values; once false, never true again.</summary>
+    internal bool Live { get; set; } = true;
+}
+
+/// <summary>
 /// What the counts by hour of a file's columns share (<see cref="ColumnCountsBuilder"/>): the instant whose hour each
 /// row is counted in, the hours met, numbered as they were met, and the number columns every column's counts carry
 /// as measures. Each batch's instants and measures are read once, before any column is counted (<see cref="Prepare"/>),
@@ -74,6 +90,33 @@ internal sealed class CountsPlan
 
     /// <summary>The number columns the counts carry the states of: every top-level integer and float but the instant.</summary>
     internal CountedMeasure[] Measures { get; }
+
+    /// <summary>
+    /// The text columns whose distinct values the counts of the columns of at most <see cref="ColumnCountsBuilder.AttachValues"/>
+    /// values keep, an entry each: every text column with a sheet at first, then those of more than
+    /// <see cref="ColumnCountsBuilder.WideValues"/> values whose values repeat (<see cref="SettleWide"/>).
+    /// </summary>
+    internal List<WideColumn> Wide { get; } = [];
+
+    /// <summary>
+    /// Settles which text columns stay wide: one whose values hardly repeat is an identifier, whose distinct values in an
+    /// entry are the entry's rows, which the counts give, and one of at most <see cref="ColumnCountsBuilder.WideValues"/> values
+    /// is counted as a column instead: once its sheet gave its counts up, or once its first rows are in or the file ends.
+    /// </summary>
+    internal void SettleWide(bool end)
+    {
+        foreach (WideColumn wide in Wide)
+        {
+            ColumnSheetBuilder sheet = wide.Sheet;
+            bool settled = end || sheet.Rows - sheet.Nulls >= ColumnCountsBuilder.FirstCheck;
+            long valid = sheet.Rows - sheet.Nulls;
+            if (wide.Live && (!sheet.Counting || (settled && (sheet.Distinct <= ColumnCountsBuilder.WideValues || sheet.Distinct * 4L > valid))))
+            {
+                wide.Live = false;
+                sheet.StopHashing();
+            }
+        }
+    }
 
     /// <summary>The hours met, by their number: hours since the Unix epoch, <see cref="NullHour"/> for a null instant.</summary>
     internal List<long> Hours { get; } = [];
@@ -461,8 +504,14 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// </summary>
     internal const int SketchValues = 1_000;
 
-    /// <summary>The valid rows at which a number shows whether it is counted or carried.</summary>
-    private const long FirstCheck = 1 << 16;
+    /// <summary>The valid rows at which a number shows whether it is counted or carried, and a text column whether it is wide.</summary>
+    internal const long FirstCheck = 1 << 16;
+
+    /// <summary>The fewest values a text column holds past which it is wide: the columns of few values keep its distinct values.</summary>
+    internal const int WideValues = 1_000;
+
+    /// <summary>The most values a column holds and keeps, for each entry, the distinct values of every wide column.</summary>
+    internal const int AttachValues = 100;
 
     /// <summary>The bits of the sketches' grid: a relative error of 1 %, the engine's for a quantile asked with none.</summary>
     private static readonly int SketchBits = QuantileSketch.BitsFor(0.01);
@@ -511,6 +560,12 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private byte[]?[][]? _sealed;
     private readonly HashSet<int> _openHours = [];
 
+    // Each row's entry by its row in the batch being fed, which the distinct values read once the batch is in; and for each
+    // wide column of the plan, the registers of each entry, null once the column holds more than AttachValues values.
+    private readonly int _field;
+    private int[] _batchEntries = new int[1_024];
+    private byte[]?[][]? _distinct;
+
     /// <param name="sheet">The column's sheet, fed first, which numbers its rows' values.</param>
     /// <param name="plan">What the file's counts share.</param>
     /// <param name="field">The column.</param>
@@ -519,6 +574,13 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     {
         _sheet = sheet;
         _plan = plan;
+        _field = field;
+        _distinct = new byte[]?[plan.Wide.Count][];
+        for (int w = 0; w < _distinct.Length; w++)
+        {
+            _distinct[w] = [];
+        }
+
         _self = plan.MeasureOf(field);
         _number = _self >= 0;
         _settled = !_number;
@@ -628,6 +690,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         Span<int> entries = _rowEntries.AsSpan(0, count);
         Span<int> indexes = _rowIndexes.AsSpan(0, count);
+        if (_distinct is not null && _batchEntries.Length < start + count)
+        {
+            Array.Resize(ref _batchEntries, Math.Max(start + count, _batchEntries.Length * 2));
+        }
         ReadOnlySpan<int> hours = _plan.HourSlots.AsSpan(start, count);
         int lastHour = -1;
         int[] map = [];
@@ -650,6 +716,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
             entries[i] = entry * _stride;
             indexes[i] = entry;
+            if (_distinct is not null)
+            {
+                _batchEntries[start + i] = entry;
+            }
         }
 
         ref long words = ref MemoryMarshal.GetArrayDataReference(_words);
@@ -699,6 +769,63 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         if (!_settled && _sheet.Rows - _sheet.Nulls >= FirstCheck)
         {
             Settle();
+        }
+    }
+
+    /// <summary>
+    /// Raises, for each of the batch's <paramref name="rows"/>, the register its wide columns' hashes call for in its entry's
+    /// registers of each: once the whole batch is in, every column's sheet having hashed its rows.
+    /// </summary>
+    internal void Attach(int rows)
+    {
+        if (_distinct is not { } distinct || _dropped)
+        {
+            return;
+        }
+
+        if (_sheet.Distinct > AttachValues || !_sheet.Counting)
+        {
+            _distinct = null;
+            return;
+        }
+
+        for (int w = 0; w < distinct.Length; w++)
+        {
+            WideColumn wide = _plan.Wide[w];
+            ReadOnlySpan<ulong> hashes = wide.Sheet.RowHashes;
+            if (!wide.Live || wide.Field == _field)
+            {
+                distinct[w] = [];
+                continue;
+            }
+
+            if (hashes.Length < rows)
+            {
+                // The wide column's sheet gave its hashes up: its counts went.
+                wide.Live = false;
+                distinct[w] = [];
+                continue;
+            }
+
+            byte[]?[] registers = distinct[w];
+            if (registers.Length < _entries)
+            {
+                Array.Resize(ref distinct[w], Math.Max(_entries, Math.Max(16, registers.Length * 2)));
+                registers = distinct[w];
+            }
+
+            for (int row = 0; row < rows; row++)
+            {
+                ulong hash = hashes[row];
+                if (hash == 0)
+                {
+                    continue;
+                }
+
+                byte[] ranks = registers[_batchEntries[row]] ??= new byte[ColumnSheet.Registers];
+                ref byte rank = ref ranks[HyperLogLog.Register(hash, ColumnSheet.Precision)];
+                rank = Math.Max(rank, HyperLogLog.Rank(hash, ColumnSheet.Precision));
+            }
         }
     }
 
@@ -1015,6 +1142,19 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         long[] words = new long[_entries * width];
         long[] entryHours = new long[_entries];
         byte[]?[]? sketchBytes = _sketches is null ? null : new byte[]?[_entries * carried.Count];
+
+        // The wide columns whose distinct values every entry keeps.
+        _plan.SettleWide(end: true);
+        List<int> attached = [];
+        for (int w = 0; _distinct is not null && distinct <= AttachValues && w < _distinct.Length; w++)
+        {
+            if (_plan.Wide[w].Live && _plan.Wide[w].Field != _field)
+            {
+                attached.Add(w);
+            }
+        }
+
+        byte[]?[]? registers = attached.Count > 0 ? new byte[]?[_entries * attached.Count] : null;
         List<CountGroup> groups = [];
         for (int i = 0; i < order.Length; i++)
         {
@@ -1024,6 +1164,12 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             Span<long> state = words.AsSpan(i * width, width);
             state[0] = record[0];
             int at = 1;
+            for (int a = 0; registers is not null && a < attached.Count; a++)
+            {
+                byte[]?[] held = _distinct![attached[a]];
+                registers[(i * attached.Count) + a] = entry < held.Length && held[entry] is { } ranks ? HyperLogLog.Encode(ranks) : null;
+            }
+
             for (int c = 0; c < carried.Count; c++)
             {
                 if (sketchBytes is not null)
@@ -1067,7 +1213,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             groups[^1] = groups[^1] with { Entries = groups[^1].Entries + 1 };
         }
 
-        return new ColumnCounts(fields, kinds, [.. groups], entryHours, words, sketchBytes).ToBytes();
+        return new ColumnCounts(fields, kinds, [.. groups], entryHours, words, sketchBytes)
+        {
+            AttachedFields = [.. attached.Select(w => _plan.Wide[w].Field)],
+            Distinct = registers,
+        }.ToBytes();
     }
 
     /// <summary>
@@ -1290,6 +1440,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// <summary>Merges the entries of every value left out into the entries of the values left out, an hour each, and renumbers the entries.</summary>
     private void Merge()
     {
+        // Entries renumbered, the registers would follow them; a column of at most AttachValues values reaches the budget
+        // only over thousands of hours, and lets them go.
+        _distinct = null;
+
         int total = _entries;
         int[] values = _entryValue;
         int[] hoursOf = _entryHour;
@@ -1392,6 +1546,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private void Drop()
     {
         _dropped = true;
+        _distinct = null;
         _sketches = null;
         _sealed = null;
         _openHours.Clear();

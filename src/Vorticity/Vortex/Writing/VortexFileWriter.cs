@@ -1497,6 +1497,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         int rows = root.Length;
         _indexes?.PrepareCounts(arena, _fieldNodes, rows);
+        IngestRows(arena, rows);
+
+        // Once every column's builders took the batch: the distinct values the columns of few values keep of the wide ones.
+        _indexes?.AttachCounts(rows);
+    }
+
+    /// <summary>Folds the batch's <paramref name="rows"/> into the open block of every column and feeds the indexes, crossing the blocks.</summary>
+    private void IngestRows(CanonicalArena arena, int rows)
+    {
         if (_blockRows == 0)
         {
             // The batch is the block: repartitioning is off, so batches are the pruning unit.

@@ -157,13 +157,7 @@ internal sealed class ColumnSheet
         at += Varint.Write(into[at..], (ulong)Distinct);
 
         // The registers, six bits each, four in three bytes.
-        for (int r = 0; r < Registers; r += 4)
-        {
-            uint word = (uint)_ranks[r] | ((uint)_ranks[r + 1] << 6) | ((uint)_ranks[r + 2] << 12) | ((uint)_ranks[r + 3] << 18);
-            into[at++] = (byte)word;
-            into[at++] = (byte)(word >> 8);
-            into[at++] = (byte)(word >> 16);
-        }
+        at += HyperLogLog.Pack(_ranks, into[at..]);
 
         at += Varint.Write(into[at..], (ulong)Top.Count);
         foreach (SheetValue value in Top)
@@ -204,15 +198,8 @@ internal sealed class ColumnSheet
         }
 
         byte[] ranks = new byte[Registers];
-        for (int r = 0; r < Registers; r += 4)
-        {
-            uint word = bytes[at] | ((uint)bytes[at + 1] << 8) | ((uint)bytes[at + 2] << 16);
-            at += 3;
-            ranks[r] = (byte)(word & 63);
-            ranks[r + 1] = (byte)((word >> 6) & 63);
-            ranks[r + 2] = (byte)((word >> 12) & 63);
-            ranks[r + 3] = (byte)((word >> 18) & 63);
-        }
+        HyperLogLog.Unpack(bytes.Slice(at, RegisterBytes), ranks);
+        at += RegisterBytes;
 
         ulong count = Varint.Read64<Errors>(bytes, ref at);
         if (count > TopValues)

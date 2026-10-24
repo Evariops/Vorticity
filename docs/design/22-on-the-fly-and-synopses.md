@@ -199,8 +199,10 @@ sorted by value then time, in chunks of 16 KB with a directory (`vorticity.colum
   design rate (section 9), which merging its synopses into coarser grains must not rewrite. A grain
   becomes the next by adding entries. The minute is not kept: recent windows are computed on the fly.
 - **Sketches.** Quantile sketches at 1 % of relative error, the engine's grid, for the columns of at
-  most 1 000 values, on every measure an entry carries; distinct-count sketches of the high-cardinality
-  columns attached to the columns of at most 100 values. A quantile sketch weighs 0.5 to 2 KB on the
+  most 1 000 values, on every measure an entry carries; distinct-count sketches of the wide columns, text
+  columns of more than 1 000 values that repeat, attached to the columns of at most 100 values, a
+  HyperLogLog of 2^11 registers each, the sheets', about 2.3 % of error, an identifier keeping none since
+  its distinct values in an entry are the entry's rows. A quantile sketch weighs 0.5 to 2 KB on the
   design's requests *(measured)*, not the 1 KB first reckoned: a measure spanning 3.7 decades fills some
   790 buckets at 1 %, and a float spanning both signs and many binades more.
 - **Measures.** Every top-level integer and float column of more than 64 values, its values, exact

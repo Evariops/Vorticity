@@ -399,6 +399,14 @@ order of their time, and opened again by a row of that hour that comes late. A s
 spanning 3.7 decades fills some 790 buckets: an entry of two sketched measures takes 1 to 3.4 KB on
 the design's requests, and the sketches cost the writer some 12 to 18 ns more a sketched column a row.
 
+A column of at most 100 values keeps, for each entry, the distinct values of every wide column as well:
+a text column of more than 1 000 values that repeat. They are a HyperLogLog of 2^11 registers of six bits
+over the hashes of the wide column's values in the entry's rows, the sheet's, written as the set
+registers while few are, packed past them, after the entry's sketches. An identifier, whose values
+hardly repeat, is no wide column: its distinct values in an entry are the entry's rows. Registers of two
+objects merge register by register. The sheet of a wide column hashes each row of a batch for them, and
+the columns of few values raise their entries' registers once the whole batch is in.
+
 ### 4.10 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file

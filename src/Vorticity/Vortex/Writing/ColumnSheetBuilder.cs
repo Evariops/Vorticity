@@ -92,6 +92,11 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     private int[]? _rowIds;
     private bool _rowIdsFilled;
 
+    // The hash of each row of the batch being fed, by its row in the batch, 0 for a null, when another column's counts ask
+    // for them; and whether every row fed of the batch has its hash.
+    private ulong[]? _rowHashes;
+    private bool _rowHashesWhole;
+
     /// <summary>Whether the builder can describe a column of <paramref name="dtype"/>: an integer, a float, a string or a binary, through any extension.</summary>
     internal static bool Supports(DType dtype) => KeyLayout.TryOf(dtype, out _);
 
@@ -123,6 +128,18 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     /// <summary>Asks the builder to number each row's value as it takes it (<see cref="RowIds"/>), for the column's counts.</summary>
     internal void NumberRows() => _rowIds ??= new int[1_024];
 
+    /// <summary>Asks the builder to keep the hash of each row of a batch (<see cref="RowHashes"/>), for the distinct values another column's counts keep of it.</summary>
+    internal void HashRows() => _rowHashes ??= new ulong[1_024];
+
+    /// <summary>Stops keeping the hash of each row: no column's counts asks for them any more.</summary>
+    internal void StopHashing() => _rowHashes = null;
+
+    /// <summary>
+    /// The hash of each row of the batch fed last, by its row in the batch, 0 for a null; empty when a row of it has none,
+    /// the counts gone. Asked for with <see cref="HashRows"/>.
+    /// </summary>
+    internal ReadOnlySpan<ulong> RowHashes => _rowHashesWhole && _slots is not null ? _rowHashes : default;
+
     internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
         _rowIdsFilled = false;
@@ -134,6 +151,16 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         if (_rowIds is { } held && held.Length < count)
         {
             _rowIds = new int[Math.Max(count, held.Length * 2)];
+        }
+
+        // A batch's first rows start its hashes; its next pieces keep those before them.
+        if (_rowHashes is { } hashes)
+        {
+            _rowHashesWhole = start == 0 || _rowHashesWhole;
+            if (hashes.Length < start + count)
+            {
+                Array.Resize(ref _rowHashes, Math.Max(start + count, hashes.Length * 2));
+            }
         }
 
         _rows += count;
@@ -150,6 +177,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         {
             _nulls += count;
             _rowIds?.AsSpan(0, count).Fill(-1);
+            _rowHashes?.AsSpan(start, count).Clear();
             _rowIdsFilled = _rowIds is not null;
             return;
         }
@@ -186,6 +214,15 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                     }
                 }
 
+                if (_rowHashes is { } rowHashes)
+                {
+                    ulong hash = valid > 0 ? SplitBlockBloom.Hash(node.ConstantElement, BloomHash.XxHash3) : 0;
+                    for (int row = start; row < start + count; row++)
+                    {
+                        rowHashes[row] = allValid || (own.IsValid(row) && wrapper.IsValid(row)) ? hash : 0;
+                    }
+                }
+
                 break;
             }
 
@@ -194,7 +231,8 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 break;
 
             default:
-                // A kind no index keys: the rows are counted, their values not.
+                // A kind no index keys: the rows are counted, their values not, nor hashed.
+                _rowHashesWhole = false;
                 return;
         }
 
@@ -269,6 +307,14 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         {
             int stop = Math.Min(from + HashBatch, start + count);
             Hash(values, width, from, stop, hashes);
+            if (_rowHashes is { } rowHashes)
+            {
+                for (int row = from; row < stop; row++)
+                {
+                    rowHashes[row] = allValid || (own.IsValid(row) && wrapper.IsValid(row)) ? hashes[row - from] : 0;
+                }
+            }
+
             if (_slots is null && allValid)
             {
                 // The counts gone, every hash raises its register and nothing more.
@@ -388,6 +434,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         ref byte origin = ref MemoryMarshal.GetReference(views);
         Span<int> ids = _rowIds is { } numbered ? numbered.AsSpan(0, count) : default;
         bool numbering = !ids.IsEmpty;
+        ulong[]? rowHashes = _rowHashes;
         for (int row = start; row < start + count; row++)
         {
             if (!allValid && !(own.IsValid(row) && wrapper.IsValid(row)))
@@ -396,6 +443,11 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 if (numbering)
                 {
                     ids[row - start] = -1;
+                }
+
+                if (rowHashes is not null)
+                {
+                    rowHashes[row] = 0;
                 }
 
                 continue;
@@ -419,6 +471,11 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                     {
                         ids[row - start] = (int)(held.Count >> IdShift);
                     }
+
+                    if (rowHashes is not null)
+                    {
+                        rowHashes[row] = held.Key;
+                    }
                 }
                 else if (_slots is not null)
                 {
@@ -427,13 +484,24 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                     {
                         ids[row - start] = _zeroId;
                     }
+
+                    if (rowHashes is not null)
+                    {
+                        rowHashes[row] = 0;
+                    }
                 }
 
                 continue;
             }
 
             ReadOnlySpan<byte> value = BloomBuilder.ValueAt(views, buffers, row);
-            int at = Take(SplitBlockBloom.Hash(value, BloomHash.XxHash3), value, 1);
+            ulong valueHash = SplitBlockBloom.Hash(value, BloomHash.XxHash3);
+            if (rowHashes is not null)
+            {
+                rowHashes[row] = valueHash;
+            }
+
+            int at = Take(valueHash, value, 1);
             if (numbering)
             {
                 ids[row - start] = at >= 0 ? IdAt(at) : _zeroId;

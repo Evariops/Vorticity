@@ -1829,11 +1829,43 @@ internal sealed class IndexWriter : IDisposable
     internal void AddCounts(CountsPlan plan)
     {
         _counts = plan;
+
+        // The text columns, wide until their first rows say otherwise, before any column's counts are made.
+        for (int field = 0; _isTabular && field < _fieldCount; field++)
+        {
+            if (field != plan.InstantField && plan.MeasureOf(field) < 0 && SheetOf(field) is { } sheet)
+            {
+                sheet.HashRows();
+                plan.Wide.Add(new WideColumn(field, sheet));
+            }
+        }
+
         for (int field = 0; _isTabular && field < _fieldCount; field++)
         {
             if (field != plan.InstantField && SheetOf(field) is { } sheet)
             {
                 _builders[field].Add(new ColumnCountsBuilder(sheet, plan, field));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Once a batch of <paramref name="rows"/> is in, every column's sheet having hashed its rows: the wide columns settled,
+    /// and each column of few values's registers of them raised.
+    /// </summary>
+    internal void AttachCounts(int rows)
+    {
+        if (_counts is not { Wide.Count: > 0 } plan)
+        {
+            return;
+        }
+
+        plan.SettleWide(end: false);
+        foreach (List<IndexBuilder> builders in _builders)
+        {
+            foreach (IndexBuilder builder in builders)
+            {
+                (builder as ColumnCountsBuilder)?.Attach(rows);
             }
         }
     }

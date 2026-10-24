@@ -70,7 +70,8 @@ public sealed class DatasetCountsTests
                 Assert.True(expected == counts[c + 1] is not null, $"seed {seed}: column {c} ({column}) counted {counts[c + 1] is not null}, {distinct} values in {valid} rows");
                 if (counts[c + 1] is { } kept)
                 {
-                    Check(kept, c, columns, mine, hour);
+                    Check(kept, c, columns, mine, hour, distinct);
+                    CheckDistinct(kept, c, columns, mine, distinct);
                     counted++;
                 }
             }
@@ -188,8 +189,8 @@ public sealed class DatasetCountsTests
         Assert.Equal(rows.Count(r => hours.Contains(HourOf((DateTimeOffset)r[0]!))), added.Values.Sum(w => w[0]));
     }
 
-    /// <summary>Holds <paramref name="counts"/> of column <paramref name="c"/> to what the rows <paramref name="rows"/> of hour <paramref name="hour"/> give.</summary>
-    private static void Check(ColumnCounts counts, int c, Drawn[] columns, object?[][] rows, long hour)
+    /// <summary>Holds <paramref name="counts"/> of column <paramref name="c"/>, of <paramref name="distinct"/> values, to what the rows <paramref name="rows"/> of hour <paramref name="hour"/> give.</summary>
+    private static void Check(ColumnCounts counts, int c, Drawn[] columns, object?[][] rows, long hour, int distinct)
     {
         // The measures: every number column of more than a few values in these rows but the column itself.
         int[] measures = [.. Enumerable.Range(0, columns.Length).Where(m => m != c && columns[m].Number
@@ -214,9 +215,12 @@ public sealed class DatasetCountsTests
                 MeasureKind kind = counts.Kinds[i];
                 Assert.Equal(values.Length, words[at + MeasureLayout.Values]);
 
-                // The entry's quantile sketch of the measure: the one its values give, a column of few values keeping them.
-                Assert.NotNull(counts.Sketches);
-                Assert.Equal(values.Length == 0 ? null : Sketch(values.Select(Convert.ToDouble)), counts.SketchOf(group.FirstEntry, i));
+                // The entry's quantile sketch of the measure: the one its values give, a column of at most 1 000 values keeping them.
+                Assert.Equal(distinct <= ColumnCountsBuilder.SketchValues, counts.Sketches is not null);
+                if (counts.Sketches is not null)
+                {
+                    Assert.Equal(values.Length == 0 ? null : Sketch(values.Select(Convert.ToDouble)), counts.SketchOf(group.FirstEntry, i));
+                }
                 if (kind == MeasureKind.Float)
                 {
                     double[] floats = [.. values.Select(Convert.ToDouble)];
@@ -252,6 +256,40 @@ public sealed class DatasetCountsTests
         }
     }
 
+    /// <summary>
+    /// Holds the registers <paramref name="counts"/> of column <paramref name="c"/>, of <paramref name="distinct"/> values,
+    /// keep of the wide columns to those their values in each entry's rows give: a column of at most 100 values keeps those
+    /// of every text column of more than 1 000 values that repeat, but itself; any other none.
+    /// </summary>
+    private static void CheckDistinct(ColumnCounts counts, int c, Drawn[] columns, object?[][] rows, int distinct)
+    {
+        int[] wide = distinct > ColumnCountsBuilder.AttachValues ? [] : [.. Enumerable.Range(0, columns.Length).Where(w =>
+        {
+            int values = rows.Select(r => r[w + 1]).Where(v => v is not null).Distinct().Count();
+            long held = rows.Count(r => r[w + 1] is not null);
+            return w != c && !columns[w].Number && values > ColumnCountsBuilder.WideValues && values * 4L <= held;
+        })];
+        Assert.Equal(wide.Select(w => w + 1), counts.AttachedFields);
+        Assert.Equal(wide.Length > 0, counts.Distinct is not null);
+        Dictionary<string, object?[][]> byValue = rows.GroupBy(r => Key(r[c + 1])).ToDictionary(g => g.Key, g => g.ToArray());
+        foreach (CountGroup group in counts.Groups)
+        {
+            object?[][] held = byValue[group.Kind == CountedValue.Null ? "null" : Key(Value(columns[c], group.Value!))];
+            for (int a = 0; a < wide.Length; a++)
+            {
+                byte[] ranks = new byte[ColumnSheet.Registers];
+                foreach (object? value in held.Select(r => r[wide[a] + 1]).Where(v => v is not null))
+                {
+                    ulong hash = SplitBlockBloom.Hash(Encoding.UTF8.GetBytes((string)value!), BloomHash.XxHash3);
+                    ref byte rank = ref ranks[HyperLogLog.Register(hash, ColumnSheet.Precision)];
+                    rank = Math.Max(rank, HyperLogLog.Rank(hash, ColumnSheet.Precision));
+                }
+
+                Assert.Equal(ranks.Any(r => r != 0) ? HyperLogLog.Encode(ranks) : null, counts.DistinctOf(group.FirstEntry, a));
+            }
+        }
+    }
+
     /// <summary>The encoded quantile sketch, at 1 % as the counts keep them, of <paramref name="values"/>.</summary>
     private static byte[] Sketch(IEnumerable<double> values)
     {
@@ -277,7 +315,7 @@ public sealed class DatasetCountsTests
     /// <summary>The value <paramref name="bytes"/> hold, as the column <paramref name="column"/> stores it.</summary>
     private static object Value(Drawn column, byte[] bytes) => column.Kind switch
     {
-        Kind.Text or Kind.Identifier => Encoding.UTF8.GetString(bytes),
+        Kind.Text or Kind.Wide or Kind.Identifier => Encoding.UTF8.GetString(bytes),
         Kind.Code => BitConverter.ToInt16(bytes),
         Kind.Int32 => BitConverter.ToInt32(bytes),
         Kind.Int64 => BitConverter.ToInt64(bytes),
@@ -291,6 +329,7 @@ public sealed class DatasetCountsTests
     private enum Kind
     {
         Text,
+        Wide,
         Code,
         Identifier,
         Int32,
@@ -304,13 +343,13 @@ public sealed class DatasetCountsTests
     /// <summary>A column drawn: its kind, whether it holds nulls, and how many values it draws from.</summary>
     private sealed record Drawn(Kind Kind, bool Nullable, int Values)
     {
-        internal bool Number => Kind is not (Kind.Text or Kind.Identifier);
+        internal bool Number => Kind is not (Kind.Text or Kind.Wide or Kind.Identifier);
 
         internal VortexType Type => Nullable ? Plain.Nullable : Plain;
 
         private VortexType Plain => Kind switch
         {
-            Kind.Text or Kind.Identifier => VortexType.Utf8,
+            Kind.Text or Kind.Wide or Kind.Identifier => VortexType.Utf8,
             Kind.Code => VortexType.Int16,
             Kind.Int32 => VortexType.Int32,
             Kind.Int64 => VortexType.Int64,
@@ -320,11 +359,17 @@ public sealed class DatasetCountsTests
         };
     }
 
-    /// <summary>Five to eight columns: texts and codes of a few to a few hundred values, an identifier, and measures of many.</summary>
+    /// <summary>Seven to ten columns: texts and codes of a few to a few hundred values, a wide text, an identifier, and measures of many.</summary>
     private static Drawn[] Draw(Random random)
     {
-        List<Drawn> columns = [new Drawn(Kind.Text, random.Next(2) == 0, 2 + random.Next(300))];
-        Kind[] menu = [Kind.Text, Kind.Code, Kind.Identifier, Kind.Int32, Kind.Int64, Kind.UInt32, Kind.Float64, Kind.Float32, Kind.FewFloats];
+        // A text and a code of few values, and a wide text, whose distinct values the columns of few values keep; then more.
+        List<Drawn> columns =
+        [
+            new Drawn(Kind.Text, random.Next(2) == 0, 2 + random.Next(300)),
+            new Drawn(Kind.Code, random.Next(2) == 0, 2 + random.Next(40)),
+            new Drawn(Kind.Wide, random.Next(2) == 0, 1_200),
+        ];
+        Kind[] menu = [Kind.Text, Kind.Wide, Kind.Code, Kind.Identifier, Kind.Int32, Kind.Int64, Kind.UInt32, Kind.Float64, Kind.Float32, Kind.FewFloats];
         int more = 4 + random.Next(4);
         for (int i = 0; i < more; i++)
         {
@@ -332,6 +377,7 @@ public sealed class DatasetCountsTests
             int values = kind switch
             {
                 Kind.Text => 2 + random.Next(300),
+                Kind.Wide => 1_200,
                 Kind.Code or Kind.FewFloats => 2 + random.Next(40),
                 _ => 0,
             };
@@ -355,6 +401,7 @@ public sealed class DatasetCountsTests
                 values[c + 1] = column.Nullable && random.Next(10) == 0 ? null : column.Kind switch
                 {
                     Kind.Text => $"v{random.Next(column.Values)}",
+                    Kind.Wide => $"w{random.Next(column.Values)}",
                     Kind.Code => (short)(100 + random.Next(column.Values)),
                     Kind.Identifier => $"id-{row}",
                     Kind.Int32 => random.Next(-1_000_000, 1_000_000),
@@ -414,7 +461,7 @@ public sealed class DatasetCountsTests
     {
         switch (column.Kind)
         {
-            case Kind.Text or Kind.Identifier when column.Nullable:
+            case Kind.Text or Kind.Wide or Kind.Identifier when column.Nullable:
                 ColumnBuilder<string?> text = builder.Column<string?>(field);
                 if (value is null)
                 {
@@ -426,7 +473,7 @@ public sealed class DatasetCountsTests
                 }
 
                 return;
-            case Kind.Text or Kind.Identifier:
+            case Kind.Text or Kind.Wide or Kind.Identifier:
                 builder.Column<string>(field).Append(((string)value!).AsSpan());
                 return;
             case Kind.Code:
