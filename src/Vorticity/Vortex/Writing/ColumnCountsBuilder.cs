@@ -61,9 +61,8 @@ internal sealed class WideColumn(int field, ColumnSheetBuilder sheet)
 
 /// <summary>
 /// What the counts of a file's columns share (<see cref="ColumnCountsBuilder"/>): the number columns every column's counts
-/// carry as measures, and the bucket each row is counted in, the object's, one for all of them. Each batch's measures are
-/// read once, before any column is counted (<see cref="Prepare"/>), so that the columns, counted side by side, only read
-/// them.
+/// carry as measures. Each batch's measures are read once, before any column is counted (<see cref="Prepare"/>), so that
+/// the columns, counted side by side, only read them.
 /// </summary>
 /// <remarks>
 /// The grain of the counts is the object: the application cuts its objects by the values it chooses, and the counts
@@ -106,18 +105,6 @@ internal sealed class CountsPlan
         }
     }
 
-    /// <summary>The buckets the rows are counted in, by their number: the object's alone, 0.</summary>
-    internal List<long> Hours { get; } = [0];
-
-    /// <summary>The number of each row's bucket in the batch being fed: the object's, 0.</summary>
-    internal int[] HourSlots { get; private set; } = [];
-
-    /// <summary>The least bucket a row of the batch being fed is counted in: the object's, which stays open to the end.</summary>
-    internal long LeastHour => 0;
-
-    /// <summary>Whether no column is counted any more; never, since no column's form stops the counts of every other.</summary>
-    internal bool Dead => false;
-
     /// <summary>The plan of a file of <paramref name="schema"/>, a struct of its columns; null for another.</summary>
     internal static CountsPlan? For(DType schema)
     {
@@ -154,14 +141,9 @@ internal sealed class CountsPlan
     /// <summary>The measure column <paramref name="field"/> is, or -1.</summary>
     internal int MeasureOf(int field) => Array.FindIndex(Measures, m => m.Field == field);
 
-    /// <summary>Puts the batch's rows in the object's bucket, and reads its measures' values, before its columns are counted.</summary>
+    /// <summary>Reads the batch's measures' values, before its columns are counted.</summary>
     internal void Prepare(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows)
     {
-        if (HourSlots.Length < rows)
-        {
-            HourSlots = new int[Math.Max(rows, HourSlots.Length * 2)];
-        }
-
         foreach (CountedMeasure measure in Measures)
         {
             if (measure.Live && !Read(measure, arena, fieldNodes[measure.Field], rows))
@@ -323,10 +305,10 @@ internal sealed class CountsPlan
         width == 8 ? MemoryMarshal.Read<double>(value[(at * 8)..]) : MemoryMarshal.Read<float>(value[(at * 4)..]);
 }
 /// <summary>
-/// Builds one column's counts by hour (<see cref="ColumnCounts"/>) as the column is written: each row's value, numbered
-/// by the column's sheet, and its hour, numbered by the plan, name an entry that counts its rows and folds every measure
-/// the plan carries, its values, its exact sum, its least and its greatest. A column whose values hardly repeat, one
-/// whose sheet gave its counts up, and a number of more than <see cref="FewValues"/> values, a measure, keep none.
+/// Builds one column's counts (<see cref="ColumnCounts"/>) as the column is written: each row's value, numbered by the
+/// column's sheet, names an entry that counts its rows and folds every measure the plan carries, its values, its exact
+/// sum, its least and its greatest. A column whose values hardly repeat, one whose sheet gave its counts up, and a number
+/// of more than <see cref="FewValues"/> values, a measure, keep none.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -337,13 +319,12 @@ internal sealed class CountsPlan
 /// <para>
 /// An entry is one record of words in <see cref="StateWords"/>' layout over every measure of the plan, so that a row
 /// folds into the few lines of the cache its entry takes, a float sum in place; the counts write the words of the
-/// measures still carried. A row's entry is looked up in its hour's table of the values' numbers, the hour's table read
-/// once for a run of rows of the same hour.
+/// measures still carried. A row's entry is looked up in a table of the values' numbers.
 /// </para>
 /// <para>
 /// The entries are an absolute budget, <see cref="EntryLimit"/> a column: past it, the values whose rows are fewest
-/// so far are left out, their entries merged into an entry of the values left out an hour, exact, and a value left out
-/// stays out, so that every value kept is counted from its first row.
+/// so far are left out, their entries merged into the entry of the values left out, exact, and a value left out stays
+/// out, so that every value kept is counted from its first row.
 /// </para>
 /// </remarks>
 internal sealed class ColumnCountsBuilder : IndexBuilder
@@ -362,7 +343,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
     /// <summary>
     /// The most values a column holds and keeps, for each entry, a quantile sketch of each measure, the distribution of its
-    /// values by hour: past them, the sketches would weigh more than the column's rows give.
+    /// values: past them, the sketches would weigh more than the column's rows give.
     /// </summary>
     internal const int SketchValues = 1_000;
 
@@ -399,28 +380,24 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private bool _settled;
     private bool _dropped;
 
-    // The entries: each one's value's number, NullValue or OtherValues, its hour's number, and its record of words.
+    // The entries: each one's value's number, NullValue or OtherValues, and its record of words.
     private int _entries;
     private int[] _entryValue = new int[1_024];
-    private int[] _entryHour = new int[1_024];
     private long[] _words;
 
-    // By hour, the entry of each value's number, -1 for none; and the entries of the nulls and of the values left out.
-    private readonly List<int[]> _entryOf = [];
-    private readonly List<int> _nullEntry = [];
-    private readonly List<int> _otherEntry = [];
+    // The entry of each value's number, -1 for none; and the entries of the nulls and of the values left out, -1 for none.
+    private int[] _entryOf = [];
+    private int _nullEntry = -1;
+    private int _otherEntry = -1;
     private bool[]? _leftOut;
 
     // Each row's entry, as where its record starts and as its number.
     private int[] _rowEntries = new int[1_024];
     private int[] _rowIndexes = new int[1_024];
 
-    // For each measure the records hold, the quantile sketch of each entry, made at its first value and encoded once its
-    // hour is done (_sealed), when a row of an hour before the batch's least can no longer come but late; null once the
-    // column holds more than SketchValues values. The hours whose sketches are still open, by number.
+    // For each measure the records hold, the quantile sketch of each entry, made at its first value, encoded at the end;
+    // null once the column holds more than SketchValues values.
     private QuantileSketch?[][]? _sketches;
-    private byte[]?[][]? _sealed;
-    private readonly HashSet<int> _openHours = [];
 
     // Each row's entry by its row in the batch being fed, which the distinct values read once the batch is in; and for each
     // wide column of the plan, the registers of each entry, null once the column holds more than AttachValues values.
@@ -453,11 +430,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         if (_measures.Length > 0)
         {
             _sketches = new QuantileSketch?[_measures.Length][];
-            _sealed = new byte[]?[_measures.Length][];
             for (int k = 0; k < _measures.Length; k++)
             {
                 _sketches[k] = new QuantileSketch?[1_024];
-                _sealed[k] = new byte[]?[1_024];
             }
         }
 
@@ -496,11 +471,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         int[] oldMeasures = _measures;
         int oldStride = _stride;
         long[] old = _words;
-        if (_sketches is { } sketches && _sealed is { } sealedSketches)
+        if (_sketches is { } sketches)
         {
             int[] from = Array.ConvertAll(live, m => Array.IndexOf(oldMeasures, m));
             _sketches = Array.ConvertAll(from, o => sketches[o]);
-            _sealed = Array.ConvertAll(from, o => sealedSketches[o]);
         }
 
         (_measures, _kinds, _at, _stride) = Layout(live);
@@ -530,11 +504,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         }
 
         ReadOnlySpan<int> ids = _sheet.RowIds;
-        if (_plan.Dead || ids.IsEmpty || _sheet.Rows >= WideIndexedSum.Epoch)
+        if (ids.IsEmpty || _sheet.Rows >= WideIndexedSum.Epoch)
         {
             // The sheet numbers no row: its counts went, the column's values hardly repeating, or its kind is none an
-            // index keys. The instant in a form the plan does not read counts nothing either, nor does a file of an epoch
-            // of rows, some 34 billion, whose entries' float sums would have to settle.
+            // index keys. Nor does a file of an epoch of rows count, some 34 billion, whose entries' float sums would have
+            // to settle.
             Drop();
             return;
         }
@@ -556,24 +530,15 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         {
             Array.Resize(ref _batchEntries, Math.Max(start + count, _batchEntries.Length * 2));
         }
-        ReadOnlySpan<int> hours = _plan.HourSlots.AsSpan(start, count);
-        int lastHour = -1;
-        int[] map = [];
+        int[] map = _entryOf;
         for (int i = 0; i < count; i++)
         {
-            int hour = hours[i];
-            if (hour != lastHour)
-            {
-                map = MapOf(hour);
-                lastHour = hour;
-            }
-
             int id = ids[i];
             int entry;
             if ((uint)id >= (uint)map.Length || (entry = map[id]) < 0)
             {
-                entry = NewEntryOf(hour, id);
-                map = _entryOf[hour];
+                entry = NewEntryOf(id);
+                map = _entryOf;
             }
 
             entries[i] = entry * _stride;
@@ -613,13 +578,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             if (_sheet.Distinct > SketchValues)
             {
                 _sketches = null;
-                _sealed = null;
-                _openHours.Clear();
             }
             else
             {
-                Seal(_plan.LeastHour);
-                Sketch(indexes, hours, start);
+                Sketch(indexes, start);
             }
         }
 
@@ -692,19 +654,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     }
 
     /// <summary>Adds the rows' values of each measure to the sketch of their entry, from the batch's row <paramref name="start"/>.</summary>
-    private void Sketch(ReadOnlySpan<int> indexes, ReadOnlySpan<int> hours, int start)
+    private void Sketch(ReadOnlySpan<int> indexes, int start)
     {
         int count = indexes.Length;
-        int last = -1;
-        foreach (int hour in hours)
-        {
-            if (hour != last)
-            {
-                last = hour;
-                _openHours.Add(hour);
-            }
-        }
-
         for (int k = 0; k < _measures.Length; k++)
         {
             CountedMeasure measure = _plan.Measures[_measures[k]];
@@ -733,90 +685,17 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         }
     }
 
-    /// <summary>The open sketch of measure <paramref name="k"/> over entry <paramref name="entry"/>: made, or opened again from its encoded bytes.</summary>
+    /// <summary>The sketch of measure <paramref name="k"/> over entry <paramref name="entry"/>, made at its first value.</summary>
     private QuantileSketch Open(int k, int entry)
     {
         QuantileSketch?[] sketches = _sketches![k];
         if (entry >= sketches.Length)
         {
             Array.Resize(ref _sketches[k], Math.Max(entry + 1, sketches.Length * 2));
-            Array.Resize(ref _sealed![k], _sketches[k].Length);
             sketches = _sketches[k];
         }
 
-        if (sketches[entry] is { } open)
-        {
-            return open;
-        }
-
-        open = sketches[entry] = new QuantileSketch(SketchBits);
-        if (_sealed![k][entry] is { } sealedBytes)
-        {
-            // A late row of an hour done: its sketch opened again.
-            open.MergeEncoded(sealedBytes);
-            _sealed[k][entry] = null;
-            _openHours.Add(_entryHour[entry]);
-        }
-
-        return open;
-    }
-
-    /// <summary>Encodes and lets go of the sketches of every hour before <paramref name="least"/>, which no row comes for but a late one.</summary>
-    private void Seal(long least)
-    {
-        // The hours are numbered as they were met, not in their order: each open one is looked at.
-        List<int>? done = null;
-        foreach (int open in _openHours)
-        {
-            long at = _plan.Hours[open];
-            if (at < least)
-            {
-                (done ??= []).Add(open);
-            }
-        }
-
-        foreach (int hour in done ?? [])
-        {
-            _openHours.Remove(hour);
-            foreach (int entry in EntriesOf(hour))
-            {
-                for (int k = 0; k < _measures.Length; k++)
-                {
-                    if (entry < _sketches![k].Length && _sketches[k][entry] is { } sketch)
-                    {
-                        _sealed![k][entry] = Encoded(sketch);
-                        _sketches[k][entry] = null;
-                    }
-                }
-            }
-        }
-    }
-
-    /// <summary>The entries of the hour numbered <paramref name="hour"/>: its values', its nulls' and its values left out's.</summary>
-    private IEnumerable<int> EntriesOf(int hour)
-    {
-        if (hour >= _entryOf.Count)
-        {
-            yield break;
-        }
-
-        foreach (int entry in _entryOf[hour])
-        {
-            if (entry >= 0)
-            {
-                yield return entry;
-            }
-        }
-
-        if (_nullEntry[hour] >= 0)
-        {
-            yield return _nullEntry[hour];
-        }
-
-        if (_otherEntry[hour] >= 0)
-        {
-            yield return _otherEntry[hour];
-        }
+        return sketches[entry] ??= new QuantileSketch(SketchBits);
     }
 
     private static byte[] Encoded(QuantileSketch sketch)
@@ -826,11 +705,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         return writer.WrittenSpan.ToArray();
     }
 
-    /// <summary>The encoded sketch of measure <paramref name="k"/> over entry <paramref name="entry"/>, open or sealed; null for none.</summary>
+    /// <summary>The encoded sketch of measure <paramref name="k"/> over entry <paramref name="entry"/>; null for none.</summary>
     private byte[]? SketchBytes(int k, int entry) =>
-        _sketches is null || entry >= _sketches[k].Length ? null
-        : _sketches[k][entry] is { } open ? Encoded(open)
-        : _sealed![k][entry];
+        _sketches is not null && entry < _sketches[k].Length && _sketches[k][entry] is { } sketch ? Encoded(sketch) : null;
 
     /// <summary>Whether each of the rows <c>[start, start + count)</c> holds a value of <paramref name="measure"/>; empty when every one does.</summary>
     private static ReadOnlySpan<byte> Valid(CountedMeasure measure, int start, int count) =>
@@ -953,7 +830,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     {
         long valid = _sheet.Rows - _sheet.Nulls;
         int distinct = _sheet.Distinct;
-        if (_dropped || _plan.Dead || !_sheet.Counting || distinct == 0 || distinct * (long)RepeatShare > valid
+        if (_dropped || !_sheet.Counting || distinct == 0 || distinct * (long)RepeatShare > valid
             || (_number && distinct > FewValues))
         {
             return null;
@@ -999,9 +876,8 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             (fields[i], kinds[i]) = (_plan.Measures[_measures[carried[i]]].Field, _kinds[carried[i]]);
         }
 
-        // The entries in the counts' order: the nulls, the values left out, then the values by their bytes, each by hour.
-        List<long> hours = _plan.Hours;
-        int[] order = EntryOrder(values, hours);
+        // The entries in the counts' order: the nulls, the values left out, then the values by their bytes.
+        int[] order = EntryOrder(values);
 
         int width = StateWords.Count(kinds);
         long[] words = new long[_entries * width];
@@ -1063,17 +939,13 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
                 at += length;
             }
 
+            // An entry a group: a value's rows, its nulls' or its values left out's, over the object.
             int value = _entryValue[entry];
-            if (groups.Count == 0 || _entryValue[order[i - 1]] != value)
-            {
-                groups.Add(new CountGroup(
-                    value switch { NullValue => CountedValue.Null, OtherValues => CountedValue.Others, _ => CountedValue.Value },
-                    value >= 0 ? values[value] : null,
-                    i,
-                    0));
-            }
-
-            groups[^1] = groups[^1] with { Entries = groups[^1].Entries + 1 };
+            groups.Add(new CountGroup(
+                value switch { NullValue => CountedValue.Null, OtherValues => CountedValue.Others, _ => CountedValue.Value },
+                value >= 0 ? values[value] : null,
+                i,
+                1));
         }
 
         // The sketches, a region of their own beside the counts, when there is a measure to sketch or a column attached.
@@ -1089,10 +961,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     }
 
     /// <summary>
-    /// The entries in the counts' order: the nulls, the values left out, then the values by their bytes, each group's
-    /// entries by hour. The values are sorted once, and the entries placed by their value's rank, in one pass.
+    /// The entries in the counts' order: the nulls, the values left out, then the values by their bytes. The values are
+    /// sorted once, and the entries placed by their value's rank, in one pass.
     /// </summary>
-    private int[] EntryOrder(byte[]?[] values, List<long> hours)
+    private int[] EntryOrder(byte[]?[] values)
     {
         // Each value's rank among those that hold an entry, in the order of their bytes; the nulls 0, the values left out 1.
         bool[] held = new bool[values.Length];
@@ -1124,7 +996,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             group[ids[rank]] = rank + 2;
         }
 
-        // The entries by group, counted then placed; within a group, by hour.
+        // The entries by group, counted then placed: one a group.
         int[] starts = new int[distinct + 3];
         for (int e = 0; e < _entries; e++)
         {
@@ -1137,27 +1009,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         }
 
         int[] order = new int[_entries];
-        int[] placed = (int[])starts.Clone();
         for (int e = 0; e < _entries; e++)
         {
-            order[placed[GroupOf(e, group)]++] = e;
-        }
-
-        for (int g = 0; g + 1 < starts.Length; g++)
-        {
-            for (int i = starts[g] + 1; i < starts[g + 1]; i++)
-            {
-                int entry = order[i];
-                long hour = hours[_entryHour[entry]];
-                int j = i - 1;
-                while (j >= starts[g] && hours[_entryHour[order[j]]] > hour)
-                {
-                    order[j + 1] = order[j];
-                    j--;
-                }
-
-                order[j + 1] = entry;
-            }
+            order[starts[GroupOf(e, group)]++] = e;
         }
 
         return order;
@@ -1171,34 +1025,21 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         int value => group[value],
     };
 
-    /// <summary>The table of the values' entries in the hour numbered <paramref name="hour"/>, which every list then covers.</summary>
-    private int[] MapOf(int hour)
-    {
-        while (_entryOf.Count <= hour)
-        {
-            _entryOf.Add([]);
-            _nullEntry.Add(-1);
-            _otherEntry.Add(-1);
-        }
-
-        return _entryOf[hour];
-    }
-
-    /// <summary>The entry of value <paramref name="id"/>, -1 for a null, in the hour numbered <paramref name="hour"/>, which its table lacks.</summary>
-    private int NewEntryOf(int hour, int id)
+    /// <summary>The entry of value <paramref name="id"/>, -1 for a null, which the table of the values' entries lacks.</summary>
+    private int NewEntryOf(int id)
     {
         if (id < 0)
         {
-            return _nullEntry[hour] >= 0 ? _nullEntry[hour] : _nullEntry[hour] = NewEntry(NullValue, hour);
+            return _nullEntry >= 0 ? _nullEntry : _nullEntry = NewEntry(NullValue);
         }
 
-        int[] map = _entryOf[hour];
+        int[] map = _entryOf;
         if (id >= map.Length)
         {
             int[] grown = new int[Math.Max(id + 1, Math.Max(16, map.Length * 2))];
             map.CopyTo(grown, 0);
             grown.AsSpan(map.Length).Fill(-1);
-            _entryOf[hour] = map = grown;
+            _entryOf = map = grown;
         }
 
         if (map[id] >= 0)
@@ -1207,28 +1048,26 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         }
 
         int entry = IsLeftOut(id)
-            ? _otherEntry[hour] >= 0 ? _otherEntry[hour] : _otherEntry[hour] = NewEntry(OtherValues, hour)
-            : NewEntry(id, hour);
+            ? _otherEntry >= 0 ? _otherEntry : _otherEntry = NewEntry(OtherValues)
+            : NewEntry(id);
         map[id] = entry;
         return entry;
     }
 
     private bool IsLeftOut(int id) => _leftOut is { } leftOut && id < leftOut.Length && leftOut[id];
 
-    /// <summary>A new entry of value <paramref name="value"/> in hour <paramref name="hour"/>: no row, each measure's extremes at their start.</summary>
-    private int NewEntry(int value, int hour)
+    /// <summary>A new entry of value <paramref name="value"/>: no row, each measure's extremes at their start.</summary>
+    private int NewEntry(int value)
     {
         int entry = _entries++;
         if (entry == _entryValue.Length)
         {
             int size = _entryValue.Length * 2;
             Array.Resize(ref _entryValue, size);
-            Array.Resize(ref _entryHour, size);
             Array.Resize(ref _words, size * _stride);
         }
 
         _entryValue[entry] = value;
-        _entryHour[entry] = hour;
         Open(_words.AsSpan(entry * _stride, _stride));
         return entry;
     }
@@ -1260,7 +1099,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
     /// <summary>
     /// Leaves out the values whose rows are fewest so far, until the entries of those kept fill half the budget: their
-    /// entries merge into the entries of the values left out, an hour each.
+    /// entries merge into the entry of the values left out.
     /// </summary>
     private void LeaveOut()
     {
@@ -1305,19 +1144,18 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         Merge();
     }
 
-    /// <summary>Merges the entries of every value left out into the entries of the values left out, an hour each, and renumbers the entries.</summary>
+    /// <summary>Merges the entries of every value left out into the entry of the values left out, and renumbers the entries.</summary>
     private void Merge()
     {
         // Entries renumbered, the registers would follow them; a column of at most AttachValues values reaches the budget
-        // only over thousands of hours, and lets them go.
+        // only with the values left out, and lets them go.
         _distinct = null;
 
         int total = _entries;
         int[] values = _entryValue;
-        int[] hoursOf = _entryHour;
         long[] words = _words;
 
-        // Each entry's sketches, open or sealed, read before the entries move.
+        // Each entry's sketches, taken before the entries move.
         QuantileSketch?[][]? sketches = null;
         if (_sketches is not null)
         {
@@ -1325,42 +1163,27 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             for (int k = 0; k < _measures.Length; k++)
             {
                 sketches[k] = new QuantileSketch?[total];
-                for (int e = 0; e < total; e++)
-                {
-                    sketches[k][e] = SketchBytes(k, e) is { } bytes ? Decoded(bytes) : null;
-                }
-
+                _sketches[k].AsSpan(0, Math.Min(total, _sketches[k].Length)).CopyTo(sketches[k]);
                 _sketches[k] = new QuantileSketch?[Math.Max(1_024, values.Length)];
-                _sealed![k] = new byte[]?[_sketches[k].Length];
-            }
-
-            foreach (int hour in Enumerable.Range(0, _entryOf.Count))
-            {
-                _openHours.Add(hour);
             }
         }
 
         _entryValue = new int[values.Length];
-        _entryHour = new int[hoursOf.Length];
         _words = new long[words.Length];
         _entries = 0;
-        for (int hour = 0; hour < _entryOf.Count; hour++)
-        {
-            _entryOf[hour].AsSpan().Fill(-1);
-            _nullEntry[hour] = -1;
-            _otherEntry[hour] = -1;
-        }
+        _entryOf.AsSpan().Fill(-1);
+        _nullEntry = -1;
+        _otherEntry = -1;
 
-        // Every entry again, in its order, a value left out's into its hour's entry of the values left out.
+        // Every entry again, in its order, a value left out's into the entry of the values left out.
         for (int e = 0; e < total; e++)
         {
             int value = values[e];
-            int hour = hoursOf[e];
             ReadOnlySpan<long> record = words.AsSpan(e * _stride, _stride);
             if (value >= 0 && !IsLeftOut(value))
             {
-                int entry = NewEntry(value, hour);
-                _entryOf[hour][value] = entry;
+                int entry = NewEntry(value);
+                _entryOf[value] = entry;
                 record.CopyTo(_words.AsSpan(entry * _stride, _stride));
                 MoveSketches(sketches, e, entry);
                 continue;
@@ -1368,13 +1191,13 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
             if (value == NullValue)
             {
-                int entry = _nullEntry[hour] = NewEntry(NullValue, hour);
+                int entry = _nullEntry = NewEntry(NullValue);
                 record.CopyTo(_words.AsSpan(entry * _stride, _stride));
                 MoveSketches(sketches, e, entry);
                 continue;
             }
 
-            int into = _otherEntry[hour] >= 0 ? _otherEntry[hour] : _otherEntry[hour] = NewEntry(OtherValues, hour);
+            int into = _otherEntry >= 0 ? _otherEntry : _otherEntry = NewEntry(OtherValues);
             StateWords.Merge(_words.AsSpan(into * _stride, _stride), record, _kinds);
             for (int k = 0; sketches is not null && k < _measures.Length; k++)
             {
@@ -1396,7 +1219,6 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
                 if (to >= _sketches![k].Length)
                 {
                     Array.Resize(ref _sketches[k], Math.Max(to + 1, _sketches[k].Length * 2));
-                    Array.Resize(ref _sealed![k], _sketches[k].Length);
                 }
 
                 _sketches[k][to] = sketch;
@@ -1404,26 +1226,16 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         }
     }
 
-    private static QuantileSketch Decoded(byte[] bytes)
-    {
-        QuantileSketch sketch = new QuantileSketch(SketchBits);
-        sketch.MergeEncoded(bytes);
-        return sketch;
-    }
-
     private void Drop()
     {
         _dropped = true;
         _distinct = null;
         _sketches = null;
-        _sealed = null;
-        _openHours.Clear();
         _entries = 0;
         _entryValue = [];
-        _entryHour = [];
         _words = [];
-        _entryOf.Clear();
-        _nullEntry.Clear();
-        _otherEntry.Clear();
+        _entryOf = [];
+        _nullEntry = -1;
+        _otherEntry = -1;
     }
 }
