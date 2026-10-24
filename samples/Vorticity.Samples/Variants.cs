@@ -76,7 +76,7 @@ internal static class Variants
             Console.WriteLine(
                 $"errors by route over two days, synopses {(synopses ? "on" : "off")}: " +
                 $"{string.Join(", ", counts.OrderBy(c => c.Route, StringComparer.Ordinal).Select(c => $"{c.Route} {c.Count}"))}; " +
-                $"{routes.Metrics.SynopsisRows} table rows, {routes.Metrics.Rows} rows read");
+                $"{routes.Metrics.Rows} rows read");
         }
 
         // The same kind of question as text, as a tool that learns its columns at run time asks it.

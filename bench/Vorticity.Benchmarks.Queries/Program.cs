@@ -98,14 +98,10 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["shredwrite"] = ("what shredding costs a job in time, counted, chosen and written (ShredWriteMicro.cs)", () => ShredWriteMicro.Run(Option(args, "--rows", 1_000_000), rounds)),
     ["slicebytes"] = ("what sorted slices weigh against the same rows in time order (SliceBytesMicro.cs)", () => SliceBytesMicro.Run(Option(args, "--rows", 1_000_000))),
     ["sliceorder"] = ("the time order of an object sorted slice by slice (SliceOrderMicro.cs)", () => SliceOrderMicro.Run(rounds, Option(args, "--slice-rows", 500_000))),
-    ["synopsisanswer"] = ("an aggregation over a dataset of periods with its synopses and without (SynopsisAnswerMicro.cs)", () =>
-        SynopsisAnswerMicro.Run(Option(args, "--rows", 2_000_000), rounds)),
     ["sparsecost"] = ("a sparse chunk's bytes and decode time against a dense one's, by the share of nulls (SparseCostMicro.cs)", () =>
         SparseCostMicro.Run(Option(args, "--rows", 1_000_000), rounds)),
     ["splitplan"] = ("--file F: the plan of splits a scan of a file's every row draws before its first read (SplitPlanMicro.cs)", () =>
         SplitPlanMicro.Run(Text(args, "--file") ?? throw new ArgumentException("--micro splitplan needs --file F."), rounds)),
-    ["slicecost"] = ("the price of a row at a window's edge and of a row of a table of slices, the two a slice's target trades (SliceCostMicro.cs)", () =>
-        SliceCostMicro.Run(Option(args, "--rows", 2_000_000), rounds)),
     ["generator"] = ("a minute of the time-window design's requests, and the runs of each synopsis column against its figures (RequestGenerator.cs)", () =>
         Task.FromResult(RequestGenerator.Run((int)Option(args, "--seed", 17)))),
     ["questions"] = ("the designs' example questions over generated requests and log records, cold and warm, synopses and rows (QuestionBench.cs)", () =>

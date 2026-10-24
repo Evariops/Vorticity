@@ -2,14 +2,13 @@
 //
 // WHAT IS HELD, per pattern: the requests and the bytes a question asks of the store, cold (a session and a handle
 // opened for it, an empty synopsis cache) and warm (the same handle again, the cache filled), and the managed bytes the
-// process allocates for one warm ask, every thread counted; and the answer, which the synopses give as the rows do.
+// process allocates for one warm ask, every thread counted.
 //
 // THE PATTERNS are the client's (QP-1 to QP-10, `vortex-queries --micro paths --qp`), over spans whose attributes hold
-// the HTTP status, declared shredded, and a key one span in five hundred holds, left in the residual: a declared
-// grouping's tables of a service's routes under 5xx per hour (QP-1) and of a route's pods (QP-2), the services under a
-// shredded status (QP-3), the spans of one trace by its identifier's postings (QP-4), the 99th percentile per service
-// over the last quarter of an hour from the sketches of the services' grouping (QP-6), and the services of a residual key
-// (QP-10).
+// the HTTP status, declared shredded, and a key one span in five hundred holds, left in the residual, every one read
+// from the rows: a service's routes under 5xx per hour (QP-1), a route's pods (QP-2), the services under a shredded
+// status (QP-3), the spans of one trace by its identifier's postings (QP-4), the 99th percentile per service over the
+// last quarter of an hour (QP-6), and the services of a residual key (QP-10).
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -36,16 +35,18 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// <summary>
     /// The ceilings of each pattern: requests and bytes cold, requests and bytes warm, which a build gives exactly, and the
     /// bytes one warm ask allocates, 2 % above what it allocated alone: beside the other classes that run alone, the pools
-    /// they leave took 112 bytes off each. QP-10, which reads rows warm, allocated 159,400 bytes on CI's Linux runner, where
-    /// Windows and WSL2 allocate 154,352: its ceiling stands 2 % above the runner's figure.
+    /// they leave took 112 bytes off each. Measured on 2026-10-24, every pattern read from the rows, the synopsis answer
+    /// removed. QP-10, whose path did not change, allocated 159,400 bytes on CI's Linux runner where Windows allocated
+    /// 154,352; Windows now allocates 146,024, and its ceiling stays 2 % above the runner's last figure until the runner
+    /// gives its new one.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["QP-1 a service's routes under 5xx, per hour"] = new(4, 30992, 0, 0, 38512),
-        ["QP-2 the pods of a route"] = new(4, 23264, 0, 0, 30560),
-        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 8560, 0, 0, 37440),
-        ["QP-4 the spans of a trace"] = new(5, 328672, 1, 66444, 54880),
-        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(1, 18484, 0, 0, 289056),
+        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 527748, 4, 265520, 58624),
+        ["QP-2 the pods of a route"] = new(12, 321780, 8, 59552, 67024),
+        ["QP-3 the services under a shredded status of 500 or more"] = new(8, 283332, 4, 21104, 195248),
+        ["QP-4 the spans of a trace"] = new(5, 328672, 1, 66444, 54768),
+        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 121441, 1, 55884, 300240),
         ["QP-10 the services of a residual key"] = new(8, 284356, 4, 22128, 162592),
     };
 
@@ -90,8 +91,6 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
                 $"warm {warmRequests} requests {warmBytes} bytes (ceilings {Shown(ceiling.WarmRequests)}, {Shown(ceiling.WarmBytes)}), " +
                 $"{allocated} bytes allocated warm (ceiling {Shown(ceiling.Allocated)}), {warm.Count} rows answered.\n"));
 
-            // The synopses answer the bits the rows give.
-            Assert.Equal(await AskAsync(dataset, pattern, synopses: false), warm);
             Assert.True(coldRequests <= ceiling.ColdRequests, $"{pattern}: {coldRequests} requests cold, over {ceiling.ColdRequests}");
             Assert.True(coldBytes <= ceiling.ColdBytes, $"{pattern}: {coldBytes} bytes cold, over {ceiling.ColdBytes}");
             Assert.True(warmRequests <= ceiling.WarmRequests, $"{pattern}: {warmRequests} requests warm, over {ceiling.WarmRequests}");
@@ -107,9 +106,9 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     private static string Shown(long ceiling) => ceiling == long.MaxValue ? "none" : ceiling.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>The rows <paramref name="pattern"/> answers, each a line of its values, sorted; none when not <paramref name="describe"/>.</summary>
-    private static async Task<List<string>> AskAsync(VortexDataset dataset, string pattern, bool synopses = true, bool describe = true)
+    private static async Task<List<string>> AskAsync(VortexDataset dataset, string pattern, bool describe = true)
     {
-        Scan<Spanned> scan = dataset.Scan<Spanned>().With(new ScanOptions { UseSynopses = synopses, DegreeOfParallelism = 1 });
+        Scan<Spanned> scan = dataset.Scan<Spanned>().With(new ScanOptions { DegreeOfParallelism = 1 });
         DateTimeOffset quarter = Start.AddHours(Hours).AddMinutes(-15);
         IAsyncEnumerator<RecordBatch> batches = pattern[..pattern.IndexOf(' ', StringComparison.Ordinal)] switch
         {

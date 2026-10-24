@@ -1908,10 +1908,8 @@ Vorticity:     property long BlocksDecoded { get; init; }
 Vorticity:     property long BlocksPruned { get; init; }
 Vorticity:     property long BytesRequested { get; init; }
 Vorticity:     property long CacheHits { get; init; }
-Vorticity:     property long EdgeRows { get; init; }
 Vorticity:     property long Requests { get; init; }
 Vorticity:     property long Rows { get; init; }
-Vorticity:     property long SynopsisRows { get; init; }
 Vorticity: sealed class Vorticity.ScanOptions : IEquatable<ScanOptions>
 Vorticity:     ctor ScanOptions()
 Vorticity:     method ScanOptions <Clone>$()

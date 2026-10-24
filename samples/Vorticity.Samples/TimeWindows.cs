@@ -75,7 +75,7 @@ internal static class TimeWindows
                 List<ServiceTotals> totals = await question.As<ServiceTotals>().ToRecordsAsync().ToListAsync();
                 Console.WriteLine(
                     $"two days by service, synopses {(synopses ? "on" : "off")}: {string.Join(", ", totals.OrderBy(t => t.Service, StringComparer.Ordinal).Select(t => $"{t.Service} {t.Count}"))}; " +
-                    $"{question.Metrics.SynopsisRows} table rows, {question.Metrics.Rows} rows read");
+                    $"{question.Metrics.Rows} rows read");
             }
 
             // One request found through its identifier's hashed postings, then left out of a count.

@@ -174,32 +174,6 @@ public sealed record DatasetOptions
     internal long LeastPieceRows { get; init; } = 1L << 20;
 
     /// <summary>
-    /// The rows of an edge of a synopsis answer, a slice its window cuts, that a piece of a pass on several lanes reads at
-    /// least: 2^17 by default, four chunks of the design's requests. An edge of twice as many or more is cut between its
-    /// chunks into pieces of its rows alone, as many as the lanes but none smaller, where one lane read the whole edge
-    /// while the others waited. A test cuts its small edges with less.
-    /// </summary>
-    internal long LeastEdgePieceRows { get; init; } = 1L << 17;
-
-    /// <summary>
-    /// The objects in a row their synopses answer that one lane's piece of a pass on several lanes takes at most: 8 by
-    /// default. An answer reads a few tables and folds their rows, a tenth of a millisecond warm, where a piece costs a
-    /// walk of the tree to its rows and a lane's turn: a piece an object made a warm question over 48 hourly objects at
-    /// 16 lanes spend more of its lanes' time waiting than answering.
-    /// </summary>
-    internal int AnswersPerPiece { get; init; } = 8;
-
-    /// <summary>
-    /// The rows of synopsis tables, the states, a lane's piece of answers folds at least, when a pass on several lanes
-    /// cuts the objects their synopses answer: 2^16 by default, about a millisecond of folding, against the tenth a piece
-    /// costs. Answers in a row share a piece while they fold less together, and an answer that folds twice as many or more
-    /// is cut between the chunks of its tables into pieces of about a share each, a lane's part of the slices of its
-    /// window, where every answer was a lane's whole: a window that cuts three hours folds 3.47 M rows of runs. A test
-    /// cuts its small tables with less.
-    /// </summary>
-    internal long LeastPieceStates { get; init; } = 1L << 16;
-
-    /// <summary>
     /// The rows of a chunk of a synopsis table and the bytes past which an hour's rows are chunks of their own, as the
     /// compaction writes them; null for the defaults (<see cref="SynopsisTables.ChunkRows"/>). A test cuts tables of a few
     /// rows into chunks, which an answer is cut between.

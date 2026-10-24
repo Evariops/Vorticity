@@ -286,7 +286,7 @@ internal static class QuestionBench
         double milliseconds = Stopwatch.GetElapsedTime(begin).TotalMilliseconds;
         double cpuMilliseconds = (Environment.CpuUsage.TotalTime - cpu).TotalMilliseconds;
         ScanMetrics metrics = aggregation.Metrics;
-        return new Measured(store.Requests, store.DependentSteps, store.BytesRead, metrics.SynopsisRows, metrics.Rows, milliseconds, cpuMilliseconds, groups)
+        return new Measured(store.Requests, store.DependentSteps, store.BytesRead, 0L, metrics.Rows, milliseconds, cpuMilliseconds, groups)
         {
             Window = metrics.WindowFrom is { } from && metrics.WindowTo is { } to ? (from, to) : null,
         };

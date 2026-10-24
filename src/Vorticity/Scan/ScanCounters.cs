@@ -66,29 +66,6 @@ internal sealed class ScanCounters
     /// </summary>
     public long SplitsProven => Interlocked.Read(ref _splitsProven);
 
-    private long _synopsisRows;
-    private long _edgeRows;
-
-    /// <summary>Rows of synopsis tables an aggregation folded as states, in place of the rows they stand for.</summary>
-    public long SynopsisRows => Interlocked.Read(ref _synopsisRows);
-
-    /// <summary>Rows of the slices at a window's edges read beside the states of their objects.</summary>
-    public long EdgeRows => Interlocked.Read(ref _edgeRows);
-
-    internal void AddSynopsisRows(long rows) => Interlocked.Add(ref _synopsisRows, rows);
-
-    internal void AddEdgeRows(long rows) => Interlocked.Add(ref _edgeRows, rows);
-
-    private long _answeredParts;
-
-    /// <summary>
-    /// Parts of objects a lane answered from their synopses alone, a window that ends where the part does: the pieces a
-    /// pass on several lanes cut an answer into, which folds more rows of tables than a lane's share.
-    /// </summary>
-    public long AnsweredParts => Interlocked.Read(ref _answeredParts);
-
-    internal void AddAnsweredPart() => Interlocked.Increment(ref _answeredParts);
-
     private long _residualChunks;
 
     /// <summary>

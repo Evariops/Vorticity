@@ -662,7 +662,7 @@ internal static partial class PathsBench
         MemoryPeaks.Close(memory);
         ScanMetrics metrics = asking.Metrics();
         return new Measured(
-            store.Requests, store.DependentSteps, store.BytesRead, metrics.SynopsisRows, metrics.Rows, milliseconds, cpuMilliseconds, bytes, groups,
+            store.Requests, store.DependentSteps, store.BytesRead, 0L, metrics.Rows, milliseconds, cpuMilliseconds, bytes, groups,
             digests ? digest.ToString() : "-", memory.Private, memory.Working);
     }
 
