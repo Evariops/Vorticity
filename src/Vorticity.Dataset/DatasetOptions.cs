@@ -174,13 +174,6 @@ public sealed record DatasetOptions
     internal long LeastPieceRows { get; init; } = 1L << 20;
 
     /// <summary>
-    /// The rows of a chunk of a synopsis table and the bytes past which an hour's rows are chunks of their own, as the
-    /// compaction writes them; null for the defaults (<see cref="SynopsisTables.ChunkRows"/>). A test cuts tables of a few
-    /// rows into chunks, which an answer is cut between.
-    /// </summary>
-    internal (int Rows, long HourBytes)? SynopsisChunking { get; init; }
-
-    /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
     /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
     /// </summary>
@@ -258,8 +251,7 @@ public sealed record DatasetOptions
     /// <summary>
     /// Keys of variant columns that every object a job writes keeps in a column of its own, in one class, written as a
     /// filter reads them, <c>Attributes['http.status_code'].AsInt64()</c>: shredded whatever the rows a job counts, so
-    /// that a question on the key reads that column rather than parse the variant, and the object's synopsis counts its
-    /// values. A key read as a string, an integer, a double or a boolean (<c>AsString</c>, <c>AsInt64</c>,
+    /// that a question on the key reads that column rather than parse the variant. A key read as a string, an integer, a double or a boolean (<c>AsString</c>, <c>AsInt64</c>,
     /// <c>AsDouble</c>, <c>AsBool</c>). Null, the default, names none. Read when the dataset is created and carried by
     /// every commit; <see cref="VortexDataset.SetShreddedPathsAsync"/> changes them later, and a handle opened on an
     /// existing dataset follows its commits, whatever this says.
@@ -273,20 +265,6 @@ public sealed record DatasetOptions
     /// A setting of the handle, which each writer chooses.
     /// </summary>
     public bool ShredOnAppend { get; init; }
-
-    /// <summary>
-    /// Columns that questions filter and group by together, beyond the prefixes of an object's synopsis order: each
-    /// grouping one to four synopsis columns, or keys of variant columns written as a filter reads them, the first the
-    /// one questions pick values of, <c>["Service", "HttpStatus", "Route"]</c>. Every job writes a table of each grouping
-    /// of two columns or more by hour and by object beside the prefix tables, and tables of each grouping's measures'
-    /// sketches by slice, by hour and by object, weighed by the same choice under the same budget, their chunks bounded
-    /// by the first column's values, so that a question over those columns alone, whatever columns the order places
-    /// between them, reads those tables rather than the rows or the deepest prefix: a quantile per service over the last
-    /// minutes, declared <c>["Service"]</c>, reads the sketches of the slices its window keeps whole. A grouping that
-    /// names a column an object's order does not hold writes no table in it. Null, the default, declares none. A setting
-    /// of the handle that runs the jobs.
-    /// </summary>
-    public IReadOnlyList<IReadOnlyList<string>>? SynopsisGroupings { get; init; }
 
     /// <summary>
     /// The bytes an object's marks may take: <see cref="MarkedVectorBytes"/>, or a part of the

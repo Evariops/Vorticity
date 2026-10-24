@@ -22,8 +22,8 @@ namespace Vorticity.Dataset;
 /// in a burst holds twice the bound at most before it is cut again.
 /// </para>
 /// <para>
-/// A stream that judges its width holds its first rows in its first slice until it has seen the rows the object's order
-/// is judged from, whose pace, their rows over the seconds they span, a second at least, chooses the width: the first
+/// A stream that judges its width holds its first rows in its first slice until it has seen the rows its pace is judged
+/// from, whose pace, their rows over the seconds they span, a second at least, chooses the width: the first
 /// slice ends with the unit of that width that holds the last of them. An object of fewer is one slice, its width the
 /// pace of all its rows, judged on every row as their count would judge it; a pace read off a batch of a few rows, or
 /// a first unit its rows start near the end of, would not be. A span of a second at least reads a burst of one instant
@@ -104,13 +104,6 @@ internal sealed class SliceStream
     internal IReadOnlyList<TimeSlice> Slices => _slices;
 
     /// <summary>
-    /// What the slices of an object of <paramref name="rows"/> rows, 0 when unknown, say of it before its first slice is
-    /// counted, once <see cref="Judged"/>: it spans hours when <paramref name="spansHours"/>, and its hours hold several
-    /// slices when the stream cuts them finer.
-    /// </summary>
-    internal SliceExtent Extent(long rows, bool spansHours) => new SliceExtent(rows, spansHours, Width < SliceWidth.Hour);
-
-    /// <summary>
     /// How many of <paramref name="instants"/>, the next rows in the order of their instants, the slice being filled takes,
     /// <paramref name="held"/> of its rows taken before, and whether it ends before the rows after them: at the first row at
     /// or past its end, or, its unit's rows past twice the target, at the end of the unit a width finer that holds the row
@@ -141,7 +134,7 @@ internal sealed class SliceStream
                 return (Taken(instants, instants.Length), false);
             }
 
-            // The pace of the rows up to the last the order is judged from chooses the width; the first slice ends with the
+            // The pace of the rows up to the last the pace is judged from chooses the width; the first slice ends with the
             // unit of that width that holds it, its rows before that unit left out of its bound.
             int judged = (int)(_least - held - 1);
             double pace = _least / Seconds(_first, instants[judged]);
@@ -305,9 +298,3 @@ internal sealed class SliceStream
         return low;
     }
 }
-
-/// <summary>
-/// What the slices of an object cut as its rows come say of it before its first slice is counted: the rows it is expected
-/// to hold, 0 when unknown, whether they may span hours, and whether its hours hold several slices.
-/// </summary>
-internal readonly record struct SliceExtent(long Rows, bool SpansHours, bool CutsHours);

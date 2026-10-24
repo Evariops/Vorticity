@@ -57,8 +57,6 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["floatsum"] = ("a grouped exact float sum alone, in memory (FloatSumMicro.cs)", () => Task.FromResult(FloatSumMicro.Run(rounds))),
     ["variants"] = ("a variant's path extracted alone, in memory (VariantMicro.cs)", () => Task.FromResult(VariantMicro.Run(rounds))),
     ["sketches"] = ("the grids of a distribution weighed, in buckets and speed (SketchMicro.cs)", () => Task.FromResult(SketchMicro.Run(rounds))),
-    ["synopsistables"] = ("what the synopsis tables cost a job, counted per slice and built (SynopsisTablesMicro.cs)", () => SynopsisTablesMicro.Run(rounds)),
-    ["slicesort"] = ("one time slice sorted as a dataset of periods writes it (SliceSortMicro.cs)", () => SliceSortMicro.Run(rounds, args.Contains("--deep"))),
     ["load"] = ("the write path of a load of sealed periods at the design's density, a few seconds a round (LoadMicro.cs)", () =>
     {
         int periods = Option(args, "--periods", 4);
@@ -91,13 +89,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Option(args, "--hours", 1),
         args.Contains("--day"))),
     ["shredcost"] = ("what shredding a path costs and saves in a file's bytes (ShredCostMicro.cs)", () => ShredCostMicro.Run()),
-    ["chunkshapes"] = ("the keys the chunks of a slice shred, three ways (ChunkShapesMicro.cs)", () =>
-        Task.FromResult(ChunkShapesMicro.Run((int)Option(args, "--rows", 3_000_000), (int)Option(args, "--chunk-rows", 1_000_000)))),
-    ["runsorder"] = ("the order inside a slice by distinct values or by runs added (RunsOrderMicro.cs)", () =>
-        Task.FromResult(RunsOrderMicro.Run((int)Option(args, "--rows", 1_000_000), rounds))),
     ["shredwrite"] = ("what shredding costs a job in time, counted, chosen and written (ShredWriteMicro.cs)", () => ShredWriteMicro.Run(Option(args, "--rows", 1_000_000), rounds)),
-    ["slicebytes"] = ("what sorted slices weigh against the same rows in time order (SliceBytesMicro.cs)", () => SliceBytesMicro.Run(Option(args, "--rows", 1_000_000))),
-    ["sliceorder"] = ("the time order of an object sorted slice by slice (SliceOrderMicro.cs)", () => SliceOrderMicro.Run(rounds, Option(args, "--slice-rows", 500_000))),
     ["sparsecost"] = ("a sparse chunk's bytes and decode time against a dense one's, by the share of nulls (SparseCostMicro.cs)", () =>
         SparseCostMicro.Run(Option(args, "--rows", 1_000_000), rounds)),
     ["splitplan"] = ("--file F: the plan of splits a scan of a file's every row draws before its first read (SplitPlanMicro.cs)", () =>

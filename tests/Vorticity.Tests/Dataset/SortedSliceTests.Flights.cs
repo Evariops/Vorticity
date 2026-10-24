@@ -1,6 +1,6 @@
-// Slices in flight: a slice sorts on a thread of its own as soon as its rows are in, beside the writes of the slices before
-// it, and the writes go one at a time in the slices' order; a write that fails stops every slice after it, and the drain
-// throws what it threw once every slice handed over is done with its buffer.
+// Slices in flight: a slice is joined on a thread of its own as soon as its rows are in, beside the writes of the slices
+// before it, and the writes go one at a time in the slices' order; a write that fails stops every slice after it, and the
+// drain throws what it threw once every slice handed over is done with its buffer.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -19,9 +19,9 @@ namespace Vorticity.Tests.Dataset;
 public sealed partial class SortedSliceTests
 {
     /// <summary>
-    /// Twelve slices of 200 spans, each write slower than a sort: the writes come one at a time and in the slices' order,
-    /// each slice's rows sorted by its order; a write that throws at the fourth slice is the last one called, and what it
-    /// threw is what the slices throw.
+    /// Twelve slices of 200 spans, each write slower than a join: the writes come one at a time and in the slices' order,
+    /// each slice's rows in the order they came; a write that throws at the fourth slice is the last one called, and what
+    /// it threw is what the slices throw.
     /// </summary>
     [Fact]
     public async Task SlicesInFlightAreWrittenInTheirOrderAndAFailureStopsThem()
@@ -48,22 +48,21 @@ public sealed partial class SortedSliceTests
         long micros = Noon.ToUnixTimeMilliseconds() * 1000;
         SliceTable table = new SliceTable(
             TimeUnit.Microseconds,
-            [.. Enumerable.Range(0, Slices).Select(s => new TimeSlice(micros + (s * 250_000_000L), micros + ((s + 1) * 250_000_000L), (long)s * SliceRows, SliceRows))],
-            [schema.IndexOfField(nameof(Span.Region)), schema.IndexOfField(nameof(Span.Status))]);
+            [.. Enumerable.Range(0, Slices).Select(s => new TimeSlice(micros + (s * 250_000_000L), micros + ((s + 1) * 250_000_000L), (long)s * SliceRows, SliceRows))]);
 
-        // Every slice written, in its order, one at a time, its rows sorted by its codes.
-        List<int> written = await WriteSlicesAsync(open, table, schema, failAt: -1);
+        // Every slice written, in its order, one at a time, its rows in the order they came.
+        List<int> written = await WriteSlicesAsync(open, table, schema, spans, failAt: -1);
         Assert.Equal(Enumerable.Range(0, Slices), written);
 
         // A write that fails at the fourth slice is the last one called.
-        InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(() => WriteSlicesAsync(open, table, schema, failAt: 3));
+        InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(() => WriteSlicesAsync(open, table, schema, spans, failAt: 3));
         Assert.Equal("slice 3", failure.Message);
     }
 
     /// <summary>
     /// A slice whose rows come in batches that its ends cut holds the rows it was handed, its columns filled as they came:
     /// names within their views and past them, a count that is now and then null, copied a batch at a time and joined, an
-    /// instant and a size; each slice its own rows, sorted by name, ties in the order they came.
+    /// instant and a size; each slice its own rows, in the order they came.
     /// </summary>
     [Fact]
     public async Task ASliceFilledBatchByBatchHoldsTheRowsItWasHanded()
@@ -93,8 +92,7 @@ public sealed partial class SortedSliceTests
         long micros = Noon.ToUnixTimeMilliseconds() * 1000;
         SliceTable table = new SliceTable(
             TimeUnit.Microseconds,
-            [.. Enumerable.Range(0, Slices).Select(s => new TimeSlice(micros + (s * SliceRows * 1_000_000L), micros + ((s + 1) * SliceRows * 1_000_000L), (long)s * SliceRows, SliceRows))],
-            [schema.IndexOfField(nameof(Filled.Name))]);
+            [.. Enumerable.Range(0, Slices).Select(s => new TimeSlice(micros + (s * SliceRows * 1_000_000L), micros + ((s + 1) * SliceRows * 1_000_000L), (long)s * SliceRows, SliceRows))]);
         List<Filled[]> written = [];
         using (SortedSlices slices = new SortedSlices(table, schema.IndexOfField(nameof(Filled.At)), schema))
         {
@@ -104,8 +102,8 @@ public sealed partial class SortedSliceTests
                 {
                     await slices.AppendAsync(batch, (slice, token) =>
                     {
-                        Filled[] rows = new Filled[slice.Batch.RowCount];
-                        Filled.ReadRows(slice.Batch.As<Filled>(), rows);
+                        Filled[] rows = new Filled[slice.RowCount];
+                        Filled.ReadRows(slice.As<Filled>(), rows);
                         written.Add(rows);
                         return ValueTask.CompletedTask;
                     }, Ct);
@@ -118,9 +116,7 @@ public sealed partial class SortedSliceTests
         Assert.Equal(Slices, written.Count);
         for (int s = 0; s < Slices; s++)
         {
-            Filled[] expected = [.. filled.Skip(s * SliceRows).Take(SliceRows).Select((row, i) => (row, i))
-                .OrderBy(p => p.row.Name, StringComparer.Ordinal).ThenBy(p => p.i).Select(p => p.row)];
-            Assert.Equal(expected, written[s]);
+            Assert.Equal(filled.Skip(s * SliceRows).Take(SliceRows), written[s]);
         }
     }
 
@@ -128,10 +124,10 @@ public sealed partial class SortedSliceTests
     public partial record struct Filled(DateTimeOffset At, string Name, int? Count, long Size);
 
     /// <summary>
-    /// The slices of <paramref name="table"/> over the rows of <paramref name="file"/>, each write 5 ms long, the write of
-    /// slice <paramref name="failAt"/> throwing: the slices written, in the order they were.
+    /// The slices of <paramref name="table"/> over the rows of <paramref name="file"/>, <paramref name="spans"/>, each write
+    /// 5 ms long, the write of slice <paramref name="failAt"/> throwing: the slices written, in the order they were.
     /// </summary>
-    private static async Task<List<int>> WriteSlicesAsync(VortexFile file, SliceTable table, DType schema, int failAt)
+    private static async Task<List<int>> WriteSlicesAsync(VortexFile file, SliceTable table, DType schema, Span[] spans, int failAt)
     {
         List<int> written = [];
         int writing = 0;
@@ -149,17 +145,10 @@ public sealed partial class SortedSliceTests
                         {
                             int index = written.Count;
                             written.Add(index);
-                            Assert.Equal(table.Slices[index].Rows, slice.Batch.RowCount);
-                            for (int row = 1; row < slice.Batch.RowCount; row++)
-                            {
-                                int compared = 0;
-                                for (int k = 0; k < slice.Codes.Count && compared == 0; k++)
-                                {
-                                    compared = slice.Codes[k][row - 1].CompareTo(slice.Codes[k][row]);
-                                }
-
-                                Assert.True(compared <= 0, $"slice {index} is not sorted at row {row}");
-                            }
+                            Assert.Equal(table.Slices[index].Rows, slice.RowCount);
+                            Span[] rows = new Span[slice.RowCount];
+                            Span.ReadRows(slice.As<Span>(), rows);
+                            Assert.Equal(spans.Skip((int)table.Slices[index].FirstRow).Take(rows.Length), rows);
 
                             await Task.Delay(5, token);
                             if (index == failAt)

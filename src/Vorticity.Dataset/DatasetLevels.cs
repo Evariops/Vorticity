@@ -37,8 +37,8 @@ internal sealed class DatasetLevels
     /// Whether a level of a dataset with a clustering key holds objects each written in the key's
     /// order, null keys last: every level above 0, which only a merge on the key writes into, since a
     /// plan refuses tiered levels for such a dataset. Level 0 holds what appends wrote, in any order,
-    /// and a dataset of periods writes its objects in sorted slices, in the key's order slice by slice
-    /// only. Off the key, a level's objects are in no order of it.
+    /// and a dataset of periods writes its objects in time slices, whose rows it may order by another
+    /// column inside each slice: in the key's order slice by slice only. Off the key, a level's objects are in no order of it.
     /// </summary>
     public bool RowsInKeyOrder(int level) => level > 0 && !ByPeriods;
 

@@ -1061,47 +1061,6 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>Counts a chunk's data bytes toward its column, for `Auto`'s shares.</summary>
     internal void AddColumnBytes(int field, long bytes) => _columnBytes[field] += bytes;
 
-    /// <summary>The bytes of the chunks of column <paramref name="field"/> written so far.</summary>
-    internal long ColumnBytes(int field) => _columnBytes[field];
-
-    /// <summary>
-    /// The bytes the synopsis's tables may take over <paramref name="dataBytes"/> of data: the indexes' share,
-    /// a budget of their own, with no floor, so that a small object keeps none.
-    /// </summary>
-    internal long SynopsisBudget(long dataBytes) => dataBytes * _budgetPerMille / 1000;
-
-    /// <summary>
-    /// <see cref="SynopsisBudget"/> over the data written so far, <see cref="long.MaxValue"/> while that data is
-    /// under <see cref="EarlyChoiceFloor"/>: past it, what a table built as the data goes takes says whether it can be
-    /// worth its bytes, and one that cannot is given up before it grows further.
-    /// </summary>
-    internal long SynopsisBudgetSoFar(long dataBytes) => dataBytes < EarlyChoiceFloor ? long.MaxValue : SynopsisBudget(dataBytes);
-
-    /// <summary>
-    /// The data under which no synopsis table is given up before the end: the columns still gathered and the chunks
-    /// in flight would weigh too much of so little, and the tables cost too little for an early verdict to save
-    /// anything, so the choice at the end weighs them all, against the whole data.
-    /// </summary>
-    internal const long DefaultEarlyChoiceBytes = 64L << 20;
-
-    /// <summary>The data under which no synopsis table is given up before the end (<see cref="VortexWriteOptions.SynopsisEarlyChoiceBytes"/>).</summary>
-    internal long EarlyChoiceFloor { get; set; } = DefaultEarlyChoiceBytes;
-
-    /// <summary>Reports what became of a synopsis table, its keys fields or the paths <paramref name="paths"/> lists, and why, with the choice's numbers.</summary>
-    internal void ReportSynopsis(SynopsisTableInfo table, IReadOnlyList<SynopsisPath> paths, bool kept, string verdict, long bytes)
-    {
-        string[] keys = new string[table.Keys.Length];
-        for (int k = 0; k < keys.Length; k++)
-        {
-            keys[k] = SynopsisPath.Names(table.Keys[k]) && paths[SynopsisPath.Place(table.Keys[k])] is { } path
-                ? $"{_paths[path.Field]}[\"{path.Key}\"]"
-                : _paths[table.Keys[k]];
-        }
-
-        string grain = $"{table.Kind} per {table.Bucket} of ({string.Join(", ", keys)})";
-        _reports.Add(new IndexWriteReport(grain, IndexKinds.SynopsisTable, kept ? IndexOutcome.Built : IndexOutcome.Abandoned, verdict, kept ? bytes : 0));
-    }
-
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
     {
@@ -1851,27 +1810,6 @@ internal sealed class IndexWriter : IDisposable
         _entries.Add(new IndexEntry(
             IndexKinds.VariantBlocks, [checked((uint)field)], (ulong)length, stats.OptionBytes(),
             [new IndexRun(0, Blocks(rows, length), regions, [])]));
-    }
-
-    /// <summary>
-    /// Names each table of the synopsis part: an entry on the root, the table's options, its one run's payload the list of
-    /// its chunks (<see cref="SynopsisContents.TableChunks.List"/>), which names their regions and buckets, and those of the
-    /// distinct sketches a chunk lays apart. The list alone: a chunk's region and dtype each, a day's 4 759 chunks, took
-    /// 4.5 MB of the directory, which every reader of the directory read whole. A table's rows decode at the struct the
-    /// file's schema and its slices' paths give it (<see cref="SynopsisTableInfo.RowType"/>).
-    /// </summary>
-    internal void AddSynopsisTables(IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> tables, long rows, int blockRows)
-    {
-        int length = Math.Max(blockRows, 1);
-        foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) in tables)
-        {
-            if (chunks is SynopsisContents.TableChunks { List: { } list })
-            {
-                _entries.Add(new IndexEntry(
-                    IndexKinds.SynopsisTable, [], (ulong)length, table.OptionBytes(),
-                    [new IndexRun(0, Blocks(rows, length), [list], [], (ulong)table.Rows, [])]));
-            }
-        }
     }
 
     /// <summary>The bytes the index budget of <paramref name="dataBytes"/> leaves the variants' indexes still to write.</summary>

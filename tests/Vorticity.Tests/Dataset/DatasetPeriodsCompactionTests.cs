@@ -219,13 +219,13 @@ public sealed partial class DatasetPeriodsCompactionTests
             await reader.RefreshAsync(Ct);
             await CheckAsync(reader, appended, SliceWidth.Hour);
 
-            // Every object a version adds sorted as its slice table says, its synopsis tables the merge of its runs.
-            await SortedAsTheirTablesAsync(reader, seen);
+            // Every object a version adds holds its slices' rows in time order.
+            await InTimeOrderAsync(reader, seen);
         }
 
-        (int sortedObjects, int withTables) = await SortedAsTheirTablesAsync(reader);
+        int slicedObjects = await InTimeOrderAsync(reader);
         Console.Out.Write(FormattableString.Invariant(
-            $"PERIODS INTERLEAVED seed {seed}: {appended.Count} rows, version {reader.Version}, {sortedObjects} objects in sorted slices, {withTables} with synopsis tables, {string.Join(", ", outcomes.OrderBy(o => o.Key).Select(o => $"{o.Key.Item1} {o.Key.Item2} {o.Value}"))}.\n"));
+            $"PERIODS INTERLEAVED seed {seed}: {appended.Count} rows, version {reader.Version}, {slicedObjects} objects in slices, {string.Join(", ", outcomes.OrderBy(o => o.Key).Select(o => $"{o.Key.Item1} {o.Key.Item2} {o.Value}"))}.\n"));
         // Half the exits or so are abandoned: another handle emptied level 0 first.
         Assert.True(outcomes.Where(o => o.Key.Item2 == OperationOutcome.Applied).Sum(o => o.Value) > 5, "the schedule must compact");
         Assert.True(outcomes.Where(o => o.Key.Item2 == OperationOutcome.Abandoned).Sum(o => o.Value) > 0, "the schedule must commit a job the ground moved under");
@@ -383,7 +383,6 @@ public sealed partial class DatasetPeriodsCompactionTests
         DateTimeOffset newest = Noon;
         Dictionary<CompactionTrigger, int> triggers = [];
         HashSet<UInt128> seen = [];
-        int tabled = 0;
         long ingested = 0;
         long rewritten = 0;
         int widest = 0;
@@ -427,8 +426,8 @@ public sealed partial class DatasetPeriodsCompactionTests
 
             await CheckAsync(dataset, appended, SliceWidth.Hour);
 
-            // Every object a round adds sorted as its slice table says, its synopsis tables the merge of its runs.
-            tabled += (await SortedAsTheirTablesAsync(dataset, seen)).WithTables;
+            // Every object a round adds holds its slices' rows in time order.
+            await InTimeOrderAsync(dataset, seen);
             widest = Math.Max(widest, await ObjectsOverAsync(dataset, newest - TimeSpan.FromMinutes(15), newest));
             int[] counts = await CountsAsync(dataset);
             Assert.InRange(counts[0], 0, compaction.LevelZeroCeiling);
@@ -439,11 +438,10 @@ public sealed partial class DatasetPeriodsCompactionTests
             }
         }
 
-        (int sortedObjects, int withTables) = await SortedAsTheirTablesAsync(dataset);
-        Assert.True(sortedObjects > 0, "the schedule must leave objects in sorted slices");
-        Assert.True(tabled > 0, "the schedule must write objects whose synopsis tables are worth their bytes");
+        int slicedObjects = await InTimeOrderAsync(dataset);
+        Assert.True(slicedObjects > 0, "the schedule must leave objects in slices");
         Console.Out.Write(FormattableString.Invariant(
-            $"PERIODS FUZZ seed {seed}: {appended.Count} rows, levels {string.Join('/', await CountsAsync(dataset))}, triggers {string.Join(", ", triggers.Select(t => $"{t.Key} {t.Value}"))}, rewrites per row {(double)rewritten / ingested:F2}, at most {widest} objects over 15 minutes, {sortedObjects} objects in sorted slices, {withTables} with synopsis tables, {tabled} over the schedule.\n"));
+            $"PERIODS FUZZ seed {seed}: {appended.Count} rows, levels {string.Join('/', await CountsAsync(dataset))}, triggers {string.Join(", ", triggers.Select(t => $"{t.Key} {t.Value}"))}, rewrites per row {(double)rewritten / ingested:F2}, at most {widest} objects over 15 minutes, {slicedObjects} objects in slices.\n"));
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.FreshMerge) > 0, "the schedule must merge fresh objects up");
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.LevelZeroCeiling) > 0, "the schedule must empty level 0");
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.Seal) > 0, "the schedule must seal a period");
@@ -458,16 +456,14 @@ public sealed partial class DatasetPeriodsCompactionTests
     }
 
     /// <summary>
-    /// Every object above level 0 that carries a slice table holds each slice's rows sorted as the table
-    /// says: by its synopsis column, the status here when it repeats enough, then by instant, and its
-    /// synopsis tables count its rows. Returns the objects checked, an object a delete rewrote carrying no
-    /// table, and those of them with synopsis tables. Objects <paramref name="seen"/> holds are not checked
-    /// again, and those checked are added to it.
+    /// Every object above level 0 that carries a slice table holds each slice's rows in the order of their instants, its
+    /// table naming no order: until a cluster column orders them, a dataset keeps its rows in the order they came. Returns
+    /// the objects checked, an object a delete rewrote carrying no table. Objects <paramref name="seen"/> holds are not
+    /// checked again, and those checked are added to it.
     /// </summary>
-    private static async Task<(int Objects, int WithTables)> SortedAsTheirTablesAsync(VortexDataset dataset, HashSet<UInt128>? seen = null)
+    private static async Task<int> InTimeOrderAsync(VortexDataset dataset, HashSet<UInt128>? seen = null)
     {
         int checkedObjects = 0;
-        int withTables = 0;
         for (int level = 1; level < dataset.Levels.Count; level++)
         {
             await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
@@ -484,13 +480,7 @@ public sealed partial class DatasetPeriodsCompactionTests
                     continue;
                 }
 
-                // The order names the status, and the request id where ids repeat, as deletes make them.
-                Dictionary<int, Comparison<Request>> by = new()
-                {
-                    [lease.File.DType.IndexOfField(nameof(Request.Status))] = static (l, r) => l.Status.CompareTo(r.Status),
-                    [lease.File.DType.IndexOfField(nameof(Request.RequestId))] = static (l, r) => string.CompareOrdinal(l.RequestId, r.RequestId),
-                };
-                Assert.All(table.Order, field => Assert.True(by.ContainsKey(field), $"order {string.Join(',', table.Order)}"));
+                Assert.Empty(table.Order);
                 List<Request> rows = [];
                 await foreach (Request row in lease.File.Scan<Request>().ToRecordsAsync(Ct))
                 {
@@ -502,28 +492,15 @@ public sealed partial class DatasetPeriodsCompactionTests
                     List<Request> part = rows.GetRange((int)slice.FirstRow, (int)slice.Rows);
                     for (int i = 1; i < part.Count; i++)
                     {
-                        int order = 0;
-                        foreach (int field in table.Order)
-                        {
-                            order = by[field](part[i - 1], part[i]);
-                            if (order != 0)
-                            {
-                                break;
-                            }
-                        }
-
-                        order = order != 0 ? order : part[i - 1].At.CompareTo(part[i].At);
-                        Assert.True(order <= 0, $"row {slice.FirstRow + i} comes before the row above it in its slice's order");
+                        Assert.True(part[i - 1].At <= part[i].At, $"row {slice.FirstRow + i} comes before the row above it in time");
                     }
                 }
 
-                // Its runs count its rows, and its coarse tables are the merge of its slices' runs.
-                withTables += await SynopsisTableTests.CoarseTablesAreTheMergeOfTheirRunsAsync(lease.File, table) > 0 ? 1 : 0;
                 checkedObjects++;
             }
         }
 
-        return (checkedObjects, withTables);
+        return checkedObjects;
     }
 
     /// <summary>

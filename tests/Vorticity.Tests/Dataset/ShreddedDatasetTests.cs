@@ -136,74 +136,6 @@ public sealed partial class ShreddedDatasetTests
     }
 
     /// <summary>
-    /// Three sources of attributes, a route and a status, a route and keys of data, a query alone,
-    /// beside a host among forty: the objects a job writes order each slice by the attributes' shape,
-    /// then by the route the object shreds, nine values, before the host, so the rows of each shape lie
-    /// together in every slice; and the rows are the ones appended.
-    /// </summary>
-    [Fact]
-    public async Task AnObjectOrdersItsSlicesByShape()
-    {
-        await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Hosted.Schema, new DatasetOptions
-        {
-            ClusteringKey = [nameof(Hosted.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
-        }, Ct);
-        Random random = new Random(23);
-        List<Hosted> appended = [];
-        for (int part = 0; part < 16; part++)
-        {
-            Hosted[] rows = [.. Enumerable.Range(part * 400, 400).Select(i => new Hosted(
-                Noon.AddSeconds(i * 1.25),
-                $"host-{random.Next(40)}",
-                (i % 3) switch
-                {
-                    0 => Variant.Object(("route", Variant.From($"/r/{i % 9}")), ("status", Variant.From(200 + (i % 4)))),
-                    1 => Variant.Object(("route", Variant.From($"/r/{i % 9}")), ($"user.{random.Next(1_000)}.score", Variant.From(i))),
-                    _ => Variant.Object(("query", Variant.From($"q{i % 5}"))),
-                }))];
-            await using ObjectDraft draft = dataset.StartObject();
-            await draft.Writer.WriteAsync<Hosted>(rows, Ct);
-            await dataset.AppendAsync(draft, Ct);
-            appended.AddRange(rows);
-        }
-
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
-        {
-        }
-
-        int sealedObjects = 0;
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
-        {
-            await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(leaf.Value.Span), Ct);
-            int attributes = lease.File.DType.IndexOfField(nameof(Hosted.Attributes));
-            SliceTable table = (await SliceTable.ReadAsync(lease.File, Ct))!;
-            // The shape first, then the route, a shredded key of nine values, then the host; the keys left in
-            // the residual are counted, never sorted by.
-            Assert.Equal([new SynopsisPath(attributes, "route", Vorticity.Types.Variants.VariantClass.String)], table.Paths.Where(p => !p.Residual));
-            Assert.Equal([-attributes - 1, SynopsisPath.Entry(0), lease.File.DType.IndexOfField(nameof(Hosted.Host))], table.Order);
-
-            // In every slice, the rows of one shape lie together: a route, or none.
-            List<Hosted> stored = await lease.File.Scan<Hosted>().ToRecordsAsync(Ct).ToListAsync(Ct);
-            foreach (TimeSlice slice in table.Slices)
-            {
-                bool[] routes = [.. stored.GetRange((int)slice.FirstRow, (int)slice.Rows).Select(r => r.Attributes.Has("route"))];
-                Assert.Equal(1, routes.Zip(routes.Skip(1)).Count(pair => pair.First != pair.Second));
-            }
-
-            // The host's rows lie apart, on either side of the shapes, and its run statistics count them alike.
-            Assert.True(await SynopsisTableTests.CoarseTablesAreTheMergeOfTheirRunsAsync(lease.File, table) > 0);
-            sealedObjects++;
-        }
-
-        Assert.Equal(2, sealedObjects);
-        Assert.Equal(
-            appended.Select(r => (r.At, r.Host)).Order(),
-            (await dataset.Scan<Hosted>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(r => (r.At, r.Host)).Order());
-    }
-
-    /// <summary>
     /// The .NET half of Rust reading the objects a job shreds: each object above level 0 of a dataset of
     /// periods written out as it is stored, beside its rows in the same order written whole, for
     /// `cargo run --example verify_shredded` to compare (`bench/crosscheck.sh`). It skips rather than
@@ -321,7 +253,4 @@ public sealed partial class ShreddedDatasetTests
 
     [VortexRecord]
     public partial record struct RouteCount(string? Route, long Rows, long Statuses);
-
-    [VortexRecord]
-    public partial record struct Hosted(DateTimeOffset At, string Host, Variant Attributes);
 }

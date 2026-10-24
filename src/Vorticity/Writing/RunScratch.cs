@@ -18,7 +18,7 @@ namespace Vorticity.Writing;
 /// <para>
 /// Its file is written a page at a time: the page being filled stays in memory, a read of it served from
 /// there, and goes to the file once full, so that a store appended a few kilobytes at a time, a bucket's
-/// page of postings or a chunk held for the synopsis part, costs a write a megabyte rather than one an append.
+/// page of postings, costs a write a megabyte rather than one an append.
 /// </para>
 /// <para>
 /// A store whose session seals its files seals its file too: frames of 64 KiB under AES-256-GCM,

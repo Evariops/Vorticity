@@ -214,7 +214,7 @@ internal static class DatasetTelemetry
 
     /// <summary>
     /// Starts the activity of one pass of a compaction job, a child of the job's, or returns null when nothing
-    /// listens: <c>plan</c>, the first pass of a job that writes sorted slices, which cuts them from the rows,
+    /// listens: <c>plan</c>, the first pass of a job that writes time slices, which cuts them from the rows,
     /// or <c>write</c>, the pass that reads the rows again and writes the outputs.
     /// </summary>
     internal static Activity? StartCompactionPass(string pass) =>

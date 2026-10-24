@@ -96,9 +96,8 @@ internal static partial class PathsBench
         internal double QpRate { get; init; } = 5_000;
 
         /// <summary>
-        /// Whether the client's spans and log records declare what their questions read (<c>--declared</c>): groupings of the
-        /// spans' synopsis columns for QP-1 and QP-2, and the log records' status code and feature flag shredded, on append too,
-        /// for QP-3, QP-9 and QP-10. Their stores are named apart.
+        /// Whether the client's log records declare what their questions read (<c>--declared</c>): their status code and
+        /// feature flag shredded, on append too, for QP-3, QP-9 and QP-10. Their stores are named apart.
         /// </summary>
         internal bool Declared { get; init; }
 
@@ -873,16 +872,6 @@ internal static partial class PathsBench
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
             Identifiers = [nameof(GeneratedSpanV2.TraceId), nameof(GeneratedSpanV2.SpanId)],
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
-
-            // --declared: the columns QP-1 and QP-2 filter and group by together, which the order of the spans' facets
-            // places far apart, and the service alone, whose durations' sketches by slice answer QP-6's last minutes.
-            SynopsisGroupings = !settings.Declared ? null :
-            [
-                [nameof(GeneratedSpanV2.Service), nameof(GeneratedSpanV2.HttpStatus), nameof(GeneratedSpanV2.Route)],
-                [nameof(GeneratedSpanV2.Route), nameof(GeneratedSpanV2.Pod)],
-                [nameof(GeneratedSpanV2.Pod), nameof(GeneratedSpanV2.Status), nameof(GeneratedSpanV2.ExceptionGroup)],
-                [nameof(GeneratedSpanV2.Service)],
-            ],
         };
         long rows = await IncrementalBuild.FillAsync<GeneratedSpanV2>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>
         {
@@ -921,11 +910,9 @@ internal static partial class PathsBench
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
 
-            // --declared: the keys of the attributes QP-3, QP-9 and QP-10 filter by, shredded by every job and every append,
-            // and the service they group by with them.
+            // --declared: the keys of the attributes QP-3, QP-9 and QP-10 filter by, shredded by every job and every append.
             ShreddedPaths = !settings.Declared ? null : [StatusCode, NewCart],
             ShredOnAppend = settings.Declared,
-            SynopsisGroupings = !settings.Declared ? null : [[StatusCode, nameof(LogRow.ServiceName)], [NewCart, nameof(LogRow.ServiceName)]],
         };
         long rows = await IncrementalBuild.FillAsync<LogRow>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>
         {

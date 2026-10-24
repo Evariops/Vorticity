@@ -28,7 +28,7 @@ public enum KeySourceKind : byte
     InMemory = 5,
 
     /// <summary>
-    /// A <c>vorticity.slices.v1</c> table on an instant column, whose rows are sorted slice by slice: the
+    /// A <c>vorticity.slices.v1</c> table on an instant column, whose rows are cut in time slices: the
     /// table finds a key's slice, and the slice's instants are read and ranked when first needed.
     /// </summary>
     Slices = 6,

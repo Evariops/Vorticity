@@ -286,32 +286,11 @@ public sealed record VortexWriteOptions
     internal IReadOnlyDictionary<string, Indexes.VariantDirectory>? VariantDirectories { get; init; }
 
     /// <summary>
-    /// The top-level columns whose chunks lie together after the rest of the data, the synopsis part,
-    /// each named in the index directory: the object's synopsis columns, which a question that needs
-    /// only them reads without the rest.
-    /// </summary>
-    internal IReadOnlyList<string>? SynopsisColumns { get; init; }
-
-    /// <summary>
     /// The chunks of a page of a sliced file's chunk directories, those that hold more than a page laid in pages
     /// (<see cref="global::Vorticity.Indexes.SliceChunks.PagedVersion"/>): <see cref="global::Vorticity.Indexes.SliceChunks.DefaultPageEntries"/>. Lowered by tests,
     /// so that objects of a few chunks lay their directories in pages as a day's do.
     /// </summary>
     internal int ChunkPageEntries { get; init; } = global::Vorticity.Indexes.SliceChunks.DefaultPageEntries;
-
-    /// <summary>
-    /// The bytes of a synopsis table's list of chunks at most for the entry to keep the chunks in its place:
-    /// <see cref="global::Vorticity.Indexes.SynopsisContents.InlineListBytes"/>. Zero by tests, so that small objects list every
-    /// table apart as a day lists its large ones.
-    /// </summary>
-    internal int InlineListBytes { get; init; } = global::Vorticity.Indexes.SynopsisContents.InlineListBytes;
-
-    /// <summary>
-    /// The data under which no synopsis table is given up before the end, every one weighed by the choice against the
-    /// whole data: <see cref="IndexWriter.DefaultEarlyChoiceBytes"/>. Lowered by tests, so that objects of a few rows
-    /// meet the early verdicts that only large ones do otherwise.
-    /// </summary>
-    internal long SynopsisEarlyChoiceBytes { get; init; } = IndexWriter.DefaultEarlyChoiceBytes;
 
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;

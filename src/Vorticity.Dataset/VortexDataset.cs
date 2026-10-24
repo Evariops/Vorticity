@@ -934,7 +934,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ObjectDraft StartObjectUnder(
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool sliced = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
-        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, IReadOnlyList<string>? synopsis = null, long byteBound = -1)
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
@@ -958,13 +958,6 @@ public sealed class VortexDataset : IAsyncDisposable
         if (directories is { Count: > 0 })
         {
             write = write with { VariantDirectories = directories };
-        }
-
-        // The synopsis columns lie together after the rest of the data, which a question that needs only
-        // them reads alone.
-        if (synopsis is { Count: > 0 })
-        {
-            write = write with { SynopsisColumns = synopsis };
         }
 
         if (_store is SealedObjectStore { Seals: true })
@@ -1005,7 +998,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
 
-        // An object in sorted slices on a key of its instant alone is walked through its slice table,
+        // An object in time slices on a key of its instant alone is walked through its slice table,
         // which finds a key's slice, and the slice's instants ranked: a run on the key would repeat
         // them, with a row for each.
         bool bySlices = sliced && schema.Key is { IsComposite: false };
@@ -3144,7 +3137,7 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// Refuses an object written in sorted slices without a run whose slice table does not walk its
+    /// Refuses an object written in time slices without a run whose slice table does not walk its
     /// key: none, one on another column, or one that does not cover its rows. A key cursor would find
     /// no source in it, and take it for an object without the key.
     /// </summary>
@@ -3155,7 +3148,7 @@ public sealed class VortexDataset : IAsyncDisposable
         if (source is null)
         {
             throw new DatasetIntegrityException(
-                $"An object written in sorted slices carries no run on '{instant}' and no slice table that walks it: {reason}.");
+                $"An object written in time slices carries no run on '{instant}' and no slice table that walks it: {reason}.");
         }
 
         await source.DisposeAsync().ConfigureAwait(false);

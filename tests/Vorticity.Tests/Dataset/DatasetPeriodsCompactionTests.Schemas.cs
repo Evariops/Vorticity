@@ -15,10 +15,9 @@ namespace Vorticity.Tests.Dataset;
 public sealed partial class DatasetPeriodsCompactionTests
 {
     /// <summary>
-    /// An hour whose first quarters were appended before a text column and a variant column were added is cut,
-    /// ordered and sealed as the same rows appended after them, the first quarters' new columns null: after each job,
-    /// every object holds the same rows in the same slices, sorted in the same order, with the same synopsis paths and
-    /// shredding, and the rows read back the same.
+    /// An hour whose first quarters were appended before a text column and a variant column were added is cut and
+    /// sealed as the same rows appended after them, the first quarters' new columns null: after each job, every object
+    /// holds the same rows in the same slices, with the same shredding, and the rows read back the same.
     /// </summary>
     [Fact]
     public async Task AnHourWrittenUnderTwoSchemasIsPlannedAsOneWrittenUnderTheLast()
@@ -60,15 +59,14 @@ public sealed partial class DatasetPeriodsCompactionTests
             Assert.True(triggers.Count < 50, $"compaction does not settle, {done.Trigger} again");
         }
 
-        // The hour is sealed, its rows sorted by the region, which the first quarters hold none of, then the status.
+        // The hour is sealed, its rows in the order they came, its slice table naming no order.
         Assert.Contains(CompactionTrigger.Seal, triggers);
         TreeEntry period = await FirstAsync(evolved, PeriodLevels.Periods);
         ObjectEntry sealedEntry = ObjectEntry.FromBytes(period.Value.Span);
         await using (ObjectLease lease = await evolved.RentAsync(sealedEntry, Ct))
         {
             SliceTable slices = (await SliceTable.ReadAsync(lease.File, Ct))!;
-            DType schema = evolved.Snapshot.Schema.DType;
-            Assert.Equal([schema.IndexOfField(nameof(Tagged.Region)), schema.IndexOfField(nameof(Tagged.Status))], slices.Order);
+            Assert.Empty(slices.Order);
             Assert.Equal(60, slices.Rows);
         }
 

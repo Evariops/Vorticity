@@ -7,10 +7,9 @@ namespace Vorticity.Dataset;
 /// <summary>
 /// Where the slices of the objects a load writes spend their time, summed over every object that adds to it, so that which
 /// stage of the pipeline holds the others is a number: the rows drawn by the caller, then on the thread that hands them
-/// over, the rows copied into a slice and the wait for a buffer to be free; on the thread that sorts a slice, its columns
-/// made one, the batches of a column copied apart joined, and sorted; on the thread that writes a slice, its synopsis
-/// counted, beside its columns and indexes written when a lane is free, and the wait for the count once they are; once an object's rows are all handed over, its
-/// last slice written, its synopsis finished and its writer completed. The object is a sink the caller owns, as
+/// over, the rows copied into a slice and the wait for a buffer to be free; on the thread that writes a slice, its columns
+/// made one, those whose batches were copied apart joined, then its columns and indexes written; once an object's rows are
+/// all handed over, its last slice written and its writer completed. The object is a sink the caller owns, as
 /// <see cref="Scanning.ScanCounters"/> is; the additions are interlocked, one a slice or a batch.
 /// </summary>
 internal sealed class WriteTimings
@@ -18,14 +17,9 @@ internal sealed class WriteTimings
     private long _feed;
     private long _copy;
     private long _join;
-    private long _sort;
     private long _wait;
-    private long _synopsis;
     private long _write;
-    private long _lag;
-    private long _beside;
     private long _drain;
-    private long _tables;
     private long _close;
 
     /// <summary>The caller's rows drawn: the time its parts took to hand each batch over.</summary>
@@ -37,29 +31,14 @@ internal sealed class WriteTimings
     /// <summary>Each slice's columns made one struct, those whose batches were copied apart joined.</summary>
     internal TimeSpan Join => Of(ref _join);
 
-    /// <summary>Each slice sorted: its codes, its permutation, its rows and codes in its order.</summary>
-    internal TimeSpan Sort => Of(ref _sort);
-
     /// <summary>The thread that hands the rows over waiting for a buffer to be free: for the oldest slice it holds to be written.</summary>
     internal TimeSpan Wait => Of(ref _wait);
-
-    /// <summary>Each slice counted into the object's synopsis.</summary>
-    internal TimeSpan Synopsis => Of(ref _synopsis);
 
     /// <summary>Each slice's columns and indexes written.</summary>
     internal TimeSpan Write => Of(ref _write);
 
-    /// <summary>The thread that writes a slice waiting, once its columns are written, for its synopsis counted beside them.</summary>
-    internal TimeSpan Lag => Of(ref _lag);
-
-    /// <summary>The slices whose synopsis was counted beside their write, on a lane of its own.</summary>
-    internal long Beside => Interlocked.Read(ref _beside);
-
     /// <summary>The last slice of each object written, once its rows are all handed over.</summary>
     internal TimeSpan Drain => Of(ref _drain);
-
-    /// <summary>Each object's synopsis finished: its last hour merged, then its hours into the object's tables.</summary>
-    internal TimeSpan Tables => Of(ref _tables);
 
     /// <summary>Each object's writer completed: its indexes finished, the chunks it held laid out, its footer.</summary>
     internal TimeSpan Close => Of(ref _close);
@@ -70,21 +49,11 @@ internal sealed class WriteTimings
 
     internal void AddJoin(long ticks) => Interlocked.Add(ref _join, ticks);
 
-    internal void AddSort(long ticks) => Interlocked.Add(ref _sort, ticks);
-
     internal void AddWait(long ticks) => Interlocked.Add(ref _wait, ticks);
-
-    internal void AddSynopsis(long ticks) => Interlocked.Add(ref _synopsis, ticks);
 
     internal void AddWrite(long ticks) => Interlocked.Add(ref _write, ticks);
 
-    internal void AddLag(long ticks) => Interlocked.Add(ref _lag, ticks);
-
-    internal void AddBeside() => Interlocked.Increment(ref _beside);
-
     internal void AddDrain(long ticks) => Interlocked.Add(ref _drain, ticks);
-
-    internal void AddTables(long ticks) => Interlocked.Add(ref _tables, ticks);
 
     internal void AddClose(long ticks) => Interlocked.Add(ref _close, ticks);
 

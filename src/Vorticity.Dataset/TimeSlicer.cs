@@ -22,10 +22,10 @@ internal enum SliceWidth : byte
 /// </summary>
 /// <remarks>
 /// A slice is the finest grain of time a question reads without reading rows, the most rows an edge
-/// of a window reads, and the rows the job sorts together. A smaller slice makes edges cheaper, but
-/// it adds rows to the tables of slices and breaks the runs of the synopsis columns that a wider
-/// slice sorts whole. A target per object from the edges and the tables alone was measured and
-/// dropped: it cut the bench's hours into minutes, whose sorted columns took 16 % more bytes.
+/// of a window reads, and the rows a job writes together. A smaller slice makes edges cheaper, but
+/// adds entries to the slice table. A target per object from the edges alone was measured and
+/// dropped when slices were sorted by the synopsis columns of the time: it cut the bench's hours
+/// into minutes, whose sorted columns took 16 % more bytes.
 /// <see cref="DefaultTargetRows"/> stays a minute of the design's example, 5 × 10⁴ rows a second.
 /// </remarks>
 internal static class TimeSlicer

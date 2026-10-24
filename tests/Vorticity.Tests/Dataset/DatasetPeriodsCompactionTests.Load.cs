@@ -21,10 +21,9 @@ public sealed partial class DatasetPeriodsCompactionTests
 {
     /// <summary>
     /// Each period a load is given becomes one object of the periods level, its rows read once, whether they come whole or
-    /// in parts, two of which share a second: an hour of fewer rows than an order is judged from is one slice, read without
-    /// its footer, sorted in the order a seal of its rows gives, judged on every row as its count judges them, with its
-    /// synopsis tables. The periods are written at once and committed one by one, nothing in the other levels, and the
-    /// dataset reads every row in key order.
+    /// in parts, two of which share a second: an hour of fewer rows than a pace is judged from is one slice, read without
+    /// its footer, its rows in the order they came, as a seal of its rows writes them. The periods are written at once and
+    /// committed one by one, nothing in the other levels, and the dataset reads every row in key order.
     /// </summary>
     [Fact]
     public async Task ALoadWritesEachPeriodInOnePass()
@@ -93,8 +92,8 @@ public sealed partial class DatasetPeriodsCompactionTests
             Assert.Equal(expected, rows.RowCount);
         }
 
-        // The same rows appended and sealed once a row past the horizon closes their hours: the first hour's object
-        // is sorted in the order the load's first slice settled from its three parts.
+        // The same rows appended and sealed once a row past the horizon closes their hours: the first hour's object holds
+        // its rows in the order they came, as the load's does, no slice sorted and no synopsis part.
         await using MemoryObjectStore reference = new MemoryObjectStore();
         await using VortexDataset sealer = await VortexDataset.CreateAsync(reference, Request.Schema, options, Ct);
         foreach (Request[] requests in hours.Append(RequestsOf([Noon.AddHours(4).AddMinutes(1)], appended.Count)))
@@ -107,14 +106,12 @@ public sealed partial class DatasetPeriodsCompactionTests
         Assert.True((await DrainAsync(sealer, new CompactionOptions { LevelZeroCeiling = 1, Fanout = 100 })).GetValueOrDefault(CompactionTrigger.Seal) > 0);
         (SliceTable Slices, string[] Indexes) sealedHour = await ShapeAsync(sealer, await FirstAsync(sealer, PeriodLevels.Periods));
         (SliceTable Slices, string[] Indexes) loadedHour = await ShapeAsync(dataset, await FirstAsync(dataset, PeriodLevels.Periods));
-        Assert.NotEmpty(loadedHour.Slices.Order);
-        Assert.Equal(sealedHour.Slices.Order, loadedHour.Slices.Order);
-
-        // Its synopsis column, the status it is sorted by, lies in its synopsis part, as the seal's does; a slice of a few
-        // rows keeps no table, which reading them costs less than.
-        int[] loadedPart = await PartColumnsAsync(dataset, await FirstAsync(dataset, PeriodLevels.Periods));
-        Assert.NotEmpty(loadedPart);
-        Assert.Equal(await PartColumnsAsync(sealer, await FirstAsync(sealer, PeriodLevels.Periods)), loadedPart);
+        Assert.Empty(loadedHour.Slices.Order);
+        Assert.Empty(sealedHour.Slices.Order);
+        Assert.DoesNotContain(loadedHour.Indexes, index => index.StartsWith("vorticity.synopsis.", StringComparison.Ordinal));
+        SynopsisContents contents = ObjectEntry.FromBytes((await FirstAsync(dataset, PeriodLevels.Periods)).Value.Span).Contents!;
+        Assert.Equal((0L, 0L), (contents.PartStart, contents.PartEnd));
+        Assert.Empty(contents.Tables);
 
         // A period the dataset holds rows of, one that starts no period, rows of another period, parts out of order, and
         // a part whose rows go back in time, are refused, and leave the dataset as it was.
@@ -136,14 +133,14 @@ public sealed partial class DatasetPeriodsCompactionTests
     }
 
     /// <summary>
-    /// A period of requests at a steady pace, past the rows an order is judged from in its first unit, is cut as its rows
-    /// come into the slices a seal's count of them cuts, sorted in the same order, with the same synopsis tables and
-    /// indexes, given the rows it holds, read once a few thousand at a time.
+    /// A period of requests at a steady pace, past the rows a pace is judged from in its first unit, is cut as its rows
+    /// come into the slices a seal's count of them cuts, with the same indexes, given the rows it holds, read once a few
+    /// thousand at a time.
     /// </summary>
     [Fact]
     public async Task ALoadCutsTheSlicesASealCountsAsItsRowsCome()
     {
-        // Three minutes of 1 200 requests a second, in slices of 40 000: a minute holds 72 000, past the 65 536 an order
+        // Three minutes of 1 200 requests a second, in slices of 40 000: a minute holds 72 000, past the 65 536 a pace
         // is judged from, and under twice the target, which an hour is past.
         await using MemoryObjectStore store = new MemoryObjectStore();
         DatasetOptions options = Options(SliceWidth.Hour);
@@ -173,19 +170,17 @@ public sealed partial class DatasetPeriodsCompactionTests
         (SliceTable Slices, string[] Indexes) loadedHour = await ShapeAsync(dataset, await FirstAsync(dataset, PeriodLevels.Periods));
         Assert.Equal(3, loadedHour.Slices.Slices.Count);
         Assert.Equal(sealedHour.Slices.Slices, loadedHour.Slices.Slices);
-        Assert.Equal(sealedHour.Slices.Order, loadedHour.Slices.Order);
         Assert.Equal(sealedHour.Indexes, loadedHour.Indexes);
-        Assert.Contains(loadedHour.Indexes, index => index.StartsWith(IndexKinds.SynopsisTable, StringComparison.Ordinal));
+        Assert.DoesNotContain(loadedHour.Indexes, index => index.StartsWith("vorticity.synopsis.", StringComparison.Ordinal));
     }
 
     /// <summary>
-    /// A load whose session has lanes to spare counts each slice's synopsis beside the slice's write, and writes the object
-    /// a load of one lane writes, which counts each slice before it: its tables weighed against the same data, and their
-    /// encodings the file's in the order its data met them, over a day whose hours merge while the next slices are written.
-    /// The two objects differ by their identity alone.
+    /// A load whose session has lanes to spare joins and writes its slices on them, and writes the object a load of one lane
+    /// writes, its encodings the file's in the order its data met them, over a day whose hours merge while the next slices
+    /// are written. The two objects differ by their identity alone.
     /// </summary>
     [Fact]
-    public async Task ASynopsisCountedBesideTheWritesGivesTheBytesOfOneCountedBeforeThem()
+    public async Task ALoadOnLanesWritesTheBytesOfALoadOnOne()
     {
         // Three hours of ten requests a second, from noon, in slices of 10 000: the writer has given the file its first
         // encodings within a few slices, and an hour is merged every five.
@@ -203,39 +198,12 @@ public sealed partial class DatasetPeriodsCompactionTests
             PeriodRows day = new PeriodRows(TimeSlicer.InstantOf(new DateTimeOffset(Noon.Date, TimeSpan.Zero), TimeUnit.Microseconds), [token => RowsAsync(file, token)]);
             WriteTimings timings = new WriteTimings();
             await DatasetCompactor.LoadPeriodsAsync(dataset, [day], degree: 1, timings, Ct);
-
-            // One lane is the slice's write's, and its synopsis is counted before it. Eight leave lanes free, once the first
-            // slices' writes have given the file an encoding.
-            if (lanes == 1)
-            {
-                Assert.Equal(0, timings.Beside);
-            }
-            else
-            {
-                Assert.True(timings.Beside > 0, "a slice's synopsis was counted beside its write");
-            }
+            Assert.True(timings.Write > TimeSpan.Zero, "the slices' writes are timed");
 
             ObjectEntry entry = ObjectEntry.FromBytes((await FirstAsync(dataset, PeriodLevels.Periods)).Value.Span);
+            Assert.Equal(instants.Count, entry.Rows);
             byte[] bytes = new byte[entry.Bytes];
             await store.ReadAsync(entry.Key, 0, bytes, null, Ct);
-
-            // Every table read back counts the object's rows over its chunks: they decode, renumbered onto the file's encodings.
-            await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
-            {
-                using SynopsisTableSet set = await SynopsisTableReader.ReadAsync(lease.File, Ct);
-                Dictionary<string, long> counted = [];
-                foreach ((SynopsisTableInfo info, TableChunk _, int node) in set.Tables)
-                {
-                    string table = $"{info.Kind} {info.Bucket} [{string.Join(", ", info.Keys)}]";
-                    foreach (long count in ColumnData.Values<long>(set.Arena, set.Arena.GetNode(node).GetFieldIndex(1 + info.Keys.Length)))
-                    {
-                        counted[table] = counted.GetValueOrDefault(table) + count;
-                    }
-                }
-
-                Assert.NotEmpty(counted);
-                Assert.All(counted, table => Assert.Equal(instants.Count, table.Value));
-            }
 
             // The identity, the bytes of the guid the uid was read from, masked wherever the file holds it.
             byte[] identity = new byte[16];
@@ -253,26 +221,15 @@ public sealed partial class DatasetPeriodsCompactionTests
         }
 
         Assert.Equal(objects[0].Length, objects[1].Length);
-        Assert.True(objects[0].AsSpan().SequenceEqual(objects[1]), "the object of a synopsis counted beside the writes is the one counted before them");
+        Assert.True(objects[0].AsSpan().SequenceEqual(objects[1]), "the object a load writes on lanes is the one it writes on one");
     }
 
     /// <summary>
     /// The requests at <paramref name="instants"/>, their ids counted from <paramref name="first"/>, three statuses taking
-    /// turns, which a synopsis table counts, and a size drawn from the instant, which it sums.
+    /// turns, and a size drawn from the instant.
     /// </summary>
     private static Request[] RequestsOf(List<DateTimeOffset> instants, int first) =>
         [.. instants.Select((at, i) => new Request(at, $"r-{first + i}", 200 + (i % 3 * 100), at.ToUnixTimeSeconds() * 7_919L % 1_000_003))];
-
-    /// <summary>The columns of an object whose every chunk lies in its synopsis part, as its table of contents bounds it, by their fields.</summary>
-    private static async Task<int[]> PartColumnsAsync(VortexDataset dataset, TreeEntry period)
-    {
-        ObjectEntry entry = ObjectEntry.FromBytes(period.Value.Span);
-        SynopsisContents contents = entry.Contents!;
-        await using ObjectLease lease = await dataset.RentAsync(entry, Ct);
-        List<VortexSegment>[] columns = await Vorticity.Tests.Writing.ColumnSegments.OfAsync(lease.File, Ct);
-        return [.. Enumerable.Range(0, columns.Length).Where(f => columns[f].Count > 0
-            && columns[f].TrueForAll(s => s.Offset >= contents.PartStart && s.Offset + s.Length <= contents.PartEnd))];
-    }
 
     /// <summary>An object's slice table, and each of its indexes as its kind, its column and its options.</summary>
     private static async Task<(SliceTable Slices, string[] Indexes)> ShapeAsync(VortexDataset dataset, TreeEntry period)

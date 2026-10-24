@@ -35,19 +35,19 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// <summary>
     /// The ceilings of each pattern: requests and bytes cold, requests and bytes warm, which a build gives exactly, and the
     /// bytes one warm ask allocates, 2 % above what it allocated alone: beside the other classes that run alone, the pools
-    /// they leave took 112 bytes off each. Measured on 2026-10-24, every pattern read from the rows, the synopsis answer
-    /// removed. QP-10, whose path did not change, allocated 159,400 bytes on CI's Linux runner where Windows allocated
-    /// 154,352; Windows now allocates 146,024, and its ceiling stays 2 % above the runner's last figure until the runner
-    /// gives its new one.
+    /// they leave took 112 bytes off each. Measured on 2026-10-24, every pattern read from the rows of objects that keep
+    /// them in the order they came, with no synopsis part nor tables. QP-10 allocated 159,400 bytes on CI's Linux runner
+    /// where Windows allocated 154,352; Windows now allocates 148,144, and its ceiling stays 2 % above the runner's last
+    /// figure until the runner gives its new one.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 527748, 4, 265520, 58624),
-        ["QP-2 the pods of a route"] = new(12, 321780, 8, 59552, 67024),
-        ["QP-3 the services under a shredded status of 500 or more"] = new(8, 283332, 4, 21104, 195248),
-        ["QP-4 the spans of a trace"] = new(5, 328672, 1, 66444, 54768),
-        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 121441, 1, 55884, 300240),
-        ["QP-10 the services of a residual key"] = new(8, 284356, 4, 22128, 162592),
+        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361244, 4, 98960, 79824),
+        ["QP-2 the pods of a route"] = new(4, 262284, 0, 0, 68784),
+        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262284, 0, 0, 168752),
+        ["QP-4 the spans of a trace"] = new(5, 287024, 1, 24740, 73760),
+        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90311, 1, 24740, 294560),
+        ["QP-10 the services of a residual key"] = new(4, 262284, 0, 0, 162592),
     };
 
     private readonly Fixture _fixture;
@@ -143,9 +143,8 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
 
     /// <summary>
     /// Four hours of spans from 20:00, 6,000 an hour, appended in parts of five minutes and compacted under periods of an
-    /// hour: the sealed hours in sorted slices with every table kept, the groupings of the client's patterns declared, the
-    /// HTTP status of the attributes shredded, a key one span in five hundred holds left in the residual, the trace ids
-    /// indexed.
+    /// hour: the sealed hours in time slices, the HTTP status of the attributes shredded, a key one span in five hundred
+    /// holds left in the residual, the trace ids indexed.
     /// </summary>
     public sealed class Fixture : IAsyncLifetime
     {
@@ -162,7 +161,6 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
                 ClusteringKey = [nameof(Spanned.At)],
                 Identifiers = [nameof(Spanned.TraceId)],
                 ShreddedPaths = ["Attributes['http.status_code'].AsInt64()"],
-                SynopsisGroupings = [[nameof(Spanned.Service), nameof(Spanned.Status), nameof(Spanned.Route)], [nameof(Spanned.Route), nameof(Spanned.Pod)], [nameof(Spanned.Service)]],
                 Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(10_000) },
             });

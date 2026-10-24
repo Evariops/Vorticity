@@ -18,9 +18,9 @@ using Vorticity.Types;
 namespace Vorticity.Keys;
 
 /// <summary>
-/// The entries of an instant column whose file is sorted slice by slice (<see cref="IndexKinds.Slices"/>):
+/// The entries of an instant column whose file is cut in time slices (<see cref="IndexKinds.Slices"/>):
 /// the slices follow each other in time, so a seek finds its slice in the slice table, and inside the
-/// slice, whose rows other columns order first, the slice's instants are read and ranked when a position
+/// slice, whose rows another column may order first, the slice's instants are read and ranked when a position
 /// first needs them. A rank before a slice is the rows of the slices before it, read from the table.
 /// </summary>
 /// <remarks>

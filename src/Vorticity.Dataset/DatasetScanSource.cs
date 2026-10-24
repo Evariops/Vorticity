@@ -77,8 +77,8 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>
     /// On the first column of the clustering key, or a function of it: the key-ordered read opens an
     /// object once it could hold the next row, so a group of it is final once a greater key is read.
-    /// Not in a dataset of periods, whose objects sort each slice by its synopsis columns: read in key
-    /// order, every slice is sorted again, its instants read to order it and its columns read again in
+    /// Not in a dataset of periods, whose objects may order each slice by another column: read in key
+    /// order, such a slice is sorted again, its instants read to order it and its columns read again in
     /// that order, which made a group by of time over a store 5 ms away 5.6 times slower than the pass
     /// that holds its groups at one lane, reading 14 times its bytes, and 35 times slower at sixteen.
     /// </summary>

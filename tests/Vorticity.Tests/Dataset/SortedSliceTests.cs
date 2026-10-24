@@ -1,6 +1,6 @@
-// Sorted slices: the objects a dataset of periods writes hold each slice's rows sorted by the object's
-// synopsis columns, then by the instant, as their slice table says; and the dataset answers as before,
-// in key order and by key.
+// Time slices: the objects a dataset of periods writes hold each slice's rows in the order of their instants, as
+// their slice table says, until a cluster column orders them; and the dataset answers as before, in key order and by
+// key.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -21,12 +21,12 @@ public sealed partial class SortedSliceTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>
-    /// Two hours of spans, three regions and five statuses: the sealed hour's object is sorted by region,
-    /// then status, then instant inside each of its slices, the host, near unique, left in that order;
-    /// and a key-ordered read, a range and a key cursor give the rows appended.
+    /// Two hours of spans, three regions and five statuses: the sealed hour's object holds the rows of each of its
+    /// slices in the order of their instants, its slice table naming no order; and a key-ordered read, a range and a
+    /// key cursor give the rows appended.
     /// </summary>
     [Fact]
-    public async Task ASealedPeriodIsSortedSliceBySlice()
+    public async Task ASealedPeriodKeepsTimeOrderSliceBySlice()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Span.Schema, new DatasetOptions
@@ -60,7 +60,7 @@ public sealed partial class SortedSliceTests
         await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
         {
             SliceTable table = (await SliceTable.ReadAsync(lease.File, Ct))!;
-            Assert.Equal([lease.File.DType.IndexOfField(nameof(Span.Region)), lease.File.DType.IndexOfField(nameof(Span.Status))], table.Order);
+            Assert.Empty(table.Order);
 
             List<Span> stored = [];
             await foreach (Span row in lease.File.Scan<Span>().ToRecordsAsync(Ct))
@@ -72,7 +72,7 @@ public sealed partial class SortedSliceTests
             foreach (TimeSlice slice in table.Slices)
             {
                 List<Span> rows = stored.GetRange((int)slice.FirstRow, (int)slice.Rows);
-                Assert.Equal(rows.OrderBy(r => r.Region, StringComparer.Ordinal).ThenBy(r => r.Status).ThenBy(r => r.At), rows);
+                Assert.Equal(rows.OrderBy(r => r.At), rows);
                 Assert.All(rows, r => Assert.InRange(r.At.ToUnixTimeMilliseconds() * 1000, slice.Start, slice.End - 1));
             }
         }
@@ -97,11 +97,11 @@ public sealed partial class SortedSliceTests
     }
 
     /// <summary>
-    /// The same rows in a dataset of periods, whose objects above level 0 are sorted slice by slice and
+    /// The same rows in a dataset of periods, whose objects above level 0 are cut in time slices and
     /// walked by their slice tables, and in a dataset of levels: every read in the key's order answers
     /// alike, forward and backward, filtered or not, through the key cursor's seeks and ranks and
     /// through a group by that streams on the instant, before and after a delete marks rows of the
-    /// sorted objects.
+    /// sliced objects.
     /// </summary>
     [Fact]
     public async Task EveryReadInKeyOrderAnswersAsADatasetOfLevels()
@@ -156,10 +156,11 @@ public sealed partial class SortedSliceTests
             }
         }
 
-        // The sealed hour carries no run on its key: its slice table walks it.
+        // The sealed hour carries no run on its key, and its slices hold their rows in the order they came: its instants
+        // ascend through the file, which the key cursor reads as a sorted column.
         await using (ObjectLease lease = await periods.RentAsync(ObjectEntry.FromBytes((await FirstAsync(periods, PeriodLevels.Periods)).Value.Span), Ct))
         {
-            Assert.Equal(KeySourceKind.Slices, (await lease.File.Keys(nameof(Span.At)).ExplainAsync(Ct)).Source);
+            Assert.Equal(KeySourceKind.SortedColumn, (await lease.File.Keys(nameof(Span.At)).ExplainAsync(Ct)).Source);
         }
 
         await SameAsync(periods, levels);

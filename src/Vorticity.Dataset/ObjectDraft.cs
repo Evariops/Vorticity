@@ -48,7 +48,7 @@ public sealed class ObjectDraft : IAsyncDisposable
     internal bool BySortedColumn { get; init; }
 
     /// <summary>
-    /// Whether the object is written in sorted slices with no run on the clustering key, the instant
+    /// Whether the object is written in time slices with no run on the clustering key, the instant
     /// its slice table is on: its seal checks that a key cursor opens on that table, since nothing
     /// else walks it by key.
     /// </summary>
