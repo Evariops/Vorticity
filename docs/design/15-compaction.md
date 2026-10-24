@@ -254,10 +254,10 @@ period, so its plan reads every leaf. Its jobs come in this order:
   0's exit sends that period's rows to the late level, since they lie before the newest fresh instant,
   so a late row never abandons a seal. Late rows of a sealed period wait in the late level, and when
   the late level is past its ceiling a second seal folds them into the period's object. Time here is
-  the data's, partition by partition, never a clock's, so a seal is the same whoever plans it and
-  whenever. A partition that receives nothing more keeps its last period in its fresh objects, which
-  answer exactly at a few requests more. A clock would seal a partition behind the others too early,
-  its rows then late, and a seal a caller asks for is the way left should one need it. Rows later than
+  the data's, never a clock's, so a seal is the same whoever plans it and whenever. A dataset that
+  receives nothing more keeps its last period in its fresh objects, which answer exactly at a few
+  requests more. A clock would seal a period whose rows are still coming too early, its rows then
+  late, and a seal a caller asks for is the way left should one need it. Rows later than
   the horizon cost seals: periods of an hour under a tail of rows an hour late seal each hour three
   times, a row rewritten 5.1 times against 2.7 in order (`vortex-queries --micro lifecycle`), so the
   horizon is to cover the tail, or the period to outlast it.
@@ -267,32 +267,10 @@ period, so its plan reads every leaf. Its jobs come in this order:
   level, where they follow every object, since only the first fresh level takes new rows. A closed
   period's objects wait for its seal instead. `F` is the fan-out until the cost model that weighs the
   objects a question over the recent hours reads against the rewrites per row gives it.
-- `F` adjacent objects of one partition in the periods level, each under an `F`-th of the joined size
-  (`CompactionOptions.JoinedPeriodBytes`, 1 GiB by default), join into one object of that level that
-  spans their periods, the periods between them included. The calendar is the dataset's, weighed on
-  its largest partition, so a partition that takes a hundredth of the rows seals objects a hundred
-  times smaller, an hour each: joined, they come near the size, in tiers as the fresh levels grow, a
-  row rewritten once each time its object grows `F`-fold. An object of an `F`-th of the size or more
-  never joins, so a joined object stays under the size. A join never spans two months of the
-  calendar, so an expiry keeps a joined object's rows at most a month past its cutoff, as it would a
-  partition whose periods last a month; and under an erasure delay a joined object stays what a purge
-  rewrites within half of it, as a period does. A late row of a period a joined object holds waits in
-  the late level as any late row does, and its second seal folds it into the whole object, with the
-  late rows of every period the object spans.
 - Purges and fragments, as for any dataset.
 
-Every job but a join writes an object per period, so that no object spans two, and level 0's exit an
-object per level as well. A joined object spans whole periods of one partition, adjacent in its level.
-A header names the joined objects a dataset holds among its features (`DatasetFeatures.JoinedPeriods`),
-from the commit of the first: a library that does not know them would seal a period one of them holds
-a second time, beside it, and refuses the dataset instead.
-
-A calendar of each partition, weighed on its own rows, was weighed against the joins, and left aside:
-the values of the partition columns are not bounded over a dataset's life, a tenant or a source each,
-and every header, written at each commit, would carry a length and its changes for each, where the
-joins need nothing beyond what the leaves say. A calendar of a partition also cuts in units, a day or
-a month, a size its rows set only within a factor of thirty, and keeps a small partition's month in
-its fresh objects until the month ends.
+Every job writes an object per period, so that no object spans two, and level 0's exit an object per
+level as well.
 
 Every such object is written in sorted slices. A job of a dataset with a variant column merges its
 inputs twice. The first pass reads the clustering key, the columns that may be synopsis columns and the
@@ -348,10 +326,9 @@ period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so
 the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
 appends, one row in a hundred late by up to half an hour, deletes now and then, and hours sealed ten
 minutes past their end. After each round it checks that every level but 0 and the late one is
-key-disjoint, that no object spans two periods but a joined one, and that the key cursor and a
-key-ordered scan give back the rows appended and not deleted. A seed runs about 75 exits, 34 fresh
-merges and 7 seals, none abandoned. A schedule of minutes, with late rows and deletes, joins its
-sealed minutes in tiers, 32 joins for 85 to 88 seals, and keeps the same invariants at each round.
+key-disjoint, that no object spans two periods, and that the key cursor and a key-ordered scan give
+back the rows appended and not deleted. A seed runs about 75 exits, 34 fresh merges and 7 seals, none
+abandoned.
 
 A seal is a compaction for its commit: a delete that marks one of its inputs while it runs abandons
 it, and its outputs are left for vacuum. Carrying the marks over to the period's object instead is

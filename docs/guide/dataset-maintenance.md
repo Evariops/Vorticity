@@ -263,9 +263,7 @@ DateTimeOffset applied = await dataset.ExpireAsync(DateTimeOffset.UtcNow - TimeS
 
 The cutoff is aligned down to the start of the period holding the instant you give, and returned. Every
 object whose rows all lie before it goes in one commit, decided from the dataset's tree, with no data
-object read. A row may therefore outlive the instant you gave by up to a period, or, in a partition
-small enough that its periods were joined (`CompactionOptions.JoinedPeriodBytes`), by up to the span of
-the joined object, a month at most, its periods kept until the last of them lies before the cutoff. To drop rows exactly,
+object read. A row may therefore outlive the instant you gave by up to a period. To drop rows exactly,
 delete them (`DeleteAsync`), which opens the objects that straddle the cutoff and marks their rows.
 Expiry, like a delete, leaves the bytes to vacuum.
 

@@ -657,9 +657,8 @@ such fields. A feature stays named in every header after the one that introduced
 that hold its entries stay in the trees, and a dataset that never uses one is written in format 2 or
 3 as before. The others are settings, most fixed when the dataset is created, which a library that
 does not know them would ignore against what the dataset promises: the erasure delay, compaction by
-periods and its lateness horizon, the identifier columns, and the shredded paths; and the joined
-periods, objects of the periods level that span several periods, which such a library would seal a
-second time ([joins](15-compaction.md#a-dataset-of-periods)). A library refuses a header that names a feature
+periods and its lateness horizon, the identifier columns, and the shredded paths. Two flags, partition
+columns and joined periods, were retired with them and are never reused. A library refuses a header that names a feature
 it does not know, as it refuses a later format, so that a feature added later is never read as
 nothing; and it refuses one whose flag of periods, lateness horizon and length of a period do not
 come together, reading a dataset's periods from the flag.
@@ -826,26 +825,12 @@ ones.
 A dataset of periods also expires whole periods (`ExpireAsync(before)`). The cutoff is aligned down to
 the start of the period holding `before`, and every object whose instant's maximum lies before it is
 removed in one commit, from what the leaves say, without reading one. Every object above level 0 holds
-one period, but a joined one, which holds several of a small partition: no other straddles the
-cutoff, a joined one stays until the last period it holds lies before it, and an object of level 0
-that straddles it stays until its exit cuts it by period. A row thus outlives the cutoff by up to a
-period, or the span of a joined object, a month at most. `DatasetExpiryTests` counts no read of a data object for an
-expiry of two sealed hours, nor for a delete of the rows before them.
+one period, so none straddles the cutoff, and an object of level 0 that straddles it stays until its
+exit cuts it by period. A row thus outlives the cutoff by up to a period. `DatasetExpiryTests` counts no
+read of a data object for an expiry of two sealed hours, nor for a delete of the rows before them.
 
-A dataset of periods may also declare its first clustering-key columns partition columns
-(`DatasetOptions.PartitionColumns`, a count), a tenant, a source or a retention whose rows are kept and
-expired apart. An append splits its rows by their values, so every
-object holds one value of each partition column, which its entry records as exact summaries even for
-a text column, which file statistics would not bound. Compaction plans each partition's periods apart,
-so no job mixes two, and an append that would hold more values than `MaxPartitionValues` is refused.
-That bound holds per append, which catches a column of identifiers declared a partition at its first
-append and keeps no state. The values a dataset gathers over its life are not bounded: the plan of a
-compaction counts those its objects hold, from the summaries it reads anyway
-(`CompactionPlan.Partitions`), and the meter records the count (`vortex.dataset.partitions`), so that a
-partition column whose values only grow shows before its periods pile up.
-`ExpireAsync(partition, before)` then removes one partition's periods from what the leaves say, and a
-question's conjunct on a partition column is decided object by object, true or false for all its rows,
-without a read. The header carries the columns, in commit format 4.
+A dataset knows no tenant. An application that keeps the rows of several tenants, sources or retentions
+apart opens a dataset for each, which expires on its own schedule, or lays its rows out as it chooses.
 
 An update is a delete and an insert applied together. The rows it takes are marked where they were,
 read as records, passed through the caller's function, and written into new level 0 objects, where

@@ -231,60 +231,27 @@ Each part's answer is final for its range of time, so once a part arrives, the w
 to the window's end is answered. Counts and sums over the parts add up, and so do minimums and
 maximums. A mean over the whole window is the sum of the parts' sums over the sum of their counts.
 
-Rows kept for different lengths of time can share a dataset by periods. Lead the clustering key with
-the column that says how long a row lives, and declare it a partition column:
+Rows kept for different lengths of time, or rows of different tenants or sources kept apart, go in a
+dataset each: the library knows no tenant, and an application lays out its rows as it chooses. Each
+dataset then expires on its own schedule, reading no data:
 
 ```csharp
-DatasetOptions options = new DatasetOptions
-{
-    ClusteringKey = [nameof(Logged.Retention), nameof(Logged.At)],
-    PartitionColumns = 1,
-    Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
-};
+await debug.ExpireAsync(DateTimeOffset.UtcNow.AddDays(-7));
+await info.ExpireAsync(DateTimeOffset.UtcNow.AddDays(-90));
 ```
 
-Every object then holds one retention value. An append is split into an object per value, and each
-value grows its own periods, so a period never mixes rows that expire at different times. An append
-of batches (`AppendAsync(batches)`) splits its rows as they come, an object per value; an object
-started with `StartObject`, whose writer is yours, is written whole first, so when its rows hold
-several values it is read back and written again an object per value, the first left for vacuum.
-Append rows of several values as batches, or start an object per value. Partition
-columns should have a few values: an append that holds more than `MaxPartitionValues` of them, 64 by
-default, is refused. That bound is per append, and nothing bounds the values a dataset gathers over
-time, each of which grows periods of its own: `PlanCompactionAsync` says how many the dataset holds
-(`CompactionPlan.Partitions`), and so does the `vortex.dataset.partitions` metric. A question filtered or
-grouped on the partition column is still answered from the synopses, since each object holds a single
-value of it.
-
-The length of a period is the dataset's, weighed on its largest partition, so a partition with a
-hundredth of the rows seals objects a hundred times smaller. Compaction joins them: ten adjacent sealed
-objects of one partition, each under a tenth of `CompactionOptions.JoinedPeriodBytes` (1 GiB by
-default), become one object that spans their periods, and joined objects join again, so that a small
-partition keeps objects near that size rather than one a period. A join never spans two months of the
-calendar. An expiry keeps a joined object until the last period it holds lies before the cutoff, so a
-small partition's rows may outlive the cutoff by up to a month; `JoinedPeriodBytes = 0` joins nothing.
-
-Each partition then expires on its own schedule, reading no data:
-
-```csharp
-await dataset.ExpireAsync<Logged>(r => r.Retention == "debug", DateTimeOffset.UtcNow.AddDays(-7));
-await dataset.ExpireAsync<Logged>(r => r.Retention == "info", DateTimeOffset.UtcNow.AddDays(-90));
-```
-
-The filter compares partition columns with values, nothing else: a filter on any other column is a
-delete, and `DeleteAsync` is the call for it.
+An expiry drops whole periods. A filter on a column is a delete, and `DeleteAsync` is the call for it.
 
 A row that arrives after its period has closed, later than the lateness horizon, is kept beside its
 period in a small object of its own, and every question reads it with the period. Its period is not
-rewritten for it, and it expires with its partition. The dataset counts such rows on its meter, as
+rewritten for it, and it expires with its period. The dataset counts such rows on its meter, as
 `vortex.dataset.rows_past_horizon`. A handle created with `PeriodOptions.RefuseLateRows = true`
 refuses an append that holds one instead.
 
 A period closes on the data's own time, never the clock's: once the dataset holds a row past the
-period's end and the lateness horizon, partition by partition. A partition that stops receiving rows
-keeps its last period open, in the small objects its last appends left. Questions over it are just as
-exact and cost a few more requests than over a sealed period, and it expires with its partition all
-the same.
+period's end and the lateness horizon. A dataset that stops receiving rows keeps its last period open,
+in the small objects its last appends left. Questions over it are just as exact and cost a few more
+requests than over a sealed period, and it expires all the same.
 
 Declare a horizon that covers how late your rows come, or periods longer than that. Rows that keep
 coming later than the horizon fill the small objects beside their period, and the period is sealed
@@ -492,7 +459,7 @@ never lend its values to an unrelated column.
 * The dataset format is experimental and specific to this project. Pin the package version, and do
   not expect another Vortex implementation to read the commit tree.
 * A dataset written in commit format 4 is refused by earlier releases, which would otherwise misread
-  it. A dataset takes format 4 once it declares periods, partition columns, identifiers, shredded paths
+  it. A dataset takes format 4 once it declares periods, identifiers, shredded paths
   or an erasure delay, or once one of its objects has a footer past the first 64 KiB an open reads.
   Upgrade every process that writes or reads such a dataset before any of them uses one of those.
 * Marked rows keep their bytes until compaction. A delete that marks rows frees no space, since the

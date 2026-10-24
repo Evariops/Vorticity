@@ -259,8 +259,8 @@ of 540 M rows, 3.47 M rows of runs, went from 69 to 33 ms and from 127 to 53 KB 
 count by service per 12 hours went from 8.3 to 5.5 ms; with the analysis of the question's filter, keys
 and measures done once for every object, and an object's kept buckets held in order rather than in a set,
 4.9 ms and 232 KB allocated, against 278 (`vortex-queries --micro paths --design --hours 48 --rate 200
---loop`). A key may be a column, a function of the instant, a partition column, whose one value the object
-holds, or a key of a variant column read strictly as an integer, a double, a text or a boolean, which
+--loop`). A key may be a column, a function of the instant,
+or a key of a variant column read strictly as an integer, a double, a text or a boolean, which
 the object's synopsis path of the same class stands for, a double only where the object holds no float
 there. A key the object leaves in its residual is counted over the rows that hold it alone, so it
 answers as a measure only. Under `ScanOptions.AlignWindow` the window grows first, each end to the
