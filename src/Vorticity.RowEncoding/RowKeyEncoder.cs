@@ -336,12 +336,18 @@ public static partial class RowEncoder
     }
 
     /// <summary>
-    /// The first value of an ascending row-encoded key, a value of a fixed width of <paramref name="dtype"/>, as the
-    /// literal <see cref="WriteValue"/> writes it from: its bits mapped back from their order, a null as a null.
+    /// The first value of an ascending row-encoded key, a value of <paramref name="dtype"/>, as the literal
+    /// <see cref="WriteValue"/> writes it from: a fixed width's bits mapped back from their order, a text's or a binary's
+    /// bytes out of their blocks, a null as a null.
     /// </summary>
     internal static FilterLiteral ReadFirstValue(ReadOnlySpan<byte> key, DType dtype)
     {
         dtype = Storage(dtype);
+        if (dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary)
+        {
+            return ReadFirstBytes(key);
+        }
+
         if (dtype.Kind is not (DTypeKind.Bool or DTypeKind.Primitive))
         {
             throw Unkeyed(dtype);
@@ -387,6 +393,40 @@ public static partial class RowEncoder
         // The sign bit flipped back, then extended from the column's width.
         int shift = 64 - (8 * width);
         return FilterLiteral.From((long)((ordered ^ sign) << shift) >> shift);
+    }
+
+    /// <summary>
+    /// The first value of an ascending row-encoded key, a text or a binary: its sentinel, then blocks of 32 bytes each
+    /// followed by a continuation marker but the last, whose marker is its length (<see cref="RowBytes.WriteVarBody"/>).
+    /// </summary>
+    private static FilterLiteral ReadFirstBytes(ReadOnlySpan<byte> key)
+    {
+        if (key[0] == RowSentinels.VarEmpty(RowSortField.Ascending))
+        {
+            return FilterLiteral.From(ReadOnlySpan<byte>.Empty);
+        }
+
+        if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
+        {
+            return FilterLiteral.Null;
+        }
+
+        const byte Continuation = 0xFF;
+        int full = 0;
+        while (key[1 + (full * RowWidths.VarBlockTotal) + RowWidths.VarBlockData] == Continuation)
+        {
+            full++;
+        }
+
+        int last = key[1 + (full * RowWidths.VarBlockTotal) + RowWidths.VarBlockData];
+        byte[] value = new byte[(full * RowWidths.VarBlockData) + last];
+        for (int block = 0; block <= full; block++)
+        {
+            int length = block < full ? RowWidths.VarBlockData : last;
+            key.Slice(1 + (block * RowWidths.VarBlockTotal), length).CopyTo(value.AsSpan(block * RowWidths.VarBlockData));
+        }
+
+        return FilterLiteral.From(value);
     }
 
     /// <summary>

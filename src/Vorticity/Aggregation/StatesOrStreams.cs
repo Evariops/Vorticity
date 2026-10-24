@@ -20,7 +20,8 @@ internal sealed class StatesOrStreams(AggregationQuery query, StateRequest state
     {
         if (_groups is null)
         {
-            bool taken = await query.Host.Source.TakesStatesAsync(query.Host.Spec(), states, cancellationToken).ConfigureAwait(false);
+            ScanSpec spec = await query.Host.AlignedSpecAsync(query.Plan, query.RowFilter, cancellationToken).ConfigureAwait(false);
+            bool taken = await query.Host.Source.TakesStatesAsync(spec, states, cancellationToken).ConfigureAwait(false);
             _groups = taken ? new GroupBatches(query, cancellationToken) : query.Streamed(cancellationToken);
         }
 

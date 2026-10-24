@@ -76,11 +76,11 @@ internal sealed class ScanCounters
 
     internal void AddResidualChunk() => Interlocked.Increment(ref _residualChunks);
 
-    /// <summary>The first instant of the window a scan aligned to its slices answered; null when it aligned none.</summary>
-    public System.DateTimeOffset? WindowFrom { get; internal set; }
-
-    /// <summary>The instant past that window; null when it aligned none, or has no upper bound.</summary>
-    public System.DateTimeOffset? WindowTo { get; internal set; }
+    /// <summary>
+    /// The range an aggregation answered under <see cref="ScanOptions.AlignWindow"/> when the source grew the one asked:
+    /// its conjuncts on the column the source is ordered by; null when the filter applied is the one asked.
+    /// </summary>
+    internal VortexExpr? Window { get; set; }
 
     internal void AddSplitProven() => Interlocked.Increment(ref _splitsProven);
 

@@ -531,7 +531,7 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>The column whose counts answer the object <paramref name="held"/> for <paramref name="answer"/>: one the scan covers whole; null for its rows.</summary>
     private int? AnsweredBy(CountsAnswer answer, in PositionedObject held) =>
-        Covered(held) == held.Entry.Rows ? answer.FieldOf(held.Entry) : null;
+        Covered(held) == held.Entry.Rows ? answer.FieldOf(held) : null;
 
     /// <summary>Whether the counts of an object the scan covers whole answer what it asks as states: read from the entries alone.</summary>
     internal async ValueTask<bool> AnswersAnyAsync(CancellationToken cancellationToken)
@@ -594,7 +594,7 @@ internal sealed class DatasetScanBuilder
                     reads[o] = null;
                     if (await read.ConfigureAwait(false) is ({ } counts, var sketched))
                     {
-                        rows = answer.Rows(counts, sketched, held.Entry.Summaries);
+                        rows = answer.Rows(counts, sketched, answer.SummariesOf(held));
                     }
                 }
 
@@ -2532,6 +2532,16 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
 
     /// <summary>Its key in that tree: what orders it, then its uid.</summary>
     internal ReadOnlyMemory<byte> TreeKey { get; init; }
+
+    /// <summary>
+    /// Its entry's summaries, the first column of <paramref name="key"/> bounded by its keys where they do not bound it, a
+    /// text's (<see cref="ClusteringKey.Bounded"/>): its smallest key, which its tree key leads with, and its largest, which
+    /// its entry states. The entry's own when the dataset has no key, or the object states no largest.
+    /// </summary>
+    internal ObjectSummaries Summaries(ClusteringKey? key) =>
+        key is null || Entry.LastKey.IsEmpty || TreeKey.Length <= VortexDataset.UidBytes
+            ? Entry.Summaries
+            : key.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
 }
 
 /// <summary>What a dataset scan would read, and what it costs.</summary>

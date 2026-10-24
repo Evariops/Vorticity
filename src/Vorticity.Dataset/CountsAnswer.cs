@@ -23,7 +23,10 @@ namespace Vorticity.Dataset;
 /// count the column's distinct values; its filter asks the column for values by equality or a set. Worked out once a
 /// question, with the columns of its batches of states; object by object, it names the column whose counts answer
 /// (<see cref="FieldOf"/>): an object whose summaries prove the filter's other conjuncts true over its every row and the
-/// other keys constant, with no row a delete marked, which its counts still hold. Any other object is read as rows.
+/// other keys constant, with no row a delete marked, which its counts still hold. Any other object is read as rows. The
+/// summaries bound the key's first column by the object's keys where its file does not, a text's; and values of that
+/// column, under a question keyed by another, are proven so rather than counted, each object holding the values asked
+/// alone when the application clusters by them.
 /// </summary>
 /// <remarks>
 /// Nothing here knows a time: a window on an instant is a conjunct like any, which an object's summaries prove true over
@@ -117,12 +120,21 @@ internal sealed class CountsAnswer
         }
 
         // The filter: values of one column by equality or a set, which its counts answer; every other conjunct, which an
-        // object's summaries prove true over its rows.
+        // object's summaries prove true over its rows. Values of the key's first column, under a question keyed by another
+        // column, are proven so too: the clustering holds a value's rows together, so that each object holds the values
+        // asked alone, and the other column's counts answer it whatever that column holds.
         int? column = null;
         List<byte[]>? values = null;
         List<VortexExpr> rest = [];
         if (filter is not null)
         {
+            int? leading = version.Schema.Key is { } clustering ? Top(Expr.Field(clustering.InstantPath), schema) : null;
+            bool keyedElsewhere = false;
+            foreach (FieldExpr key in request.Keys)
+            {
+                keyedElsewhere |= key is ColumnFieldExpr && Top(key, schema) is int keyField && keyField != leading;
+            }
+
             List<VortexExpr> conjuncts = [];
             GroupPredicates.Conjuncts(filter, conjuncts);
             foreach (VortexExpr conjunct in conjuncts)
@@ -134,6 +146,7 @@ internal sealed class CountsAnswer
                     _ => (null, null),
                 };
                 if (asked is not null && Top(asked, schema) is int field && (column is null || column == field)
+                    && !(keyedElsewhere && field == leading)
                     && ValuesOf(literals!, schema.GetField(field)) is { } wanted)
                 {
                     column = field;
@@ -213,22 +226,34 @@ internal sealed class CountsAnswer
     }
 
     /// <summary>
-    /// The column whose counts answer for the object <paramref name="entry"/> names: the column asked, or for a question of
-    /// no column the one whose counts' region is least; null when its rows are read: rows a delete marked, which its counts
+    /// The summaries an object <paramref name="held"/> is judged by: its entry's, the key's first column bounded by its keys
+    /// where they do not bound it (<see cref="PositionedObject.Summaries"/>).
+    /// </summary>
+    internal ObjectSummaries SummariesOf(in PositionedObject held) => held.Summaries(_schema.Key);
+
+    /// <summary>
+    /// The column whose counts answer for the object <paramref name="held"/>: the column asked, or for a question of no
+    /// column the one whose counts' region is least; null when its rows are read: rows a delete marked, which its counts
     /// still hold, a conjunct or a key its summaries do not prove true over every row or constant, no counts of the
     /// column, or columns of an earlier schema, which its counts name by their places.
     /// </summary>
-    internal int? FieldOf(ObjectEntry entry)
+    internal int? FieldOf(in PositionedObject held)
     {
-        if (entry.HasDeletions || entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry)
-            || (_rest is { } rest && !rest.MustMatch(entry.Summaries.Columns, entry.PhysicalRows)))
+        ObjectEntry entry = held.Entry;
+        if (entry.HasDeletions || entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry))
+        {
+            return null;
+        }
+
+        ObjectSummaries summaries = SummariesOf(held);
+        if (_rest is { } rest && !rest.MustMatch(summaries.Columns, entry.PhysicalRows))
         {
             return null;
         }
 
         foreach ((_, string path, FieldExpr key) in _constants)
         {
-            if (ConstantOf(entry.Summaries, path, key) is null)
+            if (ConstantOf(summaries, path, key) is null)
             {
                 return null;
             }

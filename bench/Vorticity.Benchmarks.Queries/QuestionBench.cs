@@ -249,7 +249,7 @@ internal static class QuestionBench
 
                 if (cold.Window is { } window)
                 {
-                    Console.WriteLine($"    window applied: [{window.From:MM-dd HH:mm:ss}, {window.To:MM-dd HH:mm:ss})");
+                    Console.WriteLine($"    window applied: {window}");
                 }
             }
             finally
@@ -282,7 +282,7 @@ internal static class QuestionBench
         ScanMetrics metrics = aggregation.Metrics;
         return new Measured(store.Requests, store.DependentSteps, store.BytesRead, 0L, metrics.Rows, milliseconds, cpuMilliseconds, groups)
         {
-            Window = metrics.WindowFrom is { } from && metrics.WindowTo is { } to ? (from, to) : null,
+            Window = metrics.Window?.ToString(),
         };
     }
 
@@ -310,7 +310,7 @@ internal static class QuestionBench
     /// <summary>What one asking cost: the store's requests, dependent round trips and bytes, the states and rows the answer read, its time.</summary>
     private readonly record struct Measured(long Requests, long Steps, long Bytes, long States, long Rows, double Milliseconds, double CpuMilliseconds, long Groups)
     {
-        /// <summary>The window an aligned question applied, null for one asked as it is.</summary>
-        internal (DateTimeOffset From, DateTimeOffset To)? Window { get; init; }
+        /// <summary>The range an aligned question applied, as its conjuncts read; null for one asked as it is.</summary>
+        internal string? Window { get; init; }
     }
 }

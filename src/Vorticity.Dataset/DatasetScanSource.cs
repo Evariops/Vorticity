@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,6 +46,189 @@ internal sealed class DatasetScanSource : ScanSource
         KeepsStates && spec.Options.UseSynopses && !spec.MatchesNothing
         && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
         && await Builder(spec with { States = states }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// The filter grown so that its range on the key's first column covers whole the objects it cuts whose counts would
+    /// answer them whole, as <see cref="CountsAnswer"/> judges an object by the filter's other conjuncts: each bound inside
+    /// such objects moves out to the furthest of their own bounds on the column, compared row-encoded as the key orders the
+    /// column, whatever its type. A bound stays where it was when another such object would hold values on both sides of
+    /// the new one, which growing on would cut in turn: objects cut by size that share a value of a composite key's first
+    /// column, which a clustering value never leaves. Two walks of the version's entries. Null when the range cuts no such
+    /// object or stays, the filter bounds no range of the column, or the counts answer no object of the question.
+    /// </summary>
+    internal override async ValueTask<(VortexExpr Filter, VortexExpr Window)?> AlignAsync(
+        ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken)
+    {
+        if (!KeepsStates || spec.Filter is not { } filter || _version.Schema.Key is not { } key
+            || !await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        // The range: the conjuncts that compare the column with a value, the tightest bound on each side row-encoded; and
+        // the rest, by which the counts judge an object.
+        List<VortexExpr> conjuncts = [];
+        Aggregating.GroupPredicates.Conjuncts(filter, conjuncts);
+        List<ComparisonExpr> range = [];
+        List<VortexExpr> rest = [];
+        (byte[]? Bytes, bool Strict) low = default;
+        (byte[]? Bytes, bool Strict) high = default;
+        foreach (VortexExpr conjunct in conjuncts)
+        {
+            if (conjunct is not ComparisonExpr { Field: ColumnFieldExpr field } comparison
+                || comparison.Op is not (ComparisonOp.Greater or ComparisonOp.GreaterOrEqual or ComparisonOp.Less or ComparisonOp.LessOrEqual)
+                || !string.Equals(field.Path, key.InstantPath, System.StringComparison.Ordinal) || Encoded(key, comparison.Value) is not { } bound)
+            {
+                rest.Add(conjunct);
+                continue;
+            }
+
+            range.Add(comparison);
+            bool strict = comparison.Op is ComparisonOp.Greater or ComparisonOp.Less;
+            if (comparison.Op is ComparisonOp.Greater or ComparisonOp.GreaterOrEqual)
+            {
+                int order = low.Bytes is null ? 1 : bound.AsSpan().SequenceCompareTo(low.Bytes);
+                low = order > 0 ? (bound, strict) : order == 0 ? (bound, strict || low.Strict) : low;
+            }
+            else
+            {
+                int order = high.Bytes is null ? -1 : bound.AsSpan().SequenceCompareTo(high.Bytes);
+                high = order < 0 ? (bound, strict) : order == 0 ? (bound, strict || high.Strict) : high;
+            }
+        }
+
+        VortexExpr? others = Aggregating.GroupPredicates.And(null, rest);
+        if (range.Count == 0 || CountsAnswer.Of(states, others, _version) is not { } answer)
+        {
+            return null;
+        }
+
+        // Whether a value lies past the range's low bound, or its high one.
+        static bool Below(byte[] value, (byte[]? Bytes, bool Strict) bound) =>
+            bound.Bytes is { } at && value.AsSpan().SequenceCompareTo(at) is var order && (bound.Strict ? order <= 0 : order < 0);
+
+        static bool Above(byte[] value, (byte[]? Bytes, bool Strict) bound) =>
+            bound.Bytes is { } at && value.AsSpan().SequenceCompareTo(at) is var order && (bound.Strict ? order >= 0 : order > 0);
+
+        // The objects the range reaches and cuts, which the counts would answer whole: the furthest of their bounds.
+        (byte[] Bytes, FilterLiteral Value)? lowest = null;
+        (byte[] Bytes, FilterLiteral Value)? highest = null;
+        await foreach (PositionedObject held in WalkAsync(spec, others, Window(range, null, null), cancellationToken).ConfigureAwait(false))
+        {
+            if (Bounds(held, key) is not { } of || Above(of.Low.Bytes, high) || Below(of.High.Bytes, low) || answer.FieldOf(held) is null)
+            {
+                continue;
+            }
+
+            if (Below(of.Low.Bytes, low) && (lowest is not { } least || of.Low.Bytes.AsSpan().SequenceCompareTo(least.Bytes) < 0))
+            {
+                lowest = of.Low;
+            }
+
+            if (Above(of.High.Bytes, high) && (highest is not { } most || of.High.Bytes.AsSpan().SequenceCompareTo(most.Bytes) > 0))
+            {
+                highest = of.High;
+            }
+        }
+
+        // Each new bound, unless another such object holds values on both sides of it.
+        if (lowest is not null || highest is not null)
+        {
+            await foreach (PositionedObject held in WalkAsync(spec, others, Window(range, lowest?.Value, highest?.Value), cancellationToken).ConfigureAwait(false))
+            {
+                if (Bounds(held, key) is not { } of || answer.FieldOf(held) is null)
+                {
+                    continue;
+                }
+
+                if (lowest is { } least && of.Low.Bytes.AsSpan().SequenceCompareTo(least.Bytes) < 0 && of.High.Bytes.AsSpan().SequenceCompareTo(least.Bytes) >= 0)
+                {
+                    lowest = null;
+                }
+
+                if (highest is { } most && of.Low.Bytes.AsSpan().SequenceCompareTo(most.Bytes) <= 0 && of.High.Bytes.AsSpan().SequenceCompareTo(most.Bytes) > 0)
+                {
+                    highest = null;
+                }
+            }
+        }
+
+        if (lowest is null && highest is null)
+        {
+            return null;
+        }
+
+        VortexExpr window = Window(range, lowest?.Value, highest?.Value);
+        return (others is null ? window : Expr.And(others, window), window);
+    }
+
+    /// <summary>The objects of the version that may hold rows of <paramref name="window"/> and <paramref name="others"/>, by their summaries.</summary>
+    private IAsyncEnumerable<PositionedObject> WalkAsync(ScanSpec spec, VortexExpr? others, VortexExpr window, CancellationToken cancellationToken)
+    {
+        SummaryPruner? pruner = spec.Options.UseStatistics
+            ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(others is null ? window : Expr.And(others, window)))
+            : null;
+        return _version.WalkAsync(pruner, 0, long.MaxValue, null, cancellationToken);
+    }
+
+    /// <summary>
+    /// The range of <paramref name="range"/>'s conjuncts, its low bound <paramref name="lowest"/> when it grew, and its high
+    /// one <paramref name="highest"/>, both inclusive.
+    /// </summary>
+    private static VortexExpr Window(List<ComparisonExpr> range, FilterLiteral? lowest, FilterLiteral? highest)
+    {
+        List<VortexExpr> bounds = [];
+        FieldExpr column = range[0].Field;
+        foreach (ComparisonExpr bound in range)
+        {
+            bool lower = bound.Op is ComparisonOp.Greater or ComparisonOp.GreaterOrEqual;
+            if ((lower && lowest is null) || (!lower && highest is null))
+            {
+                bounds.Add(bound);
+            }
+        }
+
+        if (lowest is { } low)
+        {
+            bounds.Add(Expr.Ge(column, Expr.Literal(low)));
+        }
+
+        if (highest is { } high)
+        {
+            bounds.Add(Expr.Le(column, Expr.Literal(high)));
+        }
+
+        return Aggregating.GroupPredicates.And(null, bounds)!;
+    }
+
+    /// <summary>
+    /// The least and the greatest value of the key's first column in the object <paramref name="held"/>, each with its bytes
+    /// row-encoded as the key orders the column: by its summaries, its keys bounding a text (<see cref="PositionedObject.Summaries"/>);
+    /// null when they do not bound it, or prove it holds no null.
+    /// </summary>
+    private static ((byte[] Bytes, FilterLiteral Value) Low, (byte[] Bytes, FilterLiteral Value) High)? Bounds(in PositionedObject held, ClusteringKey key) =>
+        held.Summaries(key).TryGet(key.InstantPath, out ColumnSummary column) && column.HasMin && column.HasMax
+        && column.HasNullCount && column.NullCount == 0 && Encoded(key, column.Min) is { } low && Encoded(key, column.Max) is { } high
+            ? ((low, column.Min), (high, column.Max))
+            : null;
+
+    /// <summary><paramref name="value"/> row-encoded as the key's first column, as a key of it alone; null for a value the column's type does not take.</summary>
+    private static byte[]? Encoded(ClusteringKey key, FilterLiteral value)
+    {
+        if (value.Kind == FilterLiteralKind.Null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return key.Encode([value]);
+        }
+        catch (System.ArgumentException)
+        {
+            return null;
+        }
+    }
 
     internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
         spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>() : Builder(spec, metrics).ExecuteAsync();
@@ -142,8 +326,8 @@ internal sealed class DatasetScanSource : ScanSource
                 continue;
             }
 
-            // An object its counts answer is read whole, as states and its edges' rows: a piece of its own, never cut.
-            if (answer is not null && start == held.FirstRow && end == held.FirstRow + held.Entry.Rows && answer.FieldOf(held.Entry) is not null)
+            // An object its counts answer is read whole, as states: a piece of its own, never cut.
+            if (answer is not null && start == held.FirstRow && end == held.FirstRow + held.Entry.Rows && answer.FieldOf(held) is not null)
             {
                 objects.Add((held, new RowRange(start, end)));
                 answered.Add(held.FirstRow);

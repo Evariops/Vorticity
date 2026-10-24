@@ -36,18 +36,19 @@ public sealed record ScanOptions
     public bool UseIndexes { get; init; } = true;
 
     /// <summary>
-    /// Whether an aggregation over a dataset may answer from the states its objects' synopses keep, in
-    /// place of their rows; off only to check a synopsis, never to change a result. No dataset keeps such
-    /// states yet: every aggregation reads its rows.
+    /// Whether an aggregation over a dataset may answer from the states its objects' synopses keep, their
+    /// columns' counts, in place of their rows; off only to check a synopsis, never to change a result.
     /// </summary>
     public bool UseSynopses { get; init; } = true;
 
     /// <summary>
-    /// Whether the window on a dataset's instant that an aggregation answers from its synopses may grow so that
-    /// its edges read no rows: each end that falls inside an object moves out, in the object of most rows it
-    /// cuts, to the nearest bound its synopses answer at. The answer is then the exact answer of the window
-    /// applied, which <see cref="ScanMetrics.WindowFrom"/> and <see cref="ScanMetrics.WindowTo"/> give. False by
-    /// default: the window asked, exactly. No dataset keeps such synopses yet, so no window grows.
+    /// Whether an aggregation over a dataset may grow its filter's range on the first column of the dataset's
+    /// clustering key, of any type, so that the objects it cuts are answered whole by their synopses rather than
+    /// read as rows: each bound that falls inside such objects moves out to the furthest of their own bounds on
+    /// the column, unless another such object would then hold values on both sides of it, where the bound stays.
+    /// Objects cut by a clustering value hold none in common. The answer is then the exact answer of the range applied, which
+    /// <see cref="ScanMetrics.Window"/> and <see cref="ScanPlan.Window"/> give. False by default: the range asked,
+    /// exactly.
     /// </summary>
     public bool AlignWindow { get; init; }
 

@@ -90,13 +90,6 @@ internal sealed record ScanSpec
     /// states.
     /// </summary>
     internal Aggregating.StateRequest? States { get; init; }
-
-    /// <summary>
-    /// The keys and measures of the aggregation a window is grown for under <see cref="ScanOptions.AlignWindow"/>,
-    /// set whether the pass takes states or reads rows, so that both answer the same window; null when the scan
-    /// is no such aggregation, or aligns nothing.
-    /// </summary>
-    internal Aggregating.StateRequest? Aligning { get; init; }
 }
 
 /// <summary>
@@ -160,6 +153,15 @@ internal abstract class ScanSource
     /// </summary>
     internal virtual ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
         ValueTask.FromResult(false);
+
+    /// <summary>
+    /// The filter of <paramref name="spec"/> an aggregation asking <paramref name="states"/> answers under
+    /// <see cref="ScanOptions.AlignWindow"/>, and the range it applies: its range on the column the source is ordered by,
+    /// grown to the bounds of what it cuts that states would answer whole. Null when it grows nothing: a dataset's alone may.
+    /// </summary>
+    internal virtual ValueTask<(VortexExpr Filter, VortexExpr Window)?> AlignAsync(
+        ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<(VortexExpr, VortexExpr)?>(null);
 
     /// <summary>
     /// The most bytes one split of <paramref name="spec"/> read ahead holds (<see cref="ScanSpec.ReadAhead"/>),

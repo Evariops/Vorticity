@@ -1901,8 +1901,7 @@ Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
 Vorticity:     method void Deconstruct(out long, out long, out long, out long, out long, out long, out long)
 Vorticity:     property GroupMetrics Grouping { get; init; }
-Vorticity:     property Nullable<DateTimeOffset> WindowFrom { get; init; }
-Vorticity:     property Nullable<DateTimeOffset> WindowTo { get; init; }
+Vorticity:     property VortexExpr Window { get; init; }
 Vorticity:     property long Batches { get; init; }
 Vorticity:     property long BlocksDecoded { get; init; }
 Vorticity:     property long BlocksPruned { get; init; }
@@ -1942,6 +1941,7 @@ Vorticity:     property GroupPlan Grouping { get; init; }
 Vorticity:     property ImmutableArray<PruningStep> Pruning { get; init; }
 Vorticity:     property ImmutableArray<StatesStep> States { get; init; }
 Vorticity:     property OrderPlan Order { get; init; }
+Vorticity:     property VortexExpr Window { get; init; }
 Vorticity:     property bool MayMatch { get; init; }
 Vorticity:     property int Blocks { get; init; }
 Vorticity:     property int LiveBlocks { get; init; }

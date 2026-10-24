@@ -113,6 +113,43 @@ internal sealed class ClusteringKey
     /// <summary>The dtype of the key's first column.</summary>
     internal DType LeadingType => _dtypes[0];
 
+    /// <summary>
+    /// <paramref name="summaries"/> with the key's first column bounded by an object's smallest key <paramref name="first"/>
+    /// and its largest <paramref name="last"/>, where they do not bound it: a text's, which a file's statistics leave
+    /// unbounded. The first value of each, row-encoded, read back, and no null, which the key's order would put at one end:
+    /// what a filter or a key on the column is then proven by over the object, as a number's statistics prove it. The
+    /// summaries as they are when they bound the column, or when a key's first value is a null.
+    /// </summary>
+    /// <param name="summaries">The object's summaries, as its entry holds them.</param>
+    /// <param name="first">Its smallest key, row-encoded.</param>
+    /// <param name="last">Its largest key, row-encoded.</param>
+    /// <param name="exact">Whether <paramref name="last"/> is the object's largest key, not a bound a delete left above it.</param>
+    internal ObjectSummaries Bounded(ObjectSummaries summaries, ReadOnlySpan<byte> first, ReadOnlySpan<byte> last, bool exact)
+    {
+        if (summaries.TryGet(_paths[0], out ColumnSummary held) && held.HasMin && held.HasMax)
+        {
+            return summaries;
+        }
+
+        FilterLiteral low = RowEncoder.ReadFirstValue(first, _dtypes[0]);
+        FilterLiteral high = RowEncoder.ReadFirstValue(last, _dtypes[0]);
+        if (low.Kind == FilterLiteralKind.Null || high.Kind == FilterLiteralKind.Null)
+        {
+            return summaries;
+        }
+
+        List<ColumnSummary> columns = [new ColumnSummary(_paths[0], low, true, high, true, exact, 0, true)];
+        foreach (ColumnSummary column in summaries.Columns)
+        {
+            if (!string.Equals(column.Path, _paths[0], StringComparison.Ordinal))
+            {
+                columns.Add(column);
+            }
+        }
+
+        return ObjectSummaries.From(columns);
+    }
+
     /// <summary>The key's columns, in key order.</summary>
     public IReadOnlyList<string> Paths => _paths;
 

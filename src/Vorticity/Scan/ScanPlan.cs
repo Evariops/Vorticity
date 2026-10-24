@@ -21,8 +21,8 @@ public sealed record PruningStep(string Structure, int BlocksPruned, int Segment
 /// </summary>
 /// <param name="Object">The object, by its key in the dataset.</param>
 /// <param name="Read">What it reads: <c>states</c>.</param>
-/// <param name="Detail">The column whose counts it reads, and their sketches when a quantile asks them; or what the edges hold.</param>
-/// <param name="Count">The regions the states read, the counts and their sketches; or the blocks of rows read at the edges.</param>
+/// <param name="Detail">The column whose counts it reads, and their sketches when a quantile asks them.</param>
+/// <param name="Count">The regions the states read: the counts, and their sketches.</param>
 public sealed record StatesStep(string Object, string Read, string Detail, long Count);
 
 /// <summary>
@@ -56,6 +56,12 @@ public sealed record ScanPlan(
     /// empty when they answer none, every object read as rows.
     /// </summary>
     public ImmutableArray<StatesStep> States { get; init; } = [];
+
+    /// <summary>
+    /// The range an aggregation over a dataset would answer under <see cref="ScanOptions.AlignWindow"/>, when it grows the
+    /// one asked (<see cref="ScanMetrics.Window"/>); null when it applies its filter as asked.
+    /// </summary>
+    public VortexExpr? Window { get; init; }
 
     /// <summary>The engine's own explanation, with its splits, for the tests that hold the plan to the execution.</summary>
     internal ScanExplanation? Detail { get; init; }
@@ -112,22 +118,16 @@ public readonly record struct ScanMetrics(
     public GroupMetrics? Grouping { get; init; }
 
     /// <summary>
-    /// The first instant of the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>,
-    /// at or before the one asked; null for a scan that aligned no window, or one with no lower bound.
+    /// The range on the first column of a dataset's clustering key its aggregation answered under
+    /// <see cref="ScanOptions.AlignWindow"/>, when it grew the one asked: the conjuncts on that column the answer applies,
+    /// whose bounds lie at or outside those asked. Null for a scan that applied its filter as asked.
     /// </summary>
-    public DateTimeOffset? WindowFrom { get; init; }
-
-    /// <summary>
-    /// The instant past the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>, at
-    /// or after the one asked; null for a scan that aligned no window, or one with no upper bound.
-    /// </summary>
-    public DateTimeOffset? WindowTo { get; init; }
+    public VortexExpr? Window { get; init; }
 
     internal static ScanMetrics From(ScanCounters counters) => new ScanMetrics(
         counters.Rows, counters.Batches, counters.SegmentRequests, counters.BytesRequested, counters.BlocksDecoded, counters.BlocksPruned, counters.CacheHits)
     {
-        WindowFrom = counters.WindowFrom,
-        WindowTo = counters.WindowTo,
+        Window = counters.Window,
     };
 }
 

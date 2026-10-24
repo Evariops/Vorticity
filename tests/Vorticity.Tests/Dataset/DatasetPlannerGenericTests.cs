@@ -49,6 +49,28 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
         Assert.True(!byHour || answered > 0, $"{question}: no object's counts answered");
     }
 
+    // The unaligned window of the planner's questions, cut at 37.5 and 155.25 minutes past noon, grows under AlignWindow to
+    // the two hours it cuts, whose objects' counts then answer with the hour between them; the answer is the rows' of the
+    // window applied, which the plan and the metrics give.
+    [Fact]
+    public async Task AnAlignedWindowGrowsToTheHoursItCuts()
+    {
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.ByHour, Options(), Ct);
+        VortexExpr asked = VortexExpr.Parse("At >= '2026-10-19T12:37:30.0000000+00:00' and At < '2026-10-19T14:35:15.0000000+00:00'");
+        Vorticity.Scan aligned = ByService(dataset, asked, new ScanOptions { AlignWindow = true });
+        ScanPlan plan = await aligned.ExplainAsync(Ct);
+        VortexExpr window = Assert.IsAssignableFrom<VortexExpr>(plan.Window);
+        Console.WriteLine($"ALIGNED {asked} grows to {window}");
+        Assert.Equal(3, plan.States.Count(step => step.Read == "states"));
+        List<string> answered = await DatasetAlignedWindowTests.RowsAsync(aligned);
+        Assert.Equal(window.ToString(), aligned.Metrics.Window?.ToString());
+        Assert.Equal(await DatasetAlignedWindowTests.RowsAsync(ByService(dataset, window, new ScanOptions { UseSynopses = false })), answered);
+    }
+
+    private static Vorticity.Scan ByService(VortexDataset dataset, VortexExpr filter, ScanOptions options) =>
+        dataset.Scan().With(options).Where(filter).GroupBy([nameof(DatasetPlannerTests.Call.Service)])
+            .Select([nameof(DatasetPlannerTests.Call.Service), "count()", "sum(DurationNs)", "max(Weight)"]);
+
     private static DatasetOptions Options() => new DatasetOptions { SheetObjectBytes = 0, ContentsObjectBytes = 0 };
 
     /// <summary>

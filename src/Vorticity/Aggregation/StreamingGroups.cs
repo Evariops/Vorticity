@@ -354,7 +354,8 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _query.Plan.LastGroups = 0;
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
-        ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
+        ScanSpec spec = await host.AlignedSpecAsync(plan, _query.RowFilter, _cancellationToken).ConfigureAwait(false);
+        ScanSpec pass = AggregationEngine.PassSpec(spec, columns, plan, host.Source.Schema);
         int streaming = _zones is null ? Streaming(_query) : 0;
 
         // A source that brings the rows in the component's order when asked is asked, backwards
