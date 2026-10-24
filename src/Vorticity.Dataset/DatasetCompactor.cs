@@ -809,6 +809,16 @@ internal static class DatasetCompactor
                 for (int at = 0, end; at < run.RowCount; at = end)
                 {
                     end = values is null ? run.RowCount : values.EndOfValue(merge, at, run.RowCount);
+
+                    // A run that goes on with the key the object or its slice ends on, past its size: the rows of that key
+                    // stay with it, and the next part starts where the key changes. An input runs through the rows of a key
+                    // it shares with others, into the next key, so that a key repeated across the inputs changes inside
+                    // runs: without the split, a key of one text column rolled no object, 18 000 rows for 16 KiB aimed at.
+                    if ((outputs.WantsRoll || outputs.WantsSlice) && outputs.HoldsKey(merge.KeyAt(at)))
+                    {
+                        end = EndOfKey(merge, at, end);
+                    }
+
                     if ((outputs.WantsRoll && !outputs.HoldsKey(merge.KeyAt(at)))
                         || (values is not null && outputs.HoldsOtherValue(values, merge.KeyAt(at))))
                     {
@@ -837,6 +847,36 @@ internal static class DatasetCompactor
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The first row from <paramref name="from"/> to <paramref name="to"/> of the merge's run whose key is not the key of
+    /// row <paramref name="from"/>, or <paramref name="to"/>: found by halves, the run's keys ascending.
+    /// </summary>
+    private static int EndOfKey(KeyOrderedMerge merge, int from, int to)
+    {
+        if (merge.KeyAt(from).SequenceEqual(merge.KeyAt(to - 1)))
+        {
+            return to;
+        }
+
+        // Row `low` holds the key of row `from`, row `high` another.
+        int low = from;
+        int high = to - 1;
+        while (high - low > 1)
+        {
+            int middle = low + ((high - low) >> 1);
+            if (merge.KeyAt(from).SequenceEqual(merge.KeyAt(middle)))
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return high;
     }
 
     /// <summary>

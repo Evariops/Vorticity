@@ -179,6 +179,51 @@ public sealed partial class DatasetClusteringValueTests
     }
 
     [Fact]
+    public async Task AKeyRepeatedAcrossAppendsStillRollsAtTheBytesAimedAt()
+    {
+        // A key of one text column, each tenant's rows in every append: a job's inputs share each key, and the one that
+        // emits a key last runs on into the next, so that the key changes inside its run rather than where a run starts.
+        const long Aimed = 8L << 10;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, Tenanted.Schema, Options([nameof(Tenanted.Tenant)], value: null, objectBytes: Aimed), Ct);
+        string[] tenants = [.. Enumerable.Range(0, 24).Select(t => $"tenant-{t:D2}")];
+        for (int append = 0; append < 8; append++)
+        {
+            await AppendAsync(dataset, [.. Enumerable.Range(0, 480).Select(i => new Tenanted(tenants[i % tenants.Length], (append * 1_000L) + i, i * 0.5))]);
+        }
+
+        await DrainAsync(dataset, Compaction());
+
+        // Objects of a few tenants each above level 0, by the bounds their keys give, none of a level sharing a tenant with
+        // another.
+        ClusteringKey key = dataset.Snapshot.Schema.Key!;
+        List<(int Level, string First, string Last, long Bytes)> objects = [];
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, Ct))
+        {
+            if (held.Level == 0)
+            {
+                continue;
+            }
+
+            Assert.True(held.Summaries(key).TryGet(nameof(Tenanted.Tenant), out ColumnSummary tenant) && tenant.HasMin && tenant.HasMax);
+            objects.Add((held.Level, System.Text.Encoding.UTF8.GetString(tenant.Min.BytesValue), System.Text.Encoding.UTF8.GetString(tenant.Max.BytesValue), held.Entry.Bytes));
+        }
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"CLUSTERING REPEATED KEY: {objects.Count} objects, aimed at {Aimed} bytes, the largest {objects.Max(o => o.Bytes)}.\n"));
+        Assert.True(objects.Count > 4, $"{objects.Count} object(s) for {tenants.Length} tenants at {Aimed} bytes each");
+        foreach (IGrouping<int, (int Level, string First, string Last, long Bytes)> level in objects.GroupBy(o => o.Level))
+        {
+            (int, string First, string Last, long)[] ordered = [.. level.OrderBy(o => o.First, StringComparer.Ordinal)];
+            for (int i = 1; i < ordered.Length; i++)
+            {
+                Assert.True(string.CompareOrdinal(ordered[i - 1].Last, ordered[i].First) < 0, $"level {level.Key}: {ordered[i - 1].Last} in two objects");
+            }
+        }
+    }
+
+    [Fact]
     public async Task KeysInOrderMergeTheNeighboursOfOneValueAndCloseEachValue()
     {
         Stream cut = await InOrderAsync(ClusteringValue.Bucket(1_000));
