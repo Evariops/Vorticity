@@ -180,7 +180,7 @@ public sealed class ColumnCountsTests
     }
 
     /// <summary>The encoded quantile sketch, at 1 % as the counts keep them, of <paramref name="values"/>.</summary>
-    private static byte[] Sketch(IEnumerable<double> values)
+    internal static byte[] Sketch(IEnumerable<double> values)
     {
         QuantileSketch sketch = new QuantileSketch(QuantileSketch.BitsFor(0.01));
         foreach (double value in values)
@@ -197,7 +197,7 @@ public sealed class ColumnCountsTests
     /// The counts of column <c>Key</c> of <paramref name="rows"/>, and their sketches, under a schema of an instant, the
     /// key, an amount and a price, fed in parts as a writer feeds them.
     /// </summary>
-    private static (ColumnCounts Counts, ColumnSketches? Sketches) Build(List<(long At, long Key, long Amount, double Price)> rows, int entryLimit)
+    internal static (ColumnCounts Counts, ColumnSketches? Sketches) Build(List<(long At, long Key, long Amount, double Price)> rows, int entryLimit)
     {
         VortexSchema schema = VortexSchema.Create([
             new VortexField("At", VortexType.Timestamp(TimeUnit.Microseconds, "UTC")),

@@ -1286,7 +1286,7 @@ internal static class DatasetCommitter
         {
             if (!pending.TryGetValue(level, out Dictionary<byte[], ObjectEntry?>? entries))
             {
-                entries = new Dictionary<byte[], ObjectEntry?>(KeyBytes.Instance);
+                entries = new Dictionary<byte[], ObjectEntry?>(Buffers.ByteKeys.Instance);
                 pending[level] = entries;
             }
 
@@ -1484,26 +1484,5 @@ internal static class DatasetCommitter
         internal static KeyOrder Instance { get; } = new KeyOrder();
 
         public int Compare(byte[]? x, byte[]? y) => TreePage.Compare(x, y);
-    }
-
-    /// <summary>Keys equal by their bytes, looked up by a span of them as well as by an array.</summary>
-    private sealed class KeyBytes : IEqualityComparer<byte[]>, IAlternateEqualityComparer<ReadOnlySpan<byte>, byte[]>
-    {
-        internal static KeyBytes Instance { get; } = new KeyBytes();
-
-        public bool Equals(byte[]? x, byte[]? y) => x.AsSpan().SequenceEqual(y);
-
-        public int GetHashCode(byte[] obj) => GetHashCode((ReadOnlySpan<byte>)obj);
-
-        public bool Equals(ReadOnlySpan<byte> alternate, byte[] other) => alternate.SequenceEqual(other);
-
-        public int GetHashCode(ReadOnlySpan<byte> alternate)
-        {
-            HashCode hash = default;
-            hash.AddBytes(alternate);
-            return hash.ToHashCode();
-        }
-
-        public byte[] Create(ReadOnlySpan<byte> alternate) => alternate.ToArray();
     }
 }
