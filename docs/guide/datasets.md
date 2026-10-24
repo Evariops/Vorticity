@@ -122,9 +122,9 @@ batch opens only one. `ScanOptions.Prefetch` controls this, 1 by default, and 0 
 only when the scan reaches it.
 
 A group by at a degree above one reads the objects side by side, each one a range in the lanes'
-queue, with large objects cut between their chunks. On the first column of the clustering key, or a
-function of it, a group by streams, because the dataset delivers its rows in key order. See
-[aggregates.md](aggregates.md).
+queue, with large objects cut where the chunks of the columns it reads start together. On the first
+column of the clustering key, or a function of it, a group by streams, because the dataset delivers its
+rows in key order. See [aggregates.md](aggregates.md).
 
 A dataset compacted by periods cuts the objects it seals into time slices, and a question under a
 window on the instant reads only what the window reaches: the objects whose instants it may hold, and

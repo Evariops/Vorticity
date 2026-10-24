@@ -736,7 +736,7 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
         _draft ??= _dataset.StartObjectUnder(_schema);
         await _draft.Writer.WriteAsync<TRecord>(_rows.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
         _draftRows += count;
-        if (_draft.Sink.Position >= _target)
+        if (_draft.Sink.Position + _draft.Writer.GatheredBytes >= _target)
         {
             await RollAsync(cancellationToken).ConfigureAwait(false);
         }

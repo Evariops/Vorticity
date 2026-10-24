@@ -273,6 +273,21 @@ public sealed record VortexWriteOptions
     internal bool CarriesSlices { get; init; }
 
     /// <summary>
+    /// The encoded bytes the chunks of each top-level column without a target of its own
+    /// (<see cref="ColumnChunkTargetBytes"/>) aim at, or 0, the default, for every such column chunked with the file: the
+    /// column gathers its rows across the file's chunks until they would encode to that many bytes at the rate its last
+    /// chunk compressed, so that a read of a few columns fetches segments of about that size. A dataset's objects set it.
+    /// </summary>
+    internal int GatheredChunkBytes { get; init; }
+
+    /// <summary>
+    /// The rows after which every column that gathers writes what it holds, or 0 for no bound: the chunks of every column
+    /// end together at least that often, where a reader cuts the rows between lanes without a chunk two of them read.
+    /// A flush ends such a group too.
+    /// </summary>
+    internal long GatheredGroupRows { get; init; }
+
+    /// <summary>
     /// What each top-level variant column shreds, by its name: its chunks are written as the reference
     /// stores a shredded variant, the values the shredding names in typed columns. A column not named
     /// is written whole.

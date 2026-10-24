@@ -237,6 +237,10 @@ public sealed partial class DatasetGroupTests
         MarkedObjectBytes = 0,
         MarkedVectorBytes = 1 << 20,
         LeastPieceRows = 8_192,
+
+        // Chunks of 16 KiB a column, every column's ending together each 8 192 rows: an object a pass cuts.
+        ChunkBytes = 16 << 10,
+        GroupRows = 8_192,
         Write = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 16 << 10 },
     };
 

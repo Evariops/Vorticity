@@ -174,6 +174,20 @@ public sealed record DatasetOptions
     internal long LeastPieceRows { get; init; } = 1L << 20;
 
     /// <summary>
+    /// The encoded bytes each column's chunks of an object aim at: 2^20 by default, about what a request to an object
+    /// store carries before its bytes cost more than its round trip, so that a question reading a few columns fetches
+    /// segments of that size rather than every column's bytes between them. 0 writes every column chunked with the
+    /// object.
+    /// </summary>
+    internal int ChunkBytes { get; init; } = 1 << 20;
+
+    /// <summary>
+    /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default, besides the
+    /// end of each time slice. A lane's range of the object is cut where they do, so that no chunk is read by two lanes.
+    /// </summary>
+    internal long GroupRows { get; init; } = 1L << 22;
+
+    /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
     /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
     /// </summary>

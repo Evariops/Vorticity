@@ -128,6 +128,16 @@ decoded for its other rows only.
 
 The clustered figures are estimates, which a size test checks before any synopsis relies on them.
 
+### 3.5 Each column in segments of its own
+
+A dataset's object chunks each column apart, in segments of about 1 MiB encoded, and ends the chunks of
+every column together at each time slice and at least every 2²² rows, where lanes cut the object. A
+question reading two columns of 30 days of the reference table then asks for about 150 000 segments of
+a megabyte *(computed)*, where segments laid out chunk by chunk, every column of 32 000 rows side by
+side, meant either about 8 × 10⁶ requests of a few dozen kilobytes or every column's bytes read to
+bridge them. A file written alone keeps its columns chunked together, the default a local read prefers
+([11-write-strategy.md](11-write-strategy.md#9-time-slices-and-shredded-variants)).
+
 ## 4. The dataset's read path
 
 The engine is fed by the dataset's scan, which holds to six rules.

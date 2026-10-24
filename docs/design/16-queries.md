@@ -905,8 +905,10 @@ homed by the top bits of its hash. A part is then a run of every lane's slots, w
 with nothing cut first, its own table homing them by the bits below the part's, which they share. A
 chosen row and a tie keep the earlier range's.
 
-On a dataset, a range is an object, and an object holding two shares of the rows or more is cut
-between its chunks, as a file's rows are, so no chunk is read by two ranges. Under a window on the
+On a dataset, a range is an object, and an object holding two shares of the rows or more is cut where
+a chunk of every column the pass reads starts, so no chunk is read by two ranges: the columns of a
+dataset's object are chunked apart, and their chunks end together at its slices and its groups of rows
+([time slices](11-write-strategy.md#9-time-slices-and-shredded-variants)). Under a window on the
 instant, an object of time slices counts for the rows of the slices the window reaches, which its entry
 names, and is cut between their chunks alone. The objects that are cut are opened side by side to learn
 where their chunks end, and the ranges then find them already open.

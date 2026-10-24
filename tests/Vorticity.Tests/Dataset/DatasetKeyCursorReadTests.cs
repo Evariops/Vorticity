@@ -236,10 +236,12 @@ public sealed class DatasetKeyCursorReadTests
             },
 
             // Pages of a few entries, so that a level's tree is many leaves under internal pages,
-            // and a delete marks its rows rather than rewriting their object.
+            // and a delete marks its rows rather than rewriting their object; every column chunked with
+            // the object, so that the objects a compaction rolls at its sizes are those its blocks make.
             Rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024),
             MarkedObjectBytes = 0,
             MarkedShare = 1,
+            ChunkBytes = 0,
         };
 
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, ChangeRow.Schema, options, ct);

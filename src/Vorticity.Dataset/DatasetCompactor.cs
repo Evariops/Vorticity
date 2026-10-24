@@ -1268,7 +1268,7 @@ internal static class DatasetCompactor
         }
 
         /// <summary>Whether the object being written has reached the destination's size.</summary>
-        internal bool WantsRoll => _draft is not null && _draft.Sink.Position >= _target;
+        internal bool WantsRoll => _draft is not null && _draft.Sink.Position + _draft.Writer.GatheredBytes >= _target;
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
@@ -1380,8 +1380,10 @@ internal static class DatasetCompactor
                 Judged(_stream!, _streamed!);
             }
 
+            // The slice's chunks end with it, every column's together: a lane's range of the object starts at a slice.
             long writing = Stopwatch.GetTimestamp();
             await _draft!.Writer.WriteBatchAsync(slice, cancellationToken).ConfigureAwait(false);
+            await _draft.Writer.FlushAsync(cancellationToken).ConfigureAwait(false);
             Timings?.AddWrite(Stopwatch.GetTimestamp() - writing);
         }
 

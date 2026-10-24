@@ -920,7 +920,13 @@ public sealed class VortexDataset : IAsyncDisposable
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(
             _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes, byteBound);
-        VortexWriteOptions write = _options.Write.WithIdentity(identity) with { RowBound = rowBound, CarriesSlices = sliced };
+        VortexWriteOptions write = _options.Write.WithIdentity(identity) with
+        {
+            RowBound = rowBound,
+            CarriesSlices = sliced,
+            GatheredChunkBytes = _options.ChunkBytes,
+            GatheredGroupRows = _options.GroupRows,
+        };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
         // handle says so (DatasetOptions.ShredOnAppend), and nothing otherwise.

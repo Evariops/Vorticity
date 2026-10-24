@@ -438,10 +438,29 @@ median, and cuts a burst finer, a unit past twice the target. At the target itse
 hour of the example that a few late rows of the next hour took past it went to seconds, every hour of
 a day but the last, sixty times the slices: hence twice the target.
 
-Chunks do not end at slices. Ending them around each slice's first row, at the start and the end of
-its block, was tried and measured: on six hours of requests at twenty a second, a read of whole objects
-took five times the requests, a request a chunk, and the rows a cut hour reads took 2.4 times the
-bytes, each small chunk carrying its own dictionaries and encodings.
+A dataset's object chunks each column on its own. A column gathers its rows across the object's chunks
+until they would encode to about 1 MiB (`DatasetOptions.ChunkBytes`, internal) at the rate its last
+chunk compressed to, the first guessed at a quarter, and holds at most sixteen times that in canonical
+bytes, so that a question reading a few columns fetches segments of about a megabyte rather than every
+column's bytes between them. The chunks of every column end together at each slice's end, the writer
+flushed there, and at least every 2²² rows (`GroupRows`): where a lane's range of the object starts, so
+that no chunk is read by two lanes. A file written alone keeps its columns chunked together, which the
+decision of 2026-10-11 left as the default for a file read locally.
+
+Measured on the client's spans, two hours at 500 rows a second over a store 5 ms away, at 16 lanes, cold
+(`vortex-queries --micro paths --qp`): an hour's object went from about 2 000 segments to 102, 555 KB
+each on average; QP-1 read 33.9 MB in 75 requests in 123 ms, against 177.7 MB in 232 in 280 ms; QP-5
+504 MB in 545 requests in 470 ms, against 1 061 MB in 2 688 in 1 291 ms. A needle takes a segment a
+column now, about a megabyte, where it took the small chunk of every column in one: QP-4 read 15.5 MB in
+13 requests in 39 ms, against 0.8 MB in 7 in 18 ms. A load of four hourly periods at 50 000 rows a
+second took 2.07 s against 1.75 (+19 %), its process peaking at 8.0 GB against 6.1, for 4 % fewer bytes
+(`--micro load`).
+
+Chunks of a column do not end at every slice when a column gathers no further: a slice's end closes
+the group, not a chunk of the object's own. Ending the object's chunks around each slice's first row
+was tried before columns gathered: on six hours of requests at twenty a second, a read of whole
+objects took five times the requests, a request a chunk, and the rows a cut hour reads took 2.4 times
+the bytes, each small chunk carrying its own dictionaries and encodings.
 
 A slice's rows are copied into a buffer of its own as they come, its columns laid out for all of them,
 then joined and written on a lane of the session's while the next slice fills, two slices held at most;

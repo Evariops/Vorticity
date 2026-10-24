@@ -291,6 +291,36 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private Gathering?[]? _gathering;
 
+    /// <summary>The rows after which every column that gathers writes what it holds, or 0 (<see cref="VortexWriteOptions.GatheredGroupRows"/>).</summary>
+    private long _groupRows;
+
+    /// <summary>The rows the columns that gather took since their chunks last ended together.</summary>
+    private long _groupTaken;
+
+    /// <summary>
+    /// What the columns that gather hold and have not written, as the bytes it would encode to at each one's last rate:
+    /// what a caller sizing the file adds to the bytes its sink took.
+    /// </summary>
+    internal long GatheredBytes
+    {
+        get
+        {
+            long held = 0;
+            if (_gathering is { } gathering)
+            {
+                foreach (Gathering? column in gathering)
+                {
+                    if (column is not null)
+                    {
+                        held += (long)(column.Bytes * column.Rate);
+                    }
+                }
+            }
+
+            return held;
+        }
+    }
+
     /// <summary>By column, what a variant column shreds, null for a column written whole; null when none shreds.</summary>
     private VariantShredding?[]? _shredding;
 
@@ -761,6 +791,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             (writer._gathering ??= new Gathering?[writer._fieldCount])[schema.IndexOfField(target.Key)] = new Gathering(target.Value);
         }
+
+        // Every other top-level column gathers to the encoded bytes asked for, when they are.
+        if (options.GatheredChunkBytes > 0 && writer._isTabular)
+        {
+            Gathering?[] gathering = writer._gathering ??= new Gathering?[writer._fieldCount];
+            for (int field = 0; field < writer._fieldCount; field++)
+            {
+                gathering[field] ??= Gathering.Encoded(options.GatheredChunkBytes);
+            }
+        }
+
+        writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
 
         writer._chunkPageEntries = Math.Max(options.ChunkPageEntries, 1);
 
@@ -1877,7 +1919,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     }
 
                     Gather(gathering, arena, node, rows, blocks);
-                    if (gathering.Bytes >= gathering.Target)
+                    if (gathering.Due)
                     {
                         await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
                     }
@@ -1887,6 +1929,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
                 await EmitColumnChunkAsync(field, arena, node, rows, _emittedBlocks, blocks, cancellationToken).ConfigureAwait(false);
             }
+        }
+
+        // The chunks of every column that gathers end together once the group's rows are in: where a reader cuts the
+        // rows between lanes without a chunk two of them read.
+        if (_groupRows > 0 && (_groupTaken += rows) >= _groupRows)
+        {
+            await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
         }
 
         await CloseChunkAsync(rows, blocks, cancellationToken).ConfigureAwait(false);
@@ -2059,6 +2108,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
             _columnSegments[field].Add(segment);
             _indexes?.AddColumnBytes(field, _segments[segment].Length);
+            _gathering?[field]?.Measured(_segments[segment].Length);
         }
 
         // The compact summaries stay -- the zone map wants them at completion -- and only the sized
@@ -2115,6 +2165,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int blocks = gathering.Blocks;
         gathering.Nodes.Clear();
         gathering.Rows = 0;
+        gathering.Cut = gathering.Bytes;
         gathering.Bytes = 0;
         gathering.Blocks = 0;
         try
@@ -2128,13 +2179,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
-    /// <summary>Writes what every column with a target of its own has gathered, at a flush or the completion.</summary>
+    /// <summary>Writes what every column with a target of its own has gathered, at a flush, the end of a group of rows or the completion.</summary>
     private async ValueTask EmitGatheredAsync(CancellationToken cancellationToken)
     {
         if (_gathering is not { } gathering)
         {
             return;
         }
+
+        _groupTaken = 0;
 
         if (CompressesAcross && Fan is { } fan)
         {
@@ -2154,6 +2207,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The rows a column with a chunk target of its own holds until they reach it, and the chunks it has written.</summary>
     private sealed class Gathering(long target)
     {
+        /// <summary>
+        /// The share of its canonical bytes a column's first chunk is guessed to encode to, before one has: a column of
+        /// codes or of narrow integers takes less, and its next chunks gather more.
+        /// </summary>
+        private const double FirstRate = 0.25;
+
+        /// <summary>
+        /// The least share a column is taken to encode to: past 16 times its target in canonical bytes, it holds no more,
+        /// which bounds what a writer holds of a column that compresses better still.
+        /// </summary>
+        private const double LeastRate = 1.0 / 16;
+
         internal readonly long Target = target;
         internal readonly List<int> Nodes = [];
         internal readonly AppendList<long> ChunkRows = new();
@@ -2162,6 +2227,32 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal long Bytes;
         internal int FirstBlock;
         internal int Blocks;
+
+        /// <summary>Whether the target counts encoded bytes, at <see cref="Rate"/>, rather than canonical ones.</summary>
+        internal bool IsEncoded { get; private init; }
+
+        /// <summary>The share of its canonical bytes the column's last chunk encoded to; 1 for a target in canonical bytes.</summary>
+        internal double Rate { get; private set; } = 1;
+
+        /// <summary>The canonical bytes of the chunk being written, which its segment measures the rate against; 0 when none is.</summary>
+        internal long Cut;
+
+        /// <summary>Whether what the column holds is a chunk: its target reached, in encoded bytes at the last rate when it counts them.</summary>
+        internal bool Due => Bytes * Rate >= Target;
+
+        /// <summary>A column gathering to <paramref name="bytes"/> encoded bytes a chunk.</summary>
+        internal static Gathering Encoded(long bytes) => new Gathering(bytes) { IsEncoded = true, Rate = FirstRate };
+
+        /// <summary>Takes the rate the chunk just written encoded to, <paramref name="encoded"/> bytes of its <see cref="Cut"/>.</summary>
+        internal void Measured(long encoded)
+        {
+            if (IsEncoded && Cut > 0)
+            {
+                Rate = Math.Clamp((double)encoded / Cut, LeastRate, 1);
+            }
+
+            Cut = 0;
+        }
     }
 
     /// <summary>

@@ -197,14 +197,13 @@ internal sealed class DatasetScanSource : ScanSource
             long lower = rows.Start - held.FirstRow;
             long upper = rows.End - held.FirstRow;
             RowRange physical = deletions.IsEmpty ? new RowRange(lower, upper) : new RowRange(deletions.Physical(lower), deletions.Physical(upper - 1) + 1);
-            LayoutTree tree = lease.File.LayoutTree;
-            SplitPlan plan = SplitPlan.Compute(tree, physical, in mask, SplitPlan.NaturalBatchRows(tree));
+            long[] starts = CommonStarts(lease.File.LayoutTree, physical, in mask);
             long parts = rows.Length / share;
             List<RowRange> pieces = [];
             long start = rows.Start;
-            for (int b = 0; b < plan.BoundaryCount && pieces.Count < parts - 1; b++)
+            for (int b = 0; b < starts.Length && pieces.Count < parts - 1; b++)
             {
-                long at = held.FirstRow + deletions.Logical(plan.BoundaryAt(b));
+                long at = held.FirstRow + deletions.Logical(starts[b]);
                 if (at - start >= share && at < rows.End)
                 {
                     pieces.Add(new RowRange(start, at));
@@ -214,6 +213,75 @@ internal sealed class DatasetScanSource : ScanSource
 
             pieces.Add(new RowRange(start, rows.End));
             return [.. pieces];
+        }
+    }
+
+    /// <summary>
+    /// The rows strictly inside <paramref name="physical"/> where a chunk of every top-level column of
+    /// <paramref name="mask"/> starts, ascending: where an object whose columns are chunked apart is cut between lanes
+    /// without a chunk two of them read. Its columns' chunks end together at its time slices and its groups of rows.
+    /// </summary>
+    private static long[] CommonStarts(LayoutTree tree, RowRange physical, in FieldMask mask)
+    {
+        long natural = SplitPlan.NaturalBatchRows(tree);
+        int fields = tree.Root.Encoding == Arrays.LayoutEncodingId.Struct ? tree.Root.ChildCount : 0;
+        int count = fields == 0 ? 0 : mask.IsAll ? fields : mask.NamedFieldCount;
+        if (count == 0)
+        {
+            SplitPlan whole = SplitPlan.Compute(tree, physical, in mask, natural);
+            return Interior(whole, physical);
+        }
+
+        long[]? common = null;
+        for (int i = 0; i < count && common is not { Length: 0 }; i++)
+        {
+            int field = mask.IsAll ? i : mask.GetNamedField(i);
+            FieldMask column = FieldMask.Single(field);
+            long[] starts = Interior(SplitPlan.Compute(tree, physical, in column, natural), physical);
+            common = common is null ? starts : Intersect(common, starts);
+        }
+
+        return common ?? [];
+
+        static long[] Interior(SplitPlan plan, RowRange rows)
+        {
+            List<long> inside = new List<long>(plan.BoundaryCount);
+            for (int b = 0; b < plan.BoundaryCount; b++)
+            {
+                long at = plan.BoundaryAt(b);
+                if (at > rows.Start && at < rows.End)
+                {
+                    inside.Add(at);
+                }
+            }
+
+            return [.. inside];
+        }
+
+        static long[] Intersect(long[] left, long[] right)
+        {
+            List<long> both = new List<long>(System.Math.Min(left.Length, right.Length));
+            int l = 0;
+            int r = 0;
+            while (l < left.Length && r < right.Length)
+            {
+                if (left[l] == right[r])
+                {
+                    both.Add(left[l]);
+                    l++;
+                    r++;
+                }
+                else if (left[l] < right[r])
+                {
+                    l++;
+                }
+                else
+                {
+                    r++;
+                }
+            }
+
+            return [.. both];
         }
     }
 
