@@ -180,7 +180,7 @@ internal sealed class RequestGenerator
     }
 
     /// <summary>
-    /// The runs each synopsis column holds in the rows, sorted by the design's order (status, region, method, service,
+    /// The runs each column holds in the rows sorted by the first design's order (status, region, method, service,
     /// version, endpoint, host): the distinct combinations of the first k columns, k from one to seven.
     /// </summary>
     internal static long[] RunsByDepth(IReadOnlyList<GeneratedRequest> rows)
@@ -203,7 +203,7 @@ internal sealed class RequestGenerator
 
     /// <summary>
     /// <c>--micro generator</c>: a minute at the design's rate, 5 × 10⁴ rows a second, and the runs of each
-    /// synopsis column against the design's figures.
+    /// column under the first design's order against its figures.
     /// </summary>
     internal static int Run(int seed)
     {

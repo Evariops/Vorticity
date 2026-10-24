@@ -94,9 +94,9 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         SparseCostMicro.Run(Option(args, "--rows", 1_000_000), rounds)),
     ["splitplan"] = ("--file F: the plan of splits a scan of a file's every row draws before its first read (SplitPlanMicro.cs)", () =>
         SplitPlanMicro.Run(Text(args, "--file") ?? throw new ArgumentException("--micro splitplan needs --file F."), rounds)),
-    ["generator"] = ("a minute of the time-window design's requests, and the runs of each synopsis column against its figures (RequestGenerator.cs)", () =>
+    ["generator"] = ("a minute of the time-window design's requests, and the runs of each column under the first design's order (RequestGenerator.cs)", () =>
         Task.FromResult(RequestGenerator.Run((int)Option(args, "--seed", 17)))),
-    ["questions"] = ("the designs' example questions over generated requests and log records, cold and warm, synopses and rows (QuestionBench.cs)", () =>
+    ["questions"] = ("the designs' example questions over generated requests and log records, cold and warm, by the synopses and by the rows (QuestionBench.cs)", () =>
         QuestionBench.Run(
             (int)Option(args, "--hours", 24), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100), Text(args, "--only"),
             args.Contains("--sealed"))),

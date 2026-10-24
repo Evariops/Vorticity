@@ -16,7 +16,7 @@ internal static partial class PathsBench
     /// <c>--qps SECONDS</c>: the questions a node answers a second, those <c>--only</c> keeps asked in turn by each of
     /// <c>--clients</c> clients at once, each question at one lane and by its synopses where it aggregates, for so many
     /// seconds: warm, through one session whose synopsis cache holds every region after a first round of every question;
-    /// then with no synopsis cache, every table read from the store, the requests a node asks of it. For each, the
+    /// then with no synopsis cache, every region read from the store, the requests a node asks of it. For each, the
     /// questions a second, the latencies' median and 99th percentile, the store's requests and bytes a second, and the
     /// cores the process kept busy.
     /// </summary>

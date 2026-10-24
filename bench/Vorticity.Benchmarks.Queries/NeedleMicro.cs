@@ -123,7 +123,7 @@ internal static class NeedleMicro
     /// <summary>
     /// One window of identifiers: a request's 32 hexadecimal digits, unique to its row; a span's 16,
     /// unique to its row; or a trace's 32, ten rows each, scattered over the window as a slice sorted
-    /// by its synopsis columns scatters them.
+    /// by other columns scatters them.
     /// </summary>
     private static NeedleRow[] Ids(string shape, int count, Random random)
     {

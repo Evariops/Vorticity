@@ -775,7 +775,7 @@ internal static partial class PathsBench
     /// </summary>
     /// <summary>The name of the client's spans' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
     private static string SpansName(Settings settings) =>
-        $"spans-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
+        $"spans-v2-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
 
     /// <summary>The name of the client's log records' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
     private static string LogsV2Name(Settings settings) =>

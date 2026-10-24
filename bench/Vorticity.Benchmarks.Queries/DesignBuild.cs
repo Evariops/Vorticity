@@ -40,7 +40,7 @@ internal static class DesignBuild
     internal static async Task<(long Rows, string Needle)> FillAsync(
         IObjectStore store, int hours, double rate, int budget, int parallel, int writeDegree, int partMinutes, string scratch, bool randomIds = false)
     {
-        // The runs the writers and the synopsis tables move to disk wait beside the store, on its disk.
+        // The runs the writers move to disk wait beside the store, on its disk.
         System.IO.Directory.CreateDirectory(scratch);
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = writeDegree);
         VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedRequest.Schema, new DatasetOptions
