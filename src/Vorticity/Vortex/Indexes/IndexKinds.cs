@@ -74,19 +74,6 @@ internal static class IndexKinds
     public const string VariantBlocks = "vorticity.variant.blocks.v1";
 
     /// <summary>
-    /// Where a synopsis column's chunks lie in the synopsis part, on that column: its run's payload
-    /// regions are the chunks' segments, each with its checksum, and its options the part's extent, so
-    /// that a reader of the part alone needs no footer.
-    /// </summary>
-    public const string SynopsisColumns = "vorticity.synopsis.columns.v1";
-
-    /// <summary>
-    /// One table of an object's synopsis, on the root: its kind, bucket, keys, measures and rows in its
-    /// options, its rows an array payload of its one run (<see cref="SynopsisTableInfo"/>).
-    /// </summary>
-    public const string SynopsisTable = "vorticity.synopsis.table.v1";
-
-    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -96,8 +83,7 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks or SynopsisColumns
-                or SynopsisTable => true,
+                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks => true,
             _ => false,
         };
 

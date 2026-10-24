@@ -223,10 +223,6 @@ internal static partial class PathsBench
                 {
                     Console.WriteLine($"  {built.Directory}");
                     await EntriesAsync(built.Directory);
-                    if (settings.Explain)
-                    {
-                        await TablesAsync(built);
-                    }
                 }
             }
 
@@ -242,17 +238,6 @@ internal static partial class PathsBench
             $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows){(settings.SegmentCacheBytes > 0 ? $", segments kept in {settings.SegmentCacheBytes >> 20} MiB" : string.Empty)}; processor time from cycles at {ProcessCpu.GigaHertz:F2} GHz; {label}");
         Console.WriteLine(
             $"{"question",-62} {"path",-8} {"",-4} {"dop",3} {"ms",9} {"cpu ms",9} {"alloc MB",9} {"priv MB",8} {"ws MB",8} {"req",6} {"steps",6} {"MB",8} {"states",9} {"rows",11} {"groups",7}");
-
-        if (settings.Explain)
-        {
-            foreach (Built? built in new[] { requests, logs, spans, logs2 })
-            {
-                if (built is not null)
-                {
-                    await TablesAsync(built);
-                }
-            }
-        }
 
         DateTimeOffset end = QuestionBench.Start.AddHours(settings.Hours);
         DateTimeOffset lastHour = end.AddHours(-1);
@@ -362,8 +347,7 @@ internal static partial class PathsBench
     /// <summary>
     /// <c>--entries</c>, <c>--micro entries</c>: each object's entry in the tree of the dataset at
     /// <paramref name="directory"/>, which a walk reads for every object it plans and the handle's page cache keeps, and
-    /// what the table of contents of its synopsis holds: its slices, its tables' chunks, its synopsis columns' chunks, its
-    /// schema.
+    /// what its table of contents holds: its slices and its schema.
     /// </summary>
     internal static async Task EntriesAsync(string directory)
     {
@@ -377,37 +361,12 @@ internal static partial class PathsBench
             total += bytes;
             string parts = entry.Contents is not { } contents ? "no table of contents" : string.Create(
                 CultureInfo.InvariantCulture,
-                $"contents {entry.Synopsis.Length / 1e6:F2} MB: {contents.Slices.Slices.Count} slices in {contents.Slices.ToBytes().Length / 1e3:F1} KB, " +
-                $"{contents.Tables.Count} tables of {contents.Tables.Sum(table => table.Chunks.Count)} chunks, schema {contents.Schema.Length} B");
+                $"contents {entry.TableOfContents.Length / 1e6:F2} MB: {contents.Slices.Slices.Count} slices in {contents.Slices.ToBytes().Length / 1e3:F1} KB, " +
+                $"schema {contents.Schema.Length} B");
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {entry.Key}: {entry.Rows:N0} rows, entry {bytes / 1e6:F2} MB, {parts}"));
         }
 
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {total / 1e6:F2} MB of entries"));
-    }
-
-    /// <summary>The synopsis tables each object of the store holds, as its entry's table of contents names them.</summary>
-    private static async Task TablesAsync(Built built)
-    {
-        await using FileObjectStore files = new FileObjectStore(built.Directory);
-        await using VortexDataset dataset = await VortexDataset.OpenAsync(files, new DatasetOptions());
-        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
-        {
-            if (held.Entry.Contents is not { } contents)
-            {
-                Console.WriteLine($"    tables {held.Entry.Key}: none, {held.Entry.Rows:N0} rows");
-                continue;
-            }
-
-            Vorticity.Types.DType schema = contents.SchemaType;
-            foreach ((Vorticity.Indexes.SynopsisTableInfo table, IReadOnlyList<Vorticity.Indexes.TableChunk> chunks) in contents.Tables)
-            {
-                string keys = string.Join(", ", table.Keys.Select(field => Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths)));
-                string measures = string.Join(", ", table.Measures.Select(field => Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths)));
-                string distinct = table.Distinct.Length == 0 ? string.Empty : $", distinct ({string.Join(", ", table.Distinct.Select(field =>
-                    Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths) + (table.HoldsDistinct(field) ? string.Empty : " lost")))})";
-                Console.WriteLine($"    tables {held.Entry.Key}: {table.Kind} by {table.Bucket} on ({keys}) of [{measures}]{distinct}, {table.Rows:N0} rows in {chunks.Count} chunks");
-            }
-        }
     }
 
     /// <summary>A question of the catalogue: its dataset, its name, and how it is asked of a dataset under scan options.</summary>

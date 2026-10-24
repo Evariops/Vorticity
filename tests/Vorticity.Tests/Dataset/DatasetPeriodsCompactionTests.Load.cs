@@ -106,12 +106,8 @@ public sealed partial class DatasetPeriodsCompactionTests
         Assert.True((await DrainAsync(sealer, new CompactionOptions { LevelZeroCeiling = 1, Fanout = 100 })).GetValueOrDefault(CompactionTrigger.Seal) > 0);
         (SliceTable Slices, string[] Indexes) sealedHour = await ShapeAsync(sealer, await FirstAsync(sealer, PeriodLevels.Periods));
         (SliceTable Slices, string[] Indexes) loadedHour = await ShapeAsync(dataset, await FirstAsync(dataset, PeriodLevels.Periods));
-        Assert.Empty(loadedHour.Slices.Order);
-        Assert.Empty(sealedHour.Slices.Order);
         Assert.DoesNotContain(loadedHour.Indexes, index => index.StartsWith("vorticity.synopsis.", StringComparison.Ordinal));
-        SynopsisContents contents = ObjectEntry.FromBytes((await FirstAsync(dataset, PeriodLevels.Periods)).Value.Span).Contents!;
-        Assert.Equal((0L, 0L), (contents.PartStart, contents.PartEnd));
-        Assert.Empty(contents.Tables);
+        Assert.DoesNotContain(sealedHour.Indexes, index => index.StartsWith("vorticity.synopsis.", StringComparison.Ordinal));
 
         // A period the dataset holds rows of, one that starts no period, rows of another period, parts out of order, and
         // a part whose rows go back in time, are refused, and leave the dataset as it was.

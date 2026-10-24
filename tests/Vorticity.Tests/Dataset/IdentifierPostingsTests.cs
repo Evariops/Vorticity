@@ -242,7 +242,7 @@ public sealed partial class IdentifierPostingsTests
             HashSet<string> data = new HashSet<string>(StringComparer.Ordinal);
             foreach (ObjectEntry hour in hours)
             {
-                foreach (IndexSegment region in SynopsisContents.From(hour.Synopsis.Span)!.Declared())
+                foreach (IndexSegment region in ObjectContents.From(hour.TableOfContents.Span)!.Declared())
                 {
                     declared.Add(SynopsisCache.NameOf(hour.Uid, region));
                 }

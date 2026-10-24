@@ -159,7 +159,7 @@ internal static class SealBench
                 CultureInfo.InvariantCulture,
                 $"{jobs} jobs in {seconds:F1} s, {busy / seconds:F1} cores busy of {Environment.ProcessorCount}, {peak / 1e9:F2} GB private at most in a job, a peak of {self.PeakWorkingSet64 / 1e9:F2} GB in memory"));
 
-            // What the jobs wrote: each object's slices and the order inside them.
+            // What the jobs wrote: each object's slices.
             await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, default))
             {
                 await using ObjectLease lease = await dataset.RentAsync(held.Entry, default);
@@ -168,11 +168,9 @@ internal static class SealBench
                     continue;
                 }
 
-                string order = string.Join(", ", table.Order.Select(
-                    entry => entry >= 0 && entry < lease.File.DType.FieldCount ? lease.File.DType.GetFieldName(entry) : entry.ToString(CultureInfo.InvariantCulture)));
                 Console.WriteLine(string.Create(
                     CultureInfo.InvariantCulture,
-                    $"  object of {held.Entry.Rows:N0} rows, {held.Entry.Bytes:N0} bytes: {table.Slices.Count} slices of {table.Slices.Min(s => s.Rows):N0} to {table.Slices.Max(s => s.Rows):N0} rows, order [{order}]"));
+                    $"  object of {held.Entry.Rows:N0} rows, {held.Entry.Bytes:N0} bytes: {table.Slices.Count} slices of {table.Slices.Min(s => s.Rows):N0} to {table.Slices.Max(s => s.Rows):N0} rows"));
             }
         }
         finally

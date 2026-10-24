@@ -106,7 +106,6 @@ internal static class DesignBuild
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"  built in {Stopwatch.GetElapsedTime(begin).TotalSeconds:F0} s: a peak of {self.PeakWorkingSet64 / 1e9:F2} GB in memory, {GC.GetTotalAllocatedBytes() / 1e9:F1} GB allocated, {GC.CollectionCount(2)} collections of generation 2"));
-            await TablesAsync(dataset);
             return (hours * perHour, needle);
         }
     }
@@ -162,7 +161,6 @@ internal static class DesignBuild
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"  loaded {days} periods in {seconds:F0} s, {loaded.Sum(p => p.Rows) / seconds / 1e6:F2} M rows a second: {loaded.Sum(p => p.Bytes) / 1e9:F1} GB, a peak of {self.PeakWorkingSet64 / 1e9:F2} GB in memory, {GC.GetTotalAllocatedBytes() / 1e9:F1} GB allocated, {GC.CollectionCount(2)} collections of generation 2"));
-            await TablesAsync(dataset);
             int needleHour = hours / 2;
             return (hours * perHour, RequestGenerator.IdOf((needleHour * perHour) + (perHour / 2), randomIds));
         }
@@ -236,35 +234,6 @@ internal static class DesignBuild
         finally
         {
             arena.Reset();
-        }
-    }
-
-    /// <summary>Each sealed period's synopsis tables: what each holds, its rows, its bytes and its chunks.</summary>
-    private static async Task TablesAsync(VortexDataset dataset)
-    {
-        await foreach (TreeEntry entry in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, default))
-        {
-            ObjectEntry held = ObjectEntry.FromBytes(entry.Value.Span);
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  period of {held.Rows:N0} rows, {held.Bytes / 1e6:F0} MB:"));
-            if (held.Contents is not { } contents)
-            {
-                continue;
-            }
-
-            // The tables as the entry's table of contents names them, their chunks in the lists it names apart.
-            await dataset.LoadSynopsisListsAsync([(held, contents, null)], default);
-            foreach ((SynopsisTableInfo info, IReadOnlyList<TableChunk> chunks) in contents.Tables)
-            {
-                long bytes = 0;
-                foreach (TableChunk chunk in chunks)
-                {
-                    bytes += chunk.Region.Length + (chunk.Distinct?.Length ?? 0);
-                }
-
-                Console.WriteLine(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"    {info.Kind} per {info.Bucket} of {info.Keys.Length} keys: {info.Rows:N0} rows, {bytes / 1e3:F0} KB in {chunks.Count} chunks"));
-            }
         }
     }
 

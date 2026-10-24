@@ -74,7 +74,7 @@ public sealed partial class IdentifierPostingsTests
             List<RecordBatch>?[] found = new List<RecordBatch>?[hours.Count];
             for (int h = 0; h < hours.Count; h++)
             {
-                SynopsisContents contents = hours[h].Contents!;
+                ObjectContents contents = hours[h].Contents!;
                 Assert.Equal(paged, contents.Paging is not null);
                 IndexSegment whole = contents.DirectoryRegion!.Value;
                 LocatingEntry postings = Assert.Single(contents.Locating!, l => l.Kind == IndexKinds.PostingsHashed);
@@ -84,7 +84,7 @@ public sealed partial class IdentifierPostingsTests
                 Console.Out.Write(FormattableString.Invariant(
                     $"LOCATING ENTRIES: {contents.Locating!.Count} of {named} bytes, in a directory of {whole.Length}.\n"));
                 Assert.True(named < whole.Length, $"{named} bytes of entries in a directory of {whole.Length}");
-                Assert.Equal(contents.Locating, SynopsisContents.From(contents.ToBytes())!.Locating);
+                Assert.Equal(contents.Locating, ObjectContents.From(contents.ToBytes())!.Locating);
 
                 asked.Clear();
                 found[h] = await dataset.LookupAsync(hours[h], filter, null, Ct);

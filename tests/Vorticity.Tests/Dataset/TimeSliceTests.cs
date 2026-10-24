@@ -109,6 +109,50 @@ public sealed partial class TimeSliceTests
         Assert.Throws<ArgumentException>(() => new SliceTable(TimeUnit.Microseconds, []));
     }
 
+    /// <summary>
+    /// A table of version 4, which followed its slices with the order inside them and the object's synopsis paths, reads
+    /// back as its slices alone, so that an object written then is still walked by them; one torn in its paths does not.
+    /// </summary>
+    [Fact]
+    public void ATableOfVersionFourIsReadWithoutItsOrder()
+    {
+        List<byte> bytes = [];
+        void Varint(ulong value)
+        {
+            for (; value >= 0x80; value >>= 7)
+            {
+                bytes.Add((byte)(value | 0x80));
+            }
+
+            bytes.Add((byte)value);
+        }
+
+        // Version 4, the unit, two slices as gaps, widths and rows; an order of a field and a variant's shapes, zigzagged;
+        // a path in the residual, its field, its key and its class word.
+        Varint(4);
+        Varint((byte)TimeUnit.Microseconds);
+        Varint(2);
+        Varint(9);
+        Varint(15);
+        Varint(3);
+        Varint(10);
+        Varint(10);
+        Varint(7);
+        Varint(2);
+        Varint(2);
+        Varint(5);
+        Varint(1);
+        Varint(2);
+        Varint(5);
+        bytes.AddRange("route"u8.ToArray());
+        Varint((byte)Vorticity.Types.Variants.VariantClass.String | 0x100u);
+
+        SliceTable read = SliceTable.FromBytes(bytes.ToArray())!;
+        Assert.Equal([new TimeSlice(-5, 10, 0, 3), new TimeSlice(20, 30, 3, 7)], read.Slices);
+        Assert.Equal(TimeUnit.Microseconds, read.Unit);
+        Assert.Null(SliceTable.FromBytes(bytes.ToArray()[..^4]));
+    }
+
     /// <summary>A writer that declares its slices writes them into its index directory, and a file read back finds them.</summary>
     [Fact]
     public async Task AFileCarriesItsSlicesInItsIndexDirectory()

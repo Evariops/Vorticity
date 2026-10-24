@@ -705,7 +705,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// Reads into the session's <see cref="VortexSessionOptions.SynopsisCache"/>, before a question needs
-    /// them, the tables and directories of every object whose summaries say it may hold a row
+    /// them, the directories of every object whose summaries say it may hold a row
     /// <paramref name="filter"/> selects: <c>dataset.WarmAsync&lt;Request&gt;(r =&gt; r.At &gt;= DateTime.UtcNow.AddDays(-30))</c>.
     /// </summary>
     /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
@@ -766,17 +766,16 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>Reads through the cache the regions of one object it does not hold yet: the bytes it read.</summary>
-    private async Task<long> WarmObjectAsync(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken)
+    private async Task<long> WarmObjectAsync(SynopsisCache cache, ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken)
     {
         if (_store is SealedObjectStore { Seals: true })
         {
             return await WarmSealedAsync(cache, entry, contents, cancellationToken).ConfigureAwait(false);
         }
 
-        // The lists of the tables' chunks first, from the disk when it holds them: the chunks they name are regions too.
-        bool listed = entry.Uid != UInt128.Zero && Indexes.SynopsisTableReader.LoadListsHeld(cache, entry.Uid, contents, null);
-        List<Indexes.IndexSegment> missing = Missing(cache, entry, contents);
-        if ((listed && missing.Count == 0) || entry.Uid == UInt128.Zero)
+        List<Indexes.IndexSegment> missing = contents.Declared();
+        missing.RemoveAll(region => cache.Holds(entry.Uid, region));
+        if (missing.Count == 0 || entry.Uid == UInt128.Zero)
         {
             return 0;
         }
@@ -786,17 +785,6 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             ISegmentReader reader = Footerless(source, entry, contents);
             long bytes = 0;
-            if (!listed)
-            {
-                foreach (Indexes.SynopsisContents.TableChunks table in contents.Unloaded(null) ?? [])
-                {
-                    bytes += table.List!.Value.Length;
-                }
-
-                await Indexes.SynopsisTableReader.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
-                missing = Missing(cache, entry, contents);
-            }
-
             using SegmentRequestSet requests = new SegmentRequestSet(missing.Count);
             foreach (Indexes.IndexSegment region in missing)
             {
@@ -807,20 +795,13 @@ public sealed class VortexDataset : IAsyncDisposable
             await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             return bytes;
         }
-
-        static List<Indexes.IndexSegment> Missing(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents)
-        {
-            List<Indexes.IndexSegment> regions = contents.Declared();
-            regions.RemoveAll(region => cache.Holds(entry.Uid, region));
-            return regions;
-        }
     }
 
     /// <summary>
     /// Reads the regions of one sealed object through a reader that keeps their frames, those the cache keeps
     /// from the disk, the rest from the store: the bytes it kept, its trailer and its frames as the store holds them.
     /// </summary>
-    private async Task<long> WarmSealedAsync(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken)
+    private async Task<long> WarmSealedAsync(SynopsisCache cache, ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken)
     {
         if (SealedSynopsisCache.Over(cache, entry.Uid, contents) is not { } kept)
         {
@@ -830,9 +811,7 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken, kept).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            // The lists of the tables' chunks first: the chunks they name are regions it keeps too.
             ISegmentReader reader = Footerless(source, entry, contents);
-            await Indexes.SynopsisTableReader.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
             List<Indexes.IndexSegment> regions = contents.Declared();
             using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
             foreach (Indexes.IndexSegment region in regions)
@@ -2344,27 +2323,11 @@ public sealed class VortexDataset : IAsyncDisposable
     internal LevelZeroMemo LevelZero { get; } = new LevelZeroMemo();
 
     /// <summary>
-    /// The chunks of the synopsis tables of the object <paramref name="entry"/> names that <paramref name="wanted"/>
-    /// keeps, every one when it is null, read with no open of the object: the regions its entry's table of
-    /// contents names, in one round trip. Null when the entry carries no table of contents this library reads.
-    /// </summary>
-    internal async ValueTask<Indexes.SynopsisTableSet?> ReadSynopsisAsync(
-        ObjectEntry entry, Indexes.ISynopsisReads? wanted, CancellationToken cancellationToken)
-    {
-        if (entry.Contents is not { } contents)
-        {
-            return null;
-        }
-
-        return await ReadSynopsisAsync(entry, contents, wanted, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>
     /// The store's reader of an object read with no open of it, which the caller disposes: a sealed object's
     /// keeps its trailer and the frames of the regions its table of contents declares in the session's synopsis
     /// cache, the bytes the store holds.
     /// </summary>
-    private ValueTask<ISegmentReader> OpenFooterlessAsync(ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken) =>
+    private ValueTask<ISegmentReader> OpenFooterlessAsync(ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken) =>
         SealedObjectStore.OpenDataAsync(
             _store, entry.Key, entry.Uid, entry.Bytes, cancellationToken,
             _store is SealedObjectStore { Seals: true } ? SealedSynopsisCache.Over(Session.Options.SynopsisCache, entry.Uid, contents) : null);
@@ -2374,90 +2337,16 @@ public sealed class VortexDataset : IAsyncDisposable
     /// session's, through the session's synopsis cache for the regions the object's table of contents declares
     /// when the object is plain. A sealed object's reader decrypts what its cache keeps, which holds no plaintext.
     /// </summary>
-    private ISegmentReader Footerless(ISegmentReader source, ObjectEntry entry, Indexes.SynopsisContents contents) =>
+    private ISegmentReader Footerless(ISegmentReader source, ObjectEntry entry, Indexes.ObjectContents contents) =>
         SessionReader.Wrap(
             source is ObjectStoreSource ? SynopsisCacheReader.Over(source, Session.Options.SynopsisCache, entry.Uid, contents) : source,
             Session);
 
     /// <summary>
-    /// Loads, for each object of <paramref name="answered"/>, the lists of the chunks of the tables its answer reads, every
-    /// table without one, that its entry names apart (<see cref="Indexes.SynopsisContents.TableChunks.List"/>): from the
-    /// session's synopsis cache when it holds them, the others from the store, an object's in one round trip and the objects
-    /// side by side, as many as the session lets reads be in flight. A question weighs and cuts its answers by their chunks,
-    /// before it reads one.
-    /// </summary>
-    internal async ValueTask LoadSynopsisListsAsync(
-        IReadOnlyList<(ObjectEntry Entry, Indexes.SynopsisContents Contents, Indexes.ISynopsisReads? Reads)> answered, CancellationToken cancellationToken)
-    {
-        List<Task>? loads = null;
-        foreach ((ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? reads) in answered)
-        {
-            // Lists another question loaded since the answer was made are news to it as well.
-            if (!contents.HasUnloaded(reads))
-            {
-                reads?.Loaded(contents);
-                continue;
-            }
-
-            if (Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
-                && Indexes.SynopsisTableReader.LoadListsHeld(cache, entry.Uid, contents, reads))
-            {
-                continue;
-            }
-
-            (loads ??= []).Add(LoadAsync(entry, contents, reads));
-        }
-
-        if (loads is not null)
-        {
-            await Task.WhenAll(loads).ConfigureAwait(false);
-        }
-
-        async Task LoadAsync(ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? reads)
-        {
-            ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-            await using (source.ConfigureAwait(false))
-            {
-                await Indexes.SynopsisTableReader.LoadListsAsync(Footerless(source, entry, contents), contents, reads, cancellationToken).ConfigureAwait(false);
-            }
-        }
-    }
-
-    /// <summary>
-    /// The chunks <see cref="ReadSynopsisAsync(ObjectEntry, Indexes.SynopsisContents, Indexes.ISynopsisReads?, CancellationToken)"/>
-    /// reads, when the session's synopsis cache holds every one of a plain object: read from the disk on the spot, with no
-    /// reader opened; null when one is not there, or the object is sealed.
-    /// </summary>
-    internal Indexes.SynopsisTableSet? ReadSynopsisCached(ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted) =>
-        Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
-            ? Indexes.SynopsisTableReader.ReadHeld(cache, entry.Uid, contents, wanted, SynopsisContexts.Shared, null)
-            : null;
-
-    /// <summary>
-    /// As <see cref="ReadSynopsisAsync(ObjectEntry, Indexes.ISynopsisReads?, CancellationToken)"/>, with the entry's
-    /// table of contents already read: <paramref name="wanted"/> is asked of its tables, and of the fields of their rows.
-    /// </summary>
-    internal async ValueTask<Indexes.SynopsisTableSet> ReadSynopsisAsync(
-        ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted, CancellationToken cancellationToken)
-    {
-        if (ReadSynopsisCached(entry, contents, wanted) is { } cached)
-        {
-            return cached;
-        }
-
-        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-        await using (source.ConfigureAwait(false))
-        {
-            return await Indexes.SynopsisTableReader.ReadAsync(
-                Footerless(source, entry, contents), contents, wanted, SynopsisContexts.Shared, null, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
     /// Whether an index on the column of a field of <paramref name="schema"/>'s root is one <paramref name="filter"/> may
-    /// read, by the columns it names, their first field from the root; none on the root itself, the synopsis tables and the
-    /// slices' chunks, whose runs a lookup parsed at every question for nothing; null, every one, when a name is none of
-    /// the schema's or past the 64th field.
+    /// read, by the columns it names, their first field from the root; none on the root itself, the slices' chunks,
+    /// whose runs a lookup parsed at every question for nothing; null, every one, when a name is none of the schema's or
+    /// past the 64th field.
     /// </summary>
     private static Func<uint, bool>? ColumnsOf(VortexExpr filter, DType schema)
     {
@@ -2516,7 +2405,8 @@ public sealed class VortexDataset : IAsyncDisposable
             // The directory's entries on the columns the filter reads alone: its runs' segments were a list each, every
             // index of the object parsed at every lookup, three fifths of what a question that leaves an identifier out
             // allocated. Read alone, those of the locating indexes, when the contents name them apart: the whole directory
-            // of a day's object, every chunk of its synopsis tables in it, was 11.5 MB a lookup read for a few runs.
+            // of a day's object, when it named every chunk of the synopsis tables of the time, was 11.5 MB a lookup read for a
+            // few runs.
             DType schema = contents.SchemaType;
             Func<uint, bool>? indexed = ColumnsOf(filter, schema);
             List<Indexes.IndexSegment>? named = Named(contents, indexed);
@@ -2641,10 +2531,10 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// The regions of the entries of the locating indexes on the columns <paramref name="indexed"/> keeps, every one when it
-    /// is null, that <paramref name="contents"/> name (<see cref="Indexes.SynopsisContents.Locating"/>); null when they name
+    /// is null, that <paramref name="contents"/> name (<see cref="Indexes.ObjectContents.Locating"/>); null when they name
     /// none, and a lookup reads the whole directory.
     /// </summary>
-    private static List<Indexes.IndexSegment>? Named(Indexes.SynopsisContents contents, Func<uint, bool>? indexed)
+    private static List<Indexes.IndexSegment>? Named(Indexes.ObjectContents contents, Func<uint, bool>? indexed)
     {
         if (contents.Locating is not { Count: > 0 } locating)
         {
@@ -2776,7 +2666,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// slices share read once: two round trips cold, however many slices.
     /// </summary>
     internal async ValueTask<RecordBatch[]> ReadSlicesAsync(
-        ObjectEntry entry, Indexes.SynopsisContents contents, IReadOnlyList<Indexes.TimeSlice> slices, int[]? columns,
+        ObjectEntry entry, Indexes.ObjectContents contents, IReadOnlyList<Indexes.TimeSlice> slices, int[]? columns,
         CancellationToken cancellationToken)
     {
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
@@ -2794,7 +2684,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// (<see cref="Indexes.SliceReader.ChunkStartsAsync"/>): where a span of its rows may be cut between lanes.
     /// </summary>
     internal async ValueTask<long[]> ChunkStartsAsync(
-        ObjectEntry entry, Indexes.SynopsisContents contents, int[] columns, long first, long end, CancellationToken cancellationToken)
+        ObjectEntry entry, Indexes.ObjectContents contents, int[] columns, long first, long end, CancellationToken cancellationToken)
     {
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
@@ -2894,7 +2784,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
             .WithFooterBytes(draft.Writer.TailBytes)
-            .WithSynopsis(draft.Writer.SynopsisContents);
+            .WithTableOfContents(draft.Writer.TableOfContents);
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes);
     }
 

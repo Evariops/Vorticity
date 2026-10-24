@@ -12,7 +12,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Dataset;
 
-public sealed partial class SynopsisContentsTests
+public sealed partial class ObjectContentsTests
 {
     private static readonly DateTimeOffset Noon = new(2026, 10, 18, 12, 0, 0, TimeSpan.Zero);
 
@@ -59,7 +59,7 @@ public sealed partial class SynopsisContentsTests
         }
 
         Assert.Equal(2, periods.Count);
-        SynopsisContents contents = SynopsisContents.From(periods[0].Synopsis.Span)!;
+        ObjectContents contents = ObjectContents.From(periods[0].TableOfContents.Span)!;
 
         // A slice: its columns' chunk directories, then its chunks. A latency longer than what readying a read takes,
         // which the tests running beside this one stretch, keeps the two round trips apart.
@@ -195,53 +195,42 @@ public sealed partial class SynopsisContentsTests
         return held;
     }
 
-    /// <summary>A chunk without the bounds of its key's values, whose arrays compare by their references.</summary>
-    private static TableChunk Unbounded(TableChunk chunk) => chunk with { Keys = null };
-
-    /// <summary>A chunk's bounds as bytes, null for none: the bounds a chunk holds are a view of its table's store.</summary>
-    private static (byte[]? Least, byte[]? Greatest) Bounds(TableChunk chunk) =>
-        chunk.Keys is { } keys ? (keys.Least.ToArray(), keys.Greatest.ToArray()) : (null, null);
-
     /// <summary>
-    /// A table of contents reads back as it was written, a chunk of a table of values with the least and the greatest of
-    /// its values, and an entry carries it through its bytes.
+    /// A table of contents reads back as it was written, an entry carries it through its bytes, and contents of the version
+    /// that held the synopsis tables are no contents.
     /// </summary>
     [Fact]
     public void TheContentsAndTheEntryRoundTrip()
     {
-        SliceTable slices = new SliceTable(TimeUnit.Microseconds, [new TimeSlice(0, 60_000_000, 0, 10), new TimeSlice(60_000_000, 120_000_000, 10, 5)], [1]);
-        SynopsisContents contents = new SynopsisContents(
+        SliceTable slices = new SliceTable(TimeUnit.Microseconds, [new TimeSlice(0, 60_000_000, 0, 10), new TimeSlice(60_000_000, 120_000_000, 10, 5)]);
+        ObjectContents contents = new ObjectContents(
             Vorticity.Types.Serialization.DTypeFlatBuffers.Serialize(Vorticity.VortexTypes.ToDType(Call.Schema, new Vorticity.Types.DTypeArena())),
             ["vortex.primitive", "vortex.runend"],
             slices,
             [new IndexSegment(100, 20, 0, 7), new IndexSegment(120, 30, 0, 8)],
-            4_096,
-            8_192,
-            [
-                (new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4), [new TableChunk(new IndexSegment(4_096, 512, 6, 9), 0, 3_600_000_000, 3), new TableChunk(new IndexSegment(4_608, 128, 6, 10), 3_600_000_000, 3_600_000_000, 1)]),
-                (new SynopsisTableInfo(SynopsisTableKind.Values, SynopsisBucket.Slice, [1], [3], 2), [new TableChunk(new IndexSegment(4_736, 64, 6, 11), 0, 60_000_000, 2) { Keys = new ValueBounds([1, 1, (byte)'a'], [1, 2, (byte)'e', (byte)'u']) }]),
-            ]);
-        SynopsisContents back = SynopsisContents.From(contents.ToBytes())!;
+            [(2, new IndexSegment(150, 40, 0, 9))]);
+        ObjectContents back = ObjectContents.From(contents.ToBytes())!;
         Assert.Equal(contents.Schema, back.Schema);
         Assert.Equal(contents.Encodings, back.Encodings);
         Assert.Equal(contents.Slices.Slices, back.Slices.Slices);
         Assert.Equal(contents.ChunkDirectories, back.ChunkDirectories);
-        Assert.Equal((contents.PartStart, contents.PartEnd), (back.PartStart, back.PartEnd));
-        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(Unbounded), back.Tables.SelectMany(t => t.Chunks).Select(Unbounded));
-        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(Bounds), back.Tables.SelectMany(t => t.Chunks).Select(Bounds));
-        Assert.Equal(contents.Tables.Select(t => t.Table), back.Tables.Select(t => t.Table), Same);
-        Assert.Null(SynopsisContents.From([1, 2, 3]));
+        Assert.Equal(contents.PathDirectories, back.PathDirectories);
+        Assert.Null(ObjectContents.From([1, 2, 3]));
 
-        ObjectEntry entry = new ObjectEntry("data/a.vortex", 7, 15, 9_000, 11, (ObjectSummaries?)null).WithFooterBytes(80_000).WithSynopsis(contents.ToBytes());
+        // The first version's contents, the same fields behind version 1, are none this library reads.
+        byte[] first = contents.ToBytes();
+        Assert.Equal(0x08, first[0]);
+        Assert.Equal(2, first[1]);
+        first[1] = 1;
+        Assert.Null(ObjectContents.From(first));
+
+        ObjectEntry entry = new ObjectEntry("data/a.vortex", 7, 15, 9_000, 11, (ObjectSummaries?)null).WithFooterBytes(80_000).WithTableOfContents(contents.ToBytes());
         ObjectEntry read = ObjectEntry.FromBytes(entry.ToBytes());
         Assert.Equal(entry, read);
         Assert.Equal(80_000, read.FooterBytes);
-        Assert.Equal(contents.ToBytes(), read.Synopsis.ToArray());
-        Assert.Equal(read.Synopsis.ToArray(), read.WithMarkedAt(1_000).Synopsis.ToArray());
+        Assert.Equal(contents.ToBytes(), read.TableOfContents.ToArray());
+        Assert.Equal(read.TableOfContents.ToArray(), read.WithMarkedAt(1_000).TableOfContents.ToArray());
     }
-
-    private static bool Same(SynopsisTableInfo left, SynopsisTableInfo right) =>
-        left.Kind == right.Kind && left.Bucket == right.Bucket && left.Keys.SequenceEqual(right.Keys) && left.Measures.SequenceEqual(right.Measures) && left.Rows == right.Rows;
 
     [VortexRecord]
     public partial record struct Call(DateTimeOffset At, string Region, int Status, long Duration);

@@ -12,8 +12,8 @@ namespace Vorticity;
 
 /// <summary>
 /// A cache on the local disk of what a question reads of a dataset's objects without the rest of their
-/// data: the tables of their synopses, their slices' chunk directories, their index directories, their
-/// variant columns' path directories, and the pages and segments of their indexes' runs a lookup reads;
+/// data: their slices' chunk directories, their index directories, their variant columns' path
+/// directories, and the pages and segments of their indexes' runs a lookup reads;
 /// and the pages of the dataset's tree, which say what objects it holds. A question over a month answers
 /// from the disk once those regions have been read, and makes no request to the store for them.
 /// </summary>
@@ -67,7 +67,7 @@ namespace Vorticity;
 /// (<c>vortex-queries --micro cachetrace</c>).
 /// </para>
 /// </remarks>
-public sealed class SynopsisCache : IDisposable, IHeldRegions
+public sealed class SynopsisCache : IDisposable
 {
     private const string LockName = ".lock";
     private const string TemporaryExtension = ".tmp";
@@ -1436,13 +1436,6 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
                 || (_pending.Count > 0 && _pending.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name));
         }
     }
-
-    bool IHeldRegions.Holds(UInt128 uid, IndexSegment region) => Holds(uid, region);
-
-    bool IHeldRegions.TryRead(UInt128 uid, IndexSegment region, out SegmentOwner owner) => TryRead(uid, region, out owner);
-
-    /// <summary>Tells <see cref="Asked"/>.</summary>
-    void IHeldRegions.Ask(UInt128 uid, IndexSegment region) => Asked?.Invoke(uid, region);
 
     /// <summary>
     /// Drops entries past the capacity, S3-FIFO's way. While the small queue holds its tenth of the capacity or

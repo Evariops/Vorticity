@@ -54,16 +54,16 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["count by service"] = new(4, 169572, 0, 0, 36144),
-        ["count by service, at eight lanes"] = new(4, 169572, 0, 0, 58240),
-        ["count by service and hour"] = new(4, 169572, 0, 0, 41648),
-        ["by minute, the last hour, under a predicate"] = new(1, 42153, 0, 0, 39488),
-        ["an unaligned window"] = new(3, 127419, 0, 0, 43520),
-        ["an unaligned window, at eight lanes"] = new(3, 127419, 0, 0, 63808),
-        ["every row but one id"] = new(4, 169572, 0, 0, 46272),
-        ["measures by region and hour"] = new(4, 169572, 0, 0, 49328),
-        ["count by route, a shredded path"] = new(4, 169572, 0, 0, 55888),
-        ["the rows of one id"] = new(4, 169572, 0, 0, 81328),
+        ["count by service"] = new(4, 169564, 0, 0, 36144),
+        ["count by service, at eight lanes"] = new(4, 169564, 0, 0, 58240),
+        ["count by service and hour"] = new(4, 169564, 0, 0, 41648),
+        ["by minute, the last hour, under a predicate"] = new(1, 42151, 0, 0, 39488),
+        ["an unaligned window"] = new(3, 127413, 0, 0, 43520),
+        ["an unaligned window, at eight lanes"] = new(3, 127413, 0, 0, 63808),
+        ["every row but one id"] = new(4, 169564, 0, 0, 46272),
+        ["measures by region and hour"] = new(4, 169564, 0, 0, 49328),
+        ["count by route, a shredded path"] = new(4, 169564, 0, 0, 55888),
+        ["the rows of one id"] = new(4, 169564, 0, 0, 81328),
     };
 
     private readonly Fixture _fixture;

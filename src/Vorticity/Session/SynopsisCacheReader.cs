@@ -39,7 +39,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
     /// <paramref name="inner"/> through <paramref name="cache"/> for the regions <paramref name="contents"/>
     /// declares; <paramref name="inner"/> itself without a cache, an object's uid, or a region with a checksum.
     /// </summary>
-    internal static ISegmentReader Over(ISegmentReader inner, SynopsisCache? cache, UInt128 uid, SynopsisContents contents)
+    internal static ISegmentReader Over(ISegmentReader inner, SynopsisCache? cache, UInt128 uid, ObjectContents contents)
     {
         if (cache is null || uid == UInt128.Zero)
         {

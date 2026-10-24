@@ -166,23 +166,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal long DataBytes => _reportBytes.Data;
 
     /// <summary>
-    /// Once a sliced file is completed, its table of contents (<see cref="Indexes.SynopsisContents"/>), for
+    /// Once a sliced file is completed, its table of contents (<see cref="Indexes.ObjectContents"/>), for
     /// the entry a dataset keeps of it: what a reader of its slices needs with no open.
     /// Null for a file without slices.
     /// </summary>
-    internal byte[]? SynopsisContents { get; private set; }
+    internal byte[]? TableOfContents { get; private set; }
 
     // The table of contents of a sliced file, built once its regions are written, before the directory's.
-    private SynopsisContents? _contents;
+    private ObjectContents? _contents;
 
     /// <summary>
     /// The table of contents of a sliced file: its slices' table and chunk directories, its variant columns' path
     /// directories.
     /// </summary>
-    private SynopsisContents Contents(
+    private ObjectContents Contents(
         SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging) =>
-        new SynopsisContents(
-            Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, 0, 0, [], pathDirectories)
+        new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
         };
@@ -2352,7 +2351,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // that locates a column's values in it, which a lookup reads alone.
         if (_contents is { } contents)
         {
-            SynopsisContents = (directory is null
+            TableOfContents = (directory is null
                 ? contents
                 : contents.Naming(IndexSegment.Of(directoryOffset, directory, 0), Locating(located!, directory, directoryOffset))).ToBytes();
         }

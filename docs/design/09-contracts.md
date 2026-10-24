@@ -127,8 +127,6 @@ so a listener that enables one only pays for that one:
 | `vortex.synopsis_cache.evictions`, `vortex.synopsis_cache.refused` | the regions dropped past their capacity, and those larger than it |
 | `vortex.synopsis_cache.corrupt` | regions whose file failed its checksum, dropped and read again |
 | `vortex.synopsis_cache.held` | the bytes they hold on the disk |
-| `vortex.synopsis_tables.corrupt` | chunks of synopsis tables that failed their checksum or did not decode, the question answered from the rows instead |
-| `vortex.synopsis_tables.unknown` | synopsis tables of a kind or a version a later writer made, skipped, the object's other tables answering |
 | `vortex.write.bytes` | bytes the writers handed to their sinks |
 | `vortex.dataset.commits`, by `vortex.operation` and `vortex.outcome` | how the commits of datasets end: applied, nothing to do, lost, cancelled or failed |
 | `vortex.dataset.commit_attempts`, by `vortex.operation` | the conditional creations commits sent, whose excess over the applied commits is the rebases, the measure of contention |

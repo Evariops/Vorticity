@@ -679,7 +679,7 @@ internal sealed class IndexWriter : IDisposable
             // The slice kinds and the variant paths describe the file as its writer cut it, which an
             // append changes, and the path directory counts rows the append does not parse.
             if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.VariantPaths
-                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns or IndexKinds.SynopsisTable
+                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks
                 || Kept(entry, boundary) is not { } kept)
             {
                 continue;
@@ -2001,7 +2001,7 @@ internal sealed class IndexWriter : IDisposable
         // A file's time slices and its variant paths ride in the directory whatever the policy asks.
         if (!Enabled && _preserved is not { Count: > 0 }
             && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
-                or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns or IndexKinds.SynopsisTable))
+                or IndexKinds.VariantBlocks))
         {
             return null;
         }

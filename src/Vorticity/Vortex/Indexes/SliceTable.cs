@@ -31,23 +31,15 @@ internal readonly record struct TimeSlice(long Start, long End, long FirstRow, l
 /// </remarks>
 internal sealed class SliceTable
 {
-    // The slices, the order inside them, its entries zigzagged, a variant field's shapes below zero, then the object's
-    // synopsis paths, which the order's entries from SynopsisPath.Base name. The versions before were the branch's
-    // own, which no store of a release holds.
-    private const byte Version = 4;
+    // The slices alone. Version 4 followed them with the order inside each slice and the object's synopsis paths,
+    // which a reader skips: an object written then is walked by its slices as before. The versions before it were the
+    // branch's own, which no store of a release holds.
+    private const byte Version = 5;
+    private const byte WithOrder = 4;
 
-    // A path's class word: the class, and above the classes whether the path lies in the residual and whether
-    // the object holds floats there.
-    private const uint ResidualFlag = 0x100;
-    private const uint FloatsFlag = 0x200;
-
-    /// <summary>
-    /// A table of <paramref name="slices"/> over instants counted in <paramref name="unit"/>, whose rows
-    /// are sorted inside each slice by the entries <paramref name="order"/>, then by the instant, in time
-    /// order for no order; the object's synopsis paths <paramref name="paths"/>.
-    /// </summary>
+    /// <summary>A table of <paramref name="slices"/> over instants counted in <paramref name="unit"/>.</summary>
     /// <exception cref="ArgumentException">The slices are empty, do not follow each other, or one is empty or inverted.</exception>
-    internal SliceTable(TimeUnit unit, IReadOnlyList<TimeSlice> slices, IReadOnlyList<int>? order = null, IReadOnlyList<SynopsisPath>? paths = null)
+    internal SliceTable(TimeUnit unit, IReadOnlyList<TimeSlice> slices)
     {
         ArgumentNullException.ThrowIfNull(slices);
         if (Problem(slices) is { } problem)
@@ -57,26 +49,10 @@ internal sealed class SliceTable
 
         Unit = unit;
         Slices = slices;
-        Order = order ?? [];
-        Paths = paths ?? [];
     }
-
-    /// <summary>
-    /// The paths of the object's variant columns its synopsis counts, which an entry of <see cref="Order"/>,
-    /// or a table's key or measure, names from <see cref="SynopsisPath.Base"/>. Empty for none.
-    /// </summary>
-    internal IReadOnlyList<SynopsisPath> Paths { get; }
 
     /// <summary>The unit the slices' bounds are counted in: the instant column's.</summary>
     internal TimeUnit Unit { get; }
-
-    /// <summary>
-    /// What the rows of each slice are sorted by, in that order, the instant after them: the object's
-    /// synopsis columns, a top-level field each, an entry below zero the shapes of variant field
-    /// <c>-entry - 1</c>, an entry from <see cref="SynopsisPath.Base"/> one of <see cref="Paths"/>. Empty for
-    /// rows in time order.
-    /// </summary>
-    internal IReadOnlyList<int> Order { get; }
 
     /// <summary>The slices, in time order.</summary>
     internal IReadOnlyList<TimeSlice> Slices { get; }
@@ -135,25 +111,6 @@ internal sealed class SliceTable
                 end = slice.End;
             }
 
-            writer.WriteVarint((ulong)Order.Count);
-            foreach (int entry in Order)
-            {
-                writer.WriteVarint(ZigZag(entry));
-            }
-
-            writer.WriteVarint((ulong)Paths.Count);
-            foreach (SynopsisPath path in Paths)
-            {
-                byte[] key = System.Text.Encoding.UTF8.GetBytes(path.Key);
-                writer.WriteVarint((ulong)path.Field);
-                writer.WriteVarint((ulong)key.Length);
-                writer.WriteRawBytes(key);
-
-                // The class, whether the path lies in the residual in the bit above the classes', and whether the
-                // object holds floats there in the next.
-                writer.WriteVarint((byte)path.Class | (path.Residual ? ResidualFlag : 0u) | (path.Floats ? FloatsFlag : 0u));
-            }
-
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -168,7 +125,8 @@ internal sealed class SliceTable
         try
         {
             ProtoReader reader = new ProtoReader(bytes);
-            if (reader.ReadVarint() != Version)
+            ulong version = reader.ReadVarint();
+            if (version is not (Version or WithOrder))
             {
                 return null;
             }
@@ -195,46 +153,50 @@ internal sealed class SliceTable
                 end = stop;
             }
 
-            ulong fields = reader.ReadVarint();
-            if (fields > (ulong)bytes.Length)
+            if (version == WithOrder && !SkipOrder(ref reader, bytes.Length))
             {
                 return null;
             }
 
-            int[] order = new int[(int)fields];
-            for (int i = 0; i < order.Length; i++)
-            {
-                order[i] = checked((int)UnZigZag(reader.ReadVarint()));
-            }
-
-            ulong held = reader.ReadVarint();
-            if (held > (ulong)bytes.Length)
-            {
-                return null;
-            }
-
-            SynopsisPath[] paths = new SynopsisPath[(int)held];
-            for (int i = 0; i < paths.Length; i++)
-            {
-                int field = checked((int)reader.ReadVarint());
-                string key = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
-                ulong word = reader.ReadVarint();
-                ulong @class = word & ~(ulong)(ResidualFlag | FloatsFlag);
-                if (@class > byte.MaxValue || !Enum.IsDefined((Types.Variants.VariantClass)(byte)@class))
-                {
-                    return null;
-                }
-
-                paths[i] = new SynopsisPath(
-                    field, key, (Types.Variants.VariantClass)(byte)@class, (word & ResidualFlag) != 0, (word & FloatsFlag) != 0);
-            }
-
-            return reader.End && Problem(slices) is null ? new SliceTable(unit, slices, order, paths) : null;
+            return reader.End && Problem(slices) is null ? new SliceTable(unit, slices) : null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException or ArgumentException)
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Reads past the order and the synopsis paths a table of version 4 holds after its slices: an entry a varint each,
+    /// and a path its field, its key and its class word. False when their counts run past the bytes.
+    /// </summary>
+    private static bool SkipOrder(ref ProtoReader reader, int bytes)
+    {
+        ulong entries = reader.ReadVarint();
+        if (entries > (ulong)bytes)
+        {
+            return false;
+        }
+
+        for (ulong i = 0; i < entries; i++)
+        {
+            reader.ReadVarint();
+        }
+
+        ulong paths = reader.ReadVarint();
+        if (paths > (ulong)bytes)
+        {
+            return false;
+        }
+
+        for (ulong i = 0; i < paths; i++)
+        {
+            reader.ReadVarint();
+            reader.ReadLengthDelimited();
+            reader.ReadVarint();
+        }
+
+        return true;
     }
 
     /// <summary>

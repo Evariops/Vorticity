@@ -22,8 +22,7 @@ public sealed partial class SortedSliceTests
 
     /// <summary>
     /// Two hours of spans, three regions and five statuses: the sealed hour's object holds the rows of each of its
-    /// slices in the order of their instants, its slice table naming no order; and a key-ordered read, a range and a
-    /// key cursor give the rows appended.
+    /// slices in the order of their instants; and a key-ordered read, a range and a key cursor give the rows appended.
     /// </summary>
     [Fact]
     public async Task ASealedPeriodKeepsTimeOrderSliceBySlice()
@@ -60,7 +59,6 @@ public sealed partial class SortedSliceTests
         await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
         {
             SliceTable table = (await SliceTable.ReadAsync(lease.File, Ct))!;
-            Assert.Empty(table.Order);
 
             List<Span> stored = [];
             await foreach (Span row in lease.File.Scan<Span>().ToRecordsAsync(Ct))

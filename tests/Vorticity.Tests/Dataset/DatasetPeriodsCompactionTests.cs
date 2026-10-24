@@ -456,8 +456,8 @@ public sealed partial class DatasetPeriodsCompactionTests
     }
 
     /// <summary>
-    /// Every object above level 0 that carries a slice table holds each slice's rows in the order of their instants, its
-    /// table naming no order: until a cluster column orders them, a dataset keeps its rows in the order they came. Returns
+    /// Every object above level 0 that carries a slice table holds each slice's rows in the order of their instants: until
+    /// a cluster column orders them, a dataset keeps its rows in the order they came. Returns
     /// the objects checked, an object a delete rewrote carrying no table. Objects <paramref name="seen"/> holds are not
     /// checked again, and those checked are added to it.
     /// </summary>
@@ -480,7 +480,6 @@ public sealed partial class DatasetPeriodsCompactionTests
                     continue;
                 }
 
-                Assert.Empty(table.Order);
                 List<Request> rows = [];
                 await foreach (Request row in lease.File.Scan<Request>().ToRecordsAsync(Ct))
                 {

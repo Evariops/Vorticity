@@ -32,7 +32,7 @@ internal sealed class SealedSynopsisCache : ISealedFrameCache
     /// The frames of object <paramref name="uid"/> in <paramref name="cache"/>, for the regions
     /// <paramref name="contents"/> declares; null without a cache, an object's uid, or a region with a checksum.
     /// </summary>
-    internal static SealedSynopsisCache? Over(SynopsisCache? cache, UInt128 uid, SynopsisContents contents)
+    internal static SealedSynopsisCache? Over(SynopsisCache? cache, UInt128 uid, ObjectContents contents)
     {
         if (cache is null || uid == UInt128.Zero)
         {

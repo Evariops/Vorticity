@@ -42,12 +42,12 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361244, 4, 98960, 79824),
-        ["QP-2 the pods of a route"] = new(4, 262284, 0, 0, 68784),
-        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262284, 0, 0, 168752),
-        ["QP-4 the spans of a trace"] = new(5, 287024, 1, 24740, 73760),
-        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90311, 1, 24740, 294560),
-        ["QP-10 the services of a residual key"] = new(4, 262284, 0, 0, 162592),
+        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361236, 4, 98960, 79824),
+        ["QP-2 the pods of a route"] = new(4, 262276, 0, 0, 68784),
+        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262276, 0, 0, 168752),
+        ["QP-4 the spans of a trace"] = new(5, 287016, 1, 24740, 73760),
+        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90309, 1, 24740, 294560),
+        ["QP-10 the services of a residual key"] = new(4, 262276, 0, 0, 162592),
     };
 
     private readonly Fixture _fixture;

@@ -55,7 +55,7 @@ internal sealed class SliceReader : IDisposable
 
     private SliceReader(
         ISegmentReader source, DType schema, VortexReadOptions options, SliceTable slices, string[] encodings,
-        IReadOnlyList<IndexSegment> regions, long rows, SynopsisContents? contents = null)
+        IReadOnlyList<IndexSegment> regions, long rows, ObjectContents? contents = null)
     {
         _source = source;
         _schema = schema;
@@ -74,14 +74,14 @@ internal sealed class SliceReader : IDisposable
 
     /// <summary>
     /// How a file's paged directories lie, and what a reader read of them: each column's page table, and its pages, each its
-    /// chunks. The page tables are the contents' too (<see cref="SynopsisContents.PageTable"/>), which every later read of
+    /// chunks. The page tables are the contents' too (<see cref="ObjectContents.PageTable"/>), which every later read of
     /// the object starts from, its pages asked with their checksums.
     /// </summary>
-    private sealed class PagedColumns(ChunkPaging paging, int columns, SynopsisContents contents)
+    private sealed class PagedColumns(ChunkPaging paging, int columns, ObjectContents contents)
     {
         internal ChunkPaging Paging { get; } = paging;
 
-        internal SynopsisContents Contents { get; } = contents;
+        internal ObjectContents Contents { get; } = contents;
 
         internal SliceChunks.PageTable?[] Tables { get; } = new SliceChunks.PageTable?[columns];
 
@@ -193,7 +193,7 @@ internal sealed class SliceReader : IDisposable
     /// they do not cover the schema's columns.
     /// </summary>
     /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
-    internal static SliceReader? Open(ISegmentReader source, VortexReadOptions? options, SynopsisContents contents)
+    internal static SliceReader? Open(ISegmentReader source, VortexReadOptions? options, ObjectContents contents)
     {
         ArgumentNullException.ThrowIfNull(source);
         DType schema = contents.SchemaType;

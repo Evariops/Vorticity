@@ -265,8 +265,7 @@ public sealed partial class SlicedKeySourceTests
         long hour = 3_600_000_000;
         SliceTable table = new SliceTable(
             TimeUnit.Microseconds,
-            shifted ? [.. slices.Select(slice => slice with { Start = slice.Start + hour, End = slice.End + hour })] : slices,
-            [1]);
+            shifted ? [.. slices.Select(slice => slice with { Start = slice.Start + hour, End = slice.End + hour })] : slices);
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-sliced-keys-{Guid.NewGuid():N}.vortex");
         try
         {

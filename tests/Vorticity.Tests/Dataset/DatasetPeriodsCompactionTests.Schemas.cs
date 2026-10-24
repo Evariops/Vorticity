@@ -59,14 +59,13 @@ public sealed partial class DatasetPeriodsCompactionTests
             Assert.True(triggers.Count < 50, $"compaction does not settle, {done.Trigger} again");
         }
 
-        // The hour is sealed, its rows in the order they came, its slice table naming no order.
+        // The hour is sealed, in time slices.
         Assert.Contains(CompactionTrigger.Seal, triggers);
         TreeEntry period = await FirstAsync(evolved, PeriodLevels.Periods);
         ObjectEntry sealedEntry = ObjectEntry.FromBytes(period.Value.Span);
         await using (ObjectLease lease = await evolved.RentAsync(sealedEntry, Ct))
         {
             SliceTable slices = (await SliceTable.ReadAsync(lease.File, Ct))!;
-            Assert.Empty(slices.Order);
             Assert.Equal(60, slices.Rows);
         }
 
@@ -104,8 +103,7 @@ public sealed partial class DatasetPeriodsCompactionTests
                 ObjectEntry entry = ObjectEntry.FromBytes(held.Value.Span);
                 await using ObjectLease lease = await dataset.RentAsync(entry, Ct);
                 planned.Add(await SliceTable.ReadAsync(lease.File, Ct) is { } slices
-                    ? $"{level}: {entry.Rows} rows in {string.Join(", ", slices.Slices)}, order [{string.Join(", ", slices.Order)}], "
-                        + $"paths [{string.Join(", ", slices.Paths)}], {lease.File.DType}"
+                    ? $"{level}: {entry.Rows} rows in {string.Join(", ", slices.Slices)}, {lease.File.DType}"
                     : $"{level}: {entry.Rows} rows");
             }
         }

@@ -179,7 +179,7 @@ internal static class QuestionBench
         return rows;
     }
 
-    /// <summary>Compacts until nothing is due, and says what the dataset then holds: its objects, and those with synopsis tables.</summary>
+    /// <summary>Compacts until nothing is due, and says what the dataset then holds: its objects, and those with a table of contents.</summary>
     internal static async Task CompactAsync(VortexDataset dataset)
     {
         while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
@@ -187,20 +187,14 @@ internal static class QuestionBench
         }
 
         int objects = 0;
-        int kept = 0;
-        int tables = 0;
+        int sliced = 0;
         await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, default))
         {
             objects++;
-            using Indexes.SynopsisTableSet? set = await dataset.ReadSynopsisAsync(held.Entry, null, default);
-            if (set is { Tables.Count: > 0 })
-            {
-                kept++;
-                tables += set.Tables.Count;
-            }
+            sliced += held.Entry.Contents is not null ? 1 : 0;
         }
 
-        Console.WriteLine($"{objects} objects, {kept} with synopsis tables, {tables} tables in all");
+        Console.WriteLine($"{objects} objects, {sliced} in time slices with a table of contents");
     }
 
     /// <summary>

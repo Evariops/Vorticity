@@ -9,7 +9,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Dataset;
 
-public sealed partial class SynopsisContentsTests
+public sealed partial class ObjectContentsTests
 {
     /// <summary>
     /// Two sealed hours of calls in chunks of 16 rows, their chunk directories laid in pages of four chunks: the contents say
@@ -49,13 +49,13 @@ public sealed partial class SynopsisContentsTests
         }
 
         // Every column paged alike: chunks of 16 rows, four a page.
-        SynopsisContents contents = hour.Contents!;
+        ObjectContents contents = hour.Contents!;
         ChunkPaging paging = contents.Paging!;
         Assert.Equal(4, paging.PageEntries);
         Assert.Equal(Enumerable.Range(0, contents.ChunkDirectories.Count), paging.Columns);
         Assert.True(paging.PageRows.Length > 8, $"{paging.PageRows.Length} pages");
         Assert.All(contents.ChunkDirectories, table => Assert.Equal(SliceChunks.TableBytes(paging.PageRows.Length), (int)table.Length));
-        ChunkPaging back = SynopsisContents.From(contents.ToBytes())!.Paging!;
+        ChunkPaging back = ObjectContents.From(contents.ToBytes())!.Paging!;
         Assert.Equal((paging.PageEntries, paging.Count), (back.PageEntries, back.Count));
         Assert.Equal(paging.PageRows, back.PageRows);
         Assert.Equal(paging.Columns, back.Columns);
