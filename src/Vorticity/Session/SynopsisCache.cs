@@ -281,19 +281,19 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
             return _root is not null && TryPeerRegion(region, name, out owner);
         }
 
-        // On Windows, the entry's file mapped, once, while the cache keeps its handle: a region read is then a view of
-        // it, with no read of the system's and no copy, where a read took a fifth of a warm question over 48 objects'
-        // tables. Elsewhere a read of the system's cache costs less, and a file cut short under a mapping faults its
-        // reader, where a read finds it torn.
+        // The entry's file mapped, once, while the cache keeps its handle: a region read is then a view of it, with no
+        // read of the system's and no copy, where a read took a fifth of a warm question over 48 objects' tables on
+        // Windows. A file is whole once renamed, and only its cache writes its directory, the caches that share its
+        // root reading it and mapping none of it: no mapping sees its file cut short, which would fault its reader.
         int length = checked((int)region.Length);
-        if (OperatingSystem.IsWindows() && entry.Bytes == length && length > 0 && LeaseMap(entry) is { } map)
+        if (entry.Bytes == length && length > 0 && LeaseMap(entry) is { } map)
         {
             bool held;
             try
             {
-                // Its bytes verified once a mapping: no one writes a file mapped, which Windows refuses, so a region its
-                // checksum held holds it at every next read of the same mapping, where each read hashed it again, a sixth
-                // of a question at sixteen lanes; a file mapped again, once let go, is verified again.
+                // Its bytes verified once a mapping: no one writes a file once it is renamed, so a region its checksum
+                // held holds it at every next read of the same mapping, where each read hashed it again, a sixth of a
+                // question at sixteen lanes; a file mapped again, once let go, is verified again.
                 VortexBuffer view = map.View(0, length, region.AlignmentExponent);
                 held = ReferenceEquals(entry.Verified, map) || region.Holds(view.Span);
                 if (held)

@@ -667,13 +667,14 @@ behind, and a count per service over 48 hourly objects 50 ms against 38 at one l
 sixteen. Past 256 MiB waiting, a region is written before its reader goes on, and the cache's dispose
 writes what waits. A sealed object's frames are written at once. The cache walks its directory when it opens,
 and the entries an earlier cache left are its own. One cache owns a directory, through a lock of the
-operating system. On Windows, an entry's file is opened at its first read and mapped, and kept so while
-the cache keeps up to 4 096 files open: a region read from the disk is a view of the mapping, with no
-read of the system and no copy, and its batches decode from it. A read took a fifth of a warm question
-over 48 hourly objects' tables, 5.8 ms a question against 4.6 mapped. A file the cache maps is one no
-other writer changes while it does, as the system refuses to write a mapped file. Elsewhere a region is
-read, a read of the system's cache costing less, and a file cut short under a mapping faulting its
-reader where a read finds it torn. Every read from the disk
+operating system. An entry's file is opened at its first read and mapped, and kept so while the cache
+keeps up to 4 096 files open: a region read from the disk is a view of the mapping, with no read of the
+system and no copy, and its batches decode from it. On Windows a read took a fifth of a warm question
+over 48 hourly objects' tables, 5.8 ms a question against 4.6 mapped; under Linux (WSL2), the warm
+questions the cache serves alone take up to 12 % less mapped (QP-10, 0.095 ms against 0.105). A
+file the cache maps is one no writer changes while it does: it is whole once renamed, only its own cache
+writes its directory, and the caches that share its root read it without mapping it, so no mapping sees
+its file cut short, which would fault its reader where a read finds it torn. Every read from the disk
 checks the checksum, and a region that fails it is dropped, its mapping let go, and read again from the
 store; a mapping checks it once, its bytes holding it for every next read of the same mapping, which
 no writer changes: a region hashed at each read, then again by the decode of its rows, took a sixth
