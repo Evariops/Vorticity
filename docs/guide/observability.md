@@ -155,7 +155,7 @@ activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location
 activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=3
 activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=4
 activity vortex.dataset.commit [Unset]: vortex.operation=compaction, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=5
-activity vortex.dataset.compaction [Unset]: vortex.trigger=level_zero_ceiling, vortex.level.from=0, vortex.level.to=1, vortex.objects_in=3, vortex.bytes_in=10725, vortex.location=observed-dataset, vortex.outcome=applied, vortex.objects_out=1, vortex.bytes_out=2956, vortex.rows=6, vortex.version=5
+activity vortex.dataset.compaction [Unset]: vortex.trigger=level_zero_ceiling, vortex.level.from=0, vortex.level.to=1, vortex.objects_in=3, vortex.bytes_in=10725, vortex.location=observed-dataset, vortex.outcome=applied, vortex.objects_out=1, vortex.objects_moved=0, vortex.bytes_out=2956, vortex.rows=6, vortex.version=5
 activity vortex.dataset.vacuum [Unset]: vortex.dry_run=True, vortex.location=observed-dataset, vortex.deleted=0, vortex.young=0, vortex.locked=0, vortex.retained=5
 ```
 

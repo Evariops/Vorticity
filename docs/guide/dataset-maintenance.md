@@ -51,7 +51,7 @@ CompactionResult? compacted = await dataset.CompactAsync();
 
 ```
 compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128862 bytes in and 79036 out, 50000 rows
-  cost: 12 requests (10 read, 0 head, 2 put, 0 delete, 0 list), 12 dependent steps, 128862 bytes read, 79429 written
+  cost: 12 requests (10 read, 0 head, 2 put, 0 delete, 0 list), 12 dependent steps, 128862 bytes read, 79432 written
 now: 1 objects, lag 0; again: nothing to do
 ```
 
@@ -125,8 +125,8 @@ DatasetVerification since = await dataset.VerifyAsync(since: checkedAt);
 ```
 
 ```
-verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 8 requests (6 read, 2 head, 0 put, 0 delete, 0 list), 8 dependent steps, 145609 bytes read, 0 written
-verify since 12: holds True, 1 objects, 1 pages; cost: 11 requests (9 read, 2 head, 0 put, 0 delete, 0 list), 11 dependent steps, 28178 bytes read, 0 written
+verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 8 requests (6 read, 2 head, 0 put, 0 delete, 0 list), 8 dependent steps, 145615 bytes read, 0 written
+verify since 12: holds True, 1 objects, 1 pages; cost: 11 requests (9 read, 2 head, 0 put, 0 delete, 0 list), 11 dependent steps, 28187 bytes read, 0 written
 ```
 
 `VerifyAsync` checks the version's tree pages, objects and index fragments against what their
@@ -134,7 +134,7 @@ references promise, and reports every problem instead of throwing. `Problems` is
 sentences, empty when `Holds` is true. Each object is hashed and compared with the hash its entry
 records. `Unhashed` counts the imported objects whose entry records no hash, and for those only the
 length is checked. `since` skips what an earlier, trusted version shares with this one: after one
-more append it read 28 178 bytes, where a full verification read 145 609.
+more append it read 28 187 bytes, where a full verification read 145 615.
 
 ## Vacuum
 
@@ -150,9 +150,9 @@ VacuumResult done = await dataset.VacuumAsync(later with { DryRun = false });
 ```
 
 ```
-vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 16 requests (13 read, 0 head, 0 put, 0 delete, 3 list), 16 dependent steps, 12649 bytes read, 0 written
-vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 5 requests (2 read, 0 head, 0 put, 0 delete, 3 list), 5 dependent steps, 672 bytes read, 0 written
-vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 7 requests (2 read, 0 head, 0 put, 2 delete, 3 list), 7 dependent steps, 672 bytes read, 0 written
+vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 16 requests (13 read, 0 head, 0 put, 0 delete, 3 list), 16 dependent steps, 12688 bytes read, 0 written
+vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 5 requests (2 read, 0 head, 0 put, 0 delete, 3 list), 5 dependent steps, 675 bytes read, 0 written
+vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 7 requests (2 read, 0 head, 0 put, 2 delete, 3 list), 7 dependent steps, 675 bytes read, 0 written
 and the data: 55000 rows, 2 objects
 ```
 
@@ -233,7 +233,7 @@ long none = await dataset.Scan<Reading>().Where(r => r.Celsius == 25.15).CountAs
 ```
 
 ```
-indexed: 2 objects, 0 left, 2 walks, 2 commits, 9302 fragment bytes, version 26; cost: 20 requests (16 read, 2 head, 2 put, 0 delete, 0 list), 20 dependent steps, 399334 bytes read, 10623 written
+indexed: 2 objects, 0 left, 2 walks, 2 commits, 9302 fragment bytes, version 26; cost: 20 requests (16 read, 2 head, 2 put, 0 delete, 0 list), 20 dependent steps, 399334 bytes read, 10629 written
 a temperature no row holds: 0 rows; cost: 0 requests (0 read, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
 the same without the indexes: 0 rows; cost: 2 requests (2 read, 0 head, 0 put, 0 delete, 0 list), 2 dependent steps, 121736 bytes read, 0 written
 ```
