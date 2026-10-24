@@ -21,11 +21,11 @@ namespace Vorticity.Tests.Dataset;
 
 public sealed class DatasetCountsTests
 {
-    private static readonly DateTimeOffset Noon = new(2026, 10, 19, 12, 0, 0, TimeSpan.Zero);
+    internal static readonly DateTimeOffset Noon = new(2026, 10, 19, 12, 0, 0, TimeSpan.Zero);
 
-    private const int Hours = 3;
+    internal const int Hours = 3;
 
-    private const int RowsPerHour = 6_000;
+    internal const int RowsPerHour = 6_000;
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
@@ -44,7 +44,6 @@ public sealed class DatasetCountsTests
         await using VortexDataset dataset = await WriteAsync(store, columns, rows);
 
         int counted = 0;
-        int[] fields = [.. Enumerable.Range(0, columns.Length + 1)];
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
             if (held.Entry.Contents is not { Counts.Count: > 0 })
@@ -52,13 +51,20 @@ public sealed class DatasetCountsTests
                 continue;
             }
 
+            // The instant keeps no counts; each other column its counts and their sketches, side by side, in a request.
             store.Reset();
-            ColumnCounts?[] counts = await dataset.ReadCountsAsync(held.Entry, fields, Ct);
-            Assert.Equal(1, store.Requests);
-            Assert.Null(counts[0]);
+            Assert.Equal((null, null), await dataset.ReadCountsAsync(held.Entry, 0, sketches: true, Ct));
+            Assert.Equal(0, store.Requests);
+            (ColumnCounts? Counts, ColumnSketches? Sketches)[] counts = new (ColumnCounts?, ColumnSketches?)[columns.Length + 1];
+            for (int field = 1; field <= columns.Length; field++)
+            {
+                store.Reset();
+                counts[field] = await dataset.ReadCountsAsync(held.Entry, field, sketches: true, Ct);
+                Assert.Equal(counts[field].Counts is null ? 0 : 1, store.Requests);
+            }
 
             // The object's rows: those of the hour its counts name, which its period holds whole.
-            long hour = counts.First(c => c is not null)!.Hours[0];
+            long hour = counts.First(c => c.Counts is not null).Counts!.Hours[0];
             object?[][] mine = [.. rows.Where(r => HourOf((DateTimeOffset)r[0]!) == hour)];
             Assert.Equal(mine.Length, held.Entry.Rows);
             for (int c = 0; c < columns.Length; c++)
@@ -67,11 +73,11 @@ public sealed class DatasetCountsTests
                 int distinct = mine.Select(r => r[c + 1]).Where(v => v is not null).Distinct().Count();
                 long valid = mine.Count(r => r[c + 1] is not null);
                 bool expected = distinct * 4L <= valid && (!column.Number || distinct <= ColumnCountsBuilder.FewValues) && distinct > 0;
-                Assert.True(expected == counts[c + 1] is not null, $"seed {seed}: column {c} ({column}) counted {counts[c + 1] is not null}, {distinct} values in {valid} rows");
-                if (counts[c + 1] is { } kept)
+                Assert.True(expected == counts[c + 1].Counts is not null, $"seed {seed}: column {c} ({column}) counted {counts[c + 1].Counts is not null}, {distinct} values in {valid} rows");
+                if (counts[c + 1] is ({ } kept, var sketches))
                 {
-                    Check(kept, c, columns, mine, hour, distinct);
-                    CheckDistinct(kept, c, columns, mine, distinct);
+                    Check(kept, sketches, c, columns, mine, hour, distinct);
+                    CheckDistinct(kept, sketches, c, columns, mine, distinct);
                     counted++;
                 }
             }
@@ -124,7 +130,7 @@ public sealed class DatasetCountsTests
         MeasureKind[]? kinds = null;
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
-            if ((await dataset.ReadCountsAsync(held.Entry, [1], Ct))[0] is not { } counts)
+            if (await dataset.ReadCountsAsync(held.Entry, 1, sketches: true, Ct) is not ({ } counts, var sketched))
             {
                 continue;
             }
@@ -136,7 +142,7 @@ public sealed class DatasetCountsTests
                 for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
                 {
                     (string, long) key = (Encoding.UTF8.GetString(group.Value!), counts.Hours[e]);
-                    if (counts.SketchOf(e, 1) is { } weights)
+                    if (sketched?.SketchOf(e, 1) is { } weights)
                     {
                         if (!sketches.TryGetValue(key, out QuantileSketch? sketch))
                         {
@@ -190,7 +196,7 @@ public sealed class DatasetCountsTests
     }
 
     /// <summary>Holds <paramref name="counts"/> of column <paramref name="c"/>, of <paramref name="distinct"/> values, to what the rows <paramref name="rows"/> of hour <paramref name="hour"/> give.</summary>
-    private static void Check(ColumnCounts counts, int c, Drawn[] columns, object?[][] rows, long hour, int distinct)
+    private static void Check(ColumnCounts counts, ColumnSketches? sketches, int c, Drawn[] columns, object?[][] rows, long hour, int distinct)
     {
         // The measures: every number column of more than a few values in these rows but the column itself.
         int[] measures = [.. Enumerable.Range(0, columns.Length).Where(m => m != c && columns[m].Number
@@ -216,10 +222,11 @@ public sealed class DatasetCountsTests
                 Assert.Equal(values.Length, words[at + MeasureLayout.Values]);
 
                 // The entry's quantile sketch of the measure: the one its values give, a column of at most 1 000 values keeping them.
-                Assert.Equal(distinct <= ColumnCountsBuilder.SketchValues, counts.Sketches is not null);
-                if (counts.Sketches is not null)
+                Assert.Equal(distinct <= ColumnCountsBuilder.SketchValues, counts.Sketched);
+                Assert.Equal(counts.Sketched, sketches?.Sketches is not null);
+                if (counts.Sketched)
                 {
-                    Assert.Equal(values.Length == 0 ? null : Sketch(values.Select(Convert.ToDouble)), counts.SketchOf(group.FirstEntry, i));
+                    Assert.Equal(values.Length == 0 ? null : Sketch(values.Select(Convert.ToDouble)), sketches!.SketchOf(group.FirstEntry, i));
                 }
                 if (kind == MeasureKind.Float)
                 {
@@ -261,7 +268,7 @@ public sealed class DatasetCountsTests
     /// keep of the wide columns to those their values in each entry's rows give: a column of at most 100 values keeps those
     /// of every text column of more than 1 000 values that repeat, but itself; any other none.
     /// </summary>
-    private static void CheckDistinct(ColumnCounts counts, int c, Drawn[] columns, object?[][] rows, int distinct)
+    private static void CheckDistinct(ColumnCounts counts, ColumnSketches? sketches, int c, Drawn[] columns, object?[][] rows, int distinct)
     {
         int[] wide = distinct > ColumnCountsBuilder.AttachValues ? [] : [.. Enumerable.Range(0, columns.Length).Where(w =>
         {
@@ -270,7 +277,7 @@ public sealed class DatasetCountsTests
             return w != c && !columns[w].Number && values > ColumnCountsBuilder.WideValues && values * 4L <= held;
         })];
         Assert.Equal(wide.Select(w => w + 1), counts.AttachedFields);
-        Assert.Equal(wide.Length > 0, counts.Distinct is not null);
+        Assert.Equal(wide.Length > 0, sketches?.Distinct is not null);
         Dictionary<string, object?[][]> byValue = rows.GroupBy(r => Key(r[c + 1])).ToDictionary(g => g.Key, g => g.ToArray());
         foreach (CountGroup group in counts.Groups)
         {
@@ -285,7 +292,7 @@ public sealed class DatasetCountsTests
                     rank = Math.Max(rank, HyperLogLog.Rank(hash, ColumnSheet.Precision));
                 }
 
-                Assert.Equal(ranks.Any(r => r != 0) ? HyperLogLog.Encode(ranks) : null, counts.DistinctOf(group.FirstEntry, a));
+                Assert.Equal(ranks.Any(r => r != 0) ? HyperLogLog.Encode(ranks) : null, sketches!.DistinctOf(group.FirstEntry, a));
             }
         }
     }
@@ -326,7 +333,7 @@ public sealed class DatasetCountsTests
 
     private static long HourOf(DateTimeOffset at) => (long)Math.Floor((at - DateTimeOffset.UnixEpoch).TotalHours);
 
-    private enum Kind
+    internal enum Kind
     {
         Text,
         Wide,
@@ -341,7 +348,7 @@ public sealed class DatasetCountsTests
     }
 
     /// <summary>A column drawn: its kind, whether it holds nulls, and how many values it draws from.</summary>
-    private sealed record Drawn(Kind Kind, bool Nullable, int Values)
+    internal sealed record Drawn(Kind Kind, bool Nullable, int Values)
     {
         internal bool Number => Kind is not (Kind.Text or Kind.Wide or Kind.Identifier);
 
@@ -360,7 +367,7 @@ public sealed class DatasetCountsTests
     }
 
     /// <summary>Seven to ten columns: texts and codes of a few to a few hundred values, a wide text, an identifier, and measures of many.</summary>
-    private static Drawn[] Draw(Random random)
+    internal static Drawn[] Draw(Random random)
     {
         // A text and a code of few values, and a wide text, whose distinct values the columns of few values keep; then more.
         List<Drawn> columns =
@@ -388,7 +395,7 @@ public sealed class DatasetCountsTests
     }
 
     /// <summary>The rows: an instant every 0.6 seconds from noon, in order, then each column's value or a null.</summary>
-    private static object?[][] Rows(Drawn[] columns, Random random)
+    internal static object?[][] Rows(Drawn[] columns, Random random)
     {
         object?[][] rows = new object?[Hours * RowsPerHour][];
         for (int row = 0; row < rows.Length; row++)
@@ -418,7 +425,7 @@ public sealed class DatasetCountsTests
     }
 
     /// <summary>A dataset of periods of an hour holding <paramref name="rows"/>, appended in parts of five minutes and compacted to the end.</summary>
-    private static async Task<VortexDataset> WriteAsync(CountingObjectStore store, Drawn[] columns, object?[][] rows)
+    internal static async Task<VortexDataset> WriteAsync(CountingObjectStore store, Drawn[] columns, object?[][] rows)
     {
         List<VortexField> fields = [new VortexField("At", VortexType.Timestamp(TimeUnit.Microseconds, "UTC"))];
         for (int c = 0; c < columns.Length; c++)

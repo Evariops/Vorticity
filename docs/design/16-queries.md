@@ -858,14 +858,16 @@ their files still count the rows a deletion removed.
 
 A pass may also take states rather than rows from its source. When every aggregate is a count of the
 rows, a sum, a minimum, a maximum or a mean of a number column or of a variant's integer or double path,
-none of them filtered, and every key is a column, a function of one or a variant's path read strictly,
-the pass asks its source for states, a row per group of keys with the rows it stands for and each
-measure's states; a lane gives each row its group through the same keys and functions as rows, and
-each aggregate folds the row's state into it, an exact sum merged and an extreme compared, to the bits
-the rows would give. A path's states carry the path's text as their name. No source of a dataset gives
-states for now: the per-column synopses will ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#5-the-synopses-all-per-column)).
-`ScanOptions.UseSynopses` and `ScanOptions.AlignWindow` choose them and the window they answer whole,
-and do nothing until then.
+a quantile or a distribution of one, or a distinct count of a column, none of them filtered, and every
+key is a column, a function of one or a variant's path read strictly, the pass asks its source for
+states, a row per group of keys with the rows it stands for and each measure's states and sketch; a lane
+gives each row its group through the same keys and functions as rows, and each aggregate folds the row's
+state into it, an exact sum merged, an extreme compared and a sketch merged, to the bits the rows would
+give. A path's states carry the path's text as their name. A dataset gives states where its objects'
+counts by hour answer the pass, a question on one column, the time and the measures, and rows everywhere
+else ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#8-the-planner)).
+`ScanOptions.UseSynopses` chooses them, true by default; `ScanOptions.AlignWindow`, which would move a
+window to the hours they answer whole, does nothing yet: a window that cuts an hour reads its rows.
 
 ### 9.4 Parallelism and the merge
 

@@ -2565,8 +2565,11 @@ public sealed class VortexDataset : IAsyncDisposable
         return regions;
     }
 
-    /// <summary>The column sheets this handle read, by object and column (<see cref="ReadSheetsAsync"/>).</summary>
-    private readonly SheetMemo _sheets = new SheetMemo();
+    /// <summary>The synopses this handle read, its objects' column sheets, counts and sketches, by object and region (<see cref="ReadSynopsesAsync"/>).</summary>
+    private readonly SynopsisMemo _synopses = new SynopsisMemo();
+
+    /// <summary>A synopsis read from the bytes of the region at <paramref name="position"/> of those asked, and the bytes it holds in memory.</summary>
+    private delegate (object Synopsis, long Bytes) SynopsisReader(int position, ReadOnlySpan<byte> bytes);
 
     /// <summary>
     /// The sheets of columns <paramref name="fields"/> of the object <paramref name="entry"/> names, by their position in
@@ -2583,24 +2586,82 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[fields.Count];
-        int asked = 0;
         for (int i = 0; i < fields.Count; i++)
         {
-            regions[i] = _sheets.TryGet(entry.Uid, fields[i], out sheets[i]) ? null : contents.SheetOf(fields[i]);
+            regions[i] = contents.SheetOf(fields[i]);
+        }
+
+        await ReadSynopsesAsync(entry, contents, regions, sheets, static (_, bytes) => (Indexes.ColumnSheet.From(bytes), bytes.Length), cancellationToken)
+            .ConfigureAwait(false);
+        return sheets;
+    }
+
+    /// <summary>
+    /// The counts by hour of column <paramref name="field"/> of the object <paramref name="entry"/> names, and when
+    /// <paramref name="sketches"/> asks their sketches, read with no open of the object: the regions its entry's table of
+    /// contents names, side by side in one round trip, none once this handle read them. A column the object keeps no
+    /// counts or sketches of, or an object with no table of contents this library reads, has none.
+    /// </summary>
+    internal async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadCountsAsync(
+        ObjectEntry entry, int field, bool sketches, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { Counts.Count: > 0 } contents)
+        {
+            return (null, null);
+        }
+
+        object?[] read = new object?[2];
+        Indexes.IndexSegment?[] regions = [contents.CountsOf(field), sketches ? contents.SketchesOf(field) : null];
+        await ReadSynopsesAsync(entry, contents, regions, read, CountsOrSketches, cancellationToken).ConfigureAwait(false);
+        return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
+    }
+
+    /// <summary>The counts, at the first position, or their sketches, at the second, and the bytes they hold in memory.</summary>
+    private static (object Synopsis, long Bytes) CountsOrSketches(int position, ReadOnlySpan<byte> bytes)
+    {
+        if (position == 0)
+        {
+            Indexes.ColumnCounts counts = Indexes.ColumnCounts.From(bytes);
+            return (counts, counts.Bytes);
+        }
+
+        Indexes.ColumnSketches sketches = Indexes.ColumnSketches.From(bytes);
+        return (sketches, sketches.Bytes);
+    }
+
+    /// <summary>
+    /// Reads into <paramref name="synopses"/>, by their position, the synopses of <paramref name="regions"/> of the object
+    /// <paramref name="entry"/> names, each as <paramref name="reader"/> reads its bytes: those this handle read before
+    /// from its memo, the others with no open of the object, side by side in one round trip, none once the session's cache
+    /// holds them, and kept. A region null, or whose bytes fail their checksum, reads none.
+    /// </summary>
+    private async ValueTask ReadSynopsesAsync(
+        ObjectEntry entry, Indexes.ObjectContents contents, Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader,
+        CancellationToken cancellationToken)
+    {
+        int asked = 0;
+        for (int i = 0; i < regions.Length; i++)
+        {
+            if (regions[i] is { } region && _synopses.TryGet(entry.Uid, region.Offset, out object? held))
+            {
+                synopses[i] = held;
+                regions[i] = null;
+            }
+
             asked += regions[i] is null ? 0 : 1;
         }
 
         if (asked == 0)
         {
-            return sheets;
+            return;
         }
 
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
             using SegmentRequestSet requests = new SegmentRequestSet(asked);
-            int[] slots = new int[fields.Count];
-            for (int i = 0; i < fields.Count; i++)
+            int[] slots = new int[regions.Length];
+            for (int i = 0; i < regions.Length; i++)
             {
                 slots[i] = regions[i] is { } region
                     ? requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
@@ -2608,67 +2669,16 @@ public sealed class VortexDataset : IAsyncDisposable
             }
 
             await Footerless(source, entry, contents).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            for (int i = 0; i < fields.Count; i++)
+            for (int i = 0; i < regions.Length; i++)
             {
                 if (slots[i] >= 0 && regions[i]!.Value.Holds(requests.GetBuffer(slots[i]).Span))
                 {
-                    sheets[i] = Indexes.ColumnSheet.From(requests.GetBuffer(slots[i]).Span);
-                    _sheets.Keep(entry.Uid, fields[i], sheets[i]!, regions[i]!.Value.Length);
+                    (object synopsis, long bytes) = reader(i, requests.GetBuffer(slots[i]).Span);
+                    synopses[i] = synopsis;
+                    _synopses.Keep(entry.Uid, regions[i]!.Value.Offset, synopsis, bytes);
                 }
             }
         }
-
-        return sheets;
-    }
-
-    /// <summary>
-    /// The counts by hour of columns <paramref name="fields"/> of the object <paramref name="entry"/> names, by their
-    /// position in <paramref name="fields"/>, read with no open of the object: the regions its entry's table of contents
-    /// names, in one round trip. A column the object keeps no counts of, or an object with no table of contents this
-    /// library reads, has none.
-    /// </summary>
-    internal async ValueTask<Indexes.ColumnCounts?[]> ReadCountsAsync(ObjectEntry entry, IReadOnlyList<int> fields, CancellationToken cancellationToken)
-    {
-        Indexes.ColumnCounts?[] counts = new Indexes.ColumnCounts?[fields.Count];
-        if (entry.Contents is not { Counts.Count: > 0 } contents)
-        {
-            return counts;
-        }
-
-        int[] slots = new int[fields.Count];
-        int asked = 0;
-        for (int i = 0; i < fields.Count; i++)
-        {
-            asked += contents.CountsOf(fields[i]) is null ? 0 : 1;
-        }
-
-        if (asked == 0)
-        {
-            return counts;
-        }
-
-        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-        await using (source.ConfigureAwait(false))
-        {
-            using SegmentRequestSet requests = new SegmentRequestSet(asked);
-            for (int i = 0; i < fields.Count; i++)
-            {
-                slots[i] = contents.CountsOf(fields[i]) is { } region
-                    ? requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
-                    : -1;
-            }
-
-            await Footerless(source, entry, contents).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            for (int i = 0; i < fields.Count; i++)
-            {
-                if (slots[i] >= 0 && contents.CountsOf(fields[i])!.Value.Holds(requests.GetBuffer(slots[i]).Span))
-                {
-                    counts[i] = Indexes.ColumnCounts.From(requests.GetBuffer(slots[i]).Span);
-                }
-            }
-        }
-
-        return counts;
     }
 
     /// <summary>

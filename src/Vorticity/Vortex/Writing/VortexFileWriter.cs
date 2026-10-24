@@ -181,12 +181,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private ObjectContents Contents(
         SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
-        List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts) =>
+        List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
             Sheets = sheets,
             Counts = counts,
+            Sketches = sketches,
         };
 
     /// <summary>
@@ -2381,20 +2382,29 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // no read of those bridges them. A file too small for a reader to ask its sheets before it keeps neither.
             List<(int Field, IndexSegment Region)> sheets = [];
             List<(int Field, IndexSegment Region)> counts = [];
+            List<(int Field, IndexSegment Region)> sketches = [];
             bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
             for (int field = 0; keepsSheets && field < _fieldCount; field++)
             {
                 if (closed.SheetOf(field)?.Finish() is { } sheet)
                 {
-                    sheets.Add((field, await closed.AddSheetAsync(_sink, field, sheet, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    sheets.Add((field, await closed.AddColumnRegionAsync(
+                        _sink, IndexKinds.ColumnSheet, field, sheet, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
                 }
             }
 
             for (int field = 0; keepsSheets && field < _fieldCount; field++)
             {
+                // A column's counts, then their sketches, which a question of quantiles reads with them in one request.
                 if (closed.CountsOf(field)?.Finish() is { } counted)
                 {
-                    counts.Add((field, await closed.AddCountsAsync(_sink, field, counted, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    counts.Add((field, await closed.AddColumnRegionAsync(
+                        _sink, IndexKinds.ColumnCounts, field, counted.Counts, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    if (counted.Sketches is { } sketched)
+                    {
+                        sketches.Add((field, await closed.AddColumnRegionAsync(
+                            _sink, IndexKinds.ColumnSketches, field, sketched, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    }
                 }
             }
 
@@ -2445,7 +2455,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // A sliced file's table of contents, now that every region it names is written.
             if (_slices is { } sliced)
             {
-                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts);
+                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

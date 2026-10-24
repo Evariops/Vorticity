@@ -293,6 +293,39 @@ internal sealed class DatasetSnapshot
     /// <summary>The bounds of the column <see cref="Bounds"/> worked out last, from every root in hand; null before.</summary>
     private KnownBounds? _bounds;
 
+    /// <summary>Whether an object of the version keeps counts by hour: 1, 0, or -1 before a walk found out.</summary>
+    private int _keepsCounts = -1;
+
+    /// <summary>Whether an object of the version may keep counts by hour: false once a walk found none (<see cref="KeepsCountsAsync"/>).</summary>
+    internal bool MayKeepCounts => Volatile.Read(ref _keepsCounts) != 0;
+
+    /// <summary>
+    /// Whether an object of the version keeps counts by hour (<see cref="Indexes.ObjectContents.Counts"/>), which the states
+    /// an aggregation asks for may come from: found by a walk of its entries the first time it is asked, and known after,
+    /// so that the questions on a version none of whose objects keeps counts walk nothing more than their rows.
+    /// </summary>
+    internal async ValueTask<bool> KeepsCountsAsync(CancellationToken cancellationToken)
+    {
+        int known = Volatile.Read(ref _keepsCounts);
+        if (known >= 0)
+        {
+            return known == 1;
+        }
+
+        bool any = false;
+        await foreach (PositionedObject held in WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        {
+            if (held.Entry.Contents is { Counts.Count: > 0 })
+            {
+                any = true;
+                break;
+            }
+        }
+
+        Volatile.Write(ref _keepsCounts, any ? 1 : 0);
+        return any;
+    }
+
     /// <summary>Keeps <paramref name="bounds"/> as the column's, worked out from every root of the version, and returns them.</summary>
     private Aggregating.KeyBounds? Known(string path, Aggregating.KeyBounds? bounds)
     {

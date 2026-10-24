@@ -1804,17 +1804,18 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes the sheet of the top-level column <paramref name="field"/>, one region from the sink's position, and adds
-    /// the entry that names it: on the column, one run over every block of the file's <paramref name="rows"/>.
+    /// Writes a synopsis of <paramref name="kind"/> of the top-level column <paramref name="field"/>, its sheet, its counts
+    /// or their sketches, one region from the sink's position, and adds the entry that names it: on the column, one run
+    /// over every block of the file's <paramref name="rows"/>.
     /// </summary>
-    internal async ValueTask<IndexSegment> AddSheetAsync(
-        ISegmentSink sink, int field, byte[] sheet, long rows, int blockRows, CancellationToken cancellationToken)
+    internal async ValueTask<IndexSegment> AddColumnRegionAsync(
+        ISegmentSink sink, string kind, int field, byte[] bytes, long rows, int blockRows, CancellationToken cancellationToken)
     {
-        IndexSegment region = IndexSegment.Of(sink.Position, sheet, 0);
-        await sink.WriteAsync(sheet, cancellationToken).ConfigureAwait(false);
+        IndexSegment region = IndexSegment.Of(sink.Position, bytes, 0);
+        await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
         int length = Math.Max(blockRows, 1);
         _entries.Add(new IndexEntry(
-            IndexKinds.ColumnSheet, [checked((uint)field)], (ulong)length, [],
+            kind, [checked((uint)field)], (ulong)length, [],
             [new IndexRun(0, Blocks(rows, length), [region], [])]));
         return region;
     }
@@ -1897,22 +1898,6 @@ internal sealed class IndexWriter : IDisposable
         }
 
         return null;
-    }
-
-    /// <summary>
-    /// Writes the counts of the top-level column <paramref name="field"/>, one region from the sink's position, and adds
-    /// the entry that names it: on the column, one run over every block of the file's <paramref name="rows"/>.
-    /// </summary>
-    internal async ValueTask<IndexSegment> AddCountsAsync(
-        ISegmentSink sink, int field, byte[] counts, long rows, int blockRows, CancellationToken cancellationToken)
-    {
-        IndexSegment region = IndexSegment.Of(sink.Position, counts, 0);
-        await sink.WriteAsync(counts, cancellationToken).ConfigureAwait(false);
-        int length = Math.Max(blockRows, 1);
-        _entries.Add(new IndexEntry(
-            IndexKinds.ColumnCounts, [checked((uint)field)], (ulong)length, [],
-            [new IndexRun(0, Blocks(rows, length), [region], [])]));
-        return region;
     }
 
     /// <summary>
@@ -2153,7 +2138,7 @@ internal sealed class IndexWriter : IDisposable
         // asks.
         if (!Enabled && _preserved is not { Count: > 0 }
             && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
-                or IndexKinds.VariantBlocks or IndexKinds.ColumnSheet or IndexKinds.ColumnCounts))
+                or IndexKinds.VariantBlocks or IndexKinds.ColumnSheet or IndexKinds.ColumnCounts or IndexKinds.ColumnSketches))
         {
             return null;
         }

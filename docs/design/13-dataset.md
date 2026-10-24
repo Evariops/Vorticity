@@ -181,12 +181,14 @@ A leaf entry describes one data object:
   name, its slice table and the region of each column's chunk directory, or of its page table with the
   first row of each page ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)),
   each variant column's path directory, each column's sheet ([the column
-  sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)) and counts by hour ([the
-  counts](10-indexes.md#49-vorticitycolumncountsv1-a-columns-counts-by-hour)), the region of the object's index
-  directory, and where in it the entry of each locating index lies ([the
+  sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)), counts by hour ([the
+  counts](10-indexes.md#49-vorticitycolumncountsv1-a-columns-counts-by-hour)) and their sketches ([the
+  sketches](10-indexes.md#410-vorticitycolumnsketchesv1-the-sketches-of-a-columns-counts)), the
+  region of the object's index directory, and where in it the entry of each locating index lies ([the
   directory](10-indexes.md#3-the-directory-and-the-runs)). With no open of the object, a reader of a slice
   reads its columns' directories, then its chunks; a question on a value reads the sheets of its columns
-  in one request, and passes the object over when they prove the value absent; and a lookup by a value
+  in one request, and passes the object over when they prove the value absent; a question on one column
+  and the time reads that column's counts in one request instead of its rows; and a lookup by a value
   reads its index entries with its columns' page tables, then its postings, the pages of its rows and its
   chunks, four round trips. A table of contents of the first version, which also
   held the synopsis tables of the time, is ignored, and its object read through its directory. It is a tagged field

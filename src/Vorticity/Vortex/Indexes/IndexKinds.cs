@@ -88,6 +88,14 @@ internal static class IndexKinds
     public const string ColumnCounts = "vorticity.column.counts.v1";
 
     /// <summary>
+    /// The sketches of a column's counts by hour, on that column: for each entry of its counts, a quantile sketch of each
+    /// measure and the registers of the distinct values of each wide column, in one payload region right after the
+    /// counts, which a table of contents names, so that a question of counts alone reads none of them
+    /// (<see cref="ColumnSketches"/>).
+    /// </summary>
+    public const string ColumnSketches = "vorticity.column.sketches.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -98,7 +106,7 @@ internal static class IndexKinds
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
                 or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks
-                or ColumnSheet or ColumnCounts => true,
+                or ColumnSheet or ColumnCounts or ColumnSketches => true,
             _ => false,
         };
 

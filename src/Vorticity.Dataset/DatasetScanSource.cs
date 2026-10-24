@@ -38,6 +38,14 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>The version every sink of the scan reads.</summary>
     internal ulong Version => _version.Version;
 
+    /// <summary>A dataset in periods, whose jobs' objects keep counts by hour: those answer some aggregations as states (<see cref="CountsAnswer"/>).</summary>
+    internal override bool KeepsStates => _version.MayKeepCounts && CountsAnswer.Counting(_version) is not null;
+
+    internal override async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
+        KeepsStates && spec.Options.UseSynopses && !spec.MatchesNothing
+        && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
+        && await Builder(spec with { States = states }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false);
+
     internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
         spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>() : Builder(spec, metrics).ExecuteAsync();
 
@@ -120,12 +128,25 @@ internal sealed class DatasetScanSource : ScanSource
         long low = long.MinValue;
         long high = long.MaxValue;
         bool windowed = spec.Filter is { } bounded && _dataset.Key is { } instant && DatasetScanBuilder.Bound(bounded, instant.InstantPath, ref low, ref high);
+        CountsAnswer? answer = spec.States is { } request && spec.Options.UseSynopses
+            && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
+            ? CountsAnswer.Of(request, spec.Filter, _version)
+            : null;
+        HashSet<long> answered = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
             if (end <= start)
             {
+                continue;
+            }
+
+            // An object its counts answer is read whole, as states and its edges' rows: a piece of its own, never cut.
+            if (answer is not null && start == held.FirstRow && end == held.FirstRow + held.Entry.Rows && answer.FieldOf(held.Entry) is not null)
+            {
+                objects.Add((held, new RowRange(start, end)));
+                answered.Add(held.FirstRow);
                 continue;
             }
 
@@ -147,12 +168,14 @@ internal sealed class DatasetScanSource : ScanSource
         }
 
         // An object whose column sheets prove a value the filter asks for absent is no range: the sheets of the objects
-        // read side by side, and the ranges' own walks find them read.
+        // read side by side, and the ranges' own walks find them read. An object its counts answer reads none: they say
+        // which values it holds.
         if (spec.Options.UseStatistics && spec.Filter is { } asked && SheetPruning.Asks(asked, _version.Schema.DType) && ReadsSheets(objects))
         {
             List<PositionedObject> held = objects.ConvertAll(static o => o.Held);
             List<int> columns = SheetPruning.Columns(asked, _version.Schema.DType);
-            List<PositionedObject> kept = await SheetPruning.KeptAsync(_dataset, _version.Schema.DType, held, asked, columns, null, cancellationToken)
+            List<PositionedObject> kept = await SheetPruning.KeptAsync(
+                _dataset, _version.Schema.DType, held, asked, columns, null, answered.Count == 0 ? null : o => answered.Contains(o.FirstRow), cancellationToken)
                 .ConfigureAwait(false);
             if (kept.Count < held.Count)
             {
@@ -176,7 +199,8 @@ internal sealed class DatasetScanSource : ScanSource
         List<Task> cutting = [];
         for (int o = 0; o < objects.Count; o++)
         {
-            if (objects[o].Rows.Length >= 2 * share && !(lookingUp && DatasetScanBuilder.LooksUp(objects[o].Held.Entry, _dataset.Options)))
+            if (objects[o].Rows.Length >= 2 * share && !answered.Contains(objects[o].Held.FirstRow)
+                && !(lookingUp && DatasetScanBuilder.LooksUp(objects[o].Held.Entry, _dataset.Options)))
             {
                 cuts[o] = CutAsync(objects[o].Held, objects[o].Rows, share, spec.Projection, cancellationToken);
                 cutting.Add(cuts[o]!);
@@ -351,6 +375,11 @@ internal sealed class DatasetScanSource : ScanSource
 
         ScanOptions options = spec.Options;
         builder.WithOptions(options, spec.KeepEncodings, spec.SinkDecodes, spec.PositionsUnread).WithIndexes(options.UseIndexes).WithSummaries(options.UseStatistics);
+        if (spec.States is { } states && options.UseSynopses)
+        {
+            builder.WithStates(states);
+        }
+
         return counters is null ? builder : builder.WithCounters(counters);
     }
 }

@@ -146,7 +146,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#410-the-file-level-filter)).
+file-level filter](#411-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -380,34 +380,45 @@ far are left out, their entries merged into an entry of the values left out an h
 left out stays out, so that a value kept is counted from its first row.
 
 The entry is on the column, its one run a region the object's table of contents names: a header, the
-measures, a directory of chunks of about 16 KB, each naming its first value, then the chunks. The nulls
-come first, then the values left out, then the values in the order of their bytes, and each one's
-entries in the order of their hours: an entry's rows and each measure's states as varints, a float sum
-as its three bins, the values it skipped, its top and its high part, and a float's extremes as their
-eight bytes. Entries of two objects of the same value and hour merge word for word. The sheets and the
-counts of an object lie right after its data, where no read of the structures a scan reads together bridges
-them. On the design's requests, two measures one of them a float, an entry takes 53 to 64 bytes, and
-the counts cost the writer 9.4 to 12.0 ns a counted column a row, one thread
-(`vortex-queries --micro counts`).
+measures, whether the entries have sketches and the wide columns whose registers they keep (section 4.10),
+a directory of chunks of about 16 KB, each naming its first value, then the chunks. The nulls come
+first, then the values left out, then the values in the order of their bytes, and each one's entries in
+the order of their hours: an entry's rows and each measure's states as varints, a float sum as its three
+bins, the values it skipped, its top and its high part, and a float's extremes as their eight bytes. A
+reader refuses groups out of that order, which it searches a value in. Entries of two objects of the same
+value and hour merge word for word. The sheets and the counts of an object lie right after its data, where
+no read of the structures a scan reads together bridges them. On the design's requests, two measures one
+of them a float, an entry takes 52 to 61 bytes, and the counts cost the writer 9.4 to 12.0 ns a counted
+column a row, one thread (`vortex-queries --micro counts`).
 
-A column of at most 1 000 values also keeps, for each entry, a quantile sketch of each measure: the
-engine's log-linear grid at 1 % of relative error, which a quantile asked with no error takes, its
-buckets as the engine merges them, after the entry's words, each its length first. Sketches of two
-objects merge bucket by bucket into the sketch of their rows together. While an object is written, an
-hour's sketches are encoded and let go once a batch of a later hour comes, the slices coming in the
-order of their time, and opened again by a row of that hour that comes late. A sketch of a measure
-spanning 3.7 decades fills some 790 buckets: an entry of two sketched measures takes 1 to 3.4 KB on
-the design's requests, and the sketches cost the writer some 12 to 18 ns more a sketched column a row.
+### 4.10 `vorticity.column.sketches.v1`: the sketches of a column's counts
+
+The sketches of a column's counts lie in a region of their own, right after the counts, which the table
+of contents names beside them: a question of counts, sums and extremes reads the counts alone, and one of
+quantiles both, side by side in one request. The region holds, for each entry of the counts in their
+order, a quantile sketch of each measure, then the registers of each wide column, each its length first,
+0 for none: a version byte, the entries and what each keeps, a directory of chunks of about 16 KB, each
+naming its first entry, then the chunks. On the design's requests, Service's counts take 136 KB and their
+sketches 2.4 MB, which a count by service no longer reads.
+
+A column of at most 1 000 values keeps, for each entry, a quantile sketch of each measure: the engine's
+log-linear grid at 1 % of relative error, which a quantile asked with no error takes, its buckets as the
+engine merges them. Sketches of two objects merge bucket by bucket into the sketch of their rows together.
+While an object is written, an hour's sketches are encoded and let go once a batch of a later hour comes,
+the slices coming in the order of their time, and opened again by a row of that hour that comes late. A
+sketch of a measure spanning 3.7 decades fills some 790 buckets: an entry's two sketched measures take 1
+to 3.4 KB on the design's requests, and the sketches cost the writer some 12 to 18 ns more a sketched
+column a row.
 
 A column of at most 100 values keeps, for each entry, the distinct values of every wide column as well:
 a text column of more than 1 000 values that repeat. They are a HyperLogLog of 2^11 registers of six bits
-over the hashes of the wide column's values in the entry's rows, the sheet's, written as the set
-registers while few are, packed past them, after the entry's sketches. An identifier, whose values
-hardly repeat, is no wide column: its distinct values in an entry are the entry's rows. Registers of two
-objects merge register by register. The sheet of a wide column hashes each row of a batch for them, and
-the columns of few values raise their entries' registers once the whole batch is in.
+over the hashes of the wide column's values in the entry's rows, the sheet's, written as the set registers
+while few are, packed past them, after the entry's quantile sketches. An identifier, whose values hardly
+repeat, is no wide column: its distinct values in an entry are the entry's rows. Registers of two objects
+merge register by register. The sheet of a wide column hashes each row of a batch for them, and the
+columns of few values raise their entries' registers once the whole batch is in.
 
-### 4.10 The file-level filter
+### 4.11 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

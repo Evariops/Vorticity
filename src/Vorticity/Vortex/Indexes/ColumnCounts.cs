@@ -31,7 +31,9 @@ internal readonly record struct CountGroup(CountedValue Kind, byte[]? Value, int
 /// past an absolute budget the values left out together, an entry an hour that holds the rows of the hour with that
 /// value and the states of every measure column over them, its values, their exact sum, their least and their
 /// greatest, in the words <see cref="StateWords"/> lays out. A region a column, which the object's table of contents
-/// names, so that a reader fetches it with no open of the object.
+/// names, so that a reader fetches it with no open of the object; the entries' quantile sketches and distinct registers
+/// lie in a region of their own right after it (<see cref="ColumnSketches"/>), which a question of counts, sums and
+/// extremes does not read.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -54,10 +56,10 @@ internal sealed class ColumnCounts
     /// <summary>The bytes a chunk of groups takes about: a group is never cut.</summary>
     internal const int ChunkBytes = 16 << 10;
 
-    /// <summary>The header's flag of counts whose entries keep a quantile sketch of each measure.</summary>
+    /// <summary>The header's flag of counts whose sketches keep a quantile sketch of each measure.</summary>
     private const byte SketchesFlag = 1;
 
-    /// <summary>The header's flag of counts whose entries keep the registers of the distinct values of wide columns.</summary>
+    /// <summary>The header's flag of counts whose sketches keep the registers of the distinct values of wide columns.</summary>
     private const byte DistinctFlag = 2;
 
     /// <param name="measureFields">The top-level columns whose states each entry holds, in their order.</param>
@@ -65,44 +67,30 @@ internal sealed class ColumnCounts
     /// <param name="groups">The groups, in their order.</param>
     /// <param name="hours">Each entry's hour.</param>
     /// <param name="words">Each entry's words, <see cref="StateWords.Count"/> of them: its rows, then each measure's states.</param>
-    /// <param name="sketches">
-    /// Each entry's quantile sketch of each measure, as <see cref="QuantileSketch.Encode"/> writes it, entry by entry, null for a
-    /// measure that met no value; null when the counts keep none.
-    /// </param>
-    internal ColumnCounts(int[] measureFields, MeasureKind[] kinds, CountGroup[] groups, long[] hours, long[] words, byte[]?[]? sketches = null)
+    internal ColumnCounts(int[] measureFields, MeasureKind[] kinds, CountGroup[] groups, long[] hours, long[] words)
     {
         MeasureFields = measureFields;
         Kinds = kinds;
         Groups = groups;
         Hours = hours;
         Words = words;
-        Sketches = sketches;
         WordsPerEntry = StateWords.Count(kinds);
     }
 
     /// <summary>
-    /// Each entry's quantile sketch of each measure, encoded, <see cref="MeasureFields"/> of them an entry, null for one
-    /// that met no value; null when the column keeps none, past <see cref="Writing.ColumnCountsBuilder.SketchValues"/> values.
+    /// Whether the column's sketches (<see cref="ColumnSketches"/>) keep a quantile sketch of each measure over each entry's
+    /// rows: a column of at most <see cref="Writing.ColumnCountsBuilder.SketchValues"/> values.
     /// </summary>
-    internal byte[]?[]? Sketches { get; }
+    internal bool Sketched { get; init; }
 
     /// <summary>
-    /// The wide columns whose distinct values each entry keeps: the text columns of many values of the object, the counts of
-    /// a column of few values keeping their registers, an entry each. Empty for none.
+    /// The wide columns whose distinct values the column's sketches keep the registers of over each entry's rows: the text
+    /// columns of many values of the object, the counts of a column of few values keeping their registers. Empty for none.
     /// </summary>
     internal int[] AttachedFields { get; init; } = [];
 
-    /// <summary>
-    /// Each entry's registers of each wide column, a HyperLogLog of 2^11 registers as <see cref="HyperLogLog.Encode"/>
-    /// writes them, <see cref="AttachedFields"/> of them an entry, null for none; null when no column is attached.
-    /// </summary>
-    internal byte[]?[]? Distinct { get; init; }
-
-    /// <summary>The registers of the wide column <paramref name="attached"/> over entry <paramref name="entry"/>'s rows, encoded; null for none.</summary>
-    internal byte[]? DistinctOf(int entry, int attached) => Distinct?[(entry * AttachedFields.Length) + attached];
-
-    /// <summary>The quantile sketch of measure <paramref name="measure"/> over entry <paramref name="entry"/>'s rows, encoded; null for none.</summary>
-    internal byte[]? SketchOf(int entry, int measure) => Sketches?[(entry * MeasureFields.Length) + measure];
+    /// <summary>The bytes the counts hold in memory, about: their words, their hours and their groups.</summary>
+    internal long Bytes => ((Words.Length + Hours.Length) * (long)sizeof(long)) + (Groups.Length * 64L);
 
     /// <summary>The top-level columns whose states each entry holds.</summary>
     internal int[] MeasureFields { get; }
@@ -149,7 +137,7 @@ internal sealed class ColumnCounts
 
         Output head = new Output(256);
         head.Byte(Version);
-        head.Byte((byte)((Sketches is null ? 0 : SketchesFlag) | (Distinct is null ? 0 : DistinctFlag)));
+        head.Byte((byte)((Sketched ? SketchesFlag : 0) | (AttachedFields.Length == 0 ? 0 : DistinctFlag)));
         head.Varint((ulong)MeasureFields.Length);
         for (int i = 0; i < MeasureFields.Length; i++)
         {
@@ -157,7 +145,7 @@ internal sealed class ColumnCounts
             head.Byte((byte)Kinds[i]);
         }
 
-        if (Distinct is not null)
+        if (AttachedFields.Length > 0)
         {
             head.Varint((ulong)AttachedFields.Length);
             foreach (int field in AttachedFields)
@@ -194,7 +182,6 @@ internal sealed class ColumnCounts
         }
 
         int at = 2;
-        bool sketched = (bytes[1] & SketchesFlag) != 0;
         int measures = Count(bytes, ref at);
         int[] fields = new int[measures];
         MeasureKind[] kinds = new MeasureKind[measures];
@@ -229,17 +216,23 @@ internal sealed class ColumnCounts
             SkipKey(bytes, ref at);
         }
 
-        ColumnCounts counts = new ColumnCounts(
-            fields, kinds, new CountGroup[groups], new long[entries], new long[entries * StateWords.Count(kinds)],
-            sketched ? new byte[]?[entries * measures] : null)
+        ColumnCounts counts = new ColumnCounts(fields, kinds, new CountGroup[groups], new long[entries], new long[entries * StateWords.Count(kinds)])
         {
+            Sketched = (bytes[1] & SketchesFlag) != 0,
             AttachedFields = attached,
-            Distinct = (bytes[1] & DistinctFlag) != 0 ? new byte[]?[entries * attached.Length] : null,
         };
+        // The groups in their order, which a reader of a value searches: the nulls, the values left out, then the values by
+        // their bytes, each once.
         int entry = 0;
         for (int group = 0; group < groups; group++)
         {
-            counts.Groups[group] = counts.ReadGroup(bytes, ref at, ref entry, origin);
+            CountGroup read = counts.ReadGroup(bytes, ref at, ref entry, origin);
+            if (group > 0 && !Precedes(counts.Groups[group - 1], read))
+            {
+                throw new VortexFormatException($"A column's counts hold their group {group} out of its order, at {at}.");
+            }
+
+            counts.Groups[group] = read;
         }
 
         if (entry != entries || at != bytes.Length)
@@ -248,6 +241,14 @@ internal sealed class ColumnCounts
         }
 
         return counts;
+    }
+
+    /// <summary>Whether group <paramref name="before"/> comes before <paramref name="after"/>: the nulls, the values left out, then the values by their bytes.</summary>
+    private static bool Precedes(CountGroup before, CountGroup after)
+    {
+        static int Rank(CountedValue kind) => kind switch { CountedValue.Null => 0, CountedValue.Others => 1, _ => 2 };
+        int ranks = Rank(before.Kind).CompareTo(Rank(after.Kind));
+        return ranks < 0 || (ranks == 0 && before.Kind == CountedValue.Value && before.Value.AsSpan().SequenceCompareTo(after.Value) < 0);
     }
 
     /// <summary>The least hour of an entry, the null instant's aside: what the first hour of each group counts from.</summary>
@@ -314,21 +315,6 @@ internal sealed class ColumnCounts
                 }
 
                 at += MeasureLayout.Words(floats);
-            }
-
-            // Each measure's quantile sketch, then each wide column's registers, their length first, 0 for none.
-            for (int m = 0; Sketches is not null && m < MeasureFields.Length; m++)
-            {
-                byte[]? sketch = Sketches[(entry * MeasureFields.Length) + m];
-                into.Varint((ulong)(sketch?.Length ?? 0));
-                into.Bytes(sketch);
-            }
-
-            for (int a = 0; Distinct is not null && a < AttachedFields.Length; a++)
-            {
-                byte[]? registers = Distinct[(entry * AttachedFields.Length) + a];
-                into.Varint((ulong)(registers?.Length ?? 0));
-                into.Bytes(registers);
             }
         }
     }
@@ -398,30 +384,6 @@ internal sealed class ColumnCounts
 
                 m += MeasureLayout.Words(floats);
             }
-
-            for (int measure = 0; Sketches is not null && measure < MeasureFields.Length; measure++)
-            {
-                int length = Count(bytes, ref at);
-                if (length > bytes.Length - at)
-                {
-                    throw new VortexFormatException($"A column's counts hold a sketch past their end at {at}.");
-                }
-
-                Sketches[(entry * MeasureFields.Length) + measure] = length == 0 ? null : bytes.Slice(at, length).ToArray();
-                at += length;
-            }
-
-            for (int a = 0; Distinct is not null && a < AttachedFields.Length; a++)
-            {
-                int length = Count(bytes, ref at);
-                if (length > bytes.Length - at)
-                {
-                    throw new VortexFormatException($"A column's counts hold registers past their end at {at}.");
-                }
-
-                Distinct[(entry * AttachedFields.Length) + a] = length == 0 ? null : bytes.Slice(at, length).ToArray();
-                at += length;
-            }
         }
 
         return new CountGroup(counted, value, first, entries);
@@ -482,8 +444,8 @@ internal sealed class ColumnCounts
         return value;
     }
 
-    /// <summary>A growing buffer the counts are written into.</summary>
-    private struct Output(int capacity)
+    /// <summary>A growing buffer the counts and their sketches are written into.</summary>
+    internal struct Output(int capacity)
     {
         private byte[] _bytes = new byte[capacity];
 

@@ -61,17 +61,17 @@ internal static class SheetPruning
 
     /// <summary>
     /// The objects of <paramref name="batch"/> whose sheets do not refute <paramref name="filter"/>, over <paramref name="schema"/>, in its order: those
-    /// whose sheets a scan reads (<see cref="Reads"/>) have their sheets of <paramref name="columns"/> read side by side
-    /// with no open of them.
+    /// whose sheets a scan reads (<see cref="Reads"/>), but those <paramref name="unread"/> leaves, have their sheets of
+    /// <paramref name="columns"/> read side by side with no open of them.
     /// </summary>
     internal static async Task<List<PositionedObject>> KeptAsync(
         VortexDataset dataset, DType schema, List<PositionedObject> batch, VortexExpr filter, List<int> columns, DatasetScanCounters? metrics,
-        CancellationToken cancellationToken)
+        System.Func<PositionedObject, bool>? unread, CancellationToken cancellationToken)
     {
         Task<ColumnSheet?[]>?[] reads = new Task<ColumnSheet?[]>?[batch.Count];
         for (int i = 0; i < batch.Count; i++)
         {
-            if (Reads(batch[i].Entry, dataset.Options))
+            if (Reads(batch[i].Entry, dataset.Options) && unread?.Invoke(batch[i]) != true)
             {
                 reads[i] = dataset.ReadSheetsAsync(batch[i].Entry, columns, cancellationToken).AsTask();
             }

@@ -191,7 +191,10 @@ costs 5.6 to 5.9 ns a column a row *(measured)*.
 
 For the questions on one column, the time and the measures, past the frontier of section 2.1. Each
 column has entries (value, bucket) holding the rows, and the sum, least and greatest of each measure,
-sorted by value then time, in chunks of 16 KB with a directory (`vorticity.column.counts.v1`).
+sorted by value then time, in chunks of 16 KB with a directory (`vorticity.column.counts.v1`); the
+entries' sketches lie in a region of their own right after them (`vorticity.column.sketches.v1`), which
+a question of counts, sums and extremes does not read: on the design's requests, Service's counts take
+136 KB and their sketches 2.4 MB *(measured)*.
 
 - **Grains.** The hour, in the object, for its whole life. The day and the month in monthly files
   outside the data objects, one a column and a month, summed from the objects' hours with no row read
@@ -211,7 +214,7 @@ sorted by value then time, in chunks of 16 KB with a directory (`vorticity.colum
   values past a quarter of its rows, keeps no counts: an identifier, an instant, a measure.
 - **Budget.** An absolute budget per column and object, 2^20 entries; past it the most frequent values
   are kept, with an exact `others` entry an hour, and a value left out stays out.
-- **Size.** An entry of an integer and a float measure takes 53 to 64 bytes, most of them the float's
+- **Size.** An entry of an integer and a float measure takes 52 to 61 bytes, most of them the float's
   exact sum and extremes. The reference table's 1.0 × 10⁶ entries a day make about 60 MB of hourly counts
   in the objects *(measured on the design's requests, extrapolated)*, where this design first reckoned
   51 MB for the counts and their sketches together; the sketches add to it. 2.7 MB a day of daily and
@@ -327,6 +330,20 @@ announced before it is read.
 5. The reading leaves its partials.
 
 Each object's choice is explained: the path taken, and its requests and bytes computed.
+
+The first planner, built before the blocks, chooses between the hourly counts and the rows. A question on
+one column, the time and the measures (its keys the column, functions of it, and the instant truncated
+to the hour or coarser in UTC; its aggregates counts, sums, extremes, means, quantiles and distributions
+of the measures the counts carry, and the column's distinct values; its filter a window of the instant
+and values of the column by equality or a set) is worked out once. Then each object a job wrote and no
+delete marked reads its column's counts, with their sketches for a quantile, in one request: no sheet of
+it, the counts saying which values it holds; read ahead as many objects as the session reads at once;
+kept parsed by the handle, so that the question asked again reads nothing. The rows of the hours its
+window cuts are read as the rows' scan reads them, and so is every other object, the objects side by side
+one part of the scan with its read-ahead. On the planner's dataset, four objects of an hour and two
+appended after, a count by service reads 6 requests and 41.7 KB cold, none warm, where its rows take
+323 KB; a quantile by service reads 74.4 KB; questions drawn at random on tables drawn at random answer as
+their rows do *(measured)*.
 
 ### 8.1 What each shape costs
 
@@ -449,16 +466,17 @@ directories take under 1 GB of memory *(computed)*.
 | kind | where | what |
 |---|---|---|
 | `vorticity.column.sheet.v1` | an object's region, which its table of contents names | the column sheets |
-| `vorticity.column.counts.v1` | an object's index region, by hour; the monthly files, by day and month | counts by bucket of time and their sketches |
+| `vorticity.column.counts.v1` | an object's region, by hour, which its table of contents names; the monthly files, by day and month | counts by bucket of time |
+| `vorticity.column.sketches.v1` | an object's region right after the counts, which its table of contents names; the monthly files | the counts' quantile sketches and distinct registers |
 | `vorticity.block.stats.v1` | an object's index region, by hour; the monthly files, merged by cluster value and day | blocks and their per-column statistics |
 | `vorticity.column.where.v1` | an object's index region | where each value lives |
 | `vorticity.partials.v1` | the local cache; beside the monthly files | learned partials |
 
 Readers skip a kind they do not know, as they do now. The kinds of the former synopsis tables are no
 longer written nor read. The leaf entry keeps its table of contents, at a second version that holds
-them no more and names the regions of the column sheets. An entry of the first version is read through
-its object's directory, so a dataset written before stays readable and the commit format's version does
-not rise.
+them no more and names the regions of the column sheets, counts and sketches. An entry of the first
+version is read through its object's directory, so a dataset written before stays readable and the
+commit format's version does not rise.
 
 ### 10.4 The recommendation of the cluster column
 

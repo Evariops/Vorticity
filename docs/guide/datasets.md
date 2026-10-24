@@ -159,11 +159,26 @@ var routes = dataset.Scan<LogRow>()
 `AsDouble()` reads floats as well as doubles, the floats from the field's value of the rows that hold
 one, and `ToInt64()` converts every kind of value.
 
-The synopses that will answer without rows the questions the rows cannot answer in time, counts and
-sketches per column and by hour among them, are designed in
-[22-on-the-fly-and-synopses.md](../design/22-on-the-fly-and-synopses.md). Until they come,
-`ScanOptions.UseSynopses` and `ScanOptions.AlignWindow` change nothing: every aggregation reads its
-rows, over the window asked.
+A dataset in periods answers some questions from counts rather than rows. An object its jobs write, of a
+mebibyte or more, keeps for each column whose values repeat its counts by hour: the rows of each value in
+each hour, each number column's exact sum, least and greatest there, and for a column of at most 1 000
+values a quantile sketch of each number column. A question on one column, the time and the numbers,
+keyed by that column and by the instant truncated to the hour or coarser, under a window of the instant
+and values of that column, reads an object's counts in one request instead of its rows, and the rows of
+the hours its window cuts:
+
+```csharp
+var hourly = dataset.Scan<Request>()
+    .Where(r => r.At >= from && r.At < to)
+    .GroupBy(r => (r.Service, r.At.Truncate(CalendarUnit.Hour)))
+    .Select(g => (g.Key.Service, g.Key.Item2, g.Count(), g.Sum(r => r.Bytes), g.Quantile(r => r.Bytes, 0.99)));
+```
+
+It answers what the rows would, to the bit. The objects still in their appends keep no counts and are
+read as rows, and so is every other question. `ScanOptions.UseSynopses = false` reads every object's
+rows, `ExplainAsync` says object by object which it reads (`ScanPlan.States`), and
+`ScanOptions.AlignWindow` changes nothing yet. The other synopses are designed in
+[22-on-the-fly-and-synopses.md](../design/22-on-the-fly-and-synopses.md).
 
 A page that shows a long window can show its newest part first. `AskNewestFirstAsync` cuts the window
 at the starts of the periods it crosses, asks your question over each part, several parts at once,

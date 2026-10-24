@@ -86,6 +86,15 @@ internal sealed class ObjectContents(
     /// <summary>The region of column <paramref name="field"/>'s counts, or null when the object keeps none of it.</summary>
     internal IndexSegment? CountsOf(int field) => RegionOf(Counts, field);
 
+    /// <summary>
+    /// Each top-level column's sketches of its counts (<see cref="ColumnSketches"/>), and its region, right after the
+    /// counts': what a question of quantiles on that column reads beside them. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, IndexSegment Region)> Sketches { get; init; } = [];
+
+    /// <summary>The region of the sketches of column <paramref name="field"/>'s counts, or null when the object keeps none of it.</summary>
+    internal IndexSegment? SketchesOf(int field) => RegionOf(Sketches, field);
+
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
         foreach ((int column, IndexSegment region) in regions)
@@ -119,6 +128,7 @@ internal sealed class ObjectContents(
             Paging = Paging,
             Sheets = Sheets,
             Counts = Counts,
+            Sketches = Sketches,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -172,6 +182,9 @@ internal sealed class ObjectContents(
 
     // A column's counts by hour: its field and its region, as a path directory's.
     private const int TagCounts = 15;
+
+    // The sketches of a column's counts: its field and its region, as a path directory's.
+    private const int TagSketches = 16;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -259,6 +272,11 @@ internal sealed class ObjectContents(
             Declare(region);
         }
 
+        foreach ((int _, IndexSegment region) in Sketches)
+        {
+            Declare(region);
+        }
+
         if (DirectoryRegion is { } directory)
         {
             Declare(directory);
@@ -335,6 +353,13 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
+            foreach ((int field, IndexSegment region) in Sketches)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagSketches);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
             if (DirectoryRegion is { } directoryRegion)
             {
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
@@ -381,6 +406,7 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> pathDirectories = [];
             List<(int, IndexSegment)> sheets = [];
             List<(int, IndexSegment)> counts = [];
+            List<(int, IndexSegment)> sketches = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -436,6 +462,14 @@ internal sealed class ObjectContents(
 
                         counts.Add(counted);
                         break;
+                    case (TagSketches, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } sketched)
+                        {
+                            return null;
+                        }
+
+                        sketches.Add(sketched);
+                        break;
                     case (TagLocating, ProtoWireType.LengthDelimited):
                         if (Located(reader.ReadMessage()) is not { } located)
                         {
@@ -471,6 +505,7 @@ internal sealed class ObjectContents(
                     Paging = paging,
                     Sheets = sheets,
                     Counts = counts,
+                    Sketches = sketches,
                 }
                 : null;
         }

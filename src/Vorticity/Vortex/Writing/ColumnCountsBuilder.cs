@@ -514,7 +514,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     internal const int AttachValues = 100;
 
     /// <summary>The bits of the sketches' grid: a relative error of 1 %, the engine's for a quantile asked with none.</summary>
-    private static readonly int SketchBits = QuantileSketch.BitsFor(0.01);
+    internal static readonly int SketchBits = QuantileSketch.BitsFor(0.01);
 
     /// <summary>The share of the valid rows the distinct values may reach for the column to be counted: a quarter.</summary>
     private const int RepeatShare = 4;
@@ -1083,8 +1083,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         Drop();
     }
 
-    /// <summary>The counts' bytes, once every row is in and every number settled; null for a column that keeps none.</summary>
-    internal byte[]? Finish()
+    /// <summary>
+    /// The counts' bytes and their sketches', once every row is in and every number settled, the sketches null when the
+    /// column keeps none; null for a column that keeps no counts.
+    /// </summary>
+    internal (byte[] Counts, byte[]? Sketches)? Finish()
     {
         long valid = _sheet.Rows - _sheet.Nulls;
         int distinct = _sheet.Distinct;
@@ -1213,11 +1216,16 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             groups[^1] = groups[^1] with { Entries = groups[^1].Entries + 1 };
         }
 
-        return new ColumnCounts(fields, kinds, [.. groups], entryHours, words, sketchBytes)
+        // The sketches, a region of their own beside the counts, when there is a measure to sketch or a column attached.
+        bool sketched = sketchBytes is { Length: > 0 };
+        ColumnCounts counts = new ColumnCounts(fields, kinds, [.. groups], entryHours, words)
         {
+            Sketched = sketched,
             AttachedFields = [.. attached.Select(w => _plan.Wide[w].Field)],
-            Distinct = registers,
-        }.ToBytes();
+        };
+        return (counts.ToBytes(), sketched || registers is not null
+            ? new ColumnSketches(_entries, carried.Count, sketched ? sketchBytes : null, attached.Count, registers).ToBytes()
+            : null);
     }
 
     /// <summary>

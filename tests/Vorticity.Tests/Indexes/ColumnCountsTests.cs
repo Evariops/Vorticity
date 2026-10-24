@@ -3,7 +3,7 @@
 // WHAT IS HELD: past its budget of entries, a column keeps the values whose rows are most, each exact, and counts the
 // others together an hour, exact too, so that every row is counted once; and what the counts write reads back word for
 // word: signed and unsigned extremes, sums past 64 bits, float sums and the extremes of a measure that met no value, and
-// the hour of a null instant.
+// the hour of a null instant; and their sketches byte for byte.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -44,8 +44,9 @@ public sealed class ColumnCountsTests
         rows.Sort((left, right) => (left.At / MicrosPerHour).CompareTo(right.At / MicrosPerHour));
 
         // A budget of 64 entries: 160 are met, ten values an hour fill it, and the values left out go together.
-        ColumnCounts counts = Build(rows, entryLimit: 64);
+        (ColumnCounts counts, ColumnSketches? sketches) = Build(rows, entryLimit: 64);
         Assert.Equal([2, 3], counts.MeasureFields);
+        Assert.True(counts.Sketched);
         CountGroup others = Assert.Single(counts.Groups, g => g.Kind == CountedValue.Others);
         long[] kept = [.. counts.Groups.Where(g => g.Kind == CountedValue.Value).Select(g => BitConverter.ToInt64(g.Value))];
         Assert.NotEmpty(kept);
@@ -75,8 +76,8 @@ public sealed class ColumnCountsTests
                 Assert.Equal(held.Max(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatGreatest]));
 
                 // Each entry's sketches, the values left out's merged from theirs, are those of its rows' values.
-                Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), counts.SketchOf(e, 0));
-                Assert.Equal(Sketch(held.Select(r => r.Price)), counts.SketchOf(e, 1));
+                Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
+                Assert.Equal(Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
             }
         }
 
@@ -125,7 +126,11 @@ public sealed class ColumnCountsTests
             kinds,
             [new CountGroup(CountedValue.Null, null, 0, 1), new CountGroup(CountedValue.Value, [1, 2, 3], 1, 2)],
             [-3, CountsPlan.NullHour, 451_000],
-            words);
+            words)
+        {
+            Sketched = true,
+            AttachedFields = [5],
+        };
         ColumnCounts back = ColumnCounts.From(counts.ToBytes());
 
         Assert.Equal(counts.MeasureFields, back.MeasureFields);
@@ -134,7 +139,17 @@ public sealed class ColumnCountsTests
             back.Groups.Select(g => (g.Kind, g.Value is null ? "" : Convert.ToHexString(g.Value), g.FirstEntry, g.Entries)));
         Assert.Equal(counts.Hours, back.Hours);
         Assert.Equal(counts.Words, back.Words);
+        Assert.True(back.Sketched);
+        Assert.Equal([5], back.AttachedFields);
         Assert.Throws<VortexFormatException>(() => ColumnCounts.From(counts.ToBytes()[..^1]));
+
+        // Their sketches, each entry's of each measure, none for a measure that met no value, and its registers.
+        ColumnSketches sketches = new ColumnSketches(3, 3, [[1], null, [2, 3], [4], [5], null, null, null, [6]], 1, [[7, 8], null, [9]]);
+        ColumnSketches sketchesBack = ColumnSketches.From(sketches.ToBytes());
+        Assert.Equal((3, 3, 1), (sketchesBack.Entries, sketchesBack.Measures, sketchesBack.Attached));
+        Assert.Equal(sketches.Sketches, sketchesBack.Sketches);
+        Assert.Equal(sketches.Distinct, sketchesBack.Distinct);
+        Assert.Throws<VortexFormatException>(() => ColumnSketches.From(sketches.ToBytes()[..^1]));
     }
 
     // An hour's sketches sealed once a batch of a later hour comes, then rows of that hour coming late: the sketch opened
@@ -152,15 +167,15 @@ public sealed class ColumnCountsTests
             }
         }
 
-        ColumnCounts counts = Build(rows, ColumnCountsBuilder.EntryLimit);
+        (ColumnCounts counts, ColumnSketches? sketches) = Build(rows, ColumnCountsBuilder.EntryLimit);
         Assert.Equal(15, counts.Entries);
         for (int e = 0; e < counts.Entries; e++)
         {
             long key = BitConverter.ToInt64(counts.Groups.Single(g => e >= g.FirstEntry && e < g.FirstEntry + g.Entries).Value);
             List<(long At, long Key, long Amount, double Price)> held = [.. rows.Where(r => r.Key == key && r.At / MicrosPerHour == counts.Hours[e])];
             Assert.Equal(held.Count, counts.WordsOf(e)[0]);
-            Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), counts.SketchOf(e, 0));
-            Assert.Equal(Sketch(held.Select(r => r.Price)), counts.SketchOf(e, 1));
+            Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
+            Assert.Equal(Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
         }
     }
 
@@ -179,10 +194,10 @@ public sealed class ColumnCountsTests
     }
 
     /// <summary>
-    /// The counts of column <c>Key</c> of <paramref name="rows"/>, under a schema of an instant, the key, an amount and a
-    /// price, fed in parts as a writer feeds them.
+    /// The counts of column <c>Key</c> of <paramref name="rows"/>, and their sketches, under a schema of an instant, the
+    /// key, an amount and a price, fed in parts as a writer feeds them.
     /// </summary>
-    private static ColumnCounts Build(List<(long At, long Key, long Amount, double Price)> rows, int entryLimit)
+    private static (ColumnCounts Counts, ColumnSketches? Sketches) Build(List<(long At, long Key, long Amount, double Price)> rows, int entryLimit)
     {
         VortexSchema schema = VortexSchema.Create([
             new VortexField("At", VortexType.Timestamp(TimeUnit.Microseconds, "UTC")),
@@ -214,7 +229,8 @@ public sealed class ColumnCountsTests
         }
 
         counts.Settle();
-        return ColumnCounts.From(counts.Finish()!);
+        (byte[] bytes, byte[]? sketches) = counts.Finish()!.Value;
+        return (ColumnCounts.From(bytes), sketches is null ? null : ColumnSketches.From(sketches));
     }
 
     private static int Column(

@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
+using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -48,6 +49,15 @@ internal sealed class DatasetScanCounters
     public long ObjectsCounted { get; internal set; }
 
     /// <summary>
+    /// Objects whose counts by hour answered an aggregation as states, the rows of the hours its window cuts read alone;
+    /// <see cref="StateRows"/> rows of states stood for their rows.
+    /// </summary>
+    public long ObjectsAnswered { get; internal set; }
+
+    /// <summary>The rows of states the answered objects gave, an entry of their counts each.</summary>
+    public long StateRows { get; internal set; }
+
+    /// <summary>
     /// The most data objects the scan read at once: one in the tree's order, two once a prefetch
     /// opens the next object ahead, and under <see cref="DatasetScanBuilder.InKeyOrder(string, bool)"/>
     /// the inputs the merge held open.
@@ -85,6 +95,16 @@ internal sealed class DatasetScanBuilder
     // The filter's lookup of an identifier, worked out the first time an object asks (Lookup).
     private VortexExpr? _lookup;
     private bool _lookupKnown;
+
+    // What an aggregation asks as states in place of rows, which the objects' counts answer where they can (StatesAsync).
+    private StateRequest? _states;
+
+    // How the objects' counts answer _states, worked out the first time a read asks (Answer); null when they answer none.
+    private CountsAnswer? _answer;
+    private bool _answerKnown;
+
+    // Whether the walk counts the objects it considers: not in a part of a scan whose own walk counted them (Part).
+    private bool _considers = true;
 
     internal DatasetScanBuilder(VortexDataset dataset, DatasetSnapshot version)
     {
@@ -242,6 +262,16 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
+    /// Answers what the objects' counts by hour can of <paramref name="states"/> as batches of states, and the rest as rows;
+    /// null for rows alone.
+    /// </summary>
+    internal DatasetScanBuilder WithStates(StateRequest? states)
+    {
+        _states = states;
+        return this;
+    }
+
+    /// <summary>
     /// Says that the variant columns of <paramref name="keys"/>, by name, are read only through those
     /// top-level keys, which each object's path map lets its scan read alone.
     /// </summary>
@@ -355,6 +385,16 @@ internal sealed class DatasetScanBuilder
             await foreach (RecordBatch run in MergedAsync(paths, cancellationToken).ConfigureAwait(false))
             {
                 yield return run;
+            }
+
+            yield break;
+        }
+
+        if (Answer() is { } answer && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            await foreach (RecordBatch batch in StatesAsync(answer, cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
             }
 
             yield break;
@@ -477,6 +517,177 @@ internal sealed class DatasetScanBuilder
     /// <summary>One object's batches as the dataset's rows, its lease held until the last is read.</summary>
     private IAsyncEnumerable<RecordBatch> ObjectAsync(PositionedObject held, int open, CancellationToken cancellationToken) =>
         RowsAsync(held, open, cancellationToken);
+
+    /// <summary>How the objects' counts answer the states the scan asks, worked out once; null when they answer none of them.</summary>
+    private CountsAnswer? Answer()
+    {
+        if (!_answerKnown)
+        {
+            _answer = _states is { } request ? CountsAnswer.Of(request, _filter, _version) : null;
+            _answerKnown = true;
+        }
+
+        return _answer;
+    }
+
+    /// <summary>The column whose counts answer the object <paramref name="held"/> for <paramref name="answer"/>: one the scan covers whole; null for its rows.</summary>
+    private int? AnsweredBy(CountsAnswer answer, in PositionedObject held) =>
+        Covered(held) == held.Entry.Rows ? answer.FieldOf(held.Entry) : null;
+
+    /// <summary>Whether the counts of an object the scan covers whole answer what it asks as states: read from the entries alone.</summary>
+    internal async ValueTask<bool> AnswersAnyAsync(CancellationToken cancellationToken)
+    {
+        if (Answer() is not { } answer || !await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        await foreach (PositionedObject held in _version.WalkAsync(Pruner(), _from, _to, null, cancellationToken).ConfigureAwait(false))
+        {
+            if (AnsweredBy(answer, held) is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The scan as states where the objects' counts answer: each such object's entries as batches of states, then the rows
+    /// of the hours its window cuts; the objects between them read as rows, those side by side a part of the scan, which
+    /// reads them as it would (<see cref="Part"/>). The counts of the objects that answer are read side by side, as many at
+    /// once as the session reads, and none of their sheets: their counts say which values they hold.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> StatesAsync(CountsAnswer answer, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        List<(PositionedObject Held, int? Field)> objects = [];
+        await foreach (PositionedObject held in WalkAsync(cancellationToken, answer).ConfigureAwait(false))
+        {
+            if (Covered(held) > 0)
+            {
+                objects.Add((held, AnsweredBy(answer, held)));
+            }
+        }
+
+        using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)>?[] reads = new Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)>?[objects.Count];
+        int width = Math.Max(1, _dataset.Session.Options.MaxConcurrentReads);
+        int started = 0;
+        CanonicalArena arena = new CanonicalArena(answer.Nodes);
+        try
+        {
+            for (int o = 0; o < objects.Count; o++)
+            {
+                // The counts of the next objects read ahead, as many objects ahead as the session reads at once.
+                for (; started < objects.Count && started < o + width; started++)
+                {
+                    if (objects[started].Field is { } next)
+                    {
+                        reads[started] = _dataset.ReadCountsAsync(objects[started].Held.Entry, next, answer.AsksSketches, stopped.Token).AsTask();
+                    }
+                }
+
+                PositionedObject held = objects[o].Held;
+                StateRows? rows = null;
+                if (reads[o] is { } read)
+                {
+                    reads[o] = null;
+                    if (await read.ConfigureAwait(false) is ({ } counts, var sketched))
+                    {
+                        rows = answer.Rows(counts, sketched);
+                    }
+                }
+
+                if (rows is null)
+                {
+                    // This object's rows and those of the objects after it the counts do not answer, up to the next they may:
+                    // a part of the scan, which reads them as it would, ahead and past their sheets.
+                    int last = o;
+                    while (last + 1 < objects.Count && objects[last + 1].Field is null)
+                    {
+                        last++;
+                    }
+
+                    PositionedObject end = objects[last].Held;
+                    DatasetScanBuilder part = Part(_filter, Math.Max(_from, held.FirstRow), Math.Min(_to, end.FirstRow + end.Entry.Rows));
+                    await foreach (RecordBatch batch in part.ExecuteAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        yield return batch;
+                    }
+
+                    o = last;
+                    continue;
+                }
+
+                if (_metrics is { } metrics)
+                {
+                    metrics.ObjectsAnswered++;
+                    metrics.StateRows += rows.Count;
+                }
+
+                for (int at = 0; at < rows.Count; at += StateRows.BatchRows)
+                {
+                    arena.Reset();
+                    yield return rows.Batch(arena, at, Math.Min(StateRows.BatchRows, rows.Count - at), held.FirstRow);
+                }
+
+                if (rows.CutsHours && answer.Edges is { } edges)
+                {
+                    await foreach (RecordBatch batch in Part(edges, held.FirstRow, held.FirstRow + held.Entry.Rows).ExecuteAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        yield return batch;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            // The counts read ahead of a consumer that stopped, or of a failure, are nobody's.
+            await stopped.CancelAsync().ConfigureAwait(false);
+            foreach (Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)>? left in reads)
+            {
+                if (left is not null)
+                {
+                    try
+                    {
+                        await left.ConfigureAwait(false);
+                    }
+                    catch (Exception) when (left.IsFaulted || left.IsCanceled)
+                    {
+                    }
+                }
+            }
+
+            arena.Reset();
+        }
+    }
+
+    /// <summary>
+    /// The scan of rows <c>[from, to)</c> <paramref name="filter"/> keeps, as this scan reads rows, with no states asked and
+    /// none of its objects counted again: an answered object's edges, or the objects between those its counts answer.
+    /// </summary>
+    private DatasetScanBuilder Part(VortexExpr? filter, long from, long to) =>
+        new DatasetScanBuilder(_dataset, _version)
+        {
+            _filter = filter,
+            _mask = _mask,
+            _indexes = _indexes,
+            _summaries = _summaries,
+            _from = from,
+            _to = to,
+            _rowsSet = true,
+            _considers = false,
+            _metrics = _metrics,
+            _counters = _counters,
+            _options = _options,
+            _keepEncodings = _keepEncodings,
+            _sinkDecodes = _sinkDecodes,
+            _positionsUnread = _positionsUnread,
+            _variantKeys = _variantKeys,
+            _readAhead = _readAhead,
+            _readAheadGranted = _readAheadGranted,
+        };
 
     /// <summary>
     /// The conjunct of <paramref name="filter"/> that looks one value of a declared identifier up, or a few,
@@ -1021,11 +1232,39 @@ internal sealed class DatasetScanBuilder
         long entries = 0;
         List<StatesStep> states = [];
         KeyRange? range = CountRange();
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        CountsAnswer? answer = Answer() is { } asked && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false) ? asked : null;
+        await foreach (PositionedObject held in WalkAsync(cancellationToken, answer).ConfigureAwait(false))
         {
             long covered = Covered(held);
             if (covered == 0)
             {
+                continue;
+            }
+
+            // An object whose counts answer reads its column's counts, and their sketches beside them for a quantile, in a
+            // request, and the rows of the hours a window cuts where it holds any.
+            if (answer is not null && AnsweredBy(answer, held) is int field)
+            {
+                Indexes.ObjectContents contents = held.Entry.Contents!;
+                Indexes.IndexSegment? sketched = answer.AsksSketches ? contents.SketchesOf(field) : null;
+                string column = _version.Schema.Columns[field].Name;
+                states.Add(new StatesStep(
+                    held.Entry.Key, "states", sketched is null ? $"the counts of {column} by hour" : $"the counts of {column} by hour and their sketches", sketched is null ? 1 : 2));
+                keptRows += covered;
+                segments += sketched is null ? 1 : 2;
+                bytes += contents.CountsOf(field)!.Value.Length + (sketched?.Length ?? 0);
+                mayMatch = true;
+                if (answer.Edges is { } edgeFilter)
+                {
+                    ScanPlan edges = await Part(edgeFilter, held.FirstRow, held.FirstRow + held.Entry.Rows).PlanAsync(cancellationToken).ConfigureAwait(false);
+                    if (edges.MayMatch && edges.LiveBlocks > 0)
+                    {
+                        states.Add(new StatesStep(held.Entry.Key, "edges", "the rows of the hours the window cuts", edges.LiveBlocks));
+                        segments += edges.Segments;
+                        bytes += edges.BytesToRead;
+                    }
+                }
+
                 continue;
             }
 
@@ -1355,11 +1594,15 @@ internal sealed class DatasetScanBuilder
 
     private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? new SummaryPruner(filter) : null;
 
-    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// The objects the scan walks: those the summaries keep, and of them those the sheets do not refute, but the objects
+    /// whose counts <paramref name="answered"/> answers, which read no sheet.
+    /// </summary>
+    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken, CountsAnswer? answered = null)
     {
-        IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
+        IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken);
         return _summaries && _filter is { } filter && SheetPruning.Asks(filter, _version.Schema.DType)
-            ? SheetPrunedAsync(walk, filter, cancellationToken)
+            ? SheetPrunedAsync(walk, filter, answered, cancellationToken)
             : walk;
     }
 
@@ -1370,17 +1613,20 @@ internal sealed class DatasetScanBuilder
     /// The objects of <paramref name="walk"/> their column sheets do not refute <paramref name="filter"/> by: an object
     /// whose sheets are to be read (<see cref="SheetPruning.Reads"/>) has them read with no open of it, the objects of a
     /// batch side by side, and one that lacks every value an equality or a set asks for there is passed over. An object
-    /// with none passes at once while no batch waits, so that a walk of small objects holds and allocates nothing.
+    /// with none passes at once while no batch waits, so that a walk of small objects holds and allocates nothing; and so
+    /// does an object whose counts <paramref name="answered"/> answers, whose counts say which values it holds.
     /// </summary>
     private async IAsyncEnumerable<PositionedObject> SheetPrunedAsync(
-        IAsyncEnumerable<PositionedObject> walk, VortexExpr filter, [EnumeratorCancellation] CancellationToken cancellationToken)
+        IAsyncEnumerable<PositionedObject> walk, VortexExpr filter, CountsAnswer? answered, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         DType schema = _version.Schema.DType;
         List<int>? columns = null;
         List<PositionedObject>? batch = null;
+        Func<PositionedObject, bool>? unread = answered is null ? null : held => AnsweredBy(answered, held) is not null;
+        DatasetScanCounters? metrics = _considers ? _metrics : null;
         await foreach (PositionedObject held in walk.ConfigureAwait(false))
         {
-            if (batch is not { Count: > 0 } && !SheetPruning.Reads(held.Entry, _dataset.Options))
+            if (batch is not { Count: > 0 } && (!SheetPruning.Reads(held.Entry, _dataset.Options) || unread?.Invoke(held) == true))
             {
                 yield return held;
                 continue;
@@ -1390,7 +1636,7 @@ internal sealed class DatasetScanBuilder
             if (batch.Count == SheetBatch)
             {
                 columns ??= SheetPruning.Columns(filter, schema);
-                foreach (PositionedObject kept in await SheetPruning.KeptAsync(_dataset, schema, batch, filter, columns, _metrics, cancellationToken).ConfigureAwait(false))
+                foreach (PositionedObject kept in await SheetPruning.KeptAsync(_dataset, schema, batch, filter, columns, metrics, unread, cancellationToken).ConfigureAwait(false))
                 {
                     yield return kept;
                 }
@@ -1402,7 +1648,7 @@ internal sealed class DatasetScanBuilder
         if (batch is { Count: > 0 })
         {
             columns ??= SheetPruning.Columns(filter, schema);
-            foreach (PositionedObject kept in await SheetPruning.KeptAsync(_dataset, schema, batch, filter, columns, _metrics, cancellationToken).ConfigureAwait(false))
+            foreach (PositionedObject kept in await SheetPruning.KeptAsync(_dataset, schema, batch, filter, columns, metrics, unread, cancellationToken).ConfigureAwait(false))
             {
                 yield return kept;
             }

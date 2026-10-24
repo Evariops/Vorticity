@@ -16,13 +16,13 @@ namespace Vorticity;
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
 
 /// <summary>
-/// What an aggregation reads of one object of a dataset whose synopses answer it: the states that stand for
-/// the rows of the buckets they fold; the rows of the slices a window cuts; or its rows whole, and why.
+/// What an aggregation reads of one object of a dataset whose counts by hour answer it: the states of the counts, which
+/// stand for the rows of the hours the question holds whole, or the rows of the hours its window cuts.
 /// </summary>
 /// <param name="Object">The object, by its key in the dataset.</param>
-/// <param name="Read">What it reads: states, the rows at the edges, or <c>rows</c>.</param>
-/// <param name="Detail">The synopsis, its bucket and the columns that key it; or why the rows are read.</param>
-/// <param name="Count">The buckets the synopsis folds, the slices read at the edges, or the object's rows.</param>
+/// <param name="Read">What it reads: <c>states</c>, or <c>edges</c>, the rows of the hours a window cuts.</param>
+/// <param name="Detail">The column whose counts it reads, and their sketches when a quantile asks them; or what the edges hold.</param>
+/// <param name="Count">The regions the states read, the counts and their sketches; or the blocks of rows read at the edges.</param>
 public sealed record StatesStep(string Object, string Read, string Detail, long Count);
 
 /// <summary>
@@ -52,8 +52,8 @@ public sealed record ScanPlan(
     public GroupPlan? Grouping { get; init; }
 
     /// <summary>
-    /// For an aggregation over a dataset whose objects keep synopses, what each object reads: its synopses'
-    /// states, the rows at a window's edges, or its rows and why; empty otherwise, as for every dataset yet.
+    /// For an aggregation over a dataset whose objects keep counts by hour, what each object they answer reads: its counts'
+    /// states, and the rows of the hours a window cuts; empty when they answer none, every object read as rows.
     /// </summary>
     public ImmutableArray<StatesStep> States { get; init; } = [];
 
