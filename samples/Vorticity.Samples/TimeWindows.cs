@@ -22,8 +22,8 @@ public partial record struct Logged(string Retention, DateTimeOffset At, string 
 
 /// <summary>
 /// The time-window part of the datasets page: a dataset compacted by periods, its questions answered from the
-/// synopses, a request left out, a window asked newest first, the synopsis cache, and rows kept apart by
-/// retention and expired by it.
+/// synopses, a request left out, a window asked newest first, the synopsis cache, and rows of two retentions
+/// kept in a dataset each and expired on their own.
 /// </summary>
 internal static class TimeWindows
 {
@@ -112,36 +112,36 @@ internal static class TimeWindows
         await RetentionAsync();
     }
 
-    /// <summary>Rows kept for different lengths of time in one dataset, each retention expired on its own.</summary>
+    /// <summary>Rows kept for different lengths of time: a dataset per retention, each expired on its own.</summary>
     private static async Task RetentionAsync()
     {
-        await using IObjectStore store = new FileObjectStore(Demo.Path("retention"));
+        await using IObjectStore debugStore = new FileObjectStore(Demo.Path("retention-debug"));
+        await using IObjectStore infoStore = new FileObjectStore(Demo.Path("retention-info"));
         DatasetOptions options = new DatasetOptions
         {
-            ClusteringKey = [nameof(Logged.Retention), nameof(Logged.At)],
-            PartitionColumns = 1,
+            ClusteringKey = [nameof(Logged.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
         };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Logged.Schema, options);
+        await using VortexDataset debug = await VortexDataset.CreateAsync(debugStore, Logged.Schema, options);
+        await using VortexDataset info = await VortexDataset.CreateAsync(infoStore, Logged.Schema, options);
         for (int hour = 0; hour < 3 * 24; hour++)
         {
             Logged[] rows = [.. Enumerable.Range(0, 60).Select(i => new Logged(i % 3 == 0 ? "info" : "debug", Start.AddHours(hour).AddMinutes(i), $"line {hour}-{i}"))];
-            await using ObjectDraft draft = dataset.StartObject();
-            await draft.Writer.WriteAsync<Logged>(rows);
-            await dataset.AppendAsync(draft);
+            await AppendAsync(debug, [.. rows.Where(r => r.Retention == "debug")]);
+            await AppendAsync(info, [.. rows.Where(r => r.Retention == "info")]);
         }
 
-        while (await dataset.CompactAsync() is not null)
+        while (await debug.CompactAsync() is not null)
         {
         }
 
-        long debug = await dataset.Scan<Logged>().Where(r => r.Retention == "debug").CountAsync();
-        DateTimeOffset cutoff = await dataset.ExpireAsync<Logged>(r => r.Retention == "debug", Start.AddDays(2));
-        long kept = await dataset.Scan<Logged>().Where(r => r.Retention == "debug").CountAsync();
-        long info = await dataset.Scan<Logged>().Where(r => r.Retention == "info").CountAsync();
-        Console.WriteLine($"debug lines expired before {cutoff:MM-dd}: {debug} then {kept}; info lines untouched: {info}");
+        long before = await debug.Scan<Logged>().CountAsync();
+        DateTimeOffset cutoff = await debug.ExpireAsync(Start.AddDays(2));
+        long kept = await debug.Scan<Logged>().CountAsync();
+        long untouched = await info.Scan<Logged>().CountAsync();
+        Console.WriteLine($"debug lines expired before {cutoff:MM-dd}: {before} then {kept}; info lines untouched: {untouched}");
 
-        await using VortexDataset refusing = await VortexDataset.OpenAsync(store, new DatasetOptions { Periods = new PeriodOptions { RefuseLateRows = true } });
+        await using VortexDataset refusing = await VortexDataset.OpenAsync(infoStore, new DatasetOptions { Periods = new PeriodOptions { RefuseLateRows = true } });
         try
         {
             await using ObjectDraft late = refusing.StartObject();
@@ -152,5 +152,13 @@ internal static class TimeWindows
         {
             Console.WriteLine($"a late row refused: {refused.Message}");
         }
+    }
+
+    /// <summary>Appends <paramref name="rows"/> to <paramref name="dataset"/> as one object.</summary>
+    private static async Task AppendAsync(VortexDataset dataset, Logged[] rows)
+    {
+        await using ObjectDraft draft = dataset.StartObject();
+        await draft.Writer.WriteAsync<Logged>(rows);
+        await dataset.AppendAsync(draft);
     }
 }

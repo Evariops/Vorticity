@@ -316,12 +316,6 @@ internal static class DatasetRowChanges
                 ? dataset.StartObjectUnder(
                     version.Schema, inKeyOrder: version.Levels.RowsInKeyOrder(held.Level), byteBound: ObjectBound.Of(held.Entry.Bytes, doublings, dataset.Options.BoundOutPerIn))
                 : null;
-            if (draft is not null && version.Schema.Key is { } rewritten)
-            {
-                // The rows kept are the object's own: its one partition value, if it has one.
-                draft.Partition = rewritten.PartitionOf(held.Entry.Summaries);
-            }
-
             try
             {
                 long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, changed, cancellationToken).ConfigureAwait(false);
@@ -789,8 +783,7 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
 
         if (await _dataset.SealAsync(draft, _draftRows, _firstRow, cancellationToken).ConfigureAwait(false) is { } written)
         {
-            // A changed row may carry another partition value: an object per value, as an append writes.
-            _written.AddRange(await _dataset.PartitionedAsync(written, cancellationToken).ConfigureAwait(false));
+            _written.Add(written);
         }
 
         _firstRow += _draftRows;

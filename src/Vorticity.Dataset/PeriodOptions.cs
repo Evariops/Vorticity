@@ -70,8 +70,8 @@ public sealed record PeriodOptions
     }
 
     /// <summary>
-    /// The unit of the instant a dataset of periods leads its key with, past its partition columns: a
-    /// timestamp stored in UTC, or naive, which a dataset of periods reads as UTC.
+    /// The unit of the instant a dataset of periods leads its key with: a timestamp stored in UTC, or
+    /// naive, which a dataset of periods reads as UTC.
     /// </summary>
     /// <exception cref="ArgumentException">The dataset declares no key, or its instant column is not such a timestamp.</exception>
     internal static TimeUnit InstantOf(ClusteringKey? key)
@@ -87,9 +87,7 @@ public sealed record PeriodOptions
         if (instant.ExtensionId != ExtensionIds.Timestamp || (instant.TimeZone is { } zone && !TimeZones.IsUtc(zone)))
         {
             throw new ArgumentException(
-                key.PartitionColumns == 0
-                    ? $"A dataset compacted by periods leads its clustering key with its instant, a timestamp in UTC, and '{key.InstantPath}' is {instant}."
-                    : $"A dataset compacted by periods follows its partition columns with its instant, a timestamp in UTC, and '{key.InstantPath}' is {instant}.",
+                $"A dataset compacted by periods leads its clustering key with its instant, a timestamp in UTC, and '{key.InstantPath}' is {instant}.",
                 nameof(DatasetOptions.Periods));
         }
 

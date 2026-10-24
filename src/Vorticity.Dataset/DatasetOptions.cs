@@ -262,52 +262,13 @@ public sealed record DatasetOptions
     private readonly TimeSpan? _erasureDelay;
 
     /// <summary>
-    /// Compacts the dataset by periods of its instant, the first column of its clustering key past its
-    /// partition columns, a timestamp in UTC: the open period's rows in fresh levels, rows later than the lateness horizon
+    /// Compacts the dataset by periods of its instant, the first column of its clustering key, a timestamp
+    /// in UTC: the open period's rows in fresh levels, rows later than the lateness horizon
     /// beside them, and each period, once closed, sealed into one object. Null, the default, compacts
     /// by levels. Fixed when the dataset is created and carried by every commit, which a library that
     /// does not know periods refuses.
     /// </summary>
     public PeriodOptions? Periods { get; init; }
-
-    /// <summary>
-    /// How many leading columns of the clustering key are partition columns, such as a retention class
-    /// before the instant in a key <c>(Retention, At)</c>: 0, the default, for none. Every object holds one
-    /// partition value, an append split into an object per value, and each partition grows its own periods,
-    /// so that what dies together is written together and expires without a read. Partition columns have
-    /// few values by declaration: an append that holds more than <see cref="MaxPartitionValues"/> is refused.
-    /// The instant of a dataset by periods is the key's column after them. Fixed when the dataset is created
-    /// and carried by every commit, which a library that does not know partitions refuses.
-    /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">The count is negative.</exception>
-    public int PartitionColumns
-    {
-        get => _partitionColumns;
-        init
-        {
-            ArgumentOutOfRangeException.ThrowIfNegative(value);
-            _partitionColumns = value;
-        }
-    }
-
-    private readonly int _partitionColumns;
-
-    /// <summary>
-    /// The partition values one append may hold, at most: past it the append is refused before anything is
-    /// committed, since each value is an object of its own. 64 by default.
-    /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">The bound is not positive.</exception>
-    public int MaxPartitionValues
-    {
-        get => _maxPartitionValues;
-        init
-        {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
-            _maxPartitionValues = value;
-        }
-    }
-
-    private readonly int _maxPartitionValues = 64;
 
     /// <summary>
     /// The columns whose values questions look up one at a time, such as a request's id: those an

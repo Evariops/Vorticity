@@ -22,35 +22,17 @@ internal static class DatasetExpiry
 {
     private const int Attempts = 8;
 
-    /// <summary>
-    /// Removes what lies before the start of the period holding <paramref name="before"/>, in the partitions
-    /// <paramref name="partition"/> keeps, every one when null, and returns that start.
-    /// </summary>
-    /// <exception cref="InvalidOperationException">The dataset declares no periods, or a filter is given and it declares no partition columns.</exception>
-    /// <exception cref="ArgumentException">The filter reads more than the partition columns compared with values.</exception>
+    /// <summary>Removes what lies before the start of the period holding <paramref name="before"/>, and returns that start.</summary>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods.</exception>
     /// <param name="dataset">The dataset.</param>
-    /// <param name="partition">The partitions expired; every one when null.</param>
     /// <param name="before">The instant rows are kept from.</param>
     /// <param name="cancellationToken">Cancels the walk and the commit.</param>
-    /// <param name="removes">False for a filter that holds for no row: the cutoff is worked out, and nothing removed.</param>
-    internal static async ValueTask<DateTimeOffset> RunAsync(
-        VortexDataset dataset, VortexExpr? partition, DateTimeOffset before, CancellationToken cancellationToken, bool removes = true)
+    internal static async ValueTask<DateTimeOffset> RunAsync(VortexDataset dataset, DateTimeOffset before, CancellationToken cancellationToken)
     {
         if (!dataset.Snapshot.Header.ByPeriods || dataset.Key is not { } key)
         {
             throw new InvalidOperationException(
                 "Expiry drops whole periods, and this dataset declares none (DatasetOptions.Periods): delete its rows instead.");
-        }
-
-        if (partition is not null)
-        {
-            if (key.PartitionColumns == 0)
-            {
-                throw new InvalidOperationException(
-                    "An expiry of some partitions needs partition columns, and this dataset declares none (DatasetOptions.PartitionColumns): delete its rows instead.");
-            }
-
-            PartitionFilter.RequireDecidable(partition, key, nameof(partition));
         }
 
         TimeUnit unit = PeriodOptions.InstantOf(key);
@@ -59,23 +41,9 @@ internal static class DatasetExpiry
         {
             DatasetSnapshot version = dataset.Snapshot;
             long cutoff = PeriodCalendar.Of(version.Header, unit).Floor(TimeSlicer.InstantOf(before, unit));
-            if (!removes)
-            {
-                return TimeSlicer.TimeOf(cutoff, unit);
-            }
-
             List<(int Level, ReadOnlyMemory<byte> Key)> expired = [];
-
-            // The summaries leave out the objects of the partitions the filter refutes, with none of their entries read whole.
-            SummaryPruner? pruner = partition is null ? null : new SummaryPruner(partition);
-            await foreach (PositionedObject held in version.WalkAsync(pruner, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+            await foreach (PositionedObject held in version.WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
             {
-                if (partition is not null
-                    && (PartitionFilter.ValuesOf(held.Entry, key) is not { } values || PartitionFilter.Decided(partition, values) != true))
-                {
-                    continue;
-                }
-
                 if (held.Entry.Summaries.TryGet(path, out ColumnSummary instant) && instant.HasMax
                     && instant.Max.Kind == FilterLiteralKind.Signed && instant.Max.SignedValue < cutoff)
                 {

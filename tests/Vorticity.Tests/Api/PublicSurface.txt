@@ -2824,7 +2824,6 @@ Vorticity.Dataset:     property ImmutableArray<long> BytesByLevel { get; init; }
 Vorticity.Dataset:     property ImmutableArray<long> ObjectsByLevel { get; init; }
 Vorticity.Dataset:     property bool HasWork { get; }
 Vorticity.Dataset:     property bool IsClustered { get; init; }
-Vorticity.Dataset:     property int Partitions { get; init; }
 Vorticity.Dataset:     property long FragmentedObjects { get; init; }
 Vorticity.Dataset:     property long Lag { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
@@ -2946,8 +2945,6 @@ Vorticity.Dataset:     property bool LockedStore { get; init; }
 Vorticity.Dataset:     property bool ShredOnAppend { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
-Vorticity.Dataset:     property int MaxPartitionValues { get; init; }
-Vorticity.Dataset:     property int PartitionColumns { get; init; }
 Vorticity.Dataset:     property int RetainedVersions { get; init; }
 Vorticity.Dataset:     property int SummaryColumnLimit { get; init; }
 Vorticity.Dataset:     property long InlineCompactionBytes { get; init; }
@@ -3159,8 +3156,6 @@ Vorticity.Dataset:     method ValueTask<CompactionPlan> PlanCompactionAsync(Comp
 Vorticity.Dataset:     method ValueTask<CompactionResult> CompactAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<DatasetVerification> VerifyAsync(Nullable<ulong> = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<DateTimeOffset> ExpireAsync(DateTimeOffset, CancellationToken = default)
-Vorticity.Dataset:     method ValueTask<DateTimeOffset> ExpireAsync(VortexExpr, DateTimeOffset, CancellationToken = default)
-Vorticity.Dataset:     method ValueTask<DateTimeOffset> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate>, DateTimeOffset, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<IndexingResult> IndexAsync(IndexPolicy, IndexingOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<Nullable<ulong>> RemoveTornCommitAsync(IObjectStore, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveObjectsAsync(IReadOnlyList<DataObject>, CancellationToken = default)

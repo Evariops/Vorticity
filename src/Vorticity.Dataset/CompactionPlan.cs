@@ -142,18 +142,10 @@ internal sealed record PeriodCut(PeriodCalendar Calendar, long? FreshAfter, bool
     internal TimeUnit Unit => Calendar.Unit;
 
     /// <summary>
-    /// For a seal, the newest instant the dataset held when it was planned, in any partition: a change of
-    /// length the period it writes asks for takes effect past it.
+    /// For a seal, the newest instant the dataset held when it was planned: a change of length the period it
+    /// writes asks for takes effect past it.
     /// </summary>
     internal long? Newest { get; init; }
-
-    /// <summary>
-    /// For a seal, the largest object the dataset's other partitions sealed of the period, its bytes and
-    /// rows, (0, 0) for none or without partitions: the length is weighed on the largest object of the
-    /// period, every one of which it bounds. Null while another partition still holds rows of the period
-    /// below the level of periods, when the seal weighs nothing, the period not yet sealed whole.
-    /// </summary>
-    internal (long Bytes, long Rows)? Peers { get; init; }
 
     /// <summary>The lateness horizon, in the instant's unit: in level 0's exit, a row of a period it has closed comes later than it.</summary>
     internal long Horizon { get; init; }
@@ -553,17 +545,6 @@ public sealed record CompactionPlan
     /// compacting those reads index bytes only, and is planned once no compaction that moves rows is due.
     /// </summary>
     public long FragmentedObjects { get; init; }
-
-    /// <summary>
-    /// How many values of its partition columns the dataset holds rows of, counted from the objects' summaries
-    /// the plan reads; 0 for a dataset without partition columns (<see cref="DatasetOptions.PartitionColumns"/>).
-    /// </summary>
-    /// <remarks>
-    /// <see cref="DatasetOptions.MaxPartitionValues"/> bounds the values one append holds, which catches a column
-    /// of identifiers declared as a partition. Nothing bounds the values a dataset gathers over its life: each one
-    /// grows periods of its own, and this count, which the meter records too, is what shows them pile up.
-    /// </remarks>
-    public int Partitions { get; init; }
 
     /// <summary>Whether a compaction is due.</summary>
     public bool HasWork => Job is not null;

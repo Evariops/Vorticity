@@ -191,13 +191,6 @@ internal static partial class CompactionPolicy
             jobs.Add(job);
         }
 
-        // A dataset of periods is planned from every leaf, so the partitions it holds cost no read.
-        int partitions = dataset.Key is { PartitionColumns: > 0 } partitioned ? PartitionsOf(levels, partitioned) : 0;
-        if (partitions > 0)
-        {
-            DatasetTelemetry.PartitionsHeld(partitions);
-        }
-
         return new CompactionPlan
         {
             Version = dataset.Version,
@@ -209,7 +202,6 @@ internal static partial class CompactionPolicy
             Job = jobs.Count > 0 ? jobs[0] : null,
             Jobs = [.. jobs],
             FragmentedObjects = fragmented,
-            Partitions = partitions,
         };
     }
 

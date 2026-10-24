@@ -34,185 +34,6 @@ internal static partial class CompactionPolicy
     {
         ClusteringKey key = dataset.Key!;
         bool exitDue = Held(levels, 0) > settings.LevelZeroCeiling;
-        if (key.PartitionColumns == 0)
-        {
-            return ChoosePeriodsOf(dataset, levels, settings, taken, exitDue);
-        }
-
-        // Each partition grows its own periods, and no job takes objects of two. Past level 0's ceiling, which
-        // holds over the whole level, the partition with the most objects in it exits first.
-        List<List<List<CompactionInput>>> partitions = Partitioned(levels, key);
-        int loaded = 0;
-        for (int p = 1; p < partitions.Count; p++)
-        {
-            loaded = Held(partitions[p], 0) > Held(partitions[loaded], 0) ? p : loaded;
-        }
-
-        // The calendar is the dataset's: a seal weighs it on every partition's objects of its period, and a change it asks
-        // for takes effect past the newest instant of any partition.
-        long? newest = null;
-        foreach (List<List<CompactionInput>> partition in partitions)
-        {
-            if (NewestHeld(partition, key.InstantPath) is { } held)
-            {
-                newest = Math.Max(newest ?? long.MinValue, held);
-            }
-        }
-
-        PeriodCalendar calendar = PeriodCalendar.Of(dataset.Header, PeriodOptions.InstantOf(key));
-        for (int i = 0; i < partitions.Count; i++)
-        {
-            int p = i == 0 ? loaded : i <= loaded ? i - 1 : i;
-            if (ChoosePeriodsOf(dataset, partitions[p], settings, taken, exitDue && p == loaded, newest, period => PeersOf(partitions, p, period, key.InstantPath, calendar)) is { } job)
-            {
-                return job;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// The largest object the partitions but <paramref name="sealing"/> sealed of the period from <paramref name="period"/>, its
-    /// bytes and rows, (0, 0) for none; null while one of them still holds rows of the period below the level of periods.
-    /// </summary>
-    private static (long Bytes, long Rows)? PeersOf(
-        List<List<List<CompactionInput>>> partitions, int sealing, long period, string path, PeriodCalendar calendar)
-    {
-        long end = calendar.Next(period);
-        (long Bytes, long Rows) largest = (0, 0);
-        for (int p = 0; p < partitions.Count; p++)
-        {
-            if (p == sealing)
-            {
-                continue;
-            }
-
-            List<List<CompactionInput>> levels = partitions[p];
-            for (int level = 0; level < levels.Count; level++)
-            {
-                foreach (CompactionInput input in levels[level])
-                {
-                    if (!MayHold(input.Entry, path, period, end))
-                    {
-                        continue;
-                    }
-
-                    if (level != PeriodLevels.Periods)
-                    {
-                        return null;
-                    }
-
-                    // A joined object, of a partition whose periods are small, holds several: it weighs none.
-                    if (PeriodOf(input.Entry, path, calendar) is null)
-                    {
-                        continue;
-                    }
-
-                    if (input.Entry.Bytes > largest.Bytes)
-                    {
-                        largest = (input.Entry.Bytes, input.Entry.Rows);
-                    }
-                }
-            }
-        }
-
-        return largest;
-    }
-
-    /// <summary>Whether an object may hold rows of <c>[start, end)</c>: its instants meet it, or its summaries do not bound them.</summary>
-    private static bool MayHold(ObjectEntry entry, string path, long start, long end) =>
-        !entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax
-        || column.Min.Kind != FilterLiteralKind.Signed || column.Max.Kind != FilterLiteralKind.Signed
-        || (column.Min.SignedValue < end && column.Max.SignedValue >= start);
-
-    /// <summary>
-    /// The levels of each partition, in the order of the partitions' values: every object of one value of the
-    /// partition columns, from its summaries. Objects whose summaries do not say one value, none a split append
-    /// writes, are a group of their own, first.
-    /// </summary>
-    private static List<List<List<CompactionInput>>> Partitioned(List<List<CompactionInput>> levels, ClusteringKey key)
-    {
-        SortedDictionary<byte[], List<List<CompactionInput>>> partitions = new SortedDictionary<byte[], List<List<CompactionInput>>>(ByteOrder.Instance);
-        FilterLiteral[] values = new FilterLiteral[key.PartitionColumns];
-        for (int level = 0; level < levels.Count; level++)
-        {
-            foreach (CompactionInput input in levels[level])
-            {
-                byte[] partition = [];
-                bool one = true;
-                for (int i = 0; i < values.Length && one; i++)
-                {
-                    one = input.Entry.Summaries.TryGet(key.PartitionPaths[i], out ColumnSummary column)
-                        && column.HasMin && column.HasMax && column.Min.Equals(column.Max);
-                    values[i] = one ? column.Min : default;
-                }
-
-                if (one)
-                {
-                    partition = key.Encode(values);
-                }
-
-                if (!partitions.TryGetValue(partition, out List<List<CompactionInput>>? of))
-                {
-                    of = new List<List<CompactionInput>>(levels.Count);
-                    for (int l = 0; l < levels.Count; l++)
-                    {
-                        of.Add([]);
-                    }
-
-                    partitions[partition] = of;
-                }
-
-                of[level].Add(input);
-            }
-        }
-
-        return [.. partitions.Values];
-    }
-
-    /// <summary>The values of the partition columns the objects hold rows of, from the objects whose summaries say one each.</summary>
-    private static int PartitionsOf(List<List<CompactionInput>> levels, ClusteringKey key)
-    {
-        HashSet<string> partitions = new HashSet<string>(StringComparer.Ordinal);
-        foreach (List<CompactionInput> level in levels)
-        {
-            foreach (CompactionInput input in level)
-            {
-                if (key.PartitionOf(input.Entry.Summaries) is { } values)
-                {
-                    partitions.Add(Convert.ToHexString(key.Encode(values)));
-                }
-            }
-        }
-
-        return partitions.Count;
-    }
-
-    /// <summary>Byte strings in ordinal order: the order of encoded keys.</summary>
-    private sealed class ByteOrder : IComparer<byte[]>
-    {
-        internal static readonly ByteOrder Instance = new ByteOrder();
-
-        public int Compare(byte[]? x, byte[]? y) => x.AsSpan().SequenceCompareTo(y);
-    }
-
-    /// <summary>
-    /// <see cref="ChoosePeriods"/> over the levels of one partition, or of the whole dataset without partition
-    /// columns; <paramref name="exitDue"/> says whether level 0's exit is due for these objects. With partitions,
-    /// <paramref name="newestOfAll"/> is the newest instant of any and <paramref name="peers"/> what the others sealed of a
-    /// period (<see cref="PeriodCut.Peers"/>), which a seal weighs the dataset's calendar on.
-    /// </summary>
-    private static CompactionJob? ChoosePeriodsOf(
-        PlannedVersion dataset,
-        List<List<CompactionInput>> levels,
-        CompactionOptions settings,
-        HashSet<int> taken,
-        bool exitDue,
-        long? newestOfAll = null,
-        Func<long, (long Bytes, long Rows)?>? peers = null)
-    {
-        ClusteringKey key = dataset.Key!;
         TimeUnit unit = PeriodOptions.InstantOf(key);
         PeriodCalendar calendar = PeriodCalendar.Of(dataset.Header, unit);
         TimeSpan lateness = dataset.Header.Lateness ?? TimeSpan.Zero;
@@ -252,7 +73,7 @@ internal static partial class CompactionPolicy
                 Range = LevelRange.Of(PeriodLevels.Periods, inputs, key),
                 Cut = joined is { } span
                     ? new PeriodCut(calendar, null, Exit: false, Slices: true) { Span = span }
-                    : new PeriodCut(calendar, null, Exit: false, Slices: true) { Newest = newestOfAll ?? after, Peers = peers is null ? (0, 0) : peers(sealing) },
+                    : new PeriodCut(calendar, null, Exit: false, Slices: true) { Newest = after },
             };
         }
 
@@ -300,7 +121,7 @@ internal static partial class CompactionPolicy
             };
         }
 
-        // F adjacent small objects of the partition's periods join into one that spans their periods, each under an F-th
+        // F adjacent small objects of the periods level join into one that spans their periods, each under an F-th
         // of the joined size, so that a joined object stays under it, under the dataset's object cap, and under what a
         // purge rewrites within half the erasure delay.
         double purged = dataset.ErasureDelay is { } delay ? PeriodLengths.RewriteBytesPerSecond * delay.TotalSeconds / 2 : double.PositiveInfinity;
@@ -508,15 +329,15 @@ internal static partial class CompactionPolicy
 
     /// <summary>
     /// The first <paramref name="fanout"/> adjacent objects of the periods level each under <paramref name="small"/> bytes,
-    /// in key order, of one tier, of one month of the calendar and together under <paramref name="most"/> bytes, each of
-    /// one value of the partition columns when the dataset has some; null when no run holds that many. A larger object,
-    /// one whose summaries do not place it, and the first of another tier or another month start a run again.
+    /// in key order, of one tier, of one month of the calendar and together under <paramref name="most"/> bytes; null when
+    /// no run holds that many. A larger object, one whose summaries do not place it, and the first of another tier or
+    /// another month start a run again.
     /// </summary>
     /// <remarks>
     /// A tier counts an object's rows in powers of the fan-out, so that joins grow objects <paramref name="fanout"/>-fold
     /// each time, a row rewritten once a tier, rather than one object taking its neighbours in one by one, its rows
     /// rewritten at each. A joined object never spans two months, so that an expiry keeps its rows at most a month past
-    /// the cutoff, as it would a partition whose periods last a month; <paramref name="most"/> keeps it under the
+    /// the cutoff, as it would periods that last a month; <paramref name="most"/> keeps it under the
     /// dataset's object cap and a size a purge rewrites within half its erasure delay, as the length of a period does.
     /// </remarks>
     private static List<CompactionInput>? Joinable(
@@ -533,7 +354,6 @@ internal static partial class CompactionPolicy
         foreach (CompactionInput input in levels[PeriodLevels.Periods])
         {
             if (input.Entry.Bytes >= small || SpanOf(input.Entry, key.InstantPath, calendar) is not { } span
-                || (key.PartitionColumns > 0 && key.PartitionOf(input.Entry.Summaries) is null)
                 || TimeSlicer.Floor(span.End - 1, calendar.Unit, SliceWidth.Month) != TimeSlicer.Floor(span.Start, calendar.Unit, SliceWidth.Month))
             {
                 run.Clear();

@@ -115,21 +115,6 @@ internal static class DatasetTelemetry
         }
     }
 
-    private static readonly Histogram<long> Partitions = VortexTelemetry.Meter.CreateHistogram<long>(
-        "vortex.dataset.partitions", "{partition}", "The values of its partition columns a dataset holds rows of, at each plan of its compaction.");
-
-    /// <summary>
-    /// Records the partitions a plan found a dataset to hold: one append's values are bounded, a dataset's
-    /// over its life are not, and this is what shows them pile up.
-    /// </summary>
-    internal static void PartitionsHeld(int partitions)
-    {
-        if (Partitions.Enabled)
-        {
-            Partitions.Record(partitions);
-        }
-    }
-
     private static readonly Histogram<double> PeriodLoad = VortexTelemetry.Meter.CreateHistogram<double>(
         "vortex.dataset.period.load", "By/s", "The bytes per second of data time of each period a seal wrote, with the period length that load calls for.");
 

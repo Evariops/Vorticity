@@ -124,11 +124,7 @@ internal enum DatasetFeatures : ulong
     /// <summary>Columns whose values questions look up, which a library that does not know them would drop from the headers it writes.</summary>
     Identifiers = 8,
 
-    /// <summary>
-    /// Leading key columns that partition the objects: a library that does not know them would merge objects of
-    /// two partitions, against the retention each holds.
-    /// </summary>
-    Partitions = 16,
+    // 16 named partition columns, retired with them: a header that still names it is refused, never reused.
 
     /// <summary>
     /// Keys of variant columns every job shreds into columns of their own, which a library that does not know them

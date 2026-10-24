@@ -949,9 +949,8 @@ internal sealed class DatasetScanBuilder
         // in one slice the window cuts answers with that edge alone, read by the object's chunk directories with no open
         // of it, where a scan of its rows read the footer, 31 MB for a day's, and the instant's zone map.
         SynopsisQuestion question = QuestionOf(request, key.InstantPath);
-        IReadOnlyDictionary<string, FilterLiteral>? partition = PartitionFilter.ValuesOf(held.Entry, key);
-        if ((SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, edgesAlone: inSlice)
-                ?? (question.MayExclude ? SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, assumeAbsent: true, edgesAlone: inSlice) : null))
+        if ((SynopsisAnswer.Of(question, contents, schema, instants, null, within, held.Entry.HasDeletions, edgesAlone: inSlice)
+                ?? (question.MayExclude ? SynopsisAnswer.Of(question, contents, schema, instants, null, within, held.Entry.HasDeletions, assumeAbsent: true, edgesAlone: inSlice) : null))
             is not { } answer)
         {
             return default;

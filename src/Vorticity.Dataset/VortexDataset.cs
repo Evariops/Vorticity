@@ -1050,17 +1050,12 @@ public sealed class VortexDataset : IAsyncDisposable
             : Version;
     }
 
-    /// <summary>
-    /// The objects an append of <paramref name="draft"/> adds: the draft's own, completed and put; or, when the
-    /// dataset has partition columns and its rows hold several values of them, an object per value, its rows read
-    /// back and split, the draft's object left for vacuum.
-    /// </summary>
+    /// <summary>The objects an append of <paramref name="draft"/> adds: the draft's own, completed and put.</summary>
     private async ValueTask<List<WrittenObject>> WrittenAsync(ObjectDraft draft, CancellationToken cancellationToken)
     {
         WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
-        return await ObservedAsync(written is { } produced ? await PartitionedAsync(produced, cancellationToken).ConfigureAwait(false) : [], cancellationToken)
-            .ConfigureAwait(false);
+        return await ObservedAsync(written is { } produced ? [produced] : [], cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1080,7 +1075,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// Refuses an append whose objects hold a row later than the lateness horizon, when the handle says so
-    /// (<see cref="PeriodOptions.RefuseLateRows"/>): a row of a period the newest instant its partition holds past
+    /// (<see cref="PeriodOptions.RefuseLateRows"/>): a row of a period the newest instant the dataset holds past
     /// level 0 and the late level has closed. Nothing is committed, and the objects are left for vacuum.
     /// </summary>
     /// <exception cref="ArgumentException">An object holds such a row.</exception>
@@ -1115,20 +1110,19 @@ public sealed class VortexDataset : IAsyncDisposable
 
         long reach = horizon > 0 && earliest > long.MaxValue - horizon ? long.MaxValue : earliest + horizon;
         SummaryPruner closing = new SummaryPruner(Expr.Ge(Expr.Field(key.InstantPath), Expr.Literal(FilterLiteral.From(reach))));
-        Dictionary<string, long> newest = new Dictionary<string, long>(StringComparer.Ordinal);
+        long? newest = null;
         await foreach (PositionedObject held in version.WalkAsync(closing, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
         {
             if (held.Level is not (0 or PeriodLevels.Late) && Instants(held.Entry.Summaries, key) is { } instants)
             {
-                string partition = PartitionName(held.Entry.Summaries, key);
-                newest[partition] = Math.Max(newest.GetValueOrDefault(partition, long.MinValue), instants.Greatest);
+                newest = Math.Max(newest ?? long.MinValue, instants.Greatest);
             }
         }
 
         foreach (WrittenObject produced in written)
         {
             if (Instants(produced.Entry.Summaries, key) is { } instants
-                && newest.TryGetValue(PartitionName(produced.Entry.Summaries, key), out long held)
+                && newest is { } held
                 && calendar.Next(calendar.Floor(instants.Least)) <= held - horizon)
             {
                 throw new ArgumentException(
@@ -1145,71 +1139,9 @@ public sealed class VortexDataset : IAsyncDisposable
             ? (instant.Min.SignedValue, instant.Max.SignedValue)
             : null;
 
-    /// <summary>A name of the partition an object holds, empty without partition columns or when its summaries do not say it.</summary>
-    private static string PartitionName(ObjectSummaries summaries, ClusteringKey key) =>
-        key.PartitionOf(summaries) is { } values ? Convert.ToHexString(key.Encode(values)) : string.Empty;
-
-    /// <summary>
-    /// An object a writer of this dataset put, as the objects it stands for: itself, unless the dataset has partition
-    /// columns and its rows hold several values of them, an object per value then, its rows read back and split and
-    /// the object itself left for vacuum.
-    /// </summary>
-    internal async ValueTask<List<WrittenObject>> PartitionedAsync(WrittenObject produced, CancellationToken cancellationToken)
-    {
-        if (Key is not { PartitionColumns: > 0 } key || key.PartitionOf(produced.Entry.Summaries) is not null)
-        {
-            return [produced];
-        }
-
-        PartitionedAppend split = new PartitionedAppend(this, key, _options.MaxPartitionValues);
-        await using (split.ConfigureAwait(false))
-        {
-            ObjectLease lease = await RentAsync(produced.Entry, cancellationToken).ConfigureAwait(false);
-            await using (lease.ConfigureAwait(false))
-            {
-                await foreach (RecordBatch batch in lease.File.ScanBuilder().ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
-                {
-                    await split.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
-                }
-            }
-
-            return await WrittenAsync(split, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>The objects of a split append completed and put, an object per partition value its rows hold.</summary>
-    private async ValueTask<List<WrittenObject>> WrittenAsync(PartitionedAppend split, CancellationToken cancellationToken)
-    {
-        long end = await EndAsync(cancellationToken).ConfigureAwait(false);
-        List<WrittenObject> written = [];
-        foreach (ObjectDraft draft in split.Drafts)
-        {
-            if (await CompleteAsync(draft, end, cancellationToken).ConfigureAwait(false) is { } produced)
-            {
-                written.Add(produced);
-            }
-        }
-
-        return written;
-    }
-
-    /// <summary>The batches of an append, as one object, or one per partition value when the dataset has partition columns.</summary>
+    /// <summary>The batches of an append, as one object.</summary>
     private async ValueTask<List<WrittenObject>> WrittenAsync(IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken)
     {
-        if (Key is { PartitionColumns: > 0 } key)
-        {
-            PartitionedAppend split = new PartitionedAppend(this, key, _options.MaxPartitionValues);
-            await using (split.ConfigureAwait(false))
-            {
-                await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
-                {
-                    await split.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
-                }
-
-                return await ObservedAsync(await WrittenAsync(split, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
-            }
-        }
-
         ObjectDraft draft = StartObject();
         try
         {
@@ -1667,47 +1599,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <see cref="DeleteAsync(VortexExpr, CancellationToken)"/>, which opens the objects it touches.
     /// </remarks>
     public ValueTask<DateTimeOffset> ExpireAsync(DateTimeOffset before, CancellationToken cancellationToken = default) =>
-        DatasetExpiry.RunAsync(this, null, before, cancellationToken);
-
-    /// <summary>
-    /// Drops, in one commit and reading none of them, every object of the partitions <paramref name="partition"/> keeps
-    /// whose rows all lie before <paramref name="before"/>, aligned down to the start of the period holding it:
-    /// <c>dataset.ExpireAsync&lt;Logged&gt;(r =&gt; r.Retention == "debug", now - TimeSpan.FromDays(7))</c>.
-    /// </summary>
-    /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
-    /// <param name="partition">A filter on the partition columns alone, each compared with values.</param>
-    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
-    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
-    /// <returns>The cutoff applied: the start of the period holding <paramref name="before"/>.</returns>
-    /// <exception cref="InvalidOperationException">The dataset declares no periods, or no partition columns (<see cref="DatasetOptions.PartitionColumns"/>).</exception>
-    /// <exception cref="ArgumentException">The filter reads another column, or reads the partition columns otherwise than compared with values: a delete, not an expiry.</exception>
-    /// <remarks>
-    /// Each partition holds its own periods, so the objects of the partitions the filter keeps hold no row of another,
-    /// and their entries say which partition they hold: nothing is read but the version's pages.
-    /// </remarks>
-    public ValueTask<DateTimeOffset> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate> partition, DateTimeOffset before, CancellationToken cancellationToken = default)
-        where TRecord : IVortexRecord<TRecord>
-    {
-        ArgumentNullException.ThrowIfNull(partition);
-        Predicate predicate = partition(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
-        return DatasetExpiry.RunAsync(this, predicate.IsAll || predicate.IsNone ? null : Checked(predicate.Node), before, cancellationToken, removes: !predicate.IsNone);
-    }
-
-    /// <summary>
-    /// As <see cref="ExpireAsync{TRecord}(Func{Probe{TRecord}, Predicate}, DateTimeOffset, CancellationToken)"/>, for a
-    /// caller without a record type.
-    /// </summary>
-    /// <param name="partition">A filter on the partition columns alone, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
-    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
-    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
-    /// <returns>The cutoff applied.</returns>
-    /// <exception cref="InvalidOperationException">The dataset declares no periods, or no partition columns.</exception>
-    /// <exception cref="ArgumentException">The filter is not one of the partition columns compared with values.</exception>
-    public ValueTask<DateTimeOffset> ExpireAsync(VortexExpr partition, DateTimeOffset before, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(partition);
-        return DatasetExpiry.RunAsync(this, Checked(ToolPaths.Check(Schema, partition)), before, cancellationToken);
-    }
+        DatasetExpiry.RunAsync(this, before, cancellationToken);
 
     /// <summary>
     /// Changes the rows <paramref name="filter"/> is true for, in one commit: each is read as a
@@ -2216,24 +2108,12 @@ public sealed class VortexDataset : IAsyncDisposable
             await ((SealedObjectStore)store).StartSealedAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        if (options.PartitionColumns > 0 && options.Periods is null)
-        {
-            throw new ArgumentException(
-                "Partition columns split a dataset compacted by periods, each partition growing its own: declare DatasetOptions.Periods with them.",
-                nameof(options));
-        }
-
-        ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey, options.PartitionColumns);
+        ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
         DatasetFeatures features = options.ErasureDelay is null ? DatasetFeatures.None : DatasetFeatures.ErasureDelay;
         if (options.Periods is not null)
         {
             _ = PeriodOptions.InstantOf(key);
             features |= DatasetFeatures.Periods;
-        }
-
-        if (options.PartitionColumns > 0)
-        {
-            features |= DatasetFeatures.Partitions;
         }
 
         string[] declared = [];
@@ -2264,7 +2144,6 @@ public sealed class VortexDataset : IAsyncDisposable
             ErasureDelay = options.ErasureDelay,
             Lateness = options.Periods?.Lateness,
             PeriodLength = options.Periods?.Length,
-            PartitionColumns = options.PartitionColumns,
             Identifiers = declared,
             ShreddedPaths = shredded,
             Features = features,
@@ -3179,8 +3058,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// column a reader is most likely to filter by.
     /// </summary>
     /// <param name="file">The object, open.</param>
-    /// <param name="partition">The one value of each partition column its writer knows it holds, an exact bound of each; null for none.</param>
-    private ObjectSummaries Summaries(VortexFile file, Expressions.FilterLiteral[]? partition = null)
+    private ObjectSummaries Summaries(VortexFile file)
     {
         IReadOnlyList<ColumnSummary> columns = _options.SummaryColumns is { } declared
             ? ColumnSummaries.Of(file, declared)
@@ -3190,18 +3068,8 @@ public sealed class VortexDataset : IAsyncDisposable
             return ObjectSummaries.From(columns);
         }
 
-        // The partition first: its exact value stands for whatever bounds the file states, or does not.
         List<ColumnSummary> all = [];
         HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
-        if (partition is not null && partition.Length == clustering.PartitionColumns)
-        {
-            for (int i = 0; i < partition.Length; i++)
-            {
-                all.Add(new ColumnSummary(clustering.PartitionPaths[i], partition[i], true, partition[i], true, true, 0, true));
-                seen.Add(clustering.PartitionPaths[i]);
-            }
-        }
-
         foreach (ColumnSummary column in columns)
         {
             if (seen.Add(column.Path))
@@ -3250,7 +3118,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 await CheckSlicedAsync(file, cancellationToken).ConfigureAwait(false);
             }
 
-            ObjectSummaries summaries = Summaries(file, draft.Partition);
+            ObjectSummaries summaries = Summaries(file);
             return (summaries, await PrefixAsync(file, summaries, firstRow, cancellationToken)
                 .ConfigureAwait(false));
         }

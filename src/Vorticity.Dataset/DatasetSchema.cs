@@ -36,7 +36,7 @@ internal sealed class DatasetSchema
     private readonly ConditionalWeakTable<DTypeArena, Mapped> _mapped = new ConditionalWeakTable<DTypeArena, Mapped>();
 
     private DatasetSchema(
-        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy, int partitionColumns,
+        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy,
         IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths)
     {
         Bytes = bytes;
@@ -48,7 +48,7 @@ internal sealed class DatasetSchema
         IndexedColumns = new HashSet<string>(IndexPolicy.Columns.Keys, StringComparer.Ordinal);
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
-        Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType, partitionColumns);
+        Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);
@@ -111,7 +111,7 @@ internal sealed class DatasetSchema
             && Same(previous.Identifiers, header.Identifiers) && Same(previous.ShreddedPaths, header.ShreddedPaths)
             ? previous
             : new DatasetSchema(
-                header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.PartitionColumns, header.Identifiers, header.ShreddedPaths);
+                header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.Identifiers, header.ShreddedPaths);
 
     /// <summary>
     /// How an object of this dtype answers for these columns: null when it holds exactly them, the

@@ -444,7 +444,6 @@ internal static class DatasetCompactor
                     Plans = plans,
                     Streamed = streamed,
                     InstantPath = plans is null && streamed is null ? null : key!.InstantPath,
-                    Partition = key?.SharedPartition(job.Inputs.Select(static input => input.Entry.Summaries)),
                 };
                 try
                 {
@@ -506,12 +505,11 @@ internal static class DatasetCompactor
             Joins = job.Cut is { Span: { } span } joining && joining.Calendar.Next(span.Start) < span.End,
         };
 
-        // A seal weighs the period it wrote, once every partition sealed it, and asks in the same commit for
-        // the length that load calls for, from past the newest instant: the periods already written keep
-        // their bounds.
+        // A seal weighs the period it wrote, and asks in the same commit for the length that load calls for,
+        // from past the newest instant: the periods already written keep their bounds.
         List<DatasetOperation> operations = [replacement];
-        if (job.Cut is { Slices: true, Newest: { } newest, Peers: { } peers } sealing && outputs.Written.Count == 1
-            && Reweigh(dataset, sealing, outputs.Written[0], peers, newest) is { } change)
+        if (job.Cut is { Slices: true, Newest: { } newest } sealing && outputs.Written.Count == 1
+            && Reweigh(dataset, sealing, outputs.Written[0], newest) is { } change)
         {
             operations.Add(change);
         }
@@ -1185,15 +1183,13 @@ internal static class DatasetCompactor
 
     /// <summary>
     /// The change of period length the load of the period a seal wrote calls for, or null: the bytes and
-    /// rows over its span of data time of the period's largest object, the one written or the largest
-    /// another partition sealed of it (<paramref name="peers"/>), every constraint bounding an object and
-    /// each partition sealing its own; the columns, the object cap, the erasure delay. A row's bytes of data
-    /// bound its widest column's, which keeps the chunk constraint on the safe side; the object's indexes and
-    /// synopsis tables belong to no column, and would make a small period's rows look wide, so the object
-    /// written counts its data alone, and another its whole bytes, which errs on the same side.
+    /// rows over its span of data time of the object written; the columns, the object cap, the erasure
+    /// delay. A row's bytes of data bound its widest column's, which keeps the chunk constraint on the safe
+    /// side; the object's indexes and synopsis tables belong to no column, and would make a small period's
+    /// rows look wide, so the object counts its data alone.
     /// </summary>
     private static DatasetOperation.ChangePeriodLength? Reweigh(
-        VortexDataset dataset, PeriodCut cut, WrittenObject written, (long Bytes, long Rows) peers, long newest)
+        VortexDataset dataset, PeriodCut cut, WrittenObject written, long newest)
     {
         ObjectEntry period = written.Entry;
         if (dataset.Key is not { } key || !period.Summaries.TryGet(key.InstantPath, out ColumnSummary instant)
@@ -1203,9 +1199,7 @@ internal static class DatasetCompactor
             return null;
         }
 
-        (long bytes, long rows, long data) = peers.Bytes > period.Bytes && peers.Rows > 0
-            ? (peers.Bytes, peers.Rows, peers.Bytes)
-            : (period.Bytes, period.Rows, written.DataBytes > 0 ? written.DataBytes : period.Bytes);
+        (long bytes, long rows, long data) = (period.Bytes, period.Rows, written.DataBytes > 0 ? written.DataBytes : period.Bytes);
         long start = cut.Calendar.Floor(instant.Min.SignedValue);
         double seconds = (cut.Calendar.Next(start) - start) / (double)TimeSlicer.Units(TimeSpan.FromSeconds(1), cut.Unit);
         PeriodLoad load = new PeriodLoad(
@@ -1344,9 +1338,6 @@ internal static class DatasetCompactor
         /// <summary>The instant column, top-level, the slices are declared on; null without plans.</summary>
         internal string? InstantPath { get; init; }
 
-        /// <summary>The partition every input holds, which every output then holds; null without one.</summary>
-        internal Vorticity.Expressions.FilterLiteral[]? Partition { get; init; }
-
         /// <summary>Where the stages of its sorted slices take their time is added; null for no count.</summary>
         internal WriteTimings? Timings { get; init; }
 
@@ -1438,7 +1429,6 @@ internal static class DatasetCompactor
                     _draft = _dataset.StartObjectUnder(
                         _schema, _inKeyOrder, _rowBound, sliced: plan is not null, shredded: plan?.Shredded, variantChunks: plan?.VariantChunks,
                         directories: plan?.Directories, byteBound: _byteBound);
-                    _draft.Partition = Partition;
                     if (plan is not null)
                     {
                         SliceTable table = plan.Slices;
@@ -1492,7 +1482,6 @@ internal static class DatasetCompactor
             _streamed = streamed;
             _draft = _dataset.StartObjectUnder(
                 _schema, _inKeyOrder, streamed.ExpectedRows > 0 ? streamed.ExpectedRows : _rowBound, sliced: true, byteBound: _byteBound);
-            _draft.Partition = Partition;
             _sorter = new SortedSlices(_stream, streamed.Candidates, instant, _schema.DType, rows, streamed.Target)
             {
                 Timings = Timings,

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using Vorticity.Expressions;
 using Vorticity.Keys;
 using Vorticity.Scanning;
@@ -27,17 +26,11 @@ internal sealed class LevelRange
     private readonly bool _bounded;
     private readonly bool _lowExcluded;
 
-    // The partition every source holds, each column's one value; null without partition columns, or when the
-    // sources do not share one, which the range then does not narrow to.
-    private readonly (string Path, FilterLiteral Value)[]? _partition;
-
-    private LevelRange(
-        int level, string path, FilterLiteral low, FilterLiteral high, bool bounded, bool lowExcluded = false, (string Path, FilterLiteral Value)[]? partition = null)
+    private LevelRange(int level, string path, FilterLiteral low, FilterLiteral high, bool bounded, bool lowExcluded = false)
     {
         Level = level;
         Path = path;
-        _partition = partition;
-        _leading = new SummaryColumns(partition is null ? [path] : [path, .. partition.Select(static column => column.Path)]);
+        _leading = new SummaryColumns([path]);
         _low = low;
         _high = high;
         _bounded = bounded;
@@ -54,26 +47,24 @@ internal sealed class LevelRange
     {
         LevelRange hull = Of(level, sources, key);
         return hull._bounded
-            ? new LevelRange(level, hull.Path, low, hull._high, bounded: true, lowExcluded: true, hull._partition)
+            ? new LevelRange(level, hull.Path, low, hull._high, bounded: true, lowExcluded: true)
             : hull;
     }
 
     /// <summary>The level the range lies in.</summary>
     internal int Level { get; }
 
-    /// <summary>The column the bounds are on: the clustering key's first past its partition columns.</summary>
+    /// <summary>The column the bounds are on: the clustering key's first.</summary>
     internal string Path { get; }
 
     /// <summary>
     /// The range <paramref name="sources"/> span once in <paramref name="level"/>: from the smallest
     /// minimum to the largest maximum, the holes between them included, since a merge writes one
-    /// sorted sequence across them, inside the partition they all hold. Unbounded when one of them states
-    /// no bound on the key.
+    /// sorted sequence across them. Unbounded when one of them states no bound on the key.
     /// </summary>
     internal static LevelRange Of(int level, IReadOnlyList<CompactionInput> sources, ClusteringKey key)
     {
         string path = key.InstantPath;
-        (string, FilterLiteral)[]? partition = Shared(sources, key);
         FilterLiteral low = default;
         FilterLiteral high = default;
         bool bounded = false;
@@ -81,7 +72,7 @@ internal sealed class LevelRange
         {
             if (!source.Entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax)
             {
-                return new LevelRange(level, path, default, default, bounded: false, partition: partition);
+                return new LevelRange(level, path, default, default, bounded: false);
             }
 
             if (!bounded || KeyCursor.Compare(column.Min, low) < 0)
@@ -97,64 +88,19 @@ internal sealed class LevelRange
             bounded = true;
         }
 
-        return new LevelRange(level, path, low, high, bounded, partition: partition);
-    }
-
-    /// <summary>The one value of each partition column every source holds; null without partition columns, or when they do not share one.</summary>
-    private static (string Path, FilterLiteral Value)[]? Shared(IReadOnlyList<CompactionInput> sources, ClusteringKey key)
-    {
-        if (key.PartitionColumns == 0 || sources.Count == 0)
-        {
-            return null;
-        }
-
-        (string, FilterLiteral)[] partition = new (string, FilterLiteral)[key.PartitionColumns];
-        for (int i = 0; i < partition.Length; i++)
-        {
-            string path = key.PartitionPaths[i];
-            FilterLiteral? shared = null;
-            foreach (CompactionInput source in sources)
-            {
-                if (!source.Entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax
-                    || !column.Min.Equals(column.Max) || (shared is { } seen && !seen.Equals(column.Min)))
-                {
-                    return null;
-                }
-
-                shared = column.Min;
-            }
-
-            partition[i] = (path, shared!.Value);
-        }
-
-        return partition;
+        return new LevelRange(level, path, low, high, bounded);
     }
 
     /// <summary>Whether an object with these summaries may hold a key inside the range.</summary>
     internal bool Overlaps(ObjectSummaries summaries) =>
-        InPartition(summaries) && (!_bounded || !summaries.TryGet(Path, out ColumnSummary column) || Meets(column));
-
-    /// <summary>Whether an object or a subtree with these summaries may hold a row of the range's partition; true without one.</summary>
-    private bool InPartition(ObjectSummaries summaries)
-    {
-        foreach ((string path, FilterLiteral value) in _partition ?? [])
-        {
-            if (summaries.TryGet(path, out ColumnSummary column)
-                && ((column.HasMin && KeyCursor.Compare(value, column.Min) < 0) || (column.HasMax && KeyCursor.Compare(value, column.Max) > 0)))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+        !_bounded || !summaries.TryGet(Path, out ColumnSummary column) || Meets(column);
 
     /// <summary>
     /// <see cref="Overlaps(ObjectSummaries)"/> asked of a leaf entry's bytes, its summaries decoded for
     /// the key's column alone.
     /// </summary>
     internal bool Overlaps(ReadOnlyMemory<byte> entry) =>
-        (!_bounded && _partition is null) || Overlaps(ObjectSummaries.Of(ObjectEntry.SummaryOf(entry).Span, _leading));
+        !_bounded || Overlaps(ObjectSummaries.Of(ObjectEntry.SummaryOf(entry).Span, _leading));
 
     /// <summary>
     /// Whether a subtree may hold an object overlapping the range: the test an object's own summary
@@ -162,7 +108,7 @@ internal sealed class LevelRange
     /// </summary>
     internal bool MayOverlap(InternalEntry node)
     {
-        if (!_bounded && _partition is null)
+        if (!_bounded)
         {
             return true;
         }
@@ -174,7 +120,7 @@ internal sealed class LevelRange
         }
 
         ObjectSummaries held = ObjectSummaries.Of(summaries, _leading);
-        return InPartition(held) && (!_bounded || !held.TryGet(Path, out ColumnSummary column) || Meets(column));
+        return !held.TryGet(Path, out ColumnSummary column) || Meets(column);
     }
 
     /// <summary>Whether a column's bounds may meet the range; a missing bound proves nothing, so it meets.</summary>

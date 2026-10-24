@@ -33,7 +33,7 @@ internal static class SynopsisOrder
 {
     /// <summary>
     /// The columns that may be synopsis columns: top-level, of a type whose values have an order of codes, not the
-    /// instant, a partition column, whose one value an object holds, nor an identifier.
+    /// instant, nor an identifier.
     /// </summary>
     internal static int[] Candidates(DType schema, ClusteringKey key, IReadOnlyList<string>? identifiers)
     {
@@ -42,7 +42,6 @@ internal static class SynopsisOrder
         {
             string name = schema.GetFieldName(field);
             if (string.Equals(name, key.InstantPath, StringComparison.Ordinal)
-                || key.PartitionPaths.Contains(name)
                 || (identifiers is not null && Contains(identifiers, name))
                 || !Coded(schema.GetField(field)))
             {

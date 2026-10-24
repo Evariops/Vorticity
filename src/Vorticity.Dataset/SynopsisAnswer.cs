@@ -309,16 +309,6 @@ internal sealed record SynopsisAnswer(
         for (int c = 0; c < conjuncts.Length; c++)
         {
             VortexExpr conjunct = conjuncts[c];
-            if (partition is not null && PartitionFilter.Decided(conjunct, partition) is { } holds)
-            {
-                if (!holds)
-                {
-                    return new SynopsisAnswer([], [], null, request, []);
-                }
-
-                continue;
-            }
-
             if (Exclusion(conjunct, question.Identifiers, schema) is { } part)
             {
                 if (assumeAbsent)
