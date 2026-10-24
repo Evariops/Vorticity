@@ -1,9 +1,9 @@
 # Ad hoc aggregates over long time windows
 
-> **Superseded.** This design is being removed: its composite synopsis tables answered only the
+> **Superseded.** This design is being replaced: its composite synopsis tables answered only the
 > prefixes of their order and weighed 4.7 to 8.8 % of the data. Its replacement, questions computed on
-> the fly by the group-by engine with per-column accelerators beside the rows, is
-> [22-on-the-fly-and-accelerators.md](22-on-the-fly-and-accelerators.md). This page goes when the
+> the fly by the group-by engine with synopses per column beside the rows, is
+> [22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md). This page goes when the
 > code it describes does.
 
 An application that appends events to a dataset (requests, log lines, metric points) at tens of
