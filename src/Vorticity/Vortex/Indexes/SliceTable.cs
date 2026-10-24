@@ -8,21 +8,25 @@ namespace Vorticity.Indexes;
 
 /// <summary>
 /// One time slice of a file: the rows whose instant falls in <c>[Start, End)</c>, counted in the
-/// instant column's unit, which lie at rows <c>[FirstRow, FirstRow + Rows)</c>.
+/// instant column's unit, which lie at rows <c>[FirstRow, FirstRow + Rows)</c>. A slice of a table bounded by keys
+/// states no time: its bounds are the whole of it, <c>[long.MinValue, long.MaxValue)</c>.
 /// </summary>
 internal readonly record struct TimeSlice(long Start, long End, long FirstRow, long Rows);
 
 /// <summary>
-/// The time slices of a file: per slice its bounds on the instant, its first row and its row count,
-/// in time order, covering every row once. An entry of the index directory on the instant column,
-/// <see cref="IndexKinds.Slices"/>, whose options hold the table.
+/// The slices of a file: per slice its bounds, its first row and its row count, in order, covering every row once. An
+/// entry of the index directory on the column the bounds are on, <see cref="IndexKinds.Slices"/>, whose options hold the
+/// table. The bounds are a time's, on the file's instant column, or its keys', on the first column of the key its rows
+/// lie in the order of (<see cref="ByKeys"/>).
 /// </summary>
 /// <remarks>
 /// <para>
 /// The slices follow each other: each starts at or after the end of the one before, and its rows
-/// follow the one before's. Encoded behind a version byte as the instant's unit, the slice count,
+/// follow the one before's. A time table is encoded behind a version byte as the instant's unit, the slice count,
 /// and per slice the gap from the previous end, the width and the row count, each a varint: a few
-/// bytes a slice, a day of minutes in about 6 KiB.
+/// bytes a slice, a day of minutes in about 6 KiB. A key table, behind its own version byte, holds the slice count, per
+/// slice its rows and its first key, as the bytes it shares with the first key before it and the rest, and the last key
+/// of the last slice the same way.
 /// </para>
 /// <para>
 /// Like every index it is a hint: a table that does not decode, or whose rows are not the file's,
@@ -36,6 +40,13 @@ internal sealed class SliceTable
     // branch's own, which no store of a release holds.
     private const byte Version = 5;
     private const byte WithOrder = 4;
+
+    // A table bounded by keys.
+    private const byte Keyed = 6;
+
+    // The first key of each slice, and the last key of the last one, row-encoded; null for a time table.
+    private readonly byte[][]? _lows;
+    private readonly byte[]? _high;
 
     /// <summary>A table of <paramref name="slices"/> over instants counted in <paramref name="unit"/>.</summary>
     /// <exception cref="ArgumentException">The slices are empty, do not follow each other, or one is empty or inverted.</exception>
@@ -51,14 +62,63 @@ internal sealed class SliceTable
         Slices = slices;
     }
 
-    /// <summary>The unit the slices' bounds are counted in: the instant column's.</summary>
+    private SliceTable(TimeSlice[] slices, byte[][] lows, byte[] high)
+    {
+        Slices = slices;
+        _lows = lows;
+        _high = high;
+    }
+
+    /// <summary>
+    /// A table of the slices of a file whose rows lie in the order of a key: each slice's <paramref name="rows"/>, its first
+    /// key in <paramref name="lows"/>, and the last key of the last one, <paramref name="high"/>, row-encoded as the key
+    /// orders them, so that a slice's keys lie from its first to the next slice's, or to <paramref name="high"/>.
+    /// </summary>
+    /// <exception cref="ArgumentException">There is no slice, a slice holds no row, or the keys are not in order.</exception>
+    internal static SliceTable ByKeys(IReadOnlyList<long> rows, IReadOnlyList<byte[]> lows, byte[] high)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        ArgumentNullException.ThrowIfNull(lows);
+        ArgumentNullException.ThrowIfNull(high);
+        if (rows.Count == 0 || rows.Count != lows.Count)
+        {
+            throw new ArgumentException($"{rows.Count} slice(s) of rows and {lows.Count} first key(s): a key table holds a first key a slice, and a slice at least.", nameof(rows));
+        }
+
+        TimeSlice[] slices = new TimeSlice[rows.Count];
+        long row = 0;
+        for (int i = 0; i < slices.Length; i++)
+        {
+            slices[i] = new TimeSlice(long.MinValue, long.MaxValue, row, rows[i]);
+            row += rows[i];
+        }
+
+        byte[][] held = [.. lows];
+        return KeyProblem(slices, held, high) is { } problem
+            ? throw new ArgumentException(problem, nameof(lows))
+            : new SliceTable(slices, held, high);
+    }
+
+    /// <summary>The unit the slices' bounds are counted in: the instant column's, for a time table.</summary>
     internal TimeUnit Unit { get; }
 
-    /// <summary>The slices, in time order.</summary>
+    /// <summary>The slices, in order; those of a key table state no time.</summary>
     internal IReadOnlyList<TimeSlice> Slices { get; }
 
     /// <summary>The rows the slices cover.</summary>
     internal long Rows => Slices[^1].FirstRow + Slices[^1].Rows;
+
+    /// <summary>Whether the slices are bounded by keys rather than by a time.</summary>
+    internal bool ByKey => _lows is not null;
+
+    /// <summary>The first key of slice <paramref name="slice"/> of a key table, row-encoded: no key of the slice is below it.</summary>
+    internal ReadOnlySpan<byte> LowOf(int slice) => _lows![slice];
+
+    /// <summary>
+    /// A key at or above every key of slice <paramref name="slice"/> of a key table, row-encoded: the next slice's first,
+    /// or the last key of the last slice.
+    /// </summary>
+    internal ReadOnlySpan<byte> CeilingOf(int slice) => slice + 1 < _lows!.Length ? _lows[slice + 1] : _high!;
 
     /// <summary>Why <paramref name="slices"/> are not a table, or null when they are.</summary>
     private static string? Problem(IReadOnlyList<TimeSlice> slices)
@@ -90,12 +150,47 @@ internal sealed class SliceTable
         return null;
     }
 
+    /// <summary>Why a key table's slices and keys are not one, or null when they are.</summary>
+    private static string? KeyProblem(TimeSlice[] slices, byte[][] lows, byte[] high)
+    {
+        for (int i = 0; i < slices.Length; i++)
+        {
+            if (slices[i].Rows <= 0)
+            {
+                return $"Slice {i} holds {slices[i].Rows} rows: a slice holds rows.";
+            }
+
+            if (i > 0 && lows[i].AsSpan().SequenceCompareTo(lows[i - 1]) < 0)
+            {
+                return $"Slice {i} starts below the slice before it: the slices follow the key.";
+            }
+        }
+
+        return high.AsSpan().SequenceCompareTo(lows[^1]) < 0 ? "The last key lies below the last slice's first: the slices follow the key." : null;
+    }
+
     /// <summary>The table's bytes, the options of its directory entry.</summary>
     internal byte[] ToBytes()
     {
         ProtoWriter writer = new ProtoWriter();
         try
         {
+            if (_lows is { } lows)
+            {
+                writer.WriteVarint(Keyed);
+                writer.WriteVarint((ulong)Slices.Count);
+                byte[] before = [];
+                for (int i = 0; i < Slices.Count; i++)
+                {
+                    writer.WriteVarint((ulong)Slices[i].Rows);
+                    WriteKey(ref writer, before, lows[i]);
+                    before = lows[i];
+                }
+
+                WriteKey(ref writer, before, _high!);
+                return writer.WrittenSpan.ToArray();
+            }
+
             writer.WriteVarint(Version);
             writer.WriteVarint((byte)Unit);
             writer.WriteVarint((ulong)Slices.Count);
@@ -119,6 +214,15 @@ internal sealed class SliceTable
         }
     }
 
+    /// <summary>A key as the bytes it shares with <paramref name="before"/>, a count, and the rest, its length first.</summary>
+    private static void WriteKey(ref ProtoWriter writer, ReadOnlySpan<byte> before, ReadOnlySpan<byte> key)
+    {
+        int shared = key.CommonPrefixLength(before);
+        writer.WriteVarint((ulong)shared);
+        writer.WriteVarint((ulong)(key.Length - shared));
+        writer.WriteRawBytes(key[shared..]);
+    }
+
     /// <summary>The table <paramref name="bytes"/> encode, or null when they do not decode as one.</summary>
     internal static SliceTable? FromBytes(ReadOnlySpan<byte> bytes)
     {
@@ -126,6 +230,11 @@ internal sealed class SliceTable
         {
             ProtoReader reader = new ProtoReader(bytes);
             ulong version = reader.ReadVarint();
+            if (version == Keyed)
+            {
+                return KeysFrom(ref reader, bytes.Length);
+            }
+
             if (version is not (Version or WithOrder))
             {
                 return null;
@@ -164,6 +273,53 @@ internal sealed class SliceTable
         {
             return null;
         }
+    }
+
+    /// <summary>A key table's slices and keys, past its version byte; null when they do not decode as one.</summary>
+    private static SliceTable? KeysFrom(ref ProtoReader reader, int bytes)
+    {
+        ulong count = reader.ReadVarint();
+        if (count == 0 || count > (ulong)bytes)
+        {
+            return null;
+        }
+
+        TimeSlice[] slices = new TimeSlice[(int)count];
+        byte[][] lows = new byte[slices.Length][];
+        byte[] before = [];
+        long row = 0;
+        for (int i = 0; i < slices.Length; i++)
+        {
+            long rows = (long)reader.ReadVarint();
+            slices[i] = new TimeSlice(long.MinValue, long.MaxValue, row, rows);
+            row = checked(row + rows);
+            if (ReadKey(ref reader, before) is not { } low)
+            {
+                return null;
+            }
+
+            lows[i] = before = low;
+        }
+
+        return ReadKey(ref reader, before) is { } high && reader.End && KeyProblem(slices, lows, high) is null
+            ? new SliceTable(slices, lows, high)
+            : null;
+    }
+
+    /// <summary>A key written by <see cref="WriteKey"/> after <paramref name="before"/>; null when its counts do not fit.</summary>
+    private static byte[]? ReadKey(ref ProtoReader reader, byte[] before)
+    {
+        ulong shared = reader.ReadVarint();
+        if (shared > (ulong)before.Length)
+        {
+            return null;
+        }
+
+        ReadOnlySpan<byte> tail = reader.ReadLengthDelimited();
+        byte[] key = new byte[(int)shared + tail.Length];
+        before.AsSpan(0, (int)shared).CopyTo(key);
+        tail.CopyTo(key.AsSpan((int)shared));
+        return key;
     }
 
     /// <summary>

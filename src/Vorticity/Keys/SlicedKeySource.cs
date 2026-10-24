@@ -131,8 +131,11 @@ internal sealed class SlicedKeySource : KeySource
                 return (null, $"the slice table is on a {storage.Kind} column, not one of 64-bit instants");
             }
 
+            // A table bounded by keys is a file's whose rows lie in key order, which its own run or column walks.
             return SliceTable.FromBytes(entry.Options) is { } table && table.Rows == file.RowCount
-                ? (new SlicedKeySource(file, path, table), null)
+                ? table.ByKey
+                    ? (null, "the slices are bounded by keys, not by instants")
+                    : (new SlicedKeySource(file, path, table), null)
                 : (null, "the slice table does not decode, or does not cover the file's rows");
         }
 

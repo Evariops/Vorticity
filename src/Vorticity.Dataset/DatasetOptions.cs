@@ -195,6 +195,19 @@ public sealed record DatasetOptions
     internal long SheetObjectBytes { get; init; } = 1L << 20;
 
     /// <summary>
+    /// The target from which the objects a job of a dataset with a key writes keep a table of contents and slices bounded
+    /// by their keys: 2^20 by default, the bytes under which an open reads an object's footer, and often all of it, in the
+    /// request a read without it would take. A test sets less to slice its small objects.
+    /// </summary>
+    internal long ContentsObjectBytes { get; init; } = 1L << 20;
+
+    /// <summary>
+    /// The rows a slice bounded by keys aims at: <see cref="TimeSlicer.DefaultTargetRows"/>, past which the next key starts
+    /// another. Each writer's own, since an object's slices are its own; a test sets a few rows.
+    /// </summary>
+    internal long SliceTargetRows { get; init; } = TimeSlicer.DefaultTargetRows;
+
+    /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
     /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
     /// </summary>

@@ -2119,10 +2119,19 @@ internal sealed class DatasetScanBuilder
         long low = long.MinValue;
         long high = long.MaxValue;
         if (held.Entry.Deletions.IsEmpty && filter is not null && _dataset.Key is { } key && Bound(filter, key.InstantPath, ref low, ref high)
-            && held.Entry.Contents is { } contents && WindowRows(contents.Slices.Slices, low, high) is { } window)
+            && held.Entry.Contents is { Slices.ByKey: false } contents && WindowRows(contents.Slices.Slices, low, high) is { } window)
         {
             lower = Math.Max(lower, window.Start);
             upper = Math.Min(upper, window.End);
+        }
+
+        // An object in slices bounded by its keys, the same of a range of the key's first column, of any type.
+        if (held.Entry.Deletions.IsEmpty && filter is not null && _dataset.Key is { } keyed && held.Entry.Contents is { Slices.ByKey: true } sliced
+            && KeyBounds(filter, keyed) is { } bounds)
+        {
+            RowRange range = KeyRows(sliced.Slices, bounds.Low, bounds.High, keyed.LeadingType);
+            lower = Math.Max(lower, range.Start);
+            upper = Math.Min(upper, range.End);
         }
 
         if (lower > 0 || upper < held.Entry.PhysicalRows)
@@ -2184,6 +2193,88 @@ internal sealed class DatasetScanBuilder
             default:
                 return false;
         }
+    }
+
+    /// <summary>
+    /// The bounds the conjuncts of <paramref name="filter"/> that compare the key's first column with a value put on it,
+    /// each row-encoded as the key encodes the column, inclusive, an empty array for a side none bounds; null when none
+    /// does. A strict comparison bounds as a loose one: the slices it reaches are among those, and the filter takes out
+    /// the rest. A value the column's type does not take bounds nothing.
+    /// </summary>
+    internal static (byte[] Low, byte[] High)? KeyBounds(VortexExpr filter, ClusteringKey key)
+    {
+        byte[]? low = null;
+        byte[]? high = null;
+        Narrow(filter, key, ref low, ref high);
+        return low is null && high is null ? null : (low ?? [], high ?? []);
+
+        static void Narrow(VortexExpr conjunct, ClusteringKey key, ref byte[]? low, ref byte[]? high)
+        {
+            if (conjunct is LogicalExpr { IsAnd: true } both)
+            {
+                Narrow(both.Left, key, ref low, ref high);
+                Narrow(both.Right, key, ref low, ref high);
+                return;
+            }
+
+            if (conjunct is not ComparisonExpr { Field: ColumnFieldExpr field } comparison || comparison.Value.Kind == FilterLiteralKind.Null
+                || !string.Equals(field.Path, key.InstantPath, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            byte[] bound;
+            try
+            {
+                bound = key.Encode([comparison.Value]);
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+
+            if (comparison.Op is ComparisonOp.Equal or ComparisonOp.Greater or ComparisonOp.GreaterOrEqual
+                && (low is null || bound.AsSpan().SequenceCompareTo(low) > 0))
+            {
+                low = bound;
+            }
+
+            if (comparison.Op is ComparisonOp.Equal or ComparisonOp.Less or ComparisonOp.LessOrEqual
+                && (high is null || bound.AsSpan().SequenceCompareTo(high) < 0))
+            {
+                high = bound;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The rows of the slices of <paramref name="table"/>, bounded by keys, whose first column of <paramref name="column"/>
+    /// reaches from <paramref name="low"/> to <paramref name="high"/>, inclusive, each row-encoded and empty for no bound:
+    /// from the first's first row to the last's last, empty when it reaches none.
+    /// </summary>
+    internal static RowRange KeyRows(Indexes.SliceTable table, ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, Types.DType column)
+    {
+        IReadOnlyList<Indexes.TimeSlice> slices = table.Slices;
+
+        // A slice reaches the range when the first value of the key above its keys is at its low or past, and the first
+        // value of its first key at its high or before.
+        int first = 0;
+        while (first < slices.Count && !low.IsEmpty && FirstValue(table.CeilingOf(first), column).SequenceCompareTo(low) < 0)
+        {
+            first++;
+        }
+
+        int last = slices.Count - 1;
+        while (last >= first && !high.IsEmpty && FirstValue(table.LowOf(last), column).SequenceCompareTo(high) > 0)
+        {
+            last--;
+        }
+
+        return last < first
+            ? RowRange.Empty
+            : new RowRange(slices[first].FirstRow, slices[last].FirstRow + slices[last].Rows);
+
+        static ReadOnlySpan<byte> FirstValue(ReadOnlySpan<byte> key, Types.DType column) => key[..RowEncoding.RowEncoder.FirstValueLength(key, column)];
     }
 
     /// <summary>

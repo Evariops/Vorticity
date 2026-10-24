@@ -920,6 +920,9 @@ public sealed class VortexDataset : IAsyncDisposable
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(
             _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes, byteBound);
+
+        // A dataset of periods slices its objects by time; any other, by its keys.
+        bool byTime = sliced && _options.Periods is not null;
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with
         {
             RowBound = rowBound,
@@ -927,11 +930,11 @@ public sealed class VortexDataset : IAsyncDisposable
             GatheredChunkBytes = _options.ChunkBytes,
             GatheredGroupRows = _options.GroupRows,
 
-            // An object in time slices, which a job writes, keeps a sheet of each column its table of contents names, when it
-            // is large enough for a scan to read the sheets before it, and the counts of each column by the hours of its
-            // period's instant.
+            // A sliced object, which a job writes, keeps a sheet of each column its table of contents names, when it is
+            // large enough for a scan to read the sheets before it; one in time slices, the counts of each column by the
+            // hours of its period's instant.
             ColumnSheetBytes = sliced ? _options.SheetObjectBytes : null,
-            CountsInstant = sliced && schema.Key is { } periodKey && !periodKey.InstantPath.Contains('.') ? periodKey.InstantPath : null,
+            CountsInstant = byTime && schema.Key is { } periodKey && !periodKey.InstantPath.Contains('.') ? periodKey.InstantPath : null,
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
@@ -991,8 +994,8 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // An object in time slices on a key of its instant alone is walked through its slice table,
         // which finds a key's slice, and the slice's instants ranked: a run on the key would repeat
-        // them, with a row for each.
-        bool bySlices = sliced && schema.Key is { IsComposite: false };
+        // them, with a row for each. One in key slices keeps its run, or its sorted column.
+        bool bySlices = byTime && schema.Key is { IsComposite: false };
         if (schema.Key is { } clustering && !bySortedColumn && !bySlices)
         {
             // The mandatory sorted run on the clustering key, added to the caller's own policy.

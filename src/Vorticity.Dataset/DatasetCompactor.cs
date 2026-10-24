@@ -419,6 +419,12 @@ internal static class DatasetCompactor
             }
         }
 
+        // A job of a dataset with a key whose objects aim at a mebibyte or more writes them in slices bounded by their
+        // keys, which their tables of contents name: what a lookup of an identifier and a filter on the key's first
+        // column read without an open of the object's footer. Its first column must be a top-level one, as for time.
+        string? keySliced = merge && job.Cut is null && job.TargetBytes >= dataset.Options.ContentsObjectBytes
+            && !key!.InstantPath.Contains('.') ? key.InstantPath : null;
+
         // Each object it streams is announced to the store as at most what the job reads, times what a job
         // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
         ObjectStream outputs;
@@ -435,6 +441,8 @@ internal static class DatasetCompactor
                     Plans = plans,
                     Streamed = streamed,
                     InstantPath = plans is null && streamed is null ? null : key!.InstantPath,
+                    KeySliced = keySliced,
+                    SliceTarget = dataset.Options.SliceTargetRows,
                 };
                 try
                 {
@@ -808,7 +816,13 @@ internal static class DatasetCompactor
                         // would overlap, and a level wants key-disjoint objects.
                         await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
                     }
+                    else if (outputs.WantsSlice && !outputs.HoldsKey(merge.KeyAt(at)))
+                    {
+                        // Nor across two slices, whose bounds then hold each key once.
+                        await outputs.CutSliceAsync(cancellationToken).ConfigureAwait(false);
+                    }
 
+                    outputs.Starts(merge.KeyAt(at));
                     outputs.Note(merge.KeyAt(end - 1));
                     await outputs.WriteAsync(at == 0 && end == run.RowCount ? run : run.Window(at, end - at), cancellationToken).ConfigureAwait(false);
                 }
@@ -1319,8 +1333,8 @@ internal static class DatasetCompactor
                     // variant columns shred.
                     ObjectPlan? plan = Plans?[(_level, _period)];
                     _draft = _dataset.StartObjectUnder(
-                        _schema, _inKeyOrder, _rowBound, sliced: plan is not null, shredded: plan?.Shredded, variantChunks: plan?.VariantChunks,
-                        directories: plan?.Directories, byteBound: _byteBound);
+                        _schema, _inKeyOrder, _rowBound, sliced: plan is not null || KeySliced is not null, shredded: plan?.Shredded,
+                        variantChunks: plan?.VariantChunks, directories: plan?.Directories, byteBound: _byteBound);
                     if (plan is not null)
                     {
                         _sorter = new SortedSlices(plan.Slices, _schema.DType.IndexOfField(InstantPath!), _schema.DType)
@@ -1341,7 +1355,71 @@ internal static class DatasetCompactor
                 return;
             }
 
+            _sliceFilled += batch.RowCount;
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// The key's first column, top-level, the objects' slices bounded by their keys are declared on; null for objects
+        /// written without them. Their rows come in key order.
+        /// </summary>
+        internal string? KeySliced { get; init; }
+
+        /// <summary>The rows a slice bounded by keys aims at, past which the next key starts another.</summary>
+        internal long SliceTarget { get; init; }
+
+        // The slices of the object being written, bounded by keys: each closed slice's rows, each slice's first key, and the
+        // rows of the one being written.
+        private readonly List<long> _sliceRows = [];
+        private readonly List<byte[]> _sliceLows = [];
+        private long _sliceFilled;
+
+        /// <summary>Whether the slice being written, bounded by keys, holds its target, so that the next key starts another.</summary>
+        internal bool WantsSlice => KeySliced is not null && _sliceFilled >= SliceTarget;
+
+        /// <summary>Records the first key of the rows written next, which starts a slice bounded by keys when they do.</summary>
+        internal void Starts(ReadOnlySpan<byte> key)
+        {
+            if (KeySliced is not null && _sliceFilled == 0)
+            {
+                _sliceLows.Add(key.ToArray());
+            }
+        }
+
+        /// <summary>Ends the slice being written: its chunks end with it, every column's together, and the next rows start the next.</summary>
+        internal async ValueTask CutSliceAsync(CancellationToken cancellationToken)
+        {
+            if (_draft is not { } draft || _sliceFilled == 0)
+            {
+                return;
+            }
+
+            await draft.Writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+            _sliceRows.Add(_sliceFilled);
+            _sliceFilled = 0;
+        }
+
+        /// <summary>
+        /// The slices of the object being written, bounded by keys, its last one closed at its last key; null when it holds
+        /// none. The lists start over for the next object.
+        /// </summary>
+        private SliceTable? KeySlices()
+        {
+            SliceTable? table = null;
+            if (KeySliced is not null && _sliceLows.Count > 0 && _lastKeyLength >= 0)
+            {
+                if (_sliceFilled > 0)
+                {
+                    _sliceRows.Add(_sliceFilled);
+                }
+
+                table = SliceTable.ByKeys(_sliceRows, _sliceLows, _lastKey.AsSpan(0, _lastKeyLength).ToArray());
+            }
+
+            _sliceRows.Clear();
+            _sliceLows.Clear();
+            _sliceFilled = 0;
+            return table;
         }
 
         /// <summary>
@@ -1421,7 +1499,8 @@ internal static class DatasetCompactor
             }
 
             // The object is this method's from here: whatever fails gives it up, its upload included when it streams, since
-            // nothing else holds the draft any more.
+            // nothing else holds the draft any more. Its slices bounded by keys close at its last key.
+            SliceTable? keySlices = KeySlices();
             _draft = null;
             _lastKeyLength = -1;
             _stream = null;
@@ -1430,6 +1509,11 @@ internal static class DatasetCompactor
             {
                 await using (draft.Writer.ConfigureAwait(false))
                 {
+                    if (keySlices is not null)
+                    {
+                        draft.Writer.DeclareSlices(KeySliced!, keySlices);
+                    }
+
                     if (_sorter is { } sorter)
                     {
                         // A first pass counted these rows: every slice is written, or the passes disagree.
