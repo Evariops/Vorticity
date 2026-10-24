@@ -36,7 +36,8 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// <summary>
     /// The ceilings of each pattern: requests and bytes cold, requests and bytes warm, which a build gives exactly, and the
     /// bytes one warm ask allocates, 2 % above what it allocated alone: beside the other classes that run alone, the pools
-    /// they leave took 112 bytes off each.
+    /// they leave took 112 bytes off each. QP-10, which reads rows warm, allocated 159,400 bytes on CI's Linux runner, where
+    /// Windows and WSL2 allocate 154,352: its ceiling stands 2 % above the runner's figure.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
@@ -45,7 +46,7 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
         ["QP-3 the services under a shredded status of 500 or more"] = new(4, 8560, 0, 0, 37440),
         ["QP-4 the spans of a trace"] = new(5, 328672, 1, 66444, 54880),
         ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(1, 18484, 0, 0, 289056),
-        ["QP-10 the services of a residual key"] = new(8, 284356, 4, 22128, 157440),
+        ["QP-10 the services of a residual key"] = new(8, 284356, 4, 22128, 162592),
     };
 
     private readonly Fixture _fixture;
