@@ -102,7 +102,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
     /// <summary>
     /// Whether the builder still counts the column's values, its distinct values within <see cref="ExactLimit"/> and not
-    /// new nine rows in ten; a column's counts by hour number its rows' values while it does.
+    /// new nine rows in ten; a column's counts number its rows' values while it does.
     /// </summary>
     internal bool Counting => _slots is not null;
 

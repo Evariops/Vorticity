@@ -13,7 +13,7 @@ using Vorticity.Writing;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// What a column's counts by hour cost the writer and weigh (<c>--micro counts</c>): the time-window design's requests
+/// What a column's counts cost the writer and weigh (<c>--micro counts</c>): the time-window design's requests
 /// over some hours, eleven columns, written on one thread to memory with a sheet of each column and with the counts
 /// besides, the best of several rounds of each, interleaved; the difference a counted column a row, against the 10 ns
 /// the plan allows, and each column's counts: its values, its entries, its bytes and its sketches' bytes.
@@ -40,7 +40,7 @@ internal static class CountsMicro
             Identity = new Guid("51515151-5151-4151-8151-515151515151"),
             ColumnSheetBytes = 0,
         };
-        VortexWriteOptions counted = sheets with { CountsInstant = nameof(GeneratedRequest.At) };
+        VortexWriteOptions counted = sheets with { Counted = true };
         double without = double.MaxValue;
         double with = double.MaxValue;
         byte[] file = [];
@@ -106,7 +106,7 @@ internal static class CountsMicro
         Array.Fill(ends, double.MaxValue);
         for (int round = 0; round < Math.Max(rounds, 2); round++)
         {
-            CountsPlan counts = CountsPlan.For(schema, nameof(GeneratedRequest.At))!;
+            CountsPlan counts = CountsPlan.For(schema)!;
             ColumnSheetBuilder[] sheets = new ColumnSheetBuilder[columns];
             ColumnCountsBuilder?[] builders = new ColumnCountsBuilder?[columns];
             for (int column = 0; column < columns; column++)

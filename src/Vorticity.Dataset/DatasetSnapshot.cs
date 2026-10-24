@@ -293,14 +293,14 @@ internal sealed class DatasetSnapshot
     /// <summary>The bounds of the column <see cref="Bounds"/> worked out last, from every root in hand; null before.</summary>
     private KnownBounds? _bounds;
 
-    /// <summary>Whether an object of the version keeps counts by hour: 1, 0, or -1 before a walk found out.</summary>
+    /// <summary>Whether an object of the version keeps counts: 1, 0, or -1 before a walk found out.</summary>
     private int _keepsCounts = -1;
 
-    /// <summary>Whether an object of the version may keep counts by hour: false once a walk found none (<see cref="KeepsCountsAsync"/>).</summary>
+    /// <summary>Whether an object of the version may keep counts: false once a walk found none (<see cref="KeepsCountsAsync"/>).</summary>
     internal bool MayKeepCounts => Volatile.Read(ref _keepsCounts) != 0;
 
     /// <summary>
-    /// Whether an object of the version keeps counts by hour (<see cref="Indexes.ObjectContents.Counts"/>), which the states
+    /// Whether an object of the version keeps counts (<see cref="Indexes.ObjectContents.Counts"/>), which the states
     /// an aggregation asks for may come from: found by a walk of its entries the first time it is asked, and known after,
     /// so that the questions on a version none of whose objects keeps counts walk nothing more than their rows.
     /// </summary>

@@ -1,9 +1,9 @@
-// A column's counts by hour, built as the writer builds them.
+// A column's counts over an object's rows, built as the writer builds them.
 //
 // WHAT IS HELD: past its budget of entries, a column keeps the values whose rows are most, each exact, and counts the
-// others together an hour, exact too, so that every row is counted once; and what the counts write reads back word for
-// word: signed and unsigned extremes, sums past 64 bits, float sums and the extremes of a measure that met no value, and
-// the hour of a null instant; and their sketches byte for byte.
+// others together, exact too, so that every row is counted once; and what the counts write reads back word for word:
+// signed and unsigned extremes, sums past 64 bits, float sums and the extremes of a measure that met no value; and their
+// sketches byte for byte, whatever the order the rows of a value came in.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -25,64 +25,56 @@ public sealed class ColumnCountsTests
     [Fact]
     public void AColumnPastItsBudgetKeepsItsMostFrequentValuesAndTheOthersTogether()
     {
-        // Four hours; value v of forty takes 2 × (40 - v)² rows an hour, spread over it, with an amount and a price each: the
-        // most frequent apart by a hundred rows an hour or more.
+        // Value v of forty takes 8 × (40 - v)² rows, each value's spread evenly over four hours, with an amount and a price
+        // each: the rows that come first hold every value in its share, the most frequent apart by a few rows a thousand.
         List<(long At, long Key, long Amount, double Price)> rows = [];
         Random random = new Random(5);
-        for (int hour = 0; hour < 4; hour++)
+        for (int v = 0; v < 40; v++)
         {
-            for (int v = 0; v < 40; v++)
+            int count = 8 * (40 - v) * (40 - v);
+            for (int i = 0; i < count; i++)
             {
-                for (int i = 0; i < 2 * (40 - v) * (40 - v); i++)
-                {
-                    rows.Add(((hour * MicrosPerHour) + random.NextInt64(MicrosPerHour), v, random.NextInt64(-1_000, 1_000_000), Math.Round(random.NextDouble() * 100, 2)));
-                }
+                rows.Add(((long)((i + 0.5) / count * 4 * MicrosPerHour), v, random.NextInt64(-1_000, 1_000_000), Math.Round(random.NextDouble() * 100, 2)));
             }
         }
 
-        random.Shuffle(CollectionsMarshal.AsSpan(rows));
-        rows.Sort((left, right) => (left.At / MicrosPerHour).CompareTo(right.At / MicrosPerHour));
+        rows.Sort((left, right) => left.At.CompareTo(right.At));
 
-        // A budget of 64 entries: 160 are met, ten values an hour fill it, and the values left out go together.
-        (ColumnCounts counts, ColumnSketches? sketches) = Build(rows, entryLimit: 64);
+        // A budget of 16 entries for forty values: past it, the values of fewest rows so far go together, and stay together.
+        (ColumnCounts counts, ColumnSketches? sketches) = Build(rows, entryLimit: 16);
         Assert.Equal([2, 3], counts.MeasureFields);
         Assert.True(counts.Sketched);
-        CountGroup others = Assert.Single(counts.Groups, g => g.Kind == CountedValue.Others);
+        Assert.Single(counts.Groups, g => g.Kind == CountedValue.Others);
         long[] kept = [.. counts.Groups.Where(g => g.Kind == CountedValue.Value).Select(g => BitConverter.ToInt64(g.Value))];
-        Assert.NotEmpty(kept);
-        Assert.True(kept.Length * 4 <= 32, $"{kept.Length} values kept");
+        Assert.True(kept.Length < 16, $"{kept.Length} values kept");
 
-        // The values kept are the most frequent, and each is exact; the others hold the rest, exact.
-        Assert.Equal(Enumerable.Range(0, kept.Length).Select(v => (long)v), kept.Order());
+        // The most frequent values are kept, each exact; the others hold the rest, exact.
+        Assert.Subset(kept.ToHashSet(), Enumerable.Range(0, 8).Select(v => (long)v).ToHashSet());
         foreach (CountGroup group in counts.Groups)
         {
-            Assert.Equal(4, group.Entries);
-            for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
-            {
-                long hour = counts.Hours[e];
-                List<(long At, long Key, long Amount, double Price)> held = [.. rows.Where(r => r.At / MicrosPerHour == hour
-                    && (group.Kind == CountedValue.Others ? !kept.Contains(r.Key) : r.Key == BitConverter.ToInt64(group.Value)))];
-                ReadOnlySpan<long> words = counts.WordsOf(e);
-                Assert.Equal(held.Count, words[0]);
-                Assert.Equal(held.Count, words[1 + MeasureLayout.Values]);
-                Assert.Equal(held.Aggregate(Int128.Zero, (s, r) => s + r.Amount), StateWords.IntegerOf(words, 1 + MeasureLayout.Sum));
-                Assert.Equal(held.Min(r => r.Amount), words[1 + MeasureLayout.IntegerLeast]);
-                Assert.Equal(held.Max(r => r.Amount), words[1 + MeasureLayout.IntegerGreatest]);
-                int price = 1 + MeasureLayout.IntegerWords;
-                WideIndexedSum sum = default;
-                held.ForEach(r => sum.Add(r.Price));
-                Assert.Equal(sum.Value, StateWords.SumOf(words, price + MeasureLayout.Sum).Value);
-                Assert.Equal(held.Min(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatLeast]));
-                Assert.Equal(held.Max(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatGreatest]));
+            Assert.Equal(1, group.Entries);
+            int e = group.FirstEntry;
+            List<(long At, long Key, long Amount, double Price)> held = [.. rows.Where(r =>
+                group.Kind == CountedValue.Others ? !kept.Contains(r.Key) : r.Key == BitConverter.ToInt64(group.Value))];
+            ReadOnlySpan<long> words = counts.WordsOf(e);
+            Assert.Equal(held.Count, words[0]);
+            Assert.Equal(held.Count, words[1 + MeasureLayout.Values]);
+            Assert.Equal(held.Aggregate(Int128.Zero, (s, r) => s + r.Amount), StateWords.IntegerOf(words, 1 + MeasureLayout.Sum));
+            Assert.Equal(held.Min(r => r.Amount), words[1 + MeasureLayout.IntegerLeast]);
+            Assert.Equal(held.Max(r => r.Amount), words[1 + MeasureLayout.IntegerGreatest]);
+            int price = 1 + MeasureLayout.IntegerWords;
+            WideIndexedSum sum = default;
+            held.ForEach(r => sum.Add(r.Price));
+            Assert.Equal(sum.Value, StateWords.SumOf(words, price + MeasureLayout.Sum).Value);
+            Assert.Equal(held.Min(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatLeast]));
+            Assert.Equal(held.Max(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatGreatest]));
 
-                // Each entry's sketches, the values left out's merged from theirs, are those of its rows' values.
-                Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
-                Assert.Equal(Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
-            }
+            // Each entry's sketches, the values left out's merged from theirs, are those of its rows' values.
+            Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
+            Assert.Equal(Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
         }
 
         Assert.Equal(rows.Count, Enumerable.Range(0, counts.Entries).Sum(e => counts.WordsOf(e)[0]));
-        Assert.Equal(4, others.Entries);
     }
 
     [Fact]
@@ -95,7 +87,7 @@ public sealed class ColumnCountsTests
         StateWords.Clear(words.AsSpan(width, width), kinds);
         StateWords.Clear(words.AsSpan(2 * width, width), kinds);
 
-        // An entry whose measures hold extremes and a sum past 64 bits; one whose float measure met no value; one of a null instant.
+        // An entry whose measures hold extremes and a sum past 64 bits; two whose measures met no value.
         Span<long> first = words.AsSpan(0, width);
         first[0] = 5;
         first[1 + MeasureLayout.Values] = 5;
@@ -124,8 +116,7 @@ public sealed class ColumnCountsTests
         ColumnCounts counts = new ColumnCounts(
             [4, 7, 9],
             kinds,
-            [new CountGroup(CountedValue.Null, null, 0, 1), new CountGroup(CountedValue.Value, [1, 2, 3], 1, 2)],
-            [-3, CountsPlan.NullHour, 451_000],
+            [new CountGroup(CountedValue.Null, null, 0, 1), new CountGroup(CountedValue.Value, [1, 2, 3], 1, 1), new CountGroup(CountedValue.Value, [1, 2, 4], 2, 1)],
             words)
         {
             Sketched = true,
@@ -137,11 +128,15 @@ public sealed class ColumnCountsTests
         Assert.Equal(counts.Kinds, back.Kinds);
         Assert.Equal(counts.Groups.Select(g => (g.Kind, g.Value is null ? "" : Convert.ToHexString(g.Value), g.FirstEntry, g.Entries)),
             back.Groups.Select(g => (g.Kind, g.Value is null ? "" : Convert.ToHexString(g.Value), g.FirstEntry, g.Entries)));
-        Assert.Equal(counts.Hours, back.Hours);
         Assert.Equal(counts.Words, back.Words);
         Assert.True(back.Sketched);
         Assert.Equal([5], back.AttachedFields);
         Assert.Throws<VortexFormatException>(() => ColumnCounts.From(counts.ToBytes()[..^1]));
+
+        // Counts of another version, the hours an earlier writer kept, are none this library reads.
+        byte[] earlier = counts.ToBytes();
+        earlier[0] = 1;
+        Assert.Throws<VortexFormatException>(() => ColumnCounts.From(earlier));
 
         // Their sketches, each entry's of each measure, none for a measure that met no value, and its registers.
         ColumnSketches sketches = new ColumnSketches(3, 3, [[1], null, [2, 3], [4], [5], null, null, null, [6]], 1, [[7, 8], null, [9]]);
@@ -152,10 +147,10 @@ public sealed class ColumnCountsTests
         Assert.Throws<VortexFormatException>(() => ColumnSketches.From(sketches.ToBytes()[..^1]));
     }
 
-    // An hour's sketches sealed once a batch of a later hour comes, then rows of that hour coming late: the sketch opened
-    // again from its bytes holds every value of its hour, as one built from them all.
+    // The rows of each value spread over the object, in no order: an entry a value, whose sketches hold every one of its
+    // values, as one built from them all.
     [Fact]
-    public void ASketchSealedTakesTheLateRowsOfItsHour()
+    public void AnEntryHoldsEveryRowOfItsValueWhateverTheirOrder()
     {
         Random random = new Random(9);
         List<(long At, long Key, long Amount, double Price)> rows = [];
@@ -168,11 +163,11 @@ public sealed class ColumnCountsTests
         }
 
         (ColumnCounts counts, ColumnSketches? sketches) = Build(rows, ColumnCountsBuilder.EntryLimit);
-        Assert.Equal(15, counts.Entries);
+        Assert.Equal(5, counts.Entries);
         for (int e = 0; e < counts.Entries; e++)
         {
             long key = BitConverter.ToInt64(counts.Groups.Single(g => e >= g.FirstEntry && e < g.FirstEntry + g.Entries).Value);
-            List<(long At, long Key, long Amount, double Price)> held = [.. rows.Where(r => r.Key == key && r.At / MicrosPerHour == counts.Hours[e])];
+            List<(long At, long Key, long Amount, double Price)> held = [.. rows.Where(r => r.Key == key)];
             Assert.Equal(held.Count, counts.WordsOf(e)[0]);
             Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
             Assert.Equal(Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
@@ -206,7 +201,7 @@ public sealed class ColumnCountsTests
             new VortexField("Price", VortexType.Float64)]);
         DTypeArena types = new DTypeArena();
         DType dtype = VortexTypes.ToDType(schema, types);
-        CountsPlan plan = CountsPlan.For(dtype, "At")!;
+        CountsPlan plan = CountsPlan.For(dtype)!;
         ColumnSheetBuilder sheet = new ColumnSheetBuilder();
         ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 1, entryLimit);
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);

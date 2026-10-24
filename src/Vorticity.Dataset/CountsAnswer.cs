@@ -8,22 +8,28 @@ using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
+using Vorticity.Keys;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// How the objects' counts by hour (<see cref="ColumnCounts"/>) answer an aggregation that asks for states
-/// (<see cref="StateRequest"/>) in place of its rows: a question on one column, the time and the measures. Its keys read
-/// the column, functions of it, and the instant truncated to the hour or coarser on the stored calendar; its aggregates
-/// count rows, sum, take the extremes or the mean of a measure the counts carry, take a quantile or a distribution of one
-/// they sketch, or count the column's distinct values; its filter bounds the instant and asks the column for values by
-/// equality or a set. The hours the filter's window holds whole come as states; those it cuts, the edges, are read as
-/// rows. Worked out once a question, with the columns of its batches of states; object by object, it names the column
-/// whose counts answer (<see cref="FieldOf"/>), and an object with rows a delete marked, which its counts still hold, is
-/// read as rows.
+/// How the objects' counts (<see cref="ColumnCounts"/>) answer an aggregation that asks for states
+/// (<see cref="StateRequest"/>) in place of its rows: a question on one column and the measures. Its keys read the column,
+/// functions of it, and other columns or functions of them that an object holds constant; its aggregates count rows, sum,
+/// take the extremes or the mean of a measure the counts carry, take a quantile or a distribution of one they sketch, or
+/// count the column's distinct values; its filter asks the column for values by equality or a set. Worked out once a
+/// question, with the columns of its batches of states; object by object, it names the column whose counts answer
+/// (<see cref="FieldOf"/>): an object whose summaries prove the filter's other conjuncts true over its every row and the
+/// other keys constant, with no row a delete marked, which its counts still hold. Any other object is read as rows.
 /// </summary>
+/// <remarks>
+/// Nothing here knows a time: a window on an instant is a conjunct like any, which an object's summaries prove true over
+/// its rows or not, and a truncation of an instant a function like any, constant over an object or not. The objects the
+/// application cuts by its values (<see cref="ClusteringOptions"/>) answer whole the questions that keep to those values.
+/// </remarks>
 internal sealed class CountsAnswer
 {
     // The batches' columns, the same for every object: each key's column once, the rows, each measure's states, then the
@@ -35,23 +41,27 @@ internal sealed class CountsAnswer
     // The version's columns, which an object's counts answer for when it holds them in their places.
     private readonly DatasetSchema _schema;
 
+    // The conjuncts of the filter the counts do not answer, which an object's summaries prove true over its rows or the
+    // object is read as rows; null for none.
+    private readonly SummaryPruner? _rest;
+
+    // The keys of another column than the counted one, each its column and the key itself, a function of it or the column,
+    // which an object's summaries prove constant or the object is read as rows.
+    private readonly (int Field, string Path, FieldExpr Key)[] _constants;
+
     private CountsAnswer(
-        StateRequest request, DatasetSchema version, string instant, long unitsPerHour, int? column, bool keyed, long low, long high,
-        bool windowed, byte[][]? values, VortexExpr? edges)
+        StateRequest request, DatasetSchema version, int? column, bool keyed, byte[][]? values, VortexExpr? rest,
+        (int Field, string Path, FieldExpr Key)[] constants)
     {
         VortexSchema columns = version.Columns;
         DType schema = version.DType;
         _request = request;
         _schema = version;
-        UnitsPerHour = unitsPerHour;
-        InstantField = columns.IndexOf(instant);
         Column = column;
         Keyed = keyed;
-        Low = low;
-        High = high;
-        Windowed = windowed;
         Values = values;
-        Edges = edges;
+        _rest = rest is null ? null : new SummaryPruner(rest);
+        _constants = constants;
         (KeyFields, Measures, Type) = Layout(request, columns, schema, _types);
         Bool = _types.Bool(Nullability.NonNullable);
         int sketches = 0;
@@ -66,55 +76,17 @@ internal sealed class CountsAnswer
         Nodes = (3 * KeyFields.Length) + (Type.FieldCount - KeyFields.Length - sketches) + (2 * sketches) + 1;
     }
 
-    /// <summary>
-    /// The period's instant of a dataset in periods and an hour in its units, by which its sealed objects count their
-    /// columns; null for a dataset of no periods, whose objects keep no counts.
-    /// </summary>
-    internal static (string Instant, long UnitsPerHour)? Counting(DatasetSnapshot version)
-    {
-        if (version.Header.PeriodLength is null || version.Schema.Key is not { } key || key.InstantPath.Contains('.'))
-        {
-            return null;
-        }
-
-        return (key.InstantPath, VortexTypes.FromDType(key.InstantType).Unit switch
-        {
-            TimeUnit.Seconds => 3_600L,
-            TimeUnit.Milliseconds => 3_600_000L,
-            TimeUnit.Nanoseconds => 3_600_000_000_000L,
-            _ => 3_600_000_000L,
-        });
-    }
-
-    /// <summary>The column a key or the filter reads; null for a question of time alone, which any column's counts answer.</summary>
+    /// <summary>The column a key or the filter reads, whose counts answer; null for a question of no column, which any column's counts answer.</summary>
     internal int? Column { get; }
 
     /// <summary>Whether a key or a distinct count reads the column's values, which the entries of the values a budget left out do not give.</summary>
     internal bool Keyed { get; }
 
-    /// <summary>The instant's first value the filter keeps, in its units; <see cref="long.MinValue"/> for none.</summary>
-    internal long Low { get; }
-
-    /// <summary>The instant's last value the filter keeps, in its units; <see cref="long.MaxValue"/> for none.</summary>
-    internal long High { get; }
-
-    /// <summary>Whether the filter bounds the instant: a row whose instant is null is then kept by none.</summary>
-    internal bool Windowed { get; }
-
     /// <summary>The values an equality or a set asks of the column, each by its bytes as the column stores them, each once; null for every value.</summary>
     internal byte[][]? Values { get; }
 
-    /// <summary>The filter of the object's rows the states leave to the rows, those of the hours the window cuts; null when it cuts none.</summary>
-    internal VortexExpr? Edges { get; }
-
     /// <summary>Whether the request asks a quantile or a distribution, which the counts' sketches answer: they are read beside them.</summary>
     internal bool AsksSketches { get; }
-
-    /// <summary>An hour in the instant's units.</summary>
-    internal long UnitsPerHour { get; }
-
-    /// <summary>The instant's top-level column.</summary>
-    internal int InstantField { get; }
 
     /// <summary>The top-level column of each key's column of the batches, each once, in their order.</summary>
     internal int[] KeyFields { get; }
@@ -133,28 +105,81 @@ internal sealed class CountsAnswer
 
     /// <summary>
     /// How the objects' counts answer <paramref name="request"/> under <paramref name="filter"/> over the columns of
-    /// <paramref name="version"/>; null when they answer no object of it, a dataset of no periods, a key or a filter they
-    /// do not hold, or a measure no column is, and every object is read as rows.
+    /// <paramref name="version"/>; null when they answer no object of it: a key of two columns that are no function of
+    /// each other, a key, a value or a measure on a path, or a measure no column is. Every object is then read as rows.
     /// </summary>
     internal static CountsAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version)
     {
-        if (Counting(version) is not (string instant, long unitsPerHour))
+        DType schema = version.Schema.DType;
+        if (schema.IsDefault)
         {
             return null;
         }
 
-        DType schema = version.Schema.DType;
-
-        // The keys: the column, functions of it, and the instant truncated to the hour or coarser.
+        // The filter: values of one column by equality or a set, which its counts answer; every other conjunct, which an
+        // object's summaries prove true over its rows.
         int? column = null;
+        List<byte[]>? values = null;
+        List<VortexExpr> rest = [];
+        if (filter is not null)
+        {
+            List<VortexExpr> conjuncts = [];
+            GroupPredicates.Conjuncts(filter, conjuncts);
+            foreach (VortexExpr conjunct in conjuncts)
+            {
+                (FieldExpr? asked, FilterLiteral[]? literals) = conjunct switch
+                {
+                    ComparisonExpr { Op: ComparisonOp.Equal } equal => (equal.Field, [equal.Value]),
+                    InExpr set => (set.Field, set.Literals),
+                    _ => (null, null),
+                };
+                if (asked is not null && Top(asked, schema) is int field && (column is null || column == field)
+                    && ValuesOf(literals!, schema.GetField(field)) is { } wanted)
+                {
+                    column = field;
+                    values = values is null ? wanted : values.FindAll(value => wanted.Exists(other => value.AsSpan().SequenceEqual(other)));
+                    continue;
+                }
+
+                rest.Add(conjunct);
+            }
+        }
+
+        // The keys: a column itself is the one counted, the first met when the filter asks none; another column, or a
+        // function of one, each object holds constant; a function of the counted column, its counts give.
+        List<(int Field, string Path, FieldExpr Key)> constants = [];
+        foreach (FieldExpr key in request.Keys)
+        {
+            if (key is not ColumnFieldExpr)
+            {
+                continue;
+            }
+
+            if (Top(key, schema) is not int field)
+            {
+                return null;
+            }
+
+            if (column is null || column == field)
+            {
+                column = field;
+                continue;
+            }
+
+            constants.Add((field, key.Path, key));
+        }
+
         foreach (FieldExpr key in request.Keys)
         {
             FieldExpr inner = key;
-            ValueFunction? first = null;
             while (inner is FunctionFieldExpr function)
             {
-                first = function.Function;
                 inner = function.Column;
+            }
+
+            if (ReferenceEquals(inner, key))
+            {
+                continue;
             }
 
             if (Top(inner, schema) is not int field)
@@ -162,22 +187,10 @@ internal sealed class CountsAnswer
                 return null;
             }
 
-            if (string.Equals(inner.Path, instant, StringComparison.Ordinal))
+            if (field != column)
             {
-                if (first is not InstantTruncate { Unit: >= CalendarUnit.Hour, Zoned: false })
-                {
-                    return null;
-                }
-
-                continue;
+                constants.Add((field, inner.Path, key));
             }
-
-            if (column is { } held && held != field)
-            {
-                return null;
-            }
-
-            column = field;
         }
 
         // The measures: top-level columns, which the counts carry as numbers.
@@ -189,56 +202,36 @@ internal sealed class CountsAnswer
             }
         }
 
-        // The filter: bounds of the instant, and values of the column by equality or a set.
-        bool keyed = column is not null;
-        long low = long.MinValue;
-        long high = long.MaxValue;
-        bool windowed = false;
-        List<byte[]>? values = null;
-        if (filter is not null)
+        bool keyed = false;
+        foreach (FieldExpr key in request.Keys)
         {
-            List<VortexExpr> conjuncts = [];
-            GroupPredicates.Conjuncts(filter, conjuncts);
-            foreach (VortexExpr conjunct in conjuncts)
-            {
-                if (DatasetScanBuilder.Bound(conjunct, instant, ref low, ref high))
-                {
-                    windowed = true;
-                    continue;
-                }
-
-                (FieldExpr? asked, FilterLiteral[]? literals) = conjunct switch
-                {
-                    ComparisonExpr { Op: ComparisonOp.Equal } equal => (equal.Field, [equal.Value]),
-                    InExpr set => (set.Field, set.Literals),
-                    _ => (null, null),
-                };
-                if (asked is null || Top(asked, schema) is not int field || (column is { } held && held != field)
-                    || string.Equals(asked.Path, instant, StringComparison.Ordinal) || ValuesOf(literals!, schema.GetField(field)) is not { } wanted)
-                {
-                    return null;
-                }
-
-                column = field;
-                values = values is null ? wanted : values.FindAll(value => wanted.Exists(other => value.AsSpan().SequenceEqual(other)));
-            }
+            keyed |= Top(Inner(key), schema) is int field && field == column;
         }
 
         return new CountsAnswer(
-            request, version.Schema, instant, unitsPerHour, column, keyed, low, high, windowed, values?.ToArray(),
-            EdgesOf(filter, instant, low, high, windowed, unitsPerHour));
+            request, version.Schema, column, keyed, values?.ToArray(), GroupPredicates.And(null, rest), [.. constants]);
     }
 
     /// <summary>
     /// The column whose counts answer for the object <paramref name="entry"/> names: the column asked, or for a question of
-    /// time alone the one whose counts' region is least; null when its rows are read, rows a delete marked, which its
-    /// counts still hold, no counts of the column, or columns of an earlier schema, which its counts name by their places.
+    /// no column the one whose counts' region is least; null when its rows are read: rows a delete marked, which its counts
+    /// still hold, a conjunct or a key its summaries do not prove true over every row or constant, no counts of the
+    /// column, or columns of an earlier schema, which its counts name by their places.
     /// </summary>
     internal int? FieldOf(ObjectEntry entry)
     {
-        if (entry.HasDeletions || entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry))
+        if (entry.HasDeletions || entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry)
+            || (_rest is { } rest && !rest.MustMatch(entry.Summaries.Columns, entry.PhysicalRows)))
         {
             return null;
+        }
+
+        foreach ((_, string path, FieldExpr key) in _constants)
+        {
+            if (ConstantOf(entry.Summaries, path, key) is null)
+            {
+                return null;
+            }
         }
 
         int counted = Column ?? Least(contents.Counts);
@@ -246,11 +239,51 @@ internal sealed class CountsAnswer
     }
 
     /// <summary>
-    /// The states the counts <paramref name="counts"/> give, with <paramref name="sketches"/> their sketches when the
-    /// request asks them: an entry a row of states, of the hours the window holds whole and the values asked; null when
-    /// the counts lack a measure the request reads, the sketches a quantile asks, or a value a key asks the budget left out.
+    /// The value an object's column <paramref name="path"/> holds that makes <paramref name="key"/> constant over its rows,
+    /// as its summaries prove it: the least, when the key's image of it is its greatest's and the column holds no null;
+    /// null when they prove no such thing. Bounds that are not exact lie outwards, which keeps the proof: a non-decreasing
+    /// function sends every value between them between their images.
     /// </summary>
-    internal StateRows? Rows(ColumnCounts counts, ColumnSketches? sketches)
+    private static FilterLiteral? ConstantOf(ObjectSummaries summaries, string path, FieldExpr key)
+    {
+        if (!summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax || !column.HasNullCount || column.NullCount != 0
+            || Image(key, column.Min) is not { } low || Image(key, column.Max) is not { } high || KeyCursor.Compare(low, high) != 0)
+        {
+            return null;
+        }
+
+        return column.Min;
+    }
+
+    /// <summary>The image of <paramref name="value"/> through the functions of <paramref name="key"/>, the innermost first; null when one does not read it.</summary>
+    private static FilterLiteral? Image(FieldExpr key, FilterLiteral value)
+    {
+        if (key is not FunctionFieldExpr function)
+        {
+            return value;
+        }
+
+        return Image(function.Column, value) is { } inner && function.Function.TryMap(inner, out FilterLiteral image) ? image : null;
+    }
+
+    /// <summary>The column <paramref name="key"/> reads, under its functions.</summary>
+    private static FieldExpr Inner(FieldExpr key)
+    {
+        while (key is FunctionFieldExpr function)
+        {
+            key = function.Column;
+        }
+
+        return key;
+    }
+
+    /// <summary>
+    /// The states the counts <paramref name="counts"/> of the object whose summaries are <paramref name="summaries"/> give,
+    /// with <paramref name="sketches"/> their sketches when the request asks them: an entry a row of states, those of the
+    /// values asked; null when the counts lack a measure the request reads, the sketches a quantile asks, or a value a key
+    /// asks the budget left out.
+    /// </summary>
+    internal StateRows? Rows(ColumnCounts counts, ColumnSketches? sketches, ObjectSummaries summaries)
     {
         // Each measure's place among those the counts carry.
         int[] places = new int[Measures.Length];
@@ -280,17 +313,29 @@ internal sealed class CountsAnswer
             }
         }
 
-        // The entries: those of the values asked, in the hours the window holds whole; the hours it cuts are read as rows.
+        // The value each constant key's column holds over the object, as the column stores it.
+        byte[]?[] constants = new byte[]?[KeyFields.Length];
+        foreach ((int field, string path, FieldExpr key) in _constants)
+        {
+            int at = Array.IndexOf(KeyFields, field);
+            if (ConstantOf(summaries, path, key) is not { } value || ValuesOf([value], _schema.DType.GetField(field)) is not [{ } bytes, ..])
+            {
+                return null;
+            }
+
+            constants[at] = bytes;
+        }
+
+        // The entries: those of the values asked, or every one.
         int[] entries = new int[counts.Entries];
         int taken = 0;
-        bool cuts = false;
         if (Values is { } asked)
         {
             foreach (byte[] value in asked)
             {
                 if (GroupOf(counts.Groups, value) is { } group)
                 {
-                    cuts |= Take(counts, group, entries, ref taken);
+                    Take(group, entries, ref taken);
                 }
             }
         }
@@ -298,43 +343,20 @@ internal sealed class CountsAnswer
         {
             foreach (CountGroup group in counts.Groups)
             {
-                cuts |= Take(counts, group, entries, ref taken);
+                Take(group, entries, ref taken);
             }
         }
 
-        return new StateRows(this, counts, sketches, entries, taken, places, cuts);
+        return new StateRows(this, counts, sketches, entries, taken, places, constants);
     }
 
-    /// <summary>Takes into <paramref name="entries"/> those of <paramref name="group"/> in the hours the window holds whole: whether it cuts one.</summary>
-    private bool Take(ColumnCounts counts, CountGroup group, int[] entries, ref int taken)
+    /// <summary>Takes into <paramref name="entries"/> those of <paramref name="group"/>.</summary>
+    private static void Take(CountGroup group, int[] entries, ref int taken)
     {
-        bool cuts = false;
         for (int entry = group.FirstEntry; entry < group.FirstEntry + group.Entries; entry++)
         {
-            long hour = counts.Hours[entry];
-            if (hour == CountsPlan.NullHour)
-            {
-                if (!Windowed)
-                {
-                    entries[taken++] = entry;
-                }
-
-                continue;
-            }
-
-            long start = hour * UnitsPerHour;
-            long end = start + UnitsPerHour - 1;
-            if (start >= Low && end <= High)
-            {
-                entries[taken++] = entry;
-            }
-            else if (end >= Low && start <= High)
-            {
-                cuts = true;
-            }
+            entries[taken++] = entry;
         }
-
-        return cuts;
     }
 
     /// <summary>The group of <paramref name="value"/>, searched among the values, which follow the nulls and those left out in the order of their bytes; null for none.</summary>
@@ -374,12 +396,7 @@ internal sealed class CountsAnswer
         List<VortexField> fields = [];
         foreach (FieldExpr key in request.Keys)
         {
-            FieldExpr inner = key;
-            while (inner is FunctionFieldExpr function)
-            {
-                inner = function.Column;
-            }
-
+            FieldExpr inner = Inner(key);
             int field = columns.IndexOf(inner.Path);
             if (!keyFields.Contains(field))
             {
@@ -490,43 +507,12 @@ internal sealed class CountsAnswer
             values.Add(value.ToArray());
         }
     }
-
-    /// <summary>
-    /// The filter of the rows the states of a window <c>[low, high]</c> leave, those of the hours it cuts: the
-    /// <paramref name="filter"/> and an instant before the end of its first hour or from the start of its last; null when
-    /// the window holds its hours whole.
-    /// </summary>
-    private static VortexExpr? EdgesOf(VortexExpr? filter, string instant, long low, long high, bool windowed, long unitsPerHour)
-    {
-        if (!windowed || filter is null || low > high)
-        {
-            return null;
-        }
-
-        long firstStart = Floor(low, unitsPerHour);
-        long lastStart = Floor(high, unitsPerHour);
-        bool cutsFirst = low != long.MinValue && low != firstStart;
-        bool cutsLast = high != long.MaxValue && high != lastStart + unitsPerHour - 1;
-        VortexExpr? first = cutsFirst ? Expr.Lt(Expr.Field(instant), Expr.Literal(FilterLiteral.From(firstStart + unitsPerHour))) : null;
-        VortexExpr? last = cutsLast ? Expr.Ge(Expr.Field(instant), Expr.Literal(FilterLiteral.From(lastStart))) : null;
-        return (first, last) switch
-        {
-            (null, null) => null,
-            ({ } before, null) => Expr.And(filter, before),
-            (null, { } after) => Expr.And(filter, after),
-            ({ } before, { } after) => Expr.And(filter, Expr.Or(before, after)),
-        };
-    }
-
-    /// <summary>The start of the hour <paramref name="instant"/> falls in.</summary>
-    internal static long Floor(long instant, long unitsPerHour) =>
-        (instant >= 0 ? instant / unitsPerHour : ((instant + 1) / unitsPerHour) - 1) * unitsPerHour;
 }
 
 /// <summary>
 /// An object's entries of the counts that answer, as batches of states (<see cref="RecordBatch.CarriesStates"/>): a row an
-/// entry, its keys' columns, the column's value and the hour's start, its rows, and each measure's states and sketch
-/// under the names <see cref="StateRequest"/> gives them, in the columns the answer lays out.
+/// entry, its keys' columns, the column's value and the values the object holds constant, its rows, and each measure's
+/// states and sketch under the names <see cref="StateRequest"/> gives them, in the columns the answer lays out.
 /// </summary>
 internal sealed class StateRows
 {
@@ -542,7 +528,11 @@ internal sealed class StateRows
     private readonly int[] _places;
     private readonly int[] _wordAt;
 
-    internal StateRows(CountsAnswer answer, ColumnCounts counts, ColumnSketches? sketches, int[] entries, int count, int[] places, bool cuts)
+    // The value each key's column holds over the object, as the column stores it, for a column the object holds constant;
+    // null for the counted column, whose entries give their own.
+    private readonly byte[]?[] _constants;
+
+    internal StateRows(CountsAnswer answer, ColumnCounts counts, ColumnSketches? sketches, int[] entries, int count, int[] places, byte[]?[] constants)
     {
         _answer = answer;
         _counts = counts;
@@ -550,7 +540,7 @@ internal sealed class StateRows
         _entries = entries;
         Count = count;
         _places = places;
-        CutsHours = cuts;
+        _constants = constants;
         int[] offsets = new int[counts.MeasureFields.Length];
         for (int m = 0, at = 1; m < offsets.Length; m++)
         {
@@ -568,9 +558,6 @@ internal sealed class StateRows
     /// <summary>The rows of states: an entry each.</summary>
     internal int Count { get; }
 
-    /// <summary>Whether the window cuts one of the object's hours, whose rows are then read.</summary>
-    internal bool CutsHours { get; }
-
     /// <summary>The batch of states of entries <c>[start, start + count)</c> of the answer, built in <paramref name="arena"/>, its rows counted from <paramref name="firstRow"/>.</summary>
     internal RecordBatch Batch(CanonicalArena arena, int start, int count, long firstRow)
     {
@@ -578,9 +565,9 @@ internal sealed class StateRows
         DType type = _answer.Type;
         Span<int> nodes = stackalloc int[type.FieldCount];
         int at = 0;
-        foreach (int field in _answer.KeyFields)
+        for (int k = 0; k < _answer.KeyFields.Length; k++)
         {
-            nodes[at] = field == _answer.InstantField ? Hours(arena, type.GetField(at), entries) : Bytes(arena, type.GetField(at), entries, -1);
+            nodes[at] = Bytes(arena, type.GetField(at), entries, -1, _constants[k]);
             at++;
         }
 
@@ -599,7 +586,7 @@ internal sealed class StateRows
         {
             if (_answer.Measures[i].Sketch)
             {
-                nodes[at] = Bytes(arena, type.GetField(at), entries, _places[i]);
+                nodes[at] = Bytes(arena, type.GetField(at), entries, _places[i], null);
                 at++;
             }
         }
@@ -621,48 +608,20 @@ internal sealed class StateRows
         return arena.AddPrimitive(dtype, entries.Length, Validity.NonNullable, PType.I64, buffer);
     }
 
-    /// <summary>The instant's column: each entry's hour's start, null for the hour of a null instant.</summary>
-    private int Hours(CanonicalArena arena, DType dtype, ReadOnlySpan<int> entries)
-    {
-        VortexBuffer buffer = arena.AllocateUninitialized(entries.Length * sizeof(long), sizeof(long), out Span<byte> bytes);
-        Span<long> starts = MemoryMarshal.Cast<byte, long>(bytes);
-        bool nulls = false;
-        for (int i = 0; i < entries.Length; i++)
-        {
-            long hour = _counts.Hours[entries[i]];
-            nulls |= hour == CountsPlan.NullHour;
-            starts[i] = hour == CountsPlan.NullHour ? 0 : hour * _answer.UnitsPerHour;
-        }
-
-        DType storage = Storage(dtype);
-        Validity validity = Valid(storage);
-        if (nulls)
-        {
-            VortexBuffer bits = arena.Allocate((entries.Length + 7) / 8, 1, out Span<byte> set);
-            for (int i = 0; i < entries.Length; i++)
-            {
-                set[i >> 3] |= _counts.Hours[entries[i]] == CountsPlan.NullHour ? (byte)0 : (byte)(1 << (i & 7));
-            }
-
-            validity = Validity.Bitmap(arena.AddBool(_answer.Bool, entries.Length, Validity.NonNullable, bits, 0));
-        }
-
-        return Wrap(arena, dtype, arena.AddPrimitive(storage, entries.Length, validity, PType.I64, buffer), entries.Length);
-    }
-
     /// <summary>
-    /// A column of each entry's bytes, null for none: the counted column's value as it stores it for <paramref name="place"/>
-    /// -1, the sketch of the measure at <paramref name="place"/> among the counts' otherwise; fixed-width values in a buffer,
-    /// texts and binaries as views, the long ones in one data buffer.
+    /// A column of each entry's bytes, null for none: <paramref name="constant"/> for every entry when there is one, else
+    /// the counted column's value as it stores it for <paramref name="place"/> -1, the sketch of the measure at
+    /// <paramref name="place"/> among the counts' otherwise; fixed-width values in a buffer, texts and binaries as views,
+    /// the long ones in one data buffer.
     /// </summary>
-    private int Bytes(CanonicalArena arena, DType dtype, ReadOnlySpan<int> entries, int place)
+    private int Bytes(CanonicalArena arena, DType dtype, ReadOnlySpan<int> entries, int place, byte[]? constant)
     {
         DType storage = Storage(dtype);
         bool nulls = false;
         int data = 0;
         foreach (int entry in entries)
         {
-            byte[]? value = BytesOf(entry, place);
+            byte[]? value = constant ?? BytesOf(entry, place);
             nulls |= value is null;
             data += value is { Length: > CanonicalSupport.MaxInlineViewLength } ? value.Length : 0;
         }
@@ -673,7 +632,7 @@ internal sealed class StateRows
             VortexBuffer bits = arena.Allocate((entries.Length + 7) / 8, 1, out Span<byte> set);
             for (int i = 0; i < entries.Length; i++)
             {
-                set[i >> 3] |= BytesOf(entries[i], place) is null ? (byte)0 : (byte)(1 << (i & 7));
+                set[i >> 3] |= (constant ?? BytesOf(entries[i], place)) is null ? (byte)0 : (byte)(1 << (i & 7));
             }
 
             validity = Validity.Bitmap(arena.AddBool(_answer.Bool, entries.Length, Validity.NonNullable, bits, 0));
@@ -686,7 +645,7 @@ internal sealed class StateRows
             VortexBuffer buffer = arena.Allocate(entries.Length * width, Math.Max(width, 1), out Span<byte> bytes);
             for (int i = 0; i < entries.Length; i++)
             {
-                if (BytesOf(entries[i], place) is { } value)
+                if ((constant ?? BytesOf(entries[i], place)) is { } value)
                 {
                     value.AsSpan(0, Math.Min(width, value.Length)).CopyTo(bytes[(i * width)..]);
                 }
@@ -701,7 +660,7 @@ internal sealed class StateRows
             int offset = 0;
             for (int i = 0; i < entries.Length; i++)
             {
-                byte[] value = BytesOf(entries[i], place) ?? [];
+                byte[] value = constant ?? BytesOf(entries[i], place) ?? [];
                 if (CanonicalSupport.WriteView(view.Slice(i * 16, 16), value, value.Length, 0, offset))
                 {
                     value.CopyTo(into[offset..]);

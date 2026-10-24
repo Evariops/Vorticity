@@ -60,35 +60,23 @@ internal sealed class WideColumn(int field, ColumnSheetBuilder sheet)
 }
 
 /// <summary>
-/// What the counts by hour of a file's columns share (<see cref="ColumnCountsBuilder"/>): the instant whose hour each
-/// row is counted in, the hours met, numbered as they were met, and the number columns every column's counts carry
-/// as measures. Each batch's instants and measures are read once, before any column is counted (<see cref="Prepare"/>),
-/// so that the columns, counted side by side, only read them.
+/// What the counts of a file's columns share (<see cref="ColumnCountsBuilder"/>): the number columns every column's counts
+/// carry as measures, and the bucket each row is counted in, the object's, one for all of them. Each batch's measures are
+/// read once, before any column is counted (<see cref="Prepare"/>), so that the columns, counted side by side, only read
+/// them.
 /// </summary>
+/// <remarks>
+/// The grain of the counts is the object: the application cuts its objects by the values it chooses, and the counts
+/// describe each one's rows whole.
+/// </remarks>
 internal sealed class CountsPlan
 {
-    /// <summary>The hour of a row whose instant is null.</summary>
-    internal const long NullHour = long.MinValue;
-
-    private readonly Dictionary<long, int> _slots = [];
-    private long _hourStart = 1;
-    private long _hourEnd;
-    private int _hourSlot;
-
-    private CountsPlan(int instantField, long unitsPerHour, CountedMeasure[] measures)
+    private CountsPlan(CountedMeasure[] measures)
     {
-        InstantField = instantField;
-        UnitsPerHour = unitsPerHour;
         Measures = measures;
     }
 
-    /// <summary>The top-level instant column.</summary>
-    internal int InstantField { get; }
-
-    /// <summary>The instant's units in an hour.</summary>
-    internal long UnitsPerHour { get; }
-
-    /// <summary>The number columns the counts carry the states of: every top-level integer and float but the instant.</summary>
+    /// <summary>The number columns the counts carry the states of: every top-level integer and float.</summary>
     internal CountedMeasure[] Measures { get; }
 
     /// <summary>
@@ -118,52 +106,31 @@ internal sealed class CountsPlan
         }
     }
 
-    /// <summary>The hours met, by their number: hours since the Unix epoch, <see cref="NullHour"/> for a null instant.</summary>
-    internal List<long> Hours { get; } = [];
+    /// <summary>The buckets the rows are counted in, by their number: the object's alone, 0.</summary>
+    internal List<long> Hours { get; } = [0];
 
-    /// <summary>The number of each row's hour in the batch being fed.</summary>
+    /// <summary>The number of each row's bucket in the batch being fed: the object's, 0.</summary>
     internal int[] HourSlots { get; private set; } = [];
 
-    /// <summary>
-    /// The least hour of a row of the batch being fed, a null instant's aside; <see cref="long.MaxValue"/> for none. The
-    /// writer feeds a sealed object's slices in the order of their time, so an hour before it is done.
-    /// </summary>
-    internal long LeastHour { get; private set; } = long.MaxValue;
+    /// <summary>The least bucket a row of the batch being fed is counted in: the object's, which stays open to the end.</summary>
+    internal long LeastHour => 0;
 
-    /// <summary>Whether the instant came in a form the plan does not read: no column is counted from then on.</summary>
-    internal bool Dead { get; private set; }
+    /// <summary>Whether no column is counted any more; never, since no column's form stops the counts of every other.</summary>
+    internal bool Dead => false;
 
-    /// <summary>
-    /// The plan of a file of <paramref name="schema"/> counted by the hours of its top-level column
-    /// <paramref name="instant"/>, a timestamp; null when it is none.
-    /// </summary>
-    internal static CountsPlan? For(DType schema, string instant)
+    /// <summary>The plan of a file of <paramref name="schema"/>, a struct of its columns; null for another.</summary>
+    internal static CountsPlan? For(DType schema)
     {
-        int instantField = schema.IndexOfField(instant);
-        if (instantField < 0)
+        if (schema.Kind != DTypeKind.Struct)
         {
             return null;
         }
-
-        VortexType type = VortexTypes.FromDType(schema.GetField(instantField));
-        if (type.ExtensionId != ExtensionIds.Timestamp)
-        {
-            return null;
-        }
-
-        long unitsPerHour = (type.Unit ?? TimeUnit.Microseconds) switch
-        {
-            TimeUnit.Seconds => 3_600L,
-            TimeUnit.Milliseconds => 3_600_000L,
-            TimeUnit.Microseconds => 3_600_000_000L,
-            _ => 3_600_000_000_000L,
-        };
 
         List<CountedMeasure> measures = [];
         for (int field = 0; field < schema.FieldCount; field++)
         {
             DType dtype = schema.GetField(field);
-            if (field == instantField || dtype.Kind != DTypeKind.Primitive)
+            if (dtype.Kind != DTypeKind.Primitive)
             {
                 continue;
             }
@@ -181,44 +148,19 @@ internal sealed class CountsPlan
             }
         }
 
-        return new CountsPlan(instantField, unitsPerHour, [.. measures]);
+        return new CountsPlan([.. measures]);
     }
 
     /// <summary>The measure column <paramref name="field"/> is, or -1.</summary>
     internal int MeasureOf(int field) => Array.FindIndex(Measures, m => m.Field == field);
 
-    /// <summary>Reads the batch's instants into hours, and its measures' values, before its columns are counted.</summary>
+    /// <summary>Puts the batch's rows in the object's bucket, and reads its measures' values, before its columns are counted.</summary>
     internal void Prepare(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows)
     {
-        if (Dead)
-        {
-            return;
-        }
-
         if (HourSlots.Length < rows)
         {
             HourSlots = new int[Math.Max(rows, HourSlots.Length * 2)];
         }
-
-        if (!Instants(arena, fieldNodes[InstantField], rows))
-        {
-            Dead = true;
-            return;
-        }
-
-        long least = long.MaxValue;
-        int last = -1;
-        foreach (int slot in HourSlots.AsSpan(0, rows))
-        {
-            if (slot != last)
-            {
-                last = slot;
-                long hour = Hours[slot];
-                least = hour != NullHour && hour < least ? hour : least;
-            }
-        }
-
-        LeastHour = least;
 
         foreach (CountedMeasure measure in Measures)
         {
@@ -227,86 +169,6 @@ internal sealed class CountsPlan
                 measure.Live = false;
             }
         }
-    }
-
-    /// <summary>The hour of each row of the instant column's node <paramref name="nodeIndex"/>; false for a form it does not read.</summary>
-    private bool Instants(CanonicalArena arena, int nodeIndex, int rows)
-    {
-        CanonicalNode outer = arena.GetNode(nodeIndex);
-        CanonicalNode node = outer;
-        while (node.Kind == CanonicalKind.Extension)
-        {
-            node = arena.GetNode(node.StorageIndex);
-        }
-
-        ValidityMask own = ValidityMask.From(arena, node.Validity);
-        ValidityMask wrapper = ValidityMask.From(arena, outer.Validity);
-        bool allValid = own.AllValid && wrapper.AllValid;
-        bool noneValid = own.AllInvalid || wrapper.AllInvalid;
-        Span<int> slots = HourSlots.AsSpan(0, rows);
-        switch (node.Kind)
-        {
-            case CanonicalKind.Primitive when node.PType == PType.I64:
-            {
-                ReadOnlySpan<long> instants = MemoryMarshal.Cast<byte, long>(node.Values.Span);
-                for (int row = 0; row < rows; row++)
-                {
-                    slots[row] = noneValid || !(allValid || (own.IsValid(row) && wrapper.IsValid(row))) ? SlotOf(NullHour) : HourOf(instants[row]);
-                }
-
-                return true;
-            }
-
-            case CanonicalKind.Constant:
-            {
-                int slot = noneValid ? SlotOf(NullHour) : HourOf(MemoryMarshal.Read<long>(node.ConstantElement));
-                for (int row = 0; row < rows; row++)
-                {
-                    slots[row] = allValid || (own.IsValid(row) && wrapper.IsValid(row)) ? slot : SlotOf(NullHour);
-                }
-
-                return true;
-            }
-
-            default:
-                return noneValid && Fill(slots, SlotOf(NullHour));
-        }
-    }
-
-    private static bool Fill(Span<int> slots, int slot)
-    {
-        slots.Fill(slot);
-        return true;
-    }
-
-    /// <summary>The number of the hour <paramref name="instant"/> falls in; the hour of the row before, most of the time.</summary>
-    private int HourOf(long instant)
-    {
-        if (instant >= _hourStart && instant < _hourEnd)
-        {
-            return _hourSlot;
-        }
-
-        long hour = instant >= 0 ? instant / UnitsPerHour : ((instant + 1) / UnitsPerHour) - 1;
-        _hourSlot = SlotOf(hour);
-
-        // The hour's instants, for the rows after; none at either end of the longs, where they would wrap.
-        long start = unchecked(hour * UnitsPerHour);
-        bool fits = start <= instant && start / UnitsPerHour == hour && start <= long.MaxValue - UnitsPerHour;
-        (_hourStart, _hourEnd) = fits ? (start, start + UnitsPerHour) : (1, 0);
-        return _hourSlot;
-    }
-
-    private int SlotOf(long hour)
-    {
-        if (!_slots.TryGetValue(hour, out int slot))
-        {
-            slot = Hours.Count;
-            Hours.Add(hour);
-            _slots.Add(hour, slot);
-        }
-
-        return slot;
     }
 
     /// <summary>The values of measure <paramref name="measure"/>'s node <paramref name="nodeIndex"/>; false for a form it does not read.</summary>
@@ -907,7 +769,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         foreach (int open in _openHours)
         {
             long at = _plan.Hours[open];
-            if (at != CountsPlan.NullHour && at < least)
+            if (at < least)
             {
                 (done ??= []).Add(open);
             }
@@ -1143,7 +1005,6 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         int width = StateWords.Count(kinds);
         long[] words = new long[_entries * width];
-        long[] entryHours = new long[_entries];
         byte[]?[]? sketchBytes = _sketches is null ? null : new byte[]?[_entries * carried.Count];
 
         // The wide columns whose distinct values every entry keeps.
@@ -1162,7 +1023,6 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         for (int i = 0; i < order.Length; i++)
         {
             int entry = order[i];
-            entryHours[i] = hours[_entryHour[entry]];
             ReadOnlySpan<long> record = _words.AsSpan(entry * _stride, _stride);
             Span<long> state = words.AsSpan(i * width, width);
             state[0] = record[0];
@@ -1218,7 +1078,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         // The sketches, a region of their own beside the counts, when there is a measure to sketch or a column attached.
         bool sketched = sketchBytes is { Length: > 0 };
-        ColumnCounts counts = new ColumnCounts(fields, kinds, [.. groups], entryHours, words)
+        ColumnCounts counts = new ColumnCounts(fields, kinds, [.. groups], words)
         {
             Sketched = sketched,
             AttachedFields = [.. attached.Select(w => _plan.Wide[w].Field)],

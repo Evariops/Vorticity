@@ -8,23 +8,16 @@ using Vorticity.Writing;
 namespace Vorticity.Indexes;
 
 /// <summary>
-/// Sums columns' counts (<see cref="ColumnCounts"/>) and their sketches (<see cref="ColumnSketches"/>) into buckets of
-/// time coarser than theirs, each named by its first hour since the Unix epoch, with no row read: the hours of a day's
-/// objects into the day, the days of a month into the month. The entries of a value and a bucket add up word for word,
-/// their quantile sketches bucket by bucket and their registers register by register, so that each entry holds what the
-/// rows of its value in its bucket would give. The merge carries the measures, the sketches and the wide columns every
-/// input carries.
+/// Sums objects' counts of a column (<see cref="ColumnCounts"/>) and their sketches (<see cref="ColumnSketches"/>) into the
+/// counts the objects would keep as one, with no row read: the entries of a value add up word for word, their quantile
+/// sketches bucket by bucket and their registers register by register, so that each entry holds what the rows of its
+/// value in every object would give. The merge carries the measures, the sketches and the wide columns every input
+/// carries. A caller that sums by a grain of its own, a clustering value say, keeps a merge for each.
 /// </summary>
 /// <remarks>
-/// <para>
-/// An input's entry of the values its budget left out may hold any value that input does not keep: in a bucket such an
-/// entry reaches, a value one such input does not keep goes with the values left out, so that every value's entry stays
-/// exact. Past its budget of entries, the merge leaves out the values of fewest rows the same way.
-/// </para>
-/// <para>
-/// A bucket's sketches stay open while inputs reach it, and are encoded once <see cref="Close"/> says none will any more,
-/// so that a month of days holds one day's open sketches at a time.
-/// </para>
+/// An input's entry of the values its budget left out may hold any value that input does not keep: a value one such input
+/// does not keep goes with the values left out, so that every value's entry stays exact. Past its budget of entries, the
+/// merge leaves out the values of fewest rows the same way.
 /// </remarks>
 internal sealed class CountsMerge
 {
@@ -43,20 +36,19 @@ internal sealed class CountsMerge
     private int[] _attached = [];
     private int _width;
 
-    // The values met, by their bytes, an id each; the entries, by group and bucket, an index each into the words, the
-    // sketches (each measure's encoded bytes, or the sketch that merges them while its bucket is open) and the registers
-    // (each wide column's encoded registers, or the ranks that merge them).
+    // The values met, by their bytes, an id each; the entries, by group, an index each into the words, the sketches (each
+    // measure's encoded bytes, or the sketch that merges them) and the registers (each wide column's encoded registers, or
+    // the ranks that merge them).
     private readonly Dictionary<byte[], int> _ids = new Dictionary<byte[], int>(ByteKeys.Instance);
     private readonly List<byte[]> _values = [];
-    private readonly Dictionary<(int Group, long Bucket), int> _entries = [];
-    private readonly List<(int Group, long Bucket)> _keys = [];
-    private readonly Dictionary<long, List<int>> _open = [];
+    private readonly Dictionary<int, int> _entries = [];
+    private readonly List<int> _groups = [];
     private long[] _words = [];
     private object?[] _sketches = [];
     private object?[] _registers = [];
 
-    // Per bucket an input's values left out reach, the values each such input keeps.
-    private readonly Dictionary<long, List<HashSet<int>>> _hiding = [];
+    // The values each input that left some out keeps.
+    private readonly List<HashSet<int>> _hiding = [];
 
     /// <param name="entryLimit">The entries the merge keeps at most, past which the values of fewest rows are left out.</param>
     internal CountsMerge(int entryLimit = ColumnCountsBuilder.EntryLimit) => _entryLimit = entryLimit;
@@ -64,11 +56,8 @@ internal sealed class CountsMerge
     /// <summary>The entries the merge holds.</summary>
     internal int Entries => _entries.Count;
 
-    /// <summary>
-    /// Adds the entries of <paramref name="counts"/>, with <paramref name="sketches"/> their sketches when it keeps any,
-    /// each into the bucket <paramref name="bucketOf"/> names for its hour; an entry it names none for is left out.
-    /// </summary>
-    internal void Add(ColumnCounts counts, ColumnSketches? sketches, Func<long, long?> bucketOf)
+    /// <summary>Adds the entries of <paramref name="counts"/>, with <paramref name="sketches"/> their sketches when it keeps any.</summary>
+    internal void Add(ColumnCounts counts, ColumnSketches? sketches)
     {
         Carry(counts, sketches);
         int measures = _fields!.Length;
@@ -93,12 +82,11 @@ internal sealed class CountsMerge
         }
 
         // The values an input that left some out keeps: a value it does not keep may hide in its entry of the others.
-        HashSet<int>? kept = null;
         foreach (CountGroup group in counts.Groups)
         {
             if (group.Kind == CountedValue.Others)
             {
-                kept = [];
+                HashSet<int> kept = [];
                 foreach (CountGroup held in counts.Groups)
                 {
                     if (held.Kind == CountedValue.Value)
@@ -107,6 +95,7 @@ internal sealed class CountsMerge
                     }
                 }
 
+                _hiding.Add(kept);
                 break;
             }
         }
@@ -117,17 +106,7 @@ internal sealed class CountsMerge
             int id = group.Kind switch { CountedValue.Null => NullGroup, CountedValue.Others => OthersGroup, _ => Id(group.Value!) };
             for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
             {
-                if (bucketOf(counts.Hours[e]) is not long bucket)
-                {
-                    continue;
-                }
-
-                if (id == OthersGroup)
-                {
-                    Hide(bucket, kept!);
-                }
-
-                int entry = EntryOf(id, bucket);
+                int entry = EntryOf(id);
                 ReadOnlySpan<long> words = counts.WordsOf(e);
                 projected[0] = words[0];
                 for (int m = 0, at = 1; m < measures; m++)
@@ -151,16 +130,16 @@ internal sealed class CountsMerge
         }
     }
 
-    /// <summary>Encodes the open sketches and registers of the entries of <paramref name="bucket"/>, which no later input reaches.</summary>
-    internal void Close(long bucket)
+    /// <summary>The merged counts and their sketches, the latter null when the merge keeps none; null when no entry was added.</summary>
+    internal (ColumnCounts Counts, ColumnSketches? Sketches)? Finish()
     {
-        if (!_open.Remove(bucket, out List<int>? entries))
+        if (_fields is null || _entries.Count == 0)
         {
-            return;
+            return null;
         }
 
-        int measures = _sketched ? _fields!.Length : 0;
-        foreach (int entry in entries)
+        int measures = _sketched ? _fields.Length : 0;
+        for (int entry = 0; entry < _groups.Count; entry++)
         {
             for (int m = 0; m < measures; m++)
             {
@@ -172,26 +151,12 @@ internal sealed class CountsMerge
                 Seal(ref _registers[(entry * _attached.Length) + a]);
             }
         }
-    }
 
-    /// <summary>The merged counts and their sketches, the latter null when the merge keeps none; null when no entry was added.</summary>
-    internal (ColumnCounts Counts, ColumnSketches? Sketches)? Finish()
-    {
-        if (_fields is null || _entries.Count == 0)
+        // A value an input's entry of the values left out may hide in goes with them.
+        for (int entry = 0; entry < _groups.Count; entry++)
         {
-            return null;
-        }
-
-        foreach (long bucket in new List<long>(_open.Keys))
-        {
-            Close(bucket);
-        }
-
-        // A value an input's entry of the values left out may hide in goes with them in each bucket that entry reaches.
-        for (int entry = 0; entry < _keys.Count; entry++)
-        {
-            (int group, long bucket) = _keys[entry];
-            if (group >= 0 && _hiding.TryGetValue(bucket, out List<HashSet<int>>? hiding) && !hiding.TrueForAll(values => values.Contains(group)))
+            int group = _groups[entry];
+            if (group >= 0 && !_hiding.TrueForAll(values => values.Contains(group)))
             {
                 MoveToOthers(entry);
             }
@@ -253,7 +218,7 @@ internal sealed class CountsMerge
             at += MeasureLayout.Words(_kinds[m] == MeasureKind.Float);
         }
 
-        int entries = _keys.Count;
+        int entries = _groups.Count;
         long[] words = new long[Math.Max(entries, 1) * width];
         object?[] sketches = sketched ? new object?[Math.Max(entries, 1) * measures.Length] : [];
         object?[] registers = new object?[Math.Max(entries, 1) * wide.Length];
@@ -295,29 +260,15 @@ internal sealed class CountsMerge
         return id;
     }
 
-    /// <summary>Says that the values <paramref name="kept"/> leaves out may hide in <paramref name="bucket"/>'s entry of the values left out.</summary>
-    private void Hide(long bucket, HashSet<int> kept)
+    /// <summary>The entry of group <paramref name="group"/>, made with no row the first time.</summary>
+    private int EntryOf(int group)
     {
-        if (!_hiding.TryGetValue(bucket, out List<HashSet<int>>? hiding))
-        {
-            _hiding[bucket] = hiding = [];
-        }
-
-        if (hiding.Count == 0 || !ReferenceEquals(hiding[^1], kept))
-        {
-            hiding.Add(kept);
-        }
-    }
-
-    /// <summary>The entry of group <paramref name="group"/> in <paramref name="bucket"/>, made with no row the first time.</summary>
-    private int EntryOf(int group, long bucket)
-    {
-        if (_entries.TryGetValue((group, bucket), out int entry))
+        if (_entries.TryGetValue(group, out int entry))
         {
             return entry;
         }
 
-        entry = _keys.Count;
+        entry = _groups.Count;
         int measures = _sketched ? _fields!.Length : 0;
         if ((entry + 1) * _width > _words.Length)
         {
@@ -328,14 +279,8 @@ internal sealed class CountsMerge
         }
 
         StateWords.Clear(_words.AsSpan(entry * _width, _width), _kinds);
-        _entries.Add((group, bucket), entry);
-        _keys.Add((group, bucket));
-        if (!_open.TryGetValue(bucket, out List<int>? open))
-        {
-            _open[bucket] = open = [];
-        }
-
-        open.Add(entry);
+        _entries.Add(group, entry);
+        _groups.Add(group);
         return entry;
     }
 
@@ -416,11 +361,11 @@ internal sealed class CountsMerge
         }
     }
 
-    /// <summary>Moves entry <paramref name="entry"/> into its bucket's entry of the values left out.</summary>
+    /// <summary>Moves entry <paramref name="entry"/> into the entry of the values left out.</summary>
     private void MoveToOthers(int entry)
     {
-        (int group, long bucket) = _keys[entry];
-        int others = EntryOf(OthersGroup, bucket);
+        int group = _groups[entry];
+        int others = EntryOf(OthersGroup);
         StateWords.Merge(_words.AsSpan(others * _width, _width), _words.AsSpan(entry * _width, _width), _kinds);
         int measures = _sketched ? _fields!.Length : 0;
         for (int m = 0; m < measures; m++)
@@ -435,11 +380,11 @@ internal sealed class CountsMerge
             Seal(ref _registers[(others * _attached.Length) + a]);
         }
 
-        _entries.Remove((group, bucket));
-        _keys[entry] = (Moved, bucket);
+        _entries.Remove(group);
+        _groups[entry] = Moved;
     }
 
-    /// <summary>Past the budget, leaves out the values of fewest rows, their entries moved into those of the values left out.</summary>
+    /// <summary>Past the budget, leaves out the values of fewest rows, their entries moved into the entry of the values left out.</summary>
     private void LeaveOut()
     {
         if (_entries.Count <= _entryLimit)
@@ -447,15 +392,16 @@ internal sealed class CountsMerge
             return;
         }
 
-        // Each value's rows and entries.
+        // Each value's rows and entry.
         long[] rows = new long[_values.Count];
-        List<int>?[] entries = new List<int>?[_values.Count];
-        for (int entry = 0; entry < _keys.Count; entry++)
+        int[] entries = new int[_values.Count];
+        Array.Fill(entries, -1);
+        for (int entry = 0; entry < _groups.Count; entry++)
         {
-            if (_keys[entry].Group is int value and >= 0)
+            if (_groups[entry] is int value and >= 0)
             {
-                rows[value] += _words[entry * _width];
-                (entries[value] ??= []).Add(entry);
+                rows[value] = _words[entry * _width];
+                entries[value] = entry;
             }
         }
 
@@ -469,14 +415,14 @@ internal sealed class CountsMerge
         Array.Sort(rows, order);
         for (int i = 0; i < order.Length && _entries.Count > _entryLimit; i++)
         {
-            foreach (int entry in entries[order[i]] ?? [])
+            if (entries[order[i]] >= 0)
             {
-                MoveToOthers(entry);
+                MoveToOthers(entries[order[i]]);
             }
         }
     }
 
-    /// <summary>The counts and sketches of the entries: the nulls, the values left out, then the values by their bytes, each by bucket.</summary>
+    /// <summary>The counts and sketches of the entries: the nulls, the values left out, then the values by their bytes.</summary>
     private (ColumnCounts Counts, ColumnSketches? Sketches) Written()
     {
         int[] rank = new int[_values.Count];
@@ -493,32 +439,26 @@ internal sealed class CountsMerge
         }
 
         List<int> live = new List<int>(_entries.Count);
-        for (int entry = 0; entry < _keys.Count; entry++)
+        for (int entry = 0; entry < _groups.Count; entry++)
         {
-            if (_keys[entry].Group != Moved)
+            if (_groups[entry] != Moved)
             {
                 live.Add(entry);
             }
         }
 
         int RankOf(int group) => group switch { NullGroup => 0, OthersGroup => 1, _ => rank[group] };
-        live.Sort((left, right) =>
-        {
-            int groups = RankOf(_keys[left].Group).CompareTo(RankOf(_keys[right].Group));
-            return groups != 0 ? groups : _keys[left].Bucket.CompareTo(_keys[right].Bucket);
-        });
+        live.Sort((left, right) => RankOf(_groups[left]).CompareTo(RankOf(_groups[right])));
 
         int measures = _sketched ? _fields!.Length : 0;
         long[] words = new long[live.Count * _width];
-        long[] hours = new long[live.Count];
         byte[]?[]? sketches = measures > 0 ? new byte[]?[live.Count * measures] : null;
         byte[]?[]? registers = _attached.Length > 0 ? new byte[]?[live.Count * _attached.Length] : null;
-        List<CountGroup> groups = [];
+        CountGroup[] groups = new CountGroup[live.Count];
         for (int i = 0; i < live.Count; i++)
         {
             int entry = live[i];
-            (int group, long bucket) = _keys[entry];
-            hours[i] = bucket;
+            int group = _groups[entry];
             _words.AsSpan(entry * _width, _width).CopyTo(words.AsSpan(i * _width, _width));
             for (int m = 0; m < measures; m++)
             {
@@ -530,19 +470,14 @@ internal sealed class CountsMerge
                 registers![(i * _attached.Length) + a] = _registers[(entry * _attached.Length) + a] as byte[];
             }
 
-            if (groups.Count == 0 || _keys[live[i - 1]].Group != group)
-            {
-                groups.Add(new CountGroup(
-                    group switch { NullGroup => CountedValue.Null, OthersGroup => CountedValue.Others, _ => CountedValue.Value },
-                    group >= 0 ? _values[group] : null,
-                    i,
-                    0));
-            }
-
-            groups[^1] = groups[^1] with { Entries = groups[^1].Entries + 1 };
+            groups[i] = new CountGroup(
+                group switch { NullGroup => CountedValue.Null, OthersGroup => CountedValue.Others, _ => CountedValue.Value },
+                group >= 0 ? _values[group] : null,
+                i,
+                1);
         }
 
-        ColumnCounts counts = new ColumnCounts(_fields!, _kinds, [.. groups], hours, words)
+        ColumnCounts counts = new ColumnCounts(_fields!, _kinds, groups, words)
         {
             Sketched = measures > 0,
             AttachedFields = _attached,

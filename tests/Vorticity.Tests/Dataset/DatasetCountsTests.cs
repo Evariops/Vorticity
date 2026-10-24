@@ -1,8 +1,7 @@
-// The counts by hour of a dataset's sealed objects, against their rows.
+// The counts of a dataset's sealed objects, against their rows.
 //
-// WHAT IS HELD: on schemas drawn at random, a sealed object counts each column whose values repeat by the hours of its
-// period's instant, its nulls apart, and carries every number column of many values as a measure: the rows of each value
-// and hour, and each measure's values, exact sum, least and greatest, equal those its rows give, all of a column's read
+// WHAT IS HELD: on schemas drawn at random, a sealed object counts each column whose values repeat over its rows, its
+// nulls apart, and carries every number column of many values as a measure: the rows of each value, and each measure's values, exact sum, least and greatest, equal those its rows give, all of a column's read
 // in one request with no open of the object. A number column of few values is counted and carried by none, and an
 // identifier is not counted.
 using System;
@@ -63,8 +62,8 @@ public sealed class DatasetCountsTests
                 Assert.Equal(counts[field].Counts is null ? 0 : 1, store.Requests);
             }
 
-            // The object's rows: those of the hour its counts name, which its period holds whole.
-            long hour = counts.First(c => c.Counts is not null).Counts!.Hours[0];
+            // The object's rows: those of the hour its instants lie in, which its period holds whole.
+            long hour = HourOf(held.Entry);
             object?[][] mine = [.. rows.Where(r => HourOf((DateTimeOffset)r[0]!) == hour)];
             Assert.Equal(mine.Length, held.Entry.Rows);
             for (int c = 0; c < columns.Length; c++)
@@ -76,7 +75,7 @@ public sealed class DatasetCountsTests
                 Assert.True(expected == counts[c + 1].Counts is not null, $"seed {seed}: column {c} ({column}) counted {counts[c + 1].Counts is not null}, {distinct} values in {valid} rows");
                 if (counts[c + 1] is ({ } kept, var sketches))
                 {
-                    Check(kept, sketches, c, columns, mine, hour, distinct);
+                    Check(kept, sketches, c, columns, mine, distinct);
                     CheckDistinct(kept, sketches, c, columns, mine, distinct);
                     counted++;
                 }
@@ -124,7 +123,7 @@ public sealed class DatasetCountsTests
 
         rows.AddRange(late);
 
-        // Every object's counts of the text column, added by value and hour.
+        // Every object's counts of the text column, added by value and by the hour its rows lie in.
         Dictionary<(string Value, long Hour), long[]> added = [];
         Dictionary<(string Value, long Hour), QuantileSketch> sketches = [];
         MeasureKind[]? kinds = null;
@@ -136,12 +135,13 @@ public sealed class DatasetCountsTests
             }
 
             kinds ??= counts.Kinds;
+            long hour = HourOf(held.Entry);
             Assert.Equal([3, 4], counts.MeasureFields);
             foreach (CountGroup group in counts.Groups)
             {
                 for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
                 {
-                    (string, long) key = (Encoding.UTF8.GetString(group.Value!), counts.Hours[e]);
+                    (string, long) key = (Encoding.UTF8.GetString(group.Value!), hour);
                     if (sketched?.SketchOf(e, 1) is { } weights)
                     {
                         if (!sketches.TryGetValue(key, out QuantileSketch? sketch))
@@ -195,8 +195,8 @@ public sealed class DatasetCountsTests
         Assert.Equal(rows.Count(r => hours.Contains(HourOf((DateTimeOffset)r[0]!))), added.Values.Sum(w => w[0]));
     }
 
-    /// <summary>Holds <paramref name="counts"/> of column <paramref name="c"/>, of <paramref name="distinct"/> values, to what the rows <paramref name="rows"/> of hour <paramref name="hour"/> give.</summary>
-    private static void Check(ColumnCounts counts, ColumnSketches? sketches, int c, Drawn[] columns, object?[][] rows, long hour, int distinct)
+    /// <summary>Holds <paramref name="counts"/> of column <paramref name="c"/>, of <paramref name="distinct"/> values, to what the object's rows <paramref name="rows"/> give.</summary>
+    private static void Check(ColumnCounts counts, ColumnSketches? sketches, int c, Drawn[] columns, object?[][] rows, int distinct)
     {
         // The measures: every number column of more than a few values in these rows but the column itself.
         int[] measures = [.. Enumerable.Range(0, columns.Length).Where(m => m != c && columns[m].Number
@@ -211,7 +211,6 @@ public sealed class DatasetCountsTests
             string key = group.Kind == CountedValue.Null ? "null" : Key(Value(columns[c], group.Value!));
             Assert.True(byValue.TryGetValue(key, out object?[][]? held), $"column {c} counts {key}, which no row holds");
             Assert.Equal(1, group.Entries);
-            Assert.Equal(hour, counts.Hours[group.FirstEntry]);
             ReadOnlySpan<long> words = counts.WordsOf(group.FirstEntry);
             Assert.Equal(held.Length, words[0]);
             int at = 1;
@@ -332,6 +331,15 @@ public sealed class DatasetCountsTests
     };
 
     private static long HourOf(DateTimeOffset at) => (long)Math.Floor((at - DateTimeOffset.UnixEpoch).TotalHours);
+
+    /// <summary>The hour an object's instants lie in, as its summaries bound them: one, a period's.</summary>
+    private static long HourOf(ObjectEntry entry)
+    {
+        Assert.True(entry.Summaries.TryGet("At", out Vorticity.Scanning.ColumnSummary at) && at.HasMin && at.HasMax);
+        long first = (long)Math.Floor(at.Min.SignedValue / 3_600_000_000.0);
+        Assert.Equal(first, (long)Math.Floor(at.Max.SignedValue / 3_600_000_000.0));
+        return first;
+    }
 
     internal enum Kind
     {

@@ -38,8 +38,8 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>The version every sink of the scan reads.</summary>
     internal ulong Version => _version.Version;
 
-    /// <summary>A dataset in periods, whose jobs' objects keep counts by hour: those answer some aggregations as states (<see cref="CountsAnswer"/>).</summary>
-    internal override bool KeepsStates => _version.MayKeepCounts && CountsAnswer.Counting(_version) is not null;
+    /// <summary>A dataset whose jobs' objects keep counts: those answer some aggregations as states (<see cref="CountsAnswer"/>).</summary>
+    internal override bool KeepsStates => _version.MayKeepCounts;
 
     internal override async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
         KeepsStates && spec.Options.UseSynopses && !spec.MatchesNothing

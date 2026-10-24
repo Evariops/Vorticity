@@ -1820,12 +1820,12 @@ internal sealed class IndexWriter : IDisposable
         return region;
     }
 
-    /// <summary>The plan the columns' counts by hour share (<see cref="AddCounts"/>), or null when no column is counted.</summary>
+    /// <summary>The plan the columns' counts share (<see cref="AddCounts"/>), or null when no column is counted.</summary>
     private CountsPlan? _counts;
 
     /// <summary>
-    /// Gives every top-level column with a sheet but <paramref name="plan"/>'s instant its counts by hour, fed right after
-    /// its sheet, which numbers its rows' values for them.
+    /// Gives every top-level column with a sheet its counts, fed right after its sheet, which numbers its rows' values for
+    /// them.
     /// </summary>
     internal void AddCounts(CountsPlan plan)
     {
@@ -1834,7 +1834,7 @@ internal sealed class IndexWriter : IDisposable
         // The text columns, wide until their first rows say otherwise, before any column's counts are made.
         for (int field = 0; _isTabular && field < _fieldCount; field++)
         {
-            if (field != plan.InstantField && plan.MeasureOf(field) < 0 && SheetOf(field) is { } sheet)
+            if (plan.MeasureOf(field) < 0 && SheetOf(field) is { } sheet)
             {
                 sheet.HashRows();
                 plan.Wide.Add(new WideColumn(field, sheet));
@@ -1843,7 +1843,7 @@ internal sealed class IndexWriter : IDisposable
 
         for (int field = 0; _isTabular && field < _fieldCount; field++)
         {
-            if (field != plan.InstantField && SheetOf(field) is { } sheet)
+            if (SheetOf(field) is { } sheet)
             {
                 _builders[field].Add(new ColumnCountsBuilder(sheet, plan, field));
             }

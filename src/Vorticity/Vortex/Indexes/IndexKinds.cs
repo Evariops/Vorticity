@@ -81,14 +81,14 @@ internal static class IndexKinds
     public const string ColumnSheet = "vorticity.column.sheet.v1";
 
     /// <summary>
-    /// A column's counts by hour, on that column: for each of its values, its nulls and the values its budget left out, an
-    /// entry an hour with its rows and the states of every measure column over them, in one payload region that a table of
+    /// A column's counts over the object's rows, on that column: for each of its values, its nulls and the values its budget
+    /// left out, an entry with its rows and the states of every measure column over them, in one payload region that a table of
     /// contents names, so that a question on that column alone is answered with no row read (<see cref="ColumnCounts"/>).
     /// </summary>
     public const string ColumnCounts = "vorticity.column.counts.v1";
 
     /// <summary>
-    /// The sketches of a column's counts by hour, on that column: for each entry of its counts, a quantile sketch of each
+    /// The sketches of a column's counts, on that column: for each entry of its counts, a quantile sketch of each
     /// measure and the registers of the distinct values of each wide column, in one payload region right after the
     /// counts, which a table of contents names, so that a question of counts alone reads none of them
     /// (<see cref="ColumnSketches"/>).

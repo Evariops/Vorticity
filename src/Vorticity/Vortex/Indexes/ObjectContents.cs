@@ -78,7 +78,7 @@ internal sealed class ObjectContents(
     internal IndexSegment? SheetOf(int field) => RegionOf(Sheets, field);
 
     /// <summary>
-    /// Each top-level column's counts by hour (<see cref="ColumnCounts"/>), and its region: what a question on that column
+    /// Each top-level column's counts (<see cref="ColumnCounts"/>), and its region: what a question on that column
     /// alone reads of the object instead of its rows. Empty when the object keeps none.
     /// </summary>
     internal IReadOnlyList<(int Field, IndexSegment Region)> Counts { get; init; } = [];
@@ -180,7 +180,7 @@ internal sealed class ObjectContents(
     // A column's sheet: its field and its region, as a path directory's.
     private const int TagSheet = 14;
 
-    // A column's counts by hour: its field and its region, as a path directory's.
+    // A column's counts: its field and its region, as a path directory's.
     private const int TagCounts = 15;
 
     // The sketches of a column's counts: its field and its region, as a path directory's.

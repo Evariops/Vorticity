@@ -817,8 +817,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             writer._indexes?.AddSheets(schema);
             writer._sheetBytes = options.ColumnSheetBytes;
 
-            // And the counts by hour of each column a sheet numbers the values of.
-            if (options.CountsInstant is { } instant && CountsPlan.For(schema, instant) is { } plan)
+            // And the counts of each column a sheet numbers the values of, over the whole object.
+            if (options.Counted && CountsPlan.For(schema) is { } plan)
             {
                 writer._indexes?.AddCounts(plan);
             }
@@ -2377,7 +2377,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (_indexes is { } closed)
         {
             // What each column holds, for a question on a value the file lacks, which passes it unopened; and each column's
-            // counts by hour, for a question on that column alone, which reads no row of the file. Right after the data,
+            // counts, for a question on that column alone, which reads no row of the file. Right after the data,
             // read alone through the table of contents, they lie between none of the structures a scan reads together, and
             // no read of those bridges them. A file too small for a reader to ask its sheets before it keeps neither.
             List<(int Field, IndexSegment Region)> sheets = [];

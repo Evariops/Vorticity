@@ -19,39 +19,41 @@ internal enum CountedValue : byte
     Others = 2,
 }
 
-/// <summary>A group of a column's counts: what it stands for, and its entries, one an hour, from the entry <paramref name="FirstEntry"/>.</summary>
+/// <summary>A group of a column's counts: what it stands for, and its entries from the entry <paramref name="FirstEntry"/>, one over the whole object.</summary>
 /// <param name="Kind">A value, the nulls, or the values left out.</param>
 /// <param name="Value">The value's bytes as the column stores them, when <paramref name="Kind"/> is <see cref="CountedValue.Value"/>.</param>
 /// <param name="FirstEntry">Its first entry.</param>
-/// <param name="Entries">Its entries, in the order of their hours.</param>
+/// <param name="Entries">Its entries: one.</param>
 internal readonly record struct CountGroup(CountedValue Kind, byte[]? Value, int FirstEntry, int Entries);
 
 /// <summary>
-/// A column's counts by hour in an object (<see cref="IndexKinds.ColumnCounts"/>): for each of its values, its nulls, and
-/// past an absolute budget the values left out together, an entry an hour that holds the rows of the hour with that
-/// value and the states of every measure column over them, its values, their exact sum, their least and their
-/// greatest, in the words <see cref="StateWords"/> lays out. A region a column, which the object's table of contents
-/// names, so that a reader fetches it with no open of the object; the entries' quantile sketches and distinct registers
-/// lie in a region of their own right after it (<see cref="ColumnSketches"/>), which a question of counts, sums and
-/// extremes does not read.
+/// A column's counts in an object (<see cref="IndexKinds.ColumnCounts"/>): for each of its values, its nulls, and past an
+/// absolute budget the values left out together, an entry over the whole object that holds the rows with that value and
+/// the states of every measure column over them, its values, their exact sum, their least and their greatest, in the
+/// words <see cref="StateWords"/> lays out. A region a column, which the object's table of contents names, so that a
+/// reader fetches it with no open of the object; the entries' quantile sketches and distinct registers lie in a region of
+/// their own right after it (<see cref="ColumnSketches"/>), which a question of counts, sums and extremes does not read.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The groups go the nulls first, then the values left out, then the values in the order of their bytes, and each
-/// group's entries in the order of their hours, an hour a number of hours since the Unix epoch, <see cref="long.MinValue"/>
-/// for the rows whose instant is null. Entries of the same value and hour from two objects merge word for word.
+/// The grain is the object, whatever its rows: the application cuts its objects by the values it chooses
+/// (<c>ClusteringOptions</c>), and the counts describe what each holds. The groups go the nulls first, then the values
+/// left out, then the values in the order of their bytes. Entries of the same value from two objects merge word for word.
 /// </para>
 /// <para>
 /// The region is a header, the measures, a directory of chunks of about <see cref="ChunkBytes"/>, each naming its first
-/// group, then the chunks: a group's value, its entries' hours as deltas, each entry's rows, and each measure's values
-/// as what they lack of the rows, its sum and its extremes as varints, a float's extremes as their eight bytes. A reader
-/// of one value can read the header and the chunk that holds it alone.
+/// group, then the chunks: a group's value, its entry's rows, and each measure's values as what they lack of the rows,
+/// its sum and its extremes as varints, a float's extremes as their eight bytes. A reader of one value can read the
+/// header and the chunk that holds it alone.
 /// </para>
 /// </remarks>
 internal sealed class ColumnCounts
 {
-    /// <summary>The version this library writes and reads.</summary>
-    internal const byte Version = 1;
+    /// <summary>
+    /// The version this library writes and reads. Version 1 counted each value by the hours of an instant, which an earlier
+    /// writer of this branch kept; it is read as no counts.
+    /// </summary>
+    internal const byte Version = 2;
 
     /// <summary>The bytes a chunk of groups takes about: a group is never cut.</summary>
     internal const int ChunkBytes = 16 << 10;
@@ -64,15 +66,13 @@ internal sealed class ColumnCounts
 
     /// <param name="measureFields">The top-level columns whose states each entry holds, in their order.</param>
     /// <param name="kinds">How each is summed.</param>
-    /// <param name="groups">The groups, in their order.</param>
-    /// <param name="hours">Each entry's hour.</param>
+    /// <param name="groups">The groups, in their order, an entry each.</param>
     /// <param name="words">Each entry's words, <see cref="StateWords.Count"/> of them: its rows, then each measure's states.</param>
-    internal ColumnCounts(int[] measureFields, MeasureKind[] kinds, CountGroup[] groups, long[] hours, long[] words)
+    internal ColumnCounts(int[] measureFields, MeasureKind[] kinds, CountGroup[] groups, long[] words)
     {
         MeasureFields = measureFields;
         Kinds = kinds;
         Groups = groups;
-        Hours = hours;
         Words = words;
         WordsPerEntry = StateWords.Count(kinds);
     }
@@ -89,8 +89,8 @@ internal sealed class ColumnCounts
     /// </summary>
     internal int[] AttachedFields { get; init; } = [];
 
-    /// <summary>The bytes the counts hold in memory, about: their words, their hours and their groups.</summary>
-    internal long Bytes => ((Words.Length + Hours.Length) * (long)sizeof(long)) + (Groups.Length * 64L);
+    /// <summary>The bytes the counts hold in memory, about: their words and their groups.</summary>
+    internal long Bytes => (Words.Length * (long)sizeof(long)) + (Groups.Length * 64L);
 
     /// <summary>The top-level columns whose states each entry holds.</summary>
     internal int[] MeasureFields { get; }
@@ -101,17 +101,14 @@ internal sealed class ColumnCounts
     /// <summary>The groups: the nulls, the values left out, then the values in the order of their bytes.</summary>
     internal CountGroup[] Groups { get; }
 
-    /// <summary>Each entry's hour, in hours since the Unix epoch; <see cref="long.MinValue"/> for a null instant.</summary>
-    internal long[] Hours { get; }
-
     /// <summary>Each entry's words, <see cref="WordsPerEntry"/> of them.</summary>
     internal long[] Words { get; }
 
     /// <summary>The words of an entry: its rows, then each measure's states.</summary>
     internal int WordsPerEntry { get; }
 
-    /// <summary>The entries.</summary>
-    internal int Entries => Hours.Length;
+    /// <summary>The entries: a group's each.</summary>
+    internal int Entries => Groups.Length;
 
     /// <summary>The words of entry <paramref name="entry"/>.</summary>
     internal ReadOnlySpan<long> WordsOf(int entry) => Words.AsSpan(entry * WordsPerEntry, WordsPerEntry);
@@ -121,12 +118,11 @@ internal sealed class ColumnCounts
     {
         Output chunks = new Output(ChunkBytes);
         List<(int Offset, int Length, int FirstGroup)> directory = [];
-        long origin = Origin();
         int chunkStart = 0;
         int chunkGroup = 0;
         for (int group = 0; group < Groups.Length; group++)
         {
-            WriteGroup(ref chunks, Groups[group], origin);
+            WriteGroup(ref chunks, Groups[group]);
             if (chunks.Length - chunkStart >= ChunkBytes || group == Groups.Length - 1)
             {
                 directory.Add((chunkStart, chunks.Length - chunkStart, chunkGroup));
@@ -154,9 +150,7 @@ internal sealed class ColumnCounts
             }
         }
 
-        head.Varint(Varint.ZigZagEncode64(origin));
         head.Varint((ulong)Groups.Length);
-        head.Varint((ulong)Entries);
         head.Varint((ulong)directory.Count);
         foreach ((int offset, int length, int firstGroup) in directory)
         {
@@ -203,9 +197,7 @@ internal sealed class ColumnCounts
             }
         }
 
-        long origin = Varint.ZigZagDecode64(Varint.Read64<Errors>(bytes, ref at));
         int groups = Count(bytes, ref at);
-        int entries = Count(bytes, ref at);
         int chunks = Count(bytes, ref at);
         for (int chunk = 0; chunk < chunks; chunk++)
         {
@@ -216,17 +208,16 @@ internal sealed class ColumnCounts
             SkipKey(bytes, ref at);
         }
 
-        ColumnCounts counts = new ColumnCounts(fields, kinds, new CountGroup[groups], new long[entries], new long[entries * StateWords.Count(kinds)])
+        ColumnCounts counts = new ColumnCounts(fields, kinds, new CountGroup[groups], new long[groups * StateWords.Count(kinds)])
         {
             Sketched = (bytes[1] & SketchesFlag) != 0,
             AttachedFields = attached,
         };
         // The groups in their order, which a reader of a value searches: the nulls, the values left out, then the values by
         // their bytes, each once.
-        int entry = 0;
         for (int group = 0; group < groups; group++)
         {
-            CountGroup read = counts.ReadGroup(bytes, ref at, ref entry, origin);
+            CountGroup read = counts.ReadGroup(bytes, ref at, group);
             if (group > 0 && !Precedes(counts.Groups[group - 1], read))
             {
                 throw new VortexFormatException($"A column's counts hold their group {group} out of its order, at {at}.");
@@ -235,9 +226,9 @@ internal sealed class ColumnCounts
             counts.Groups[group] = read;
         }
 
-        if (entry != entries || at != bytes.Length)
+        if (at != bytes.Length)
         {
-            throw new VortexFormatException($"A column's counts hold {entry} entries in {at} bytes where their header says {entries} in {bytes.Length}.");
+            throw new VortexFormatException($"A column's counts end at {at} where their header says {bytes.Length}.");
         }
 
         return counts;
@@ -251,142 +242,108 @@ internal sealed class ColumnCounts
         return ranks < 0 || (ranks == 0 && before.Kind == CountedValue.Value && before.Value.AsSpan().SequenceCompareTo(after.Value) < 0);
     }
 
-    /// <summary>The least hour of an entry, the null instant's aside: what the first hour of each group counts from.</summary>
-    private long Origin()
-    {
-        long origin = long.MaxValue;
-        foreach (long hour in Hours)
-        {
-            origin = hour != long.MinValue ? Math.Min(origin, hour) : origin;
-        }
-
-        return origin == long.MaxValue ? 0 : origin;
-    }
-
-    private void WriteGroup(ref Output into, CountGroup group, long origin)
+    private void WriteGroup(ref Output into, CountGroup group)
     {
         Key(ref into, group);
-        into.Varint((ulong)group.Entries);
-        long previous = origin;
         int words = WordsPerEntry;
-        for (int entry = group.FirstEntry; entry < group.FirstEntry + group.Entries; entry++)
+        ReadOnlySpan<long> state = Words.AsSpan(group.FirstEntry * words, words);
+        long rows = state[0];
+        into.Varint((ulong)rows);
+        int at = 1;
+        foreach (MeasureKind kind in Kinds)
         {
-            long hour = Hours[entry];
-            into.Varint(Varint.ZigZagEncode64(unchecked(hour - previous)));
-            previous = hour;
-            ReadOnlySpan<long> state = Words.AsSpan(entry * words, words);
-            long rows = state[0];
-            into.Varint((ulong)rows);
-            int at = 1;
-            foreach (MeasureKind kind in Kinds)
+            bool floats = kind == MeasureKind.Float;
+            long values = state[at + MeasureLayout.Values];
+            into.Varint((ulong)(rows - values));
+            if (values > 0)
             {
-                bool floats = kind == MeasureKind.Float;
-                long values = state[at + MeasureLayout.Values];
-                into.Varint((ulong)(rows - values));
-                if (values > 0)
+                int sum = at + MeasureLayout.Sum;
+                if (floats)
                 {
-                    int sum = at + MeasureLayout.Sum;
-                    if (floats)
+                    // The three bins, the meta word as the values it skipped, its top and its infinities, then the high part.
+                    for (int bin = 0; bin < 3; bin++)
                     {
-                        // The three bins, the meta word as the values it skipped, its top and its infinities, then the high part.
-                        for (int bin = 0; bin < 3; bin++)
-                        {
-                            into.Varint(Varint.ZigZagEncode64(state[sum + bin]));
-                        }
+                        into.Varint(Varint.ZigZagEncode64(state[sum + bin]));
+                    }
 
-                        (long counted, int top, int infinities) = IndexedSum.PartsOf(state[sum + 3]);
-                        into.Varint((ulong)(values - counted));
-                        into.Varint((ulong)(top | (infinities << 7)));
-                        into.Varint(Varint.ZigZagEncode64(state[sum + 4]));
-                        into.Long(state[at + MeasureLayout.FloatLeast]);
-                        into.Long(state[at + MeasureLayout.FloatGreatest]);
-                    }
-                    else
-                    {
-                        Int128 total = StateWords.IntegerOf(state, sum);
-                        UInt128 zigzag = (UInt128)((total << 1) ^ (total >> 127));
-                        into.Varint((ulong)zigzag);
-                        into.Varint((ulong)(zigzag >> 64));
-                        long least = state[at + MeasureLayout.IntegerLeast];
-                        long greatest = state[at + MeasureLayout.IntegerGreatest];
-                        into.Varint(kind == MeasureKind.Signed ? Varint.ZigZagEncode64(least) : (ulong)least);
-                        into.Varint(kind == MeasureKind.Signed ? Varint.ZigZagEncode64(greatest) : (ulong)greatest);
-                    }
+                    (long counted, int top, int infinities) = IndexedSum.PartsOf(state[sum + 3]);
+                    into.Varint((ulong)(values - counted));
+                    into.Varint((ulong)(top | (infinities << 7)));
+                    into.Varint(Varint.ZigZagEncode64(state[sum + 4]));
+                    into.Long(state[at + MeasureLayout.FloatLeast]);
+                    into.Long(state[at + MeasureLayout.FloatGreatest]);
                 }
-
-                at += MeasureLayout.Words(floats);
+                else
+                {
+                    Int128 total = StateWords.IntegerOf(state, sum);
+                    UInt128 zigzag = (UInt128)((total << 1) ^ (total >> 127));
+                    into.Varint((ulong)zigzag);
+                    into.Varint((ulong)(zigzag >> 64));
+                    long least = state[at + MeasureLayout.IntegerLeast];
+                    long greatest = state[at + MeasureLayout.IntegerGreatest];
+                    into.Varint(kind == MeasureKind.Signed ? Varint.ZigZagEncode64(least) : (ulong)least);
+                    into.Varint(kind == MeasureKind.Signed ? Varint.ZigZagEncode64(greatest) : (ulong)greatest);
+                }
             }
+
+            at += MeasureLayout.Words(floats);
         }
     }
 
-    private CountGroup ReadGroup(ReadOnlySpan<byte> bytes, ref int at, ref int entry, long origin)
+    private CountGroup ReadGroup(ReadOnlySpan<byte> bytes, ref int at, int entry)
     {
         (CountedValue counted, byte[]? value) = ReadKey(bytes, ref at);
-        int entries = Count(bytes, ref at);
-        if (entries > Entries - entry)
-        {
-            throw new VortexFormatException($"A column's counts hold more entries than their header says, at {at}.");
-        }
-
-        int first = entry;
-        long previous = origin;
         int words = WordsPerEntry;
-        for (int e = 0; e < entries; e++, entry++)
+        Span<long> state = Words.AsSpan(entry * words, words);
+        StateWords.Clear(state, Kinds);
+        long rows = (long)Varint.Read64<Errors>(bytes, ref at);
+        state[0] = rows;
+        int m = 1;
+        foreach (MeasureKind kind in Kinds)
         {
-            long hour = unchecked(previous + Varint.ZigZagDecode64(Varint.Read64<Errors>(bytes, ref at)));
-            previous = hour;
-            Hours[entry] = hour;
-            Span<long> state = Words.AsSpan(entry * words, words);
-            StateWords.Clear(state, Kinds);
-            long rows = (long)Varint.Read64<Errors>(bytes, ref at);
-            state[0] = rows;
-            int m = 1;
-            foreach (MeasureKind kind in Kinds)
+            bool floats = kind == MeasureKind.Float;
+            long values = rows - (long)Varint.Read64<Errors>(bytes, ref at);
+            state[m + MeasureLayout.Values] = values;
+            if (values > 0)
             {
-                bool floats = kind == MeasureKind.Float;
-                long values = rows - (long)Varint.Read64<Errors>(bytes, ref at);
-                state[m + MeasureLayout.Values] = values;
-                if (values > 0)
+                int sum = m + MeasureLayout.Sum;
+                if (floats)
                 {
-                    int sum = m + MeasureLayout.Sum;
-                    if (floats)
+                    for (int bin = 0; bin < 3; bin++)
                     {
-                        for (int bin = 0; bin < 3; bin++)
-                        {
-                            state[sum + bin] = Varint.ZigZagDecode64(Varint.Read64<Errors>(bytes, ref at));
-                        }
-
-                        ulong skipped = Varint.Read64<Errors>(bytes, ref at);
-                        ulong top = Varint.Read64<Errors>(bytes, ref at);
-                        if (skipped > (ulong)values || top >= 1 << 9)
-                        {
-                            throw new VortexFormatException($"A column's counts hold a float sum they cannot read at {at}.");
-                        }
-
-                        state[sum + 3] = IndexedSum.MetaOf(values - (long)skipped, (int)(top & 0x7F), (int)(top >> 7));
-                        state[sum + 4] = Varint.ZigZagDecode64(Varint.Read64<Errors>(bytes, ref at));
-                        state[m + MeasureLayout.FloatLeast] = Long(bytes, ref at);
-                        state[m + MeasureLayout.FloatGreatest] = Long(bytes, ref at);
+                        state[sum + bin] = Varint.ZigZagDecode64(Varint.Read64<Errors>(bytes, ref at));
                     }
-                    else
+
+                    ulong skipped = Varint.Read64<Errors>(bytes, ref at);
+                    ulong top = Varint.Read64<Errors>(bytes, ref at);
+                    if (skipped > (ulong)values || top >= 1 << 9)
                     {
-                        ulong low = Varint.Read64<Errors>(bytes, ref at);
-                        ulong high = Varint.Read64<Errors>(bytes, ref at);
-                        UInt128 zigzag = new UInt128(high, low);
-                        Int128 total = (Int128)(zigzag >> 1) ^ -(Int128)(zigzag & 1);
-                        StateWords.Write(total, state, sum);
-                        ulong least = Varint.Read64<Errors>(bytes, ref at);
-                        ulong greatest = Varint.Read64<Errors>(bytes, ref at);
-                        state[m + MeasureLayout.IntegerLeast] = kind == MeasureKind.Signed ? Varint.ZigZagDecode64(least) : (long)least;
-                        state[m + MeasureLayout.IntegerGreatest] = kind == MeasureKind.Signed ? Varint.ZigZagDecode64(greatest) : (long)greatest;
+                        throw new VortexFormatException($"A column's counts hold a float sum they cannot read at {at}.");
                     }
+
+                    state[sum + 3] = IndexedSum.MetaOf(values - (long)skipped, (int)(top & 0x7F), (int)(top >> 7));
+                    state[sum + 4] = Varint.ZigZagDecode64(Varint.Read64<Errors>(bytes, ref at));
+                    state[m + MeasureLayout.FloatLeast] = Long(bytes, ref at);
+                    state[m + MeasureLayout.FloatGreatest] = Long(bytes, ref at);
                 }
-
-                m += MeasureLayout.Words(floats);
+                else
+                {
+                    ulong low = Varint.Read64<Errors>(bytes, ref at);
+                    ulong high = Varint.Read64<Errors>(bytes, ref at);
+                    UInt128 zigzag = new UInt128(high, low);
+                    Int128 total = (Int128)(zigzag >> 1) ^ -(Int128)(zigzag & 1);
+                    StateWords.Write(total, state, sum);
+                    ulong least = Varint.Read64<Errors>(bytes, ref at);
+                    ulong greatest = Varint.Read64<Errors>(bytes, ref at);
+                    state[m + MeasureLayout.IntegerLeast] = kind == MeasureKind.Signed ? Varint.ZigZagDecode64(least) : (long)least;
+                    state[m + MeasureLayout.IntegerGreatest] = kind == MeasureKind.Signed ? Varint.ZigZagDecode64(greatest) : (long)greatest;
+                }
             }
+
+            m += MeasureLayout.Words(floats);
         }
 
-        return new CountGroup(counted, value, first, entries);
+        return new CountGroup(counted, value, entry, 1);
     }
 
     private static void Key(ref Output into, CountGroup group)

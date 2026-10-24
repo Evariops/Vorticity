@@ -1,9 +1,8 @@
-// Columns' counts by hour summed into days and months, with no row read.
+// Objects' counts of a column summed into the counts they would keep as one, with no row read.
 //
-// WHAT IS HELD: the counts by hour of several objects, merged into days, hold for each value and day what the rows of
-// every object give, word for word and sketch for sketch, and a wide column's registers the most of theirs; merged
-// again into their month, what the hours merged into it give; a value one object left out goes with the values left
-// out in each day that object's others reach, every count staying exact; the merge carries the measures and the
+// WHAT IS HELD: the counts of several objects, merged, hold for each value what the rows of every object give, word for
+// word and sketch for sketch, and a wide column's registers the most of theirs; merged again, what they gave; a value one
+// object left out goes with the values left out, every count staying exact; the merge carries the measures and the
 // sketches every object carries; and past its budget, the values of fewest rows go with the others.
 using System;
 using System.Collections.Generic;
@@ -20,56 +19,52 @@ public sealed class CountsMergeTests
     private const long MicrosPerHour = 3_600_000_000L;
 
     [Fact]
-    public void TheHoursOfSeveralObjectsMergeIntoDaysAsTheirRowsDo()
+    public void TheCountsOfSeveralObjectsMergeAsTheirRowsDo()
     {
         Random random = new Random(3);
         List<(long At, long Key, long Amount, double Price)>[] objects = [Rows(random, 0, 30), Rows(random, 5, 48), Rows(random, 40, 70)];
-        CountsMerge days = new CountsMerge();
+        CountsMerge merge = new CountsMerge();
         foreach (List<(long At, long Key, long Amount, double Price)> rows in objects)
         {
             (ColumnCounts counts, ColumnSketches? sketches) = ColumnCountsTests.Build(rows, ColumnCountsBuilder.EntryLimit);
-            days.Add(counts, sketches, hour => Day(hour));
+            merge.Add(counts, sketches);
         }
 
-        (ColumnCounts merged, ColumnSketches? sketched) = days.Finish()!.Value;
+        (ColumnCounts merged, ColumnSketches? sketched) = merge.Finish()!.Value;
         Assert.Equal([2, 3], merged.MeasureFields);
         Assert.True(merged.Sketched);
         Assert.DoesNotContain(merged.Groups, group => group.Kind == CountedValue.Others);
-        Check(merged, sketched, [.. objects.SelectMany(rows => rows)], at => Day(at / MicrosPerHour));
+        Check(merged, sketched, [.. objects.SelectMany(rows => rows)]);
 
-        // The days into their month: what the hours merged into it would give.
-        CountsMerge month = new CountsMerge();
-        month.Add(merged, sketched, _ => 0);
-        (ColumnCounts monthly, ColumnSketches? monthSketches) = month.Finish()!.Value;
-        Check(monthly, monthSketches, [.. objects.SelectMany(rows => rows)], _ => 0);
+        // Merged again, alone: what it gave.
+        CountsMerge again = new CountsMerge();
+        again.Add(merged, sketched);
+        (ColumnCounts twice, ColumnSketches? twiceSketches) = again.Finish()!.Value;
+        Check(twice, twiceSketches, [.. objects.SelectMany(rows => rows)]);
     }
 
     [Fact]
-    public void AValueAnObjectLeftOutGoesWithTheOthersWhereItsOthersReach()
+    public void AValueAnObjectLeftOutGoesWithTheOthers()
     {
         Random random = new Random(5);
         List<(long At, long Key, long Amount, double Price)> crowded = Rows(random, 0, 24, keys: 40, skewed: true);
         List<(long At, long Key, long Amount, double Price)> plain = Rows(random, 12, 48, keys: 40);
-        (ColumnCounts left, ColumnSketches? leftSketches) = ColumnCountsTests.Build(crowded, entryLimit: 64);
+        (ColumnCounts left, ColumnSketches? leftSketches) = ColumnCountsTests.Build(crowded, entryLimit: 12);
         (ColumnCounts kept, ColumnSketches? keptSketches) = ColumnCountsTests.Build(plain, ColumnCountsBuilder.EntryLimit);
         Assert.Contains(left.Groups, group => group.Kind == CountedValue.Others);
-        CountsMerge days = new CountsMerge();
-        days.Add(left, leftSketches, hour => Day(hour));
-        days.Add(kept, keptSketches, hour => Day(hour));
-        (ColumnCounts merged, ColumnSketches? sketched) = days.Finish()!.Value;
+        CountsMerge merge = new CountsMerge();
+        merge.Add(left, leftSketches);
+        merge.Add(kept, keptSketches);
+        (ColumnCounts merged, ColumnSketches? sketched) = merge.Finish()!.Value;
 
-        // The values the crowded object keeps are exact in every day; in the day its others reach, every other value went
-        // with them; past it, every value is its own.
+        // The values the crowded object keeps are exact; every other value went with the others, which may hide them.
         HashSet<long> keptByLeft = [.. left.Groups.Where(g => g.Kind == CountedValue.Value).Select(g => BitConverter.ToInt64(g.Value))];
         List<(long At, long Key, long Amount, double Price)> all = [.. crowded, .. plain];
         foreach (CountGroup group in merged.Groups.Where(g => g.Kind == CountedValue.Value))
         {
             long key = BitConverter.ToInt64(group.Value);
-            for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
-            {
-                Assert.True(keptByLeft.Contains(key) || merged.Hours[e] != 0, $"value {key} stands alone in the day the others reach");
-                Assert.Equal(all.Count(r => r.Key == key && Day(r.At / MicrosPerHour) == merged.Hours[e]), merged.WordsOf(e)[0]);
-            }
+            Assert.True(keptByLeft.Contains(key), $"value {key} stands alone where the crowded object's others may hold it");
+            Assert.Equal(all.Count(r => r.Key == key), merged.WordsOf(group.FirstEntry)[0]);
         }
 
         Assert.Equal(all.Count, Enumerable.Range(0, merged.Entries).Sum(e => merged.WordsOf(e)[0]));
@@ -85,26 +80,24 @@ public sealed class CountsMergeTests
         List<(long At, long Key, long Amount, double Price)> second = Rows(random, 24, 48);
         (ColumnCounts a, ColumnSketches? aSketches) = ColumnCountsTests.Build(first, ColumnCountsBuilder.EntryLimit);
         (ColumnCounts b, ColumnSketches? bSketches) = WithoutPrice(ColumnCountsTests.Build(second, ColumnCountsBuilder.EntryLimit));
-        CountsMerge days = new CountsMerge();
-        days.Add(a, aSketches, hour => Day(hour));
-        days.Add(b, bSketches, hour => Day(hour));
-        (ColumnCounts merged, ColumnSketches? sketched) = days.Finish()!.Value;
+        CountsMerge merge = new CountsMerge();
+        merge.Add(a, aSketches);
+        merge.Add(b, bSketches);
+        (ColumnCounts merged, ColumnSketches? sketched) = merge.Finish()!.Value;
         Assert.Equal([2], merged.MeasureFields);
         foreach (CountGroup group in merged.Groups)
         {
             long key = BitConverter.ToInt64(group.Value);
-            for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
-            {
-                List<(long At, long Key, long Amount, double Price)> held = [.. first.Concat(second).Where(r => r.Key == key && Day(r.At / MicrosPerHour) == merged.Hours[e])];
-                Assert.Equal(held.Count, merged.WordsOf(e)[0]);
-                Assert.Equal(held.Aggregate(Int128.Zero, (s, r) => s + r.Amount), StateWords.IntegerOf(merged.WordsOf(e), 1 + MeasureLayout.Sum));
-                Assert.Equal(ColumnCountsTests.Sketch(held.Select(r => (double)r.Amount)), sketched!.SketchOf(e, 0));
-            }
+            int e = group.FirstEntry;
+            List<(long At, long Key, long Amount, double Price)> held = [.. first.Concat(second).Where(r => r.Key == key)];
+            Assert.Equal(held.Count, merged.WordsOf(e)[0]);
+            Assert.Equal(held.Aggregate(Int128.Zero, (s, r) => s + r.Amount), StateWords.IntegerOf(merged.WordsOf(e), 1 + MeasureLayout.Sum));
+            Assert.Equal(ColumnCountsTests.Sketch(held.Select(r => (double)r.Amount)), sketched!.SketchOf(e, 0));
         }
     }
 
     [Fact]
-    public void TheRegistersOfAWideColumnRiseToTheMostOfTheirHours()
+    public void TheRegistersOfAWideColumnRiseToTheMostOfTheirs()
     {
         // Two objects whose entries each keep registers of a wide column, drawn at random, a few set.
         Random random = new Random(13);
@@ -126,37 +119,30 @@ public sealed class CountsMergeTests
             }
 
             objects.Add((
-                new ColumnCounts(counts.MeasureFields, counts.Kinds, counts.Groups, counts.Hours, counts.Words) { Sketched = true, AttachedFields = [9] },
+                new ColumnCounts(counts.MeasureFields, counts.Kinds, counts.Groups, counts.Words) { Sketched = true, AttachedFields = [9] },
                 new ColumnSketches(counts.Entries, counts.MeasureFields.Length, sketches!.Sketches, 1, registers),
                 ranks));
         }
 
-        CountsMerge days = new CountsMerge();
-        objects.ForEach(o => days.Add(o.Counts, o.Sketches, hour => Day(hour)));
-        (ColumnCounts merged, ColumnSketches? sketched) = days.Finish()!.Value;
+        CountsMerge merge = new CountsMerge();
+        objects.ForEach(o => merge.Add(o.Counts, o.Sketches));
+        (ColumnCounts merged, ColumnSketches? sketched) = merge.Finish()!.Value;
         Assert.Equal([9], merged.AttachedFields);
         foreach (CountGroup group in merged.Groups)
         {
-            for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
+            byte[] expected = new byte[ColumnSheet.Registers];
+            foreach ((ColumnCounts counts, _, byte[][] ranks) in objects)
             {
-                byte[] expected = new byte[ColumnSheet.Registers];
-                foreach ((ColumnCounts counts, _, byte[][] ranks) in objects)
+                if (counts.Groups.Where(g => g.Value.AsSpan().SequenceEqual(group.Value)).Cast<CountGroup?>().FirstOrDefault() is { } same)
                 {
-                    CountGroup? same = counts.Groups.Where(g => g.Value.AsSpan().SequenceEqual(group.Value)).Cast<CountGroup?>().FirstOrDefault();
-                    for (int i = same?.FirstEntry ?? 0; same is { } held && i < held.FirstEntry + held.Entries; i++)
+                    for (int r = 0; r < expected.Length; r++)
                     {
-                        if (Day(counts.Hours[i]) == merged.Hours[e])
-                        {
-                            for (int r = 0; r < expected.Length; r++)
-                            {
-                                expected[r] = Math.Max(expected[r], ranks[i][r]);
-                            }
-                        }
+                        expected[r] = Math.Max(expected[r], ranks[same.FirstEntry][r]);
                     }
                 }
-
-                Assert.Equal(HyperLogLog.Encode(expected), sketched!.DistinctOf(e, 0));
             }
+
+            Assert.Equal(HyperLogLog.Encode(expected), sketched!.DistinctOf(group.FirstEntry, 0));
         }
     }
 
@@ -166,18 +152,18 @@ public sealed class CountsMergeTests
         Random random = new Random(11);
         List<(long At, long Key, long Amount, double Price)> rows = Rows(random, 0, 72, keys: 30, skewed: true);
         (ColumnCounts counts, ColumnSketches? sketches) = ColumnCountsTests.Build(rows, ColumnCountsBuilder.EntryLimit);
-        CountsMerge days = new CountsMerge(entryLimit: 40);
-        days.Add(counts, sketches, hour => Day(hour));
-        (ColumnCounts merged, ColumnSketches? sketched) = days.Finish()!.Value;
-        Assert.InRange(merged.Entries, 1, 40);
+        CountsMerge merge = new CountsMerge(entryLimit: 12);
+        merge.Add(counts, sketches);
+        (ColumnCounts merged, ColumnSketches? sketched) = merge.Finish()!.Value;
+        Assert.InRange(merged.Entries, 1, 12);
         CountGroup others = Assert.Single(merged.Groups, g => g.Kind == CountedValue.Others);
 
         // The values kept are those of most rows, each exact; the others hold the rest.
         long[] kept = [.. merged.Groups.Where(g => g.Kind == CountedValue.Value).Select(g => BitConverter.ToInt64(g.Value))];
         long fewestKept = kept.Min(key => rows.Count(r => r.Key == key));
         Assert.All(rows.Select(r => r.Key).Distinct().Where(key => !kept.Contains(key)), key => Assert.True(rows.Count(r => r.Key == key) <= fewestKept));
-        Check(merged, sketched, [.. rows.Where(r => kept.Contains(r.Key))], at => Day(at / MicrosPerHour), skipOthers: true);
-        Assert.Equal(rows.Count(r => !kept.Contains(r.Key)), Enumerable.Range(others.FirstEntry, others.Entries).Sum(e => merged.WordsOf(e)[0]));
+        Check(merged, sketched, [.. rows.Where(r => kept.Contains(r.Key))], skipOthers: true);
+        Assert.Equal(rows.Count(r => !kept.Contains(r.Key)), merged.WordsOf(others.FirstEntry)[0]);
     }
 
     /// <summary>The counts and sketches <paramref name="built"/> with their first measure, the amount, alone.</summary>
@@ -193,20 +179,14 @@ public sealed class CountsMergeTests
             amounts[e] = sketches!.SketchOf(e, 0);
         }
 
-        return (new ColumnCounts([2], [MeasureKind.Signed], counts.Groups, counts.Hours, words) { Sketched = true },
+        return (new ColumnCounts([2], [MeasureKind.Signed], counts.Groups, words) { Sketched = true },
             new ColumnSketches(counts.Entries, 1, amounts, 0, null));
     }
 
-    /// <summary>The first hour of the day <paramref name="hour"/> falls in, both counted from the Unix epoch.</summary>
-    private static long Day(long hour) => hour / 24 * 24;
-
-    /// <summary>Holds <paramref name="counts"/> and their sketches to what the rows <paramref name="rows"/> give, each in the bucket of its instant.</summary>
-    private static void Check(
-        ColumnCounts counts, ColumnSketches? sketches, List<(long At, long Key, long Amount, double Price)> rows, Func<long, long> bucketOf,
-        bool skipOthers = false)
+    /// <summary>Holds <paramref name="counts"/> and their sketches to what the rows <paramref name="rows"/> give, value by value.</summary>
+    private static void Check(ColumnCounts counts, ColumnSketches? sketches, List<(long At, long Key, long Amount, double Price)> rows, bool skipOthers = false)
     {
-        Dictionary<(long Key, long Bucket), List<(long At, long Key, long Amount, double Price)>> expected = rows
-            .GroupBy(r => (r.Key, bucketOf(r.At))).ToDictionary(g => g.Key, g => g.ToList());
+        Dictionary<long, List<(long At, long Key, long Amount, double Price)>> expected = rows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => g.ToList());
         int entries = 0;
         foreach (CountGroup group in counts.Groups)
         {
@@ -216,25 +196,24 @@ public sealed class CountsMergeTests
             }
 
             Assert.Equal(CountedValue.Value, group.Kind);
-            long key = BitConverter.ToInt64(group.Value);
-            for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++, entries++)
-            {
-                List<(long At, long Key, long Amount, double Price)> held = expected[(key, counts.Hours[e])];
-                ReadOnlySpan<long> words = counts.WordsOf(e);
-                Assert.Equal(held.Count, words[0]);
-                Assert.Equal(held.Count, words[1 + MeasureLayout.Values]);
-                Assert.Equal(held.Aggregate(Int128.Zero, (s, r) => s + r.Amount), StateWords.IntegerOf(words, 1 + MeasureLayout.Sum));
-                Assert.Equal(held.Min(r => r.Amount), words[1 + MeasureLayout.IntegerLeast]);
-                Assert.Equal(held.Max(r => r.Amount), words[1 + MeasureLayout.IntegerGreatest]);
-                int price = 1 + MeasureLayout.IntegerWords;
-                WideIndexedSum sum = default;
-                held.ForEach(r => sum.Add(r.Price));
-                Assert.Equal(sum.Value, StateWords.SumOf(words, price + MeasureLayout.Sum).Value);
-                Assert.Equal(held.Min(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatLeast]));
-                Assert.Equal(held.Max(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatGreatest]));
-                Assert.Equal(ColumnCountsTests.Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
-                Assert.Equal(ColumnCountsTests.Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
-            }
+            Assert.Equal(1, group.Entries);
+            int e = group.FirstEntry;
+            entries++;
+            List<(long At, long Key, long Amount, double Price)> held = expected[BitConverter.ToInt64(group.Value)];
+            ReadOnlySpan<long> words = counts.WordsOf(e);
+            Assert.Equal(held.Count, words[0]);
+            Assert.Equal(held.Count, words[1 + MeasureLayout.Values]);
+            Assert.Equal(held.Aggregate(Int128.Zero, (s, r) => s + r.Amount), StateWords.IntegerOf(words, 1 + MeasureLayout.Sum));
+            Assert.Equal(held.Min(r => r.Amount), words[1 + MeasureLayout.IntegerLeast]);
+            Assert.Equal(held.Max(r => r.Amount), words[1 + MeasureLayout.IntegerGreatest]);
+            int price = 1 + MeasureLayout.IntegerWords;
+            WideIndexedSum sum = default;
+            held.ForEach(r => sum.Add(r.Price));
+            Assert.Equal(sum.Value, StateWords.SumOf(words, price + MeasureLayout.Sum).Value);
+            Assert.Equal(held.Min(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatLeast]));
+            Assert.Equal(held.Max(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatGreatest]));
+            Assert.Equal(ColumnCountsTests.Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
+            Assert.Equal(ColumnCountsTests.Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
         }
 
         Assert.Equal(expected.Count, entries);

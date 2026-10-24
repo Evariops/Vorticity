@@ -1,4 +1,4 @@
-// The questions the objects' counts by hour answer, held to a ratchet.
+// The questions the objects' counts answer, held to a ratchet.
 //
 // WHAT IS HELD, per question: the requests and the bytes it asks of the store, cold (a session and a handle opened for
 // it, an empty synopsis cache) and warm (the same handle again, its memo of synopses and the cache filled), and the
@@ -29,22 +29,23 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
 {
     /// <summary>
     /// The ceilings of each question: requests and bytes cold, requests and bytes warm, and the bytes one warm ask
-    /// allocates, 2 % above what it measured in a process of its own. Measured on 2026-10-24: a request an object its
-    /// counts answer, its counts and their sketches side by side, and the two appended objects read as rows; warm, the
-    /// handle keeps the counts parsed and nothing is read but the unaligned window's edges, whose rows no cache keeps.
+    /// allocates, 2 % above what it measured in a process of its own. Measured on 2026-10-25, the counts over each object:
+    /// a request an object its counts answer, its counts and their sketches side by side, and the two appended objects
+    /// read as rows; warm, the handle keeps the counts parsed and nothing is read but the rows of the objects the unaligned
+    /// window cuts, which no cache keeps.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["count by service"] = new(6, 41679, 0, 0, 46744),
-        ["count by service and hour"] = new(6, 41679, 0, 0, 52128),
-        ["measures by service"] = new(6, 41679, 0, 0, 69400),
-        ["count by day"] = new(6, 41679, 0, 0, 59400),
-        ["count by hour, one service"] = new(6, 41679, 0, 0, 63232),
-        ["count by service, an aligned window"] = new(2, 778, 0, 0, 37248),
-        ["measures by service, an unaligned window"] = new(8, 361282, 3, 228900, 77400),
-        ["quantiles by service"] = new(6, 74369, 0, 0, 1037864),
-        ["distinct services by hour"] = new(6, 41679, 0, 0, 53816),
-        ["count by route and day"] = new(6, 95380, 0, 0, 56784),
+        ["count by service"] = new(6, 41615, 0, 0, 45378),
+        ["count by service and hour"] = new(6, 41615, 0, 0, 51825),
+        ["measures by service"] = new(6, 41615, 0, 0, 68030),
+        ["count by day"] = new(6, 41615, 0, 0, 59062),
+        ["count by hour, one service"] = new(6, 41615, 0, 0, 62897),
+        ["count by service, an aligned window"] = new(2, 746, 0, 0, 37248),
+        ["measures by service, an unaligned window"] = new(6, 360429, 3, 228900, 76704),
+        ["quantiles by service"] = new(6, 74305, 0, 0, 1036385),
+        ["distinct services by hour"] = new(6, 41615, 0, 0, 53513),
+        ["count by route and day"] = new(6, 93376, 0, 0, 56475),
     };
 
     private readonly DatasetPlannerTests.Fixture _fixture;

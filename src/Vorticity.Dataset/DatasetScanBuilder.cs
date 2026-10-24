@@ -49,8 +49,7 @@ internal sealed class DatasetScanCounters
     public long ObjectsCounted { get; internal set; }
 
     /// <summary>
-    /// Objects whose counts by hour answered an aggregation as states, the rows of the hours its window cuts read alone;
-    /// <see cref="StateRows"/> rows of states stood for their rows.
+    /// Objects whose counts answered an aggregation as states; <see cref="StateRows"/> rows of states stood for their rows.
     /// </summary>
     public long ObjectsAnswered { get; internal set; }
 
@@ -262,7 +261,7 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
-    /// Answers what the objects' counts by hour can of <paramref name="states"/> as batches of states, and the rest as rows;
+    /// Answers what the objects' counts can of <paramref name="states"/> as batches of states, and the rest as rows;
     /// null for rows alone.
     /// </summary>
     internal DatasetScanBuilder WithStates(StateRequest? states)
@@ -554,8 +553,8 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The scan as states where the objects' counts answer: each such object's entries as batches of states, then the rows
-    /// of the hours its window cuts; the objects between them read as rows, those side by side a part of the scan, which
+    /// The scan as states where the objects' counts answer: each such object's entries as batches of states; the objects
+    /// between them read as rows, those side by side a part of the scan, which
     /// reads them as it would (<see cref="Part"/>). The counts of the objects that answer are read side by side, as many at
     /// once as the session reads, and none of their sheets: their counts say which values they hold.
     /// </summary>
@@ -595,7 +594,7 @@ internal sealed class DatasetScanBuilder
                     reads[o] = null;
                     if (await read.ConfigureAwait(false) is ({ } counts, var sketched))
                     {
-                        rows = answer.Rows(counts, sketched);
+                        rows = answer.Rows(counts, sketched, held.Entry.Summaries);
                     }
                 }
 
@@ -630,14 +629,6 @@ internal sealed class DatasetScanBuilder
                 {
                     arena.Reset();
                     yield return rows.Batch(arena, at, Math.Min(StateRows.BatchRows, rows.Count - at), held.FirstRow);
-                }
-
-                if (rows.CutsHours && answer.Edges is { } edges)
-                {
-                    await foreach (RecordBatch batch in Part(edges, held.FirstRow, held.FirstRow + held.Entry.Rows).ExecuteAsync(cancellationToken).ConfigureAwait(false))
-                    {
-                        yield return batch;
-                    }
                 }
             }
         }
@@ -1242,29 +1233,18 @@ internal sealed class DatasetScanBuilder
             }
 
             // An object whose counts answer reads its column's counts, and their sketches beside them for a quantile, in a
-            // request, and the rows of the hours a window cuts where it holds any.
+            // request.
             if (answer is not null && AnsweredBy(answer, held) is int field)
             {
                 Indexes.ObjectContents contents = held.Entry.Contents!;
                 Indexes.IndexSegment? sketched = answer.AsksSketches ? contents.SketchesOf(field) : null;
                 string column = _version.Schema.Columns[field].Name;
                 states.Add(new StatesStep(
-                    held.Entry.Key, "states", sketched is null ? $"the counts of {column} by hour" : $"the counts of {column} by hour and their sketches", sketched is null ? 1 : 2));
+                    held.Entry.Key, "states", sketched is null ? $"the counts of {column}" : $"the counts of {column} and their sketches", sketched is null ? 1 : 2));
                 keptRows += covered;
                 segments += sketched is null ? 1 : 2;
                 bytes += contents.CountsOf(field)!.Value.Length + (sketched?.Length ?? 0);
                 mayMatch = true;
-                if (answer.Edges is { } edgeFilter)
-                {
-                    ScanPlan edges = await Part(edgeFilter, held.FirstRow, held.FirstRow + held.Entry.Rows).PlanAsync(cancellationToken).ConfigureAwait(false);
-                    if (edges.MayMatch && edges.LiveBlocks > 0)
-                    {
-                        states.Add(new StatesStep(held.Entry.Key, "edges", "the rows of the hours the window cuts", edges.LiveBlocks));
-                        segments += edges.Segments;
-                        bytes += edges.BytesToRead;
-                    }
-                }
-
                 continue;
             }
 

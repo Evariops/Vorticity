@@ -6,7 +6,7 @@ using Vorticity.Serialization;
 namespace Vorticity.Indexes;
 
 /// <summary>
-/// The sketches of a column's counts by hour (<see cref="IndexKinds.ColumnSketches"/>): for each entry of the counts
+/// The sketches of a column's counts (<see cref="IndexKinds.ColumnSketches"/>): for each entry of the counts
 /// (<see cref="ColumnCounts"/>), in their order, a quantile sketch of each measure they carry, and the registers of the
 /// distinct values of each wide column they attach. A region a column, right after its counts, which the object's table
 /// of contents names: a question of counts, sums and extremes reads the counts alone, and one of quantiles reads both,

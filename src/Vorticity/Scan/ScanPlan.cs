@@ -16,11 +16,11 @@ namespace Vorticity;
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
 
 /// <summary>
-/// What an aggregation reads of one object of a dataset whose counts by hour answer it: the states of the counts, which
-/// stand for the rows of the hours the question holds whole, or the rows of the hours its window cuts.
+/// What an aggregation reads of one object of a dataset whose counts answer it: the states of the counts, which stand for
+/// its rows.
 /// </summary>
 /// <param name="Object">The object, by its key in the dataset.</param>
-/// <param name="Read">What it reads: <c>states</c>, or <c>edges</c>, the rows of the hours a window cuts.</param>
+/// <param name="Read">What it reads: <c>states</c>.</param>
 /// <param name="Detail">The column whose counts it reads, and their sketches when a quantile asks them; or what the edges hold.</param>
 /// <param name="Count">The regions the states read, the counts and their sketches; or the blocks of rows read at the edges.</param>
 public sealed record StatesStep(string Object, string Read, string Detail, long Count);
@@ -52,8 +52,8 @@ public sealed record ScanPlan(
     public GroupPlan? Grouping { get; init; }
 
     /// <summary>
-    /// For an aggregation over a dataset whose objects keep counts by hour, what each object they answer reads: its counts'
-    /// states, and the rows of the hours a window cuts; empty when they answer none, every object read as rows.
+    /// For an aggregation over a dataset whose objects keep counts, what each object they answer reads: its counts' states;
+    /// empty when they answer none, every object read as rows.
     /// </summary>
     public ImmutableArray<StatesStep> States { get; init; } = [];
 

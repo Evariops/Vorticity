@@ -1,14 +1,15 @@
-// Questions on one column answered from the objects' counts by hour, against the same questions read from the rows.
+// Questions on one column answered from the objects' counts, against the same questions read from the rows.
 //
-// WHAT IS HELD: a question on one column, the time and the measures, its keys the column and the instant truncated to
-// the hour or coarser, its aggregates counts, sums, extremes, means, quantiles and distinct counts, its filter a window
-// on the instant and values of the column, gives the same answer whether the objects' counts answer it as states
-// or every object is read as rows; a window that cuts an hour reads that hour's rows; and the plan says, object by
-// object, which objects their counts answer, at one request each. So do questions drawn at random on tables drawn at
-// random, columns of every kind with nulls among them, through the path whose columns are named at run time.
+// WHAT IS HELD: a question on one column and the measures, its keys the column and functions of another column each
+// object holds constant, the instant truncated to the hour or coarser here, its aggregates counts, sums, extremes,
+// means, quantiles and distinct counts, its filter a window on the instant and values of the column, gives the same
+// answer whether the objects' counts answer it as states or every object is read as rows; a window that cuts an object
+// reads that object's rows; and the plan says, object by object, which objects their counts answer, at one request
+// each. So do questions drawn at random on tables drawn at random, columns of every kind with nulls among them, through
+// the path whose columns are named at run time.
 //
-// THE DATASET: four hours of calls, an object an hour once compacted, each with its columns' counts by hour; then the
-// first ten minutes of the next hour, still in their appends, which keep no counts and are read as rows.
+// THE DATASET: four hours of calls, an object an hour once compacted, each with its columns' counts; then the first ten
+// minutes of the next hour, still in their appends, which keep no counts and are read as rows.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -36,12 +37,15 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    public static TheoryData<string> Questions() =>
+    /// <summary>The questions <see cref="Ask(VortexDataset, string, bool)"/> knows by name.</summary>
+    internal static readonly string[] Named =
     [
         "count by service", "count by service and hour", "measures by service", "count by day", "count by hour, one service",
         "count by service, an aligned window", "measures by service, an unaligned window", "quantiles by service",
         "distinct services by hour", "count by route and day",
     ];
+
+    public static TheoryData<string> Questions() => [.. Named];
 
     [Theory]
     [MemberData(nameof(Questions))]
@@ -65,13 +69,15 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
     }
 
     [Fact]
-    public async Task AWindowThatCutsAnHourReadsItsRows()
+    public async Task AWindowThatCutsAnObjectReadsItsRows()
     {
+        // Cut at 37.5 and 155.25 minutes, the window holds the second hour's object whole, whose counts answer, and reads the
+        // rows of the two it cuts; on the hours, it holds its two objects whole.
         await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.Store, Options(), Ct);
         ScanPlan plan = await Ask(dataset, "measures by service, an unaligned window", synopses: true).ExplainAsync(Ct);
-        Assert.Contains(plan.States, step => step.Read == "edges");
+        Assert.Equal(1, plan.States.Count(step => step.Read == "states"));
         ScanPlan aligned = await Ask(dataset, "count by service, an aligned window", synopses: true).ExplainAsync(Ct);
-        Assert.DoesNotContain(aligned.States, step => step.Read == "edges");
+        Assert.Equal(2, aligned.States.Count(step => step.Read == "states"));
     }
 
     // Questions drawn at random on the tables DatasetCountsTests draws, columns of every kind and nulls among them: a key
@@ -104,8 +110,10 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             answered += plan.States.Any(step => step.Read == "states") ? 1 : 0;
         }
 
+        // A window that cuts every object it reaches reads their rows, and so does a number column of many values, which no
+        // counts keep: the counts answer a third of the questions at least.
         Console.WriteLine($"PLANNER seed {seed}: the counts answered {answered} questions of {Questions}");
-        Assert.True(answered >= Questions / 2, $"seed {seed}: the counts answered {answered} questions of {Questions}");
+        Assert.True(answered >= Questions / 3, $"seed {seed}: the counts answered {answered} questions of {Questions}");
     }
 
     // An object written before the schema moved its columns holds its synopses by its own columns' places: its sheets and
@@ -287,7 +295,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
 
     /// <summary>
     /// Four hours of calls from noon, appended in parts of five minutes and compacted: an object an hour, its columns
-    /// counted by hour; then two parts more, appended after, in objects of their own.
+    /// counted; then two parts more, appended after, in objects of their own.
     /// </summary>
     public sealed class Fixture : IAsyncLifetime
     {
