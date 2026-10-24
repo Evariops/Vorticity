@@ -167,7 +167,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
     }
 
     /// <summary>A question on <paramref name="columns"/>: its key, its results, and its filter as text, null for none.</summary>
-    private static (string[] Keys, string[] Results, string? Filter) Draw(Random random, DatasetCountsTests.Drawn[] columns, object?[][] rows)
+    internal static (string[] Keys, string[] Results, string? Filter) Draw(Random random, DatasetCountsTests.Drawn[] columns, object?[][] rows)
     {
         int key = random.Next(4) == 0 ? -1 : random.Next(columns.Length);
         string[] keys = key < 0 ? [] : [$"c{key}"];
@@ -222,12 +222,12 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         _ => throw new ArgumentException($"No literal for {value}.", nameof(value)),
     };
 
-    /// <summary>The groups the question answers, each a line of its values, sorted.</summary>
-    private static async Task<List<string>> AskAsync(
-        VortexDataset dataset, string[] keys, string[] results, string? filter, bool synopses, bool statistics = true)
+    /// <summary>The groups the question answers, each a line of its values, sorted; on <paramref name="lanes"/> lanes, 0 for the session's.</summary>
+    internal static async Task<List<string>> AskAsync(
+        VortexDataset dataset, string[] keys, string[] results, string? filter, bool synopses, bool statistics = true, int lanes = 0)
     {
         List<string> rows = [];
-        await foreach (RecordBatch batch in Ask(dataset, keys, results, filter, synopses, statistics).ToBatchesAsync(Ct))
+        await foreach (RecordBatch batch in Ask(dataset, keys, results, filter, synopses, statistics, lanes).ToBatchesAsync(Ct))
         {
             Values.DescribeRows(batch, rows);
         }
@@ -236,9 +236,10 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         return rows;
     }
 
-    private static Vorticity.Scan Ask(VortexDataset dataset, string[] keys, string[] results, string? filter, bool synopses, bool statistics = true)
+    internal static Vorticity.Scan Ask(
+        VortexDataset dataset, string[] keys, string[] results, string? filter, bool synopses, bool statistics = true, int lanes = 0)
     {
-        Vorticity.Scan scan = dataset.Scan().With(new ScanOptions { UseSynopses = synopses, UseStatistics = statistics });
+        Vorticity.Scan scan = dataset.Scan().With(new ScanOptions { UseSynopses = synopses, UseStatistics = statistics, DegreeOfParallelism = lanes });
         if (filter is not null)
         {
             scan.Where(VortexExpr.Parse(filter));

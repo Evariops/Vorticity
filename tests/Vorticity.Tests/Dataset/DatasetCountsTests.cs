@@ -196,7 +196,7 @@ public sealed class DatasetCountsTests
     }
 
     /// <summary>Holds <paramref name="counts"/> of column <paramref name="c"/>, of <paramref name="distinct"/> values, to what the object's rows <paramref name="rows"/> give.</summary>
-    private static void Check(ColumnCounts counts, ColumnSketches? sketches, int c, Drawn[] columns, object?[][] rows, int distinct)
+    internal static void Check(ColumnCounts counts, ColumnSketches? sketches, int c, Drawn[] columns, object?[][] rows, int distinct)
     {
         // The measures: every number column of more than a few values in these rows but the column itself.
         int[] measures = [.. Enumerable.Range(0, columns.Length).Where(m => m != c && columns[m].Number
@@ -267,7 +267,7 @@ public sealed class DatasetCountsTests
     /// keep of the wide columns to those their values in each entry's rows give: a column of at most 100 values keeps those
     /// of every text column of more than 1 000 values that repeat, but itself; any other none.
     /// </summary>
-    private static void CheckDistinct(ColumnCounts counts, ColumnSketches? sketches, int c, Drawn[] columns, object?[][] rows, int distinct)
+    internal static void CheckDistinct(ColumnCounts counts, ColumnSketches? sketches, int c, Drawn[] columns, object?[][] rows, int distinct)
     {
         int[] wide = distinct > ColumnCountsBuilder.AttachValues ? [] : [.. Enumerable.Range(0, columns.Length).Where(w =>
         {
@@ -310,7 +310,7 @@ public sealed class DatasetCountsTests
         return writer.WrittenSpan.ToArray();
     }
 
-    private static string Key(object? value) => value switch
+    internal static string Key(object? value) => value switch
     {
         null => "null",
         double d => d.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
@@ -319,7 +319,7 @@ public sealed class DatasetCountsTests
     };
 
     /// <summary>The value <paramref name="bytes"/> hold, as the column <paramref name="column"/> stores it.</summary>
-    private static object Value(Drawn column, byte[] bytes) => column.Kind switch
+    internal static object Value(Drawn column, byte[] bytes) => column.Kind switch
     {
         Kind.Text or Kind.Wide or Kind.Identifier => Encoding.UTF8.GetString(bytes),
         Kind.Code => BitConverter.ToInt16(bytes),
@@ -433,7 +433,16 @@ public sealed class DatasetCountsTests
     }
 
     /// <summary>A dataset of periods of an hour holding <paramref name="rows"/>, appended in parts of five minutes and compacted to the end.</summary>
-    internal static async Task<VortexDataset> WriteAsync(CountingObjectStore store, Drawn[] columns, object?[][] rows)
+    internal static Task<VortexDataset> WriteAsync(CountingObjectStore store, Drawn[] columns, object?[][] rows) =>
+        WriteAsync(store, columns, rows, new DatasetOptions
+        {
+            ClusteringKey = ["At"],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+            SheetObjectBytes = 0,
+        });
+
+    /// <summary>A dataset of <paramref name="options"/> holding <paramref name="rows"/>, appended in parts of five minutes and compacted to the end.</summary>
+    internal static async Task<VortexDataset> WriteAsync(CountingObjectStore store, Drawn[] columns, object?[][] rows, DatasetOptions options)
     {
         List<VortexField> fields = [new VortexField("At", VortexType.Timestamp(TimeUnit.Microseconds, "UTC"))];
         for (int c = 0; c < columns.Length; c++)
@@ -441,12 +450,7 @@ public sealed class DatasetCountsTests
             fields.Add(new VortexField($"c{c}", columns[c].Type));
         }
 
-        VortexDataset dataset = await VortexDataset.CreateAsync(store, VortexSchema.Create([.. fields]), new DatasetOptions
-        {
-            ClusteringKey = ["At"],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
-            SheetObjectBytes = 0,
-        }, Ct);
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, VortexSchema.Create([.. fields]), options, Ct);
         int part = RowsPerHour / 12;
         for (int from = 0; from < rows.Length; from += part)
         {
