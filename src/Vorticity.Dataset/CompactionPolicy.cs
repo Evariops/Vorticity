@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Expressions;
 
 namespace Vorticity.Dataset;
 
@@ -369,7 +368,7 @@ internal static partial class CompactionPolicy
             // stays key-disjoint.
             foreach (CompactionInput candidate in levels[to])
             {
-                if (range.Overlaps(candidate.Entry.Summaries))
+                if (range.Overlaps(candidate.Key.Span, candidate.Entry))
                 {
                     inputs.Add(candidate);
                 }
@@ -788,7 +787,7 @@ internal static partial class CompactionPolicy
                 .WalkAsync(dataset.Pages, 0, long.MaxValue, range.MayOverlap, cancellationToken)
                 .ConfigureAwait(false))
             {
-                if (range.Overlaps(held.Entry.Value))
+                if (range.Overlaps(held.Entry.Key.Span, held.Entry.Value))
                 {
                     inputs.Add(new CompactionInput(to, held.Entry.Key, ObjectEntry.FromBytes(held.Entry.Value)));
                 }
@@ -938,23 +937,18 @@ internal static partial class CompactionPolicy
             return null;
         }
 
-        FilterLiteral last = default;
-        if (values is not null)
+        CompactionInput last = tail[^1];
+        if (values is not null && !values.HoldsOne(last))
         {
-            if (values.Single(tail[^1].Entry.Summaries) is not { } held)
-            {
-                return null;
-            }
-
-            last = held;
+            return null;
         }
 
-        int size = ClassOf(tail[^1].Entry.Bytes, target, fanout);
+        int size = ClassOf(last.Entry.Bytes, target, fanout);
         List<CompactionInput> run = [];
         long bytes = 0;
         for (int i = tail.Count - 1;
              i >= 0 && size > 0 && ClassOf(tail[i].Entry.Bytes, target, fanout) == size && bytes + tail[i].Entry.Bytes <= target
-             && (values is null || values.HoldsOnly(tail[i].Entry.Summaries, last));
+             && (values is null || (values.HoldsOne(tail[i]) && values.SameValue(tail[i], last)));
              i--)
         {
             run.Add(tail[i]);
@@ -974,24 +968,25 @@ internal static partial class CompactionPolicy
     /// The small objects of the value before the last at a level's end, <paramref name="tail"/> in key order, those of
     /// classes above 0 at its end whose bytes stay within the target, when they are two or more; null otherwise.
     /// </summary>
-    private static List<CompactionInput>? Closed(List<CompactionInput> tail, long target, int fanout, ValueCut values, FilterLiteral last)
+    private static List<CompactionInput>? Closed(List<CompactionInput> tail, long target, int fanout, ValueCut values, CompactionInput last)
     {
         int end = tail.Count - 1;
-        while (end >= 0 && values.HoldsOnly(tail[end].Entry.Summaries, last))
+        while (end >= 0 && values.HoldsOne(tail[end]) && values.SameValue(tail[end], last))
         {
             end--;
         }
 
-        if (end < 1 || values.Single(tail[end].Entry.Summaries) is not { } closed)
+        if (end < 1 || !values.HoldsOne(tail[end]))
         {
             return null;
         }
 
+        CompactionInput closed = tail[end];
         List<CompactionInput> run = [];
         long bytes = 0;
         for (int i = end;
              i >= 0 && ClassOf(tail[i].Entry.Bytes, target, fanout) > 0 && bytes + tail[i].Entry.Bytes <= target
-             && values.HoldsOnly(tail[i].Entry.Summaries, closed);
+             && values.HoldsOne(tail[i]) && values.SameValue(tail[i], closed);
              i--)
         {
             run.Add(tail[i]);
@@ -1014,7 +1009,7 @@ internal static partial class CompactionPolicy
     /// level, or this one's move into the object's, has to rewrite, and every such move after it again.
     /// </summary>
     private static List<CompactionInput>? Unspanned(
-        List<CompactionInput> run, List<ObjectSummaries> others, int level, ClusteringKey key, CompactionOptions settings)
+        List<CompactionInput> run, List<CompactionInput> others, int level, ClusteringKey key, CompactionOptions settings)
     {
         if (others.Count == 0)
         {
@@ -1022,7 +1017,7 @@ internal static partial class CompactionPolicy
         }
 
         int start = run.Count;
-        while (start > 0 && !others.Exists(LevelRange.Of(level, run.GetRange(start - 1, run.Count - start + 1), key).Overlaps))
+        while (start > 0 && !Spans(LevelRange.Of(level, run.GetRange(start - 1, run.Count - start + 1), key), others))
         {
             start--;
         }
@@ -1030,10 +1025,24 @@ internal static partial class CompactionPolicy
         return run.Count - start >= Math.Max(settings.Fanout, 2) ? run.GetRange(start, run.Count - start) : null;
     }
 
-    /// <summary>The summaries of the objects outside <paramref name="level"/> that may hold a key inside <paramref name="range"/>.</summary>
-    private static List<ObjectSummaries> Spanning(List<List<CompactionInput>> levels, int level, LevelRange range)
+    /// <summary>Whether one of <paramref name="others"/> may hold a key inside <paramref name="range"/>.</summary>
+    private static bool Spans(LevelRange range, List<CompactionInput> others)
     {
-        List<ObjectSummaries> found = [];
+        foreach (CompactionInput other in others)
+        {
+            if (range.Overlaps(other.Key.Span, other.Entry))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The objects outside <paramref name="level"/> that may hold a key inside <paramref name="range"/>.</summary>
+    private static List<CompactionInput> Spanning(List<List<CompactionInput>> levels, int level, LevelRange range)
+    {
+        List<CompactionInput> found = [];
         for (int other = 0; other < levels.Count; other++)
         {
             if (other == level)
@@ -1043,9 +1052,9 @@ internal static partial class CompactionPolicy
 
             foreach (CompactionInput input in levels[other])
             {
-                if (range.Overlaps(input.Entry.Summaries))
+                if (range.Overlaps(input.Key.Span, input.Entry))
                 {
-                    found.Add(input.Entry.Summaries);
+                    found.Add(input);
                 }
             }
         }
@@ -1054,10 +1063,10 @@ internal static partial class CompactionPolicy
     }
 
     /// <summary><see cref="Spanning"/> by walks that skip every subtree whose summary puts it outside the range.</summary>
-    private static async ValueTask<List<ObjectSummaries>> SpanningAsync(
+    private static async ValueTask<List<CompactionInput>> SpanningAsync(
         PlannedVersion dataset, int level, LevelRange range, CancellationToken cancellationToken)
     {
-        List<ObjectSummaries> found = [];
+        List<CompactionInput> found = [];
         for (int other = 0; other < dataset.Levels.Count; other++)
         {
             if (other == level)
@@ -1069,9 +1078,9 @@ internal static partial class CompactionPolicy
                 .WalkAsync(dataset.Pages, 0, long.MaxValue, range.MayOverlap, cancellationToken)
                 .ConfigureAwait(false))
             {
-                if (range.Overlaps(held.Entry.Value))
+                if (range.Overlaps(held.Entry.Key.Span, held.Entry.Value))
                 {
-                    found.Add(ObjectEntry.FromBytes(held.Entry.Value).Summaries);
+                    found.Add(new CompactionInput(other, held.Entry.Key, ObjectEntry.FromBytes(held.Entry.Value)));
                 }
             }
         }

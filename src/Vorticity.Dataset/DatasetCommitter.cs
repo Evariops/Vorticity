@@ -1227,7 +1227,7 @@ internal static class DatasetCommitter
                     continue;
                 }
 
-                if (!Takes(replace, range.Level, key.Span) && range.Overlaps(held.Entry.Value))
+                if (!Takes(replace, range.Level, key.Span) && range.Overlaps(key.Span, held.Entry.Value))
                 {
                     return true;
                 }
@@ -1237,7 +1237,7 @@ internal static class DatasetCommitter
             {
                 foreach ((byte[] key, ObjectEntry? entry) in entries)
                 {
-                    if (entry is not null && !Takes(replace, range.Level, key) && range.Overlaps(entry.Summaries))
+                    if (entry is not null && !Takes(replace, range.Level, key) && range.Overlaps(key, entry))
                     {
                         return true;
                     }

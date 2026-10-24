@@ -2894,17 +2894,18 @@ public sealed class VortexDataset : IAsyncDisposable
         // left unnamed, as an abandoned job's are, for a vacuum to take.
         ObjectSummaries summaries;
         byte[] prefix;
+        byte[] last;
         bool streamed = draft.Sink.IsStreamed;
         try
         {
             if (!streamed)
             {
                 SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true, _options.Session.Options.EnginePool);
-                (summaries, prefix) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
+                (summaries, prefix, last) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
             }
             else
             {
-                (summaries, prefix) = (ObjectSummaries.Empty, []);
+                (summaries, prefix, last) = (ObjectSummaries.Empty, [], []);
             }
 
             if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
@@ -2924,11 +2925,12 @@ public sealed class VortexDataset : IAsyncDisposable
         if (streamed)
         {
             ISegmentReader stored = await SealedObjectStore.OpenDataAsync(_store, draft.Key, Uid(draft.Identity), bytes, cancellationToken).ConfigureAwait(false);
-            (summaries, prefix) = await DescribeAsync(stored, firstRow, draft, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
+            (summaries, prefix, last) = await DescribeAsync(stored, firstRow, draft, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
         }
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
             .WithFooterBytes(draft.Writer.TailBytes)
-            .WithTableOfContents(draft.Writer.TableOfContents);
+            .WithTableOfContents(draft.Writer.TableOfContents)
+            .WithLastKey(last);
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes);
     }
 
@@ -3126,7 +3128,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="draft">The object's draft, which says what walks it by key without a run: its rows in key order, or its slices, which is checked.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <param name="tailBytes">The bytes of its footer when they pass an open's first read, so that the open reads them at once; 0 otherwise.</param>
-    private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix)> DescribeAsync(
+    private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix, byte[] Last)> DescribeAsync(
         ISegmentReader source, long firstRow, ObjectDraft draft, CancellationToken cancellationToken, long tailBytes = 0)
     {
         VortexOpenOptions options = tailBytes > ObjectEntry.FirstReadBytes
@@ -3146,8 +3148,8 @@ public sealed class VortexDataset : IAsyncDisposable
             }
 
             ObjectSummaries summaries = Summaries(file);
-            return (summaries, await PrefixAsync(file, summaries, firstRow, cancellationToken)
-                .ConfigureAwait(false));
+            (byte[] prefix, byte[] last) = await BoundsAsync(file, summaries, firstRow, cancellationToken).ConfigureAwait(false);
+            return (summaries, prefix, last);
         }
     }
 
@@ -3187,6 +3189,17 @@ public sealed class VortexDataset : IAsyncDisposable
 
         await source.DisposeAsync().ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// What orders an object's leaf, its smallest key or its position, and its largest key, which its entry states when
+    /// its statistics do not bound the key (<see cref="ClusteringKey.StatesLastKey"/>): empty otherwise, without a key, or
+    /// without a cursor to say it.
+    /// </summary>
+    private async ValueTask<(byte[] Prefix, byte[] Last)> BoundsAsync(
+        VortexFile file, ObjectSummaries summaries, long firstRow, CancellationToken cancellationToken) =>
+        Key is not { } clustering ? (PositionOf(firstRow), [])
+        : clustering.StatesLastKey ? await clustering.BoundsAsync(file, summaries, cancellationToken).ConfigureAwait(false)
+        : (await clustering.MinimumAsync(file, summaries, cancellationToken).ConfigureAwait(false), []);
 
     /// <summary>What orders an object's leaf: its smallest key, or its position.</summary>
     private async ValueTask<byte[]> PrefixAsync(

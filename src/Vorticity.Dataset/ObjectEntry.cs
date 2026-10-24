@@ -353,7 +353,26 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             return this;
         }
 
-        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(footerBytes, MarkedAt, TableOfContents.Span));
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(footerBytes, MarkedAt, TableOfContents.Span, LastKey.Span));
+    }
+
+    /// <summary>
+    /// The object's largest key on the dataset's clustering key, row-encoded as the key orders it: with its smallest, which
+    /// its tree key leads with, the bounds of its keys whatever their type, where its summaries bound a number and not a
+    /// text. At or above every key it holds, a delete leaving it as it was. Empty when the entry does not say.
+    /// </summary>
+    public ReadOnlyMemory<byte> LastKey { get; private set; }
+
+    /// <summary>The entry with <paramref name="key"/> as its largest key; itself when the key is empty or already the one.</summary>
+    /// <param name="key">The object's largest key, row-encoded.</param>
+    public ObjectEntry WithLastKey(ReadOnlySpan<byte> key)
+    {
+        if (key.IsEmpty || key.SequenceEqual(LastKey.Span))
+        {
+            return this;
+        }
+
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, TableOfContents.Span, key));
     }
 
     /// <summary>
@@ -397,7 +416,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             return this;
         }
 
-        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, contents));
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, contents, LastKey.Span));
     }
 
     /// <summary>
@@ -411,7 +430,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(seconds);
         return MarkedAt > 0
             ? this
-            : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, seconds, TableOfContents.Span));
+            : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, seconds, TableOfContents.Span, LastKey.Span));
     }
 
     /// <summary>What an open reads of an object's end before it knows its footer: past it, a second request.</summary>
@@ -421,10 +440,10 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// The fields of format 4, tagged and in the order of their tags, those this library knows written
     /// afresh and those it does not carried as they were read; null when there are none.
     /// </summary>
-    private byte[]? Fields(long footerBytes, long markedAt, ReadOnlySpan<byte> contents)
+    private byte[]? Fields(long footerBytes, long markedAt, ReadOnlySpan<byte> contents, ReadOnlySpan<byte> lastKey)
     {
         ReadOnlySpan<byte> unknown = UnknownFields(_fields);
-        if (footerBytes == 0 && markedAt == 0 && contents.IsEmpty && unknown.IsEmpty)
+        if (footerBytes == 0 && markedAt == 0 && contents.IsEmpty && lastKey.IsEmpty && unknown.IsEmpty)
         {
             return null;
         }
@@ -445,6 +464,11 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             if (!contents.IsEmpty)
             {
                 writer.WriteBytes(FieldTag.Contents, contents);
+            }
+
+            if (!lastKey.IsEmpty)
+            {
+                writer.WriteBytes(FieldTag.LastKey, lastKey);
             }
 
             byte[] fields = new byte[writer.WrittenSpan.Length + unknown.Length];
@@ -482,6 +506,9 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
                     case (FieldTag.Contents, ProtoWireType.LengthDelimited):
                         TableOfContents = reader.ReadLengthDelimited().ToArray();
                         break;
+                    case (FieldTag.LastKey, ProtoWireType.LengthDelimited):
+                        LastKey = reader.ReadLengthDelimited().ToArray();
+                        break;
                     default:
                         reader.SkipField(wire);
                         break;
@@ -513,7 +540,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             }
 
             reader.SkipField(wire);
-            if (start < 0 && field is not (FieldTag.FooterBytes or FieldTag.MarkedAt or FieldTag.Contents))
+            if (start < 0 && field is not (FieldTag.FooterBytes or FieldTag.MarkedAt or FieldTag.Contents or FieldTag.LastKey))
             {
                 // Known fields come first, in the order of their tags, and a later library's after them.
                 start = at;
@@ -527,6 +554,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         internal const int FooterBytes = 1;
         internal const int MarkedAt = 2;
         internal const int Contents = 3;
+        internal const int LastKey = 4;
     }
 
     /// <summary>
@@ -732,6 +760,54 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         int length = (int)Math.Min(Read(span, ref at), int.MaxValue);
         Skip(span, ref at, length);
         return value.Slice(at - length, length);
+    }
+
+    /// <summary>
+    /// The largest key an entry's bytes carry (<see cref="LastKey"/>), as a slice of <paramref name="value"/>, read in place
+    /// as <see cref="SummaryOf"/> reads the summaries; empty when the entry does not say.
+    /// </summary>
+    /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
+    public static ReadOnlyMemory<byte> LastKeyOf(ReadOnlyMemory<byte> value)
+    {
+        ReadOnlySpan<byte> span = value.Span;
+        int at = 0;
+        Skip(span, ref at, (long)Read(span, ref at));
+        Skip(span, ref at, 16);
+        Read(span, ref at);
+        Read(span, ref at);
+        Skip(span, ref at, 16);
+        Skip(span, ref at, (long)Read(span, ref at) * PageReference.Bytes);
+        Skip(span, ref at, (long)Read(span, ref at));
+
+        // The fields of format 4 stand behind a zero, where an earlier format's count of deleted rows would.
+        int start = at;
+        if (!SkipFields(span, ref at))
+        {
+            return default;
+        }
+
+        at = start + 1;
+        int length = Length(Read(span, ref at), "fields");
+        try
+        {
+            ProtoReader reader = new ProtoReader(span.Slice(at, length));
+            while (reader.TryReadTag(out int field, out ProtoWireType wire))
+            {
+                if (field == FieldTag.LastKey && wire == ProtoWireType.LengthDelimited)
+                {
+                    int bytes = reader.ReadLengthDelimited().Length;
+                    return value.Slice(at + reader.Position - bytes, bytes);
+                }
+
+                reader.SkipField(wire);
+            }
+        }
+        catch (VortexFormatException cause)
+        {
+            throw new CommitFormatException($"An object entry's fields of format 4 do not decode: {cause.Message}", cause);
+        }
+
+        return default;
     }
 
     /// <summary>

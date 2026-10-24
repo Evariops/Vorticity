@@ -284,6 +284,25 @@ internal sealed class ValueCut
     /// <summary>Whether an object's summaries prove it holds <paramref name="value"/> alone.</summary>
     internal bool HoldsOnly(ObjectSummaries summaries, FilterLiteral value) => Single(summaries) is { } held && Equal(held, value);
 
+    /// <summary>
+    /// Whether the object <paramref name="input"/> names holds one value: its first key, which its tree key leads with, and
+    /// its last, of one, for a key of any type; its summaries' bounds, when its entry states no last key.
+    /// </summary>
+    internal bool HoldsOne(CompactionInput input) =>
+        input.Entry.LastKey.IsEmpty ? Single(input.Entry.Summaries) is not null : Same(FirstKey(input), input.Entry.LastKey.Span);
+
+    /// <summary>
+    /// Whether two objects that each hold one value hold the same: by their first keys when both entries state their
+    /// last, by their summaries otherwise.
+    /// </summary>
+    internal bool SameValue(CompactionInput left, CompactionInput right) =>
+        !left.Entry.LastKey.IsEmpty && !right.Entry.LastKey.IsEmpty
+            ? Same(FirstKey(left), FirstKey(right))
+            : Single(left.Entry.Summaries) is { } one && Single(right.Entry.Summaries) is { } other && Equal(one, other);
+
+    /// <summary>The smallest key of the object an input names: its tree key without the uid that ends it.</summary>
+    private static ReadOnlySpan<byte> FirstKey(CompactionInput input) => input.Key.Span[..^VortexDataset.UidBytes];
+
     /// <summary>The clustering value of a row-encoded key: its first value through the function, a null as a null.</summary>
     private FilterLiteral Image(ReadOnlySpan<byte> key)
     {

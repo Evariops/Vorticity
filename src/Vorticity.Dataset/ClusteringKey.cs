@@ -90,6 +90,26 @@ internal sealed class ClusteringKey
     /// <summary>Whether a column of the key, or a struct on its path, is nullable.</summary>
     public bool MayHoldNull { get; }
 
+    /// <summary>
+    /// Whether an object's entry states its last key (<see cref="ObjectEntry.LastKey"/>): a composite key, whose leading
+    /// column's bounds take every object sharing a value of it, or a column a file's statistics do not bound, a text's.
+    /// A number's or a time's statistics bound a key of that column alone exactly, and its entries keep the commit
+    /// format the dataset would write without the field.
+    /// </summary>
+    public bool StatesLastKey
+    {
+        get
+        {
+            DType leading = _dtypes[0];
+            while (leading.Kind == DTypeKind.Extension)
+            {
+                leading = leading.StorageType;
+            }
+
+            return IsComposite || leading.Kind != DTypeKind.Primitive;
+        }
+    }
+
     /// <summary>The dtype of the key's first column.</summary>
     internal DType LeadingType => _dtypes[0];
 
@@ -236,6 +256,16 @@ internal sealed class ClusteringKey
     /// minimum, so the order is approximate while no scan result changes.
     /// </summary>
     public async ValueTask<byte[]> MinimumAsync(
+        VortexFile file, ObjectSummaries summaries, CancellationToken cancellationToken) =>
+        (await BoundsAsync(file, summaries, cancellationToken).ConfigureAwait(false)).First;
+
+    /// <summary>
+    /// The object's smallest and largest keys, row-encoded, from one key cursor: what orders its leaf, and what its entry
+    /// bounds its keys by (<see cref="ObjectEntry.LastKey"/>). Without a key cursor the smallest falls back to the
+    /// summaries, as <see cref="MinimumAsync"/> says, and the largest is empty, which states nothing; so it is for a key
+    /// that may hold a null, which a cursor puts last and the encoding first.
+    /// </summary>
+    public async ValueTask<(byte[] First, byte[] Last)> BoundsAsync(
         VortexFile file, ObjectSummaries summaries, CancellationToken cancellationToken)
     {
         KeyCursor? cursor = await TryOpenAsync(file, cancellationToken).ConfigureAwait(false);
@@ -245,16 +275,20 @@ internal sealed class ClusteringKey
             {
                 if (!await cursor.SeekFirstAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    return [];
+                    return ([], []);
                 }
 
                 // A composite cursor's keys are already the row encoding; a single column's are values.
-                return IsComposite ? cursor.KeyBytes.ToArray() : Encode([cursor.Key]);
+                byte[] first = Current(cursor);
+                return !MayHoldNull && await cursor.SeekLastAsync(cancellationToken).ConfigureAwait(false) ? (first, Current(cursor)) : (first, []);
             }
         }
 
-        return FromSummaries(summaries);
+        return (FromSummaries(summaries), []);
     }
+
+    /// <summary>The key a cursor is on, row-encoded.</summary>
+    private byte[] Current(KeyCursor cursor) => IsComposite ? cursor.KeyBytes.ToArray() : Encode([cursor.Key]);
 
     /// <summary>The per-column minima, encoded as a tuple.</summary>
     private byte[] FromSummaries(ObjectSummaries summaries)
