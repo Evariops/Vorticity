@@ -53,12 +53,6 @@ internal abstract record DatasetOperation
         /// read the level, and the outputs would overlap it.
         /// </summary>
         public LevelRange? Range { get; init; }
-
-        /// <summary>
-        /// Whether an output joins several sealed periods of a dataset of periods, which every header names from
-        /// then on (<see cref="DatasetFeatures.JoinedPeriods"/>).
-        /// </summary>
-        public bool Joins { get; init; }
     }
 
     /// <summary>Attaches an index fragment to an object.</summary>

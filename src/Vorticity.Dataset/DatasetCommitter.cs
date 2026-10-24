@@ -765,8 +765,7 @@ internal static class DatasetCommitter
 
     /// <summary>
     /// The features of format 4 the operations bring into the trees: an entry they add with fields of
-    /// format 4, and an object that joins periods. An entry rebuilt from one in the trees keeps its fields,
-    /// and its feature is named already.
+    /// format 4. An entry rebuilt from one in the trees keeps its fields, and its feature is named already.
     /// </summary>
     private static DatasetFeatures FeaturesOf(IReadOnlyList<DatasetOperation> operations)
     {
@@ -779,7 +778,6 @@ internal static class DatasetCommitter
                     features |= DatasetFeatures.EntryFields;
                     break;
                 case DatasetOperation.ReplaceObjects replace:
-                    features |= replace.Joins ? DatasetFeatures.JoinedPeriods : DatasetFeatures.None;
                     foreach ((int _, ReadOnlyMemory<byte> _, ObjectEntry entry) in replace.Outputs)
                     {
                         if (entry.HasFields)

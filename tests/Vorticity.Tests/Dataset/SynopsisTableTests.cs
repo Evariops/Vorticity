@@ -135,7 +135,7 @@ public sealed partial class SynopsisTableTests
         }
 
         // One write leaves level 0 at once, the parts two by two.
-        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = oneWrite ? 0 : 2, Fanout = 2, JoinedPeriodBytes = 0 };
+        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = oneWrite ? 0 : 2, Fanout = 2 };
         while (await dataset.CompactAsync(compaction, Ct) is not null)
         {
         }

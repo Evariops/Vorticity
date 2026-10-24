@@ -114,13 +114,6 @@ public enum CompactionTrigger
     /// crowd the late level.
     /// </summary>
     Seal = 9,
-
-    /// <summary>
-    /// The periods level of a dataset compacted by periods holds <c>F</c> adjacent small objects of one
-    /// partition, each under an <c>F</c>-th of <see cref="CompactionOptions.JoinedPeriodBytes"/>: they are
-    /// joined into one object of that level, which spans their periods.
-    /// </summary>
-    Join = 10,
 }
 
 /// <summary>
@@ -150,13 +143,6 @@ internal sealed record PeriodCut(PeriodCalendar Calendar, long? FreshAfter, bool
     /// <summary>The lateness horizon, in the instant's unit: in level 0's exit, a row of a period it has closed comes later than it.</summary>
     internal long Horizon { get; init; }
 
-    /// <summary>
-    /// The periods, from the start of the first to the end of the last, of the one object a join writes, or a seal
-    /// of the late rows of a period a joined object holds, which rewrites the whole object; null for a job that
-    /// writes an object per period.
-    /// </summary>
-    internal (long Start, long End)? Span { get; init; }
-
     /// <summary>Whether level 0's exit takes a row of <paramref name="period"/> later than the horizon: its period closed by the newest instant held.</summary>
     internal bool PastHorizon(long period) =>
         Exit && FreshAfter is { } newest && newest != long.MaxValue && Calendar.Next(period) <= newest - Horizon;
@@ -181,11 +167,7 @@ public sealed record CompactionOptions
 
     internal const int DefaultMaxFragments = 4;
 
-    internal const long DefaultJoinedPeriodBytes = 1L << 30;
-
     private readonly int _maxLevels;
-
-    private readonly long _joinedPeriodBytes = DefaultJoinedPeriodBytes;
 
     /// <summary>What level 0 may hold before the read bound degrades; 8 by default.</summary>
     public int LevelZeroCeiling { get; init; } = DatasetLevels.DefaultLevelZeroCeiling;
@@ -222,30 +204,6 @@ public sealed record CompactionOptions
 
     /// <summary>The index fragments an object may carry before a fragment compaction is due; 4 by default.</summary>
     public int MaxFragments { get; init; } = DefaultMaxFragments;
-
-    /// <summary>
-    /// The size a dataset of periods joins its small sealed objects up to; 1 GiB by default, 0 to join none.
-    /// <see cref="Fanout"/> adjacent objects of one partition in the periods level, each under an <c>F</c>-th of
-    /// it, join into one object that spans their periods, so that a partition whose periods are small, a tenant
-    /// among larger ones, keeps objects near this size rather than one a period.
-    /// </summary>
-    /// <remarks>
-    /// The calendar of the periods is the dataset's, weighed on its largest partition: a partition that takes a
-    /// hundredth of the rows seals objects a hundred times smaller. A joined object grows in tiers, as the fresh
-    /// levels do, a row rewritten once each time its object grows <c>F</c>-fold. It never spans two months of the
-    /// calendar, an expiry keeping it until the last period it holds lies before the cutoff, and under an erasure delay
-    /// it stays what a purge rewrites within half of it.
-    /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
-    public long JoinedPeriodBytes
-    {
-        get => _joinedPeriodBytes;
-        init
-        {
-            ArgumentOutOfRangeException.ThrowIfNegative(value);
-            _joinedPeriodBytes = value;
-        }
-    }
 
     /// <summary>
     /// Leveled, tiered, or whichever the clustering key implies. A plan refuses tiered for a dataset

@@ -64,16 +64,12 @@ internal static partial class CompactionPolicy
         if (!taken.Contains(PeriodLevels.Late) && !taken.Contains(PeriodLevels.Periods)
             && Sealable(levels, path, calendar, Closed, lateCrowded) is { } sealing)
         {
-            // The late rows of a period a joined object holds are folded into the whole object, which weighs no length: it
-            // holds several periods.
-            (List<CompactionInput> inputs, (long Start, long End)? joined) = Of(levels, sealing, path, calendar);
+            List<CompactionInput> inputs = Of(levels, sealing, path, calendar);
             return new CompactionJob(
                 inputs[0].Level, PeriodLevels.Periods, CompactionStyle.Periods, CompactionTrigger.Seal, inputs, long.MaxValue, 0)
             {
                 Range = LevelRange.Of(PeriodLevels.Periods, inputs, key),
-                Cut = joined is { } span
-                    ? new PeriodCut(calendar, null, Exit: false, Slices: true) { Span = span }
-                    : new PeriodCut(calendar, null, Exit: false, Slices: true) { Newest = after },
+                Cut = new PeriodCut(calendar, null, Exit: false, Slices: true) { Newest = after },
             };
         }
 
@@ -118,26 +114,6 @@ internal static partial class CompactionPolicy
             {
                 Range = range,
                 Cut = new PeriodCut(calendar, null, Exit: false),
-            };
-        }
-
-        // F adjacent small objects of the periods level join into one that spans their periods, each under an F-th
-        // of the joined size, so that a joined object stays under it, under the dataset's object cap, and under what a
-        // purge rewrites within half the erasure delay.
-        double purged = dataset.ErasureDelay is { } delay ? PeriodLengths.RewriteBytesPerSecond * delay.TotalSeconds / 2 : double.PositiveInfinity;
-        long capped = Math.Min(settings.JoinedPeriodBytes, dataset.Options.MaxObjectBytes);
-        long most = purged >= capped ? capped : (long)purged;
-        if (settings.JoinedPeriodBytes > 0 && !taken.Contains(PeriodLevels.Periods)
-            && Joinable(levels, fanout, settings.JoinedPeriodBytes / fanout, most, key, calendar) is { } joining)
-        {
-            return new CompactionJob(
-                PeriodLevels.Periods, PeriodLevels.Periods, CompactionStyle.Periods, CompactionTrigger.Join, joining, long.MaxValue, 0)
-            {
-                Range = LevelRange.Of(PeriodLevels.Periods, joining, key),
-                Cut = new PeriodCut(calendar, null, Exit: false, Slices: true)
-                {
-                    Span = (SpanOf(joining[0].Entry, path, calendar)!.Value.Start, SpanOf(joining[^1].Entry, path, calendar)!.Value.End),
-                },
             };
         }
 
@@ -240,15 +216,15 @@ internal static partial class CompactionPolicy
     private static long? Sealable(
         List<List<CompactionInput>> levels, string path, PeriodCalendar calendar, Func<long, bool> closed, bool lateCrowded)
     {
-        // The periods the periods level holds, a joined object's every one.
-        List<(long Start, long End)> done = [];
+        // The periods the periods level holds.
+        HashSet<long> done = [];
         if (PeriodLevels.Periods < levels.Count)
         {
             foreach (CompactionInput input in levels[PeriodLevels.Periods])
             {
-                if (SpanOf(input.Entry, path, calendar) is { } span)
+                if (PeriodOf(input.Entry, path, calendar) is { } period)
                 {
-                    done.Add(span);
+                    done.Add(period);
                 }
             }
         }
@@ -264,7 +240,7 @@ internal static partial class CompactionPolicy
             foreach (CompactionInput input in levels[level])
             {
                 if (PeriodOf(input.Entry, path, calendar) is { } period && closed(period)
-                    && (level != PeriodLevels.Late || lateCrowded || !done.Exists(span => span.Start <= period && period < span.End))
+                    && (level != PeriodLevels.Late || lateCrowded || !done.Contains(period))
                     && (oldest is null || period < oldest))
                 {
                     oldest = period;
@@ -275,29 +251,9 @@ internal static partial class CompactionPolicy
         return oldest;
     }
 
-    /// <summary>
-    /// Every object of <paramref name="period"/> in the fresh levels, the late level and the periods level, in that order;
-    /// and when the object of the periods level that holds the period joins several, their span, every object of whose
-    /// periods comes too: the seal rewrites the whole object.
-    /// </summary>
-    private static (List<CompactionInput> Inputs, (long Start, long End)? Joined) Of(
-        List<List<CompactionInput>> levels, long period, string path, PeriodCalendar calendar)
+    /// <summary>Every object of <paramref name="period"/> in the fresh levels, the late level and the periods level, in that order.</summary>
+    private static List<CompactionInput> Of(List<List<CompactionInput>> levels, long period, string path, PeriodCalendar calendar)
     {
-        (long Start, long End)? joined = null;
-        if (PeriodLevels.Periods < levels.Count)
-        {
-            foreach (CompactionInput input in levels[PeriodLevels.Periods])
-            {
-                if (SpanOf(input.Entry, path, calendar) is { } span && span.Start <= period && period < span.End
-                    && calendar.Next(span.Start) < span.End)
-                {
-                    joined = span;
-                    break;
-                }
-            }
-        }
-
-        (long start, long end) = joined ?? (period, calendar.Next(period));
         List<CompactionInput> inputs = [];
         void Add(int level)
         {
@@ -308,9 +264,7 @@ internal static partial class CompactionPolicy
 
             foreach (CompactionInput input in levels[level])
             {
-                if (level == PeriodLevels.Periods
-                        ? SpanOf(input.Entry, path, calendar) is { } span && span.Start >= start && span.End <= end
-                        : PeriodOf(input.Entry, path, calendar) is { } of && of >= start && of < end)
+                if (PeriodOf(input.Entry, path, calendar) == period)
                 {
                     inputs.Add(input);
                 }
@@ -324,72 +278,7 @@ internal static partial class CompactionPolicy
 
         Add(PeriodLevels.Late);
         Add(PeriodLevels.Periods);
-        return (inputs, joined);
-    }
-
-    /// <summary>
-    /// The first <paramref name="fanout"/> adjacent objects of the periods level each under <paramref name="small"/> bytes,
-    /// in key order, of one tier, of one month of the calendar and together under <paramref name="most"/> bytes; null when
-    /// no run holds that many. A larger object, one whose summaries do not place it, and the first of another tier or
-    /// another month start a run again.
-    /// </summary>
-    /// <remarks>
-    /// A tier counts an object's rows in powers of the fan-out, so that joins grow objects <paramref name="fanout"/>-fold
-    /// each time, a row rewritten once a tier, rather than one object taking its neighbours in one by one, its rows
-    /// rewritten at each. A joined object never spans two months, so that an expiry keeps its rows at most a month past
-    /// the cutoff, as it would periods that last a month; <paramref name="most"/> keeps it under the
-    /// dataset's object cap and a size a purge rewrites within half its erasure delay, as the length of a period does.
-    /// </remarks>
-    private static List<CompactionInput>? Joinable(
-        List<List<CompactionInput>> levels, int fanout, long small, long most, ClusteringKey key, PeriodCalendar calendar)
-    {
-        if (PeriodLevels.Periods >= levels.Count)
-        {
-            return null;
-        }
-
-        List<CompactionInput> run = [];
-        (long Month, int Tier) of = (long.MinValue, -1);
-        long bytes = 0;
-        foreach (CompactionInput input in levels[PeriodLevels.Periods])
-        {
-            if (input.Entry.Bytes >= small || SpanOf(input.Entry, key.InstantPath, calendar) is not { } span
-                || TimeSlicer.Floor(span.End - 1, calendar.Unit, SliceWidth.Month) != TimeSlicer.Floor(span.Start, calendar.Unit, SliceWidth.Month))
-            {
-                run.Clear();
-                of = (long.MinValue, -1);
-                continue;
-            }
-
-            (long Month, int Tier) place = (TimeSlicer.Floor(span.Start, calendar.Unit, SliceWidth.Month), TierOf(input.Entry.Rows, fanout));
-            if (place != of || bytes + input.Entry.Bytes > most)
-            {
-                run.Clear();
-                of = place;
-                bytes = 0;
-            }
-
-            run.Add(input);
-            bytes += input.Entry.Bytes;
-            if (run.Count == fanout)
-            {
-                return run;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>The tier of an object of <paramref name="rows"/> rows: how many times the fan-out goes into them.</summary>
-    private static int TierOf(long rows, int fanout)
-    {
-        int tier = 0;
-        for (long left = rows; left >= fanout; left /= fanout)
-        {
-            tier++;
-        }
-
-        return tier;
+        return inputs;
     }
 
     /// <summary>
@@ -431,20 +320,5 @@ internal static partial class CompactionPolicy
 
         long start = calendar.Floor(column.Min.SignedValue);
         return calendar.Floor(column.Max.SignedValue) == start ? start : null;
-    }
-
-    /// <summary>
-    /// The periods an object's instants lie in, from the start of the first to the end of the last, or null when its
-    /// summaries do not say so: one period, but for an object a join wrote.
-    /// </summary>
-    private static (long Start, long End)? SpanOf(ObjectEntry entry, string path, PeriodCalendar calendar)
-    {
-        if (!entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax
-            || column.Min.Kind != FilterLiteralKind.Signed || column.Max.Kind != FilterLiteralKind.Signed)
-        {
-            return null;
-        }
-
-        return (calendar.Floor(column.Min.SignedValue), calendar.Next(calendar.Floor(column.Max.SignedValue)));
     }
 }

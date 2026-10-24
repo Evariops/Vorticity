@@ -132,11 +132,8 @@ internal enum DatasetFeatures : ulong
     /// </summary>
     ShreddedPaths = 32,
 
-    /// <summary>
-    /// Objects of the periods level that join several sealed periods of one partition: a library that does not know
-    /// them would seal a period one of them holds a second time, beside it.
-    /// </summary>
-    JoinedPeriods = 64,
+    // 64 named objects that joined several sealed periods, retired with the joins: a header that still names it is
+    // refused, never reused.
 }
 
 /// <summary>
