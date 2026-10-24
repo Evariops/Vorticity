@@ -198,9 +198,11 @@ sorted by value then time, in chunks of 16 KB with a directory (`vorticity.colum
   and rewritten when a day of the month changes: a sealed day is an object of about 173 GB at the
   design rate (section 9), which merging its synopses into coarser grains must not rewrite. A grain
   becomes the next by adding entries. The minute is not kept: recent windows are computed on the fly.
-- **Sketches.** Quantile sketches (1 KB, 1 % relative error) for the columns of at most 1 000 values a
-  bucket, on the measures; distinct-count sketches of the high-cardinality columns attached to the
-  columns of at most 100 values.
+- **Sketches.** Quantile sketches at 1 % of relative error, the engine's grid, for the columns of at
+  most 1 000 values, on every measure an entry carries; distinct-count sketches of the high-cardinality
+  columns attached to the columns of at most 100 values. A quantile sketch weighs 0.5 to 2 KB on the
+  design's requests *(measured)*, not the 1 KB first reckoned: a measure spanning 3.7 decades fills some
+  790 buckets at 1 %, and a float spanning both signs and many binades more.
 - **Measures.** Every top-level integer and float column of more than 64 values, its values, exact
   sum, least and greatest in the engine's state words; a number column of 64 values or fewer, a status
   or a code, is counted as a column and carried by none. A column whose values hardly repeat, distinct
@@ -214,7 +216,10 @@ sorted by value then time, in chunks of 16 KB with a directory (`vorticity.colum
   monthly ones in the monthly files, 1.1 GB *(computed)*.
 - **Writing.** 9.4 to 10.2 ns a counted column a row at 12 million rows an hour, 10.0 to 12.0 at 750 000,
   where each entry holds fewer rows *(measured, one thread)*: a row's float is split into its bins'
-  parts once for the entries of every column it falls in.
+  parts once for the entries of every column it falls in. The quantile sketches add 12 to 18 ns a
+  sketched column a row, a bucket of each measure reached a row: with four of the seven columns sketched,
+  the design's requests cost 21 to 25 ns a counted column a row, 150 to 175 ns a row, where section 10.1
+  reckoned 123 ns for the counts and their sketches.
 
 ### 5.3 Block statistics, and settling blocks
 

@@ -54,20 +54,37 @@ internal sealed class ColumnCounts
     /// <summary>The bytes a chunk of groups takes about: a group is never cut.</summary>
     internal const int ChunkBytes = 16 << 10;
 
+    /// <summary>The header's flag of counts whose entries keep a quantile sketch of each measure.</summary>
+    private const byte SketchesFlag = 1;
+
     /// <param name="measureFields">The top-level columns whose states each entry holds, in their order.</param>
     /// <param name="kinds">How each is summed.</param>
     /// <param name="groups">The groups, in their order.</param>
     /// <param name="hours">Each entry's hour.</param>
     /// <param name="words">Each entry's words, <see cref="StateWords.Count"/> of them: its rows, then each measure's states.</param>
-    internal ColumnCounts(int[] measureFields, MeasureKind[] kinds, CountGroup[] groups, long[] hours, long[] words)
+    /// <param name="sketches">
+    /// Each entry's quantile sketch of each measure, as <see cref="QuantileSketch.Encode"/> writes it, entry by entry, null for a
+    /// measure that met no value; null when the counts keep none.
+    /// </param>
+    internal ColumnCounts(int[] measureFields, MeasureKind[] kinds, CountGroup[] groups, long[] hours, long[] words, byte[]?[]? sketches = null)
     {
         MeasureFields = measureFields;
         Kinds = kinds;
         Groups = groups;
         Hours = hours;
         Words = words;
+        Sketches = sketches;
         WordsPerEntry = StateWords.Count(kinds);
     }
+
+    /// <summary>
+    /// Each entry's quantile sketch of each measure, encoded, <see cref="MeasureFields"/> of them an entry, null for one
+    /// that met no value; null when the column keeps none, past <see cref="Writing.ColumnCountsBuilder.SketchValues"/> values.
+    /// </summary>
+    internal byte[]?[]? Sketches { get; }
+
+    /// <summary>The quantile sketch of measure <paramref name="measure"/> over entry <paramref name="entry"/>'s rows, encoded; null for none.</summary>
+    internal byte[]? SketchOf(int entry, int measure) => Sketches?[(entry * MeasureFields.Length) + measure];
 
     /// <summary>The top-level columns whose states each entry holds.</summary>
     internal int[] MeasureFields { get; }
@@ -114,7 +131,7 @@ internal sealed class ColumnCounts
 
         Output head = new Output(256);
         head.Byte(Version);
-        head.Byte(0);
+        head.Byte(Sketches is null ? (byte)0 : SketchesFlag);
         head.Varint((ulong)MeasureFields.Length);
         for (int i = 0; i < MeasureFields.Length; i++)
         {
@@ -150,6 +167,7 @@ internal sealed class ColumnCounts
         }
 
         int at = 2;
+        bool sketched = (bytes[1] & SketchesFlag) != 0;
         int measures = Count(bytes, ref at);
         int[] fields = new int[measures];
         MeasureKind[] kinds = new MeasureKind[measures];
@@ -174,7 +192,9 @@ internal sealed class ColumnCounts
             SkipKey(bytes, ref at);
         }
 
-        ColumnCounts counts = new ColumnCounts(fields, kinds, new CountGroup[groups], new long[entries], new long[entries * StateWords.Count(kinds)]);
+        ColumnCounts counts = new ColumnCounts(
+            fields, kinds, new CountGroup[groups], new long[entries], new long[entries * StateWords.Count(kinds)],
+            sketched ? new byte[]?[entries * measures] : null);
         int entry = 0;
         for (int group = 0; group < groups; group++)
         {
@@ -254,6 +274,14 @@ internal sealed class ColumnCounts
 
                 at += MeasureLayout.Words(floats);
             }
+
+            // Each measure's quantile sketch, its length first, 0 for none.
+            for (int m = 0; Sketches is not null && m < MeasureFields.Length; m++)
+            {
+                byte[]? sketch = Sketches[(entry * MeasureFields.Length) + m];
+                into.Varint((ulong)(sketch?.Length ?? 0));
+                into.Bytes(sketch);
+            }
         }
     }
 
@@ -321,6 +349,18 @@ internal sealed class ColumnCounts
                 }
 
                 m += MeasureLayout.Words(floats);
+            }
+
+            for (int measure = 0; Sketches is not null && measure < MeasureFields.Length; measure++)
+            {
+                int length = Count(bytes, ref at);
+                if (length > bytes.Length - at)
+                {
+                    throw new VortexFormatException($"A column's counts hold a sketch past their end at {at}.");
+                }
+
+                Sketches[(entry * MeasureFields.Length) + measure] = length == 0 ? null : bytes.Slice(at, length).ToArray();
+                at += length;
             }
         }
 

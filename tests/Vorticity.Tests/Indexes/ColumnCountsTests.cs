@@ -73,6 +73,10 @@ public sealed class ColumnCountsTests
                 Assert.Equal(sum.Value, StateWords.SumOf(words, price + MeasureLayout.Sum).Value);
                 Assert.Equal(held.Min(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatLeast]));
                 Assert.Equal(held.Max(r => r.Price), BitConverter.Int64BitsToDouble(words[price + MeasureLayout.FloatGreatest]));
+
+                // Each entry's sketches, the values left out's merged from theirs, are those of its rows' values.
+                Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), counts.SketchOf(e, 0));
+                Assert.Equal(Sketch(held.Select(r => r.Price)), counts.SketchOf(e, 1));
             }
         }
 
@@ -131,6 +135,47 @@ public sealed class ColumnCountsTests
         Assert.Equal(counts.Hours, back.Hours);
         Assert.Equal(counts.Words, back.Words);
         Assert.Throws<VortexFormatException>(() => ColumnCounts.From(counts.ToBytes()[..^1]));
+    }
+
+    // An hour's sketches sealed once a batch of a later hour comes, then rows of that hour coming late: the sketch opened
+    // again from its bytes holds every value of its hour, as one built from them all.
+    [Fact]
+    public void ASketchSealedTakesTheLateRowsOfItsHour()
+    {
+        Random random = new Random(9);
+        List<(long At, long Key, long Amount, double Price)> rows = [];
+        foreach (int hour in (int[])[0, 0, 1, 0, 2, 1])
+        {
+            for (int i = 0; i < 1_000; i++)
+            {
+                rows.Add(((hour * MicrosPerHour) + random.NextInt64(MicrosPerHour), random.Next(5), random.NextInt64(1, 100_000), Math.Round(random.NextDouble() * 50, 3)));
+            }
+        }
+
+        ColumnCounts counts = Build(rows, ColumnCountsBuilder.EntryLimit);
+        Assert.Equal(15, counts.Entries);
+        for (int e = 0; e < counts.Entries; e++)
+        {
+            long key = BitConverter.ToInt64(counts.Groups.Single(g => e >= g.FirstEntry && e < g.FirstEntry + g.Entries).Value);
+            List<(long At, long Key, long Amount, double Price)> held = [.. rows.Where(r => r.Key == key && r.At / MicrosPerHour == counts.Hours[e])];
+            Assert.Equal(held.Count, counts.WordsOf(e)[0]);
+            Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), counts.SketchOf(e, 0));
+            Assert.Equal(Sketch(held.Select(r => r.Price)), counts.SketchOf(e, 1));
+        }
+    }
+
+    /// <summary>The encoded quantile sketch, at 1 % as the counts keep them, of <paramref name="values"/>.</summary>
+    private static byte[] Sketch(IEnumerable<double> values)
+    {
+        QuantileSketch sketch = new QuantileSketch(QuantileSketch.BitsFor(0.01));
+        foreach (double value in values)
+        {
+            sketch.Add(value);
+        }
+
+        System.Buffers.ArrayBufferWriter<byte> writer = new System.Buffers.ArrayBufferWriter<byte>();
+        sketch.Encode(writer);
+        return writer.WrittenSpan.ToArray();
     }
 
     /// <summary>

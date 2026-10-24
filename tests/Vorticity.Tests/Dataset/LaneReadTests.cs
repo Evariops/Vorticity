@@ -130,11 +130,14 @@ public sealed partial class LaneReadTests : IClassFixture<LaneReadTests.Fixture>
 
         public async ValueTask InitializeAsync()
         {
+            // Objects with no sheet nor counts: what this test holds is how the lanes read their data, which the synopses'
+            // bytes would move, the jobs sizing their levels by the objects' bytes.
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Call.Schema, new DatasetOptions
             {
                 ClusteringKey = [nameof(Call.At)],
                 Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 10_000 },
                 Write = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 4_096 },
+                SheetObjectBytes = long.MaxValue,
             });
             Random random = new Random(61);
             int row = 0;

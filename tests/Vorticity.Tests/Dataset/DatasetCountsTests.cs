@@ -119,6 +119,7 @@ public sealed class DatasetCountsTests
 
         // Every object's counts of the text column, added by value and hour.
         Dictionary<(string Value, long Hour), long[]> added = [];
+        Dictionary<(string Value, long Hour), QuantileSketch> sketches = [];
         MeasureKind[]? kinds = null;
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
@@ -134,6 +135,16 @@ public sealed class DatasetCountsTests
                 for (int e = group.FirstEntry; e < group.FirstEntry + group.Entries; e++)
                 {
                     (string, long) key = (Encoding.UTF8.GetString(group.Value!), counts.Hours[e]);
+                    if (counts.SketchOf(e, 1) is { } weights)
+                    {
+                        if (!sketches.TryGetValue(key, out QuantileSketch? sketch))
+                        {
+                            sketches[key] = sketch = new QuantileSketch(QuantileSketch.BitsFor(0.01));
+                        }
+
+                        sketch.MergeEncoded(weights);
+                    }
+
                     if (added.TryGetValue(key, out long[]? into))
                     {
                         StateWords.Merge(into, counts.WordsOf(e), kinds);
@@ -167,6 +178,11 @@ public sealed class DatasetCountsTests
 
             int floats = 1 + MeasureLayout.IntegerWords;
             Assert.Equal(weights.Value, StateWords.SumOf(words, floats + MeasureLayout.Sum).Value);
+
+            // The weights' sketches of every object, merged, are the sketch of every weight.
+            System.Buffers.ArrayBufferWriter<byte> merged = new System.Buffers.ArrayBufferWriter<byte>();
+            sketches[group.Key].Encode(merged);
+            Assert.Equal(Sketch(group.Select(r => (double)r[4]!)), merged.WrittenSpan.ToArray());
         }
 
         Assert.Equal(rows.Count(r => hours.Contains(HourOf((DateTimeOffset)r[0]!))), added.Values.Sum(w => w[0]));
@@ -197,6 +213,10 @@ public sealed class DatasetCountsTests
                 object[] values = [.. held.Select(r => r[measures[i] + 1]).Where(v => v is not null).Cast<object>()];
                 MeasureKind kind = counts.Kinds[i];
                 Assert.Equal(values.Length, words[at + MeasureLayout.Values]);
+
+                // The entry's quantile sketch of the measure: the one its values give, a column of few values keeping them.
+                Assert.NotNull(counts.Sketches);
+                Assert.Equal(values.Length == 0 ? null : Sketch(values.Select(Convert.ToDouble)), counts.SketchOf(group.FirstEntry, i));
                 if (kind == MeasureKind.Float)
                 {
                     double[] floats = [.. values.Select(Convert.ToDouble)];
@@ -230,6 +250,20 @@ public sealed class DatasetCountsTests
                 at += MeasureLayout.IntegerWords;
             }
         }
+    }
+
+    /// <summary>The encoded quantile sketch, at 1 % as the counts keep them, of <paramref name="values"/>.</summary>
+    private static byte[] Sketch(IEnumerable<double> values)
+    {
+        QuantileSketch sketch = new QuantileSketch(QuantileSketch.BitsFor(0.01));
+        foreach (double value in values)
+        {
+            sketch.Add(value);
+        }
+
+        System.Buffers.ArrayBufferWriter<byte> writer = new System.Buffers.ArrayBufferWriter<byte>();
+        sketch.Encode(writer);
+        return writer.WrittenSpan.ToArray();
     }
 
     private static string Key(object? value) => value switch

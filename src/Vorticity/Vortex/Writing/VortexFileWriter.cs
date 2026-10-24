@@ -2362,10 +2362,33 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 $"The {missing.Kind} index on '{missing.Column}' is required and was not built: {missing.Reason}. The file is not completed.");
         }
 
-        // A long run's fence pages, which name the regions just written, then where the chunks of a
-        // sliced file lie, for a reader that opens no footer.
+        // The columns' sheets and counts, then a long run's fence pages, which name the regions just written, then where the
+        // chunks of a sliced file lie, for a reader that opens no footer.
         if (_indexes is { } closed)
         {
+            // What each column holds, for a question on a value the file lacks, which passes it unopened; and each column's
+            // counts by hour, for a question on that column alone, which reads no row of the file. Right after the data,
+            // read alone through the table of contents, they lie between none of the structures a scan reads together, and
+            // no read of those bridges them. A file too small for a reader to ask its sheets before it keeps neither.
+            List<(int Field, IndexSegment Region)> sheets = [];
+            List<(int Field, IndexSegment Region)> counts = [];
+            bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
+            for (int field = 0; keepsSheets && field < _fieldCount; field++)
+            {
+                if (closed.SheetOf(field)?.Finish() is { } sheet)
+                {
+                    sheets.Add((field, await closed.AddSheetAsync(_sink, field, sheet, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                }
+            }
+
+            for (int field = 0; keepsSheets && field < _fieldCount; field++)
+            {
+                if (closed.CountsOf(field)?.Finish() is { } counted)
+                {
+                    counts.Add((field, await closed.AddCountsAsync(_sink, field, counted, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                }
+            }
+
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
             SliceChunks? chunks = null;
             IndexSegment[] chunkDirectories = [];
@@ -2407,28 +2430,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
                     pathDirectories.Add((field, await closed.AddVariantDirectoryAsync(
                         _sink, field, paths, _rowCount, _blockRows, dataEnd - interleaved, cancellationToken).ConfigureAwait(false)));
-                }
-            }
-
-            // What each column holds, for a question on a value the file lacks, which passes it unopened; a file too small
-            // for a reader to ask its sheets before it keeps none.
-            List<(int Field, IndexSegment Region)> sheets = [];
-            bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
-            for (int field = 0; keepsSheets && field < _fieldCount; field++)
-            {
-                if (closed.SheetOf(field)?.Finish() is { } sheet)
-                {
-                    sheets.Add((field, await closed.AddSheetAsync(_sink, field, sheet, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
-                }
-            }
-
-            // Each column's counts by hour, for a question on that column alone, which reads no row of the file.
-            List<(int Field, IndexSegment Region)> counts = [];
-            for (int field = 0; keepsSheets && field < _fieldCount; field++)
-            {
-                if (closed.CountsOf(field)?.Finish() is { } counted)
-                {
-                    counts.Add((field, await closed.AddCountsAsync(_sink, field, counted, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
                 }
             }
 

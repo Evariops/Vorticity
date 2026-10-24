@@ -384,9 +384,20 @@ measures, a directory of chunks of about 16 KB, each naming its first value, the
 come first, then the values left out, then the values in the order of their bytes, and each one's
 entries in the order of their hours: an entry's rows and each measure's states as varints, a float sum
 as its three bins, the values it skipped, its top and its high part, and a float's extremes as their
-eight bytes. Entries of two objects of the same value and hour merge word for word. On the design's
-requests, two measures one of them a float, an entry takes 53 to 64 bytes, and the counts cost the
-writer 9.4 to 12.0 ns a counted column a row, one thread (`vortex-queries --micro counts`).
+eight bytes. Entries of two objects of the same value and hour merge word for word. The sheets and the
+counts of an object lie right after its data, where no read of the structures a scan reads together bridges
+them. On the design's requests, two measures one of them a float, an entry takes 53 to 64 bytes, and
+the counts cost the writer 9.4 to 12.0 ns a counted column a row, one thread
+(`vortex-queries --micro counts`).
+
+A column of at most 1 000 values also keeps, for each entry, a quantile sketch of each measure: the
+engine's log-linear grid at 1 % of relative error, which a quantile asked with no error takes, its
+buckets as the engine merges them, after the entry's words, each its length first. Sketches of two
+objects merge bucket by bucket into the sketch of their rows together. While an object is written, an
+hour's sketches are encoded and let go once a batch of a later hour comes, the slices coming in the
+order of their time, and opened again by a row of that hour that comes late. A sketch of a measure
+spanning 3.7 decades fills some 790 buckets: an entry of two sketched measures takes 1 to 3.4 KB on
+the design's requests, and the sketches cost the writer some 12 to 18 ns more a sketched column a row.
 
 ### 4.10 The file-level filter
 
