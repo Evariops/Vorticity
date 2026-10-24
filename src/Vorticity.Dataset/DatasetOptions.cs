@@ -58,6 +58,13 @@ public sealed record DatasetOptions
     internal long StreamedObjectBytes { get; init; } = ObjectSegmentSink.DefaultStreamedFromBytes;
 
     /// <summary>
+    /// The bytes of an object's footer from which a scan for an identifier's value finds the object's rows by its index
+    /// rather than open it: a mebibyte, unless a test asks for less. A lookup reads a few kilobytes a column, each column
+    /// asked for apart, where an open reads the footer whole: under a mebibyte the open asks the store for less.
+    /// </summary>
+    internal long LookupFooterBytes { get; init; } = 1 << 20;
+
+    /// <summary>
     /// The bytes a rewrite announces to the store for each byte it reads, as the bound of an object it
     /// streams: <see cref="ObjectBound.OutPerIn"/>, unless a test asks for less to run past it.
     /// </summary>
@@ -307,10 +314,44 @@ public sealed record DatasetOptions
     /// object indexes by value so that a lookup reads the objects that hold the value and no other.
     /// An identifier may also be a key of a variant column read as a string or an integer, written as a
     /// filter writes it, <c>Attributes['user'].AsString()</c>: a job then shreds that key wherever a
-    /// row holds it in that class, and indexes it. Null, the default, names none. Fixed when the
-    /// dataset is created and carried by every commit.
+    /// row holds it in that class, and indexes it. Null, the default, names none. Read when the dataset
+    /// is created and carried by every commit; <see cref="VortexDataset.AddIdentifiersAsync"/> adds
+    /// others later, and a handle opened on an existing dataset follows its commits, whatever this says.
     /// </summary>
     public IReadOnlyList<string>? Identifiers { get; init; }
+
+    /// <summary>
+    /// Keys of variant columns that every object a job writes keeps in a column of its own, in one class, written as a
+    /// filter reads them, <c>Attributes['http.status_code'].AsInt64()</c>: shredded whatever the rows a job counts, so
+    /// that a question on the key reads that column rather than parse the variant, and the object's synopsis counts its
+    /// values. A key read as a string, an integer, a double or a boolean (<c>AsString</c>, <c>AsInt64</c>,
+    /// <c>AsDouble</c>, <c>AsBool</c>). Null, the default, names none. Read when the dataset is created and carried by
+    /// every commit; <see cref="VortexDataset.SetShreddedPathsAsync"/> changes them later, and a handle opened on an
+    /// existing dataset follows its commits, whatever this says.
+    /// </summary>
+    public IReadOnlyList<string>? ShreddedPaths { get; init; }
+
+    /// <summary>
+    /// Whether an append shreds the <see cref="ShreddedPaths"/> as a job does, so that a question on them over the rows
+    /// no job has rewritten yet, the last minutes', reads their columns rather than parse the variant, at the price of
+    /// the shredding in each append. False, the default, leaves an append's variants whole until a job rewrites them.
+    /// A setting of the handle, which each writer chooses.
+    /// </summary>
+    public bool ShredOnAppend { get; init; }
+
+    /// <summary>
+    /// Columns that questions filter and group by together, beyond the prefixes of an object's synopsis order: each
+    /// grouping one to four synopsis columns, or keys of variant columns written as a filter reads them, the first the
+    /// one questions pick values of, <c>["Service", "HttpStatus", "Route"]</c>. Every job writes a table of each grouping
+    /// of two columns or more by hour and by object beside the prefix tables, and tables of each grouping's measures'
+    /// sketches by slice, by hour and by object, weighed by the same choice under the same budget, their chunks bounded
+    /// by the first column's values, so that a question over those columns alone, whatever columns the order places
+    /// between them, reads those tables rather than the rows or the deepest prefix: a quantile per service over the last
+    /// minutes, declared <c>["Service"]</c>, reads the sketches of the slices its window keeps whole. A grouping that
+    /// names a column an object's order does not hold writes no table in it. Null, the default, declares none. A setting
+    /// of the handle that runs the jobs.
+    /// </summary>
+    public IReadOnlyList<IReadOnlyList<string>>? SynopsisGroupings { get; init; }
 
     /// <summary>
     /// The bytes an object's marks may take: <see cref="MarkedVectorBytes"/>, or a part of the
@@ -328,8 +369,23 @@ public sealed record DatasetOptions
     /// </summary>
     internal int InlineVectorBytes { get; init; } = 256;
 
-    /// <summary>The chunking seed, drawn once at creation and carried by every header.</summary>
-    internal ulong Seed { get; init; } = (ulong)Random.Shared.NextInt64();
+    /// <summary>
+    /// The chunking seed every header carries; 0, the default, for one drawn at creation (<see cref="SeedOf"/>), so that
+    /// options built alike are equal.
+    /// </summary>
+    internal ulong Seed { get; init; }
+
+    /// <summary>The seed a creation under <paramref name="options"/> writes: theirs, or one drawn now, never 0.</summary>
+    internal static ulong SeedOf(DatasetOptions options)
+    {
+        ulong seed = options.Seed;
+        while (seed == 0)
+        {
+            seed = (ulong)Random.Shared.NextInt64();
+        }
+
+        return seed;
+    }
 
     /// <summary>
     /// The compaction settings every header carries: the level cap, level 1's object size and the
@@ -383,7 +439,6 @@ public sealed record DatasetOptions
             LockedStore = false,
             ErasureDelay = header.ErasureDelay,
             Periods = PeriodsOf(header, Periods),
-            Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
         }
         : this with
         {
@@ -391,7 +446,6 @@ public sealed record DatasetOptions
             LockedStore = true,
             ErasureDelay = null,
             Periods = PeriodsOf(header, Periods),
-            Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,

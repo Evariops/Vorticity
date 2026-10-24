@@ -32,6 +32,9 @@ internal sealed class DatasetScanCounters
     /// <summary>Objects the scan went to read. <see cref="CacheHits"/> of them cost no open.</summary>
     public long ObjectsOpened { get; internal set; }
 
+    /// <summary>Objects whose rows an identifier's index found, read with no open of the object.</summary>
+    public long ObjectsLookedUp { get; internal set; }
+
     /// <summary>Child pages a node's summaries refuted, each a whole subtree never read.</summary>
     public long SubtreesSkipped { get; internal set; }
 
@@ -75,6 +78,10 @@ internal sealed class DatasetScanBuilder
     private bool _keepEncodings;
     private bool _sinkDecodes;
     private bool _positionsUnread;
+
+    // The filter's lookup of an identifier, worked out the first time an object asks (Lookup).
+    private VortexExpr? _lookup;
+    private bool _lookupKnown;
 
     internal DatasetScanBuilder(VortexDataset dataset, DatasetSnapshot version)
     {
@@ -290,10 +297,47 @@ internal sealed class DatasetScanBuilder
     internal DatasetScanBuilder WithReadAhead(int splits)
     {
         _readAhead = splits;
+        _readAheadGranted = true;
         return this;
     }
 
     private int _readAhead;
+
+    /// <summary>Whether an aggregation granted the scan its reads ahead, none among them, which its objects read as granted.</summary>
+    private bool _readAheadGranted;
+
+    /// <summary>
+    /// Has the scan of one lane of an object read ahead, over a store whose read is a round trip, as many of its splits as
+    /// a pass's lanes keep in flight together (<see cref="AggregationEngine.TotalAhead"/>), reserved in the session's
+    /// budget as a pass reserves them: half as many at a time as the budget grants fewer, and none below two, the scan
+    /// then decoding a batch ahead as before. The reservation, held while the scan reads; null when it reads none ahead:
+    /// an aggregation's lane, granted its own, a scan of several lanes, of a take, or of a file that costs no round trip.
+    /// </summary>
+    private QueryMemory? ReadsAhead(ScanBuilder scan, VortexFile file)
+    {
+        int degree = _options.DegreeOfParallelism > 0 ? _options.DegreeOfParallelism : _dataset.Session.Options.MaxDegreeOfParallelism;
+        if (_readAheadGranted || degree > 1 || _options.Prefetch > 1 || _take is not null || _orderPaths is not null
+            || file.Source.CostsNoRoundTrip || scan.LargestSplitBytes() is not (> 0 and var split))
+        {
+            return null;
+        }
+
+        QueryMemory memory = new QueryMemory(_dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        int ahead = AggregationEngine.TotalAhead(split);
+        while (ahead >= BatchAsyncEnumerator.ReadAheadSplits && !memory.TryGrow(ahead * split))
+        {
+            ahead /= 2;
+        }
+
+        if (ahead < BatchAsyncEnumerator.ReadAheadSplits)
+        {
+            memory.Dispose();
+            return null;
+        }
+
+        scan.WithReadAhead(ahead);
+        return memory;
+    }
 
     /// <summary>
     /// A lease of <paramref name="held"/>: for a scan that reads keys of variant columns, an object of level 0
@@ -355,6 +399,16 @@ internal sealed class DatasetScanBuilder
         if (_states is { } request)
         {
             await foreach (RecordBatch batch in StatesAsync(request, cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
+        if (Lookup is { } lookup)
+        {
+            await foreach (RecordBatch batch in LookedUpAsync(lookup, cancellationToken).ConfigureAwait(false))
             {
                 yield return batch;
             }
@@ -482,6 +536,323 @@ internal sealed class DatasetScanBuilder
         }
     }
 
+    /// <summary>
+    /// The conjunct of <paramref name="filter"/> that looks one value of a declared identifier up, or a few,
+    /// <c>id == v</c> or <c>id IN (…)</c> on a column of its own, never null: what the identifier's index answers object
+    /// by object with no open of the object (<see cref="VortexDataset.LookupAsync"/>). Null for any other filter.
+    /// </summary>
+    internal static VortexExpr? LookupOf(VortexExpr? filter, IReadOnlyList<string> identifiers)
+    {
+        if (filter is null || identifiers.Count == 0)
+        {
+            return null;
+        }
+
+        List<VortexExpr> conjuncts = [];
+        GroupPredicates.Conjuncts(filter, conjuncts);
+        foreach (VortexExpr conjunct in conjuncts)
+        {
+            FieldExpr? field = conjunct switch
+            {
+                ComparisonExpr { Op: ComparisonOp.Equal } equal when equal.Value.Kind != FilterLiteralKind.Null => equal.Field,
+                InExpr inList when inList.Values.Count > 0 && !HoldsNull(inList.Literals) => inList.Field,
+                _ => null,
+            };
+            if (field is ColumnFieldExpr)
+            {
+                foreach (string identifier in identifiers)
+                {
+                    if (string.Equals(identifier, field.Path, StringComparison.Ordinal))
+                    {
+                        return conjunct;
+                    }
+                }
+            }
+        }
+
+        return null;
+
+        static bool HoldsNull(FilterLiteral[] values)
+        {
+            foreach (FilterLiteral value in values)
+            {
+                if (value.Kind == FilterLiteralKind.Null)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The filter's lookup of an identifier (<see cref="LookupOf"/>), for a scan of rows that reads them in the tree's order
+    /// with its indexes; null otherwise.
+    /// </summary>
+    private VortexExpr? Lookup
+    {
+        get
+        {
+            if (!_lookupKnown)
+            {
+                _lookup = _indexes && _states is null && _orderPaths is null && _take is null && LookupColumns(out _)
+                    ? LookupOf(_filter, _version.Header.Identifiers)
+                    : null;
+                _lookupKnown = true;
+            }
+
+            return _lookup;
+        }
+    }
+
+    /// <summary>
+    /// The columns a lookup reads its rows for: the projected ones, whole, which the filter's must be among; null in
+    /// <paramref name="columns"/> for every one. False when the projection keeps part of a column, or leaves out a column
+    /// the filter reads.
+    /// </summary>
+    private bool LookupColumns(out int[]? columns)
+    {
+        columns = null;
+        if (_mask is not { IsAll: false } mask)
+        {
+            return true;
+        }
+
+        DType schema = _version.Schema.DType;
+        int count = mask.SelectedCount(schema.FieldCount);
+        int[] fields = new int[count];
+        for (int i = 0; i < count; i++)
+        {
+            if (!mask.SelectedMask(i).IsAll)
+            {
+                return false;
+            }
+
+            fields[i] = mask.SelectedField(i);
+        }
+
+        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
+        _filter?.CollectFields(named);
+        foreach (string path in named)
+        {
+            int field = schema.IndexOfField(path);
+            if (field < 0 || Array.IndexOf(fields, field) < 0)
+            {
+                return false;
+            }
+        }
+
+        columns = fields;
+        return true;
+    }
+
+    /// <summary>
+    /// Whether an object's rows are found by its identifier's index rather than its open, when a scan looks a value up: one
+    /// with no row marked, whose footer an open would read is large (<see cref="DatasetOptions.LookupFooterBytes"/>), and
+    /// whose entry carries a table of contents that names its index directory.
+    /// </summary>
+    internal static bool LooksUp(ObjectEntry entry, DatasetOptions options) =>
+        !entry.HasDeletions && entry.FooterBytes >= options.LookupFooterBytes && entry.Contents is { DirectoryRegion: not null };
+
+    /// <summary>
+    /// The filter's lookup when <paramref name="held"/> takes it: an object the scan covers whole, with no row marked, of the
+    /// version's own columns, whose footer an open would read is large (<see cref="DatasetOptions.LookupFooterBytes"/>), and
+    /// whose entry carries a table of contents that names its index directory; null otherwise.
+    /// </summary>
+    private VortexExpr? LookupFor(in PositionedObject held)
+    {
+        if (Lookup is not { } lookup || Covered(held) != held.Entry.Rows || !LooksUp(held.Entry, _dataset.Options)
+            || held.Entry.Contents is not { } contents)
+        {
+            return null;
+        }
+
+        try
+        {
+            return _version.Schema.ColumnsOf(contents.SchemaType, held.Entry.Key) is null ? lookup : null;
+        }
+        catch (VortexFormatException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The scan of a lookup of an identifier: every object the walk keeps that takes the lookup (<see cref="LookupFor"/>)
+    /// looked up at once, as many reads in flight as the session lets be, and the objects' rows given in the tree's order;
+    /// an object that does not take it, a small one whose footer an open reads in a request, read as the scan reads any,
+    /// <see cref="LookupReads"/> of them at once, the rows they keep copied. A lookup takes four round trips whatever the
+    /// object holds, and an open and a read of a small object two or three: thirty objects one after the other would wait
+    /// for 120, or for 60 to 90.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> LookedUpAsync(VortexExpr lookup, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        LookupColumns(out int[]? columns);
+        List<(PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)> objects = [];
+        using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        SemaphoreSlim? reading = null;
+        try
+        {
+            int read = 0;
+            await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (Covered(held) > 0)
+                {
+                    bool looked = LookupFor(held) is not null;
+                    objects.Add((held, looked ? _dataset.LookupAsync(held.Entry, lookup, columns, stopped.Token).AsTask() : null, looked));
+                    read += looked ? 0 : 1;
+                }
+            }
+
+            // Objects read as rows, two or more, read ahead together; one alone is read when its turn comes, as a scan reads it.
+            for (int i = 0; i < objects.Count && read > 1; i++)
+            {
+                if (!objects[i].Looked)
+                {
+                    reading ??= new SemaphoreSlim(LookupReads);
+                    objects[i] = (objects[i].Held, ReadAheadAsync(objects[i].Held, reading, stopped.Token), false);
+                }
+            }
+
+            foreach ((PositionedObject held, Task<List<RecordBatch>?>? found, bool looked) in objects)
+            {
+                if (looked)
+                {
+                    await foreach (RecordBatch batch in FoundAsync(held, await found!.ConfigureAwait(false), cancellationToken).ConfigureAwait(false))
+                    {
+                        yield return batch;
+                    }
+
+                    continue;
+                }
+
+                if (found is not null)
+                {
+                    foreach (RecordBatch batch in await found.ConfigureAwait(false) ?? [])
+                    {
+                        yield return batch;
+                    }
+
+                    continue;
+                }
+
+                await foreach (RecordBatch batch in RowsAsync(held, 1, cancellationToken).ConfigureAwait(false))
+                {
+                    yield return batch;
+                }
+            }
+        }
+        finally
+        {
+            // A scan stopped or failed: the lookups and the reads still on their way are called off and end, and what they
+            // found is let go.
+            await stopped.CancelAsync().ConfigureAwait(false);
+            foreach ((_, Task<List<RecordBatch>?>? found, _) in objects)
+            {
+                if (found is null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    foreach (RecordBatch batch in await found.ConfigureAwait(false) ?? [])
+                    {
+                        batch.Dispose();
+                    }
+                }
+                catch (Exception) when (found.IsFaulted || found.IsCanceled)
+                {
+                }
+            }
+
+            reading?.Dispose();
+        }
+    }
+
+    /// <summary>The objects a lookup's scan reads as rows at once, those that do not take the lookup.</summary>
+    private const int LookupReads = 16;
+
+    /// <summary>
+    /// The rows of <paramref name="held"/> the scan keeps, read as the scan reads any object once <paramref name="reading"/>
+    /// lets one more be read, each batch that keeps a row copied, the scan's own batches being let go as it moves on.
+    /// </summary>
+    private async Task<List<RecordBatch>?> ReadAheadAsync(PositionedObject held, SemaphoreSlim reading, CancellationToken cancellationToken)
+    {
+        await reading.WaitAsync(cancellationToken).ConfigureAwait(false);
+        List<RecordBatch> kept = [];
+        try
+        {
+            await foreach (RecordBatch batch in RowsAsync(held, 1, cancellationToken).ConfigureAwait(false))
+            {
+                if (batch.SelectedRows > 0)
+                {
+                    kept.Add(batch.View.ToOwned());
+                }
+            }
+
+            return kept;
+        }
+        catch
+        {
+            foreach (RecordBatch batch in kept)
+            {
+                batch.Dispose();
+            }
+
+            throw;
+        }
+        finally
+        {
+            reading.Release();
+        }
+    }
+
+    /// <summary>
+    /// The rows an object's lookup found, the scan's filter kept, as the dataset's; the object's rows as any other's when its
+    /// index could not say (<paramref name="found"/> null). The batches stay the lookup's, which the scan lets go.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> FoundAsync(
+        PositionedObject held, List<RecordBatch>? found, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (found is null)
+        {
+            await foreach (RecordBatch batch in RowsAsync(held, 1, cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+
+            yield break;
+        }
+
+        if (_metrics is { } metrics)
+        {
+            metrics.ObjectsLookedUp++;
+        }
+
+        RecordBatch? view = null;
+        try
+        {
+            foreach (RecordBatch batch in found)
+            {
+                if (_filter is { } filter)
+                {
+                    SelectBy(batch, filter);
+                }
+
+                if (batch.SelectedRows > 0)
+                {
+                    yield return InDataset(batch, held.FirstRow, ref view);
+                }
+            }
+        }
+        finally
+        {
+            view?.Dispose();
+        }
+    }
+
     /// <summary>One object's rows as the dataset's, its lease held until the last is read.</summary>
     private async IAsyncEnumerable<RecordBatch> RowsAsync(
         PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -496,7 +867,9 @@ internal sealed class DatasetScanBuilder
                 // The object's own scan, which every object of the version's schema with no row
                 // marked is read by, rebased into one view for the whole object.
                 RecordBatch? view = null;
-                await foreach (RecordBatch batch in Of(lease.File, held).ExecuteAsync()
+                ScanBuilder scan = Of(lease.File, held);
+                using QueryMemory? ahead = ReadsAhead(scan, lease.File);
+                await foreach (RecordBatch batch in scan.ExecuteAsync()
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     yield return InDataset(batch, held.FirstRow, ref view);
@@ -530,16 +903,25 @@ internal sealed class DatasetScanBuilder
             return default;
         }
 
+        // A part of the object is answered under a window that ends where the part does: the slices it begins and ends
+        // with, or the one slice that holds it, a lane's share of an edge, whose answer is then that edge alone.
         (long, long)? within = null;
+        long first = Math.Max(_from, held.FirstRow) - held.FirstRow;
+        bool inSlice = false;
         if (covered != held.Entry.Rows)
         {
-            if (held.Entry.HasDeletions || _take is not null
-                || Within(contents.Slices.Slices, Math.Max(_from, held.FirstRow) - held.FirstRow, covered) is not { } part)
+            if (held.Entry.HasDeletions || _take is not null)
             {
                 return default;
             }
 
-            within = part;
+            (long, long)? slice = SliceHolding(contents.Slices.Slices, first, covered);
+            within = Within(contents.Slices.Slices, first, covered) ?? slice;
+            inSlice = slice is not null;
+            if (within is null)
+            {
+                return default;
+            }
         }
 
         DType schema;
@@ -557,10 +939,70 @@ internal sealed class DatasetScanBuilder
             && summary is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
             ? (summary.Min.SignedValue, summary.Max.SignedValue)
             : null;
-        return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
-            && SynopsisAnswer.Of(QuestionOf(request, key.InstantPath), contents, schema, instants, PartitionFilter.ValuesOf(held.Entry, key), within, held.Entry.HasDeletions) is { } answer
-            ? (answer, contents, key.InstantPath)
-            : default;
+        if (_version.Schema.ColumnsOf(schema, held.Entry.Key) is not null)
+        {
+            return default;
+        }
+
+        // An answer that cannot take the values of identifiers the filter leaves out of its tables, a distinct count
+        // from sketches, takes them for absent instead: the identifier's index says so before the tables answer. A part
+        // in one slice the window cuts answers with that edge alone, read by the object's chunk directories with no open
+        // of it, where a scan of its rows read the footer, 31 MB for a day's, and the instant's zone map.
+        SynopsisQuestion question = QuestionOf(request, key.InstantPath);
+        IReadOnlyDictionary<string, FilterLiteral>? partition = PartitionFilter.ValuesOf(held.Entry, key);
+        if ((SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, edgesAlone: inSlice)
+                ?? (question.MayExclude ? SynopsisAnswer.Of(question, contents, schema, instants, partition, within, held.Entry.HasDeletions, assumeAbsent: true, edgesAlone: inSlice) : null))
+            is not { } answer)
+        {
+            return default;
+        }
+
+        // A share of a slice: its own rows of the edge, or, should the tables answer the slice, its rows, which no table holds apart.
+        if (inSlice && answer.Edges is [TimeSlice edge] && (edge.FirstRow != first || edge.Rows != covered))
+        {
+            if (answer.Parts.Count > 0)
+            {
+                return default;
+            }
+
+            answer = answer with { Edges = [new TimeSlice(edge.Start, edge.End, first, covered)] };
+        }
+        else if (inSlice && Within(contents.Slices.Slices, first, covered) is null)
+        {
+            return default;
+        }
+
+        return (answer, contents, key.InstantPath);
+    }
+
+    /// <summary>
+    /// The instants of the one slice of <paramref name="slices"/> that holds rows <paramref name="first"/> to
+    /// <paramref name="first"/> + <paramref name="count"/> of an object, its start to its end, inclusive: what a lane's share
+    /// of an edge, or a whole edge, lies in. Null when no one slice holds them all.
+    /// </summary>
+    private static (long Low, long High)? SliceHolding(IReadOnlyList<TimeSlice> slices, long first, long count)
+    {
+        int low = 0;
+        int high = slices.Count - 1;
+        while (low <= high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            TimeSlice slice = slices[middle];
+            if (first < slice.FirstRow)
+            {
+                high = middle - 1;
+            }
+            else if (first >= slice.FirstRow + slice.Rows)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                return first + count <= slice.FirstRow + slice.Rows ? (slice.Start, slice.End - 1) : null;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -650,7 +1092,7 @@ internal sealed class DatasetScanBuilder
     internal SynopsisAnswer? AnswerOf(in PositionedObject held, out bool light, out SynopsisContents? contents)
     {
         (SynopsisAnswer? answer, contents, _) = _states is { } request && _orderPaths is null && _take is null ? Answer(held, request) : default;
-        light = answer is { Edges.Count: 0, Excluded.Count: 0 } && !held.Entry.HasDeletions;
+        light = answer is { Edges.Count: 0, Excluded.Count: 0, Absent.Count: 0 } && !held.Entry.HasDeletions;
         return answer;
     }
 
@@ -1024,7 +1466,7 @@ internal sealed class DatasetScanBuilder
     private bool TryAnswerNow(PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, out AnsweredObject? answered)
     {
         answered = null;
-        if (held.Entry.HasDeletions || answer.Edges.Count > 0 || answer.Excluded.Count > 0 || answer.Parts.Count == 0)
+        if (held.Entry.HasDeletions || answer.Edges.Count > 0 || answer.Excluded.Count > 0 || answer.Absent.Count > 0 || answer.Parts.Count == 0)
         {
             return false;
         }
@@ -1098,6 +1540,11 @@ internal sealed class DatasetScanBuilder
         Task<List<RecordBatch>>? excluded = answer.Excluded.Count > 0 && answer.Parts.Count > 0
             ? ExcludedAsync(held, answer.Excluded, ExcludedColumns(answer, schema), cancellationToken)
             : null;
+
+        // The values the answer takes for absent, looked up beside the tables: a row that holds one sends the object to its rows.
+        Task<List<RecordBatch>>? present = answer.Absent.Count > 0 && answer.Parts.Count > 0
+            ? ExcludedAsync(held, answer.Absent, LeftOutColumns(answer.Absent, [], schema), cancellationToken)
+            : null;
         List<RecordBatch> states = [];
         SynopsisTableSet? tables = null;
         bool exact = true;
@@ -1112,6 +1559,12 @@ internal sealed class DatasetScanBuilder
                 }
 
                 tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer, cancellationToken).ConfigureAwait(false);
+                if (present is not null)
+                {
+                    List<RecordBatch> found = await present.ConfigureAwait(false);
+                    exact = !ReferenceEquals(found, Unfound) && found.TrueForAll(static batch => batch.SelectedRows == 0);
+                }
+
                 List<RecordBatch>? removed = marked is null ? null : await marked.ConfigureAwait(false);
                 if (excluded is not null)
                 {
@@ -1132,14 +1585,14 @@ internal sealed class DatasetScanBuilder
         }
         catch
         {
-            await LetGoAsync(states, tables, marked, edges, excluded).ConfigureAwait(false);
+            await LetGoAsync(states, tables, marked, edges, excluded, present).ConfigureAwait(false);
             throw;
         }
 
-        // The rows taken out are spent once the states are corrected.
-        if (marked is not null || excluded is not null)
+        // The rows taken out are spent once the states are corrected, and the rows looked for once seen.
+        if (marked is not null || excluded is not null || present is not null)
         {
-            await LetGoAsync(NoRows, null, marked, excluded).ConfigureAwait(false);
+            await LetGoAsync(NoRows, null, marked, excluded, present).ConfigureAwait(false);
         }
 
         if (!exact)
@@ -1319,17 +1772,23 @@ internal sealed class DatasetScanBuilder
         return spans;
     }
 
-    /// <summary>The columns the answer's tables key and measure: what charges a row taken out to its table's row.</summary>
     /// <summary>
     /// The columns the rows an identifier's index finds are read for: the keys and the measures of the tables they come out
     /// of, and the columns of the filters that leave them out and keep the rest; null, every one, when a filter names a
     /// column that is none of the schema's. Every column's chunk directory was read and parsed for them, at every question.
     /// </summary>
-    private static int[]? ExcludedColumns(SynopsisAnswer answer, DType schema)
+    private static int[]? ExcludedColumns(SynopsisAnswer answer, DType schema) => LeftOutColumns(answer.Excluded, MeasuredColumns(answer), schema);
+
+    /// <summary>
+    /// The columns of <paramref name="measured"/> and those the filters of <paramref name="leftOut"/> read, which leave
+    /// values of identifiers out and keep the rest; null, every one, when a filter names a column that is none of the
+    /// schema's.
+    /// </summary>
+    private static int[]? LeftOutColumns(IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> leftOut, int[] measured, DType schema)
     {
-        SortedSet<int> fields = [.. MeasuredColumns(answer)];
+        SortedSet<int> fields = [.. measured];
         HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
-        foreach ((VortexExpr part, VortexExpr kept) in answer.Excluded)
+        foreach ((VortexExpr part, VortexExpr kept) in leftOut)
         {
             part.CollectFields(named);
             kept.CollectFields(named);
@@ -1349,6 +1808,7 @@ internal sealed class DatasetScanBuilder
         return [.. fields];
     }
 
+    /// <summary>The columns the answer's tables key and measure: what charges a row taken out to its table's row.</summary>
     private static int[] MeasuredColumns(SynopsisAnswer answer)
     {
         SortedSet<int> fields = [];
@@ -1438,18 +1898,12 @@ internal sealed class DatasetScanBuilder
             FilterEvaluator.Evaluate(filter, batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
             int words = Math.Max((rows + 63) >> 6, 1);
             Buffers.VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
-            bytes.Clear();
             Span<ulong> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
-            int selected = 0;
-            for (int r = 0; r < rows; r++)
-            {
-                if (states[r] == Trilean.True)
-                {
-                    kept[r >> 6] |= 1UL << (r & 63);
-                    selected++;
-                }
-            }
 
+            // The states compared 64 at a time, each word of the selection written whole, and counted by its popcount; the
+            // one word of a batch of no row, which no compare writes, cleared.
+            kept[^1] = 0;
+            int selected = Trilean.ToWords(states.AsSpan(0, rows), Trilean.True, equal: true, kept);
             batch.Select(selection, selected);
         }
         finally
@@ -1780,6 +2234,12 @@ internal sealed class DatasetScanBuilder
                 key, "excluded", "rows the filter leaves out by an identifier, found by its index and taken out of the tables", answer.Excluded.Count));
         }
 
+        if (answer.Absent.Count > 0 && answer.Parts.Count > 0)
+        {
+            into.Add(new StatesStep(
+                key, "absent", "values the filter leaves out by an identifier, which its index must find in no row before the tables answer, or the object's rows", answer.Absent.Count));
+        }
+
         DType schema = contents.SchemaType;
         foreach (SynopsisPart part in answer.Parts)
         {
@@ -2080,11 +2540,15 @@ internal sealed class DatasetScanBuilder
     {
         if (_metrics is { } metrics)
         {
-            metrics.ObjectsOpened++;
-            metrics.Cursors = Math.Max(metrics.Cursors, open);
-            if (lease.WasCached)
+            // A lookup's scan opens the objects it reads as rows several at once.
+            lock (metrics)
             {
-                metrics.CacheHits++;
+                metrics.ObjectsOpened++;
+                metrics.Cursors = Math.Max(metrics.Cursors, open);
+                if (lease.WasCached)
+                {
+                    metrics.CacheHits++;
+                }
             }
         }
     }

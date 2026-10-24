@@ -160,6 +160,32 @@ of every object that holds no float at the path, and reads the rows of the other
 every kind of value, so it reads the rows, as a key an object leaves unshredded does, since its tables
 count only the rows that hold it.
 
+The tables follow one order of the columns per object, fewest values first, and hold the prefixes of
+that order the budget keeps. A question over two columns the order places far apart, a route and a
+pod after a dozen facets, finds them together only in the deepest prefix, whose rows come close to the
+rows themselves. Declare the columns your questions filter and group by together, and every
+compaction keeps a table of each grouping, by hour and by object, weighed under the same budget:
+
+```csharp
+SynopsisGroupings = [["Service", "HttpStatus", "Route"], ["Route", "Pod"]],
+```
+
+Put first the column the questions pick values of: each chunk of the table says the least and the
+greatest value of it that it holds, so a question of one route reads the chunks that may hold it. A
+column of a grouping may be a key of a variant column the objects shred, written as a filter reads
+it, `Attributes['http.response.status_code'].AsInt64()`. A grouping is a setting of the handle that
+runs the compactions, and an object whose order does not hold one of its columns writes no table of it.
+
+A grouping also keeps the sketches of its measures by slice, by hour and by object, for quantiles and
+distributions. A grouping of one column keeps those alone, its values' counts being in the order's
+tables already: declare `["Service"]` and a 99th percentile per service over the last 15 minutes reads
+the sketches of the minutes its window holds whole and the rows of the one it cuts, where no prefix
+holding the service would have kept sketches by slice. The choice keeps a table of sketches by slice
+only where it costs fewer bytes than the columns it answers for, that is where a slice holds many rows
+per group: on three hours of spans at 800 rows a minute, a quantile per service over a window that
+cuts its hours read 540 rows of sketches and 800 rows at its edges, against 72,800 rows without the
+grouping.
+
 A window whose ends fall inside an hour reads the rows its tables cannot answer there: the slices it
 cuts when a table of slices holds the question's keys, the whole hour when only the hour's table does.
 A dashboard over the last N minutes has an end inside an hour every time. `ScanOptions.AlignWindow`
@@ -218,13 +244,25 @@ DatasetOptions options = new DatasetOptions
 ```
 
 Every object then holds one retention value. An append is split into an object per value, and each
-value grows its own periods, so a period never mixes rows that expire at different times. Partition
+value grows its own periods, so a period never mixes rows that expire at different times. An append
+of batches (`AppendAsync(batches)`) splits its rows as they come, an object per value; an object
+started with `StartObject`, whose writer is yours, is written whole first, so when its rows hold
+several values it is read back and written again an object per value, the first left for vacuum.
+Append rows of several values as batches, or start an object per value. Partition
 columns should have a few values: an append that holds more than `MaxPartitionValues` of them, 64 by
 default, is refused. That bound is per append, and nothing bounds the values a dataset gathers over
 time, each of which grows periods of its own: `PlanCompactionAsync` says how many the dataset holds
 (`CompactionPlan.Partitions`), and so does the `vortex.dataset.partitions` metric. A question filtered or
 grouped on the partition column is still answered from the synopses, since each object holds a single
 value of it.
+
+The length of a period is the dataset's, weighed on its largest partition, so a partition with a
+hundredth of the rows seals objects a hundred times smaller. Compaction joins them: ten adjacent sealed
+objects of one partition, each under a tenth of `CompactionOptions.JoinedPeriodBytes` (1 GiB by
+default), become one object that spans their periods, and joined objects join again, so that a small
+partition keeps objects near that size rather than one a period. A join never spans two months of the
+calendar. An expiry keeps a joined object until the last period it holds lies before the cutoff, so a
+small partition's rows may outlive the cutoff by up to a month; `JoinedPeriodBytes = 0` joins nothing.
 
 Each partition then expires on its own schedule, reading no data:
 
@@ -272,7 +310,18 @@ Only what an object's table of contents declares enters the cache: its synopsis 
 directories that find its rows, never its data. An object never changes, so an entry never goes stale.
 Each region is checked against its checksum whenever it is read from the disk, and one that fails is
 read again from the store. One process owns a directory at a time, and the entries outlive it: the
-next session that opens the directory finds them. Of an encrypted dataset, the cache keeps the
+next session that opens the directory finds them. A second cache on the same directory, in the same
+process or another, throws `InvalidOperationException`. Processes of one machine share a root instead:
+
+```csharp
+options.SynopsisCache = SynopsisCache.OpenShared("/var/cache/vorticity", capacityBytes: 64L * 1024 * 1024 * 1024);
+```
+
+Each takes a directory of its own under the root, `p0`, `p1` and on, with its own share of the disk,
+and on a miss reads the region from the others' directories before it asks the store, without keeping
+it again: a region the processes read lies once on the disk, unless two of them read it from the store
+before either kept it ([several processes](../design/19-object-storage.md#106-several-processes-on-one-machine)).
+A root is shared or owned, never both. Of an encrypted dataset, the cache keeps the
 encrypted bytes the store holds, the frames around each region and the object's trailer, and decrypts
 them at each read: no key and no plain byte reaches the disk, and a frame altered there is refused and
 read again from the store. A frame is 64 KiB, so a small region costs the disk more than its own bytes.
@@ -443,9 +492,9 @@ never lend its values to an unrelated column.
 * The dataset format is experimental and specific to this project. Pin the package version, and do
   not expect another Vortex implementation to read the commit tree.
 * A dataset written in commit format 4 is refused by earlier releases, which would otherwise misread
-  it. A dataset takes format 4 once it declares periods, partition columns, identifiers or an erasure
-  delay, or once one of its objects has a footer past the first 64 KiB an open reads. Upgrade every
-  process that writes or reads such a dataset before any of them uses one of those.
+  it. A dataset takes format 4 once it declares periods, partition columns, identifiers, shredded paths
+  or an erasure delay, or once one of its objects has a footer past the first 64 KiB an open reads.
+  Upgrade every process that writes or reads such a dataset before any of them uses one of those.
 * Marked rows keep their bytes until compaction. A delete that marks rows frees no space, since the
   object holds them (up to an eighth of its rows) until compaction rewrites it or a later delete
   passes that share. An object under a mebibyte is rewritten by every delete that touches it, so

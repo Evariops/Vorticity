@@ -18,9 +18,6 @@ namespace Vorticity.Compute;
 /// </summary>
 internal static class LiteralReader
 {
-    private const int ViewSize = 16;
-    private const int MaxInlineLength = 12;
-
     /// <summary>
     /// Reads row <paramref name="row"/> of <paramref name="nodeIndex"/> as a literal.
     /// </summary>
@@ -87,6 +84,50 @@ internal static class LiteralReader
 
             case CanonicalKind.RunEnd:
                 return TryRead(arena, node.EncodedValuesIndex, RunOf(node.RunEnds.Span, row), out literal);
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads row <paramref name="row"/> of a column of byte strings as its bytes where they lie, with
+    /// no copy: what a caller that only compares or hashes the value reads, where
+    /// <see cref="TryRead"/> copies it into a literal.
+    /// </summary>
+    /// <param name="arena">The arena the node lives in.</param>
+    /// <param name="nodeIndex">The column.</param>
+    /// <param name="row">The row.</param>
+    /// <param name="bytes">The value's bytes, when the row holds one.</param>
+    /// <returns><see langword="false"/> for a null row or a column of another type.</returns>
+    internal static bool TryReadBytes(CanonicalArena arena, int nodeIndex, int row, out ReadOnlySpan<byte> bytes)
+    {
+        bytes = default;
+        int index = ComparisonKernels.Unwrap(arena, nodeIndex);
+        CanonicalNode node = arena.GetNode(index);
+        if ((uint)row >= (uint)node.Length || !ValidityMask.From(arena, node.Validity).IsValid(row))
+        {
+            return false;
+        }
+
+        switch (node.Kind)
+        {
+            case CanonicalKind.VarBinView:
+                bytes = ViewAt(node, row);
+                return true;
+
+            case CanonicalKind.Constant when node.DType.Kind is DTypeKind.Utf8 or DTypeKind.Binary:
+                bytes = node.ConstantElement;
+                return true;
+
+            case CanonicalKind.Dictionary:
+                return TryReadBytes(
+                    arena, node.EncodedValuesIndex,
+                    (int)BinaryPrimitives.ReadUInt32LittleEndian(node.Codes.Span[(row * sizeof(uint))..]),
+                    out bytes);
+
+            case CanonicalKind.RunEnd:
+                return TryReadBytes(arena, node.EncodedValuesIndex, RunOf(node.RunEnds.Span, row), out bytes);
 
             default:
                 return false;
@@ -223,20 +264,8 @@ internal static class LiteralReader
         return false;
     }
 
-    /// <summary>Resolves one 16-byte view, inline or by reference.</summary>
+    /// <summary>Resolves one 16-byte view, inline or by reference (<see cref="ViewValues.At(CanonicalNode, int)"/>).</summary>
     /// <param name="node">A <c>VarBinView</c> node.</param>
     /// <param name="row">The row.</param>
-    internal static ReadOnlySpan<byte> ViewAt(CanonicalNode node, int row)
-    {
-        ReadOnlySpan<byte> view = node.Views.Span.Slice(row * ViewSize, ViewSize);
-        int size = BinaryPrimitives.ReadInt32LittleEndian(view);
-        if (size <= MaxInlineLength)
-        {
-            return view.Slice(4, size);
-        }
-
-        int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
-        int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
-        return node.GetDataBuffer(buffer).Span.Slice(offset, size);
-    }
+    internal static ReadOnlySpan<byte> ViewAt(CanonicalNode node, int row) => ViewValues.At(node, row);
 }

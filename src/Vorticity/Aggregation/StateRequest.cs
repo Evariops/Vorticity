@@ -33,8 +33,16 @@ internal sealed class StateRequest
     /// <summary>What ends the name of a key's column whose own name a column of states could take (<see cref="KeyColumn"/>).</summary>
     private const string KeyMark = "#key";
 
-    /// <summary>The words that end the name of a column of states, after a dot and the name of its measure or key.</summary>
-    private static readonly string[] StateWords = ["values", "low", "high", "m0", "m1", "m2", "meta", "min", "max", "sketch", "distinct"];
+    // The words that end the name of a column of states, after a dot and the name of its measure or key.
+    private const string ValuesWord = "values";
+    private const string LeastWord = "min";
+    private const string GreatestWord = "max";
+    private const string SketchWord = "sketch";
+    private const string DistinctWord = "distinct";
+
+    /// <summary>Every word that ends the name of a column of states: those above, and those of a measure's sum (<see cref="MeasureLayout.SumWords"/>).</summary>
+    private static readonly string[] StateWords =
+        [ValuesWord, .. MeasureLayout.SumWords(floats: false), .. MeasureLayout.SumWords(floats: true), LeastWord, GreatestWord, SketchWord, DistinctWord];
 
     /// <summary>The keys <see cref="KeyField"/> renamed, each renamed once and let go with its key.</summary>
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<FieldExpr, FieldExpr> Renamed = [];
@@ -55,13 +63,13 @@ internal sealed class StateRequest
     internal static FieldExpr KeyField(FieldExpr key)
     {
         FieldExpr column = ColumnOf(key);
-        return column.GetType() == typeof(FieldExpr) && Reserved(column.Path) ? Renamed.GetValue(key, Rename) : key;
+        return column is ColumnFieldExpr && Reserved(column.Path) ? Renamed.GetValue(key, Rename) : key;
     }
 
     /// <summary>The key <paramref name="key"/> over its column renamed by <see cref="KeyColumn"/>.</summary>
     private static FieldExpr Rename(FieldExpr key)
     {
-        FieldExpr named = new FieldExpr([KeyColumn(ColumnOf(key).Path)]);
+        FieldExpr named = new ColumnFieldExpr([KeyColumn(ColumnOf(key).Path)]);
         return key is FunctionFieldExpr functions ? functions.Over(named) : named;
     }
 
@@ -145,25 +153,25 @@ internal sealed class StateRequest
     }
 
     /// <summary>The column of how many values of <paramref name="column"/> a row of states folds.</summary>
-    internal static string ValuesOf(string column) => column + ".values";
+    internal static string ValuesOf(string column) => column + "." + ValuesWord;
 
     /// <summary>The column of a word of the sum of <paramref name="column"/>: <c>low</c> and <c>high</c> for integers, <c>m0</c> to <c>m2</c>, <c>meta</c> and <c>high</c> for floats.</summary>
     internal static string SumWord(string column, string word) => column + ".sum." + word;
 
     /// <summary>The column of the least value of <paramref name="column"/>.</summary>
-    internal static string LeastOf(string column) => column + ".min";
+    internal static string LeastOf(string column) => column + "." + LeastWord;
 
     /// <summary>The column of the greatest value of <paramref name="column"/>.</summary>
-    internal static string GreatestOf(string column) => column + ".max";
+    internal static string GreatestOf(string column) => column + "." + GreatestWord;
 
     /// <summary>The column of the sketch of <paramref name="column"/>'s values (<see cref="QuantileSketch.Encode"/>), which a table of sketches holds.</summary>
-    internal static string SketchOf(string column) => column + ".sketch";
+    internal static string SketchOf(string column) => column + "." + SketchWord;
 
     /// <summary>
     /// The column of the distinct sketch of <paramref name="column"/>'s values (<see cref="CardinalitySketch.Encode"/>),
     /// which a table of sketches holds for each key deeper than its own.
     /// </summary>
-    internal static string DistinctOf(string column) => column + ".distinct";
+    internal static string DistinctOf(string column) => column + "." + DistinctWord;
 
     /// <summary>
     /// The mantissa bits of the finest grid a distribution or a quantile asks for, 0 when none does: a row of states
@@ -237,7 +245,7 @@ internal sealed class StateRequest
                     // for each of its values in a group, and the count folds those values, the rows' own. A column only
                     // approximate counts fold may come instead as the sketch of its values a table of sketches holds.
                     bool approximately = aggregate.Kind == AggregateKind.ApproximateCountDistinct;
-                    int at = keys.FindIndex(key => key.GetType() == typeof(FieldExpr) && string.Equals(key.Path, distinct.Field.Path, System.StringComparison.Ordinal));
+                    int at = keys.FindIndex(key => key is ColumnFieldExpr && string.Equals(key.Path, distinct.Field.Path, System.StringComparison.Ordinal));
                     if (at < 0)
                     {
                         keys.Add(distinct.Field);
@@ -300,7 +308,7 @@ internal sealed class StateRequest
 
     /// <summary>A top-level column, read as it is.</summary>
     private static bool Column(FieldExpr field) =>
-        field.GetType() == typeof(FieldExpr) && !field.Path.Contains('.', System.StringComparison.Ordinal);
+        field is ColumnFieldExpr && !field.Path.Contains('.', System.StringComparison.Ordinal);
 
     /// <summary>The numbers a synopsis keeps states of: integers, and floats of 32 and 64 bits.</summary>
     private static bool Numeric(PType ptype) =>

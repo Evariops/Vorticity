@@ -240,9 +240,23 @@ DatasetOptions options = new DatasetOptions
 Every object the dataset writes then carries hashed postings on the column, appends and compactions
 alike, exempt from the index budget as the clustering key's run is. A lookup of one id reads one segment
 of about 44 KiB per object, then only the blocks that hold it, and about one probe in a thousand keeps a
-block that does not. On ids of 32 hexadecimal digits the postings take under 3 bytes a row, where a
-sorted run took 19.5. No Bloom filter is tried on an identifier: its values are as many as its rows,
+block that does not. No Bloom filter is tried on an identifier: its values are as many as its rows,
 and a tree of filters loses its upper nodes past what one filter holds.
+
+The postings cost about 4 bytes a row when each row holds a value of its own, whatever their order: a
+pair of a fingerprint and a block per row, where a sorted run took 19.5. A value several neighbouring
+rows share costs less, a pair per block and value. Measured on a day's objects:
+
+| rows of a day | identifier | postings | a row | share of the object |
+|---|---|---|---|---|
+| 4.32 × 10⁹ requests, ids in the rows' order | `RequestId` | 18.0 GB | 4.17 bytes | 17.6 % |
+| the same, ids of 32 random hexadecimal digits | `RequestId` | 18.0 GB | 4.17 bytes | 11.1 % |
+| 432 × 10⁶ spans | `TraceId`, a dozen spans each | 1.07 GB | 2.48 bytes | 4.9 % |
+| 432 × 10⁶ spans | `SpanId` | 1.58 GB | 3.66 bytes | 7.2 % |
+
+Random ids leave the share lower only because the object itself compresses worse, by 58 %. Declare a
+column whose values questions look up one at a time, and no other: a column they filter or group by
+is answered by the synopses, and a key of a variant column they filter on is declared shredded, below.
 
 An identifier may also be a key of a variant column, read as a string or an integer, written as a filter
 writes it:
@@ -255,7 +269,48 @@ A compaction then shreds the key wherever a row holds a string there, and indexe
 `r.Attributes["user"].AsString() == id` finds its rows as `r.RequestId == id` does. Objects written by
 appends shred nothing and carry no index on the key, until a compaction rewrites them. A name that is
 neither a column nor such a key, or a key read in another class, is refused when the dataset is
-created.
+created, or the identifier added. An identifier whose column a schema change drops or renames is left
+out of the writes that follow.
+
+A key that questions filter or group by, but look up no value of, is declared shredded instead, in the
+class it is read in:
+
+```csharp
+ShreddedPaths = ["Attributes['http.response.status_code'].AsInt64()"],
+```
+
+Every compaction then keeps the key in a column of its own, whatever share of the rows holds it, so that
+`r.Attributes["http.response.status_code"].AsInt64() >= 500` reads that column instead of parsing the
+attributes, and the objects' synopses count its values. The class is one of `AsString`, `AsInt64`,
+`AsDouble` and `AsBool`; values of another class at the key stay in the column's residual.
+
+Appends leave the attributes whole, so a question over the last minutes, which no compaction has
+rewritten yet, still parses them once per query node. A handle opened with `ShredOnAppend = true`
+shreds the declared keys in each append too, and its questions then read those objects by the keys as
+they lie. The append pays for it: on 100,000 rows of eight keys, 65 ms against 23 ms, for an object
+5 % smaller.
+
+### Changing them on a dataset that exists
+
+Both lists change later, each in one commit that rewrites nothing:
+
+```csharp
+await dataset.AddIdentifiersAsync(["SpanId", "Attributes['http.route'].AsString()"]);
+await dataset.SetShreddedPathsAsync(["Attributes['http.response.status_code'].AsInt64()", "Attributes['db.system'].AsString()"]);
+```
+
+`AddIdentifiersAsync` adds to the identifiers the dataset has; there is no way to take one back.
+`SetShreddedPathsAsync` replaces the list, so an empty one shreds nothing more. Every object written
+from then on follows the new lists, the appends of every handle and the compactions of every loop,
+handles opened before the change included. The objects already written stay as they are: a lookup of
+an added identifier reads the rows of an object written before as a scan does, and finds them all the
+same, only slower, until a compaction rewrites that object. A period already sealed is not rewritten
+again, so its objects keep being read that way until the retention lets them go.
+
+Each call is checked against the dataset's schema and refused, before anything is committed, with the
+messages a creation gives. It throws `InvalidOperationException` when another writer changed the schema
+first, or, for the shredded paths, the list: refresh the handle, and ask again against what the dataset
+has now. A column renamed is indexed again once its new name is added.
 
 ## Watch out
 

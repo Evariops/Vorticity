@@ -57,10 +57,15 @@ internal static class WindowAlignment
             return null;
         }
 
-        // The objects each end cuts, the one of most rows first.
+        // The objects each end cuts, the one of most rows first: those whose instants may hold an end, found by their
+        // summaries and their pages', where a walk of every object read every page of the dataset at each question.
+        FieldExpr instantColumn = Expr.Field(instant);
+        VortexExpr? lowEnd = low == long.MinValue ? null : Expr.Eq(instantColumn, Expr.Literal(FilterLiteral.From(low)));
+        VortexExpr? highEnd = high == long.MaxValue ? null : Expr.Eq(instantColumn, Expr.Literal(FilterLiteral.From(high)));
+        SummaryPruner cutting = new SummaryPruner(lowEnd is null ? highEnd! : highEnd is null ? lowEnd : Expr.Or(lowEnd, highEnd));
         (long Rows, SynopsisContents Contents, DType Schema, (long Least, long Greatest) Held)? starts = null;
         (long Rows, SynopsisContents Contents, DType Schema, (long Least, long Greatest) Held)? ends = null;
-        await foreach (PositionedObject held in version.WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        await foreach (PositionedObject held in version.WalkAsync(cutting, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
         {
             ObjectEntry entry = held.Entry;
             if (!entry.Summaries.TryGet(instant, out ColumnSummary summary)
@@ -175,14 +180,18 @@ internal static class WindowAlignment
 
     /// <summary>
     /// Whether the object answers <paramref name="request"/> from its tables, with no row at the window's end
-    /// that <paramref name="side"/> sets, the other end left open.
+    /// that <paramref name="side"/> sets, the other end left open: under the values of identifiers the filter leaves
+    /// out, or with them taken for absent, as its scan answers.
     /// </summary>
     private static bool Answers(
         SynopsisContents contents, DType schema, (long, long) held, string instant, StateRequest request, IReadOnlyList<string>? identifiers,
         List<VortexExpr> others, VortexExpr side)
     {
         VortexExpr filter = others.Count == 0 ? side : Expr.And(And(others)!, side);
-        return SynopsisAnswer.Of(contents, schema, instant, request, filter, held, identifiers) is { Edges.Count: 0, Parts.Count: > 0 };
+        SynopsisQuestion question = new SynopsisQuestion(request, filter, instant, identifiers);
+        return (SynopsisAnswer.Of(question, contents, schema, held)
+                ?? (question.MayExclude ? SynopsisAnswer.Of(question, contents, schema, held, assumeAbsent: true) : null))
+            is { Edges.Count: 0, Parts.Count: > 0 };
     }
 
     /// <summary>The object's schema from its table of contents, or null when it does not decode.</summary>

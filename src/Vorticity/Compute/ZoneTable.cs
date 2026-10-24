@@ -204,28 +204,33 @@ internal sealed class ZoneTable
     /// <param name="value">The constant.</param>
     /// <param name="nanMatches">Whether a NaN row satisfies the pushed-down comparison.</param>
     /// <param name="words">One bit per zone; a bit past the table's zones is set, as a zone with no bounds would be.</param>
+    /// <param name="scope">
+    /// The zones whose answer matters, one bit per zone; empty for every one. Sixty-four zones of which it holds none are
+    /// not asked, and their bits in <paramref name="words"/> say nothing: a lane that scans a piece of a day's object asks
+    /// the few hundred zones its rows reach, not the half million of the object.
+    /// </param>
     /// <returns>Whether it answered; when not, the zones are to be asked one by one.</returns>
-    internal bool TryMayMatch(ComparisonOp op, FilterLiteral value, bool nanMatches, Span<ulong> words)
+    internal bool TryMayMatch(ComparisonOp op, FilterLiteral value, bool nanMatches, Span<ulong> words, ReadOnlySpan<ulong> scope = default)
     {
         switch (Kind)
         {
             case FilterLiteralKind.Signed when value.Kind == FilterLiteralKind.Signed:
-                Signed(op, value.SignedValue, words);
+                Signed(op, value.SignedValue, words, scope);
                 break;
             case FilterLiteralKind.Unsigned when value.Kind == FilterLiteralKind.Unsigned:
-                Unsigned(op, value.UnsignedValue, words);
+                Unsigned(op, value.UnsignedValue, words, scope);
                 break;
             case FilterLiteralKind.Float when value.Kind == FilterLiteralKind.Float && !double.IsNaN(value.FloatValue):
-                Float(op, value.FloatValue, words);
+                Float(op, value.FloatValue, words, scope);
                 break;
 
             // An integer constant against a float column is widened, as the kernels widen it for
             // every row.
             case FilterLiteralKind.Float when value.Kind == FilterLiteralKind.Signed:
-                Float(op, value.SignedValue, words);
+                Float(op, value.SignedValue, words, scope);
                 break;
             case FilterLiteralKind.Float when value.Kind == FilterLiteralKind.Unsigned:
-                Float(op, value.UnsignedValue, words);
+                Float(op, value.UnsignedValue, words, scope);
                 break;
             default:
                 return false;
@@ -245,24 +250,24 @@ internal sealed class ZoneTable
         return true;
     }
 
-    private void Signed(ComparisonOp op, long value, Span<ulong> words)
+    private void Signed(ComparisonOp op, long value, Span<ulong> words, ReadOnlySpan<ulong> scope)
     {
         switch (op)
         {
             case ComparisonOp.Greater:
-                Upper(new SignedAbove(value), words);
+                Upper(new SignedAbove(value), words, scope);
                 break;
             case ComparisonOp.GreaterOrEqual:
-                Upper(new SignedAtLeast(value), words);
+                Upper(new SignedAtLeast(value), words, scope);
                 break;
             case ComparisonOp.Less:
-                Lower(new SignedBelow(value), words);
+                Lower(new SignedBelow(value), words, scope);
                 break;
             case ComparisonOp.LessOrEqual:
-                Lower(new SignedAtMost(value), words);
+                Lower(new SignedAtMost(value), words, scope);
                 break;
             case ComparisonOp.Equal:
-                Inside(new SignedAbove(value), new SignedBelow(value), words);
+                Inside(new SignedAbove(value), new SignedBelow(value), words, scope);
                 break;
             default:
                 // Not equal rules out only a zone every value of which is the constant, which the
@@ -272,24 +277,24 @@ internal sealed class ZoneTable
         }
     }
 
-    private void Unsigned(ComparisonOp op, ulong value, Span<ulong> words)
+    private void Unsigned(ComparisonOp op, ulong value, Span<ulong> words, ReadOnlySpan<ulong> scope)
     {
         switch (op)
         {
             case ComparisonOp.Greater:
-                Upper(new UnsignedAbove(value), words);
+                Upper(new UnsignedAbove(value), words, scope);
                 break;
             case ComparisonOp.GreaterOrEqual:
-                Upper(new UnsignedAtLeast(value), words);
+                Upper(new UnsignedAtLeast(value), words, scope);
                 break;
             case ComparisonOp.Less:
-                Lower(new UnsignedBelow(value), words);
+                Lower(new UnsignedBelow(value), words, scope);
                 break;
             case ComparisonOp.LessOrEqual:
-                Lower(new UnsignedAtMost(value), words);
+                Lower(new UnsignedAtMost(value), words, scope);
                 break;
             case ComparisonOp.Equal:
-                Inside(new UnsignedAbove(value), new UnsignedBelow(value), words);
+                Inside(new UnsignedAbove(value), new UnsignedBelow(value), words, scope);
                 break;
             default:
                 words.Fill(ulong.MaxValue);
@@ -302,24 +307,24 @@ internal sealed class ZoneTable
     /// ordering open, so each test is the negation of its complement, which a NaN fails; and it
     /// proves no bound outside an equality, so those two are the plain tests, which a NaN fails too.
     /// </summary>
-    private void Float(ComparisonOp op, double value, Span<ulong> words)
+    private void Float(ComparisonOp op, double value, Span<ulong> words, ReadOnlySpan<ulong> scope)
     {
         switch (op)
         {
             case ComparisonOp.Greater:
-                Upper(new FloatNotAtMost(value), words);
+                Upper(new FloatNotAtMost(value), words, scope);
                 break;
             case ComparisonOp.GreaterOrEqual:
-                Upper(new FloatNotBelow(value), words);
+                Upper(new FloatNotBelow(value), words, scope);
                 break;
             case ComparisonOp.Less:
-                Lower(new FloatNotAtLeast(value), words);
+                Lower(new FloatNotAtLeast(value), words, scope);
                 break;
             case ComparisonOp.LessOrEqual:
-                Lower(new FloatNotAbove(value), words);
+                Lower(new FloatNotAbove(value), words, scope);
                 break;
             case ComparisonOp.Equal:
-                Inside(new FloatAbove(value), new FloatBelow(value), words);
+                Inside(new FloatAbove(value), new FloatBelow(value), words, scope);
                 break;
             default:
                 words.Fill(ulong.MaxValue);
@@ -328,10 +333,10 @@ internal sealed class ZoneTable
     }
 
     /// <summary>A zone may hold <c>x above v</c> where its maximum passes <paramref name="test"/> or it has none.</summary>
-    private void Upper<TTest>(TTest test, Span<ulong> words)
+    private void Upper<TTest>(TTest test, Span<ulong> words, ReadOnlySpan<ulong> scope)
         where TTest : struct, IBoundTest
     {
-        Fill(_max, test, words);
+        Fill(_max, test, words, scope);
         for (int i = 0; i < words.Length; i++)
         {
             words[i] |= ~Word(_hasMax, i);
@@ -339,10 +344,10 @@ internal sealed class ZoneTable
     }
 
     /// <summary>A zone may hold <c>x below v</c> where its minimum passes <paramref name="test"/> or it has none.</summary>
-    private void Lower<TTest>(TTest test, Span<ulong> words)
+    private void Lower<TTest>(TTest test, Span<ulong> words, ReadOnlySpan<ulong> scope)
         where TTest : struct, IBoundTest
     {
-        Fill(_min, test, words);
+        Fill(_min, test, words, scope);
         for (int i = 0; i < words.Length; i++)
         {
             words[i] |= ~Word(_hasMin, i);
@@ -351,15 +356,21 @@ internal sealed class ZoneTable
 
     /// <summary>
     /// A zone may hold <c>x = v</c> unless its minimum is above the constant or its maximum below it:
-    /// both tests in one walk, no scratch.
+    /// both tests in one walk, no scratch, over the words <paramref name="scope"/> asks alone.
     /// </summary>
-    private void Inside<TAbove, TBelow>(TAbove above, TBelow below, Span<ulong> words)
+    private void Inside<TAbove, TBelow>(TAbove above, TBelow below, Span<ulong> words, ReadOnlySpan<ulong> scope)
         where TAbove : struct, IBoundTest
         where TBelow : struct, IBoundTest
     {
         int zones = _min.Length;
         for (int w = 0; w < words.Length; w++)
         {
+            if (!scope.IsEmpty && scope[w] == 0)
+            {
+                words[w] = 0;
+                continue;
+            }
+
             int start = w << 6;
             int end = Math.Min(start + 64, zones);
             ulong minAbove = 0;
@@ -385,14 +396,21 @@ internal sealed class ZoneTable
 
     /// <summary>
     /// One bit per zone for <paramref name="test"/>, sixty-four zones a word: a compare and a shift a
-    /// zone, no branch, the test inlined per shape. Words past the zones are cleared.
+    /// zone, no branch, the test inlined per shape. Words past the zones are cleared, and so are those
+    /// <paramref name="scope"/> holds no zone of, unasked.
     /// </summary>
-    private static void Fill<TTest>(ulong[] bounds, TTest test, Span<ulong> words)
+    private static void Fill<TTest>(ulong[] bounds, TTest test, Span<ulong> words, ReadOnlySpan<ulong> scope)
         where TTest : struct, IBoundTest
     {
         int zones = bounds.Length;
         for (int w = 0; w < words.Length; w++)
         {
+            if (!scope.IsEmpty && scope[w] == 0)
+            {
+                words[w] = 0;
+                continue;
+            }
+
             int start = w << 6;
             int end = Math.Min(start + 64, zones);
             ulong word = 0;

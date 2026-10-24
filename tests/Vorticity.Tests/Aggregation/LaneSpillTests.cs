@@ -33,7 +33,7 @@ public sealed partial class LaneSpillTests
     {
         // A million and a half values, nulls, and the value of zero bits, which no slot of a set holds.
         (string path, Row[] rows) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-lane-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-lane-spill-");
         try
         {
             long result = await PeakAsync(path, degree: 1);
@@ -64,7 +64,7 @@ public sealed partial class LaneSpillTests
     {
         // The spill of a session that seals its files: runs sealed on the disk, read back exact.
         (string path, Row[] rows) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-lane-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-lane-spill-");
         try
         {
             long result = await PeakAsync(path, degree: 1);
@@ -98,7 +98,7 @@ public sealed partial class LaneSpillTests
         // A tenth of the result, and 64 KiB of scratch, which the first run passes: the typed refusal, no
         // file left, nothing reserved of either budget. That it fails shows the spill was taken.
         (string path, _) = await WriteAsync();
-        string scratch = Directory.CreateTempSubdirectory("vorticity-lane-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-lane-spill-");
         try
         {
             long result = await PeakAsync(path, degree: 1);

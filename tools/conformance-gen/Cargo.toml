@@ -41,9 +41,13 @@ parquet = { version = "=60.0.0", default-features = false }
 # For examples/gen_shredded_variants: the Arrow variant crates the reference's
 # `vortex.parquet.variant` is built on, at the versions vortex-parquet-variant 0.86.1 takes, whose
 # `json_to_variant` and `shred_variant` make the shredded columns the reference itself would.
-arrow-array = "59.2"
-arrow-schema = "59.2"
-parquet-variant-compute = "59.2"
+# Pinned exactly, at what the lock resolved them to, as the reference is: a caret on 59.2 let them
+# move under the corpus. They are the 59 family of arrow-rs, beside the parquet crate pinned at
+# 60.0.0 above for its SBBF alone, default features off, so that no arrow 60 comes with it: the two
+# families meet in no type the examples pass between them.
+arrow-array = "=59.3.0"
+arrow-schema = "=59.3.0"
+parquet-variant-compute = "=59.3.0"
 
 [profile.release]
 opt-level = 1

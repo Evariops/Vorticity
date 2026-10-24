@@ -394,13 +394,13 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         {
             VortexType type = ordered.Keys[i].Field.Column(keys).Type;
             fields.Add(new VortexField($"$order{i}", type));
-            chain.Add(new SortKey(new FieldExpr($"$order{i}"), type, ordered.Keys[i].Descending));
+            chain.Add(new SortKey(new ColumnFieldExpr($"$order{i}"), type, ordered.Keys[i].Descending));
         }
 
         for (int k = 0; k < keys.Length; k++)
         {
             fields.Add(new VortexField($"$tie{k}", keys[k].Type));
-            chain.Add(new SortKey(new FieldExpr($"$tie{k}"), keys[k].Type, Descending: false));
+            chain.Add(new SortKey(new ColumnFieldExpr($"$tie{k}"), keys[k].Type, Descending: false));
         }
 
         int[] delivered = new int[results.Length];

@@ -92,7 +92,7 @@ public sealed partial class SynopsisTableTests
             await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
             {
                 await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(entry.Value.Span), Ct);
-                using SynopsisTableSet set = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
+                using SynopsisTableSet set = await SynopsisTableReader.ReadAsync(lease.File, Ct);
                 long bytes = set.Tables.Sum(t => (long)t.Chunk.Region.Length + (t.Chunk.Distinct?.Length ?? 0));
                 Assert.InRange(bytes, 0, lease.File.FileLength / 10);
                 Assert.True(level != PeriodLevels.Periods || bytes > 0, "a sealed hour keeps tables");
@@ -135,7 +135,7 @@ public sealed partial class SynopsisTableTests
         }
 
         // One write leaves level 0 at once, the parts two by two.
-        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = oneWrite ? 0 : 2, Fanout = 2 };
+        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = oneWrite ? 0 : 2, Fanout = 2, JoinedPeriodBytes = 0 };
         while (await dataset.CompactAsync(compaction, Ct) is not null)
         {
         }
@@ -284,18 +284,18 @@ public sealed partial class SynopsisTableTests
         static long Columns(int field) => field switch { 1 => 100, 2 => 400, 3 => 10_000, _ => 0 };
         SynopsisPrices prices = new SynopsisPrices(1e-8, 1e-8);
 
-        (bool[] kept, string[] verdicts) = SynopsisTableInfo.Choose(tables, Columns, 10_000, 6_000, prices);
+        (bool[] kept, string[] verdicts) = SynopsisTableChoice.Choose(tables, Columns, 10_000, 6_000, prices);
         Assert.Equal([false, true, true, true, false, true, false], kept);
         Assert.StartsWith("left out: 12000 bytes past the 200 the budget of 6000 left", verdicts[0]);
         Assert.StartsWith("kept: saves", verdicts[3]);
         Assert.StartsWith("left out: 400 bytes past", verdicts[4]);
         Assert.StartsWith("left out: its 500 bytes save nothing", verdicts[6]);
-        (bool[] again, string[] reasons) = SynopsisTableInfo.Choose(tables, Columns, 10_000, 6_000, prices);
+        (bool[] again, string[] reasons) = SynopsisTableChoice.Choose(tables, Columns, 10_000, 6_000, prices);
         Assert.Equal(kept, again);
         Assert.Equal(verdicts, reasons);
 
         // With room for every table, all are kept but the one holding the hour's rows a second time.
-        Assert.Equal([true, true, true, true, true, true, false], SynopsisTableInfo.Choose(tables, Columns, 10_000, 1_000_000, prices).Kept);
+        Assert.Equal([true, true, true, true, true, true, false], SynopsisTableChoice.Choose(tables, Columns, 10_000, 1_000_000, prices).Kept);
     }
 
     /// <summary>
@@ -453,7 +453,7 @@ public sealed partial class SynopsisTableTests
     /// <summary>Every synopsis table of <paramref name="file"/>, its rows read.</summary>
     private static async Task<List<(SynopsisTableInfo Info, List<TableRow> Rows)>> TablesAsync(VortexFile file)
     {
-        using SynopsisTableSet set = await SynopsisTableInfo.ReadAsync(file, Ct);
+        using SynopsisTableSet set = await SynopsisTableReader.ReadAsync(file, Ct);
         IReadOnlyList<SynopsisPath> paths = (await SliceTable.ReadAsync(file, Ct))?.Paths ?? [];
         List<(SynopsisTableInfo, List<TableRow>)> tables = [];
         foreach ((SynopsisTableInfo info, TableChunk _, int node) in set.Tables)
@@ -503,14 +503,19 @@ public sealed partial class SynopsisTableTests
             WideIndexedSum[] floats = new WideIndexedSum[buckets.Length];
             if (kinds[m] == Kind.Float)
             {
-                long[][] words = [.. Enumerable.Range(0, 5).Select(_ => ColumnData.Values<long>(arena, Next()).ToArray())];
-                PersistedStates.Read(words[0], words[1], words[2], words[3], words[4], floats);
+                long[][] words = [.. Enumerable.Range(0, MeasureLayout.SumLength(floats: true)).Select(_ => ColumnData.Values<long>(arena, Next()).ToArray())];
+                for (int row = 0; row < buckets.Length; row++)
+                {
+                    floats[row] = StateWords.SumOf([.. words.Select(word => word[row])], 0);
+                }
             }
             else
             {
-                long[] low = ColumnData.Values<long>(arena, Next()).ToArray();
-                long[] high = ColumnData.Values<long>(arena, Next()).ToArray();
-                PersistedStates.Read(low, high, sums);
+                long[][] words = [.. Enumerable.Range(0, MeasureLayout.SumLength(floats: false)).Select(_ => ColumnData.Values<long>(arena, Next()).ToArray())];
+                for (int row = 0; row < buckets.Length; row++)
+                {
+                    sums[row] = StateWords.IntegerOf([.. words.Select(word => word[row])], 0);
+                }
             }
 
             long[] least = ColumnData.Values<long>(arena, Next()).ToArray();

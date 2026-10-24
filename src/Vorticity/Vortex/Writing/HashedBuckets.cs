@@ -37,14 +37,22 @@ internal sealed class HashedBuckets : IDisposable
     /// <summary>The pairs a bucket aims at by the end, which sets how many buckets an object of a known size takes.</summary>
     internal const long BucketPairs = 1L << 22;
 
+    /// <summary>The most bits a bucket past twice its aim is cut again by at the end: 1,024 parts, an open page each at most.</summary>
+    private const int MostSplitBits = 10;
+
     private const int PageBytes = PagePairs * (sizeof(ulong) + sizeof(uint));
 
     private readonly int _bits;
+    private readonly long _bucketPairs;
     private readonly ulong[][] _hashes;
     private readonly uint[][] _blocks;
     private readonly int[] _fill;
     private readonly List<long>[] _pages;
     private readonly List<(int Bucket, ulong[] Hashes, uint[] Blocks)> _full = [];
+
+    // The buckets the end sorts, in the hashes' order, once those past twice their aim are cut again (RefineAsync); null
+    // before, the buckets noted then being those.
+    private List<Part>? _parts;
 
     // The hashes of the open block, a slot each, live when its stamp is the block's: a slot's hash and stamp side by side,
     // a probe a line of the caches, where two arrays took two.
@@ -58,14 +66,16 @@ internal sealed class HashedBuckets : IDisposable
         internal int Stamp;
     }
 
-    /// <param name="expectedPairs">The pairs the index is expected to hold, or 0 when unknown: a bucket for every <see cref="BucketPairs"/>.</param>
+    /// <param name="expectedPairs">The pairs the index is expected to hold, or 0 when unknown: a bucket for every <paramref name="bucketPairs"/>.</param>
     /// <param name="bits">The bits of a hash the buckets are told apart by, past <paramref name="expectedPairs"/>'s, or -1 for those.</param>
-    internal HashedBuckets(long expectedPairs, int bits = -1)
+    /// <param name="bucketPairs">The pairs a bucket aims at, <see cref="BucketPairs"/> but in tests.</param>
+    internal HashedBuckets(long expectedPairs, int bits = -1, long bucketPairs = BucketPairs)
     {
+        _bucketPairs = bucketPairs;
         if (bits < 0)
         {
             bits = 0;
-            while (bits < MostBits && (expectedPairs >> bits) > BucketPairs)
+            while (bits < MostBits && (expectedPairs >> bits) > bucketPairs)
             {
                 bits++;
             }
@@ -83,8 +93,8 @@ internal sealed class HashedBuckets : IDisposable
         }
     }
 
-    /// <summary>The buckets there are.</summary>
-    internal int Buckets => _hashes.Length;
+    /// <summary>The buckets there are, those cut again at the end each a bucket of its own.</summary>
+    internal int Buckets => _parts?.Count ?? _hashes.Length;
 
     /// <summary>The pairs noted, each (hash, block) once.</summary>
     internal long Pairs { get; private set; }
@@ -95,14 +105,19 @@ internal sealed class HashedBuckets : IDisposable
         get
         {
             long largest = 0;
-            for (int b = 0; b < _pages.Length; b++)
+            for (int b = 0; b < Buckets; b++)
             {
-                largest = Math.Max(largest, ((long)_pages[b].Count * PagePairs) + _fill[b]);
+                largest = Math.Max(largest, PairsOf(b));
             }
 
             return checked((int)largest);
         }
     }
+
+    /// <summary>The pairs of bucket <paramref name="bucket"/>, in the scratch and in its open page.</summary>
+    private long PairsOf(int bucket) => _parts is { } parts
+        ? ((long)parts[bucket].Pages.Count * PagePairs) + parts[bucket].Fill
+        : ((long)_pages[bucket].Count * PagePairs) + _fill[bucket];
 
     /// <summary>Notes <paramref name="hash"/> in <paramref name="block"/>, the open block, once.</summary>
     internal void Note(ulong hash, uint block)
@@ -193,8 +208,9 @@ internal sealed class HashedBuckets : IDisposable
     internal async ValueTask<int> SortedAsync(
         int bucket, RunScratch scratch, BucketBuffers buffers, CancellationToken cancellationToken)
     {
-        List<long> pages = _pages[bucket];
-        int open = _fill[bucket];
+        (List<long> pages, ulong[]? openHashes, uint[]? openBlocks, int open, int bits) = _parts is { } parts
+            ? (parts[bucket].Pages, parts[bucket].Hashes, parts[bucket].Blocks, parts[bucket].Fill, parts[bucket].Bits)
+            : (_pages[bucket], _hashes[bucket], _blocks[bucket], _fill[bucket], _bits);
         int count = checked((pages.Count * PagePairs) + open);
         buffers.Reserve(count);
         byte[] page = ArrayPool<byte>.Shared.Rent(PageBytes);
@@ -211,8 +227,8 @@ internal sealed class HashedBuckets : IDisposable
 
             if (open > 0)
             {
-                _hashes[bucket].AsSpan(0, open).CopyTo(buffers.Hashes.AsSpan(at));
-                _blocks[bucket].AsSpan(0, open).CopyTo(buffers.Blocks.AsSpan(at));
+                openHashes.AsSpan(0, open).CopyTo(buffers.Hashes.AsSpan(at));
+                openBlocks.AsSpan(0, open).CopyTo(buffers.Blocks.AsSpan(at));
             }
         }
         finally
@@ -220,53 +236,142 @@ internal sealed class HashedBuckets : IDisposable
             ArrayPool<byte>.Shared.Return(page);
         }
 
-        RadixSort(buffers, count, 64 - _bits);
+        RadixSort(buffers, count, 64 - bits);
         return count;
     }
 
     /// <summary>
-    /// Sorts the first <paramref name="count"/> pairs of <paramref name="buffers"/> by the low <paramref name="bits"/> bits of
-    /// their hashes, stably, eleven bits a pass, a pass skipped where every pair holds the same digit.
+    /// Cuts every bucket past twice its aim again by the next bits of its hashes, as many as bring its parts to the aim, up to
+    /// <see cref="MostSplitBits"/>: its pages read back from <paramref name="scratch"/> in their order and its open page after
+    /// them, each pair to its part's open page, the full ones laid in the scratch. The parts, in the order of those bits, hold
+    /// the blocks of a hash in their order as the bucket did, and are sorted alone: an object written with no bound on its
+    /// rows, all its pairs in one bucket, sorts parts of the aim rather than every pair at once.
     /// </summary>
-    private static void RadixSort(BucketBuffers buffers, int count, int bits)
+    /// <remarks>Every full page is to be spilled first (<see cref="SpillAsync"/>); the buckets are those parts after.</remarks>
+    internal async ValueTask RefineAsync(RunScratch scratch, CancellationToken cancellationToken)
     {
-        const int Digit = 11;
-        const int Radix = 1 << Digit;
-        Span<int> starts = buffers.Starts;
-        ulong[] hashes = buffers.Hashes;
-        uint[] blocks = buffers.Blocks;
-        ulong[] otherHashes = buffers.OtherHashes;
-        uint[] otherBlocks = buffers.OtherBlocks;
-        for (int shift = 0; shift < bits; shift += Digit)
+        List<Part> parts = new List<Part>(_hashes.Length);
+        for (int b = 0; b < _hashes.Length; b++)
         {
-            starts.Clear();
-            for (int i = 0; i < count; i++)
+            Part whole = new Part(_pages[b], _bits) { Hashes = _hashes[b], Blocks = _blocks[b], Fill = _fill[b] };
+            _hashes[b] = null!;
+            _blocks[b] = null!;
+            long count = ((long)whole.Pages.Count * PagePairs) + whole.Fill;
+            int extra = 0;
+            while (count > 2 * _bucketPairs && (count >> extra) > _bucketPairs && extra < MostSplitBits && _bits + extra < 64)
             {
-                starts[(int)((hashes[i] >> shift) & (Radix - 1)) + 1]++;
+                extra++;
             }
 
-            if (count <= 1 || starts[(int)((hashes[0] >> shift) & (Radix - 1)) + 1] == count)
+            if (extra == 0)
             {
+                parts.Add(whole);
                 continue;
             }
 
-            for (int d = 0; d < Radix; d++)
-            {
-                starts[d + 1] += starts[d];
-            }
-
-            for (int i = 0; i < count; i++)
-            {
-                int at = starts[(int)((hashes[i] >> shift) & (Radix - 1))]++;
-                otherHashes[at] = hashes[i];
-                otherBlocks[at] = blocks[i];
-            }
-
-            (hashes, otherHashes) = (otherHashes, hashes);
-            (blocks, otherBlocks) = (otherBlocks, blocks);
+            parts.AddRange(await SplitAsync(whole, extra, scratch, cancellationToken).ConfigureAwait(false));
         }
 
-        buffers.Settle(hashes, blocks);
+        _parts = parts;
+    }
+
+    /// <summary>The parts of <paramref name="whole"/> by the <paramref name="extra"/> bits of a hash past its own.</summary>
+    private async ValueTask<Part[]> SplitAsync(Part whole, int extra, RunScratch scratch, CancellationToken cancellationToken)
+    {
+        Part[] parts = new Part[1 << extra];
+        for (int p = 0; p < parts.Length; p++)
+        {
+            parts[p] = new Part([], whole.Bits + extra);
+        }
+
+        List<(Part Part, ulong[] Hashes, uint[] Blocks)> full = [];
+        byte[] page = ArrayPool<byte>.Shared.Rent(PageBytes);
+        try
+        {
+            foreach (long offset in whole.Pages)
+            {
+                await scratch.ReadAsync(offset, page.AsMemory(0, PageBytes), cancellationToken).ConfigureAwait(false);
+                Route(
+                    MemoryMarshal.Cast<byte, ulong>(page.AsSpan(0, PagePairs * sizeof(ulong))),
+                    MemoryMarshal.Cast<byte, uint>(page.AsSpan(PagePairs * sizeof(ulong), PagePairs * sizeof(uint))));
+                await SpillPartsAsync().ConfigureAwait(false);
+            }
+
+            if (whole.Fill > 0)
+            {
+                Route(whole.Hashes.AsSpan(0, whole.Fill), whole.Blocks.AsSpan(0, whole.Fill));
+                await SpillPartsAsync().ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(page);
+            whole.Return();
+            foreach ((Part _, ulong[] hashes, uint[] blocks) in full)
+            {
+                ArrayPool<ulong>.Shared.Return(hashes);
+                ArrayPool<uint>.Shared.Return(blocks);
+            }
+        }
+
+        return parts;
+
+        // Each pair to its part's open page, in their order; a page that fills waits for the scratch.
+        void Route(ReadOnlySpan<ulong> hashes, ReadOnlySpan<uint> blocks)
+        {
+            for (int i = 0; i < hashes.Length; i++)
+            {
+                Part part = parts[(int)((hashes[i] << whole.Bits) >> (64 - extra))];
+                part.Hashes ??= ArrayPool<ulong>.Shared.Rent(PagePairs);
+                part.Blocks ??= ArrayPool<uint>.Shared.Rent(PagePairs);
+                part.Hashes[part.Fill] = hashes[i];
+                part.Blocks[part.Fill] = blocks[i];
+                if (++part.Fill == PagePairs)
+                {
+                    full.Add((part, part.Hashes, part.Blocks));
+                    part.Hashes = null;
+                    part.Blocks = null;
+                    part.Fill = 0;
+                }
+            }
+        }
+
+        // The pages filled, laid in the scratch, each its part noting where.
+        async ValueTask SpillPartsAsync()
+        {
+            byte[] bytes = ArrayPool<byte>.Shared.Rent(PageBytes);
+            try
+            {
+                while (full.Count > 0)
+                {
+                    (Part part, ulong[] hashes, uint[] blocks) = full[^1];
+                    full.RemoveAt(full.Count - 1);
+                    MemoryMarshal.AsBytes(hashes.AsSpan(0, PagePairs)).CopyTo(bytes);
+                    MemoryMarshal.AsBytes(blocks.AsSpan(0, PagePairs)).CopyTo(bytes.AsSpan(PagePairs * sizeof(ulong)));
+                    ArrayPool<ulong>.Shared.Return(hashes);
+                    ArrayPool<uint>.Shared.Return(blocks);
+                    part.Pages.Add(await scratch.AppendAsync(bytes.AsMemory(0, PageBytes), cancellationToken).ConfigureAwait(false));
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(bytes);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sorts the first <paramref name="count"/> pairs of <paramref name="buffers"/> by the low <paramref name="bits"/> bits of
+    /// their hashes, stably.
+    /// </summary>
+    private static void RadixSort(BucketBuffers buffers, int count, int bits)
+    {
+        if (Compute.RadixSort.Sort(
+                buffers.Hashes.AsSpan(0, count), buffers.Blocks.AsSpan(0, count),
+                buffers.OtherHashes.AsSpan(0, count), buffers.OtherBlocks.AsSpan(0, count), bits, buffers.Starts))
+        {
+            buffers.Settle(buffers.OtherHashes, buffers.OtherBlocks);
+        }
     }
 
     private void GrowSeen()
@@ -309,13 +414,47 @@ internal sealed class HashedBuckets : IDisposable
         }
 
         _full.Clear();
+        foreach (Part part in _parts ?? [])
+        {
+            part.Return();
+        }
+    }
+
+    /// <summary>A bucket the end sorts: its pages in the scratch, its open page and how full, and the bits of a hash it is told apart by.</summary>
+    private sealed class Part(List<long> pages, int bits)
+    {
+        internal List<long> Pages { get; } = pages;
+
+        internal int Bits { get; } = bits;
+
+        internal ulong[]? Hashes { get; set; }
+
+        internal uint[]? Blocks { get; set; }
+
+        internal int Fill { get; set; }
+
+        /// <summary>Gives its open page back to the pool.</summary>
+        internal void Return()
+        {
+            if (Hashes is { } hashes)
+            {
+                ArrayPool<ulong>.Shared.Return(hashes);
+                Hashes = null;
+            }
+
+            if (Blocks is { } blocks)
+            {
+                ArrayPool<uint>.Shared.Return(blocks);
+                Blocks = null;
+            }
+        }
     }
 }
 
 /// <summary>The arrays a bucket is read back and sorted in, two of each, kept from one bucket to the next.</summary>
 internal sealed class BucketBuffers
 {
-    private int[] _starts = new int[(1 << 11) + 1];
+    private int[] _starts = new int[Compute.RadixSort.Counts];
 
     /// <summary>The sorted pairs' hashes, valid up to the count the sort returned.</summary>
     internal ulong[] Hashes { get; private set; } = [];

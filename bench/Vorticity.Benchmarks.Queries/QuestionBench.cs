@@ -101,10 +101,10 @@ internal static class QuestionBench
     /// <summary>
     /// The requests of <paramref name="hours"/> hours at <paramref name="rate"/> a second, appended a minute at a
     /// time and compacted until nothing is due; and the id of a request in the middle, a needle to leave out.
-    /// Sealed under <paramref name="keyring"/> when one is given.
+    /// Sealed under <paramref name="keyring"/> when one is given; ids that look random when <paramref name="randomIds"/> says so.
     /// </summary>
     internal static async Task<(long Rows, string Needle)> FillRequestsAsync(
-        IObjectStore store, int hours, double rate, VortexWriteOptions write, VortexKeyring? keyring = null, int degree = 1)
+        IObjectStore store, int hours, double rate, VortexWriteOptions write, VortexKeyring? keyring = null, int degree = 1, bool randomIds = false)
     {
         await using VortexSession? session = keyring is null && degree == 1 ? null : VortexSession.Create(options =>
         {
@@ -121,7 +121,7 @@ internal static class QuestionBench
             Write = write,
         });
 
-        RequestGenerator generator = new RequestGenerator(17);
+        RequestGenerator generator = new RequestGenerator(17, randomIds: randomIds);
         long rows = 0;
         string needle = string.Empty;
         foreach (GeneratedRequest[] batch in generator.Appends(Start, TimeSpan.FromHours(hours), rate, TimeSpan.FromMinutes(1), writers: 1))

@@ -61,7 +61,7 @@ public sealed partial class SynopsisContentsTests
         Assert.All(contents.Tables, t => Assert.Null(((SynopsisContents.TableChunks)t.Chunks).Parsed));
         SynopsisContents walked = SynopsisContents.From(hour.Synopsis.Span)!;
         await dataset.LoadSynopsisListsAsync([(hour, walked, null)], Ct);
-        List<IndexSegment> declared = SynopsisCacheReader.Declared(walked);
+        List<IndexSegment> declared = walked.Declared();
         IReadOnlyDictionary<(ulong Offset, uint Length), IndexSegment> regions = contents.DeclaredRegions;
         Assert.Equal(declared.Select(r => (r.Offset, r.Length)).Distinct().Count(), regions.Count);
         Assert.All(contents.Tables, t => Assert.Null(((SynopsisContents.TableChunks)t.Chunks).Parsed));
@@ -77,7 +77,14 @@ public sealed partial class SynopsisContentsTests
         // The chunks parsed are those the lists hold: written in an entry of their own, which outweighs the one that names
         // their lists, they read back the same. The bounds of a table of values parse through the same store, which the
         // round trip of the contents reads back.
-        SynopsisContents held = contents with { Tables = [.. contents.Tables.Select(t => (t.Table, (IReadOnlyList<TableChunk>)[.. t.Chunks]))] };
+        SynopsisContents held = new SynopsisContents(
+            contents.Schema, contents.Encodings, contents.Slices, contents.ChunkDirectories, contents.PartStart, contents.PartEnd,
+            [.. contents.Tables.Select(t => (t.Table, (IReadOnlyList<TableChunk>)[.. t.Chunks]))], contents.PathDirectories)
+        {
+            DirectoryRegion = contents.DirectoryRegion,
+            Locating = contents.Locating,
+            Paging = contents.Paging,
+        };
         byte[] inline = held.ToBytes();
         Assert.True(hour.Synopsis.Length < inline.Length, $"an entry of {hour.Synopsis.Length} B, {inline.Length} B with its chunks");
         SynopsisContents back = SynopsisContents.From(inline)!;

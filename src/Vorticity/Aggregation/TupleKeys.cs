@@ -279,7 +279,7 @@ internal sealed class TupleLayout
 /// <remarks>
 /// db-benchmark's q10, six columns of which three short texts and a group nearly a row, held a table of
 /// numbers a lane at fourteen lanes, ≈ 714 000 groups each, then merged them, copying every one: half its
-/// time (2026-10-09). Its tuples go to the core, which holds each group once.
+/// time. Its tuples go to the core, which holds each group once.
 /// </remarks>
 internal sealed class TupleKeys : GroupKeys
 {

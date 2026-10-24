@@ -227,7 +227,7 @@ public sealed partial class VortexFile : IIndexHost
         if (entry is { VariantPath: { } keys, VariantClass: { } @class } && entry.ColumnPath.Count > 0)
         {
             return new Compute.VariantFieldExpr(
-                new Expressions.FieldExpr(PathOf(entry.ColumnPath)), [.. keys.Select(Compute.VariantStep.Of)], Writing.IndexWriter.ReadOf(@class)).Text;
+                new Expressions.ColumnFieldExpr(PathOf(entry.ColumnPath)), [.. keys.Select(Compute.VariantStep.Of)], Writing.IndexWriter.ReadOf(@class)).Text;
         }
 
         if (entry.ColumnPath.Count > 0)

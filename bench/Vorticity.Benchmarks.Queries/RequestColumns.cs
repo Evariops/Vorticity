@@ -13,13 +13,13 @@ namespace Vorticity.Benchmarks.Queries;
 /// <summary>
 /// The time-window design's requests drawn a batch at a time straight into the columns of a batch, in the order of their
 /// instants: the draws of a <see cref="RequestGenerator"/>, each name a view made once, every one of them short enough to
-/// lie inside its view, and a request's id written in place, sixteen bytes a row. No record and no string a row, where a
+/// lie inside its view, and a request's id written in place, sixteen bytes a row, or 32 when they look random. No record
+/// and no string a row, where a
 /// record a row made a string for its id and copied every name into the columns, a third of an incremental build's time.
 /// </summary>
 internal sealed class RequestColumns
 {
     private const int ViewSize = 16;
-    private const int IdBytes = 16;
 
     // Every name's view, made once: the names are the generator's, the same for every generator.
     private static readonly Int128[] ServiceViews = Views(RequestGenerator.ServiceNames);
@@ -32,12 +32,16 @@ internal sealed class RequestColumns
     private readonly RequestGenerator _generator;
     private readonly DType _row;
 
+    // The bytes of an id: "req-" and twelve hexadecimal digits, or 32 of them when the ids look random.
+    private readonly int _idBytes;
+
     /// <param name="generator">The draws, which a generator of the same seed repeats.</param>
     /// <param name="row">The row type of the dataset the batches are for: <see cref="GeneratedRequest"/>'s columns, in its order.</param>
     internal RequestColumns(RequestGenerator generator, DType row)
     {
         _generator = generator;
         _row = row;
+        _idBytes = generator.RandomIds ? 32 : 16;
     }
 
     /// <summary>
@@ -56,7 +60,7 @@ internal sealed class RequestColumns
         VortexBuffer versionBuffer = arena.AllocateUninitialized(count * ViewSize, 64, out Span<byte> versionBytes);
         VortexBuffer hostBuffer = arena.AllocateUninitialized(count * ViewSize, 64, out Span<byte> hostBytes);
         VortexBuffer idViewBuffer = arena.AllocateUninitialized(count * ViewSize, 64, out Span<byte> idViewBytes);
-        VortexBuffer idBuffer = arena.AllocateUninitialized(count * IdBytes, 64, out Span<byte> ids);
+        VortexBuffer idBuffer = arena.AllocateUninitialized(count * _idBytes, 64, out Span<byte> ids);
         VortexBuffer durationBuffer = arena.AllocateUninitialized(count * sizeof(long), 64, out Span<byte> durationBytes);
         VortexBuffer weightBuffer = arena.AllocateUninitialized(count * sizeof(double), 64, out Span<byte> weightBytes);
 
@@ -86,16 +90,30 @@ internal sealed class RequestColumns
 
             // "req-" and the id's twelve hexadecimal digits, in the data buffer, two digits a byte of the id; the view holds
             // the length, the first four bytes, the buffer and the offset. Words written whole, where a copy of four bytes
-            // and a digit at a time took a call each.
-            Span<byte> text = ids.Slice(i * IdBytes, IdBytes);
-            BinaryPrimitives.WriteUInt32LittleEndian(text, IdPrefix);
-            for (int pair = 7; pair >= 2; pair--)
+            // and a digit at a time took a call each. A random-looking id spells the 128 bits of its number's hash, the
+            // highest byte first, as RequestGenerator.IdOf does.
+            Span<byte> text = ids.Slice(i * _idBytes, _idBytes);
+            if (_generator.RandomIds)
             {
-                BinaryPrimitives.WriteUInt16LittleEndian(text[(pair * 2)..], HexPairs[(int)(id & 0xFF)]);
-                id >>= 8;
+                UInt128 bits = RequestGenerator.RandomIdOf(id);
+                for (int pair = 15; pair >= 0; pair--)
+                {
+                    BinaryPrimitives.WriteUInt16LittleEndian(text[(pair * 2)..], HexPairs[(int)(byte)bits]);
+                    bits >>= 8;
+                }
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(text, IdPrefix);
+                for (int pair = 7; pair >= 2; pair--)
+                {
+                    BinaryPrimitives.WriteUInt16LittleEndian(text[(pair * 2)..], HexPairs[(int)(id & 0xFF)]);
+                    id >>= 8;
+                }
             }
 
-            MemoryMarshal.Write(idViewBytes[(i * ViewSize)..], new Int128((ulong)(uint)(i * IdBytes) << 32, ((ulong)IdPrefix << 32) | IdBytes));
+            uint prefix = BinaryPrimitives.ReadUInt32LittleEndian(text);
+            MemoryMarshal.Write(idViewBytes[(i * ViewSize)..], new Int128((ulong)(uint)(i * _idBytes) << 32, ((ulong)prefix << 32) | (uint)_idBytes));
         }
 
         DType instant = _row.GetField(0);

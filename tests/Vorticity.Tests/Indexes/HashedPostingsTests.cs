@@ -5,8 +5,9 @@
 // WHAT IS HELD: a column written in hundreds of chunks carries one run holding each distinct (value,
 // block) pair once; an equality leaves the blocks that hold the value and reads one segment of the
 // run; every filter counts what the oracle counts with the index and without; values the column lacks
-// leave almost no block live; an append adds runs and never reads the old ones back, since a run keeps
-// only the bits of its hashes its own pairs need; and a torn segment costs pruning, never rows.
+// leave almost no block live; a column whose every question the postings answer has no zone map read;
+// an append adds runs and never reads the old ones back, since a run keeps only the bits of its hashes
+// its own pairs need; and a torn segment costs pruning, never rows.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -30,6 +31,7 @@ using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
+using static Vorticity.Tests.MemoryFiles;
 
 namespace Vorticity.Tests.Indexes;
 
@@ -188,6 +190,43 @@ public sealed class HashedPostingsTests
 
         Assert.InRange(live, 0, 5);
         Assert.Equal(27, 64 - KeyRunOptions.HashShift(Rows));
+    }
+
+    /// <summary>
+    /// A column whose every question the postings answer has no zone map read: an equality on it, or an <c>IN</c>, reads
+    /// the postings alone, and beside a range on another column that column's zone map alone. A range on it, a negation,
+    /// or a scan without indexes, reads its zone map as before; the counts are the same either way.
+    /// </summary>
+    [Fact]
+    public async Task AColumnThePostingsAnswerAloneHasNoZoneMapRead()
+    {
+        (byte[] bytes, _) = await WriteAsync(Rows);
+        int row = 12_345;
+        VortexExpr needle = Equal("k", FilterLiteral.From(K(row)));
+        VortexExpr above = Expr.Gt(Expr.Field("n"), Expr.Literal(FilterLiteral.From(2_900L)));
+        VortexExpr range = Expr.Gt(Expr.Field("k"), Expr.Literal(FilterLiteral.From(99_000L)));
+
+        // The bytes of zone maps a file opened afresh reads to plan the filter, which an open file keeps once decoded.
+        async Task<long> ZonesAsync(VortexExpr filter, bool indexes = true)
+        {
+            await using VortexFile file = await OpenAsync(bytes);
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).WithIndexes(indexes).ExplainAsync(Ct);
+            Assert.Equal(await CountRowsAsync(file, filter, indexes: false), await CountRowsAsync(file, filter, indexes));
+            return plan.Pruning.Where(step => step.Structure == "zone map").Sum(step => step.BytesRead);
+        }
+
+        Assert.Equal(0, await ZonesAsync(needle));
+        Assert.Equal(0, await ZonesAsync(Expr.In(Expr.Field("k"), [FilterLiteral.From(K(row)), FilterLiteral.From(4_242L)])));
+        Assert.Equal(0, await ZonesAsync(Expr.Or(needle, Equal("s", FilterLiteral.From("s17")))));
+        long other = await ZonesAsync(above);
+        Assert.True(other > 0, "the zone map of n");
+        Assert.Equal(other, await ZonesAsync(Expr.And(needle, above)));
+
+        long own = await ZonesAsync(range);
+        Assert.True(own > 0, "the zone map of k");
+        Assert.Equal(own, await ZonesAsync(Expr.Or(needle, range)));
+        Assert.Equal(own, await ZonesAsync(Expr.Not(needle)));
+        Assert.Equal(own, await ZonesAsync(needle, indexes: false));
     }
 
     [Fact]
@@ -418,9 +457,6 @@ public sealed class HashedPostingsTests
         WritePolicy = Policy,
         IndexBudgetPerMille = 1_000_000,
     };
-
-    private static async Task<VortexFile> OpenAsync(byte[] bytes) =>
-        await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
 
     private static async Task<(byte[] Bytes, WriteReport Report)> WriteAsync(
         int rows, VortexWriteOptions? options = null, VortexSession? session = null, Func<int, long?>? nullable = null)

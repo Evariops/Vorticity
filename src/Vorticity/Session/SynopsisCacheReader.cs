@@ -50,67 +50,6 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
         return regions.Count == 0 ? inner : new SynopsisCacheReader(inner, cache, uid, regions);
     }
 
-    /// <summary>
-    /// The regions of an object the cache may keep: those its table of contents declares with a checksum, its
-    /// tables, its chunk directories, its path directories, its index directory and the entries of its locating
-    /// indexes in it.
-    /// </summary>
-    internal static List<IndexSegment> Declared(SynopsisContents contents)
-    {
-        List<IndexSegment> regions = [];
-        void Declare(IndexSegment region)
-        {
-            if (region.Checksum is not null)
-            {
-                regions.Add(region);
-            }
-        }
-
-        foreach ((SynopsisTableInfo _, IReadOnlyList<TableChunk> chunks) in contents.Tables)
-        {
-            // A table's chunks listed apart are known once their list is loaded; their list is a region of its own.
-            if (chunks is SynopsisContents.TableChunks { List: { } list } listed)
-            {
-                Declare(list);
-                if (!listed.Loaded)
-                {
-                    continue;
-                }
-            }
-
-            foreach (TableChunk chunk in chunks)
-            {
-                Declare(chunk.Region);
-                if (chunk.Distinct is { } distinct)
-                {
-                    Declare(distinct);
-                }
-            }
-        }
-
-        foreach (IndexSegment region in contents.ChunkDirectories)
-        {
-            Declare(region);
-        }
-
-        foreach ((int _, IndexSegment region) in contents.PathDirectories ?? [])
-        {
-            Declare(region);
-        }
-
-        if (contents.DirectoryRegion is { } directory)
-        {
-            Declare(directory);
-        }
-
-        foreach (LocatingEntry located in contents.Locating ?? [])
-        {
-            Declare(located.Region);
-        }
-
-        return regions;
-    }
-
     /// <summary>The store's reader under the cache's.</summary>
     internal ISegmentReader Inner => _inner;
 

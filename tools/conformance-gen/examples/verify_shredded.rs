@@ -8,8 +8,10 @@
 //!
 //! - an integer of any width reads as the width of the typed column it was shredded into, so every
 //!   integer is rendered as a 64-bit one;
-//! - a key an object does not hold reads as a null field, so a null field, and one holding the
-//!   variant null, is left out of its object, on both sides.
+//! - a key an object does not hold reads as a null field, so a null field is left out of its
+//!   object, on both sides. A field holding the variant null stays: a writer that wrote the
+//!   variant null where the key was absent, or left the key out where it held the variant null,
+//!   reads differently.
 //!
 //! The rows that differ before the normalizations are counted and printed; those that still differ
 //! after them fail the run.
@@ -114,7 +116,7 @@ async fn read_all(session: &VortexSession, path: &Path) -> anyhow::Result<ArrayR
     Ok(file.scan()?.into_array_stream()?.read_all().await?)
 }
 
-/// A scalar rendered with its integers at 64 bits and the null fields of its objects left out.
+/// A scalar rendered with its integers at 64 bits and the null fields of its objects, the keys they do not hold, left out.
 fn render(scalar: &Scalar) -> String {
     if scalar.is_null() {
         return "null".to_string();
@@ -143,7 +145,7 @@ fn render(scalar: &Scalar) -> String {
                 .iter()
                 .zip(values)
                 .map(|(name, value)| (name.to_string(), render(&value)))
-                .filter(|(_, value)| value != "null" && value != "variant-null")
+                .filter(|(_, value)| value != "null")
                 .map(|(name, value)| format!("{name}: {value}"))
                 .collect();
             rendered.sort();

@@ -5,8 +5,6 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using ManagedCompressions.Zstd;
-using Vorticity.Arrays;
 using Vorticity.File;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Protobuf;
@@ -92,37 +90,7 @@ internal sealed class VariantPathMap
     /// The region of key <paramref name="key"/>: behind a version byte and the body's length, its body
     /// as one zstd frame, since the trees of one key differ little from chunk to chunk.
     /// </summary>
-    internal byte[] KeyBytes(int key)
-    {
-        byte[] body = Body(Chunks[key]);
-        byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(body.Length)];
-        ZstdCompressor encoder = Writing.ZstdEncoders.Rent();
-        int written;
-        try
-        {
-            if (encoder.Compress(body, frame, out _, out written) != System.Buffers.OperationStatus.Done)
-            {
-                throw new InvalidOperationException("A key's region did not compress into the bound zstd gives it.");
-            }
-        }
-        finally
-        {
-            Writing.ZstdEncoders.Return(encoder);
-        }
-
-        ProtoWriter writer = new ProtoWriter();
-        try
-        {
-            writer.WriteVarint(Version);
-            writer.WriteVarint((ulong)body.Length);
-            writer.WriteRawBytes(frame.AsSpan(0, written));
-            return writer.WrittenSpan.ToArray();
-        }
-        finally
-        {
-            writer.Dispose();
-        }
-    }
+    internal byte[] KeyBytes(int key) => ZstdRegion.Encode(Version, Body(Chunks[key]));
 
     /// <summary>A key's chunks, each its rows, its range, its dtype and its tree.</summary>
     private static byte[] Body(PathChunk[] chunks)
@@ -176,43 +144,19 @@ internal sealed class VariantPathMap
     /// <summary>The chunks a key's region <paramref name="bytes"/> holds, or null when they do not decode.</summary>
     internal static PathChunk[]? KeyFrom(ReadOnlySpan<byte> bytes)
     {
-        byte[] body;
-        try
-        {
-            ProtoReader header = new ProtoReader(bytes);
-            if (header.ReadVarint() != Version)
-            {
-                return null;
-            }
-
-            // A body of more than a thousand times its frame is not one this writer made.
-            ulong length = header.ReadVarint();
-            ReadOnlySpan<byte> frame = bytes[(bytes.Length - header.Remaining)..];
-            if (length > (ulong)frame.Length * 1_000 || length > int.MaxValue)
-            {
-                return null;
-            }
-
-            body = new byte[(int)length];
-            ZstdDecompressor decoder = ZstdDecoders.Rent();
-            try
-            {
-                if (decoder.Decompress(frame, body, out _, out int produced) != System.Buffers.OperationStatus.Done || produced != body.Length)
-                {
-                    return null;
-                }
-            }
-            finally
-            {
-                ZstdDecoders.Return(decoder);
-            }
-        }
-        catch (VortexFormatException)
+        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
         {
             return null;
         }
 
-        return BodyFrom(body);
+        try
+        {
+            return BodyFrom(body.AsSpan(0, length));
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(body);
+        }
     }
 
     /// <summary>The chunks a key's body holds, or null when they do not decode.</summary>

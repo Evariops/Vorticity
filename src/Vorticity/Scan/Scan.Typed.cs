@@ -234,7 +234,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.CountAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.CountAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -250,7 +250,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.AnyAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.AnyAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -331,7 +331,7 @@ public sealed partial class Scan<TRecord>
         FilterLiteral value;
         try
         {
-            value = await _source.ExtremeAsync(Spec(), target.Field, min, _counters, cancellationToken).ConfigureAwait(false);
+            value = await _source.ExtremeAsync(Spec().Reading([target.Field]), target.Field, min, _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {

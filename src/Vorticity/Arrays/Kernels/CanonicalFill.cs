@@ -25,7 +25,7 @@ internal static class CanonicalFill
     /// <param name="validity">The validity the result carries.</param>
     /// <returns>The new canonical node's index.</returns>
     /// <exception cref="VortexFormatException">
-    /// <paramref name="dtype"/> is a Map, Union or Variant, which have no zeroed canonical form.
+    /// <paramref name="dtype"/> is a Map or a Union, which have no zeroed canonical form.
     /// </exception>
     internal static int BuildZeroed(
         ArrayDecodeContext context, DType dtype, int length, Validity validity) =>
@@ -42,12 +42,17 @@ internal static class CanonicalFill
     /// <param name="validity">The validity the result carries.</param>
     /// <returns>The new canonical node's index.</returns>
     /// <exception cref="VortexFormatException">
-    /// <paramref name="dtype"/> is a Map, Union or Variant, which have no zeroed canonical form.
+    /// <paramref name="dtype"/> is a Map or a Union, which have no zeroed canonical form.
     /// </exception>
     internal static int BuildZeroed(CanonicalArena arena, DType dtype, int length, Validity validity) =>
         BuildZeroed(arena, null, dtype, length, validity, depth: 1);
 
-    /// <summary>Whether <see cref="BuildZeroed(ArrayDecodeContext, DType, int, Validity)"/> can build <paramref name="dtype"/>.</summary>
+    /// <summary>
+    /// Whether a column of <paramref name="dtype"/> may be zero-filled in place of its values: a column of nulls a writer
+    /// writes as a constant, values a decoder or a filter does not read. Every dtype
+    /// <see cref="BuildZeroed(ArrayDecodeContext, DType, int, Validity)"/> builds but a variant, whose nulls stay in its own
+    /// encoding, which another reader may not take as a constant.
+    /// </summary>
     /// <param name="dtype">The dtype.</param>
     internal static bool CanBuild(DType dtype) => CanBuild(dtype, depth: 1);
 
@@ -161,6 +166,17 @@ internal static class CanonicalFill
 
             case DTypeKind.Struct:
                 return BuildZeroedStruct(arena, context, dtype, length, validity, depth);
+
+            case DTypeKind.Variant:
+            {
+                // The struct of its metadata and its value wearing the variant dtype, the shape a read delivers, both
+                // empty in every row, as a writer leaves a null row's.
+                DType binary = dtype.Arena.Binary(Nullability.NonNullable);
+                Span<int> fields = [
+                    BuildZeroed(arena, context, binary, length, Validity.NonNullable, depth + 1),
+                    BuildZeroed(arena, context, binary, length, Validity.NonNullable, depth + 1)];
+                return arena.AddStruct(dtype, length, validity, fields);
+            }
 
             case DTypeKind.Extension:
             {

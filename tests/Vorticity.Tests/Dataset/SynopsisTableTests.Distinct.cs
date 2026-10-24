@@ -106,8 +106,11 @@ public sealed partial class SynopsisTableTests
         }
     }
 
-    /// <summary>The wide rows, of <paramref name="hosts"/> hosts, written with their synopsis, every table kept, into <paramref name="scratch"/>.</summary>
-    private static async Task<string> WideAsync(string scratch, int hosts = 2_000)
+    /// <summary>
+    /// The wide rows, of <paramref name="hosts"/> hosts, written with their synopsis, every table kept, into <paramref name="scratch"/>;
+    /// the groups of sketches of an hour or of the object held to <paramref name="heldSketchBytes"/> when it is given.
+    /// </summary>
+    private static async Task<string> WideAsync(string scratch, int hosts = 2_000, long? heldSketchBytes = null, List<WriteReport>? reports = null)
     {
         Random random = new Random(29);
         Wide[] rows = new Wide[WideRows];
@@ -147,7 +150,10 @@ public sealed partial class SynopsisTableTests
         await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Wide>(path, options))
         {
             using SortedSlices slices = new SortedSlices(table, instant, schema);
-            using SynopsisTables tables = new SynopsisTables(schema, table.Unit, SynopsisTables.Measures(schema, instant), writer, slices: table.Slices);
+            using SynopsisTables tables = new SynopsisTables(schema, table.Unit, SynopsisTables.Measures(schema, instant), writer, slices: table.Slices)
+            {
+                HeldSketchBytes = heldSketchBytes ?? SynopsisTables.DefaultHeldSketchBytes,
+            };
             SliceWriter writes = new SliceWriter(writer, tables, null, null);
             int next = 0;
             await foreach (RecordBatch batch in file.Scan<Wide>().ToBatchesAsync(Ct))
@@ -162,7 +168,8 @@ public sealed partial class SynopsisTableTests
             Assert.Equal(WideSlices, next);
             writer.DeclareSlices(nameof(Wide.At), slices.Table);
             writer.DeclareSynopsisTables(await tables.FinishAsync(Ct));
-            await writer.CompleteAsync(Ct);
+            WriteReport report = await writer.CompleteAsync(Ct);
+            reports?.Add(report);
         }
 
         return path;

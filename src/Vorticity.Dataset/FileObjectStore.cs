@@ -42,6 +42,11 @@ public sealed class FileObjectStore : IObjectStore
     private readonly string _root;
     private bool _disposed;
 
+    // The objects read lately, held open, the most recently read first; under the gate.
+    private readonly Dictionary<string, HeldFile> _held = new Dictionary<string, HeldFile>(StringComparer.Ordinal);
+    private readonly LinkedList<HeldFile> _recent = [];
+    private readonly Lock _heldGate = new Lock();
+
     /// <summary>Opens a store over a directory, creating it if needed.</summary>
     /// <param name="root">The directory the objects live in.</param>
     public FileObjectStore(string root)
@@ -59,6 +64,24 @@ public sealed class FileObjectStore : IObjectStore
     /// default; set it when the store is the system of record.
     /// </summary>
     public bool Durable { get; init; }
+
+    /// <summary>
+    /// How many objects the store keeps open after reading them, the most recently read: a later read that names an
+    /// object's token reads the file already open, where each read opened, queried and closed it, a tenth of a millisecond
+    /// on the reading thread. A read with no token, as an object's first is, opens the file again and holds that one. A put
+    /// or a delete of a key by this store lets its file go first. 64 by default; 0 opens the file at every read.
+    /// </summary>
+    public int HeldFiles
+    {
+        get => _heldFiles;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _heldFiles = value;
+        }
+    }
+
+    private readonly int _heldFiles = 64;
 
     /// <summary>
     /// Reads suffixes, lists in order, creates a key only while it is free by the file system's
@@ -89,11 +112,25 @@ public sealed class FileObjectStore : IObjectStore
         ObjectDisposedException.ThrowIf(_disposed, this);
         cancellationToken.ThrowIfCancellationRequested();
 
+        // A read that names the token of an object held open reads that file: the bytes of the object the token names,
+        // whatever a rename over the key has put there since.
+        if (!tail && ifToken is not null && Lease(key, ifToken) is { } held)
+        {
+            try
+            {
+                return await ReadAtAsync(held.Handle, key, offset, destination, held.Length, held.Token, tail: false, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                Return(held);
+            }
+        }
+
         string path = PathOf(key);
         SafeFileHandle handle;
         try
         {
-            handle = await OpenToReadAsync(path, key, cancellationToken).ConfigureAwait(false);
+            handle = await OpenToReadAsync(path, key, _heldFiles > 0, cancellationToken).ConfigureAwait(false);
         }
         catch (FileNotFoundException cause)
         {
@@ -104,7 +141,8 @@ public sealed class FileObjectStore : IObjectStore
             throw new ObjectNotFoundException($"No object at '{key}'.", cause) { Key = key };
         }
 
-        using (handle)
+        bool kept = false;
+        try
         {
             // The length and the date of the file this handle opened, which a rename over the key since
             // leaves as they were: a token read from the path could name the next object.
@@ -115,33 +153,191 @@ public sealed class FileObjectStore : IObjectStore
                 throw ObjectStoreExtensions.Changed(key, ifToken, token);
             }
 
-            if (tail)
+            ObjectRead read = await ReadAtAsync(handle, key, offset, destination, size, token, tail, cancellationToken).ConfigureAwait(false);
+            kept = Hold(key, handle, size, token);
+            return read;
+        }
+        finally
+        {
+            if (!kept)
             {
-                offset = Math.Max(0, size - destination.Length);
+                handle.Dispose();
             }
-            else if (offset >= size && !(offset == 0 && size == 0))
+        }
+    }
+
+    /// <summary>
+    /// Reads <paramref name="destination"/> from <paramref name="offset"/> of the file <paramref name="handle"/> opened, of
+    /// <paramref name="size"/> bytes under <paramref name="token"/>, or its last bytes with <paramref name="tail"/>.
+    /// </summary>
+    private static async ValueTask<ObjectRead> ReadAtAsync(
+        SafeFileHandle handle, string key, long offset, Memory<byte> destination, long size, string token, bool tail, CancellationToken cancellationToken)
+    {
+        if (tail)
+        {
+            offset = Math.Max(0, size - destination.Length);
+        }
+        else if (offset >= size && !(offset == 0 && size == 0))
+        {
+            throw ObjectStoreExtensions.PastEnd(key, offset, size);
+        }
+
+        int available = (int)Math.Min(destination.Length, size - offset);
+        int read = 0;
+        while (read < available)
+        {
+            int got = await RandomAccess
+                .ReadAsync(handle, destination[read..available], offset + read, cancellationToken)
+                .ConfigureAwait(false);
+            if (got == 0)
             {
-                throw ObjectStoreExtensions.PastEnd(key, offset, size);
+                throw new ObjectStoreException(
+                    $"'{key}' ended after {read} of {available} bytes; it changed under the read.");
             }
 
-            int available = (int)Math.Min(destination.Length, size - offset);
-            int read = 0;
-            while (read < available)
+            read += got;
+        }
+
+        return new ObjectRead(available, size, token);
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="handle"/>, just read under <paramref name="token"/>, open for the next reads of
+    /// <paramref name="key"/> that name that token; false, the handle the caller's to close, when the store keeps none or
+    /// already holds that file.
+    /// </summary>
+    private bool Hold(string key, SafeFileHandle handle, long size, string token)
+    {
+        if (_heldFiles == 0)
+        {
+            return false;
+        }
+
+        List<HeldFile>? closed = null;
+        lock (_heldGate)
+        {
+            if (_disposed)
             {
-                int got = await RandomAccess
-                    .ReadAsync(handle, destination[read..available], offset + read, cancellationToken)
-                    .ConfigureAwait(false);
-                if (got == 0)
+                return false;
+            }
+
+            if (_held.TryGetValue(key, out HeldFile? held))
+            {
+                if (string.Equals(held.Token, token, StringComparison.Ordinal))
                 {
-                    throw new ObjectStoreException(
-                        $"'{key}' ended after {read} of {available} bytes; it changed under the read.");
+                    _recent.Remove(held.Node);
+                    _recent.AddFirst(held.Node);
+                    return false;
                 }
 
-                read += got;
+                Retire(held, ref closed);
             }
 
-            return new ObjectRead(available, size, token);
+            HeldFile kept = new HeldFile(key, handle, size, token);
+            _held[key] = kept;
+            _recent.AddFirst(kept.Node);
+            while (_held.Count > _heldFiles)
+            {
+                Retire(_recent.Last!.Value, ref closed);
+            }
         }
+
+        Close(closed);
+        return true;
+    }
+
+    /// <summary>The file held for <paramref name="key"/> under <paramref name="token"/>, leased to a read; null when none is.</summary>
+    private HeldFile? Lease(string key, string token)
+    {
+        lock (_heldGate)
+        {
+            if (!_held.TryGetValue(key, out HeldFile? held) || !string.Equals(held.Token, token, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            held.Leases++;
+            _recent.Remove(held.Node);
+            _recent.AddFirst(held.Node);
+            return held;
+        }
+    }
+
+    /// <summary>Ends a read's lease of <paramref name="held"/>: a file let go meanwhile closes with its last lease.</summary>
+    private void Return(HeldFile held)
+    {
+        bool close;
+        lock (_heldGate)
+        {
+            close = --held.Leases == 0 && held.Retired;
+        }
+
+        if (close)
+        {
+            held.Handle.Dispose();
+        }
+    }
+
+    /// <summary>Lets go of the file held for <paramref name="key"/>, before this store writes or deletes the key.</summary>
+    private void LetGo(string key)
+    {
+        List<HeldFile>? closed = null;
+        lock (_heldGate)
+        {
+            if (_held.TryGetValue(key, out HeldFile? held))
+            {
+                Retire(held, ref closed);
+            }
+        }
+
+        Close(closed);
+    }
+
+    /// <summary>Takes <paramref name="held"/> out of the files held, to <paramref name="closed"/> when no read leases it; under the gate.</summary>
+    private void Retire(HeldFile held, ref List<HeldFile>? closed)
+    {
+        _held.Remove(held.Key);
+        _recent.Remove(held.Node);
+        held.Retired = true;
+        if (held.Leases == 0)
+        {
+            (closed ??= []).Add(held);
+        }
+    }
+
+    private static void Close(List<HeldFile>? closed)
+    {
+        foreach (HeldFile held in closed ?? [])
+        {
+            held.Handle.Dispose();
+        }
+    }
+
+    /// <summary>A file held open after a read: its key, handle, length and token, the reads that lease it, its place among the recent.</summary>
+    private sealed class HeldFile
+    {
+        internal HeldFile(string key, SafeFileHandle handle, long length, string token)
+        {
+            Key = key;
+            Handle = handle;
+            Length = length;
+            Token = token;
+            Node = new LinkedListNode<HeldFile>(this);
+        }
+
+        internal string Key { get; }
+
+        internal SafeFileHandle Handle { get; }
+
+        internal long Length { get; }
+
+        internal string Token { get; }
+
+        internal LinkedListNode<HeldFile> Node { get; }
+
+        internal int Leases { get; set; }
+
+        internal bool Retired { get; set; }
     }
 
     /// <inheritdoc/>
@@ -183,8 +379,10 @@ public sealed class FileObjectStore : IObjectStore
             }
 
             // A replacement is written beside the object under a name no key can have, a character
-            // past ASCII in it, so that no listing ever shows it.
+            // past ASCII in it, so that no listing ever shows it. The file held for the key goes first: a read
+            // that names its token then meets the object as it is.
             path = PathOf(key);
+            LetGo(key);
             target = condition.Kind == PutConditionKind.IfAbsent
                 ? path
                 : string.Create(CultureInfo.InvariantCulture, $"{path}.·{Guid.NewGuid():N}");
@@ -342,6 +540,7 @@ public sealed class FileObjectStore : IObjectStore
         {
             cancellationToken.ThrowIfCancellationRequested();
             string path = PathOf(key);
+            LetGo(key);
             if (System.IO.File.Exists(path))
             {
                 System.IO.File.Delete(path);
@@ -417,7 +616,17 @@ public sealed class FileObjectStore : IObjectStore
     /// <inheritdoc/>
     public ValueTask DisposeAsync()
     {
-        _disposed = true;
+        List<HeldFile>? closed = null;
+        lock (_heldGate)
+        {
+            _disposed = true;
+            foreach (HeldFile held in new List<HeldFile>(_held.Values))
+            {
+                Retire(held, ref closed);
+            }
+        }
+
+        Close(closed);
         return ValueTask.CompletedTask;
     }
 
@@ -425,7 +634,7 @@ public sealed class FileObjectStore : IObjectStore
     /// Opens an object to read it. A put holds its object exclusively until its last byte, so a read
     /// that meets one waits for the put to let go, and then reads the object whole.
     /// </summary>
-    private static async ValueTask<SafeFileHandle> OpenToReadAsync(string path, string key, CancellationToken cancellationToken)
+    private static async ValueTask<SafeFileHandle> OpenToReadAsync(string path, string key, bool kept, CancellationToken cancellationToken)
     {
         long started = Stopwatch.GetTimestamp();
         int pause = 1;
@@ -433,7 +642,8 @@ public sealed class FileObjectStore : IObjectStore
         {
             try
             {
-                return System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.Asynchronous);
+                // A file the store may hold open lets a rename or a delete of its key go through, as a store in the cloud does.
+                return System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Read, kept ? FileShare.Read | FileShare.Delete : FileShare.Read, FileOptions.Asynchronous);
             }
             catch (IOException held) when (HeldByAPut(held))
             {

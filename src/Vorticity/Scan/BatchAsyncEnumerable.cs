@@ -344,7 +344,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>
     /// What a split the consumer runs may cost before the lanes take the splits after it: about what
     /// the lanes add to a split of a projection, their hand-offs and the scan's lanes made and woken
-    /// (measured on 2026-10-11, a Ryzen 9 7950X: a 64 KiB column split from the page cache, 11 µs,
+    /// (measured on a Ryzen 9 7950X: a 64 KiB column split from the page cache, 11 µs,
     /// runs a fifth faster here than on 32 lanes, and a taxi trips split of 43 µs 2.5 times slower).
     /// </summary>
     private static readonly long InlineSplitTicks = Stopwatch.Frequency * 25 / 1_000_000;
@@ -418,15 +418,15 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// The splits a scan of one lane reads ahead of the one it decodes, over a source whose read is a
-    /// round trip, when its budget grants them: two. Measured on 2026-10-06 at fourteen lanes and 20 ms a
-    /// request, four read no faster and held 10 to 28 MiB more: what is left is each range's first read.
+    /// round trip, when its budget grants them: two. Measured at fourteen lanes and 20 ms a request, four
+    /// read no faster and held 10 to 28 MiB more: what is left is each range's first read.
     /// </summary>
     internal const int ReadAheadSplits = 2;
 
     /// <summary>
     /// The most bytes a segment of a split ahead may take for a batch to read it along with its own: what a chunk of a few
     /// thousand rows of a column coded in runs takes, a few dozen bytes, which every split of a log object's 8 192 rows
-    /// asked for alone over a store 5 ms away, 440 requests an object for its service names (2026-10-21).
+    /// would otherwise ask for alone: over a store 5 ms away, 440 requests an object for its service names.
     /// </summary>
     internal const int AlongSegmentBytes = 4 << 10;
 
@@ -820,9 +820,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
-    /// A split's read, started ahead: its claims, waiting for a segment an earlier split is reading
-    /// rather than reading it twice, then the read of what it claimed, published at once for the
-    /// splits after it. Pooled, as the scan's own steps are: a split read ahead allocates nothing.
+    /// A split's read, started ahead: its claims, then the read of what it claimed, published at once
+    /// for the splits after it, made while it waits for a segment an earlier split is reading rather
+    /// than reading it twice. Pooled, as the scan's own steps are: a split read ahead allocates nothing.
     /// </summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask ReadAheadAsync(Lane lane)
@@ -833,6 +833,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             while (_segments.Claim(lane.Context.Segments, lane.Sequence, lane, along && lane.Context.Along is { } specs ? specs.Specs : default, along && lane.Context.Along is { } batches ? batches.Batches : default))
             {
                 along = false;
+                await _segments.ReadOwnAsync(lane.Context.Segments, lane.Sequence, _source, lane.Context.OwnSegments(), _metrics, _token)
+                    .ConfigureAwait(false);
                 await lane.ReadByOthersAsync().ConfigureAwait(false);
             }
 
@@ -2400,12 +2402,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             Register(context, rows);
 
-            // A segment another lane is reading is waited for rather than read twice; once it is
-            // in, the claim fills it and the batch reads only what it claimed.
+            // A segment another lane is reading is waited for rather than read twice, the batch's own claims read meanwhile;
+            // once it is in, the claim fills it.
             bool along = true;
             while (_segments.Claim(context.Segments, batch, lane, along && context.Along is { } specs ? specs.Specs : default, along && context.Along is { } batches ? batches.Batches : default))
             {
                 along = false;
+                await _segments.ReadOwnAsync(context.Segments, batch, _source, context.OwnSegments(), _metrics, _token)
+                    .ConfigureAwait(false);
                 await lane.ReadByOthersAsync().ConfigureAwait(false);
             }
 

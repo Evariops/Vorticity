@@ -26,6 +26,7 @@ using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
+using static Vorticity.Tests.MemoryFiles;
 
 namespace Vorticity.Tests.File;
 
@@ -388,9 +389,6 @@ public sealed class TornTailTests
 
     private static string TempPath() =>
         Path.Combine(Path.GetTempPath(), $"vorticity-torn-{Guid.NewGuid():N}.vortex");
-
-    private static async Task<VortexFile> OpenAsync(byte[] bytes) =>
-        await VortexFile.OpenAsync(new MemorySegmentSource(bytes), VortexOpenOptions.Default);
 
     private static List<long> Expected(int start, int end)
     {

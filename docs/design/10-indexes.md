@@ -527,6 +527,11 @@ from the write report and a probe's from one segment decoded and searched:
 | 16 hex digits, one a row | 11.50 B/row | 2.78 B/row | 44 KiB instead of 736 KiB | 4.9 µs instead of 717 µs |
 | 32 hex digits, ten rows each | 4.96 B/row | 2.00 B/row | 34 KiB instead of 317 KiB | 7.4 µs instead of 63 µs |
 
+At the design's scale an identifier costs more, its block numbers wider: a day of 4.32 × 10⁹ requests
+writes 4.17 bytes a row of hashed postings for its request id, 18.0 GB, whether the ids follow the
+rows' order or not, a segment of about 16 384 pairs taking 68.5 KB ([what an identifier
+costs](../guide/indexes.md)).
+
 The block numbers take what the run's blocks need, 9 bits here and 19 in an object of 2³² rows, where
 a pair weighs about 4 bytes. Two probes in a thousand for values the column lacks answered a block.
 
@@ -598,7 +603,12 @@ After the last chunk the buckets are sorted one at a time, in the hashes' order,
 under the bucket's, so a hash's blocks keep their order, and fed to the runs the merge of chunk runs
 would have made: the same pairs, the same segments. An identifier of a day of the design's requests,
 4.3 × 10⁹ pairs, then takes two passes over its pairs, where its runs of 33 000 pairs a chunk, 130 000
-of them, took a k-way merge in passes of 64.
+of them, took a k-way merge in passes of 64. A bucket past twice its aim, as every bucket of a file
+written with no bound on its rows is, is first cut again by the next bits of its hashes, up to ten, its
+pages read back in their order, and each part sorted alone: a file of 10⁷ random integers and no
+bound ends allocating 225 MB where sorting its one bucket whole took 404, and holding 199 MB of
+working set more where it held 370, measured by a probe; `HashedBucketsTests` holds the parts to a
+stable sort of every pair.
 
 When appending (see [appending to a file](11-write-strategy.md#38-appending-to-a-file)), runs that end
 before the append's first block are kept and listed again next to the new ones, a run reaching into a

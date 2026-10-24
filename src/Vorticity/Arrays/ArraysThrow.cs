@@ -39,6 +39,11 @@ internal static class ArraysThrow
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]
+    internal static ReadOnlySpan<byte> ViewPast(int row, uint offset, uint size, int length) =>
+        throw new VortexFormatException($"Row {row} spans [{offset}, {(ulong)offset + size}) of a data buffer holding {length} bytes.");
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     internal static void CanonicalIndex(int index, int count) =>
         throw new VortexFormatException(
             $"Canonical node index {index} is outside [0, {count}) of the canonical arena.");

@@ -267,15 +267,39 @@ period, so its plan reads every leaf. Its jobs come in this order:
   level, where they follow every object, since only the first fresh level takes new rows. A closed
   period's objects wait for its seal instead. `F` is the fan-out until the cost model that weighs the
   objects a question over the recent hours reads against the rewrites per row gives it.
+- `F` adjacent objects of one partition in the periods level, each under an `F`-th of the joined size
+  (`CompactionOptions.JoinedPeriodBytes`, 1 GiB by default), join into one object of that level that
+  spans their periods, the periods between them included. The calendar is the dataset's, weighed on
+  its largest partition, so a partition that takes a hundredth of the rows seals objects a hundred
+  times smaller, an hour each: joined, they come near the size, in tiers as the fresh levels grow, a
+  row rewritten once each time its object grows `F`-fold. An object of an `F`-th of the size or more
+  never joins, so a joined object stays under the size. A join never spans two months of the
+  calendar, so an expiry keeps a joined object's rows at most a month past its cutoff, as it would a
+  partition whose periods last a month; and under an erasure delay a joined object stays what a purge
+  rewrites within half of it, as a period does. A late row of a period a joined object holds waits in
+  the late level as any late row does, and its second seal folds it into the whole object, with the
+  late rows of every period the object spans.
 - Purges and fragments, as for any dataset.
 
-Every job writes an object per period, so that no object spans two, and level 0's exit an object per
-level as well.
+Every job but a join writes an object per period, so that no object spans two, and level 0's exit an
+object per level as well. A joined object spans whole periods of one partition, adjacent in its level.
+A header names the joined objects a dataset holds among its features (`DatasetFeatures.JoinedPeriods`),
+from the commit of the first: a library that does not know them would seal a period one of them holds
+a second time, beside it, and refuses the dataset instead.
 
-Every such object is written in sorted slices. A job merges its inputs twice. The first pass counts,
-for each object it will write, its rows per second and the distinct values of the columns that may be
-synopsis columns, from which it cuts the object's slices and picks the order inside them: the
-columns whose values repeat twice on average, fewest values first
+A calendar of each partition, weighed on its own rows, was weighed against the joins, and left aside:
+the values of the partition columns are not bounded over a dataset's life, a tenant or a source each,
+and every header, written at each commit, would carry a length and its changes for each, where the
+joins need nothing beyond what the leaves say. A calendar of a partition also cuts in units, a day or
+a month, a size its rows set only within a factor of thirty, and keeps a small partition's month in
+its fresh objects until the month ends.
+
+Every such object is written in sorted slices. A job of a dataset with a variant column merges its
+inputs twice. The first pass reads the clustering key, the columns that may be synopsis columns and the
+variant columns alone, through a projection of each input, and counts, for each object it will write,
+its rows per second and the distinct values of the columns that may be synopsis columns, from which it
+cuts the object's slices and picks the order inside them: the columns whose values repeat twice on
+average, fewest values first
 ([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)). The second
 pass gathers each slice as its rows come, in time order, codes each synopsis column's values in the
 order of the values, and sorts the slice by one stable counting sort per column, from the last to the
@@ -288,6 +312,20 @@ instant alone it carries no sorted run on the key: its slice table is the source
 cursor and every read in key order find its rows, a job's merge of its inputs included, which reads
 each slice once ([sources of order](12-index-reads.md#2-sources-of-order)). A slice is held whole while
 it sorts: a slice past the query memory's grant, sorted in runs and merged, is not done yet.
+
+A job of a dataset without a variant column merges its inputs once, each object written as its rows
+come, as a load writes a period: its first slice runs to the end of the unit that holds its 65 536th
+row, those rows' pace choosing the width of its slices and its order judged on that slice, and each
+slice after it is cut at that width as its rows come, a burst finer where the stream meets it
+(`SliceStream`). For rows at a steady pace,
+those are the slices a count of every row cuts once a slice aims at 2²¹ rows or more, three million
+by default: a unit of the width a count chooses then holds more than the rows the order is judged
+from, the widths being sixty times apart at most. A dataset whose slices aim at fewer rows is merged
+twice. A seal knows the rows of its one object from its inputs, which weigh its synopsis tables as
+the first pass's count does; the objects of another job are weighed at the end. On an hour of thirty
+million requests (`vortex-queries --micro seal --ceiling 1`), level 0's exit takes 11.4 s and the seal
+9.3 s in one pass, against 18.3 and 14.0 s in two, and the sealed object is the same to the byte, its
+ten slices and its order included; the process peaks at 9.2 GB against 8.5.
 
 The first pass also counts the paths of each variant column, value by value, and the object shreds
 those its own rows pay for, each column in long chunks of its own, with a path map that lets a
@@ -310,13 +348,33 @@ period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so
 the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
 appends, one row in a hundred late by up to half an hour, deletes now and then, and hours sealed ten
 minutes past their end. After each round it checks that every level but 0 and the late one is
-key-disjoint, that no object spans two periods, and that the key cursor and a key-ordered scan give
-back the rows appended and not deleted. A seed runs about 75 exits, 34 fresh merges and 7 seals,
-none abandoned.
+key-disjoint, that no object spans two periods but a joined one, and that the key cursor and a
+key-ordered scan give back the rows appended and not deleted. A seed runs about 75 exits, 34 fresh
+merges and 7 seals, none abandoned. A schedule of minutes, with late rows and deletes, joins its
+sealed minutes in tiers, 32 joins for 85 to 88 seals, and keeps the same invariants at each round.
 
 A seal is a compaction for its commit: a delete that marks one of its inputs while it runs abandons
 it, and its outputs are left for vacuum. Carrying the marks over to the period's object instead is
 worth measuring on jobs of minutes over gigabytes, and is not done.
+
+### Resuming a seal
+
+A seal of a day at the design's rate reads and writes some 170 GB, and a failure starts it again from
+nothing: its object is one upload, whose writer holds until the end what the end writes, the chunk
+directories, the zone maps, the postings' pages, the synopsis tables' runs, the census of the paths.
+Three ways to lose less were weighed, none built:
+
+| | how | what it takes | what it leaves |
+|---|---|---|---|
+| a checkpointed upload | at the end of a part, the writer saves its state beside the upload's parts, and a seal that fails takes the upload back from there | every builder of the writer able to save and restore itself: its open chunks, its pages in the scratch, its counts, the slice being sorted | gigabytes of state saved at each checkpoint, and a writer twice as hard to change |
+| the hours sealed first | a period's hours sealed one at a time, each an object committed alone, then the day's object assembled from theirs | slices that keep the order and the shredding their hour chose, where the slice table holds one order for the whole object; the day's tables merged from the hours' | the day rewritten whole a second time, unless it is assembled by copying the hours' segments, a format change |
+| a shorter period | the length of a period follows its load already, under the object cap among its constraints (`DatasetOptions.MaxObjectBytes`, no bound by default): a lower cap bounds what a failure costs | nothing new | more objects over a window, a request each |
+
+The third is there today: a dataset whose failed seals cost too much lowers its object cap, and each
+seal at risk is that much smaller. The second is the shape of a seal that resumes, at the price of a
+format change, and waits for a measure of how often seals fail. A delete that marks an input while
+the seal runs is the common reason a seal starts again, and carrying its marks over to the period's
+object answers it without either.
 
 ## 4. Folding marks where no merge goes
 

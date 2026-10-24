@@ -655,9 +655,11 @@ rows, and refuse it, or worse. So the header names the features of format 4 the 
 `Features`, and a header that names one is written in commit format 4. The first is entries with
 such fields. A feature stays named in every header after the one that introduced it, since the pages
 that hold its entries stay in the trees, and a dataset that never uses one is written in format 2 or
-3 as before. The others are settings fixed when the dataset is created, which a library that does not
-know them would ignore against what the dataset promises: the erasure delay, compaction by periods
-and its lateness horizon, and the identifier columns. A library refuses a header that names a feature
+3 as before. The others are settings, most fixed when the dataset is created, which a library that
+does not know them would ignore against what the dataset promises: the erasure delay, compaction by
+periods and its lateness horizon, the identifier columns, and the shredded paths; and the joined
+periods, objects of the periods level that span several periods, which such a library would seal a
+second time ([joins](15-compaction.md#a-dataset-of-periods)). A library refuses a header that names a feature
 it does not know, as it refuses a later format, so that a feature added later is never read as
 nothing; and it refuses one whose flag of periods, lateness horizon and length of a period do not
 come together, reading a dataset's periods from the flag.
@@ -683,9 +685,28 @@ the dataset held is kept, in the late level, and sealed into its period with the
 the dataset counts it (`vortex.dataset.rows_past_horizon`). A handle created with
 `PeriodOptions.RefuseLateRows` refuses an append that holds one instead, before anything is written.
 Identifier columns (`DatasetOptions.Identifiers`) name the
-columns whose values questions look up one at a time; each names a column of the schema, once. A key
+columns whose values questions look up one at a time; each names a column of the schema, once. An
+identifier whose column a change of the schema drops or renames names nothing the writers hold any
+more, and they leave it out rather than fail. A key
 that leads with a timestamp is encoded as the timestamp's storage, its seek keys too
 ([06-row-encoding.md](06-row-encoding.md#6-unsupported-types)).
+Shredded paths (`DatasetOptions.ShreddedPaths`) name keys of variant columns, each read in one class as a
+filter reads it, `Attributes['status'].AsInt64()`: every job shreds them into columns of their own, the
+keys its census counted or not, as it shreds an identifier's key, so that a question on one reads its
+column and the object's synopsis counts its values. Each names a key of a variant column of the
+schema, once, in a class among string, integer, double and boolean.
+
+Both lists change after the creation, each in a commit that rewrites no object. `AddIdentifiersAsync`
+joins identifiers to the version's, as two indexings join their policies, so two writers that add one
+each keep both; it is dropped on a version whose schema is not the one it checked them against.
+`SetShreddedPathsAsync` puts a list in place of the version's, and is dropped on a version whose list
+or schema is not the one it was worked out against, since it would undo another writer's list. A
+writer reads both from the version it builds on, as it reads the index policy: an append from the
+handle's version, a job from the version it read, whatever the handle's options say. The objects
+written before keep what they hold: a lookup of an added identifier reads an object without its
+postings as a scan reads any object, and a question on a key reads it typed or from the residual as
+each object lies, so a change of either list changes what a question costs, never what it answers.
+A column renamed is indexed again once its new name is added.
 
 ## 9. The read-path budget
 
@@ -805,9 +826,11 @@ ones.
 A dataset of periods also expires whole periods (`ExpireAsync(before)`). The cutoff is aligned down to
 the start of the period holding `before`, and every object whose instant's maximum lies before it is
 removed in one commit, from what the leaves say, without reading one. Every object above level 0 holds
-one period, so none straddles the cutoff, and an object of level 0 that does stays until its exit
-cuts it by period. A row thus outlives the cutoff by up to a period. `DatasetExpiryTests` counts no
-read of a data object for an expiry of two sealed hours, nor for a delete of the rows before them.
+one period, but a joined one, which holds several of a small partition: no other straddles the
+cutoff, a joined one stays until the last period it holds lies before it, and an object of level 0
+that straddles it stays until its exit cuts it by period. A row thus outlives the cutoff by up to a
+period, or the span of a joined object, a month at most. `DatasetExpiryTests` counts no read of a data object for an
+expiry of two sealed hours, nor for a delete of the rows before them.
 
 A dataset of periods may also declare its first clustering-key columns partition columns
 (`DatasetOptions.PartitionColumns`, a count), a tenant, a source or a retention whose rows are kept and

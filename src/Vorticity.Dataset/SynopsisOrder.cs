@@ -129,7 +129,7 @@ internal static class SynopsisOrder
                 }
 
                 ReadOnlySpan<byte> value = values.Slice(row * width, width);
-                sketch.Add(CardinalitySlot.Hash(isFloat ? Normalized(record.PType, value, scratch) : value));
+                sketch.Add(CardinalitySlot.Hash(isFloat ? FloatKey.Normal(value, scratch) : value));
             }
 
             return;
@@ -183,37 +183,6 @@ internal static class SynopsisOrder
             if (valid.IsEmpty || ((valid[row >> 6] >> (row & 63)) & 1) != 0)
             {
                 sketch.Add(CardinalitySlot.Hash(ColumnData.Bytes(arena, canonical, row)));
-            }
-        }
-    }
-
-    /// <summary>A float's bytes with its zeros and its NaNs each taken as one value.</summary>
-    private static ReadOnlySpan<byte> Normalized(PType type, ReadOnlySpan<byte> value, Span<byte> scratch)
-    {
-        switch (type)
-        {
-            case PType.F64:
-            {
-                double d = MemoryMarshal.Read<double>(value);
-                d = double.IsNaN(d) ? double.NaN : d == 0 ? 0 : d;
-                MemoryMarshal.Write(scratch, in d);
-                return scratch[..sizeof(double)];
-            }
-
-            case PType.F32:
-            {
-                float f = MemoryMarshal.Read<float>(value);
-                f = float.IsNaN(f) ? float.NaN : f == 0 ? 0 : f;
-                MemoryMarshal.Write(scratch, in f);
-                return scratch[..sizeof(float)];
-            }
-
-            default:
-            {
-                Half h = MemoryMarshal.Read<Half>(value);
-                h = Half.IsNaN(h) ? Half.NaN : h == Half.Zero ? Half.Zero : h;
-                MemoryMarshal.Write(scratch, in h);
-                return scratch[..2];
             }
         }
     }

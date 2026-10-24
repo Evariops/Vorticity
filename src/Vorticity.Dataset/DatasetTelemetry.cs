@@ -29,7 +29,7 @@ internal enum CommitKind
     /// <summary>The schema changed.</summary>
     Schema = 6,
 
-    /// <summary>Index fragments attached to objects.</summary>
+    /// <summary>Indexes or identifiers every writer builds declared, or index fragments attached to objects.</summary>
     Index = 7,
 
     /// <summary>A compaction's replacement, or its bundling of fragments.</summary>
@@ -43,6 +43,9 @@ internal enum CommitKind
 
     /// <summary>The offsets of sources no writer takes any more forgotten.</summary>
     Sources = 11,
+
+    /// <summary>The keys of variant columns every job shreds changed.</summary>
+    Layout = 12,
 }
 
 /// <summary>How a commit ended, as the dataset's telemetry names it.</summary>
@@ -352,6 +355,7 @@ internal static class DatasetTelemetry
         CommitKind.Repack => "repack",
         CommitKind.Rekey => "rekey",
         CommitKind.Sources => "sources",
+        CommitKind.Layout => "layout",
         _ => "other",
     };
 
@@ -380,6 +384,10 @@ internal static class DatasetTelemetry
         CompactionTrigger.Marks => "marks",
         CompactionTrigger.Erasure => "erasure",
         CompactionTrigger.Neighbours => "neighbours",
+        CompactionTrigger.LateCeiling => "late_ceiling",
+        CompactionTrigger.FreshMerge => "fresh_merge",
+        CompactionTrigger.Seal => "seal",
+        CompactionTrigger.Join => "join",
         _ => "none",
     };
 }

@@ -24,7 +24,7 @@ namespace Vorticity.Aggregating;
 /// O. Ertl, <i>New cardinality estimation algorithms for HyperLogLog sketches</i> (2017), algorithm 6.
 /// </para>
 /// </remarks>
-internal sealed class CardinalitySketch
+internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
 {
     /// <summary>The register index's bits.</summary>
     internal const int Precision = 14;
@@ -51,7 +51,7 @@ internal sealed class CardinalitySketch
     private byte[]? _dense;
 
     /// <summary>The bytes the sketch holds.</summary>
-    internal long Bytes =>
+    public long Bytes =>
         ((long)(_hashes?.Length ?? 0) * sizeof(ulong)) + ((long)(_table?.Length ?? 0) * sizeof(int)) + (_dense?.Length ?? 0);
 
     /// <summary>Whether the sketch still counts exactly.</summary>
@@ -92,7 +92,7 @@ internal sealed class CardinalitySketch
     }
 
     /// <summary>Merges <paramref name="other"/>: the union of their hashes, or each register's maximum.</summary>
-    internal void Merge(CardinalitySketch other)
+    public void Merge(CardinalitySketch other)
     {
         if (other._hashes is { } theirs)
         {
@@ -164,7 +164,7 @@ internal sealed class CardinalitySketch
     /// registers ascending by index, each <c>(index &lt;&lt; 8) | rank</c>: the same words for the same
     /// content, whichever form held it.
     /// </summary>
-    internal void Write(Action<long> word)
+    public void Write(Action<long> word)
     {
         if (_hashes is { } hashes)
         {
@@ -210,17 +210,18 @@ internal sealed class CardinalitySketch
         }
     }
 
-    /// <summary>A sketch read back from <see cref="Write"/>'s words.</summary>
-    internal static CardinalitySketch Read(Func<long> word)
+    /// <summary>A sketch read back from <see cref="Write"/>'s words, a spill's or a test's.</summary>
+    internal static CardinalitySketch Read<TWords>(ref TWords words)
+        where TWords : IWordSource, allows ref struct
     {
         CardinalitySketch sketch = new CardinalitySketch();
-        long form = word();
-        long entries = word();
+        long form = words.NextWord();
+        long entries = words.NextWord();
         if (form == 0)
         {
             for (long i = 0; i < entries; i++)
             {
-                sketch.Add(unchecked((ulong)word()));
+                sketch.Add(unchecked((ulong)words.NextWord()));
             }
 
             return sketch;
@@ -229,10 +230,17 @@ internal sealed class CardinalitySketch
         sketch.Registered();
         for (long i = 0; i < entries; i++)
         {
-            sketch.RaiseEntry(word());
+            sketch.RaiseEntry(words.NextWord());
         }
 
         return sketch;
+    }
+
+    /// <summary>A sketch read back from the words <paramref name="word"/> hands out one at a time.</summary>
+    internal static CardinalitySketch Read(Func<long> word)
+    {
+        WordsOf words = new WordsOf(word);
+        return Read(ref words);
     }
 
     /// <summary>
@@ -300,7 +308,7 @@ internal sealed class CardinalitySketch
     /// or each register's maximum, so that the sketch holds what adding the values of both would have made it hold.
     /// </summary>
     /// <exception cref="VortexFormatException">The bytes do not hold a sketch.</exception>
-    internal void MergeEncoded(ReadOnlySpan<byte> bytes)
+    public void MergeEncoded(ReadOnlySpan<byte> bytes)
     {
         if (bytes.IsEmpty)
         {
@@ -426,13 +434,10 @@ internal sealed class CardinalitySketch
         public static ulong Malformed(int position, byte value) => throw new VortexFormatException($"A distinct sketch holds a varint too wide at {position}.");
     }
 
-    /// <summary>Adds a register entry read back, <c>(index &lt;&lt; 8) | rank</c>, after <see cref="BeginRegisters"/>.</summary>
+    /// <summary>Adds a register entry read back, <c>(index &lt;&lt; 8) | rank</c>, after <see cref="Registered"/>.</summary>
     internal void RaiseEntry(long entry) => Raise(checked((int)(entry >> 8)), (byte)entry);
 
-    /// <summary>Turns a sketch read back into registers, before its entries.</summary>
-    internal void BeginRegisters() => Registered();
-
-    /// <summary>Moves the exact hashes into registers, once.</summary>
+    /// <summary>Moves the exact hashes into registers, once: a sketch read back in registers, before its entries.</summary>
     private void Registered()
     {
         if (_hashes is not { } hashes)

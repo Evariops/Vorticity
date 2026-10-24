@@ -12,10 +12,13 @@ namespace Vorticity.Scanning;
 /// <remarks>
 /// <para>
 /// A split reads a large segment of its own when the split before it does not ask for it too, a chunk of several splits
-/// being read by the first that asks; such a split makes a request whatever is read along, and its batch would wait for
-/// what is read along before it made it. The small segments read along are therefore those of the splits that read
-/// nothing of their own, and that no such split asks for too: a split that reads takes its small segments, and so does
-/// each split after it that shares one.
+/// being read by the first that asks; such a split makes a request whatever is read along. The small segments read along
+/// are therefore those of the splits that read nothing of their own, and that no such split asks for too: a split that
+/// reads takes its small segments, and so does each split after it that shares one. Read along, the small segments of
+/// the splits that read cut a day of logs' requests by half, but its runs reached over bytes their splits then read
+/// again, and the batches waited on longer chains of reads: a count per status took 8 % more at one lane, and a service
+/// per minute under a predicate 27 % more at 32 lanes, for 3 % saved on the day of logs at 32 lanes and none at one
+/// (<c>vortex-queries --micro paths --design --paths rows</c>, a store 5 ms away).
 /// </para>
 /// <para>
 /// The context the scan rents to register the segments ahead in holds the walk, beside the segments a batch on that

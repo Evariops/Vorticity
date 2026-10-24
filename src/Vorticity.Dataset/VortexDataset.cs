@@ -399,7 +399,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// of one of its variant columns read as a string or an integer, <c>Attributes['user'].AsString()</c>,
     /// written as a plan writes it. Refuses any other, and one named twice.
     /// </summary>
-    private static string[] RequireIdentifiers(IReadOnlyList<string> identifiers, DType schema)
+    private static string[] RequireIdentifiers(IReadOnlyList<string> identifiers, DType schema, string parameter)
     {
         HashSet<string> seen = new(StringComparer.Ordinal);
         string[] kept = new string[identifiers.Count];
@@ -413,18 +413,77 @@ public sealed class VortexDataset : IAsyncDisposable
             {
                 throw new ArgumentException(
                     $"The identifier '{identifier}' names no column of the dataset's schema, nor a key of a variant column read as a string or an integer, such as Attributes['user'].AsString().",
-                    nameof(DatasetOptions.Identifiers));
+                    parameter);
             }
 
             if (!seen.Add(name))
             {
-                throw new ArgumentException($"The identifier '{identifier}' is named twice.", nameof(DatasetOptions.Identifiers));
+                throw new ArgumentException($"The identifier '{identifier}' is named twice.", parameter);
             }
 
             kept[i] = name;
         }
 
         return kept;
+    }
+
+    /// <summary>
+    /// The shredded paths as a commit keeps them (<see cref="DatasetOptions.ShreddedPaths"/>): a key of a variant column
+    /// of <paramref name="schema"/> read as a string, an integer, a double or a boolean, written as a plan writes it.
+    /// Refuses any other, and a key named twice, in one class or two.
+    /// </summary>
+    private static string[] RequireShreddedPaths(IReadOnlyList<string> paths, DType schema, string parameter)
+    {
+        HashSet<(int, string)> seen = [];
+        string[] kept = new string[paths.Count];
+        for (int i = 0; i < paths.Count; i++)
+        {
+            if (paths[i] is not { } text || schema.Kind != DTypeKind.Struct || ShreddedPath(text, schema) is not { } path)
+            {
+                throw new ArgumentException(
+                    $"The shredded path '{paths[i]}' names no key of a variant column of the dataset's schema read as a string, an integer, a double or a boolean, such as Attributes['status'].AsInt64().",
+                    parameter);
+            }
+
+            if (!seen.Add((path.Field, path.Key)))
+            {
+                throw new ArgumentException($"The key of the shredded path '{text}' is named twice.", parameter);
+            }
+
+            kept[i] = path.Text;
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// The key of a variant column a shredded path names, and the class it is kept in, for a path written
+    /// <c>Attributes['status'].AsInt64()</c>, <c>.AsString()</c>, <c>.AsDouble()</c> or <c>.AsBool()</c>; null for any
+    /// other. <c>Text</c> is the path as a plan writes it.
+    /// </summary>
+    internal static (int Field, string Key, Types.Variants.VariantClass Class, string Text)? ShreddedPath(string path, DType schema)
+    {
+        if (Expressions.ExprText.LastPath(path) is not ([string column], [{ Key: { } key }], { } read))
+        {
+            return null;
+        }
+
+        Types.Variants.VariantClass? @class = read switch
+        {
+            Compute.VariantRead.AsString => Types.Variants.VariantClass.String,
+            Compute.VariantRead.AsInt64 => Types.Variants.VariantClass.Integer,
+            Compute.VariantRead.AsDouble => Types.Variants.VariantClass.Double,
+            Compute.VariantRead.AsBool => Types.Variants.VariantClass.Boolean,
+            _ => null,
+        };
+        int field = schema.IndexOfField(column);
+        if (@class is null || field < 0 || schema.GetField(field).Kind != DTypeKind.Variant)
+        {
+            return null;
+        }
+
+        string text = new Compute.VariantFieldExpr(new Expressions.ColumnFieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
+        return (field, key, @class.Value, text);
     }
 
     /// <summary>
@@ -447,7 +506,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return null;
         }
 
-        string text = new Compute.VariantFieldExpr(new Expressions.FieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
+        string text = new Compute.VariantFieldExpr(new Expressions.ColumnFieldExpr(column), [Compute.VariantStep.Of(key)], read).Text;
         Types.Variants.VariantClass @class = read == Compute.VariantRead.AsString ? Types.Variants.VariantClass.String : Types.Variants.VariantClass.Integer;
         return (field, key, @class, text);
     }
@@ -619,8 +678,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// A page that shows a month can show its newest day while the rest is read: a part's answer is final
     /// for its range of time, so once a part is delivered the window from its start to the window's end is
     /// answered. A question over one period reads the synopses of its sealed objects, a round trip for
-    /// them all, and the parts are asked several at once, as many as the session lets reads be in flight,
-    /// so a month asked part by part costs about the round trips of one question over it. Answers over
+    /// them all, and the parts are asked several at once, sixteen at most and no more than the session lets
+    /// reads be in flight, so a month asked part by part costs about the round trips of one question over it. Answers over
     /// parts add up for counts and sums, and their extremes are the window's, but a mean over the window
     /// is its sum over its count.
     /// </remarks>
@@ -641,7 +700,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         PeriodCalendar calendar = PeriodCalendar.Of(Snapshot.Header, PeriodOptions.InstantOf(key));
-        return WindowParts.AskAsync(WindowParts.Of(calendar, from, to), Session.Options.MaxConcurrentReads, question, cancellationToken);
+        return WindowParts.AskAsync(WindowParts.Of(calendar, from, to), Math.Min(Session.Options.MaxConcurrentReads, WindowParts.Width), question, cancellationToken);
     }
 
     /// <summary>
@@ -715,7 +774,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         // The lists of the tables' chunks first, from the disk when it holds them: the chunks they name are regions too.
-        bool listed = entry.Uid != UInt128.Zero && Indexes.SynopsisTableInfo.LoadListsCached(cache, entry.Uid, contents, null);
+        bool listed = entry.Uid != UInt128.Zero && Indexes.SynopsisTableReader.LoadListsHeld(cache, entry.Uid, contents, null);
         List<Indexes.IndexSegment> missing = Missing(cache, entry, contents);
         if ((listed && missing.Count == 0) || entry.Uid == UInt128.Zero)
         {
@@ -734,7 +793,7 @@ public sealed class VortexDataset : IAsyncDisposable
                     bytes += table.List!.Value.Length;
                 }
 
-                await Indexes.SynopsisTableInfo.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
+                await Indexes.SynopsisTableReader.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
                 missing = Missing(cache, entry, contents);
             }
 
@@ -751,7 +810,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         static List<Indexes.IndexSegment> Missing(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents)
         {
-            List<Indexes.IndexSegment> regions = SynopsisCacheReader.Declared(contents);
+            List<Indexes.IndexSegment> regions = contents.Declared();
             regions.RemoveAll(region => cache.Holds(entry.Uid, region));
             return regions;
         }
@@ -773,8 +832,8 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             // The lists of the tables' chunks first: the chunks they name are regions it keeps too.
             ISegmentReader reader = Footerless(source, entry, contents);
-            await Indexes.SynopsisTableInfo.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
-            List<Indexes.IndexSegment> regions = SynopsisCacheReader.Declared(contents);
+            await Indexes.SynopsisTableReader.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
+            List<Indexes.IndexSegment> regions = contents.Declared();
             using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
             foreach (Indexes.IndexSegment region in regions)
             {
@@ -824,7 +883,46 @@ public sealed class VortexDataset : IAsyncDisposable
     /// options, plus the sorted run the clustering key requires.
     /// </summary>
     /// <returns>The draft; write its rows, then append it, or dispose it to abandon it.</returns>
-    public ObjectDraft StartObject() => StartObjectUnder(Snapshot.Schema);
+    public ObjectDraft StartObject()
+    {
+        DatasetSchema schema = Snapshot.Schema;
+        return StartObjectUnder(schema, shredded: _options.ShredOnAppend ? DeclaredShredding(schema) : null);
+    }
+
+    /// <summary>
+    /// The shredding of the <see cref="DatasetOptions.ShreddedPaths"/> by variant column, each key in its class, which an
+    /// append writes when <see cref="DatasetOptions.ShredOnAppend"/> says so; null for none.
+    /// </summary>
+    private static Dictionary<string, Types.Variants.VariantShredding>? DeclaredShredding(DatasetSchema schema)
+    {
+        Dictionary<string, List<(string, Types.Variants.VariantShredding)>>? keys = null;
+        foreach (string declared in schema.ShreddedPaths)
+        {
+            if (ShreddedPath(declared, schema.DType) is { } path)
+            {
+                string column = schema.DType.GetFieldName(path.Field);
+                if (!(keys ??= new(StringComparer.Ordinal)).TryGetValue(column, out List<(string, Types.Variants.VariantShredding)>? list))
+                {
+                    keys[column] = list = [];
+                }
+
+                list.Add((path.Key, Types.Variants.VariantShredding.Primitive(path.Class)));
+            }
+        }
+
+        if (keys is null)
+        {
+            return null;
+        }
+
+        Dictionary<string, Types.Variants.VariantShredding> plans = new(StringComparer.Ordinal);
+        foreach ((string column, List<(string, Types.Variants.VariantShredding)> list) in keys)
+        {
+            plans[column] = Types.Variants.VariantShredding.Object([.. list]);
+        }
+
+        return plans;
+    }
 
     /// <summary>
     /// Starts a data object under <paramref name="schema"/>: what a rewrite uses, whose rows are read
@@ -845,7 +943,8 @@ public sealed class VortexDataset : IAsyncDisposable
             _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes, byteBound);
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with { RowBound = rowBound, CarriesSlices = sliced };
 
-        // The variant columns a job shreds, each in long chunks of its own; an append shreds nothing.
+        // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
+        // handle says so (DatasetOptions.ShredOnAppend), and nothing otherwise.
         if (shredded is { Count: > 0 })
         {
             write = write with
@@ -893,10 +992,15 @@ public sealed class VortexDataset : IAsyncDisposable
         // Each declared identifier's hashed postings, required and spared by the budget as the clustering
         // key's run is: a lookup of one value reads the objects that hold it and almost no other, one
         // segment of about 64 KiB an object, at about four bytes a (value, block) pair. A Bloom filter,
-        // which a tree of them loses past what one filter holds, is never tried on it.
-        foreach (string identifier in Snapshot.Header.Identifiers)
+        // which a tree of them loses past what one filter holds, is never tried on it. The identifiers are
+        // those of the version the write builds on, as its indexes are; one whose column a change of the
+        // schema dropped or renamed names nothing the write holds, and is left out rather than required.
+        foreach (string identifier in schema.Identifiers)
         {
-            write = write.WithIndexes(write.WritePolicy.For(identifier, Indexes.IndexSpec.HashedPostings.AsRequired())) with { BudgetSparesRequired = true };
+            if (schema.DType.IndexOfField(identifier) >= 0 || IdentifierPath(identifier, schema.DType) is not null)
+            {
+                write = write.WithIndexes(write.WritePolicy.For(identifier, Indexes.IndexSpec.HashedPostings.AsRequired())) with { BudgetSparesRequired = true };
+            }
         }
 
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
@@ -991,8 +1095,28 @@ public sealed class VortexDataset : IAsyncDisposable
         TimeUnit unit = PeriodOptions.InstantOf(key);
         PeriodCalendar calendar = PeriodCalendar.Of(version.Header, unit);
         long horizon = TimeSlicer.Units(version.Header.Lateness ?? TimeSpan.Zero, unit);
+
+        // Only the objects whose instants may reach the earliest end of a period an appended row lies in, past the
+        // horizon, found by their summaries and their pages': an object short of it closes none of their periods, and a
+        // walk of every object read every page of the dataset at each append.
+        long earliest = long.MaxValue;
+        foreach (WrittenObject produced in written)
+        {
+            if (Instants(produced.Entry.Summaries, key) is { } appended)
+            {
+                earliest = Math.Min(earliest, calendar.Next(calendar.Floor(appended.Least)));
+            }
+        }
+
+        if (earliest == long.MaxValue)
+        {
+            return;
+        }
+
+        long reach = horizon > 0 && earliest > long.MaxValue - horizon ? long.MaxValue : earliest + horizon;
+        SummaryPruner closing = new SummaryPruner(Expr.Ge(Expr.Field(key.InstantPath), Expr.Literal(FilterLiteral.From(reach))));
         Dictionary<string, long> newest = new Dictionary<string, long>(StringComparer.Ordinal);
-        await foreach (PositionedObject held in version.WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        await foreach (PositionedObject held in version.WalkAsync(closing, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
         {
             if (held.Level is not (0 or PeriodLevels.Late) && Instants(held.Entry.Summaries, key) is { } instants)
             {
@@ -1786,6 +1910,86 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Adds identifiers to the dataset's (<see cref="DatasetOptions.Identifiers"/>), in one commit that rewrites no object:
+    /// every object written from the version it creates carries hashed postings on them, appends and compactions alike,
+    /// and the objects written before are read without them.
+    /// </summary>
+    /// <param name="identifiers">
+    /// The identifiers, each a column of the schema or a key of a variant column read as a string or an integer,
+    /// <c>Attributes['user'].AsString()</c>; one the dataset has already stays as it is.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the commit.</param>
+    /// <returns>The version created, which this handle now reads; the one it held when the dataset has every identifier already.</returns>
+    /// <remarks>
+    /// A lookup of an added identifier reads an object written since by its postings, and one written before as a scan
+    /// reads any object, its rows found all the same, until a compaction rewrites it: a period already sealed, which no
+    /// job takes again, is read so until the retention lets it go. Two writers that add one identifier each keep both.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="identifiers"/> is null.</exception>
+    /// <exception cref="ArgumentException">An identifier names neither a column of the schema nor such a key, or is named twice.</exception>
+    /// <exception cref="InvalidOperationException">Another writer changed the schema first; refresh, and add the identifiers to the schema the dataset has now.</exception>
+    public async ValueTask<ulong> AddIdentifiersAsync(IReadOnlyList<string> identifiers, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(identifiers);
+        DatasetSnapshot version = Snapshot;
+        DatasetSchema current = version.Schema;
+        string[] adding = RequireIdentifiers(identifiers, current.DType, nameof(identifiers));
+        if (new HashSet<string>(current.Identifiers, StringComparer.Ordinal).IsSupersetOf(adding))
+        {
+            return version.Version;
+        }
+
+        CommitResult commit = await CommitAsync([new DatasetOperation.AddIdentifiers(current.Bytes, adding)], CommitKind.Index, cancellationToken)
+            .ConfigureAwait(false);
+        return commit.Outcomes[0] is OperationOutcome.Applied or OperationOutcome.AlreadyThere
+            ? commit.Version
+            : throw new InvalidOperationException(
+                $"Another writer changed the dataset's schema after version {version.Version}, which the identifiers were checked " +
+                $"against; version {commit.Version} has another. Refresh, and add the identifiers to the schema the dataset has now.");
+    }
+
+    /// <summary>
+    /// Sets the keys of variant columns every job shreds into columns of their own (<see cref="DatasetOptions.ShreddedPaths"/>),
+    /// in one commit that rewrites no object: each job that starts from the version it creates shreds these, and no
+    /// other the dataset declared, and the objects written before keep their columns as they lie.
+    /// </summary>
+    /// <param name="paths">
+    /// The paths, each a key of a variant column read as a string, an integer, a double or a boolean,
+    /// <c>Attributes['http.response.status_code'].AsInt64()</c>; empty for none. Every question reads what the rows hold,
+    /// whichever objects shred a key: a path added or taken away changes the cost of a question, never its answer.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the commit.</param>
+    /// <returns>The version created, which this handle now reads; the one it held when the dataset has these paths already.</returns>
+    /// <remarks>
+    /// A key an identifier names is shredded by every job whether a path names it or not, in the identifier's class.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> is null.</exception>
+    /// <exception cref="ArgumentException">A path names no such key, or a key is named twice.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// Another writer changed the schema or the paths first; refresh, and set the paths against those the dataset has now.
+    /// </exception>
+    public async ValueTask<ulong> SetShreddedPathsAsync(IReadOnlyList<string> paths, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        DatasetSnapshot version = Snapshot;
+        DatasetSchema current = version.Schema;
+        string[] set = RequireShreddedPaths(paths, current.DType, nameof(paths));
+        if (DatasetCommitter.SameNames(set, current.ShreddedPaths))
+        {
+            return version.Version;
+        }
+
+        CommitResult commit = await CommitAsync(
+                [new DatasetOperation.ChangeShreddedPaths(current.Bytes, current.ShreddedPaths, set)], CommitKind.Layout, cancellationToken)
+            .ConfigureAwait(false);
+        return commit.Outcomes[0] is OperationOutcome.Applied or OperationOutcome.AlreadyThere
+            ? commit.Version
+            : throw new InvalidOperationException(
+                $"Another writer changed the dataset's schema or its shredded paths after version {version.Version}, which these " +
+                $"were set against; version {commit.Version} has others. Refresh, and set the paths against those the dataset has now.");
+    }
+
+    /// <summary>
     /// What compaction is due on this version and what it would cost, read from the leaf entries
     /// alone; the plan's job is null when nothing is over its bound.
     /// </summary>
@@ -2035,14 +2239,21 @@ public sealed class VortexDataset : IAsyncDisposable
         string[] declared = [];
         if (options.Identifiers is { Count: > 0 } identifiers)
         {
-            declared = RequireIdentifiers(identifiers, schema);
+            declared = RequireIdentifiers(identifiers, schema, nameof(DatasetOptions.Identifiers));
             features |= DatasetFeatures.Identifiers;
+        }
+
+        string[] shredded = [];
+        if (options.ShreddedPaths is { Count: > 0 } paths)
+        {
+            shredded = RequireShreddedPaths(paths, schema, nameof(DatasetOptions.ShreddedPaths));
+            features |= DatasetFeatures.ShreddedPaths;
         }
 
         CommitHeader template = new CommitHeader
         {
             Version = 1,
-            Seed = options.Seed,
+            Seed = DatasetOptions.SeedOf(options),
             Schema = DTypeProtobuf.Serialize(schema),
             ClusteringKey = [.. options.ClusteringKey ?? []],
             Retention = options.Retention,
@@ -2055,6 +2266,7 @@ public sealed class VortexDataset : IAsyncDisposable
             PeriodLength = options.Periods?.Length,
             PartitionColumns = options.PartitionColumns,
             Identifiers = declared,
+            ShreddedPaths = shredded,
             Features = features,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
@@ -2316,7 +2528,7 @@ public sealed class VortexDataset : IAsyncDisposable
             }
 
             if (Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
-                && Indexes.SynopsisTableInfo.LoadListsCached(cache, entry.Uid, contents, reads))
+                && Indexes.SynopsisTableReader.LoadListsHeld(cache, entry.Uid, contents, reads))
             {
                 continue;
             }
@@ -2334,7 +2546,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
             await using (source.ConfigureAwait(false))
             {
-                await Indexes.SynopsisTableInfo.LoadListsAsync(Footerless(source, entry, contents), contents, reads, cancellationToken).ConfigureAwait(false);
+                await Indexes.SynopsisTableReader.LoadListsAsync(Footerless(source, entry, contents), contents, reads, cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -2346,7 +2558,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal Indexes.SynopsisTableSet? ReadSynopsisCached(ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted) =>
         Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
-            ? Indexes.SynopsisTableInfo.ReadCached(cache, entry.Uid, contents, wanted, null)
+            ? Indexes.SynopsisTableReader.ReadHeld(cache, entry.Uid, contents, wanted, SynopsisContexts.Shared, null)
             : null;
 
     /// <summary>
@@ -2364,8 +2576,8 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            return await Indexes.SynopsisTableInfo.ReadAsync(
-                Footerless(source, entry, contents), contents, wanted, null, cancellationToken).ConfigureAwait(false);
+            return await Indexes.SynopsisTableReader.ReadAsync(
+                Footerless(source, entry, contents), contents, wanted, SynopsisContexts.Shared, null, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -2701,6 +2913,23 @@ public sealed class VortexDataset : IAsyncDisposable
             using Indexes.SliceReader reader = Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents)
                 ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
             return await reader.ReadSpansAsync(slices, columns, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The rows strictly inside <paramref name="first"/> to <paramref name="end"/> of the object <paramref name="entry"/>
+    /// names at which a chunk of one of <paramref name="columns"/> starts, read from its chunk directories with no open of it
+    /// (<see cref="Indexes.SliceReader.ChunkStartsAsync"/>): where a span of its rows may be cut between lanes.
+    /// </summary>
+    internal async ValueTask<long[]> ChunkStartsAsync(
+        ObjectEntry entry, Indexes.SynopsisContents contents, int[] columns, long first, long end, CancellationToken cancellationToken)
+    {
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            using Indexes.SliceReader reader = Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents)
+                ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
+            return await reader.ChunkStartsAsync(columns, first, end, cancellationToken).ConfigureAwait(false);
         }
     }
 

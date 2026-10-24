@@ -737,7 +737,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             return;
         }
 
-        // Past what the budget grants every lane at once, the set grows as before.
+        // Past what the budget grants every lane at once, the set grows by doubling.
         if (memory is not null && !memory.CanGrow(DistinctValues<TValue>.FootprintOf((int)count) * lanes))
         {
             return;

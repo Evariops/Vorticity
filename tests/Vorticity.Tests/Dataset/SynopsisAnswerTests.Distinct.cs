@@ -121,4 +121,81 @@ public sealed partial class SynopsisAnswerTests
             }
         }
     }
+
+    /// <summary>
+    /// The hosts per method but one request's, approximately, on hours whose budget keeps the hosts' distinct sketches but
+    /// no table keyed by the host. No sketch can take the request's rows out, so an object whose identifier's index finds
+    /// no row of the request answers from its sketches as if the filter did not name it, and the object that holds the
+    /// request reads its rows. A request every object holds sends every object to its rows; one no object holds leaves
+    /// every table to answer. Every answer gives the bits of its rows, at one lane and four.
+    /// </summary>
+    [Fact]
+    public async Task ADistinctCountThatLeavesARequestOutTakesTheSketchesOfTheObjectsWithoutIt()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await HostedAsync(store);
+        Dictionary<string, ScanMetrics> asked = [];
+        foreach (string left in new[] { "r3-22", "nowhere", "hot" })
+        {
+            Func<Scan<Hosted>, Vorticity.Aggregation> sketched = scan => scan.Where(r => r.RequestId != left)
+                .GroupBy(r => r.Method).Select(g => (g.Key, g.ApproximateCountDistinct(r => r.Host)));
+            (List<string> on, ScanMetrics metrics) = await GroupsAsync(sketched(dataset.Scan<Hosted>().With(new ScanOptions { UseSynopses = true })));
+            (List<string> lanes, _) = await GroupsAsync(sketched(dataset.Scan<Hosted>().With(new ScanOptions { UseSynopses = true, DegreeOfParallelism = 4 })));
+            (List<string> off, ScanMetrics rows) = await GroupsAsync(sketched(dataset.Scan<Hosted>().With(new ScanOptions { UseSynopses = false })));
+            ScanPlan plan = await sketched(dataset.Scan<Hosted>().With(new ScanOptions { UseSynopses = true })).ExplainAsync(Ct);
+            Console.Out.Write(
+                $"ABSENT {left}: {metrics.SynopsisRows} table rows and {metrics.Rows} rows, against {rows.Rows}: " +
+                $"{string.Join(" | ", plan.States.Select(step => $"{step.Read} {step.Detail} x{step.Count}"))}\n");
+            Assert.Equal(off, on);
+            Assert.Equal(off, lanes);
+            Assert.Contains(plan.States, step => step.Read == "absent");
+            Assert.Contains(plan.States, step => step.Detail.StartsWith("Sketches by", StringComparison.Ordinal));
+            asked[left] = metrics;
+        }
+
+        Assert.Equal(0, asked["hot"].SynopsisRows);
+        Assert.True(asked["r3-22"].SynopsisRows > 0, "no sketch merged");
+        Assert.True(asked["r3-22"].Rows < asked["hot"].Rows, $"{asked["r3-22"].Rows} rows read against {asked["hot"].Rows}");
+        Assert.True(asked["nowhere"].Rows < asked["r3-22"].Rows, $"{asked["nowhere"].Rows} rows read against {asked["r3-22"].Rows}");
+    }
+
+    /// <summary>
+    /// The requests of <see cref="StampedAsync"/> with a host of 400, each id its own or one in thirty-seven "hot", under a
+    /// budget of the data's bytes: the hosts' distinct sketches kept, no table keyed by the host.
+    /// </summary>
+    private static async Task<VortexDataset> HostedAsync(Vorticity.IO.IObjectStore store)
+    {
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Hosted.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Hosted.At)],
+            Identifiers = [nameof(Hosted.RequestId)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 100 },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },
+        }, Ct);
+        Random random = new Random(53);
+        for (int part = 0; part < 16; part++)
+        {
+            Hosted[] rows = [.. Enumerable.Range(0, 400).Select(i => new Hosted(
+                Noon.AddSeconds((part * 400 + i) * 1.25),
+                Services[random.Next(Services.Length)],
+                Methods[random.Next(Methods.Length)],
+                random.Next(4) switch { 0 => 200L, 1 => 201L, 2 => 404L, _ => 500L },
+                random.NextDouble() * 1_000,
+                random.NextInt64(1, 1L << 40),
+                $"host-{random.Next(400)}",
+                i % 37 == 0 ? "hot" : $"r{part}-{i}"))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Hosted>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        return dataset;
+    }
+
+    [VortexRecord]
+    public partial record struct Hosted(DateTimeOffset At, string Service, string Method, long Status, double Duration, long Bytes, string Host, string RequestId);
 }

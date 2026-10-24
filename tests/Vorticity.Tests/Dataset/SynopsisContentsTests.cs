@@ -101,7 +101,7 @@ public sealed partial class SynopsisContentsTests
         {
             using SynopsisTableSet read = sets[i]!;
             await using ObjectLease lease = await dataset.RentAsync(periods[i], Ct);
-            using SynopsisTableSet named = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
+            using SynopsisTableSet named = await SynopsisTableReader.ReadAsync(lease.File, Ct);
             Assert.Equal(named.Tables.Select(t => t.Table), read.Tables.Select(t => t.Table), Same);
             Assert.Contains(read.Tables, t => t.Chunk.Distinct is not null);
             Assert.Equal(read.Tables.Select(t => t.Chunk.Distinct), named.Tables.Select(t => t.Chunk.Distinct));
@@ -144,17 +144,39 @@ public sealed partial class SynopsisContentsTests
     /// <summary>
     /// An hour of calls whose attributes hold a route, and on about one row in a hundred a key no table
     /// counts: a question on that key reads, cold, the path directory beside the column's chunk directory,
-    /// then the slices that may hold the key, two round trips, and warm none at all; it finds every row that
-    /// holds the key.
+    /// then the slices that may hold the key, two round trips, and warm none at all, whether the session
+    /// keeps the declared regions in a synopsis cache as well or not; it finds every row that holds the key.
     /// </summary>
-    [Fact]
-    public async Task APathNoTableNamesReadsInTwoRoundTripsColdAndNoneWarm()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task APathNoTableNamesReadsInTwoRoundTripsColdAndNoneWarm(bool synopsisCache)
+    {
+        string directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vorticity-path-cache-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await PathReadsAsync(directory, synopsisCache);
+        }
+        finally
+        {
+            if (System.IO.Directory.Exists(directory))
+            {
+                System.IO.Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    private static async Task PathReadsAsync(string directory, bool synopsisCache)
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
         // A session of its own, with a cache that keeps what a read fetched for the next.
-        await using VortexSession session = VortexSession.Create(static options => options.SegmentCache = new SegmentCache(64 << 20));
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.SegmentCache = new SegmentCache(64 << 20);
+            options.SynopsisCache = synopsisCache ? new SynopsisCache(directory, 64 << 20) : null;
+        });
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Tagged.Schema, new DatasetOptions
         {
             Session = session,
@@ -326,6 +348,65 @@ public sealed partial class SynopsisContentsTests
         Assert.Equal(80_000, read.FooterBytes);
         Assert.Equal(contents.ToBytes(), read.Synopsis.ToArray());
         Assert.Equal(read.Synopsis.ToArray(), read.WithMarkedAt(1_000).Synopsis.ToArray());
+    }
+
+    /// <summary>
+    /// A table a later writer made, of a kind this reader does not know, is skipped and counted, the contents' other tables
+    /// read as before; a table of a known kind whose options are torn still refuses the contents, as it did.
+    /// </summary>
+    [Fact]
+    public void ATableOfALaterKindIsSkippedAndTheOthersRead()
+    {
+        SliceTable slices = new SliceTable(TimeUnit.Microseconds, [new TimeSlice(0, 60_000_000, 0, 10)], [1]);
+        SynopsisContents contents = new SynopsisContents(
+            Vorticity.Types.Serialization.DTypeFlatBuffers.Serialize(Vorticity.VortexTypes.ToDType(Call.Schema, new Vorticity.Types.DTypeArena())),
+            ["vortex.primitive"],
+            slices,
+            [new IndexSegment(100, 20, 0, 7)],
+            4_096,
+            8_192,
+            [(new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4), [new TableChunk(new IndexSegment(4_096, 512, 6, 9), 0, 3_600_000_000, 3)])]);
+        byte[] whole = contents.ToBytes();
+        byte[] later = TableMessage(new SynopsisTableInfo((SynopsisTableKind)9, SynopsisBucket.Hour, [1], [3], 4).OptionBytes());
+        byte[] torn = TableMessage(new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4).OptionBytes()[..^1]);
+
+        long skipped = 0;
+        using System.Diagnostics.Metrics.MeterListener listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, listening) =>
+        {
+            if (instrument.Meter.Name == VortexDiagnostics.MeterName && instrument.Name == "vortex.synopsis_tables.unknown")
+            {
+                listening.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Add(ref skipped, value));
+        listener.Start();
+
+        SynopsisContents back = SynopsisContents.From([.. whole, .. later])!;
+        Assert.NotNull(back);
+        Assert.Equal(contents.Tables.Select(t => t.Table), back.Tables.Select(t => t.Table), Same);
+        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks).Select(Unbounded), back.Tables.SelectMany(t => t.Chunks).Select(Unbounded));
+        Assert.Equal(1, Interlocked.Read(ref skipped));
+
+        Assert.Null(SynopsisContents.From([.. whole, .. torn]));
+    }
+
+    /// <summary>A table's message as the contents lay it out, holding its options alone.</summary>
+    private static byte[] TableMessage(ReadOnlySpan<byte> options)
+    {
+        Vorticity.Serialization.Protobuf.ProtoWriter table = new Vorticity.Serialization.Protobuf.ProtoWriter();
+        Vorticity.Serialization.Protobuf.ProtoWriter message = new Vorticity.Serialization.Protobuf.ProtoWriter();
+        try
+        {
+            table.WriteBytes(1, options);
+            message.WriteBytes(7, table.WrittenSpan);
+            return message.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            table.Dispose();
+            message.Dispose();
+        }
     }
 
     /// <summary>

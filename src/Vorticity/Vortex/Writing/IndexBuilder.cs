@@ -42,7 +42,7 @@ internal abstract class IndexBuilder : IDisposable
 
     /// <summary>
     /// Whether a payload of it is already in the file. A verdict of Auto's share or of the budget
-    /// no longer drops such a builder, since what it wrote would stay as bytes nothing lists.
+    /// never drops such a builder, since what it wrote would stay as bytes nothing lists.
     /// </summary>
     protected bool Committed => WrittenBytes > 0;
 

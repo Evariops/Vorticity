@@ -45,6 +45,10 @@ public partial record struct MeterDetail(int Floor, string? Room);
 [VortexRecord]
 public partial record struct MeterNested(long Key, int Reading, string Site, MeterDetail? Detail);
 
+/// <summary>The first schema with a variant column added.</summary>
+[VortexRecord]
+public partial record struct MeterTagged(long Key, int Reading, string Site, Variant? Tags);
+
 /// <summary>
 /// A dataset's schema changes without an object being rewritten: the objects written before read as
 /// the new schema through every read the dataset has -- rows, counts, extremes, key order, key
@@ -393,6 +397,32 @@ public sealed class DatasetSchemaEvolutionTests
         List<MeterNested> expected = [.. earlier.Select(row => new MeterNested(row.Key, row.Reading, row.Site, null)), .. later];
         Assert.Equal(expected, await dataset.Scan<MeterNested>().ToRecordsAsync(ct).ToListAsync(ct));
         Assert.Equal(1, await dataset.Scan<MeterNested>().Where(r => r.Detail.IsNotNull).CountAsync(ct));
+    }
+
+    [Fact]
+    public async Task AnAddedVariantColumnIsNullInTheObjectsWrittenBeforeIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, MeterV1.Schema, Options(clustered: true), ct);
+        List<MeterV1> earlier = Meters(0, 2);
+        await AppendAsync(dataset, earlier, ct);
+        await dataset.EvolveSchemaAsync(MeterTagged.Schema, cancellationToken: ct);
+        MeterTagged[] later = [new MeterTagged(-1, 7, "Paris", Variant.Object(("floor", Variant.From(3)))), new MeterTagged(-2, 8, "Lyon", null)];
+        await AppendAsync(dataset, later, ct);
+
+        List<MeterTagged> expected = [.. earlier.Select(row => new MeterTagged(row.Key, row.Reading, row.Site, null)), .. later];
+        Assert.Equal([.. expected.OrderBy(row => row.Key)], (await dataset.Scan<MeterTagged>().ToRecordsAsync(ct).ToListAsync(ct)).OrderBy(row => row.Key));
+        Assert.Equal(1, await dataset.Scan<MeterTagged>().Where(r => r.Tags["floor"].AsInt64().IsNotNull).CountAsync(ct));
+
+        // A compaction writes the earlier object's rows in the current schema, their variants null.
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 4 << 10 }, ct) is not null)
+        {
+        }
+
+        Assert.Equal(0, await EarlierObjectsAsync(dataset, ct));
+        Assert.Equal([.. expected.OrderBy(row => row.Key)], await dataset.Scan<MeterTagged>().ToRecordsAsync(ct).ToListAsync(ct));
+        Assert.True((await dataset.VerifyAsync(cancellationToken: ct)).Holds);
     }
 
     [Fact]

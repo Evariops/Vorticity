@@ -136,7 +136,7 @@ which is made for them.
 ## Reads in flight
 
 A file at a location is read as a file on disk is: the session's `MaxConcurrentReads` bounds the
-batches in flight, 16 by default, which also bounds the memory their reads hold, and each batch issues
+batches in flight, 128 by default, which also bounds the memory their reads hold, and each batch issues
 its coalesced ranges together. The store sends at most `StoreTransportOptions.MaxConnections` requests
 at once, 64 by default, and a request past them waits for a connection.
 

@@ -177,7 +177,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.CountAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.CountAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -193,7 +193,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.AnyAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.AnyAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -331,7 +331,7 @@ public ref struct FilterHandler
         {
             ClrShape shape = ClrShape.For<T>.Value;
             ToolPaths.RequireValue<T>(column);
-            ColumnSym target = new ColumnSym(new FieldExpr(column.Name), column.Type, null, null, -1, []);
+            ColumnSym target = new ColumnSym(new ColumnFieldExpr(column.Name), column.Type, null, null, -1, []);
             if (shape.Kind is ClrKind.Decimal or ClrKind.VortexDecimal or ClrKind.Integer128 or ClrKind.UInteger128 or ClrKind.BigInteger)
             {
                 // Refused here when it has more digits than the column keeps; the check of the

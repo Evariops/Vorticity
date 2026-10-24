@@ -19,7 +19,7 @@ internal static class PartitionFilter
     {
         switch (expr)
         {
-            case ComparisonExpr comparison when comparison.Field.GetType() == typeof(FieldExpr)
+            case ComparisonExpr comparison when comparison.Field is ColumnFieldExpr
                 && values.TryGetValue(comparison.Field.Path, out FilterLiteral value) && comparison.Value.Kind == value.Kind:
                 int order = Keys.KeyCursor.Compare(value, comparison.Value);
                 return comparison.Op switch
@@ -32,7 +32,7 @@ internal static class PartitionFilter
                     ComparisonOp.GreaterOrEqual => order >= 0,
                     _ => null,
                 };
-            case InExpr set when set.Field.GetType() == typeof(FieldExpr) && values.TryGetValue(set.Field.Path, out FilterLiteral member):
+            case InExpr set when set.Field is ColumnFieldExpr && values.TryGetValue(set.Field.Path, out FilterLiteral member):
                 bool found = false;
                 foreach (FilterLiteral candidate in set.Literals)
                 {
@@ -68,9 +68,9 @@ internal static class PartitionFilter
     {
         switch (expr)
         {
-            case ComparisonExpr comparison when comparison.Field.GetType() == typeof(FieldExpr) && key.PartitionPaths.Contains(comparison.Field.Path):
+            case ComparisonExpr comparison when comparison.Field is ColumnFieldExpr && key.PartitionPaths.Contains(comparison.Field.Path):
                 return;
-            case InExpr set when set.Field.GetType() == typeof(FieldExpr) && key.PartitionPaths.Contains(set.Field.Path):
+            case InExpr set when set.Field is ColumnFieldExpr && key.PartitionPaths.Contains(set.Field.Path):
                 return;
             case LogicalExpr logical:
                 RequireDecidable(logical.Left, key, parameter);

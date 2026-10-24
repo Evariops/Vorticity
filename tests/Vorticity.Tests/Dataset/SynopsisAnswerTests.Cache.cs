@@ -450,7 +450,7 @@ public sealed partial class SynopsisAnswerTests
 
                 // The tables' lists of chunks loaded, the regions they name are declared with them.
                 await dataset.LoadSynopsisListsAsync([(held.Entry, contents, null)], Ct);
-                foreach (IndexSegment region in SynopsisCacheReader.Declared(contents))
+                foreach (IndexSegment region in contents.Declared())
                 {
                     declared.Add(SynopsisCache.NameOf(held.Entry.Uid, region));
                 }

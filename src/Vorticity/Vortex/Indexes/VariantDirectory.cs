@@ -4,8 +4,6 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using ManagedCompressions.Zstd;
-using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
@@ -127,7 +125,7 @@ internal sealed class VariantDirectory
         List<PathEntry> entries = [];
         List<string> path = [];
         Walk(census.Root, shredding, slices, path, entries);
-        return new VariantDirectory(census.Rows, entries, slices?.Count ?? 0);
+        return new VariantDirectory(census.Rows, entries, slices?.Count ?? 0, partial: census.Partial);
     }
 
     private static void Walk(
@@ -298,7 +296,7 @@ internal sealed class VariantDirectory
     /// The least text above every text that starts with <paramref name="prefix"/>: the prefix up to its
     /// last byte below 255, that byte one more; null when every byte is 255.
     /// </summary>
-    private static byte[]? Above(ReadOnlySpan<byte> prefix)
+    internal static byte[]? Above(ReadOnlySpan<byte> prefix)
     {
         for (int i = prefix.Length - 1; i >= 0; i--)
         {
@@ -322,13 +320,14 @@ internal sealed class VariantDirectory
     /// <param name="filter">The scan's predicate.</param>
     /// <param name="directories">The directory of each variant column, by its name; a column without one may match anything.</param>
     /// <param name="slice">The one slice of the object asked about, by the bits its paths carry; -1 for the whole object.</param>
-    internal static bool MayMatch(VortexExpr filter, IReadOnlyDictionary<string, VariantDirectory> directories, int slice = -1) => filter switch
+    internal static bool MayMatch(VortexExpr filter, IReadOnlyDictionary<string, VariantDirectory> directories, int slice = -1) =>
+        VariantFilters.MayMatch(filter, new FencedJudge(directories, slice));
+
+    /// <summary>The directories' answer for one fenced predicate.</summary>
+    private readonly struct FencedJudge(IReadOnlyDictionary<string, VariantDirectory> directories, int slice) : IFencedJudge
     {
-        LogicalExpr { IsAnd: true } both => MayMatch(both.Left, directories, slice) && MayMatch(both.Right, directories, slice),
-        LogicalExpr either => MayMatch(either.Left, directories, slice) || MayMatch(either.Right, directories, slice),
-        VariantFilterExpr fence => MayMatchFenced(fence.Inner, directories, slice),
-        _ => true,
-    };
+        public bool MayMatch(VortexExpr predicate) => MayMatchFenced(predicate, directories, slice);
+    }
 
     private static bool MayMatchFenced(VortexExpr predicate, IReadOnlyDictionary<string, VariantDirectory> directories, int slice)
     {
@@ -530,37 +529,7 @@ internal sealed class VariantDirectory
     };
 
     /// <summary>The region: behind a version byte and the body's length, the body as one zstd frame.</summary>
-    internal byte[] ToBytes()
-    {
-        byte[] body = Body();
-        byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(body.Length)];
-        ZstdCompressor encoder = Writing.ZstdEncoders.Rent();
-        int written;
-        try
-        {
-            if (encoder.Compress(body, frame, out _, out written) != System.Buffers.OperationStatus.Done)
-            {
-                throw new InvalidOperationException("A path directory did not compress into the bound zstd gives it.");
-            }
-        }
-        finally
-        {
-            Writing.ZstdEncoders.Return(encoder);
-        }
-
-        ProtoWriter writer = new ProtoWriter();
-        try
-        {
-            writer.WriteVarint(Version);
-            writer.WriteVarint((ulong)body.Length);
-            writer.WriteRawBytes(frame.AsSpan(0, written));
-            return writer.WrittenSpan.ToArray();
-        }
-        finally
-        {
-            writer.Dispose();
-        }
-    }
+    internal byte[] ToBytes() => ZstdRegion.Encode(Version, Body());
 
     /// <summary>The rows, then each entry: its keys, class, count, place, bounds and texts.</summary>
     private byte[] Body()
@@ -626,41 +595,7 @@ internal sealed class VariantDirectory
     /// </remarks>
     internal static VariantDirectory? From(ReadOnlySpan<byte> bytes, IReadOnlyList<byte[][]>? wanted)
     {
-        byte[] body;
-        int length;
-        try
-        {
-            ProtoReader header = new ProtoReader(bytes);
-            if (header.ReadVarint() != Version)
-            {
-                return null;
-            }
-
-            // A body of more than a thousand times its frame is not one this writer made.
-            ulong declared = header.ReadVarint();
-            ReadOnlySpan<byte> frame = bytes[(bytes.Length - header.Remaining)..];
-            if (declared > (ulong)frame.Length * 1_000 || declared > int.MaxValue)
-            {
-                return null;
-            }
-
-            length = (int)declared;
-            body = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
-            ZstdDecompressor decoder = ZstdDecoders.Rent();
-            try
-            {
-                if (decoder.Decompress(frame, body.AsSpan(0, length), out _, out int produced) != System.Buffers.OperationStatus.Done || produced != length)
-                {
-                    System.Buffers.ArrayPool<byte>.Shared.Return(body);
-                    return null;
-                }
-            }
-            finally
-            {
-                ZstdDecoders.Return(decoder);
-            }
-        }
-        catch (VortexFormatException)
+        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
         {
             return null;
         }

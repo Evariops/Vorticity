@@ -242,7 +242,7 @@ public sealed partial class IdentifierPostingsTests
             HashSet<string> data = new HashSet<string>(StringComparer.Ordinal);
             foreach (ObjectEntry hour in hours)
             {
-                foreach (IndexSegment region in SynopsisCacheReader.Declared(SynopsisContents.From(hour.Synopsis.Span)!))
+                foreach (IndexSegment region in SynopsisContents.From(hour.Synopsis.Span)!.Declared())
                 {
                     declared.Add(SynopsisCache.NameOf(hour.Uid, region));
                 }
@@ -433,6 +433,65 @@ public sealed partial class IdentifierPostingsTests
         }
     }
 
+    /// <summary>
+    /// An identifier whose column a change of the schema renames, then drops: the appends that follow are written, the
+    /// column carries no postings under its new name until that name is added as an identifier, and every id is found in
+    /// the objects of before and after the rename; once the column is dropped, appends are written still.
+    /// </summary>
+    [Fact]
+    public async Task AnIdentifierWhoseColumnIsRenamedOrDroppedLeavesTheWritesAlone()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Request.At)],
+            Identifiers = [nameof(Request.RequestId)],
+            LookupFooterBytes = 0,
+        }, Ct);
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Request>([.. Enumerable.Range(0, 100).Select(i => new Request(Noon.AddSeconds(i), $"r{i:D3}", 200))], Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        await dataset.EvolveSchemaAsync(Renamed.Schema, new Dictionary<string, string> { [nameof(Renamed.Id)] = nameof(Request.RequestId) }, Ct);
+        Renamed[] after = [.. Enumerable.Range(100, 100).Select(i => new Renamed(Noon.AddSeconds(i), $"r{i:D3}", 200))];
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Renamed>(after[..50], Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        await dataset.AddIdentifiersAsync([nameof(Renamed.Id)], Ct);
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Renamed>(after[50..], Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        List<(bool OnRequestId, bool OnId)> postings = [];
+        await foreach (TreeEntry leaf in dataset.Levels[0].EnumerateAsync(dataset.Pages, Ct))
+        {
+            ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
+            postings.Add((await PostingsAsync(dataset, entry, nameof(Request.RequestId)), await PostingsAsync(dataset, entry, nameof(Renamed.Id))));
+        }
+
+        Assert.Equal([(true, false), (false, false), (false, true)], postings);
+        foreach (string id in new[] { "r007", "r120", "r170" })
+        {
+            Assert.Equal([id], (await dataset.Scan<Renamed>().Where(r => r.Id == id).ToRecordsAsync(Ct).ToListAsync(Ct)).Select(r => r.Id));
+        }
+
+        await dataset.EvolveSchemaAsync(Slim.Schema, cancellationToken: Ct);
+        await using (ObjectDraft draft = dataset.StartObject())
+        {
+            await draft.Writer.WriteAsync<Slim>([new Slim(Noon.AddSeconds(300), 404)], Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        Assert.Equal(201, await dataset.Scan<Slim>().CountAsync(Ct));
+    }
+
     /// <summary>The objects of <paramref name="level"/>, each checked to carry hashed postings on the request id; how many.</summary>
     private static async Task<int> WithPostingsAsync(VortexDataset dataset, int level)
     {
@@ -457,4 +516,10 @@ public sealed partial class IdentifierPostingsTests
 
     [VortexRecord]
     public partial record struct Visit(DateTimeOffset At, Variant Attributes);
+
+    [VortexRecord]
+    public partial record struct Renamed(DateTimeOffset At, string Id, long Status);
+
+    [VortexRecord]
+    public partial record struct Slim(DateTimeOffset At, long Status);
 }

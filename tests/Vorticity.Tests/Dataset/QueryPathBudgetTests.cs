@@ -59,21 +59,29 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// chunks and columns, an object 17.5 KB lighter: an open reads the last 64 KB from an offset aligned on 64 bytes,
     /// up to 63 bytes more or less with the file's length, and five paths read 72 more over their four objects. The
     /// requests then fell back the same day, and those bytes with them: an entry keeps the chunks of the tables whose
-    /// lists would take 512 bytes or less, as all of these hours' do.
+    /// lists would take 512 bytes or less, as all of these hours' do. An answer then grew by a field, the values of
+    /// identifiers it takes for absent, and the path at eight lanes, which makes one for each lane's part, rose from
+    /// 27,288 bytes to 27,376 alone, past its ceiling, set again 2 % above. A part of an object that one slice its window
+    /// cuts holds then read that edge by the object's chunk directories rather than by a scan of its rows, which opened the
+    /// object: the unaligned window rose from 81,248 bytes to 81,648, its ceiling set again 2 % above, and the same window
+    /// at eight lanes, whose lanes read their shares of an edge so, was given ceilings. The small objects a needle reads as
+    /// rows were then read ahead together, the rows each keeps copied into batches of its own: the rows of one id rose
+    /// past their ceiling of 60,864 bytes to 63,496, the ceiling set again 2 % above.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["synopses: count by service"] = new(4, 6640, 0, 0, 25152),
-        ["synopses: count by service, at eight lanes"] = new(4, 6640, 0, 0, 27328),
+        ["synopses: count by service, at eight lanes"] = new(4, 6640, 0, 0, 27968),
         ["synopses: count by service and hour"] = new(4, 6640, 0, 0, 29888),
         ["synopses: by minute, the last hour, under a predicate"] = new(3, 101020, 2, 35424, 61440),
-        ["synopses: an unaligned window"] = new(7, 107200, 2, 66728, 81280),
+        ["synopses: an unaligned window"] = new(7, 107200, 2, 66728, 83280),
+        ["synopses: an unaligned window, at eight lanes"] = new(7, 107200, 2, 66728, 95392),
         ["synopses: every row but one id"] = new(8, 297122, 4, 34768, 54528),
         ["synopses: measures by region and hour"] = new(4, 3872, 0, 0, 41664),
         ["synopses: count by route, a shredded path"] = new(8, 268256, 4, 5902, 65216),
         ["rows: count by service and hour"] = new(8, 392866, 4, 130512, 43520),
         ["rows: count by route, a shredded path"] = new(8, 268256, 4, 5902, 58816),
-        ["rows: the rows of one id"] = new(6, 335730, 2, 73408, 60864),
+        ["rows: the rows of one id"] = new(6, 335730, 2, 73408, 64768),
     };
 
     private readonly Fixture _fixture;

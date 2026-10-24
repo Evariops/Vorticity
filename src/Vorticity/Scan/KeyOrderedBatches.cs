@@ -750,6 +750,8 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             {
                 while (_held.Claim(context.Segments, ticket, waiter))
                 {
+                    await _held.ReadOwnAsync(context.Segments, ticket, _scan.File.Segments, context.OwnSegments(), _scan.Metrics, _token)
+                        .ConfigureAwait(false);
                     await waiter!.ReadByOthersAsync().ConfigureAwait(false);
                 }
 

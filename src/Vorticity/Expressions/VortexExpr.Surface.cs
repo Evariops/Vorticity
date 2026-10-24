@@ -50,7 +50,7 @@ public abstract class VortexExpr
     public static VortexExpr In<T>(string column, params ReadOnlySpan<T> values)
     {
         ArgumentException.ThrowIfNullOrEmpty(column);
-        return new TypedInExpr<T>(new FieldExpr(column), values.ToArray());
+        return new TypedInExpr<T>(new ColumnFieldExpr(column), values.ToArray());
     }
 
     /// <summary>The rows both filters keep.</summary>

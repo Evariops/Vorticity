@@ -2128,6 +2128,7 @@ Vorticity: static class Vorticity.SymExtensions.<G>$EAA1A4811C4615E6168DDA7467CF
 Vorticity:     method void <Extension>$(Sym<Nullable<long>>)
 Vorticity: sealed class Vorticity.SynopsisCache : IDisposable
 Vorticity:     ctor SynopsisCache(string, long)
+Vorticity:     method SynopsisCache OpenShared(string, long)
 Vorticity:     method void Dispose()
 Vorticity:     property long CapacityBytes { get; }
 Vorticity:     property long HeldBytes { get; }
@@ -2800,6 +2801,7 @@ Vorticity.Dataset:     property int Fanout { get; init; }
 Vorticity.Dataset:     property int LevelZeroCeiling { get; init; }
 Vorticity.Dataset:     property int MaxFragments { get; init; }
 Vorticity.Dataset:     property int MaxLevels { get; init; }
+Vorticity.Dataset:     property long JoinedPeriodBytes { get; init; }
 Vorticity.Dataset:     property long MaxObjectBytes { get; init; }
 Vorticity.Dataset:     property long TargetBytesAtLevelOne { get; init; }
 Vorticity.Dataset: enum Vorticity.Dataset.CompactionPick
@@ -2873,6 +2875,7 @@ Vorticity.Dataset: enum Vorticity.Dataset.CompactionTrigger
 Vorticity.Dataset:     const CompactionTrigger Erasure = 5
 Vorticity.Dataset:     const CompactionTrigger Fragments = 3
 Vorticity.Dataset:     const CompactionTrigger FreshMerge = 8
+Vorticity.Dataset:     const CompactionTrigger Join = 10
 Vorticity.Dataset:     const CompactionTrigger LateCeiling = 7
 Vorticity.Dataset:     const CompactionTrigger LevelSize = 2
 Vorticity.Dataset:     const CompactionTrigger LevelZeroCeiling = 1
@@ -2927,8 +2930,10 @@ Vorticity.Dataset:     method bool op_Equality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method bool op_Inequality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property IReadOnlyList<IReadOnlyList<string>> SynopsisGroupings { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> Identifiers { get; init; }
+Vorticity.Dataset:     property IReadOnlyList<string> ShreddedPaths { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> SummaryColumns { get; init; }
 Vorticity.Dataset:     property Nullable<TimeSpan> ErasureDelay { get; init; }
 Vorticity.Dataset:     property PeriodOptions Periods { get; init; }
@@ -2938,6 +2943,7 @@ Vorticity.Dataset:     property VortexSession Session { get; init; }
 Vorticity.Dataset:     property VortexWriteOptions Write { get; init; }
 Vorticity.Dataset:     property bool Encrypted { get; init; }
 Vorticity.Dataset:     property bool LockedStore { get; init; }
+Vorticity.Dataset:     property bool ShredOnAppend { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
 Vorticity.Dataset:     property int MaxPartitionValues { get; init; }
@@ -2976,6 +2982,7 @@ Vorticity.Dataset:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.Dataset:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.Dataset:     property bool Durable { get; init; }
+Vorticity.Dataset:     property int HeldFiles { get; init; }
 Vorticity.Dataset:     property string Root { get; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.IndexingOptions : IEquatable<IndexingOptions>
 Vorticity.Dataset:     ctor IndexingOptions()
@@ -3176,6 +3183,7 @@ Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, Dataset
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, ulong, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<long> WarmAsync(VortexExpr, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<long> WarmAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ulong> AddIdentifiersAsync(IReadOnlyList<string>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(IAsyncEnumerable<RecordBatch>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(ObjectDraft, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, IReadOnlyDictionary<string, string> = default, CancellationToken = default)
@@ -3183,6 +3191,7 @@ Vorticity.Dataset:     method ValueTask<ulong> ForgetSourcesAsync(IReadOnlyList<
 Vorticity.Dataset:     method ValueTask<ulong> ImportAsync(string, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RefreshAsync(CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RekeyAsync(CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ulong> SetShreddedPathsAsync(IReadOnlyList<string>, CancellationToken = default)
 Vorticity.Dataset:     method bool MayMatch<TRecord>(Func<Probe<TRecord>, Predicate>)
 Vorticity.Dataset:     method ulong SourceOffset(string)
 Vorticity.Dataset:     property Exception LastInlineCompactionFailure { get; }

@@ -268,7 +268,24 @@ internal sealed class LayoutTree
 
     /// <summary>The root of column <paramref name="slot"/>'s tree, parsed when first asked for.</summary>
     internal LayoutNode Column(int slot) =>
-        new LayoutNode(Volatile.Read(ref _columns!.Trees[slot]) ?? ParseColumn(slot), 0);
+        new LayoutNode(Volatile.Read(ref _columns!.Trees[slot]) ?? ParseColumnOnce(slot), 0);
+
+    /// <summary>
+    /// Parses column <paramref name="slot"/> unless a walk is parsing it: that walk's tree, once published, is the one taken.
+    /// </summary>
+    /// <remarks>
+    /// The walks of a file's lanes ask for its columns at once. Each parsed a column of its own, and all but the first
+    /// went to the collector, a large array each for a column of a day's object: nine gigabytes of them in twenty seconds
+    /// of a question read cold at 32 lanes. One parse a column at a time, the others waiting for it, costs them what they
+    /// would have spent parsing; two columns still parse side by side.
+    /// </remarks>
+    private LayoutTree ParseColumnOnce(int slot)
+    {
+        lock (_columns!.ParsingGate(slot))
+        {
+            return Volatile.Read(ref _columns.Trees[slot]) ?? ParseColumn(slot);
+        }
+    }
 
     /// <summary>Parses every column not yet parsed, in order.</summary>
     private void ParseColumns()
@@ -844,6 +861,28 @@ internal sealed class LayoutTree
 
         /// <summary>Taken to publish a column, or a zone table one derived: its numbering and the budgets it spent are the tree's.</summary>
         internal readonly Lock Gate = new();
+
+        /// <summary>The locks the columns' parses are taken under, a column's chosen by its tree and its slot.</summary>
+        private static readonly object[] ParsingStripes = Stripes(64);
+
+        /// <summary>
+        /// The lock the parse of column <paramref name="slot"/> is taken under, the same for every walk: one of
+        /// <see cref="ParsingStripes"/>, which every tree shares, so that opening a file allocates no lock of its own. A tree's
+        /// columns take stripes in a row; another tree's column on the same stripe waits for a parse it did not need to.
+        /// </summary>
+        internal object ParsingGate(int slot) =>
+            ParsingStripes[(int)((uint)(RuntimeHelpers.GetHashCode(this) + slot) % (uint)ParsingStripes.Length)];
+
+        private static object[] Stripes(int count)
+        {
+            object[] stripes = new object[count];
+            for (int i = 0; i < count; i++)
+            {
+                stripes[i] = new object();
+            }
+
+            return stripes;
+        }
 
         internal readonly int SegmentCount = segmentCount;
 

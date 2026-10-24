@@ -141,7 +141,7 @@ internal abstract class StreamScanSource : ScanSource
         try
         {
             IAsyncEnumerator<RecordBatch> batches = Stream(new ScanSpec(), ReadsColumns ? [column] : null, new ScanCounters(), cancellationToken);
-            MemoryKeySource source = await MemoryKeySource.ReadAsync(batches, new FieldExpr(path), kind, cancellationToken, memory).ConfigureAwait(false);
+            MemoryKeySource source = await MemoryKeySource.ReadAsync(batches, new ColumnFieldExpr(path), kind, cancellationToken, memory).ConfigureAwait(false);
             return new KeyCursor(source, distinct);
         }
         catch
@@ -302,7 +302,7 @@ internal abstract class StreamScanSource : ScanSource
                     delivered[c] = c;
                 }
 
-                _sort = new ExternalSort(session, schema, [new SortKey(new FieldExpr(_spec.OrderPath!), type, _spec.Descending)], delivered, _memory, GroupBatches.BatchRows);
+                _sort = new ExternalSort(session, schema, [new SortKey(new ColumnFieldExpr(_spec.OrderPath!), type, _spec.Descending)], delivered, _memory, GroupBatches.BatchRows);
                 while (await _kept.MoveNextAsync().ConfigureAwait(false))
                 {
                     await _sort.AddAsync(_kept.Current, _cancellationToken).ConfigureAwait(false);

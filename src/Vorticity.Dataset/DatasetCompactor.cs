@@ -99,6 +99,15 @@ internal readonly record struct LoadedPeriod(long Period, long Rows, long Bytes,
 /// one, a concatenation otherwise.</summary>
 internal static class DatasetCompactor
 {
+    /// <summary>
+    /// The least rows the slices of a job of periods may aim at for its objects to be written in one pass: from it on, the
+    /// first slice of a stream, which holds the rows it judges its order from, is the first unit a count of every row cuts at
+    /// any steady pace, a unit of the width a count chooses holding more than a thirtieth of twice the target, the widths
+    /// being sixty times apart at most. Slices of fewer rows, which a stream would hold together in its first slice until it
+    /// judged its order, two passes cut.
+    /// </summary>
+    private const long OnePassTargetRows = 32L * SortedSlices.JudgedRows;
+
     /// <summary>Reads the job's inputs and replaces them by the objects it writes; the dataset moves
     /// to the version the commit creates.</summary>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
@@ -244,11 +253,10 @@ internal static class DatasetCompactor
         {
             Plans = planner?.Plans(),
             Streamed = planner is not null ? null : new StreamPlan(
-                calendar.Unit,
-                SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers),
+                calendar,
+                SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers),
                 dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows,
-                period.ExpectedRows,
-                TimeSlicer.SecondsBetween(period.Period, next, calendar.Unit)),
+                period.ExpectedRows),
             InstantPath = key.InstantPath,
             Timings = timings,
             Hold = hold,
@@ -392,15 +400,32 @@ internal static class DatasetCompactor
         // how objects of an earlier schema come to hold the current one.
         DatasetSchema schema = dataset.Snapshot.Schema;
 
-        // A job of a dataset of periods writes its objects in sorted slices: a first pass over its rows
-        // cuts each object's slices, picks the order inside them and the paths its variant columns
-        // shred, the second sorts and writes them. The instant must be a top-level column, which
-        // slices are declared on. Appends write neither slices nor shredded variants.
+        // A job of a dataset of periods writes its objects in sorted slices. Of a schema with a variant
+        // column, or slices of fewer rows than a stream cuts as a count does, a first pass over its rows
+        // cuts each object's slices, picks the order inside them and the paths its variant columns shred,
+        // the second sorts and writes them; of another, each object is written in one pass, as a load
+        // writes it, its slices cut as its rows come and its order judged on its first slice's. The
+        // instant must be a top-level column, which slices are declared on. Appends write neither slices
+        // nor shredded variants.
         IReadOnlyDictionary<(int Level, long Period), ObjectPlan>? plans = null;
-        if (merge && job.Cut is not null && !key!.InstantPath.Contains('.'))
+        StreamPlan? streamed = null;
+        long target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
+        if (merge && job.Cut is { } cut && !key!.InstantPath.Contains('.'))
         {
-            using Activity? planning = DatasetTelemetry.StartCompactionPass("plan");
-            plans = await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false);
+            if (VariantColumns(schema.DType).Length > 0 || target < OnePassTargetRows)
+            {
+                using Activity? planning = DatasetTelemetry.StartCompactionPass("plan");
+                plans = await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // A seal's one object holds every row the job reads; the objects of another share them out.
+                streamed = new StreamPlan(
+                    cut.Calendar, SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers), target, cut.Slices ? job.Rows : 0)
+                {
+                    Span = cut.Span,
+                };
+            }
         }
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job
@@ -413,11 +438,12 @@ internal static class DatasetCompactor
             for (int doublings = 0; ; doublings++)
             {
                 outputs = new ObjectStream(
-                    dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null, rowBound: job.Rows, job.ToLevel,
-                    ObjectBound.Of(job.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                    dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null && streamed is null, rowBound: job.Rows,
+                    job.ToLevel, ObjectBound.Of(job.Bytes, doublings, dataset.Options.BoundOutPerIn))
                 {
                     Plans = plans,
-                    InstantPath = plans is null ? null : key!.InstantPath,
+                    Streamed = streamed,
+                    InstantPath = plans is null && streamed is null ? null : key!.InstantPath,
                     Partition = key?.SharedPartition(job.Inputs.Select(static input => input.Entry.Summaries)),
                 };
                 try
@@ -477,6 +503,7 @@ internal static class DatasetCompactor
             Expected = read,
             Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
             Range = job.Range,
+            Joins = job.Cut is { Span: { } span } joining && joining.Calendar.Next(span.Start) < span.End,
         };
 
         // A seal weighs the period it wrote, once every partition sealed it, and asks in the same commit for
@@ -647,21 +674,23 @@ internal static class DatasetCompactor
 
     /// <summary>
     /// An input's rows, in its own order or in key order along <paramref name="paths"/>, as
-    /// <paramref name="schema"/>'s columns: its own scan, each batch reshaped when it was written
-    /// under another schema.
+    /// <paramref name="schema"/>'s columns, or those of them <paramref name="fields"/> names: its own scan, each batch
+    /// reshaped when it was written under another schema.
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
-        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken, bool wide = false)
+        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken, bool wide = false,
+        int[]? fields = null)
     {
         VortexFile file = lease.File;
+        FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            return LiveRowsAsync(file, file.ScanBuilder, entry, paths, wide, cancellationToken);
+            return LiveRowsAsync(file, fields is null ? file.ScanBuilder : () => file.ScanBuilder().ProjectMask(projection), entry, paths, wide, cancellationToken);
         }
 
         // The clustering key keeps its columns under every schema, so a key-ordered read of an
         // earlier object names them as the dataset does.
-        ObjectReadPlan read = columns.Read(null, FieldMask.All);
+        ObjectReadPlan read = columns.Read(null, projection);
         return ObjectColumns.ReshapeAsync(
             LiveRowsAsync(file, () => file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, paths, wide, cancellationToken),
             read.Shape,
@@ -675,9 +704,9 @@ internal static class DatasetCompactor
     /// The entries a key-ordered read of an input walks at once: an append holds its rows mostly in time order, some of
     /// them a few seconds late, which a window of the file's zones reads ahead of itself split after split, once for
     /// each window that holds a few of them. On 3 × 10⁷ requests at the design's rate, two in a hundred a few seconds
-    /// late and one in ten thousand up to an hour, a window of 2^18 entries reads them in 6.8 s instead of 13.6 s
-    /// (2.8 s without late rows); 2^20 reads the objects of sorted slices half again slower, its windows past their
-    /// slices.
+    /// late and one in ten thousand up to an hour, a window of 2^18 entries reads them in 6.8 s, one of the zones'
+    /// 8 192 in 13.6 s (2.8 s without late rows); 2^20 reads the objects of sorted slices half again slower, its
+    /// windows past their slices (<c>vortex-queries --micro lifecycle</c>).
     /// </summary>
     private const int KeyWindowRows = 1 << 18;
 
@@ -804,7 +833,12 @@ internal static class DatasetCompactor
     /// so an input opens only once it could hold the next row; the job's own order breaks ties among
     /// inputs holding the same key.
     /// </summary>
-    private static KeyOrderedMerge InputsMerged(VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
+    /// <remarks>
+    /// With <paramref name="fields"/>, each input reads those fields of <paramref name="schema"/> alone, the clustering
+    /// key's among them, and the rows merged hold them alone.
+    /// </remarks>
+    private static KeyOrderedMerge InputsMerged(
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken, int[]? fields = null)
     {
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         for (int i = 0; i < job.Inputs.Count; i++)
@@ -821,7 +855,7 @@ internal static class DatasetCompactor
             key.Paths,
             descending: false,
             rankedTies: false,
-            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken, wide: job.Cut is not null),
+            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken, wide: job.Cut is not null, fields),
             opened: null,
             cancellationToken);
     }
@@ -834,16 +868,18 @@ internal static class DatasetCompactor
     /// its paths (<see cref="ShreddingChoice"/>), before a row is written.
     /// </summary>
     /// <remarks>
-    /// The pass reads the inputs whole a second time: the instant and the candidate columns alone would
-    /// do, read through a projection, which a later change takes.
+    /// The pass reads the columns it counts alone: the clustering key, the candidate columns and the variant columns,
+    /// through a projection of each input, where it read every column, the identifiers' and the texts' that no order
+    /// takes among them, and decoded them all a second time.
     /// </remarks>
     private static async ValueTask<IReadOnlyDictionary<(int Level, long Period), ObjectPlan>> PlanSlicesAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
     {
         PeriodCut cut = job.Cut!;
-        PeriodPlanner planner = new PeriodPlanner(dataset, schema, key, cut.Unit);
+        int[]? counted = PeriodPlanner.Counted(dataset, schema, key);
+        PeriodPlanner planner = new PeriodPlanner(dataset, schema, key, cut.Unit, counted);
         List<Cut> cuts = [];
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken, counted);
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
@@ -878,19 +914,51 @@ internal static class DatasetCompactor
         private readonly long _target;
         private readonly int[] _candidates;
         private readonly int[] _variants;
+
+        // The candidates' and the variant columns' places in the rows the planner is given: the schema's own, or their
+        // places among the fields a projection of the rows keeps.
+        private readonly int[] _candidatesRead;
+        private readonly int[] _variantsRead;
         private readonly int _textBound;
         private readonly Dictionary<(int Level, long Period), (SecondCounts Seconds, CardinalitySketch[] Sketches, PathCensus[] Paths)> _tallies = [];
 
-        internal PeriodPlanner(VortexDataset dataset, DatasetSchema schema, ClusteringKey key, TimeUnit unit)
+        /// <summary>
+        /// A planner of the objects of <paramref name="schema"/> a job or a load writes, given rows that hold the fields
+        /// <paramref name="fields"/> names alone, ascending, a projection's (<see cref="Counted"/>), or every field.
+        /// </summary>
+        internal PeriodPlanner(VortexDataset dataset, DatasetSchema schema, ClusteringKey key, TimeUnit unit, int[]? fields = null)
         {
             _dataset = dataset;
             _schema = schema;
             _instant = key.InstantPath;
             _unit = unit;
             _target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
-            _candidates = SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers);
+            _candidates = SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers);
             _variants = VariantColumns(schema.DType);
             _textBound = dataset.Options.Write.StringBoundBytes;
+            _candidatesRead = fields is null ? _candidates : [.. _candidates.Select(field => Array.BinarySearch(fields, field))];
+            _variantsRead = fields is null ? _variants : [.. _variants.Select(field => Array.BinarySearch(fields, field))];
+        }
+
+        /// <summary>
+        /// The fields of <paramref name="schema"/> the planner counts, ascending: the clustering key's, the candidates and the
+        /// variant columns, what a seal's first pass reads of its inputs; null, every field, for a key on a nested column.
+        /// </summary>
+        internal static int[]? Counted(VortexDataset dataset, DatasetSchema schema, ClusteringKey key)
+        {
+            SortedSet<int> fields = [.. SynopsisOrder.Candidates(schema.DType, key, schema.Identifiers), .. VariantColumns(schema.DType)];
+            foreach (string path in key.Paths)
+            {
+                int field = schema.DType.IndexOfField(path);
+                if (field < 0)
+                {
+                    return null;
+                }
+
+                fields.Add(field);
+            }
+
+            return [.. fields];
         }
 
         /// <summary>Counts the rows of <paramref name="part"/>, every one of which goes to the object of <paramref name="level"/> and <paramref name="period"/>.</summary>
@@ -904,10 +972,10 @@ internal static class DatasetCompactor
 
             ReadOnlySpan<long> instants = ColumnPath.Instants(part, _instant);
             tally.Seconds.Add(instants);
-            SynopsisOrder.Count(part, _candidates, tally.Sketches);
+            SynopsisOrder.Count(part, _candidatesRead, tally.Sketches);
             for (int v = 0; v < _variants.Length; v++)
             {
-                tally.Paths[v].Add(part, _variants[v], instants);
+                tally.Paths[v].Add(part, _variantsRead[v], instants);
             }
         }
 
@@ -942,7 +1010,7 @@ internal static class DatasetCompactor
                 for (int v = 0; v < _variants.Length; v++)
                 {
                     string name = _schema.DType.GetFieldName(_variants[v]);
-                    VariantShredding? chosen = ShreddingChoice.Choose(paths[v], required: IdentifierKeys(_dataset, _schema.DType, _variants[v]));
+                    VariantShredding? chosen = ShreddingChoice.Choose(paths[v], required: IdentifierKeys(_schema, _variants[v]));
                     if (chosen is not null)
                     {
                         shredded = shredded.SetItem(name, chosen);
@@ -1047,15 +1115,24 @@ internal static class DatasetCompactor
     private const long SmallestTableBytes = 1_452;
 
     /// <summary>
-    /// The keys of the variant column <paramref name="field"/> the dataset declares as identifiers, each
-    /// with the class it is read in, which every object shreds wherever a row holds one; null for none.
+    /// The keys of the variant column <paramref name="field"/> the dataset declares as identifiers or as shredded paths,
+    /// each with the class it is read in, which every object shreds wherever a row holds one; null for none. A key
+    /// declared both ways keeps its identifier's class, the one its index holds.
     /// </summary>
-    private static Dictionary<string, VariantClass>? IdentifierKeys(VortexDataset dataset, Vorticity.Types.DType schema, int field)
+    private static Dictionary<string, VariantClass>? IdentifierKeys(DatasetSchema schema, int field)
     {
         Dictionary<string, VariantClass>? keys = null;
-        foreach (string identifier in dataset.Options.Identifiers ?? [])
+        foreach (string declared in schema.ShreddedPaths)
         {
-            if (VortexDataset.IdentifierPath(identifier, schema) is { } path && path.Field == field)
+            if (VortexDataset.ShreddedPath(declared, schema.DType) is { } path && path.Field == field)
+            {
+                (keys ??= new Dictionary<string, VariantClass>(StringComparer.Ordinal))[path.Key] = path.Class;
+            }
+        }
+
+        foreach (string identifier in schema.Identifiers)
+        {
+            if (VortexDataset.IdentifierPath(identifier, schema.DType) is { } path && path.Field == field)
             {
                 (keys ??= new Dictionary<string, VariantClass>(StringComparer.Ordinal))[path.Key] = path.Class;
             }
@@ -1090,11 +1167,21 @@ internal static class DatasetCompactor
         ImmutableDictionary<string, VariantDirectory> Directories);
 
     /// <summary>
-    /// What a load writes an object of one pass with, its slices cut as its rows come: the unit of its instant, the columns
-    /// that may be its synopsis columns, the rows a slice aims at, the rows the object is expected to hold, 0 when unknown,
-    /// and the seconds its period spans.
+    /// What a load or a job writes an object of one pass with, its slices cut as its rows come: the calendar of its periods,
+    /// the columns that may be its synopsis columns, the rows a slice aims at, and the rows the object is expected to hold,
+    /// 0 when unknown.
     /// </summary>
-    internal sealed record StreamPlan(TimeUnit Unit, int[] Candidates, long Target, long ExpectedRows, double PeriodSeconds);
+    internal sealed record StreamPlan(PeriodCalendar Calendar, int[] Candidates, long Target, long ExpectedRows)
+    {
+        /// <summary>The unit of the instant.</summary>
+        internal TimeUnit Unit => Calendar.Unit;
+
+        /// <summary>The span of the one object a join writes (<see cref="PeriodCut.Span"/>); null for an object per period.</summary>
+        internal (long Start, long End)? Span { get; init; }
+
+        /// <summary>The seconds the object from <paramref name="period"/> spans: its period's, or a join's.</summary>
+        internal double SecondsOf(long period) => TimeSlicer.SecondsBetween(period, Span?.End ?? Calendar.Next(period), Calendar.Unit);
+    }
 
     /// <summary>
     /// The change of period length the load of the period a seal wrote calls for, or null: the bytes and
@@ -1156,8 +1243,8 @@ internal static class DatasetCompactor
     private readonly record struct Cut(int End, int Level, long Period);
 
     /// <summary>
-    /// Cuts a run, sorted on its instant, into the parts that go to one level and one period, into
-    /// <paramref name="cuts"/>.
+    /// Cuts a run, sorted on its instant, into the parts that go to one level and one period, or to the one object
+    /// over a join's span (<see cref="PeriodCut.Span"/>), into <paramref name="cuts"/>.
     /// </summary>
     private static void CutRun(RecordBatch run, string instant, PeriodCut cut, int to, List<Cut> cuts)
     {
@@ -1168,14 +1255,21 @@ internal static class DatasetCompactor
         {
             long first = instants[at];
             int level = cut.LevelOf(first, to);
-            long period = cut.Calendar.Floor(first);
-            long stop = cut.Calendar.Next(period);
+
+            // A join, or a seal of a joined object, writes one object over the periods it spans.
+            long period = cut.Span?.Start ?? cut.Calendar.Floor(first);
+            long stop = cut.Span?.End ?? cut.Calendar.Next(period);
             if (level == PeriodLevels.Late && cut.Exit && cut.FreshAfter is { } after && after < long.MaxValue)
             {
                 stop = Math.Min(stop, after + 1);
             }
 
             int end = at + LowerBound(instants[at..], stop);
+            if (end == at)
+            {
+                throw new InvalidOperationException($"A row of instant {first} lies past the end, at {stop}, of the span its job writes.");
+            }
+
             cuts.Add(new Cut(end, level, period));
             at = end;
         }
@@ -1360,7 +1454,10 @@ internal static class DatasetCompactor
                         // own, their chunks held by the writer.
                         _synopsis = new SynopsisTables(
                             _schema.DType, table.Unit, SynopsisTables.Measures(_schema.DType, instant), _draft.Writer, table.Paths, table.Slices,
-                            _dataset.Options.SynopsisChunking);
+                            _dataset.Options.SynopsisChunking)
+                        {
+                            Groupings = _dataset.Options.SynopsisGroupings,
+                        };
                         _slices = new SliceWriter(_draft.Writer, _synopsis, _dataset.Session.WriteLanes, Timings);
                         _declare = true;
                     }
@@ -1393,7 +1490,8 @@ internal static class DatasetCompactor
             double rows = Math.Max(TimeSlicer.RowsAt(pace, TimeSlicer.WidthAt(pace, streamed.Target)), SortedSlices.JudgedRows);
             _stream = new SliceStream(streamed.Unit, streamed.Target, least: SortedSlices.JudgedRows);
             _streamed = streamed;
-            _draft = _dataset.StartObjectUnder(_schema, _inKeyOrder, streamed.ExpectedRows, sliced: true, byteBound: _byteBound);
+            _draft = _dataset.StartObjectUnder(
+                _schema, _inKeyOrder, streamed.ExpectedRows > 0 ? streamed.ExpectedRows : _rowBound, sliced: true, byteBound: _byteBound);
             _draft.Partition = Partition;
             _sorter = new SortedSlices(_stream, streamed.Candidates, instant, _schema.DType, rows, streamed.Target)
             {
@@ -1403,21 +1501,26 @@ internal static class DatasetCompactor
             };
 
             _synopsis = new SynopsisTables(
-                _schema.DType, streamed.Unit, SynopsisTables.Measures(_schema.DType, instant), _draft.Writer, chunking: _dataset.Options.SynopsisChunking);
+                _schema.DType, streamed.Unit, SynopsisTables.Measures(_schema.DType, instant), _draft.Writer, chunking: _dataset.Options.SynopsisChunking)
+            {
+                Groupings = _dataset.Options.SynopsisGroupings,
+            };
             _slices = new SliceWriter(_draft.Writer, _synopsis, _dataset.Session.WriteLanes, Timings);
             _declare = true;
         }
 
         /// <summary>
         /// Tells the writer and the synopsis of an object of one pass what its first slice judged, before it is written: the
-        /// rows its period holds at the pace of the rows judged, unless it is expected to hold some, which size its chunks
-        /// and its hashed postings; and the extent the synopsis weighs its tables by, which gives up none before the end
-        /// without the rows expected, and spans hours when its period does.
+        /// rows its period holds at the pace of the rows judged, unless it is expected to hold some, at most the rows a job
+        /// reads, which size its chunks and its hashed postings; and the extent the synopsis weighs its tables by, which gives
+        /// up none before the end without the rows expected, and spans hours when its period does.
         /// </summary>
         private void Judged(SliceStream stream, StreamPlan streamed)
         {
-            _draft!.Writer.DeclareRowBound(streamed.ExpectedRows > 0 ? streamed.ExpectedRows : (long)(stream.Pace * streamed.PeriodSeconds));
-            _synopsis!.Extend(stream.Extent(streamed.ExpectedRows, streamed.PeriodSeconds > 3_600));
+            double seconds = streamed.SecondsOf(_period);
+            long rows = streamed.ExpectedRows > 0 ? streamed.ExpectedRows : (long)(stream.Pace * seconds);
+            _draft!.Writer.DeclareRowBound(_rowBound > 0 ? Math.Min(rows, _rowBound) : rows);
+            _synopsis!.Extend(stream.Extent(streamed.ExpectedRows, seconds > 3_600));
         }
 
         // The stream an object of one pass cuts its slices with, and what it was started with; null for another.

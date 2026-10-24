@@ -26,7 +26,7 @@ namespace Vorticity.Aggregating;
 /// <para>
 /// The line bounds the probe: a run of keys in a row fills its lines, and a key that lands in it costs
 /// a link of a chain, where a probe past the line would walk the run. Linear probing over the whole
-/// table, measured on 2026-10-06, read hot keys in a row among keys spread over a range folded on
+/// table read hot keys in a row among keys spread over a range folded on
 /// them (the bench's <c>drift</c>) three times slower than the dictionary, and keys at a stride of
 /// 2²² or a permutation of the integers twice, both after a probe of 256 slots made it take a seed.
 /// </para>
@@ -221,7 +221,7 @@ internal struct KeyTable<TValue>
                 // A line of two slots, a key of 16 bytes: the key its home's neighbour took is found here
                 // too, both slots compared and the group taken by masks, rather than in the search. Its
                 // home alone sent a hundred short texts' rows to the search one time in five, re-hashed
-                // there, a sixth of the cycles of a sum by them (2026-10-09). The last line of a table of a
+                // there, a sixth of the cycles of a sum by them. The last line of a table of a
                 // prime number of slots holds one: its home is then compared twice.
                 uint last = length - 1;
                 for (int i = 0; i < keys.Length; i++)
@@ -314,14 +314,14 @@ internal struct KeyTable<TValue>
     /// hundred and twenty-eight keys. Past it, a table grows by the same primes as before, a quarter full
     /// sooner, and lands on the length six tenths would have given it: up to 8 192 slots, a stream of sorted
     /// names grew its table once more after its first read, where its reads allocate nothing
-    /// (AllocationContractTests, 2026-10-09).
+    /// (AllocationContractTests).
     /// </summary>
     private const int RoomySlots = 512;
 
     /// <summary>
     /// Whether a table of <paramref name="slots"/> slots fills to a quarter only: a short text's, while it is
     /// small. Six tenths full, a hundred texts lay a tenth of their keys in the chains, past a full line,
-    /// each of their rows sent to the search (2026-10-09); a quarter full, few.
+    /// each of their rows sent to the search; a quarter full, few.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool Roomy(long slots) => typeof(TValue) == typeof(TextWord) && slots <= RoomySlots;
@@ -346,7 +346,7 @@ internal struct KeyTable<TValue>
 
         // A table cleared to keep some groups, a stream's from batch to batch or a cache's, fills to six tenths
         // from then on: a quarter full, a stream of sorted names grew its table once more after its first
-        // read, where its reads allocate nothing (AllocationContractTests, 2026-10-09).
+        // read, where its reads allocate nothing (AllocationContractTests).
         if (!_carried)
         {
             _carried = true;

@@ -24,12 +24,13 @@ public sealed class ZoneTableTests
         // side, NaN bounds, zones whose nulls fill them, NaN counts recorded or not, a short last
         // zone. Every filter on the column, over masks with dead blocks already, must leave live
         // exactly the blocks the range question does not refuse, with the table answering what it
-        // can and the zones asked one by one for the rest.
+        // can and the zones asked one by one for the rest. One mask in two is a lane's piece, the
+        // blocks of a range alone, whose words outside it the table does not ask.
         Random random = new Random(seed);
         FieldExpr field = Expr.Field("x");
         for (int column = 0; column < 20; column++)
         {
-            int zones = random.Next(1, 300);
+            int zones = random.Next(1, 1_000);
             long rows = (zones * ZoneLength) - random.Next(0, (int)ZoneLength);
             ZoneColumn zoned = new ZoneColumn(field, ZoneLength, rows, RandomZones(random, kind, zones, rows));
             bool bounded = false;
@@ -45,9 +46,12 @@ public sealed class ZoneTableTests
                 ZonePruner pruner = new ZonePruner(filter, [zoned]);
                 BlockMask mask = new BlockMask(rows, ZoneLength);
                 bool[] wasLive = new bool[mask.BlockCount];
+                bool piece = random.Next(2) == 0;
+                int first = piece ? random.Next(mask.BlockCount) : 0;
+                int last = piece ? random.Next(first, mask.BlockCount + 1) : mask.BlockCount;
                 for (int block = 0; block < mask.BlockCount; block++)
                 {
-                    if (random.Next(5) == 0)
+                    if (block < first || block >= last || random.Next(5) == 0)
                     {
                         mask.Kill(block);
                     }

@@ -8,7 +8,7 @@ namespace Vorticity.Aggregating;
 
 /// <summary>
 /// One aggregate's column in a batch of states, as a dataset's synopsis keeps them: per row of the batch,
-/// how many values of the column it folds, their exact sum in the words <see cref="PersistedStates"/> lays
+/// how many values of the column it folds, their exact sum in the words <see cref="MeasureLayout"/> lays
 /// out, two for an integer and five for a float, and their least and greatest widened to 64 bits, a
 /// float's as its double's bits with NaN left out, an unsigned integer's as its bits.
 /// </summary>

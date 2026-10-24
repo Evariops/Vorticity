@@ -1,6 +1,7 @@
 // Compaction by periods: level 0's exit routes the rows past every fresh object to the first fresh
 // level and the others to the late level, adjacent fresh objects of one period merge into the next
-// level, the late level merges into itself past its ceiling, and no object spans two periods.
+// level, the late level merges into itself past its ceiling, small sealed periods join, and no object
+// spans two periods but a joined one, which spans whole periods of one month.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -359,9 +360,9 @@ public sealed partial class DatasetPeriodsCompactionTests
     /// <summary>
     /// Appends in the order of their instants, one row in a hundred late by up to half an hour, a delete
     /// now and then, each round followed by compactions until none is due: after every round every level
-    /// but 0 and the late one is key-disjoint, no object outside level 0 spans two periods, level 0
-    /// stays under its ceiling and the late level too unless each of its periods holds one object, and
-    /// the rows read back in key order are the rows appended and not deleted.
+    /// but 0 and the late one is key-disjoint, no object outside level 0 spans two periods but a joined
+    /// one, level 0 stays under its ceiling and the late level too unless each of its periods holds one
+    /// object, and the rows read back in key order are the rows appended and not deleted.
     /// </summary>
     [Theory]
     [InlineData(3)]
@@ -527,8 +528,8 @@ public sealed partial class DatasetPeriodsCompactionTests
 
     /// <summary>
     /// The invariants of a dataset of periods: every level above 0 but the late one key-disjoint, no
-    /// object above level 0 across two periods, and the rows in key order those appended, through the
-    /// key cursor and a key-ordered scan.
+    /// object above level 0 across two periods but a joined one, across periods of one month, and the rows
+    /// in key order those appended, through the key cursor and a key-ordered scan.
     /// </summary>
     private static async Task CheckAsync(VortexDataset dataset, List<DateTimeOffset> appended, SliceWidth length)
     {
@@ -541,7 +542,9 @@ public sealed partial class DatasetPeriodsCompactionTests
                 Assert.True(ObjectEntry.FromBytes(entry.Value.Span).Summaries.TryGet(nameof(Request.At), out ColumnSummary at));
                 long min = at.Min.SignedValue;
                 long max = at.Max.SignedValue;
-                Assert.Equal(TimeSlicer.Floor(min, TimeUnit.Microseconds, length), TimeSlicer.Floor(max, TimeUnit.Microseconds, length));
+                // One period, but for a joined object of the periods level, which holds whole periods of one month.
+                SliceWidth span = level == PeriodLevels.Periods ? SliceWidth.Month : length;
+                Assert.Equal(TimeSlicer.Floor(min, TimeUnit.Microseconds, span), TimeSlicer.Floor(max, TimeUnit.Microseconds, span));
                 if (dataset.Levels.IsDisjoint(level))
                 {
                     Assert.True(last < min, $"level {level} holds an object from {min} after one that ends at {last}");

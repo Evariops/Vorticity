@@ -222,7 +222,7 @@ public sealed partial class DatasetPeriodsCompactionTests
             // Every table read back counts the object's rows over its chunks: they decode, renumbered onto the file's encodings.
             await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
             {
-                using SynopsisTableSet set = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
+                using SynopsisTableSet set = await SynopsisTableReader.ReadAsync(lease.File, Ct);
                 Dictionary<string, long> counted = [];
                 foreach ((SynopsisTableInfo info, TableChunk _, int node) in set.Tables)
                 {

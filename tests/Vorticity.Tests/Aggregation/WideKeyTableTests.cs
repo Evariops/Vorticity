@@ -501,7 +501,7 @@ public sealed partial class WideKeyTableTests
         // a group grow, are written to the scratch and read back as the tables of other keys are; nothing
         // written at one lane under twice it, the peak within 6 % of the ceiling, nothing left after.
         (string path, Dictionary<Guid, UserTotal> expected) = await SpilledUuids.Async;
-        string scratch = Directory.CreateTempSubdirectory("vorticity-wide-spill-").FullName;
+        string scratch = TestScratch.Create("vorticity-wide-spill-");
         try
         {
             long result;

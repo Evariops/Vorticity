@@ -91,6 +91,35 @@ public sealed partial class ValueFunctionTests
         }
     }
 
+    /// <summary>
+    /// Levels from 3 to 97 grouped by their buckets of ten: the first bucket, 0, lies below the least level, so a key of a
+    /// function of the column is not bounded by the column's own statistics, at one lane as at four.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task AFunctionOfAColumnIsGroupedPastTheColumnsBounds(int degree)
+    {
+        Random random = new Random(5);
+        Reading[] rows = [.. Readings().Select(r => r with { Level = random.Next(3, 98) })];
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            List<LevelCount> buckets = await ListAsync(
+                file.Scan<Reading>().GroupBy(r => r.Level.Bucket(10)).OrderBy(g => g.Key).Select(g => (g.Key, g.Count())).As<LevelCount>());
+            Assert.Equal(
+                rows.GroupBy(r => Bucket(r.Level, 10)).OrderBy(g => g.Key).Select(g => new LevelCount(g.Key, g.Count())),
+                buckets);
+            Assert.Equal(0, buckets[0].Bucket);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public async Task AZonesCalendarHoldsItsTransitions()
     {
@@ -467,4 +496,7 @@ public sealed partial class ValueFunctionTests
 
     [VortexRecord]
     public partial record struct HourCount(DateTimeOffset Hour, long Count);
+
+    [VortexRecord]
+    public partial record struct LevelCount(int Bucket, long Count);
 }

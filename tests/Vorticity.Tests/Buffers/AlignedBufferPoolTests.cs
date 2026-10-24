@@ -714,16 +714,19 @@ public sealed class AlignedBufferPoolTests
         // A budget of 2 MiB parks sixteen of these, the eight of the floor among them.
         AlignedBufferPool tight = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 2L * 1024 * 1024);
 
-        // 4 MiB blocks keep 64 MiB of themselves at most: sixteen.
+        // 4 MiB blocks keep their class's ceiling at most, 64 MiB a processor and 64 MiB at least: sixteen blocks a
+        // processor, the blocks past it given back freed.
         AlignedBufferPool wide = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 1L << 40);
         const int big = 4 * 1024 * 1024;
+        int ceiling = (int)(wide.ClassCeilingBytes(big) / big);
+        Assert.Equal(16 * Environment.ProcessorCount, ceiling);
         try
         {
             ReturnAll(tight, RentAll(tight, block, 40));
             Assert.Equal(16, tight.ParkedCount(block));
 
-            ReturnAll(wide, RentAll(wide, big, 20));
-            Assert.Equal(16, wide.ParkedCount(big));
+            ReturnAll(wide, RentAll(wide, big, ceiling + 4));
+            Assert.Equal(ceiling, wide.ParkedCount(big));
         }
         finally
         {
@@ -818,12 +821,15 @@ public sealed class SharedPoolTests
     }
 
     [Fact]
-    public void The_shared_pool_parks_a_chunk_sized_block_and_keeps_sixty_four_mebibytes_of_them_at_most()
+    public void The_shared_pool_parks_chunk_sized_blocks_up_to_their_class_ceiling()
     {
         const int large = 32 * 1024 * 1024;
         Assert.True(AlignedBufferPool.Shared.MaxPooledLength >= large);
 
-        NativeSegmentOwner[] rented = new NativeSegmentOwner[3];
+        // A class of blocks past 8 MiB keeps 16 MiB of them a processor, 64 MiB at least: two of these on four processors.
+        int ceiling = (int)(AlignedBufferPool.Shared.ClassCeilingBytes(large) / large);
+        Assert.Equal(Math.Max(2, Environment.ProcessorCount / 2), ceiling);
+        NativeSegmentOwner[] rented = new NativeSegmentOwner[ceiling + 1];
         for (int i = 0; i < rented.Length; i++)
         {
             rented[i] = AlignedBufferPool.Shared.Rent(large, 64);
@@ -835,7 +841,7 @@ public sealed class SharedPoolTests
             AlignedBufferPool.Shared.Return(owner);
         }
 
-        // Two blocks of 32 MiB is the budget; the third return is freed rather than parked.
-        Assert.Equal(Math.Min(2, before + rented.Length), AlignedBufferPool.Shared.ParkedCount(large));
+        // The ceiling's blocks are the budget; a return past it is freed rather than parked.
+        Assert.Equal(Math.Min(ceiling, before + rented.Length), AlignedBufferPool.Shared.ParkedCount(large));
     }
 }

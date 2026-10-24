@@ -540,6 +540,12 @@ internal sealed class ScanContext : IDisposable
     internal AlongSegments? Along { get; set; }
 
     /// <summary>
+    /// The set a batch reads the segments it claimed through while it waits for those another batch of its scan reads
+    /// (<see cref="Scanning.ScanSegments.ReadOwnAsync"/>): <see cref="AlongSegments.Own"/>, made at the first such wait.
+    /// </summary>
+    internal SegmentRequestSet OwnSegments() => (Along ??= new AlongSegments()).Own ??= new SegmentRequestSet();
+
+    /// <summary>
     /// The segments of the splits ahead a batch reads along with its own, and the batch that asks for each; and, for a
     /// context a scan rents to plan them in rather than to run a batch on, the scan's walk over those splits.
     /// </summary>
@@ -560,6 +566,12 @@ internal sealed class ScanContext : IDisposable
         /// such as the one that decodes zone maps, is allocated with every field it has.
         /// </summary>
         internal Scanning.AlongWalk? Walk { get; set; }
+
+        /// <summary>
+        /// The segments a batch claimed, read while it waits for those another batch of its scan reads; empty between such
+        /// waits, and kept here rather than in a field of the context, as <see cref="Walk"/> is.
+        /// </summary>
+        internal SegmentRequestSet? Own { get; set; }
 
         internal ReadOnlySpan<Serialization.Schemas.SegmentSpec> Specs => _specs.AsSpan(0, _count);
 
@@ -1733,6 +1745,7 @@ internal sealed class ScanContext : IDisposable
         }
 
         Segments.Dispose();
+        Along?.Own?.Dispose();
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

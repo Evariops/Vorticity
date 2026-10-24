@@ -28,7 +28,7 @@ namespace Vorticity.Dataset;
 /// <para>
 /// A table's row is a bucket, the values of its keys, a count of rows, then for each measure column the
 /// count of its values, their exact sum (an <see cref="Int128"/> for integers, a <see cref="WideIndexedSum"/>
-/// for floats, in the words <see cref="PersistedStates"/> lays out), and their least and greatest, widened to
+/// for floats, in the words <see cref="MeasureLayout"/> lays out), and their least and greatest, widened to
 /// 64 bits, a float's NaN aside as the engine's Min and Max take it. Rows are in the order of their bucket,
 /// then of their keys' values, so that the same rows give the same tables, whoever writes them; those of a column's
 /// values per slice in the order of their hour, then of their value, then of their slice, each chunk saying the least
@@ -125,7 +125,7 @@ internal sealed partial class SynopsisTables : IDisposable
     private int[] _keys = [];
     private int _first;
     private bool _settled;
-    private KeyShape[] _keyShapes = [];
+    private SynopsisKeyShape[] _keyShapes = [];
 
     // The columns of the slice being counted's paths, in its batch's arena, -1 for a path not read.
     private IReadOnlyList<int> _pathColumns = [];
@@ -495,10 +495,13 @@ internal sealed partial class SynopsisTables : IDisposable
             }
         }
 
+        await AddGroupingsAsync(start, arena, sorted.RootIndex, rows, keyCodes, columns, cancellationToken).ConfigureAwait(false);
+
         _hourRowsSeen += rows;
         Note(_hourly, _hourGrowth, _hourRowsSeen);
         Note(_whole, _objectGrowth, _rowsWritten + rows);
         Note(_values, _valueGrowth, _hourRowsSeen);
+        NoteGroupings(_hourRowsSeen, _rowsWritten + rows);
         Prune();
         _rowsWritten += rows;
 
@@ -604,7 +607,7 @@ internal sealed partial class SynopsisTables : IDisposable
     /// rows of the slices' table and a run of the hour's.
     /// </summary>
     private async ValueTask ValuesAsync(
-        int slot, long start, CanonicalArena arena, int root, int rows, int column, KeyShape shape, int[] valueCodes, int distinct,
+        int slot, long start, CanonicalArena arena, int root, int rows, int column, SynopsisKeyShape shape, int[] valueCodes, int distinct,
         CancellationToken cancellationToken)
     {
         // A null codes after every value: a group of its own, which a path's counts leave out.
@@ -630,7 +633,7 @@ internal sealed partial class SynopsisTables : IDisposable
     /// slice does not hold: a run of the hour's, which its end merges into the rows of the hour's table and of the slices'.
     /// </summary>
     private async ValueTask EmitValuesAsync(
-        int slot, long start, CanonicalArena arena, int column, KeyShape shape, Accumulators states, int[] first, int kept,
+        int slot, long start, CanonicalArena arena, int column, SynopsisKeyShape shape, Accumulators states, int[] first, int kept,
         CancellationToken cancellationToken)
     {
         Growth? growth = Counts(_values[slot], _valueGrowth[slot]);
@@ -693,6 +696,7 @@ internal sealed partial class SynopsisTables : IDisposable
         }
 
         await FinishSketchesAsync(cancellationToken).ConfigureAwait(false);
+        await FinishGroupingsAsync(cancellationToken).ConfigureAwait(false);
 
         // Every table with rows, and every one given up, which the choice still weighs as a grain asked.
         foreach (Candidate table in _candidates)
@@ -767,10 +771,10 @@ internal sealed partial class SynopsisTables : IDisposable
         _keys = [.. keys];
         int depth = _keys.Length;
         _first = _measures.Length > 0 ? 0 : 1;
-        _keyShapes = new KeyShape[depth];
+        _keyShapes = new SynopsisKeyShape[depth];
         for (int k = 0; k < depth; k++)
         {
-            _keyShapes[k] = KeyShape.Of(KeyType(_keys[k]));
+            _keyShapes[k] = SynopsisKeyShape.Of(KeyType(_keys[k]));
         }
 
         _runs = new Candidate?[depth + 1];
@@ -792,7 +796,7 @@ internal sealed partial class SynopsisTables : IDisposable
         _valueSum = new long[depth + _counted.Length];
         for (int c = 0; c < _counted.Length; c++)
         {
-            _values[depth + c] = Add(SynopsisTableKind.Values, SynopsisBucket.Hour, [_counted[c]], [KeyShape.Of(KeyType(_counted[c]))]);
+            _values[depth + c] = Add(SynopsisTableKind.Values, SynopsisBucket.Hour, [_counted[c]], [SynopsisKeyShape.Of(KeyType(_counted[c]))]);
         }
 
         for (int d = _first; d <= depth; d++)
@@ -845,14 +849,18 @@ internal sealed partial class SynopsisTables : IDisposable
         {
             _valueGrowth[v] = _values[v] is null ? null : new Growth();
         }
+
+        // The declared groupings' tables, weighed after those of the order.
+        SettleGroupings();
     }
 
     /// <summary>
     /// A table the object may keep, added to those the choice weighs: its measures every measure but its keys, whose
     /// states would only repeat them, and the words of a record that hold the count and those measures' states; a table
-    /// of sketches, a sketch of each of those measures.
+    /// of sketches, a sketch of each of those measures, and with <paramref name="distinctBelow"/> the distinct sketches of
+    /// the keys deeper than its own.
     /// </summary>
-    private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, KeyShape[] shapes, bool bounded = false)
+    private Candidate Add(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, SynopsisKeyShape[] shapes, bool bounded = false, bool distinctBelow = true)
     {
         List<int> measures = [];
         List<int> sketched = [];
@@ -860,7 +868,7 @@ internal sealed partial class SynopsisTables : IDisposable
         int at = 1;
         for (int m = 0; m < _measures.Length; m++)
         {
-            int width = _kinds[m] == MeasureKind.Float ? 8 : 5;
+            int width = MeasureLayout.Words(_kinds[m] == MeasureKind.Float);
             if (!Contains(keys, _measures[m]))
             {
                 measures.Add(_measures[m]);
@@ -879,7 +887,7 @@ internal sealed partial class SynopsisTables : IDisposable
 
         // A table of sketches holds, besides its measures', the distinct sketch of each key deeper than its own the hour's
         // merge carries, a column or a number, of which an approximate distinct count merges the sketches.
-        int[] distinctAt = sketches ? DistinctPositions(keys.Length) : [];
+        int[] distinctAt = sketches && distinctBelow ? DistinctPositions(keys.Length) : [];
         int[] distinct = [.. distinctAt.Select(at => _keys[at])];
         DType rowType = new SynopsisTableInfo(kind, bucket, keys, kept, 0) { Distinct = distinct }.RowType(_schema, _paths, _types);
         ChunkStage stage = new ChunkStage(shapes, [.. words], sketches ? kept.Length + distinct.Length : 0, bounded);
@@ -943,6 +951,7 @@ internal sealed partial class SynopsisTables : IDisposable
         await FlushHourAsync(_sliceValues, cancellationToken).ConfigureAwait(false);
 
         await CloseSketchesAsync(cancellationToken).ConfigureAwait(false);
+        await CloseGroupingsAsync(cancellationToken).ConfigureAwait(false);
         await FlushHourAsync(_hourly, cancellationToken).ConfigureAwait(false);
         await FlushHourAsync(_values, cancellationToken).ConfigureAwait(false);
         await FlushHourAsync(_sketchedHours, cancellationToken).ConfigureAwait(false);
@@ -971,9 +980,9 @@ internal sealed partial class SynopsisTables : IDisposable
     /// hour, then of their values, then of their slices, and a question of a few values reads the chunks that hold them;
     /// the hour's table takes each value once, the states of its records merged.
     /// </summary>
-    private async ValueTask MergeValuesAsync(int slot, KeyShape[] shapes, CancellationToken cancellationToken)
+    private async ValueTask MergeValuesAsync(int slot, SynopsisKeyShape[] shapes, CancellationToken cancellationToken)
     {
-        using RunMerger merger = await RunMerger.OpenAsync(_hourScratch!, _valueRuns[slot], shapes, 1, _kinds, cancellationToken).ConfigureAwait(false);
+        using SynopsisRunMerger merger = await SynopsisRunMerger.OpenAsync(_hourScratch!, _valueRuns[slot], shapes, 1, _kinds, cancellationToken).ConfigureAwait(false);
         bool any = false;
         while (await merger.MoveNextRecordAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -1053,7 +1062,7 @@ internal sealed partial class SynopsisTables : IDisposable
         }
 
         int fed = -1;
-        using (RunMerger merger = await RunMerger.OpenAsync(scratch, runs, _keyShapes, depth, _kinds, cancellationToken).ConfigureAwait(false))
+        using (SynopsisRunMerger merger = await SynopsisRunMerger.OpenAsync(scratch, runs, _keyShapes, depth, _kinds, cancellationToken).ConfigureAwait(false))
         {
             while (await merger.MoveNextAsync(cancellationToken).ConfigureAwait(false))
             {
@@ -1225,8 +1234,8 @@ internal sealed partial class SynopsisTables : IDisposable
             }
 
             // The distinct sketches apart from the rest of the rows, which a question that counts no distinct value does
-            // not read: a question of percentiles read twice its bytes cold, 6.1 MB against 3.1 at 32 lanes, once the
-            // chunks held them.
+            // not read: in the same chunks, a question of percentiles would read twice its bytes cold, 6.1 MB against 3.1
+            // at 32 lanes.
             int sketches = -1;
             if (table.Apart is { } apart)
             {
@@ -1354,6 +1363,11 @@ internal sealed partial class SynopsisTables : IDisposable
             {
                 RuleOut(_values[v]!, _valueSum[v] + values.Distinct, (_valueSum[v] + values.Projected(hourRows)) * scale, perRow);
             }
+        }
+
+        if (_groupings.Length > 0)
+        {
+            PruneGroupings(RuleOut, hourRows, scale, perRow);
         }
 
         _hourDepth = Math.Min(_hourDepth, DeepestCoarse());
@@ -1820,7 +1834,7 @@ internal sealed partial class SynopsisTables : IDisposable
     /// being filled, and what the writer holds of it so far.
     /// </summary>
     private sealed class Candidate(
-        SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, int[] measures, KeyShape[] shapes, DType rowType, ChunkStage stage)
+        SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, int[] measures, SynopsisKeyShape[] shapes, DType rowType, ChunkStage stage)
     {
         internal SynopsisTableKind Kind { get; } = kind;
 
@@ -1846,7 +1860,7 @@ internal sealed partial class SynopsisTables : IDisposable
         /// </summary>
         internal (DType Main, DType Distinct)? Apart { get; init; }
 
-        internal KeyShape[] Shapes { get; } = shapes;
+        internal SynopsisKeyShape[] Shapes { get; } = shapes;
 
         internal DType RowType { get; } = rowType;
 
@@ -1944,27 +1958,25 @@ internal sealed partial class SynopsisTables : IDisposable
         /// <summary>Group <paramref name="group"/>'s states as the words of a record (<see cref="StateWords"/>).</summary>
         internal void Words(int group, Span<long> words)
         {
+            const int Sum = MeasureLayout.Sum;
             words[0] = Count[group];
             int at = 1;
             for (int m = 0; m < _kinds.Length; m++)
             {
-                words[at] = _values[m][group];
+                words[at + MeasureLayout.Values] = _values[m][group];
                 if (_kinds[m] == MeasureKind.Float)
                 {
-                    ref readonly WideIndexedSum sum = ref _floats[m][group];
-                    (words[at + 1], words[at + 2], words[at + 3], words[at + 4], words[at + 5]) = (sum.Sum.M0, sum.Sum.M1, sum.Sum.M2, sum.Sum.Meta, sum.High);
-                    words[at + 6] = _least[m][group];
-                    words[at + 7] = _greatest[m][group];
-                    at += 8;
+                    StateWords.Write(in _floats[m][group], words, at + Sum);
+                    words[at + MeasureLayout.FloatLeast] = _least[m][group];
+                    words[at + MeasureLayout.FloatGreatest] = _greatest[m][group];
+                    at += MeasureLayout.FloatWords;
                 }
                 else
                 {
-                    Int128 sum = _integers[m][group];
-                    words[at + 1] = unchecked((long)(ulong)sum);
-                    words[at + 2] = (long)(sum >> 64);
-                    words[at + 3] = _least[m][group];
-                    words[at + 4] = _greatest[m][group];
-                    at += 5;
+                    StateWords.Write(_integers[m][group], words, at + Sum);
+                    words[at + MeasureLayout.IntegerLeast] = _least[m][group];
+                    words[at + MeasureLayout.IntegerGreatest] = _greatest[m][group];
+                    at += MeasureLayout.IntegerWords;
                 }
             }
         }

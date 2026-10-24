@@ -19,7 +19,7 @@ public sealed class VortexSessionOptions
     private MemoryPool<byte> _memoryPool = AlignedMemoryPool.Shared;
     private SegmentCache? _segmentCache;
     private SynopsisCache? _synopsisCache;
-    private int _maxConcurrentReads = 16;
+    private int _maxConcurrentReads = 128;
     private int _maxDegreeOfParallelism = 1;
     private long _indexCacheBytes = 64L * 1024 * 1024;
     private int _mappedFileCacheCount = 64;
@@ -70,7 +70,8 @@ public sealed class VortexSessionOptions
 
     /// <summary>
     /// The local disk's copy of what questions read of a dataset's objects without the rest of their data,
-    /// their synopses' tables and directories, across the processes that open it in turn; null keeps none.
+    /// their synopses' tables and directories, across the processes that open it in turn, or at once when they share a
+    /// root (<see cref="SynopsisCache.OpenShared"/>); null keeps none.
     /// The session owns it, and releases its directory when it is disposed.
     /// </summary>
     /// <remarks>
@@ -85,11 +86,17 @@ public sealed class VortexSessionOptions
         set => _synopsisCache = Set(value);
     }
 
-    /// <summary>The most reads in flight across every scan of every file of the session whose reads do I/O.</summary>
+    /// <summary>The most reads in flight across every scan of every file of the session whose reads do I/O: 128 by default.</summary>
     /// <remarks>
     /// As for <see cref="SegmentCache"/>: a file opened from an <see cref="ISegmentSource"/> that
     /// reads, or from a path while <see cref="MapFiles"/> is false. A mapped file faults its pages in
     /// instead of reading them, and bytes in memory are not read at all.
+    /// <para>
+    /// Over an object store, what keeps a link busy is its bandwidth times its latency in flight: a pass
+    /// reads ahead the splits that hold 16 MiB, up to sixty-four of them, and the objects a question's
+    /// synopses answer are read as many at once as this bound lets. Sixteen left a store 5 ms away to
+    /// bound a scan of rows by its latency. A store's transport bounds its own connections besides.
+    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
     public int MaxConcurrentReads
@@ -337,7 +344,7 @@ public sealed class VortexSession : IAsyncDisposable
     }
 
     /// <summary>
-    /// The process-wide session: the shared pool, no segment cache, 16 reads in flight, no
+    /// The process-wide session: the shared pool, no segment cache, 128 reads in flight, no
     /// parallelism, no extensions, 64 closed files kept mapped.
     /// </summary>
     public static VortexSession Default { get; } = CreateDefault();

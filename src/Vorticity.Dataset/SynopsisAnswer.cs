@@ -223,6 +223,14 @@ internal sealed record SynopsisAnswer(
     internal IReadOnlyDictionary<string, string>? Renames { get; init; }
 
     /// <summary>
+    /// The values of identifiers the filter leaves out that the answer takes for absent from the object, as
+    /// <see cref="Excluded"/> names them: its tables answer as if the filter did not name them, their sketches
+    /// among them, once the identifier's index finds no row that holds one; the object's rows answer otherwise.
+    /// Empty when the answer takes none for absent.
+    /// </summary>
+    internal IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> Absent { get; init; } = [];
+
+    /// <summary>
     /// The answer of the object of <paramref name="contents"/> to <paramref name="request"/> under
     /// <paramref name="filter"/>, or null when its rows are read whole: a part of the filter on the instant
     /// that is not a bound, or on a column no table keys, a key or a measure no table holds, or a window and
@@ -263,9 +271,18 @@ internal sealed record SynopsisAnswer(
     /// that part alone (<see cref="Cuts"/>): the window ends where the part does. Null for the whole object.
     /// </param>
     /// <param name="marked">Whether a delete marked rows of the object, which come out of the tables' states, and of no sketch.</param>
+    /// <param name="assumeAbsent">
+    /// Whether the values of identifiers the filter leaves out are taken for absent from the object (<see cref="Absent"/>)
+    /// rather than taken out of its tables (<see cref="Excluded"/>).
+    /// </param>
+    /// <param name="edgesAlone">
+    /// Whether an object, or a part of it, whose every row the edges hold answers with its edges alone, which its chunk
+    /// directories read, rather than with null and its rows: what a lane that reads a share of an edge asks.
+    /// </param>
     internal static SynopsisAnswer? Of(
         SynopsisQuestion question, SynopsisContents contents, DType schema, (long Least, long Greatest)? held = null,
-        IReadOnlyDictionary<string, FilterLiteral>? partition = null, (long Low, long High)? within = null, bool marked = false)
+        IReadOnlyDictionary<string, FilterLiteral>? partition = null, (long Low, long High)? within = null, bool marked = false,
+        bool assumeAbsent = false, bool edgesAlone = false)
     {
         string instant = question.Instant;
         StateRequest request = question.Request;
@@ -282,6 +299,7 @@ internal sealed record SynopsisAnswer(
         int onKeyCount = 0;
         ulong joined = 0;
         List<(VortexExpr, VortexExpr)>? excluded = null;
+        List<(VortexExpr, VortexExpr)>? assumed = null;
         FieldSet keyed = new FieldSet(stackalloc int[MaxFields]);
 
         // The keys a table of sketches may hold the distinct sketches of in their place: the columns only approximate
@@ -303,7 +321,15 @@ internal sealed record SynopsisAnswer(
 
             if (Exclusion(conjunct, question.Identifiers, schema) is { } part)
             {
-                (excluded ??= []).Add((part, conjunct));
+                if (assumeAbsent)
+                {
+                    (assumed ??= []).Add((part, conjunct));
+                }
+                else
+                {
+                    (excluded ??= []).Add((part, conjunct));
+                }
+
                 continue;
             }
 
@@ -340,7 +366,7 @@ internal sealed record SynopsisAnswer(
         for (int k = 0; k < request.Keys.Count; k++)
         {
             FieldExpr key = request.Keys[k];
-            if (key.GetType() == typeof(FieldExpr) && partition is not null && partition.TryGetValue(key.Path, out FilterLiteral constant))
+            if (key is ColumnFieldExpr && partition is not null && partition.TryGetValue(key.Path, out FilterLiteral constant))
             {
                 (constants ??= []).Add((key.Path, constant));
                 continue;
@@ -374,7 +400,7 @@ internal sealed record SynopsisAnswer(
             }
 
             int field = schema.IndexOfField(column.Path);
-            if (field >= 0 && request.DistinctColumn(k) is not null && key.GetType() == typeof(FieldExpr) && !keyed.Fields.Contains(field)
+            if (field >= 0 && request.DistinctColumn(k) is not null && key is ColumnFieldExpr && !keyed.Fields.Contains(field)
                 && !sketchable.Add(field))
             {
                 return null;
@@ -410,8 +436,8 @@ internal sealed record SynopsisAnswer(
         // window keeps whole; inside an object's bucket it cuts, the table of hours of fewest rows the hours
         // it keeps whole; inside the buckets it cuts, the runs of the slices of fewest rows the slices it keeps,
         // and the slices cut are read as rows. Without a table of slices, a bucket cut is read as rows. A distribution
-        // is read from a table of sketches of a grid as fine as it asks, which no table of slices is; a question of none
-        // reads the tables of states alone, a table of sketches holding the same rows in more bytes.
+        // is read from a table of sketches of a grid as fine as it asks, of slices only for a declared grouping's; a
+        // question of none reads the tables of states alone, a table of sketches holding the same rows in more bytes.
         bool sketched = request.SketchBits > 0;
 
         // A distinct count merges a table's distinct sketches where no row comes out of the table: a sketch is corrected
@@ -502,9 +528,9 @@ internal sealed record SynopsisAnswer(
             }
         }
 
-        // An object whose every row the edges hold is read as rows, with no table.
+        // An object whose every row the edges hold is read as rows, with no table, unless the caller reads its edges alone.
         int count = (whole.KeptCount > 0 ? 1 : 0) + (hours is { KeptCount: > 0 } ? 1 : 0) + (runs is { KeptCount: > 0 } ? 1 : 0);
-        if (count == 0 && edges is not null)
+        if (count == 0 && edges is not null && !edgesAlone)
         {
             return null;
         }
@@ -528,6 +554,7 @@ internal sealed record SynopsisAnswer(
         {
             Constants = (IReadOnlyList<(string, FilterLiteral)>?)constants ?? [],
             Renames = renames,
+            Absent = (IReadOnlyList<(VortexExpr, VortexExpr)>?)assumed ?? [],
         };
         answer.Prune(contents);
         return answer;
@@ -563,13 +590,14 @@ internal sealed record SynopsisAnswer(
     }
 
     /// <summary>
-    /// The chunks of <paramref name="table"/> whose values of its key <paramref name="filter"/> rules out, by the offsets of
-    /// their regions: a table of one column's values, whose chunks say the least and the greatest they hold, each chunk a
-    /// zone of the zone pruner; null for none. A float's key, whose NaNs the bounds leave out, prunes nothing.
+    /// The chunks of <paramref name="table"/> whose values of its first key <paramref name="filter"/> rules out, by the
+    /// offsets of their regions: a table of one column's values, or of a declared grouping, whose chunks say the least and
+    /// the greatest value of that key they hold, each chunk a zone of the zone pruner; null for none. A float's key, whose
+    /// NaNs the bounds leave out, prunes nothing.
     /// </summary>
     private static HashSet<ulong>? Pruned(SynopsisContents contents, DType schema, SynopsisTableInfo table, VortexExpr filter)
     {
-        if (table.Kind != SynopsisTableKind.Values || table.Keys is not [int key] || SynopsisPath.Names(key))
+        if (table.Kind is not (SynopsisTableKind.Values or SynopsisTableKind.Coarse) || table.Keys is not [int key, ..] || SynopsisPath.Names(key))
         {
             return null;
         }
@@ -581,8 +609,8 @@ internal sealed record SynopsisAnswer(
         }
 
         DType dtype = schema.GetField(key);
-        KeyShape shape = KeyShape.Of(dtype);
-        if (chunks is not { Count: > 1 } || dtype.Kind == DTypeKind.Extension || shape.Form == KeyForm.Float)
+        SynopsisKeyShape shape = SynopsisKeyShape.Of(dtype);
+        if (chunks is not { Count: > 1 } || dtype.Kind == DTypeKind.Extension || shape.Form == KeyForm.Float || !AnyBounded(chunks))
         {
             return null;
         }
@@ -617,8 +645,22 @@ internal sealed record SynopsisAnswer(
         return pruned;
     }
 
+    /// <summary>Whether a chunk of <paramref name="chunks"/> says the bounds of its first key: none does in a table of a prefix of the order.</summary>
+    private static bool AnyBounded(IReadOnlyList<TableChunk> chunks)
+    {
+        for (int c = 0; c < chunks.Count; c++)
+        {
+            if (chunks[c].Keys is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>The value a component of a run's key holds, as a filter's literal; null for none, or a null.</summary>
-    private static FilterLiteral? Literal(ReadOnlySpan<byte> component, KeyShape shape)
+    private static FilterLiteral? Literal(ReadOnlySpan<byte> component, SynopsisKeyShape shape)
     {
         if (component.IsEmpty)
         {
@@ -853,7 +895,7 @@ internal sealed record SynopsisAnswer(
 
             other = a as ComparisonExpr;
             if (b is not NullCheckExpr { IsNull: true } missing || other is null
-                || missing.Field.GetType() != typeof(FieldExpr) || !string.Equals(other.Field.Path, missing.Field.Path, StringComparison.Ordinal))
+                || missing.Field is not ColumnFieldExpr || !string.Equals(other.Field.Path, missing.Field.Path, StringComparison.Ordinal))
             {
                 return null;
             }
@@ -869,7 +911,7 @@ internal sealed record SynopsisAnswer(
             }
         }
 
-        if (other is { Op: ComparisonOp.NotEqual } && other.Value.Kind != FilterLiteralKind.Null && other.Field.GetType() == typeof(FieldExpr))
+        if (other is { Op: ComparisonOp.NotEqual } && other.Value.Kind != FilterLiteralKind.Null && other.Field is ColumnFieldExpr)
         {
             foreach (string identifier in identifiers)
             {
@@ -1436,11 +1478,30 @@ internal sealed record SynopsisAnswer(
                 fields[width + c] = constant;
             }
 
+            int bucketed = fields[0];
+            ReadOnlySpan<long> buckets = arena.GetNode(bucketed).Values.Cast<long>()[..count];
+
+            // The filter on the keys first, over the table's columns as they lie, of which it reads no bucket. Where it
+            // holds for few rows, those rows alone go on, gathered: a question of one value of a column, whose table of
+            // values lies in the order of its values within each hour, keeps a row in a few hundred, where selecting
+            // every row by its bucket and making every row's instant took four fifths of a question for one host per
+            // minute.
+            Span<byte> states = default;
+            if (KeyFilter is { } keyFilter)
+            {
+                _ = arena.Allocate(count, 1, out states);
+                states.Clear();
+                FilterEvaluator.Evaluate(keyFilter, arena, arena.AddStruct(root, count, Validity.NonNullable, fields), count, states);
+                if (corrected is null && Gathered(arena, root, fields, buckets, states, stoodAt, part, bucketType, startRow) is { } few)
+                {
+                    into.Add(few);
+                    continue;
+                }
+            }
+
             // The runs of the chunk's buckets, found once, a vector at a time: the instants' column is made of them, and
             // the rows are selected by them, where each scanned the buckets for them again, a third of a question that
             // folds a million rows of runs.
-            int bucketed = fields[0];
-            ReadOnlySpan<long> buckets = arena.GetNode(bucketed).Values.Cast<long>()[..count];
             int[] rented = System.Buffers.ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
             try
             {
@@ -1457,13 +1518,6 @@ internal sealed record SynopsisAnswer(
                 int words = Math.Max((count + 63) >> 6, 1);
                 VortexBuffer selection = arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bits);
                 bits.Clear();
-                Span<byte> states = default;
-                if (KeyFilter is { } keyFilter)
-                {
-                    _ = arena.Allocate(count, 1, out states);
-                    states.Clear();
-                    FilterEvaluator.Evaluate(keyFilter, arena, node, count, states);
-                }
 
                 // A bucket's verdict is taken once for all its rows. With no filter on the keys and no row taken out,
                 // every row of a bucket kept stands for a row and is kept, its run's bits set a word at a time; else a
@@ -1471,7 +1525,7 @@ internal sealed record SynopsisAnswer(
                 int selected = states.IsEmpty && corrected is null
                     ? SelectRuns(part, buckets, ends, bits)
                     : SelectRows(part, buckets, ends, arena.GetNode(fields[stoodAt]).Values.Cast<long>(), states, System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bits));
-                RecordBatch batch = new RecordBatch(arena, node, startRow) { CarriesStates = true };
+                RecordBatch batch = RecordBatch.OfStates(arena, node, startRow);
                 batch.Select(selection, selected);
                 into.Add(batch);
             }
@@ -1523,6 +1577,74 @@ internal sealed record SynopsisAnswer(
         }
 
         return selected;
+    }
+
+    /// <summary>
+    /// The rows of a chunk whose filter on the keys, its <paramref name="states"/>, holds for few of them, as a batch of their
+    /// own: those that stand for a row, in the column of <paramref name="fields"/> at <paramref name="stoodAt"/>, and whose
+    /// bucket the part folds, their columns gathered and their instants made from their buckets; null when the filter holds
+    /// for an eighth of the chunk's rows or more, which a selection of its runs keeps in place for less.
+    /// </summary>
+    private static RecordBatch? Gathered(
+        CanonicalArena arena, DType root, ReadOnlySpan<int> fields, ReadOnlySpan<long> buckets, ReadOnlySpan<byte> states, int stoodAt,
+        SynopsisPart part, DType bucketType, long startRow)
+    {
+        int count = buckets.Length;
+        int held = System.MemoryExtensions.Count(states, Trilean.True);
+        if (count == 0 || held >= Math.Max(count >> 3, 1))
+        {
+            return null;
+        }
+
+        // The rows the filter holds for, found in order a vector at a time, the rows of one value lying together; those
+        // rows lie in the order of their buckets, whose verdict is taken once a bucket. The rows kept are numbered in the
+        // arena, the gather's and then the runs' of their buckets.
+        ReadOnlySpan<long> stood = arena.GetNode(fields[stoodAt]).Values.Cast<long>();
+        _ = arena.AllocateUninitialized(held * sizeof(int), sizeof(int), out Span<byte> keptBytes);
+        Span<int> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, int>(keptBytes);
+        int taken = 0;
+        long last = 0;
+        bool folds = false;
+        bool any = false;
+        for (int from = 0; from < count;)
+        {
+            int at = states[from..].IndexOf(Trilean.True);
+            if (at < 0)
+            {
+                break;
+            }
+
+            int row = from + at;
+            long bucket = buckets[row];
+            if (!any || bucket != last)
+            {
+                (last, folds, any) = (bucket, part.Holds(bucket), true);
+            }
+
+            if (folds && stood[row] > 0)
+            {
+                kept[taken++] = row;
+            }
+
+            from = row + 1;
+        }
+
+        Span<int> gathered = fields.Length <= 64 ? stackalloc int[64] : new int[fields.Length];
+        gathered = gathered[..fields.Length];
+        for (int f = 0; f < fields.Length; f++)
+        {
+            gathered[f] = CanonicalFilter.Apply(arena, fields[f], kept[..taken]);
+        }
+
+        // The instants of the buckets kept, by their runs, as a chunk's are made.
+        if (taken > 0)
+        {
+            int bucketed = gathered[0];
+            ReadOnlySpan<long> keptBuckets = arena.GetNode(bucketed).Values.Cast<long>()[..taken];
+            gathered[0] = InstantsOf(arena, bucketed, keptBuckets, kept[..BucketRuns.Ends(keptBuckets, kept)], bucketType, part.Instants);
+        }
+
+        return RecordBatch.OfStates(arena, arena.AddStruct(root, taken, Validity.NonNullable, gathered), startRow);
     }
 
     /// <summary>The fields of every chunk read of <paramref name="part"/>'s table that holds a bucket it folds, as their nodes, which a correction reads.</summary>
@@ -1740,7 +1862,7 @@ internal sealed record SynopsisAnswer(
     internal static bool Bound(VortexExpr conjunct, string instant, ref long low, ref long high)
     {
         if (conjunct is not ComparisonExpr { Value.Kind: FilterLiteralKind.Signed } comparison
-            || comparison.Field.GetType() != typeof(FieldExpr) || !string.Equals(comparison.Field.Path, instant, StringComparison.Ordinal))
+            || comparison.Field is not ColumnFieldExpr || !string.Equals(comparison.Field.Path, instant, StringComparison.Ordinal))
         {
             return false;
         }

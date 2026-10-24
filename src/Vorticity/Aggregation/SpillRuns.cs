@@ -627,10 +627,13 @@ internal sealed class SpillBuffer
 }
 
 /// <summary>The bytes of a section read back, a value after the other, in the order they were written.</summary>
-internal ref struct SpillReader(ReadOnlySpan<byte> bytes)
+internal ref struct SpillReader(ReadOnlySpan<byte> bytes) : IWordSource
 {
     private readonly ReadOnlySpan<byte> _bytes = bytes;
     private int _at;
+
+    /// <summary>The next word, a sketch's as it wrote them.</summary>
+    public long NextWord() => Read<long>();
 
     /// <summary>Whether every byte was read.</summary>
     internal readonly bool End => _at == _bytes.Length;

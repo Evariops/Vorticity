@@ -802,8 +802,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     /// <summary>
     /// The groups past which a key wider than a word leaves slots that hold it for slots of its hash and
-    /// its group (<see cref="WideKeyTable{TValue}"/>): 4 096, a table of a few hundred kilobytes. Measured on
-    /// 2026-10-08 against slots that hold the key: a hundred short texts took ×1.10 the time in slots of a
+    /// its group (<see cref="WideKeyTable{TValue}"/>): 4 096, a table of a few hundred kilobytes. Measured
+    /// against slots that hold the key: a hundred short texts took ×1.10 the time in slots of a
     /// hash and a group, a second read every row; a million UUIDs took a quarter of the memory (38.5 MB
     /// against 139.7), ≈ ×0.91 the time at one lane and ×0.93 at fourteen once the first pass read slots
     /// and keys in two loops. The value itself is not swept.
@@ -820,8 +820,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// <summary>
     /// Whether the groups are in the table of a hash and a group from the first: a key wider than 16 bytes,
     /// a tuple of values (<see cref="TupleKeys"/>). In slots that held it, more than a line each, the core's
-    /// sub-tables, a few thousand groups each, compared whole keys at every probe: 22 % of q10's cycles at
-    /// fourteen lanes, which took ×0.80 the time without them (2026-10-09).
+    /// sub-tables, a few thousand groups each, compared whole keys at every probe: 22 % of db-benchmark's
+    /// q10's cycles at fourteen lanes, which took ×0.80 the time without them.
     /// </summary>
     private static bool CompactAlways
     {
@@ -1658,7 +1658,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// The page of the table of groups at <paramref name="at"/>, allocated, every number in it not met
     /// yet; the slab it lies in. Pages come from slabs of one page, then two, four, up to sixteen: a
     /// table whose values are many takes its pages sixteen at a time, one that meets a few keeps them
-    /// a page each. Measured on the Mac on 2026-10-07, at fourteen lanes, a million keys in no order
+    /// a page each. Measured on an M4 Pro at fourteen lanes, a million keys in no order
     /// made 3 400 pages of 16 KiB, each through the lock the runtime allocates by: 14 % of the cycles,
     /// most of them waiting on it.
     /// </summary>
@@ -2326,7 +2326,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         if (kind == StorageKind.Primitive && store.Leaf is FixedStore leaf && leaf.Width == Unsafe.SizeOf<TValue>())
         {
             // Into the values at once up to the null group, then one at a time from it: a call a value
-            // took a group by's output six cycles a key (q10's tuples, 2026-10-10).
+            // took a group by's output six cycles a key (db-benchmark's q10, its tuples).
             Span<TValue> into = leaf.GetSpan<TValue>(groups.Length);
             int done = 0;
             for (; done < groups.Length; done++)

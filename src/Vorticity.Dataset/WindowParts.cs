@@ -13,6 +13,12 @@ namespace Vorticity.Dataset;
 internal static class WindowParts
 {
     /// <summary>
+    /// The most parts asked at once: each one a question that reads its objects as many at once as the session lets
+    /// reads be in flight, so that more parts would only share those reads with the newest one, whose answer comes first.
+    /// </summary>
+    internal const int Width = 16;
+
+    /// <summary>
     /// The parts of the window from <paramref name="from"/> to <paramref name="to"/>, newest first: the
     /// window cut at the starts of the periods it crosses, by the calendar the dataset's commits keep.
     /// </summary>

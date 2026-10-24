@@ -125,6 +125,12 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The session's lanes hashed postings read and sort their buckets ahead on, a bucket a lane; null to sort them one at a time.</summary>
     internal LaneBudget? Lanes { get; set; }
 
+    /// <summary>
+    /// Awaited on a lane's task, given the bucket, before a bucket is read back and sorted there: what a test holds those sorts
+    /// by. Null but in tests.
+    /// </summary>
+    internal Func<int, Task>? BeforeSort { get; set; }
+
     /// <summary>The buckets read and sorted ahead of the one being fed, at most, each with buffers of its own.</summary>
     private const int BucketsAhead = 4;
 
@@ -494,6 +500,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
         RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
         await buckets.SpillAsync(scratch, cancellationToken).ConfigureAwait(false);
+        await buckets.RefineAsync(scratch, cancellationToken).ConfigureAwait(false);
         bool tail = BlockRows > 0 && _row % BlockRows != 0;
         long tailPairs = tail ? buckets.Pairs - PairsBefore(_lastChunkBlock) : 0;
         int mainEnd = tail ? _lastChunkBlock : _lastChunkBlock + _lastChunkBlocks;
@@ -584,9 +591,15 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
 
         LaneBudget lanes = Lanes!;
+        Func<int, Task>? held = BeforeSort;
         return Task.Run(
             async () =>
             {
+                if (held is not null)
+                {
+                    await held(bucket).ConfigureAwait(false);
+                }
+
                 long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {

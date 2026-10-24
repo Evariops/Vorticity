@@ -82,7 +82,7 @@ internal sealed class KeyTop
     /// values, over every lane together, reach it as well, since a key's extreme only gets better as its
     /// rows come. A row past the edge, on whichever lane, then changes no group of the top: were it its
     /// key's best, <c>k</c> keys would beat that key. So every lane drops what the best of them drops,
-    /// where each used to wait for its own <c>k</c> groups and keep, on 32 lanes, most of its rows.
+    /// where each, waiting for its own <c>k</c> groups, would keep, on 32 lanes, most of its rows.
     /// </remarks>
     internal long? SharedEdge
     {

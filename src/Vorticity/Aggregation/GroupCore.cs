@@ -23,10 +23,10 @@ namespace Vorticity.Aggregating;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A query whose caches never fill runs as before, its lanes' partitions merged at the end. α is derived
-/// from the lanes and the bytes of a group and of an entry. The core a query turns to under pressure
-/// holds as little past its groups as it can, α at 1 and a part applied from 256 entries pending, and
-/// spills to the query's scratch the part its budget cannot hold.
+/// A query whose caches never fill runs as it would without the core, its lanes' partitions merged at
+/// the end. α is derived from the lanes and the bytes of a group and of an entry. The core a query turns
+/// to under pressure holds as little past its groups as it can, α at 1 and a part applied from 256
+/// entries pending, and spills to the query's scratch the part its budget cannot hold.
 /// </para>
 /// <para>
 /// A burst: the lane that deposits pushes its batch, adds its entries to the part's count, and past the
@@ -60,18 +60,18 @@ internal sealed partial class GroupCore
     /// <summary>
     /// The entries a part holds pending at least before it is applied. A burst early in the pass falls on
     /// a part whose groups are still to come: its sub-tables grow and split under the bursts after it,
-    /// where the end splits a part once to the depth of all its groups. Measured on the Mac on 2026-10-07
-    /// at fourteen lanes on 20M rows, 16 384 against 4 096 took ×0.71 to ×0.94 off every
-    /// cardinality from 10⁵ up, nothing at 10³ and 10⁴; 65 536, more off 10⁵ and 10⁶, but ×1.17 at 10⁷
-    /// and ×1.29 on a key a row, its entries waiting past what their groups would hold. At most 64 MiB
-    /// pending past α times the groups, on entries of 16 bytes.
+    /// where the end splits a part once to the depth of all its groups. Measured on an M4 Pro at fourteen
+    /// lanes on 20M rows, 16 384 against 4 096 took ×0.71 to ×0.94 off every cardinality from 10⁵ up,
+    /// nothing at 10³ and 10⁴; 65 536, more off 10⁵ and 10⁶, but ×1.17 at 10⁷ and ×1.29 on a key a row,
+    /// its entries waiting past what their groups would hold (<c>vortex-queries --matrix small --switch
+    /// floor:4096:16384</c>). At most 64 MiB pending past α times the groups, on entries of 16 bytes.
     /// </summary>
     private const int DefaultFloor = 16_384;
 
     /// <summary>
     /// The bytes of a sub-table past which it splits under pressure, S: within the private cache of any
-    /// current core, half a megabyte where the smallest hold one. Measured on the Mac on 2026-10-07 at
-    /// fourteen lanes on 20M rows, sub-tables of 16 000 groups against 7 900 (a count and a sum, 528 KB
+    /// current core, half a megabyte where the smallest hold one. Measured on an M4 Pro at fourteen lanes
+    /// on 20M rows, sub-tables of 16 000 groups against 7 900 (a count and a sum, 528 KB
     /// against 256 KiB) took ×0.91 to ×0.95 off 10⁷, the stride, ten rows a key and a key a row, nothing
     /// below, and ×0.83 off four aggregates at ≈ 900 KB; 32 000 groups more off 10⁷ (×0.81), but a
     /// megabyte fills the whole private cache of a core of a current x64.
@@ -83,8 +83,8 @@ internal sealed partial class GroupCore
     /// <see cref="WideTableBytes"/> of wide groups. A split moves half a sub-table, and each level of
     /// splits moves every group again, where a table held whole moves each about twice as it doubles:
     /// 10⁷ groups make 39 000 a part, which sub-tables of half a megabyte split three times over (q10)
-    /// or once (a key of 8 bytes). Measured on the Mac on 2026-10-10 at fourteen lanes, the process's
-    /// shelf keeping their arrays: against half a megabyte, 64 000 groups took ×0.754 off q10 on 10M
+    /// or once (a key of 8 bytes). Measured on an M4 Pro at fourteen lanes, the process's shelf keeping
+    /// their arrays: against half a megabyte, 64 000 groups took ×0.754 off q10 on 10M
     /// (132 to 100 ms) and ×0.787 off the keys of 10⁷ hashed on 40M; 128 000 the same, 256 000 ×1.10 on
     /// the hashed keys (the first sub-table reserves what is pending, four times their groups there),
     /// and 40 000, just past q10's parts, ×1.20: a single split of a sub-table that size costs more than
@@ -100,8 +100,8 @@ internal sealed partial class GroupCore
     private const int MostAlpha = 8;
 
     /// <summary>
-    /// The lanes from which the core holds a query's groups. Measured on the Mac on 2026-10-06, each
-    /// row of the core costs two to four times a row of a lane's table alone, its cache, its entry and
+    /// The lanes from which the core holds a query's groups. Measured on an M4 Pro, each row of the
+    /// core costs two to four times a row of a lane's table alone, its cache, its entry and
     /// its application, which a lane's table repays only when many lanes each build a table of every
     /// key and the merge rehashes them all: at one lane two to three times slower, at two 1.3 to 1.9,
     /// at four about even, at eight and fourteen faster by a sixth to a half. Below, the lanes' tables;
@@ -720,7 +720,7 @@ internal sealed partial class GroupCore
     /// applied made a group three times in four or more, and the budget could still grant half its ceiling.
     /// Such a burst only moves entries into sub-tables that split at the end, their groups moved again:
     /// ten million keys over forty million rows at fourteen lanes took 205 ms with no burst against 273,
-    /// their peak 1.30 GB against 1.57 (2026-10-09). A million keys, each forty times, reduce: they burst.
+    /// their peak 1.30 GB against 1.57. A million keys, each forty times, reduce: they burst.
     /// </summary>
     private bool Defers
     {
@@ -1858,8 +1858,8 @@ internal sealed class CorePressure(Func<bool, GroupCore?> make, int lanes)
     /// <summary>
     /// A lane turns because its rows showed a key the lanes' tables cannot hold well, <paramref name="reason"/>,
     /// <paramref name="rows"/> of them folded: the core, if not made yet, is made for speed rather than
-    /// lean, and every lane turns. The first lane's judgment turns them all, not most lanes': measured on
-    /// 2026-10-08 at fourteen lanes, a key of 10⁷ values on its first quarter of rows and 10³ on the rest
+    /// lean, and every lane turns. The first lane's judgment turns them all, not most lanes': measured at
+    /// fourteen lanes, a key of 10⁷ values on its first quarter of rows and 10³ on the rest
     /// was ×0.67 on the core, which a majority of lanes that met the 10³ values kept from it.
     /// </summary>
     internal void Outgrew(CoreReason reason, long rows)

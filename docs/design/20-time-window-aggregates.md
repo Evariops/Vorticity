@@ -115,15 +115,29 @@ each answer any question.
 
 ### 1.4 The targets
 
-"Cold" means nothing on the local disk, and "warm" means the synopsis parts of the window's objects
-are there. Requests to the store run in parallel.
+The targets are those of the questions views and explorers ask, pattern by pattern, and they are the
+design's acceptance criteria. Each holds over any window, thirteen months included, at the example's
+rate:
 
-| class | 30 days | 13 months |
-|---|---|---|
-| a question the runs and synopses answer | under 1 s cold, under 100 ms warm | under 2 s cold, under 300 ms warm |
-| the same, excluding one rare value | under 1.5 s cold | under 3 s cold |
-| a selective question, through the indexes | first rows under 500 ms, all under 2 s | progressive |
-| a broad question nothing summarizes | seconds, progressive | progressive |
+| pattern | example | first result | whole answer, cold | warm |
+|---|---|---|---|---|
+| a column late in the order, under a filter on another | one service's routes under a 5xx status, per hour | under 300 ms | under 1 s | under 100 ms |
+| two columns late in the order | the pods of one route; the exception groups of one pod's errors | under 300 ms | under 1 s | under 100 ms |
+| a filter on a key of a variant column, grouped by a column | the services under a status code of 500 or more | under 300 ms | under 1 s | under 100 ms |
+| a quantile over a sliding window | the 99th percentile of the durations per service, the last 15 minutes | under 300 ms | under 1 s | under 100 ms |
+| a needle | the spans of one trace over 30 days | | under 1 s | |
+| every row but one rare value | every request but one, per service and per 12 hours | | under 1 s | |
+| the last minutes, on a key of a variant column | the services under a status code, the last 15 minutes | no variant parsed again at each question | | |
+
+"Cold" means a process just started and every cache empty, the synopsis cache's disk included;
+"warm" means the process running and the synopsis cache holding the regions of the window's objects;
+the first result is the first part `AskNewestFirstAsync` delivers, the newest. Requests to the store
+run in parallel. The questions bench asks these patterns, and others without a target in time, a
+distinct count under an exclusion and a key of a minority source
+(`vortex-queries --micro paths --qp`), over a store that waits 5 ms a request or answers as S3 does
+(`--profile s3`), and sets each answer against its target (`--micro qp-dashboard`).
+
+A broad question nothing summarizes takes seconds, and answers progressively, newest first.
 
 A question the runs and synopses answer is also held to one dependent round trip per object cold and
 none warm, tens of megabytes read whatever its window, memory bounded by the groups it delivers, and
@@ -300,7 +314,7 @@ their answer.
 | case | what it costs | on the example | what the design does | what remains |
 |---|---|---|---|---|
 | a deep question over a long window, with no coarse table at its depth | the runs of its depth in every slice, `Σ R_d` | down to `Endpoint` over thirteen months: 5.7 × 10⁵ × 4 × 10⁴ = 2.3 × 10¹⁰ runs, minutes | coarse tables by period down to the deep columns, when the budget allows: 395 × 2 × 10⁶ = 8 × 10⁸ entries, seconds | progressive. The coarsest table lives in one object, so the period's length bounds it |
-| untouched shallow columns: a question touches a deep column but not some of those before it | the runs of its depth, not the combinations of the columns it touches: their product with the values the untouched columns take inside each combination | `Version` and `Endpoint` together, without `Status`, `Method` and `Region`: about 15 times their own combinations | value counts serve single columns. No table over a subset of columns ([decision 5](#7-decisions)) | ×10 to ×100 over the ideal, on structures already ×100 to ×1 000 smaller than the rows |
+| untouched shallow columns: a question touches a deep column but not some of those before it | the runs of its depth, not the combinations of the columns it touches: their product with the values the untouched columns take inside each combination | `Version` and `Endpoint` together, without `Status`, `Method` and `Region`: about 15 times their own combinations | value counts serve single columns, and a grouping the application declares serves its columns together, by hour and by object ([decision 5](#7-decisions)) | ×10 to ×100 over the ideal for undeclared columns, on structures already ×100 to ×1 000 smaller than the rows |
 | a non-selective predicate on a deep column, under a shallow grouping | the rows of the deep column's table, the predicate evaluated once per table row | `Endpoint` matching a pattern half of them match, by `Service`, 30 days by hour: 720 × 5 × 10⁵ = 3.6 × 10⁸, a second or two | the complement, when the predicate is the negation of a selective one | the rest |
 | a selective predicate on a deep column without postings | every table row of that column, or its rows | `Host == "h-17"`: 5 × 10⁵ runs a minute | value counts that tell how many rows the value holds, where the budget keeps them | rows, where the budget keeps none |
 | many facets: a dozen repeating columns or more, as a table of spans holds | the deepest facets' runs, of one or two rows, and their rows spread over thousands of ranges a minute | `route` after a dozen shallower facets: runs close to its rows | value counts and coarse tables by bucket for deep columns, which the budget admits by their benefit. Measured on spans with a dozen facets, the route's value counts answer a count per route from 22 tables an hour (`vortex-queries --micro facets`) | the deepest facets' rows, for questions finer than their tables |
@@ -324,12 +338,12 @@ their answer.
 |---|---|---|---|---|
 | many objects | one round trip per object, in parallel | 395 objects over thirteen months: two to four rounds of parallel requests, 0.1 to 0.2 s cold | periods sized by volume, objects read many at once | none |
 | many groups, or a top N whose ranking needs every group | `G` hash lookups, `G log N` to rank, memory for `G` | the top 100 of `(Endpoint, Host)` over 30 days: about 10⁶ groups, tens of milliseconds | the governor and the spill ([16-queries.md](16-queries.md#95-memory)) | output-bound |
-| fresh rows | the rows of level 0, and the objects of the fresh levels | the last hour: level 0's appends and about 20 fresh objects, measured on periods of a day with fan-out 30 (`vortex-queries --micro lifecycle`). A path of a variant column costs 60 to 120 ms of one core more, since appends leave variants unshredded | fresh merges by f, and a memo of level 0's parsed paths | the objects f leaves, and a lagging loop, which `PlanCompactionAsync` reports |
+| fresh rows | the rows of level 0, and the objects of the fresh levels | the last hour: level 0's appends and about 20 fresh objects, measured on periods of a day with fan-out 30 (`vortex-queries --micro lifecycle`). A path of a variant column costs 60 to 120 ms of one core more where appends leave variants unshredded | fresh merges by f, a memo of level 0's parsed paths, and declared paths each append shreds (`ShredOnAppend`) | the objects f leaves, and a lagging loop, which `PlanCompactionAsync` reports |
 | deletes | the marked rows' contributions, computed once per object and vector | in proportion to the marks | tables corrected by the marked rows, and a purge per erasure delay | bounded by the purge policy |
 | rows newest first under a broad filter | the last slices of the newest objects | 200 rows: no request from a fresh tail its open holds whole, 2 dependent requests and 68 KB when the page ends in a sealed period, the segment of instants its slices lie in and then the rows (measured, at the test's scale) | slices bound each slice in time, objects open as the read reaches their newest instant, and a slice's instants come from the segments the slices before it read | the open of an object the page reaches, a round trip when its footer is not held |
 | a lookup by key, a rank, a page in key order inside a sorted slice | the slice's instant | about 13.5 MB a slice (estimate) | the index of an identifier the key holds | a slice's instants per seek |
 | requests a second at the busiest load | the reads each question sends | 9.7 reads a question without the cache, 5.7 with every region held, on the bench's mix: 569 to 972 questions a second under S3's limit, 93 to 159 under OVHcloud's (measured, `vortex-queries --micro cachetrace`) | the cache, and data objects named by a fresh uid that S3 can partition | the data's reads, and a cold load past the store's limit |
-| long jobs | a seal of a day is minutes of work at the example's rate | 173 GB read and written | late rows routed away from a period that seals, and a lifecycle rule for the uploads an abort missed | a failure restarts the seal |
+| long jobs | a seal of a day is minutes of work at the example's rate | 173 GB read and written | late rows routed away from a period that seals, and a lifecycle rule for the uploads an abort missed | a failure restarts the seal, which a lower object cap keeps short ([15-compaction.md, resuming a seal](15-compaction.md#resuming-a-seal)) |
 | a window larger than the cache | cold round trips for what the cache does not hold | thirteen months of synopsis parts, about 300 GB | an eviction policy that a sweep does not empty, chosen by replaying traces | none |
 | hundreds of questions a second | their processor time | | each question is cancellable and governed, and a progressive one yields as it goes | sizing |
 
@@ -379,7 +393,7 @@ of a day under late rows and four writers, 2.7 times when rows come in order (me
 | 2 | the order of the synopsis columns | one per object, measured on its rows by the runs each adds, and recorded in its slice table ([sorted time slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)) | measured per slice, which breaks the sorted merges of coarse tables, or per dataset |
 | 3 | the slice's target | a minute of the example's rate, 3 × 10⁶ rows, cut at the coarsest calendar unit whose median unit holds no more than twice it, the bound a burst is cut at. A slice is also the rows the job sorts together, so a narrower one breaks the runs of the synopsis columns | a target per object from the rows a cut hour's edge reads against the table rows it folds, a table row worth 2.3 edge rows (measured, 39.4 bytes against 16.5): on six hours of the questions bench it cut hours into minutes, whose sorted columns took 16 % more bytes, and questions read from rows took up to three times the requests and 3.8 times the bytes (measured) |
 | 4 | the depth of the synopsis part | every synopsis column. A reader takes the regions it needs, not the whole part | where the budget stops |
-| 5 | tables over subsets of columns | none beyond the prefixes of the order and each column's value counts | admitted by their benefit per byte, as every other table |
+| 5 | tables over subsets of columns | besides the prefixes of the order and each column's value counts, the groupings of one to four columns the application declares (`DatasetOptions.SynopsisGroupings`): for two columns or more, a table by hour and one by object; for every grouping, tables of its measures' sketches by slice, by hour and by object; all weighed by the same choice under the same budget, their chunks bounded by the first column. On spans whose order puts the status 6th, the service 10th and the route last, one service's routes under a status need the three together, which no pair and no prefix plus one column holds, and a quantile per service over the last minutes needs sketches by slice of the service, which no shallow prefix holds: on three hours at 800 rows a minute, 540 rows of sketches and 800 rows at the edges against 72,800 rows (measured) | subsets the writer picks alone by their benefit per byte: weighed alike, as no question is known, the choice keeps any of the many of the same size; sketches by slice of the shallow prefixes, which hold no column a question groups by past the first few |
 | 6 | edges | exact by default, their rows stated by the plan. `ScanOptions.AlignWindow` moves each end to the nearest bound the tables answer at, a slice's, an hour's or the object's, no further than its rows, and the metrics return the window applied, the same whether states or rows answer: a window that cuts its first and last hours, 8 requests in 6 round trips warm, aligned none (measured) | moved to slice boundaries by default, which changes what a question means without its asking |
 | 7 | the synopsis part's table of contents | in the object's leaf entry, about 2.2 KB for an hour and 19.7 KB for a day, a table of many chunks listing them in a region of the object, so one round trip per object for whole periods and two for a shorter window, one more for such a table: a day's entry held 320 KB with every table's chunks, which every walk of the tree read | read from the object's index directory, one round trip more |
 | 8 | deletes | tables corrected by the marked rows' contributions, computed at read | deltas written beside the vector, or the runs of every marked bucket |
@@ -393,7 +407,7 @@ of a day under late rows and four writers, 2.7 times when rows come in order (me
 | 16 | writing large objects | a bound on a put's length and the spool, the store choosing by its profile and the object's size. Every rewrite announces what it reads times 1.03 (measured at worst 1.024), and starts again under twice the bound when its content runs past it | the spool alone, or the bound alone |
 | 17 | the size of a chunk in a period | from the footer's cap. Chunks do not end at slices | 16 MB of the widest column, or chunks ended around each slice, which took five times the requests of a whole read and 2.4 times the bytes of a cut hour's rows (measured) |
 | 18 | reading part of a flat segment | no, while chunks stay at a megabyte of values: what it saves of one segment, at most 10 ms, never pays the round trip it adds, 30 to 50 ms | now, for every column |
-| 19 | needles | identifiers declared by the application, with hashed postings from value to block outside the index budget (0.14 to 0.40 times the bytes of a sorted run, a probe reading 44 KB instead of up to 1.2 MB) | Bloom filter trees, a sorted run inside or outside the budget |
+| 19 | needles | identifiers declared by the application, with hashed postings from value to block outside the index budget (0.14 to 0.40 times the bytes of a sorted run, a probe reading 44 KB instead of up to 1.2 MB; 4.17 bytes a row for an id of its own per row, 2.48 for a trace id, measured on a day), read with no open of an object whose footer passes a mebibyte, every object looked up at once | Bloom filter trees, a sorted run inside or outside the budget |
 | 20 | physical erasure | a delay the application declares, one purge per object and delay | a purge triggered by the vector's bytes |
 | 21 | the float sum's state | 32 bytes where the source proves its rows within 2^36, and a wide state of 40 bytes with its high parts in a fifth word elsewhere and for persisted states | 40 bytes for every sum, which every group by of floats would pay |
 | 22 | the size of objects for every dataset | 64 MiB at the deep levels | 4 MiB, or 256 MiB once the churn bench says so |
@@ -411,7 +425,7 @@ of a day under late rows and four writers, 2.7 times when rows come in order (me
 | the instant first and the synopsis columns after it across a whole period, sorted by columns first and time last | runs across the whole period, so coarse counts come free too | a window of a few minutes of that period would touch every run of it. Slices first keep time local, and coarse tables cost a small fraction of the rows |
 | re-sorting old periods into coarser slices | fewer runs for long windows | a question about a few minutes of an old period would read a whole coarse slice. Slices keep their grain for life, and coarse tables serve long windows |
 | coarse tables across objects, in trees of their own, in the same commits | a combination counted once over any window, whatever the number of objects | a second lifecycle beside the objects. Everything an object knows stays in it, and longer periods bring the same gain inside each object |
-| count tables per column and per pair of columns | small, and every single column served | a question over three columns is served by none, and the pairs to keep depend on questions nobody knows |
+| count tables per column and per pair of columns | small, and every single column served | a question over three columns is served by none, and the pairs to keep depend on questions nobody knows: declared groupings name them |
 | aggregates declared for given questions: a filtered count, a chosen set of columns | the cheapest answer to those questions | the questions are not known in advance, and each new one would need a declaration |
 | a star-tree per object, as Apache Pinot builds one per segment (source) | any combination of filters over its dimensions, with a bounded leaf | its star nodes multiply its size. Sorted slices are its spine on an order the data chooses, stored as the rows themselves, and value counts stand in for its star nodes on single columns |
 | granules of a fixed number of rows, with a sparse index and skipping indexes per granule | pruning for selective filters | a filter that keeps most rows still reads every row |

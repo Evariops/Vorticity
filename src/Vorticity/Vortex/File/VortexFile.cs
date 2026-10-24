@@ -1419,9 +1419,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <param name="claimed">Whether the decoding is the caller's.</param>
     /// <remarks>
     /// The lanes of a question are as many scans of a file, which start together and miss the kept
-    /// maps together: each decoding them read every map once a lane. A day of 4.32 G rows holds
-    /// ~50 MB of maps for the four columns of one filter, read 32 times over 32 lanes (one service
-    /// per minute under a predicate, 1.72 GB read cold where one lane reads 178 MB, 2026-10-21).
+    /// maps together: each decoding them would read every map once a lane. A day of 4.32 G rows holds
+    /// ~50 MB of maps for the four columns of one filter, which 32 lanes would read 32 times (one
+    /// service per minute under a predicate, 1.72 GB read cold where one lane reads 178 MB).
     /// </remarks>
     internal Compute.ZoneColumn? ClaimZones(int node, out Task<Compute.ZoneColumn?>? flight, out bool claimed)
     {
@@ -1456,6 +1456,17 @@ public sealed partial class VortexFile : IAsyncDisposable
             return null;
         }
     }
+
+    /// <summary>
+    /// How many times a scan waited for another's decoding of a zone map rather than read it: what a test that starts
+    /// scans together waits for before it lets the first one's read go.
+    /// </summary>
+    internal int ZoneWaits => Volatile.Read(ref _zoneWaits);
+
+    private int _zoneWaits;
+
+    /// <summary>Counts a scan about to wait for another's decoding of a zone map.</summary>
+    internal void NoteZoneWait() => Interlocked.Increment(ref _zoneWaits);
 
     /// <summary>
     /// Ends the decoding of zoned node <paramref name="node"/>'s zone map that <see cref="ClaimZones"/>

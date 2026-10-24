@@ -1,5 +1,8 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO.Hashing;
 using System.Linq;
 
 namespace Vorticity.Benchmarks.Queries;
@@ -55,10 +58,31 @@ internal sealed class RequestGenerator
 
     /// <param name="seed">The seed: the same seed draws the same rows.</param>
     /// <param name="firstId">The number of the first request's id, so that generators of several hours draw ids apart.</param>
-    internal RequestGenerator(int seed, long firstId = 0)
+    /// <param name="randomIds">Whether a request's id looks random, as the ids a service draws do, rather than counts up (<see cref="IdOf"/>).</param>
+    internal RequestGenerator(int seed, long firstId = 0, bool randomIds = false)
     {
         _next = firstId;
         _random = new Random(seed);
+        RandomIds = randomIds;
+    }
+
+    /// <summary>Whether its requests' ids look random (<see cref="IdOf"/>).</summary>
+    internal bool RandomIds { get; }
+
+    /// <summary>
+    /// The id of request number <paramref name="id"/>: "req-" and the number's twelve hexadecimal digits, which keep an
+    /// hour's ids in the order of its rows and their postings small; or, <paramref name="random"/>, the 32 hexadecimal
+    /// digits of the number's XXH3-128, which no order keeps, as the ids a service draws.
+    /// </summary>
+    internal static string IdOf(long id, bool random) =>
+        random ? RandomIdOf(id).ToString("x32", CultureInfo.InvariantCulture) : string.Create(CultureInfo.InvariantCulture, $"req-{id:x12}");
+
+    /// <summary>The 128 bits a random id spells: the XXH3-128 of the request's number, little-endian.</summary>
+    internal static UInt128 RandomIdOf(long id)
+    {
+        Span<byte> number = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64LittleEndian(number, id);
+        return XxHash128.HashToUInt128(number);
     }
 
     /// <summary>One request at <paramref name="at"/>, its other columns drawn.</summary>
@@ -67,7 +91,7 @@ internal sealed class RequestGenerator
         RequestDraw draw = Draw(out long id);
         return new GeneratedRequest(
             at, ServiceNameTable[draw.Service], EndpointNameTable[draw.Service][draw.Endpoint], Methods[draw.Method], draw.Status, Regions[draw.Region],
-            VersionNameTable[draw.Service][draw.Version], HostNameTable[draw.Service][draw.Host], $"req-{id:x12}", draw.DurationNs, draw.Weight);
+            VersionNameTable[draw.Service][draw.Version], HostNameTable[draw.Service][draw.Host], IdOf(id, RandomIds), draw.DurationNs, draw.Weight);
     }
 
     /// <summary>

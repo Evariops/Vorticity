@@ -459,7 +459,7 @@ public readonly struct Variant : IEquatable<Variant>
     private static Variant ObjectOf(List<(byte[] Key, Variant Value)> fields)
     {
         fields.Sort(static (a, b) => VariantEncoding.KeyOrder.Compare(a.Key, b.Key));
-        SortedSet<byte[]> names = new(VariantEncoding.KeyOrder);
+        bool scalars = true;
         for (int i = 0; i < fields.Count; i++)
         {
             if (i > 0 && fields[i - 1].Key.AsSpan().SequenceEqual(fields[i].Key))
@@ -467,6 +467,27 @@ public readonly struct Variant : IEquatable<Variant>
                 throw new ArgumentException($"A variant object repeats the key '{Encoding.UTF8.GetString(fields[i].Key)}'.", nameof(fields));
             }
 
+            scalars &= VariantScalar.KindOf(fields[i].Value.ValueSpan) is not (VariantKind.Object or VariantKind.Array);
+        }
+
+        // An object of scalars, as a record's attributes are: its keys are its fields', sorted, and each value's bytes stand
+        // as they are, where the keys of every value were gathered and each value rewritten against them.
+        if (scalars)
+        {
+            List<byte[]> own = new(fields.Count);
+            List<(int Id, byte[] Value)> values = new(fields.Count);
+            for (int i = 0; i < fields.Count; i++)
+            {
+                own.Add(fields[i].Key);
+                values.Add((i, fields[i].Value.ScalarBytes()));
+            }
+
+            return new Variant(VariantEncoding.Metadata(own), VariantEncoding.Object(values));
+        }
+
+        SortedSet<byte[]> names = new(VariantEncoding.KeyOrder);
+        for (int i = 0; i < fields.Count; i++)
+        {
             _ = names.Add(fields[i].Key);
             VariantEncoding.CollectKeys(fields[i].Value.MetadataSpan, fields[i].Value.ValueSpan, names);
         }
@@ -482,6 +503,14 @@ public readonly struct Variant : IEquatable<Variant>
     }
 
     private static Variant Primitive(byte[] value) => new(VariantEncoding.EmptyMetadata, value);
+
+    /// <summary>The bytes of this value, a scalar, as many as its encoding takes: its own array when it is the whole of it.</summary>
+    private byte[] ScalarBytes()
+    {
+        ReadOnlySpan<byte> value = ValueSpan;
+        int size = ParquetVariant.SizeOf(value);
+        return _value is not null && _offset == 0 && size == _value.Length ? _value : value[..size].ToArray();
+    }
 
     /// <summary>The value <paramref name="slice"/> of this one's bytes, sharing them.</summary>
     private Variant Within(ReadOnlySpan<byte> slice)

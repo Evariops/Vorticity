@@ -22,16 +22,28 @@ namespace Vorticity.Aggregating;
 /// <para>
 /// Positive and negative values keep stores of their own, by magnitude, and zeros a count; a NaN is
 /// skipped, an infinity falls in the bucket past the largest double. A store is sparse, sorted indices
-/// and their counts, while it holds few buckets, then a dense window over the indices it spans.
+/// and their counts, while it holds few buckets, then a dense window over the indices it spans, and past
+/// <see cref="MaxWindow"/> of them a map of the buckets that hold values, so that its bytes follow the
+/// values it holds and not the range they span.
 /// </para>
 /// </remarks>
-internal sealed class QuantileSketch
+internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
 {
     /// <summary>The buckets a store keeps sorted before it becomes a dense window.</summary>
     internal const int SparseLimit = 32;
 
     /// <summary>The most mantissa bits a grid takes: a relative error near 5 × 10⁻⁷.</summary>
     internal const int MaxBits = 20;
+
+    /// <summary>
+    /// The most buckets a store's dense window spans: 512 KiB of counts. A grid of many bits over a wide range, which a
+    /// relative error of 5 × 10⁻⁷ asks, spans a million buckets a power of two, 8 MiB of counts a binade; past this, a
+    /// store keeps a map of the buckets that hold values instead, its bytes those values' and not their range's.
+    /// </summary>
+    internal const int MaxWindow = 1 << 16;
+
+    /// <summary>The bytes a bucket of a store's map takes: its entry, and its share of the map's buckets.</summary>
+    private const int WideEntryBytes = 32;
 
     private readonly int _shift;
     private Store _positive;
@@ -56,7 +68,7 @@ internal sealed class QuantileSketch
     internal long Zeros { get; private set; }
 
     /// <summary>The bytes the sketch holds in its arrays, which grow as it meets buckets.</summary>
-    internal long Bytes => _positive.Bytes + _negative.Bytes;
+    public long Bytes => _positive.Bytes + _negative.Bytes;
 
     /// <summary>The fewest mantissa bits whose buckets answer within <paramref name="relativeError"/>: <c>2^-k / (2 + 2^-k)</c> at most.</summary>
     /// <exception cref="ArgumentOutOfRangeException">The error is not in (0, 1).</exception>
@@ -166,7 +178,7 @@ internal sealed class QuantileSketch
 
     /// <summary>Adds <paramref name="other"/>'s counts, a sketch of the same grid.</summary>
     /// <exception cref="ArgumentException">The grids differ.</exception>
-    internal void Merge(QuantileSketch other)
+    public void Merge(QuantileSketch other)
     {
         if (other.Bits != Bits)
         {
@@ -218,7 +230,7 @@ internal sealed class QuantileSketch
     }
 
     /// <summary>The buckets of each store, written for a spill or a state: zeros and count, then each store's entries.</summary>
-    internal void Write(Action<long> word)
+    public void Write(Action<long> word)
     {
         word(Count);
         word(Zeros);
@@ -255,7 +267,7 @@ internal sealed class QuantileSketch
     /// so that the counts are those this grid gives the same values.
     /// </summary>
     /// <exception cref="VortexFormatException">The bytes do not hold a sketch, or one of a coarser grid.</exception>
-    internal void MergeEncoded(ReadOnlySpan<byte> bytes)
+    public void MergeEncoded(ReadOnlySpan<byte> bytes)
     {
         int at = 0;
         int bits = checked((int)ReadVarint(bytes, ref at));
@@ -338,24 +350,32 @@ internal sealed class QuantileSketch
         throw new VortexFormatException("A sketch holds a varint of more than 64 bits.");
     }
 
-    /// <summary>A sketch read back from the words <see cref="Write"/> wrote.</summary>
-    internal static QuantileSketch Read(int bits, Func<long> word)
+    /// <summary>A sketch read back from the words <see cref="Write"/> wrote, a spill's or a test's.</summary>
+    internal static QuantileSketch Read<TWords>(int bits, ref TWords words)
+        where TWords : IWordSource, allows ref struct
     {
         QuantileSketch sketch = new QuantileSketch(bits);
-        long count = word();
-        long zeros = word();
+        long count = words.NextWord();
+        long zeros = words.NextWord();
         for (int side = 0; side < 2; side++)
         {
-            long entries = word();
+            long entries = words.NextWord();
             for (long e = 0; e < entries; e++)
             {
-                int index = checked((int)word());
-                sketch.AddBucket(negative: side == 0, index, word());
+                int index = checked((int)words.NextWord());
+                sketch.AddBucket(negative: side == 0, index, words.NextWord());
             }
         }
 
         sketch.SetTotals(count, zeros);
         return sketch;
+    }
+
+    /// <summary>A sketch read back from the words <paramref name="word"/> hands out one at a time.</summary>
+    internal static QuantileSketch Read(int bits, Func<long> word)
+    {
+        WordsOf words = new WordsOf(word);
+        return Read(bits, ref words);
     }
 
     /// <summary>Adds a bucket's count as read back, its values already counted by <see cref="SetTotals"/>.</summary>
@@ -387,7 +407,10 @@ internal sealed class QuantileSketch
         return double.IsInfinity(lower) ? (lower, lower) : (lower, BitConverter.Int64BitsToDouble((long)(index + 1) << _shift));
     }
 
-    /// <summary>The counts of one sign's buckets: sorted indices while few, a dense window past them.</summary>
+    /// <summary>
+    /// The counts of one sign's buckets: sorted indices while few, a dense window past them, and past a window of
+    /// <see cref="MaxWindow"/> buckets a map of the buckets that hold values.
+    /// </summary>
     private struct Store
     {
         private int[] _keys;
@@ -398,8 +421,13 @@ internal sealed class QuantileSketch
         private long[]? _window;
         private int _low;
 
+        // The buckets of values too far apart for a window, by index: what a grid of many bits over a wide range holds.
+        private Dictionary<int, long>? _wide;
+
         internal readonly long Bytes =>
-            _window is { } window ? (long)window.Length * sizeof(long) : ((long)(_keys?.Length ?? 0) * sizeof(int)) + ((long)(_counts?.Length ?? 0) * sizeof(long));
+            _wide is { } wide ? (long)wide.Count * WideEntryBytes
+            : _window is { } window ? (long)window.Length * sizeof(long)
+            : ((long)(_keys?.Length ?? 0) * sizeof(int)) + ((long)(_counts?.Length ?? 0) * sizeof(long));
 
         /// <summary>Whether the store is a dense window, and its counts and the index of its first, which a run of adds reads in place.</summary>
         internal readonly bool Dense(out long[] window, out int low)
@@ -412,6 +440,13 @@ internal sealed class QuantileSketch
         /// <summary>Adds a bucket's count, and returns the bytes the store grew by: zero unless an array grew.</summary>
         internal long Add(int index, long count)
         {
+            if (_wide is { } wide)
+            {
+                ref long held = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(wide, index, out bool existed);
+                held += count;
+                return existed ? 0 : WideEntryBytes;
+            }
+
             if (_window is { } window)
             {
                 int at = index - _low;
@@ -423,7 +458,7 @@ internal sealed class QuantileSketch
 
                 long before = Bytes;
                 Widen(index);
-                _window![index - _low] += count;
+                Add(index, count);
                 return Bytes - before;
             }
 
@@ -466,7 +501,7 @@ internal sealed class QuantileSketch
             return grown;
         }
 
-        /// <summary>Forgets every count, a dense window kept as it is, zeroed.</summary>
+        /// <summary>Forgets every count, a dense window or a map kept as it is, emptied.</summary>
         internal void Clear()
         {
             if (_window is { } window)
@@ -474,12 +509,23 @@ internal sealed class QuantileSketch
                 Array.Clear(window);
             }
 
+            _wide?.Clear();
             _sparse = 0;
         }
 
         /// <summary>Adds this store's counts into <paramref name="into"/>.</summary>
         internal readonly void AddTo(ref Store into)
         {
+            if (_wide is { } wide)
+            {
+                foreach ((int index, long count) in wide)
+                {
+                    into.Add(index, count);
+                }
+
+                return;
+            }
+
             if (_window is { } window)
             {
                 for (int i = 0; i < window.Length; i++)
@@ -502,6 +548,25 @@ internal sealed class QuantileSketch
         /// <summary>The buckets that hold values, as <see cref="QuantileSketch.Encode"/> writes them: their count, then each one's gap and count.</summary>
         internal readonly void Encode(IBufferWriter<byte> into)
         {
+            // A map's buckets, put in order first.
+            if (_wide is not null)
+            {
+                List<(int Index, long Count)> sorted = Entries();
+                Span<byte> count = into.GetSpan(MaxVarint);
+                into.Advance(Varint(count, (ulong)sorted.Count));
+                int last = 0;
+                foreach ((int index, long held) in sorted)
+                {
+                    Span<byte> entry = into.GetSpan(2 * MaxVarint);
+                    int at = Varint(entry, (ulong)(index - last));
+                    at += Varint(entry[at..], (ulong)held);
+                    into.Advance(at);
+                    last = index;
+                }
+
+                return;
+            }
+
             int entries = 0;
             if (_window is { } window)
             {
@@ -537,7 +602,21 @@ internal sealed class QuantileSketch
         /// <summary>The indices that hold values and their counts, ascending.</summary>
         internal readonly List<(int Index, long Count)> Entries()
         {
-            List<(int, long)> entries = [];
+            List<(int Index, long Count)> entries = [];
+            if (_wide is { } wide)
+            {
+                foreach ((int index, long count) in wide)
+                {
+                    if (count != 0)
+                    {
+                        entries.Add((index, count));
+                    }
+                }
+
+                entries.Sort(static (left, right) => left.Index.CompareTo(right.Index));
+                return entries;
+            }
+
             if (_window is { } window)
             {
                 for (int i = 0; i < window.Length; i++)
@@ -559,23 +638,45 @@ internal sealed class QuantileSketch
             return entries;
         }
 
+        /// <summary>
+        /// Leaves the sorted indices for a dense window over the ones they span, or for a map of them when that window
+        /// would pass <see cref="MaxWindow"/> buckets.
+        /// </summary>
         private void Densify()
         {
             int low = _keys[0];
-            long[] window = new long[Math.Max(_keys[_sparse - 1] - low + 1, SparseLimit * 2)];
-            for (int i = 0; i < _sparse; i++)
+            long span = (long)_keys[_sparse - 1] - low + 1;
+            if (span > MaxWindow)
             {
-                window[_keys[i] - low] = _counts[i];
+                Dictionary<int, long> wide = new Dictionary<int, long>(2 * _sparse);
+                for (int i = 0; i < _sparse; i++)
+                {
+                    wide[_keys[i]] = _counts[i];
+                }
+
+                _wide = wide;
+            }
+            else
+            {
+                long[] window = new long[Math.Max((int)span, SparseLimit * 2)];
+                for (int i = 0; i < _sparse; i++)
+                {
+                    window[_keys[i] - low] = _counts[i];
+                }
+
+                _window = window;
+                _low = low;
             }
 
-            _window = window;
-            _low = low;
             _keys = null!;
             _counts = null!;
             _sparse = 0;
         }
 
-        /// <summary>Grows the window to hold <paramref name="index"/>, by half its length again at least each way it grows.</summary>
+        /// <summary>
+        /// Grows the window to hold <paramref name="index"/>, by half its length again at least each way it grows; or,
+        /// when it would pass <see cref="MaxWindow"/> buckets, leaves it for a map of the buckets it holds.
+        /// </summary>
         private void Widen(int index)
         {
             long[] window = _window!;
@@ -583,7 +684,23 @@ internal sealed class QuantileSketch
             int high = Math.Max(_low + window.Length - 1, index);
             int slack = window.Length / 2;
             int newLow = index < _low ? Math.Max(0, low - slack) : _low;
-            int length = checked(high - newLow + 1 + (index > _low ? slack : 0));
+            long length = (long)high - newLow + 1 + (index > _low ? slack : 0);
+            if (length > MaxWindow)
+            {
+                Dictionary<int, long> wide = new Dictionary<int, long>();
+                for (int i = 0; i < window.Length; i++)
+                {
+                    if (window[i] != 0)
+                    {
+                        wide[_low + i] = window[i];
+                    }
+                }
+
+                _wide = wide;
+                _window = null;
+                return;
+            }
+
             long[] grown = new long[length];
             Array.Copy(window, 0, grown, _low - newLow, window.Length);
             _window = grown;

@@ -178,7 +178,7 @@ internal sealed class ZonePruner : IBlockPruner
                 if (comparison.Value.Kind != FilterLiteralKind.Null &&
                     Find(comparison.Field) is { HasStatistics: true } column &&
                     column.ZoneLength == live.BlockRows && column.RowCount == live.RowCount &&
-                    column.Table.TryMayMatch(op, comparison.Value, nanMatches, words))
+                    column.Table.TryMayMatch(op, comparison.Value, nanMatches, words, scope))
                 {
                     return;
                 }
@@ -1556,17 +1556,24 @@ internal sealed class ZonePruner : IBlockPruner
         return true;
     }
 
-    private ZoneColumn? Find(FieldExpr field)
+    /// <summary>
+    /// The zones of <paramref name="field"/>: a column's own, or a function's of its column; none for a path into a variant
+    /// or a result, whose values are not the column's.
+    /// </summary>
+    private ZoneColumn? Find(FieldExpr field) => field switch
     {
-        if (field is FunctionFieldExpr function)
-        {
-            return Through(function);
-        }
+        ColumnFieldExpr column => Find(column),
+        FunctionFieldExpr function => Through(function),
+        _ => null,
+    };
 
+    /// <summary>The zones of <paramref name="column"/>, when the pruner holds them.</summary>
+    private ZoneColumn? Find(ColumnFieldExpr column)
+    {
         for (int i = 0; i < _columns.Length; i++)
         {
-            if (ReferenceEquals(_columns[i].Field, field) ||
-                string.Equals(_columns[i].Field.Path, field.Path, StringComparison.Ordinal))
+            if (ReferenceEquals(_columns[i].Field, column) ||
+                string.Equals(_columns[i].Field.Path, column.Path, StringComparison.Ordinal))
             {
                 return _columns[i];
             }

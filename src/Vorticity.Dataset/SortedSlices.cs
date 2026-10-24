@@ -58,7 +58,7 @@ internal sealed class SortedSlices : IDisposable, IAsyncDisposable
     /// others sort and write, held a period's load a slice ahead of its writes, which only a lone period whose writes
     /// hold it gains from: five periods loaded at once, their lanes all taken, held 18.3 GB and took 485-495 s of the
     /// processors with three, 13.3 GB and 455-460 s with two, in the same 25.2-25.5 s; a lone day took 17.1-17.2 s with
-    /// three and 17.7-18.0 s with two.
+    /// three and 17.7-18.0 s with two (<c>vortex-queries --micro load --periods 5</c>, then <c>--periods 1</c>).
     /// </summary>
     internal const int InFlight = 2;
 
@@ -108,8 +108,9 @@ internal sealed class SortedSlices : IDisposable, IAsyncDisposable
     /// in an order the first slice settles from the columns <paramref name="order"/> names: the stream's first slice is
     /// laid out for <paramref name="rows"/> rows, those its pace holds, each after it for those of the slice before and
     /// the most the rows rose from one slice to the next, twice <paramref name="target"/> at most, a burst's bound. A
-    /// stream at a steady pace lays its slices out for what they hold, give or take its noise; a margin of an eighth held
-    /// 2.3 GB more than the rows at the start of five periods loaded at once, and 0.35 GB after, its room unwritten.
+    /// stream at a steady pace lays its slices out for what they hold and a sixty-fourth more, its noise: a slice a few
+    /// rows past its room doubles it, and the room it outgrew stays with the buffer. A margin of an eighth held 2.3 GB
+    /// more than the rows at the start of five periods loaded at once, and 0.35 GB after, its room unwritten.
     /// </summary>
     internal SortedSlices(SliceStream stream, IReadOnlyList<int> order, int instant, DType schema, double rows, long target)
         : this(stream.Unit, order, [], instant, schema)
@@ -232,9 +233,12 @@ internal sealed class SortedSlices : IDisposable, IAsyncDisposable
     /// <summary>Whether every slice was handed to its write, each of the table's; <see cref="DrainAsync"/> says when the last is written.</summary>
     internal bool Complete => _held == 0 && (_stream is not null || _slice == _slices!.Count);
 
-    /// <summary>The rows a slice of the stream is laid out for, the rows <paramref name="rows"/> it is expected to hold, a burst's bound at most.</summary>
+    /// <summary>
+    /// The rows a slice of the stream is laid out for: the rows <paramref name="rows"/> it is expected to hold and a
+    /// sixty-fourth more, a burst's bound at most.
+    /// </summary>
     private int Room(double rows) =>
-        (int)Math.Clamp(Math.Min(rows, 2.0 * _target), 1, int.MaxValue);
+        (int)Math.Clamp(Math.Min(rows + (rows / 64), 2.0 * _target), 1, int.MaxValue);
 
     /// <summary>
     /// Waits for every slice handed over to be written, on no lane, and throws what the oldest that failed threw: every one,

@@ -103,8 +103,8 @@ public sealed partial class SynopsisAnswerTests
     /// <summary>
     /// The objects written in chunks of a block of 16 rows, their directories in pages of four chunks, and every edge of an
     /// answer, a slice its window cuts, cut at four lanes between them into pieces of its rows alone: every question gives
-    /// the bits its rows give and its answer at one lane, and a window that cuts slices reads fewer of their rows as an
-    /// answer's edges than one lane does, the rest by pieces of their own.
+    /// the bits its rows give and its answer at one lane, and the pieces read their rows as edges of their own, by the
+    /// objects' chunk directories, as one lane reads the edges whole: as many rows at edges, and none as rows.
     /// </summary>
     [Theory]
     [MemberData(nameof(Questions))]
@@ -124,10 +124,8 @@ public sealed partial class SynopsisAnswerTests
             $"EDGES {question}: {metrics.Rows} rows ({metrics.EdgeRows} at edges); at one lane {alone.Rows} rows ({alone.EdgeRows} at edges).\n");
         Assert.Equal(off, cut);
         Assert.Equal(whole, cut);
-        if (alone.EdgeRows > 0)
-        {
-            Assert.True(metrics.EdgeRows < alone.EdgeRows, $"{metrics.EdgeRows} rows at edges, {alone.EdgeRows} at one lane");
-        }
+        Assert.Equal(alone.EdgeRows, metrics.EdgeRows);
+        Assert.Equal(alone.Rows, metrics.Rows);
     }
 
     /// <summary>
@@ -284,7 +282,7 @@ public sealed partial class SynopsisAnswerTests
             await dataset.AppendAsync(draft, Ct);
         }
 
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, JoinedPeriodBytes = 0 }, Ct) is not null)
         {
         }
 

@@ -18,28 +18,59 @@ namespace Vorticity.Indexes;
 /// schema, which the contents hold once, so that they hold no table's dtype: the file's schema, not the
 /// dataset's, which may have changed since. A table of contents a later library cannot read is ignored,
 /// and the file is read through its directory.
+/// <para>
+/// A class, not a record: it keeps what its readers load and decode, page tables, row types, states structs,
+/// which an equality of its members or a copy of it would compare or share.
+/// </para>
 /// </remarks>
-/// <param name="Schema">The file's schema, a struct of its columns, as <see cref="DTypeFlatBuffers"/> writes it.</param>
-/// <param name="Encodings">The array encodings the file's blobs name, by their index.</param>
-/// <param name="Slices">The file's slice table.</param>
-/// <param name="ChunkDirectories">Each top-level column's chunk directory, the regions of its index entry.</param>
-/// <param name="PartStart">Where the synopsis part starts in the file.</param>
-/// <param name="PartEnd">Where it ends.</param>
-/// <param name="Tables">Each synopsis table, and its chunks: their regions, the buckets they count over and their rows.</param>
-/// <param name="PathDirectories">
+/// <param name="schema">The file's schema, a struct of its columns, as <see cref="DTypeFlatBuffers"/> writes it.</param>
+/// <param name="encodings">The array encodings the file's blobs name, by their index.</param>
+/// <param name="slices">The file's slice table.</param>
+/// <param name="chunkDirectories">Each top-level column's chunk directory, the regions of its index entry.</param>
+/// <param name="partStart">Where the synopsis part starts in the file.</param>
+/// <param name="partEnd">Where it ends.</param>
+/// <param name="tables">Each synopsis table, and its chunks: their regions, the buckets they count over and their rows.</param>
+/// <param name="pathDirectories">
 /// Each variant column's path directory, and its region: what a question on a path the tables do not name
 /// reads first, before that path's regions.
 /// </param>
-internal sealed record SynopsisContents(
-    byte[] Schema,
-    IReadOnlyList<string> Encodings,
-    SliceTable Slices,
-    IReadOnlyList<IndexSegment> ChunkDirectories,
-    long PartStart,
-    long PartEnd,
-    IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> Tables,
-    IReadOnlyList<(int Field, IndexSegment Region)>? PathDirectories = null)
+internal sealed class SynopsisContents(
+    byte[] schema,
+    IReadOnlyList<string> encodings,
+    SliceTable slices,
+    IReadOnlyList<IndexSegment> chunkDirectories,
+    long partStart,
+    long partEnd,
+    IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> tables,
+    IReadOnlyList<(int Field, IndexSegment Region)>? pathDirectories = null)
 {
+    /// <summary>The file's schema, a struct of its columns, as <see cref="DTypeFlatBuffers"/> writes it.</summary>
+    internal byte[] Schema { get; } = schema;
+
+    /// <summary>The array encodings the file's blobs name, by their index.</summary>
+    internal IReadOnlyList<string> Encodings { get; } = encodings;
+
+    /// <summary>The file's slice table.</summary>
+    internal SliceTable Slices { get; } = slices;
+
+    /// <summary>Each top-level column's chunk directory, the regions of its index entry.</summary>
+    internal IReadOnlyList<IndexSegment> ChunkDirectories { get; } = chunkDirectories;
+
+    /// <summary>Where the synopsis part starts in the file.</summary>
+    internal long PartStart { get; } = partStart;
+
+    /// <summary>Where the synopsis part ends.</summary>
+    internal long PartEnd { get; } = partEnd;
+
+    /// <summary>Each synopsis table, and its chunks: their regions, the buckets they count over and their rows.</summary>
+    internal IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> Tables { get; } = tables;
+
+    /// <summary>
+    /// Each variant column's path directory, and its region: what a question on a path the tables do not name
+    /// reads first, before that path's regions.
+    /// </summary>
+    internal IReadOnlyList<(int Field, IndexSegment Region)>? PathDirectories { get; } = pathDirectories;
+
     /// <summary>
     /// The region of the file's index directory: what a lookup of one value reads first, the runs of the
     /// file's identifiers and every other index in it, with no open of the file. Null when unknown.
@@ -60,6 +91,19 @@ internal sealed record SynopsisContents(
     /// pages a slice's rows lie in, with no read. Null when no column's directory is paged.
     /// </summary>
     internal ChunkPaging? Paging { get; init; }
+
+    /// <summary>
+    /// These contents naming the region of the file's index directory <paramref name="directory"/> and the entries of
+    /// the indexes that locate a column's values in it, <paramref name="locating"/>: new contents, which hold nothing a
+    /// reader of these loaded.
+    /// </summary>
+    internal SynopsisContents Naming(IndexSegment directory, IReadOnlyList<LocatingEntry>? locating) =>
+        new SynopsisContents(Schema, Encodings, Slices, ChunkDirectories, PartStart, PartEnd, Tables, PathDirectories)
+        {
+            DirectoryRegion = directory,
+            Locating = locating,
+            Paging = Paging,
+        };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
     private SliceChunks.PageTable?[]? _pageTables;
@@ -186,6 +230,66 @@ internal sealed record SynopsisContents(
             DeclaredRegionMap regions = new DeclaredRegionMap(this);
             return System.Threading.Interlocked.CompareExchange(ref _declared, regions, null) ?? regions;
         }
+    }
+
+    /// <summary>
+    /// The regions of the object the contents declare with a checksum, which the synopsis cache may keep: its tables, its
+    /// chunk directories, its path directories, its index directory and the entries of its locating indexes in it.
+    /// </summary>
+    internal List<IndexSegment> Declared()
+    {
+        List<IndexSegment> regions = [];
+        void Declare(IndexSegment region)
+        {
+            if (region.Checksum is not null)
+            {
+                regions.Add(region);
+            }
+        }
+
+        foreach ((SynopsisTableInfo _, IReadOnlyList<TableChunk> chunks) in Tables)
+        {
+            // A table's chunks listed apart are known once their list is loaded; their list is a region of its own.
+            if (chunks is TableChunks { List: { } list } listed)
+            {
+                Declare(list);
+                if (!listed.Loaded)
+                {
+                    continue;
+                }
+            }
+
+            foreach (TableChunk chunk in chunks)
+            {
+                Declare(chunk.Region);
+                if (chunk.Distinct is { } distinct)
+                {
+                    Declare(distinct);
+                }
+            }
+        }
+
+        foreach (IndexSegment region in ChunkDirectories)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, IndexSegment region) in PathDirectories ?? [])
+        {
+            Declare(region);
+        }
+
+        if (DirectoryRegion is { } directory)
+        {
+            Declare(directory);
+        }
+
+        foreach (LocatingEntry located in Locating ?? [])
+        {
+            Declare(located.Region);
+        }
+
+        return regions;
     }
 
     /// <summary>
@@ -340,7 +444,7 @@ internal sealed record SynopsisContents(
                 }
 
                 Dictionary<(ulong, uint), IndexSegment> regions = new Dictionary<(ulong, uint), IndexSegment>(_count);
-                foreach (IndexSegment region in SynopsisCacheReader.Declared(_contents))
+                foreach (IndexSegment region in _contents.Declared())
                 {
                     regions[(region.Offset, region.Length)] = region;
                 }
@@ -678,12 +782,20 @@ internal sealed record SynopsisContents(
                         break;
                     case (TagTable, ProtoWireType.LengthDelimited):
                         ReadOnlySpan<byte> held = reader.ReadLengthDelimited();
-                        if (Table(bytes.Slice(reader.Position - held.Length, held.Length)) is not { } table)
+                        if (Table(bytes.Slice(reader.Position - held.Length, held.Length), out bool later) is { } table)
+                        {
+                            tables.Add(table);
+                        }
+                        else if (later)
+                        {
+                            // A table a later writer made is skipped, the object's other tables answering what they hold.
+                            VortexTelemetry.SynopsisTableUnknown();
+                        }
+                        else
                         {
                             return null;
                         }
 
-                        tables.Add(table);
                         break;
                     case (TagSchema, ProtoWireType.LengthDelimited):
                         schema = reader.ReadLengthDelimited().ToArray();
@@ -744,10 +856,12 @@ internal sealed record SynopsisContents(
     /// <summary>
     /// A table and its chunks, which the message <paramref name="message"/> holds, its chunks checked and left in the bytes
     /// (<see cref="TableChunks"/>), or listed apart in a region of the object the message names, read when a question loads
-    /// it; null for a table of no chunk.
+    /// it; null for a table of no chunk, and for a table of a kind or a version a later writer made, which
+    /// <paramref name="later"/> then says.
     /// </summary>
-    private static (SynopsisTableInfo, IReadOnlyList<TableChunk>)? Table(ReadOnlyMemory<byte> message)
+    private static (SynopsisTableInfo, IReadOnlyList<TableChunk>)? Table(ReadOnlyMemory<byte> message, out bool later)
     {
+        later = false;
         ProtoReader reader = new ProtoReader(message.Span);
         SynopsisTableInfo? table = null;
         int count = 0;
@@ -762,7 +876,9 @@ internal sealed record SynopsisContents(
             switch (field, wire)
             {
                 case (TagTableInfo, ProtoWireType.LengthDelimited):
-                    table = SynopsisTableInfo.From(reader.ReadLengthDelimited());
+                    ReadOnlySpan<byte> options = reader.ReadLengthDelimited();
+                    table = SynopsisTableInfo.From(options);
+                    later = table is null && SynopsisTableInfo.IsLater(options);
                     break;
                 case (TagTableList, ProtoWireType.LengthDelimited):
                     list = IndexDirectory.ReadSegment(reader.ReadMessage());

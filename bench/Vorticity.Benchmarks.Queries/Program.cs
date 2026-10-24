@@ -17,6 +17,7 @@
 //   … -- --switch merge                                                                every file's query under both settings of an engine switch, in turns (Switches.cs)
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
 //   … -- --fixture spread-random-20000000-core2025.10                                   that fixture written if it is not yet, its path printed
+//   … -- --help                                                                         the micro benches --micro NAME runs, each with what it measures
 //
 // The files are written once under ~/.cache/vorticity/queries (VORTICITY_QUERIES_CORPUS overrides it).
 using System;
@@ -47,192 +48,111 @@ if (compared is not null && Text(args, "--setting") is { } setting)
 }
 string[] only = [.. args.Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal) && (i == 0 || !args[i - 1].StartsWith("--", StringComparison.Ordinal) || args[i - 1] is "--check" or "--parallel"))];
 
-// --micro keys: a key's groups found alone, in memory, with the statistics' bounds and without (KeyMicro.cs).
-if (Text(args, "--micro") == "keys")
+// The micro benches, each a name for --micro, what it measures and how it runs: --help lists them, and a name none holds is
+// refused rather than taken for the query matrix, which a mistyped name used to start.
+Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<string, (string, Func<Task<int>>)>(StringComparer.Ordinal)
 {
-    return KeyMicro.Run(rounds);
-}
-
-// --micro words: a short text key's groups found alone, in memory (WordMicro.cs).
-if (Text(args, "--micro") == "words")
-{
-    return WordMicro.Run(rounds);
-}
-
-// --micro floatsum: a grouped exact float sum alone, in memory (FloatSumMicro.cs).
-if (Text(args, "--micro") == "floatsum")
-{
-    return FloatSumMicro.Run(rounds);
-}
-
-// --micro variants: a variant's path extracted alone, in memory (VariantMicro.cs).
-if (Text(args, "--micro") == "variants")
-{
-    return VariantMicro.Run(rounds);
-}
-
-// --micro sketches: the grids of a distribution weighed, in buckets and speed (SketchMicro.cs).
-if (Text(args, "--micro") == "sketches")
-{
-    return SketchMicro.Run(rounds);
-}
-
-// --micro synopsistables: what the synopsis tables cost a job, counted per slice and built (SynopsisTablesMicro.cs).
-if (Text(args, "--micro") == "synopsistables")
-{
-    return await SynopsisTablesMicro.Run(rounds);
-}
-
-// --micro slicesort: one time slice sorted as a dataset of periods writes it (SliceSortMicro.cs).
-if (Text(args, "--micro") == "slicesort")
-{
-    return await SliceSortMicro.Run(rounds, args.Contains("--deep"));
-}
-
-// --micro load: the write path of a load of sealed periods at the design's density, a few seconds a round (LoadMicro.cs).
-if (Text(args, "--micro") == "load")
-{
-    int periods = Option(args, "--periods", 4);
-    return await LoadMicro.Run(
-        Text(args, "--store") ?? "E:/vorticity-load-micro",
-        periods,
-        Option(args, "--parallel", periods),
-        Option(args, "--minutes", 3),
-        Option(args, "--rate", 50_000),
-        Option(args, "--rounds", 3),
-        Option(args, "--budget", 100),
-        Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
-        args.Contains("--disk"),
-        Option(args, "--period-hours", 1));
-}
-
-// --micro entries: each object's entry in the tree of the dataset at --store, and what its table of contents holds.
-if (Text(args, "--micro") == "entries")
-{
-    await PathsBench.EntriesAsync(Text(args, "--store") ?? throw new ArgumentException("--micro entries reads the dataset at --store."));
-    return 0;
-}
-
-// --micro seal: what the compaction of a period costs at the design's scale, job by job and pass by pass (SealBench.cs).
-if (Text(args, "--micro") == "seal")
-{
-    return await SealBench.Run(
-        Text(args, "--store") ?? "E:/vorticity-seal",
+    ["keys"] = ("a key's groups found alone, in memory, with the statistics' bounds and without (KeyMicro.cs)", () => Task.FromResult(KeyMicro.Run(rounds))),
+    ["words"] = ("a short text key's groups found alone, in memory (WordMicro.cs)", () => Task.FromResult(WordMicro.Run(rounds))),
+    ["floatsum"] = ("a grouped exact float sum alone, in memory (FloatSumMicro.cs)", () => Task.FromResult(FloatSumMicro.Run(rounds))),
+    ["variants"] = ("a variant's path extracted alone, in memory (VariantMicro.cs)", () => Task.FromResult(VariantMicro.Run(rounds))),
+    ["sketches"] = ("the grids of a distribution weighed, in buckets and speed (SketchMicro.cs)", () => Task.FromResult(SketchMicro.Run(rounds))),
+    ["synopsistables"] = ("what the synopsis tables cost a job, counted per slice and built (SynopsisTablesMicro.cs)", () => SynopsisTablesMicro.Run(rounds)),
+    ["slicesort"] = ("one time slice sorted as a dataset of periods writes it (SliceSortMicro.cs)", () => SliceSortMicro.Run(rounds, args.Contains("--deep"))),
+    ["load"] = ("the write path of a load of sealed periods at the design's density, a few seconds a round (LoadMicro.cs)", () =>
+    {
+        int periods = Option(args, "--periods", 4);
+        return LoadMicro.Run(
+            Text(args, "--store") ?? BenchStores.Of("load-micro"),
+            periods,
+            Option(args, "--parallel", periods),
+            Option(args, "--minutes", 3),
+            Option(args, "--rate", 50_000),
+            Option(args, "--rounds", 3),
+            Option(args, "--budget", 100),
+            Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
+            args.Contains("--disk"),
+            Option(args, "--period-hours", 1));
+    }),
+    ["entries"] = ("each object's entry in the tree of the dataset at --store, and what its table of contents holds", async () =>
+    {
+        await PathsBench.EntriesAsync(Text(args, "--store") ?? throw new ArgumentException("--micro entries reads the dataset at --store."));
+        return 0;
+    }),
+    ["seal"] = ("what the compaction of a period costs at the design's scale, job by job and pass by pass (SealBench.cs)", () => SealBench.Run(
+        Text(args, "--store") ?? BenchStores.Of("seal"),
         Option(args, "--minutes", 10),
         Option(args, "--rate", 50_000),
         Option(args, "--part-minutes", 10),
         Option(args, "--ceiling", 2),
         Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
         Option(args, "--budget", 100),
-        !args.Contains("--no-late"));
-}
+        !args.Contains("--no-late"),
+        Option(args, "--hours", 1),
+        args.Contains("--day"))),
+    ["shredcost"] = ("what shredding a path costs and saves in a file's bytes (ShredCostMicro.cs)", () => ShredCostMicro.Run()),
+    ["chunkshapes"] = ("the keys the chunks of a slice shred, three ways (ChunkShapesMicro.cs)", () =>
+        Task.FromResult(ChunkShapesMicro.Run((int)Option(args, "--rows", 3_000_000), (int)Option(args, "--chunk-rows", 1_000_000)))),
+    ["runsorder"] = ("the order inside a slice by distinct values or by runs added (RunsOrderMicro.cs)", () =>
+        Task.FromResult(RunsOrderMicro.Run((int)Option(args, "--rows", 1_000_000), rounds))),
+    ["shredwrite"] = ("what shredding costs a job in time, counted, chosen and written (ShredWriteMicro.cs)", () => ShredWriteMicro.Run(Option(args, "--rows", 1_000_000), rounds)),
+    ["slicebytes"] = ("what sorted slices weigh against the same rows in time order (SliceBytesMicro.cs)", () => SliceBytesMicro.Run(Option(args, "--rows", 1_000_000))),
+    ["sliceorder"] = ("the time order of an object sorted slice by slice (SliceOrderMicro.cs)", () => SliceOrderMicro.Run(rounds, Option(args, "--slice-rows", 500_000))),
+    ["synopsisanswer"] = ("an aggregation over a dataset of periods with its synopses and without (SynopsisAnswerMicro.cs)", () =>
+        SynopsisAnswerMicro.Run(Option(args, "--rows", 2_000_000), rounds)),
+    ["sparsecost"] = ("a sparse chunk's bytes and decode time against a dense one's, by the share of nulls (SparseCostMicro.cs)", () =>
+        SparseCostMicro.Run(Option(args, "--rows", 1_000_000), rounds)),
+    ["splitplan"] = ("--file F: the plan of splits a scan of a file's every row draws before its first read (SplitPlanMicro.cs)", () =>
+        SplitPlanMicro.Run(Text(args, "--file") ?? throw new ArgumentException("--micro splitplan needs --file F."), rounds)),
+    ["slicecost"] = ("the price of a row at a window's edge and of a row of a table of slices, the two a slice's target trades (SliceCostMicro.cs)", () =>
+        SliceCostMicro.Run(Option(args, "--rows", 2_000_000), rounds)),
+    ["generator"] = ("a minute of the time-window design's requests, and the runs of each synopsis column against its figures (RequestGenerator.cs)", () =>
+        Task.FromResult(RequestGenerator.Run((int)Option(args, "--seed", 17)))),
+    ["questions"] = ("the designs' example questions over generated requests and log records, cold and warm, synopses and rows (QuestionBench.cs)", () =>
+        QuestionBench.Run(
+            (int)Option(args, "--hours", 24), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100), Text(args, "--only"),
+            args.Contains("--sealed"))),
+    ["facets"] = ("the worst case of many facets, spans with a dozen repeating columns and a route under them (FacetsBench.cs)", () =>
+        FacetsBench.Run((int)Option(args, "--hours", 12), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100))),
+    ["lifecycle"] = ("what a row costs from its append to its last rewrite, and the objects a window finds (LifecycleBench.cs)", () =>
+        LifecycleBench.Run(
+            (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
+            Text(args, "--style") == "leveled", (int)Option(args, "--period-hours", 1), Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
+            Text(args, "--late") != "off", Text(args, "--neighbours") != "off", (long)Option(args, "--max-object-mib", 0) << 20,
+            Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0))),
+    ["qp-dashboard"] = ("the client's questions of a --qp run's TSV against the review's targets, a Markdown table (QpDashboard.cs)", () =>
+    {
+        if (Text(args, "--tsv") is not { } qpTsv)
+        {
+            Console.Error.WriteLine("--micro qp-dashboard reads the TSV of a --qp run: --tsv FILE [--label TEXT].");
+            return Task.FromResult(2);
+        }
 
-// --micro shredcost: what shredding a path costs and saves in a file's bytes (ShredCostMicro.cs).
-if (Text(args, "--micro") == "shredcost")
-{
-    return await ShredCostMicro.Run();
-}
-
-// --micro chunkshapes: the keys the chunks of a slice shred, three ways (ChunkShapesMicro.cs).
-if (Text(args, "--micro") == "chunkshapes")
-{
-    return ChunkShapesMicro.Run((int)Option(args, "--rows", 3_000_000), (int)Option(args, "--chunk-rows", 1_000_000));
-}
-
-// --micro runsorder: the order inside a slice by distinct values or by runs added (RunsOrderMicro.cs).
-if (Text(args, "--micro") == "runsorder")
-{
-    return RunsOrderMicro.Run((int)Option(args, "--rows", 1_000_000), rounds);
-}
-
-// --micro shredwrite: what shredding costs a job in time, counted, chosen and written (ShredWriteMicro.cs).
-if (Text(args, "--micro") == "shredwrite")
-{
-    return await ShredWriteMicro.Run(Option(args, "--rows", 1_000_000), rounds);
-}
-
-// --micro slicebytes: what sorted slices weigh against the same rows in time order (SliceBytesMicro.cs).
-if (Text(args, "--micro") == "slicebytes")
-{
-    return await SliceBytesMicro.Run(Option(args, "--rows", 1_000_000));
-}
-
-// --micro sliceorder: the time order of an object sorted slice by slice (SliceOrderMicro.cs).
-if (Text(args, "--micro") == "sliceorder")
-{
-    return await SliceOrderMicro.Run(rounds, Option(args, "--slice-rows", 500_000));
-}
-
-// --micro synopsisanswer: an aggregation over a dataset of periods with its synopses and without (SynopsisAnswerMicro.cs).
-if (Text(args, "--micro") == "synopsisanswer")
-{
-    return await SynopsisAnswerMicro.Run(Option(args, "--rows", 2_000_000), rounds);
-}
-
-// --micro sparsecost: a sparse chunk's bytes and decode time against a dense one's, by the share of nulls (SparseCostMicro.cs).
-if (Text(args, "--micro") == "sparsecost")
-{
-    return await SparseCostMicro.Run(Option(args, "--rows", 1_000_000), rounds);
-}
-
-// --micro splitplan --file F: the plan of splits a scan of a file's every row draws before its first read (SplitPlanMicro.cs).
-if (Text(args, "--micro") == "splitplan")
-{
-    return await SplitPlanMicro.Run(Text(args, "--file") ?? throw new ArgumentException("--micro splitplan needs --file F."), rounds);
-}
-
-// --micro slicecost: the price of a row at a window's edge and of a row of a table of slices, the two a slice's target trades (SliceCostMicro.cs).
-if (Text(args, "--micro") == "slicecost")
-{
-    return await SliceCostMicro.Run(Option(args, "--rows", 2_000_000), rounds);
-}
-
-// --micro generator: a minute of the time-window design's requests, and the runs of each synopsis column against its figures (RequestGenerator.cs).
-if (Text(args, "--micro") == "generator")
-{
-    return RequestGenerator.Run((int)Option(args, "--seed", 17));
-}
-
-// --micro questions: the designs' example questions over generated requests and log records, cold and warm, synopses and rows (QuestionBench.cs).
-if (Text(args, "--micro") == "questions")
-{
-    return await QuestionBench.Run(
-        (int)Option(args, "--hours", 24), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100), Text(args, "--only"),
-        args.Contains("--sealed"));
-}
-
-// --micro facets: the worst case of many facets, spans with a dozen repeating columns and a route under them (FacetsBench.cs).
-if (Text(args, "--micro") == "facets")
-{
-    return await FacetsBench.Run((int)Option(args, "--hours", 12), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100));
-}
-
-// --micro lifecycle: what a row costs from its append to its last rewrite, and the objects a window finds (LifecycleBench.cs).
-if (Text(args, "--micro") == "lifecycle")
-{
-    return await LifecycleBench.Run(
-        (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
-        Text(args, "--style") == "leveled", (int)Option(args, "--period-hours", 1), Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
-        Text(args, "--late") != "off", Text(args, "--neighbours") != "off", (long)Option(args, "--max-object-mib", 0) << 20,
-        Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0));
-}
-
-// --micro cachetrace: the regions a run of questions asks of the synopsis cache, replayed through three eviction policies (CacheTrace.cs).
-if (Text(args, "--micro") == "cachetrace")
-{
-    return await CacheTrace.Run((int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--questions", 2_000), (int)Option(args, "--seed", 29));
-}
-
-// --micro needles: what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs).
-if (Text(args, "--micro") == "needles")
-{
-    return await NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds);
-}
-
-// --micro paths: every query path of a dataset of periods at scale, over a store that waits a round trip per request (PathsBench.cs).
-if (Text(args, "--micro") == "paths")
-{
-    return await PathsBench.Run(new PathsBench.Settings
+        return Task.FromResult(QpDashboard.Run(qpTsv, Text(args, "--label")));
+    }),
+    ["logs"] = ("the client's log records of a day, their sources, their keys and the keys of more than one type (LogGeneratorV2.cs)", () =>
+        Task.FromResult(LogGeneratorV2.Run(Option(args, "--seed", 37), Option(args, "--rows", 10_000_000)))),
+    ["spans"] = ("the client's spans of a day, and the values each column holds against its figure (SpanGeneratorV2.cs)", () =>
+        Task.FromResult(SpanGeneratorV2.Run(Option(args, "--seed", 31), Option(args, "--rows", 10_000_000)))),
+    ["s3profile"] = ("the waits and the turns of the store --profile s3 answers as, drawn without waiting (StoreProfileMicro.cs)", () => StoreProfileMicro.Run()),
+    ["cachetrace"] = ("the regions a run of questions asks of the synopsis cache, replayed through three eviction policies (CacheTrace.cs)", () =>
+        CacheTrace.Run((int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--questions", 2_000), (int)Option(args, "--seed", 29))),
+    ["cacheviews"] = ("the synopsis cache under views of dashboards over a built requests store, replayed and counted (CacheViews.cs)", () =>
+        CacheViews.Run(
+            Text(args, "--store") ?? new PathsBench.Settings().Store, (int)Option(args, "--hours", 9_480), Option(args, "--rate", 500),
+            (int)Option(args, "--budget", 100), (int)Option(args, "--views", 200), (int)Option(args, "--seed", 31))),
+    ["hashedend"] = ("what the end of a file's hashed postings holds with no bound on its rows (HashedEndMicro.cs)", () =>
+        HashedEndMicro.Run(Text(args, "--store") ?? BenchStores.Of("hashedend"), Option(args, "--rows", 10_000_000))),
+    ["logwrite"] = ("what building the client's log records costs, as an ingestion builds them (LogWriteMicro.cs)", () => LogWriteMicro.Run(
+        Text(args, "--store") ?? BenchStores.Of("logwrite"),
+        Option(args, "--hours", 2),
+        Option(args, "--rate", 5_000),
+        Option(args, "--part-minutes", 10),
+        Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
+        Option(args, "--budget", 100))),
+    ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
+        NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
+    ["paths"] = ("every query path of a dataset of periods at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
     {
         Store = Text(args, "--store") ?? new PathsBench.Settings().Store,
         Design = args.Contains("--design"),
@@ -244,8 +164,12 @@ if (Text(args, "--micro") == "paths")
         PartMinutes = Option(args, "--part-minutes", 10),
         LogHours = Option(args, "--log-hours", 12),
         LogRate = Option(args, "--log-rate", 1_000),
-        Latency = args.Contains("--latency") ? int.Parse(Text(args, "--latency")!, CultureInfo.InvariantCulture) : 5,
-        BytesPerSecond = Option(args, "--mbps", 0) * 1e6,
+        // --profile s3: a round trip of 30 ms at the median and 120 at the 99th percentile, 90 MB/s a connection, and
+        // 5 500 reads a second a prefix, as S3 serves them; each figure may still be given on its own.
+        Latency = args.Contains("--latency") ? int.Parse(Text(args, "--latency")!, CultureInfo.InvariantCulture) : S3(args) ? 30 : 5,
+        LatencyP99 = (int)Option(args, "--latency-p99", S3(args) ? 120 : 0),
+        ReadsPerSecondPerPrefix = Option(args, "--prefix-reads", S3(args) ? 5_500 : 0),
+        BytesPerSecond = Option(args, "--mbps", S3(args) ? 90 : 0) * 1e6,
         LinkBitsPerSecond = args.Contains("--gbps") ? double.Parse(Text(args, "--gbps")!, CultureInfo.InvariantCulture) * 1e9 : 10e9,
         Rounds = Option(args, "--rounds", 5),
         RowsRounds = Option(args, "--rows-rounds", 1),
@@ -256,6 +180,11 @@ if (Text(args, "--micro") == "paths")
         Budget = Option(args, "--budget", 100),
         WriteDegree = Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
         Rebuild = args.Contains("--rebuild"),
+        RandomIds = args.Contains("--random-ids"),
+        Qp = args.Contains("--qp"),
+        Declared = args.Contains("--declared"),
+        QpHours = Option(args, "--qp-hours", 30),
+        QpRate = Option(args, "--qp-rate", 5_000),
         BuildOnly = args.Contains("--build-only"),
         Entries = args.Contains("--entries"),
         Verify = args.Contains("--verify"),
@@ -267,9 +196,39 @@ if (Text(args, "--micro") == "paths")
         LoopColdSeconds = Option(args, "--loop-cold", 0),
         NoDigest = args.Contains("--no-digest"),
         MaxReads = Option(args, "--max-reads", 0),
+        SegmentCacheBytes = Option(args, "--segment-cache-mb", 0) * (1L << 20),
         KeepHandles = args.Contains("--keep-handles"),
         WarmSeconds = args.Contains("--warm") ? double.Parse(Text(args, "--warm")!, CultureInfo.InvariantCulture) : 3,
-    });
+        QpsSeconds = args.Contains("--qps") ? double.Parse(Text(args, "--qps")!, CultureInfo.InvariantCulture) : 0,
+        QpsByQuestion = args.Contains("--qps-by-question"),
+        OpenObjects = (int)Option(args, "--open-objects", 0),
+        Handles = (int)Option(args, "--handles", 1),
+        SharedCache = Text(args, "--shared-cache"),
+        QpWrite = Text(args, "--qp-write"),
+        Clients = args.Contains("--clients") ? [.. Text(args, "--clients")!.Split(',').Select(c => int.Parse(c, CultureInfo.InvariantCulture))] : [1, Environment.ProcessorCount],
+    })),
+};
+
+if (args.Contains("--help") || args.Contains("-h"))
+{
+    Console.WriteLine("The query matrix with no --micro (the options at the head of Program.cs); with --micro NAME, one of:");
+    foreach ((string name, (string help, Func<Task<int>> _)) in micros)
+    {
+        Console.WriteLine($"  {name,-15} {help}");
+    }
+
+    return 0;
+}
+
+if (Text(args, "--micro") is { } micro)
+{
+    if (micros.TryGetValue(micro, out (string Help, Func<Task<int>> Run) chosen))
+    {
+        return await chosen.Run();
+    }
+
+    Console.Error.WriteLine($"No micro bench is named '{micro}'; --help lists them.");
+    return 2;
 }
 
 // Each file is written the first time a query asks for it, and kept.
@@ -562,6 +521,9 @@ static string? Text(string[] args, string name)
     int at = Array.IndexOf(args, name);
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
+
+// Whether the store answers as S3 does (--profile s3).
+static bool S3(string[] args) => Text(args, "--profile") is "s3";
 
 // A fixture named by its rows rather than registered: spread-random-N, spread-strided-N or groupby-N-K, each
 // with -core2025.10 for that edition; null for any other name.

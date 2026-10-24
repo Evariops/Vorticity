@@ -37,20 +37,20 @@ A `VortexSession` holds what would otherwise be process-wide state, so a host de
 |---|---|---|
 | `MemoryPool` | `AlignedMemoryPool.Shared` | every batch and builder buffer, and the segments read by a source of yours. The file sources of the library read into `AlignedMemoryPool.Shared` |
 | `SegmentCache` | none | segments kept across scans, one budget for every file of the session whose reads do I/O |
-| `MaxConcurrentReads` | 16 | reads in flight across every scan of every file of the session whose reads do I/O |
+| `MaxConcurrentReads` | 128 | reads in flight across every scan of every file of the session whose reads do I/O |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer uses |
 | `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file |
 | `MappedFileCacheCount` | 64 | files opened from a path that stay mapped after they are closed, so the next open reuses the mapping |
 | `MapFiles` | true | whether a file opened from a path is mapped by its first scan. When false, it is read positionally, and a file truncated during a scan fails the read instead of the process |
 | `MemoryBudget` | the process's | the memory the session's queries share with every session given the same `QueryMemoryBudget`: their group tables and their merges. Past it, a group by spills to `ScratchDirectory`, or fails with `VortexMemoryException` |
-| `ScratchDirectory` | the system's temporary directory | where a group by writes what its memory budget cannot hold, and where a sort writes its runs. A file system in memory is refused |
+| `ScratchDirectory` | the system's temporary directory, or the user's cache when that lies in memory | where a group by writes what its memory budget cannot hold, and where a sort and a writer write their runs. A file system in memory is refused: where `/tmp` is one, as on Ubuntu 26.04, the default is `$XDG_CACHE_HOME/vorticity`, or `~/.cache/vorticity`, which the `Vorticity` event source says once |
 | `ScratchBudget` | none, a tenth of the directory's free space is kept free | the scratch space the session's queries share with every session given the same `ScratchBudget`. Past it, `VortexMemoryException`, and no file is left behind |
 | `Extensions` | empty | extension types the session reads beyond the editions |
 
 The options are set inside `Create` and frozen when it returns. Setting one afterwards throws
 `InvalidOperationException: The session is created; its options are frozen. Set them inside
 VortexSession.Create.` `VortexFile.OpenAsync(path)` uses `VortexSession.Default`, which is
-immutable: the shared pool, no cache, 16 reads in flight, no parallelism, and 64 closed files kept
+immutable: the shared pool, no cache, 128 reads in flight, no parallelism, and 64 closed files kept
 mapped.
 
 A session is disposed after its files. Disposing it while one is still open throws
@@ -66,6 +66,37 @@ and the cache served all 45. Over the five scans, this run counted 173 hits and 
 cache held 1 431 KiB: the data segments of the 1.5 MB file except the six that lie in the tail read by
 the open, which the file serves itself. The concurrent scans miss more often than a single scan
 would, because two scans asking for the same segment at the same moment both miss it.
+
+## The memory the pool keeps
+
+Every block a scan, a read or a write gives back is parked in the process-wide pool for the next rent,
+in size classes of powers of two from 4 KiB to 32 MiB. At rest a class keeps a few blocks. Under
+demand a class up to 8 MiB keeps up to 64 MiB per processor, as long as every class together parks
+less than 256 MiB per processor: up to 8 GiB on a machine of 32 processors. A class above 8 MiB keeps
+16 MiB per processor, and one block of up to 256 MiB is kept on its own.
+
+At each full collection, the pool frees what a class keeps once no rent has asked for it for a minute,
+and everything it keeps when the machine's memory load is high. In a container, the runtime measures
+that load against the container's memory limit.
+
+It keeps that much because 32 questions at once each hold dozens of blocks of the same few classes.
+With 1 GiB parked in all, one block in four was freed as it came back, and the next rent took it from
+the system again, every page faulted anew: the declared spans and logs at a tenth of the design's
+rate answered about half as many questions a second as once the blocks were kept. Sealing an hour
+at the design's rate peaks at 9.8 GB instead of 8.8.
+
+The blocks parked are native memory: they count in the process's private bytes, not in the managed
+heap's counters, and a heap dump does not show them. To bound what a session's batches, builders and
+decodes keep, give it a pool of its own:
+
+```csharp
+await using VortexSession session = VortexSession.Create(o =>
+    o.MemoryPool = new AlignedMemoryPool(maxRetainedBytes: 512L * 1024 * 1024));
+```
+
+The reads of the library's own sources, its files, its object stores and its caches, still go through
+the process-wide pool, whose budgets grow with `Environment.ProcessorCount`, which a container's CPU
+limit lowers.
 
 ## What is safe to share
 

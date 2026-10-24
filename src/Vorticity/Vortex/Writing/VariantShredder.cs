@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -63,6 +64,10 @@ internal static class VariantShredder
             }
         }
 
+        // Rows in a run of the same metadata share its dictionary, which each object node looks its keys up in once: a run
+        // a source's rows, which the slice's sort keeps together.
+        ReadOnlySpan<byte> previous = default;
+        int epoch = -1;
         for (int row = 0; row < rows; row++)
         {
             if (!ArenaWords.IsValid(arena, node, row))
@@ -72,8 +77,15 @@ internal static class VariantShredder
             }
 
             ReadOnlySpan<byte> bytes = ArenaWords.IsValid(arena, value, row) ? LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue;
-            VariantDictionary dictionary = VariantDictionary.Read(LiteralReader.ViewAt(metadataNode, row));
-            root.Present(in dictionary, bytes);
+            ReadOnlySpan<byte> metadataBytes = LiteralReader.ViewAt(metadataNode, row);
+            if (epoch < 0 || !metadataBytes.SequenceEqual(previous))
+            {
+                epoch++;
+                previous = metadataBytes;
+            }
+
+            VariantDictionary dictionary = VariantDictionary.Read(metadataBytes);
+            root.Present(in dictionary, epoch, bytes);
         }
 
         int tree = root.Typed(arena, types, rows, metadata, out _);
@@ -172,23 +184,8 @@ internal static class VariantShredder
         return built;
     }
 
-    /// <summary>
-    /// Whether <paramref name="value"/> is of <paramref name="class"/>, from its header byte alone: a short
-    /// string or the string primitive, the four integers', the double's, the booleans'.
-    /// </summary>
-    private static bool OfClass(VariantClass @class, ReadOnlySpan<byte> value)
-    {
-        int header = value[0];
-        int basic = header & 0x03;
-        int primitive = basic == ParquetVariant.BasicPrimitive ? header >> 2 : -1;
-        return @class switch
-        {
-            VariantClass.Integer => primitive is >= 3 and <= 6,
-            VariantClass.Double => primitive == 7,
-            VariantClass.String => basic == ParquetVariant.BasicShortString || primitive == 16,
-            _ => primitive is 1 or 2,
-        };
-    }
+    /// <summary>Whether <paramref name="value"/> is of <paramref name="class"/>, from its header byte alone (<see cref="VariantClasses.OfHeader"/>).</summary>
+    private static bool OfClass(VariantClass @class, ReadOnlySpan<byte> value) => VariantClasses.OfHeader(value[0]) == @class;
 
     /// <summary>
     /// One node of the shredding over the rows: its typed column, what of each row it does not take, and
@@ -215,8 +212,11 @@ internal static class VariantShredder
         /// <summary>A row that does not hold the node.</summary>
         internal abstract void Absent();
 
-        /// <summary>A row whose node holds <paramref name="value"/>, its keys named by <paramref name="dictionary"/>.</summary>
-        internal abstract void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value);
+        /// <summary>
+        /// A row whose node holds <paramref name="value"/>, its keys named by <paramref name="dictionary"/>, the same as every
+        /// row of its run of <paramref name="epoch"/>.
+        /// </summary>
+        internal abstract void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value);
 
         /// <summary>The node's typed column over <paramref name="rows"/> rows.</summary>
         internal abstract int Typed(CanonicalArena arena, DTypeArena types, int rows, int metadata, out DType dtype);
@@ -256,13 +256,13 @@ internal static class VariantShredder
             Values.AppendNull();
         }
 
-        internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
+        internal override void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value)
         {
             Held.Append(true);
             VariantScalar scalar = VariantScalar.Read(value);
             if (_typed.Takes(scalar.Kind))
             {
-                _typed.Append(value);
+                _typed.Append(in scalar);
                 Values.AppendNull();
                 Bounds?.Note(Held.Count - 1, scalar);
                 return;
@@ -284,6 +284,11 @@ internal static class VariantShredder
         private readonly int[] _found;
         private readonly Bits _objects = new Bits();
         private int[] _kept = new int[8];
+
+        // The plan's key of each field id of the dictionary the rows of run _epoch share: rows of one source share their
+        // metadata, whose field names a search of the plan per field and per row looked up again.
+        private int[] _keyOf = [];
+        private int _epoch = -1;
 
         /// <summary>The node of the plan's key <paramref name="index"/>.</summary>
         internal Group FieldAt(int index) => _fields[index];
@@ -312,7 +317,7 @@ internal static class VariantShredder
             Values.AppendNull();
         }
 
-        internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
+        internal override void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value)
         {
             Held.Append(true);
             if ((value[0] & 0x03) != ParquetVariant.BasicObject)
@@ -333,11 +338,38 @@ internal static class VariantShredder
                 _kept = new int[Math.Max(fields.Count, 2 * _kept.Length)];
             }
 
+            // The plan's key of each field id of the run's dictionary, looked up once a run: -2 for an id not looked up yet.
+            if (epoch != _epoch)
+            {
+                _epoch = epoch;
+                if (_keyOf.Length < dictionary.Count)
+                {
+                    _keyOf = new int[Math.Max(dictionary.Count, 2 * _keyOf.Length)];
+                }
+
+                _keyOf.AsSpan(0, dictionary.Count).Fill(-2);
+            }
+
             _found.AsSpan().Fill(-1);
             int kept = 0;
             for (int i = 0; i < fields.Count; i++)
             {
-                int key = _plan.IndexOf(dictionary[fields.IdAt(i)]);
+                int id = fields.IdAt(i);
+                int key;
+                if ((uint)id < (uint)dictionary.Count)
+                {
+                    key = _keyOf[id];
+                    if (key == -2)
+                    {
+                        _keyOf[id] = key = _plan.IndexOf(dictionary[id]);
+                    }
+                }
+                else
+                {
+                    // An id out of the dictionary: its read refuses it.
+                    key = _plan.IndexOf(dictionary[id]);
+                }
+
                 if (key >= 0)
                 {
                     _found[key] = i;
@@ -353,7 +385,7 @@ internal static class VariantShredder
             {
                 if (_found[k] >= 0)
                 {
-                    _fields[k].Present(in dictionary, fields.ValueAt(_found[k]));
+                    _fields[k].Present(in dictionary, epoch, fields.ValueAt(_found[k]));
                 }
                 else
                 {
@@ -422,7 +454,7 @@ internal static class VariantShredder
             Values.AppendNull();
         }
 
-        internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
+        internal override void Present(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value)
         {
             Held.Append(true);
             if ((value[0] & 0x03) == ParquetVariant.BasicArray)
@@ -483,7 +515,7 @@ internal static class VariantShredder
     }
 
     /// <summary>The typed column of one class, its rows appended one at a time.</summary>
-    private abstract class TypedColumn
+    private abstract class TypedColumn(VariantClass @class)
     {
         protected Bits Valid { get; } = new Bits();
 
@@ -502,10 +534,13 @@ internal static class VariantShredder
         internal bool Fits(ReadOnlySpan<byte> value) => Takes(VariantScalar.Read(value).Kind);
 
         /// <summary>Whether a value of <paramref name="kind"/> is of the column's class.</summary>
-        internal abstract bool Takes(VariantKind kind);
+        internal bool Takes(VariantKind kind) => VariantClasses.Of(kind) == @class;
 
         /// <summary>Appends <paramref name="value"/>, which fits.</summary>
-        internal abstract void Append(ReadOnlySpan<byte> value);
+        internal void Append(ReadOnlySpan<byte> value) => Append(VariantScalar.Read(value));
+
+        /// <summary>Appends a value of the column's class, read.</summary>
+        internal abstract void Append(in VariantScalar scalar);
 
         internal abstract void AppendNull();
 
@@ -513,13 +548,11 @@ internal static class VariantShredder
     }
 
     /// <summary>Integers of every width, as 64-bit integers.</summary>
-    private sealed class IntegerColumn : TypedColumn
+    private sealed class IntegerColumn() : TypedColumn(VariantClass.Integer)
     {
         private long[] _values = new long[64];
 
-        internal override bool Takes(VariantKind kind) => kind is VariantKind.Int8 or VariantKind.Int16 or VariantKind.Int32 or VariantKind.Int64;
-
-        internal override void Append(ReadOnlySpan<byte> value) => Add((long)VariantScalar.Read(value).Integer, true);
+        internal override void Append(in VariantScalar scalar) => Add((long)scalar.Integer, true);
 
         internal override void AppendNull() => Add(0, false);
 
@@ -543,13 +576,11 @@ internal static class VariantShredder
     }
 
     /// <summary>64-bit floats.</summary>
-    private sealed class DoubleColumn : TypedColumn
+    private sealed class DoubleColumn() : TypedColumn(VariantClass.Double)
     {
         private double[] _values = new double[64];
 
-        internal override bool Takes(VariantKind kind) => kind == VariantKind.Double;
-
-        internal override void Append(ReadOnlySpan<byte> value) => Add(VariantScalar.Read(value).Number, true);
+        internal override void Append(in VariantScalar scalar) => Add(scalar.Number, true);
 
         internal override void AppendNull() => Add(0, false);
 
@@ -573,15 +604,13 @@ internal static class VariantShredder
     }
 
     /// <summary>Booleans.</summary>
-    private sealed class BooleanColumn : TypedColumn
+    private sealed class BooleanColumn() : TypedColumn(VariantClass.Boolean)
     {
         private readonly Bits _values = new Bits();
 
-        internal override bool Takes(VariantKind kind) => kind == VariantKind.Bool;
-
-        internal override void Append(ReadOnlySpan<byte> value)
+        internal override void Append(in VariantScalar scalar)
         {
-            _values.Append(VariantScalar.Read(value).Integer != 0);
+            _values.Append(scalar.Integer != 0);
             Valid.Append(true);
         }
 
@@ -599,15 +628,13 @@ internal static class VariantShredder
     }
 
     /// <summary>UTF-8 text.</summary>
-    private sealed class StringColumn : TypedColumn
+    private sealed class StringColumn() : TypedColumn(VariantClass.String)
     {
         private readonly BinaryColumn _values = new BinaryColumn();
 
-        internal override bool Takes(VariantKind kind) => kind == VariantKind.String;
-
-        internal override void Append(ReadOnlySpan<byte> value)
+        internal override void Append(in VariantScalar scalar)
         {
-            _values.Append(VariantScalar.Read(value).Bytes);
+            _values.Append(scalar.Bytes);
             Valid.Append(true);
         }
 
@@ -633,31 +660,66 @@ internal static class VariantShredder
     }
 
     /// <summary>Bits appended one at a time, as a validity or a column of booleans.</summary>
+    /// <remarks>
+    /// Counted alone while they are all set or all clear, as a key every object holds, or the residual of a key its class
+    /// types, lays them for a chunk's rows: their words are written from the first bit that differs on, where every row
+    /// of every node of the tree wrote one.
+    /// </remarks>
     private sealed class Bits
     {
-        private ulong[] _words = new ulong[1];
+        private ulong[] _words = [];
         private int _set;
+        private int _count;
+        private bool _mixed;
 
         /// <summary>The bits set.</summary>
         internal int SetCount => _set;
 
-        internal int Count { get; private set; }
+        internal int Count => _count;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal void Append(bool bit)
         {
-            int at = Count;
-            if (at >> 6 == _words.Length)
+            int at = _count++;
+            _set += bit ? 1 : 0;
+            if (_mixed)
             {
-                Array.Resize(ref _words, 2 * _words.Length);
+                Write(at, bit);
+            }
+            else if (_set != _count && _set != 0)
+            {
+                Mix(at, bit);
+            }
+        }
+
+        private void Write(int at, bool bit)
+        {
+            if (at >> 6 >= _words.Length)
+            {
+                Array.Resize(ref _words, Math.Max(2 * _words.Length, (at >> 6) + 1));
             }
 
             if (bit)
             {
                 _words[at >> 6] |= 1UL << (at & 63);
-                _set++;
+            }
+        }
+
+        /// <summary>Lays out the bits before <paramref name="at"/>, all the opposite of <paramref name="bit"/>, then writes it.</summary>
+        private void Mix(int at, bool bit)
+        {
+            _mixed = true;
+            _words = new ulong[Math.Max(1, (at >> 6) + 1) * 2];
+            if (!bit)
+            {
+                _words.AsSpan(0, at >> 6).Fill(ulong.MaxValue);
+                if ((at & 63) != 0)
+                {
+                    _words[at >> 6] = (1UL << (at & 63)) - 1;
+                }
             }
 
-            Count = at + 1;
+            Write(at, bit);
         }
 
         /// <summary>The validity of <paramref name="rows"/> rows these bits say are valid.</summary>
@@ -681,7 +743,21 @@ internal static class VariantShredder
         {
             int bytes = (rows + 7) / 8;
             VortexBuffer buffer = arena.Allocate(Math.Max(bytes, 1), 8, out Span<byte> into).Slice(0, bytes);
-            MemoryMarshal.AsBytes(_words.AsSpan()).Slice(0, bytes).CopyTo(into);
+            if (_mixed)
+            {
+                ReadOnlySpan<byte> words = MemoryMarshal.AsBytes(_words.AsSpan());
+                words[..Math.Min(bytes, words.Length)].CopyTo(into);
+            }
+            else if (_set > 0)
+            {
+                // Every bit set, none past the rows.
+                into[..(rows / 8)].Fill(0xFF);
+                if ((rows & 7) != 0)
+                {
+                    into[rows / 8] = (byte)((1 << (rows & 7)) - 1);
+                }
+            }
+
             return buffer;
         }
     }
@@ -756,7 +832,7 @@ internal static class VariantShredder
         {
             int bytes = checked(rows * ViewSize);
             VortexBuffer views = arena.Allocate(Math.Max(bytes, 1), 64, out Span<byte> into).Slice(0, bytes);
-            for (int row = 0; row < rows; row++)
+            for (int row = 0; _used > 0 && row < rows; row++)
             {
                 int start = _starts[row];
                 int length = _starts[row + 1] - start;
@@ -787,13 +863,19 @@ internal static class VariantShredder
 
         private void Close(int end, bool valid)
         {
+            // A start is written once a row holds bytes: those before it are zero, as the array is, and a column of no
+            // bytes, the residual of a key its class types, writes none.
             int row = _valid.Count;
-            if (row + 2 > _starts.Length)
+            if (end != 0)
             {
-                Array.Resize(ref _starts, 2 * _starts.Length);
+                if (row + 2 > _starts.Length)
+                {
+                    Array.Resize(ref _starts, Math.Max(2 * _starts.Length, row + 2));
+                }
+
+                _starts[row + 1] = end;
             }
 
-            _starts[row + 1] = end;
             _used = end;
             _held += valid ? 1 : 0;
             _valid.Append(valid);

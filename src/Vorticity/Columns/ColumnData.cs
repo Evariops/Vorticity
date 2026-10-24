@@ -15,7 +15,6 @@ namespace Vorticity;
 internal static class ColumnData
 {
     private const int ViewSize = 16;
-    private const int MaxInlineLength = 12;
     private const int ValuesAlignment = 64;
 
     /// <summary>The contiguous value bytes of a primitive or decimal node, 64-byte aligned.</summary>
@@ -74,27 +73,7 @@ internal static class ColumnData
         int views = EncodedForms.Canonical(arena, node);
         CanonicalNode record = arena.GetNode(views);
         CheckRow(index, record.Length);
-        if (!ArenaWords.IsValid(arena, views, index))
-        {
-            return default;
-        }
-
-        ReadOnlySpan<byte> view = record.Views.Span.Slice(index * ViewSize, ViewSize);
-        uint size = BinaryPrimitives.ReadUInt32LittleEndian(view);
-        if (size <= MaxInlineLength)
-        {
-            return view.Slice(4, (int)size);
-        }
-
-        int buffer = (int)BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
-        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
-        VortexBuffer data = record.GetDataBuffer(buffer);
-        if ((ulong)offset + size > (ulong)(uint)data.Length)
-        {
-            throw new VortexFormatException($"Row {index} spans [{offset}, {(ulong)offset + size}) of a data buffer holding {data.Length} bytes.");
-        }
-
-        return data.Span.Slice((int)offset, (int)size);
+        return ArenaWords.IsValid(arena, views, index) ? ViewValues.At(record, index) : default;
     }
 
     /// <summary>The byte length of row <paramref name="index"/> of a text or binary node; 0 for a null.</summary>
@@ -472,12 +451,12 @@ internal static class ColumnData
     {
         int views = EncodedForms.Canonical(arena, node);
         CanonicalNode record = arena.GetNode(views);
-        ReadOnlySpan<byte> viewBytes = record.Views.Span;
+        ViewValues texts = new ViewValues(record);
         ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, views);
         Span<TText> into = Destination(destination, record.Length);
         for (int i = 0; i < into.Length; i++)
         {
-            string? text = IsValid(valid, i) ? Encoding.UTF8.GetString(ViewBytes(in record, viewBytes, i)) : null;
+            string? text = IsValid(valid, i) ? Encoding.UTF8.GetString(texts.At(i)) : null;
             into[i] = Unsafe.As<string?, TText>(ref text);
         }
     }
@@ -542,9 +521,8 @@ internal static class ColumnData
     {
         (int metadataIndex, int valueIndex) = VariantFields(arena, node);
         CanonicalNode metadata = arena.GetNode(metadataIndex);
-        CanonicalNode value = arena.GetNode(valueIndex);
-        ReadOnlySpan<byte> metadataViews = metadata.Views.Span;
-        ReadOnlySpan<byte> valueViews = value.Views.Span;
+        ViewValues metadatas = new ViewValues(metadata);
+        ViewValues values = new ViewValues(arena.GetNode(valueIndex));
         ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
         Span<TVariant> into = Destination(destination, metadata.Length);
         byte[]? shared = null;
@@ -556,13 +534,13 @@ internal static class ColumnData
                 continue;
             }
 
-            ReadOnlySpan<byte> bytes = ViewBytes(in metadata, metadataViews, i);
+            ReadOnlySpan<byte> bytes = metadatas.At(i);
             if (shared is null || !bytes.SequenceEqual(shared))
             {
                 shared = bytes.ToArray();
             }
 
-            Variant row = new(shared, ViewBytes(in value, valueViews, i).ToArray());
+            Variant row = new(shared, values.At(i).ToArray());
             if (typeof(TVariant) == typeof(Variant))
             {
                 into[i] = Unsafe.As<Variant, TVariant>(ref row);
@@ -573,27 +551,6 @@ internal static class ColumnData
                 into[i] = Unsafe.As<Variant?, TVariant>(ref present);
             }
         }
-    }
-
-    /// <summary>The bytes of row <paramref name="index"/> of a canonical text node, which must be valid.</summary>
-    private static ReadOnlySpan<byte> ViewBytes(in CanonicalNode record, ReadOnlySpan<byte> views, int index)
-    {
-        ReadOnlySpan<byte> view = views.Slice(index * ViewSize, ViewSize);
-        uint size = BinaryPrimitives.ReadUInt32LittleEndian(view);
-        if (size <= MaxInlineLength)
-        {
-            return view.Slice(4, (int)size);
-        }
-
-        int buffer = (int)BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
-        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
-        VortexBuffer data = record.GetDataBuffer(buffer);
-        if ((ulong)offset + size > (ulong)(uint)data.Length)
-        {
-            throw new VortexFormatException($"Row {index} spans [{offset}, {(ulong)offset + size}) of a data buffer holding {data.Length} bytes.");
-        }
-
-        return data.Span.Slice((int)offset, (int)size);
     }
 
     /// <summary>The unscaled value at <paramref name="index"/> of a decimal node's storage, up to 128 bits.</summary>
