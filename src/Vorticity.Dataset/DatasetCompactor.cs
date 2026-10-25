@@ -791,8 +791,16 @@ internal static class DatasetCompactor
                 ValueShredding? shredding = Shreddings is { } shreddings ? shreddings[Math.Clamp(_value, 0, shreddings.Count - 1)] : null;
                 _draft = _dataset.StartObjectUnder(
                     _schema, _inKeyOrder, _rowBound, sliced: KeySliced is not null, shredded: shredding?.Shredded, variantChunks: shredding?.VariantChunks,
-                    byteBound: _byteBound);
+                    byteBound: _byteBound, blocked: Blocked is not null);
                 _census = shredding is null ? null : [.. VariantColumns(_schema.DType).Select(_ => new PathCensus(_dataset.Options.Write.StringBoundBytes, SliceTarget))];
+            }
+
+            // The blocks the rows before these and these themselves closed, declared before their rows are written: the
+            // statistics of each column over them cut where they end.
+            for (; _declaredBlocks < _blockRows.Count; _declaredBlocks++)
+            {
+                _declaredEnd += _blockRows[_declaredBlocks];
+                _draft.Writer.EndBlock(_declaredEnd);
             }
 
             _rows += batch.RowCount;
@@ -875,6 +883,10 @@ internal static class DatasetCompactor
         private byte[] _blockLow = [];
         private byte[] _blockHigh = [];
         private int _blockHighLength;
+
+        // The blocks of the object being written already declared to its writer, and the rows they end at.
+        private int _declaredBlocks;
+        private long _declaredEnd;
 
         /// <summary>
         /// Notes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
@@ -999,6 +1011,8 @@ internal static class DatasetCompactor
             }
 
             BlockTable? table = Blocked is not null && _blockRows.Count > 0 && covered == _rows ? BlockTable.Of(_blockRows, _blockLows, _blockHighs) : null;
+            _declaredBlocks = 0;
+            _declaredEnd = 0;
             _blockRows.Clear();
             _blockLows.Clear();
             _blockHighs.Clear();

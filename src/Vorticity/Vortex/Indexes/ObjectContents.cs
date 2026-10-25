@@ -104,6 +104,24 @@ internal sealed class ObjectContents(
     /// <summary>The region of the blocks on column <paramref name="field"/>, or null when the object keeps none on it.</summary>
     internal IndexSegment? BlocksOf(int field) => RegionOf(Blocks, field);
 
+    /// <summary>
+    /// The statistics of each column over the object's blocks (<see cref="ColumnBlocks"/>) and their regions: what a
+    /// question reads to answer a block from its columns' values without its rows. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, IndexSegment Region)> BlockStats { get; init; } = [];
+
+    /// <summary>The region of column <paramref name="field"/>'s statistics over the blocks, or null when the object keeps none of it.</summary>
+    internal IndexSegment? BlockStatsOf(int field) => RegionOf(BlockStats, field);
+
+    /// <summary>
+    /// Where each value of each column lives (<see cref="ColumnWhere"/>), and their regions: what a filter on a value reads
+    /// to read the value's rows alone. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, IndexSegment Region)> Wheres { get; init; } = [];
+
+    /// <summary>The region of where column <paramref name="field"/>'s values live, or null when the object keeps none of it.</summary>
+    internal IndexSegment? WhereOf(int field) => RegionOf(Wheres, field);
+
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
         foreach ((int column, IndexSegment region) in regions)
@@ -139,6 +157,8 @@ internal sealed class ObjectContents(
             Counts = Counts,
             Sketches = Sketches,
             Blocks = Blocks,
+            BlockStats = BlockStats,
+            Wheres = Wheres,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -198,6 +218,12 @@ internal sealed class ObjectContents(
 
     // The object's blocks: the field of its key's first column and their region, as a path directory's.
     private const int TagBlocks = 17;
+
+    // A column's statistics over the blocks: its field and its region, as a path directory's.
+    private const int TagBlockStats = 18;
+
+    // Where a column's values live: its field and its region, as a path directory's.
+    private const int TagWhere = 19;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -295,6 +321,16 @@ internal sealed class ObjectContents(
             Declare(region);
         }
 
+        foreach ((int _, IndexSegment region) in BlockStats)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, IndexSegment region) in Wheres)
+        {
+            Declare(region);
+        }
+
         if (DirectoryRegion is { } directory)
         {
             Declare(directory);
@@ -385,6 +421,20 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
+            foreach ((int field, IndexSegment region) in BlockStats)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagBlockStats);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
+            foreach ((int field, IndexSegment region) in Wheres)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagWhere);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
             if (DirectoryRegion is { } directoryRegion)
             {
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
@@ -433,6 +483,8 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> counts = [];
             List<(int, IndexSegment)> sketches = [];
             List<(int, IndexSegment)> blocks = [];
+            List<(int, IndexSegment)> blockStats = [];
+            List<(int, IndexSegment)> wheres = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -504,6 +556,22 @@ internal sealed class ObjectContents(
 
                         blocks.Add(blocked);
                         break;
+                    case (TagBlockStats, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } stated)
+                        {
+                            return null;
+                        }
+
+                        blockStats.Add(stated);
+                        break;
+                    case (TagWhere, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } placed)
+                        {
+                            return null;
+                        }
+
+                        wheres.Add(placed);
+                        break;
                     case (TagLocating, ProtoWireType.LengthDelimited):
                         if (Located(reader.ReadMessage()) is not { } located)
                         {
@@ -541,6 +609,8 @@ internal sealed class ObjectContents(
                     Counts = counts,
                     Sketches = sketches,
                     Blocks = blocks,
+                    BlockStats = blockStats,
+                    Wheres = wheres,
                 }
                 : null;
         }

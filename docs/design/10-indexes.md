@@ -146,7 +146,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#412-the-file-level-filter)).
+file-level filter](#414-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -425,7 +425,7 @@ repeat, is no wide column: its distinct values in an entry are the entry's rows.
 merge register by register. The sheet of a wide column hashes each row of a batch for them, and the
 columns of few values raise their entries' registers once the whole batch is in.
 
-### 4.11 `vorticity.block.stats.v1`: an object's blocks
+### 4.11 `vorticity.block.table.v1`: an object's blocks
 
 An object a compaction job writes in slices bounded by keys keeps its blocks on its key's first column,
 in a region of their own right after the counts, which its table of contents names. As with its sheets
@@ -439,13 +439,56 @@ The region holds a version byte, the count of blocks, then for each block its ro
 last keys, as the clustering key encodes them. Each key is written as the bytes it shares with the key
 before it, a count, and the rest. The blocks cover the object's rows once, in order, and their keys
 follow the key. A reader reads the region with no open of the object, in one request, and the statistics
-of each column of each block extend it ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#53-block-statistics-and-settling-blocks)).
+of each column of each block extend it ([section 4.12](#412-vorticityblockstatsv1-a-column-over-the-blocks)).
 On sixty sources whose runs are a few rows, thousands, or more than two blocks, a block took 46 bytes,
 the keys a source text and an integer. The writer finds the end of a block by halves in the runs it
 merges, one bisection per change of the first column and a key copied per run *(computed: a few dozen
 comparisons per block)*.
 
-### 4.12 The file-level filter
+### 4.12 `vorticity.block.stats.v1`: a column over the blocks
+
+An object that keeps blocks keeps, for each top-level column with a sheet, that column's statistics over
+them, in a region of their own that its table of contents names, right after where the column's values
+live ([section 4.13](#413-vorticitycolumnwherev1-where-each-value-lives)): a reader takes both in one
+request. They are built as the column is written. The dataset's job declares each block's end before it
+writes the rows the block ends in, and each column's builder, fed right after the column's sheet and
+counts, cuts its blocks there; at the end they must be the table's blocks, or the column keeps none.
+
+The region holds a version, the count of blocks and the parts it holds, then a section a part, so that a
+part given up midway is dropped whole:
+
+- **rows:** each block's rows and nulls;
+- **values:** each block's count of distinct values, then, for a block of at most 256 of them, their
+  numbers ascending, as the gaps between them, and past one value each one's rows. A number names a value
+  in the column's index of section 4.13. The part holds while the column's sheet numbers every row and
+  keeps every value's bytes;
+- **a measure:** for a number column the counts carry as a measure, of more than 64 values, each block's
+  count of values, the words of its exact sum, an `Int128` or a float's wide sum, its least and its
+  greatest, as the counts keep a measure's states.
+
+A column that keeps neither part keeps no region: an identifier, an instant. On three million requests of
+the design over four hours, in the order of a key by emitter and cut as a job cuts them, 335 blocks of
+8 955 rows, every column's statistics cost 11.4 ns a row on one thread, and took 337 bytes a block, of
+which the endpoints took 129 and the hosts 83: the values of a service's block, each a number and its
+rows *(measured, `--micro blocks`)*.
+
+### 4.13 `vorticity.column.where.v1`: where each value lives
+
+For each column whose blocks list values, the column's values in the order of their bytes, each with its
+number and the ranges of rows of the blocks it appears in, consecutive blocks joined into one range. A
+filter on a value reads its ranges alone, whatever column it is on: the key's first, or one that depends
+on it. A value that appears in more than half the blocks, or in more ranges than a sixteenth of them,
+lives *everywhere* and lists no range: its ranges would spare a reader nothing. While the column is
+written, its values' ranges are held to four a block, and a thousand more; past that, the column's values
+spread wider than a filter skips blocks by, and they all live everywhere. A column whose every value lives
+everywhere and whose blocks list none keeps no index.
+
+The region holds a version, the object's rows and the count of values, then each value: its bytes, as
+those it shares with the value before it, a count, and the rest; its number; its count of ranges, then
+each range as the rows from the end of the one before it and its rows. On the requests of section 4.12,
+the index took 209 KB, most of it the endpoints' and hosts' names, which an object holds once each.
+
+### 4.14 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

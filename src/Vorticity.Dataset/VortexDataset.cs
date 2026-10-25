@@ -861,7 +861,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ObjectDraft StartObjectUnder(
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool sliced = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
-        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1)
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, bool blocked = false)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
@@ -880,6 +880,9 @@ public sealed class VortexDataset : IAsyncDisposable
             // large enough for a scan to read the sheets before it, and the counts of each column over its rows.
             ColumnSheetBytes = sliced ? _options.SheetObjectBytes : null,
             Counted = sliced,
+
+            // An object a job writes in its key's order, in blocks, keeps each column's statistics over them.
+            Blocked = sliced && blocked,
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
@@ -2549,6 +2552,54 @@ public sealed class VortexDataset : IAsyncDisposable
             ? (table, table.Bytes)
             : throw new VortexFormatException("The blocks of an object do not decode as a table of blocks."), cancellationToken).ConfigureAwait(false);
         return read[0] as Indexes.BlockTable;
+    }
+
+    /// <summary>
+    /// Where the values of columns <paramref name="fields"/> of the object <paramref name="entry"/> names live
+    /// (<see cref="Indexes.ColumnWhere"/>), and with <paramref name="stats"/> each one's statistics over the object's blocks
+    /// (<see cref="Indexes.ColumnBlocks"/>), by their position in <paramref name="fields"/>, read with no open of the object:
+    /// the regions its entry's table of contents names, side by side in one round trip, a column's statistics right after
+    /// its index, none once this handle read them. A column the object keeps none of has none.
+    /// </summary>
+    internal async ValueTask<(Indexes.ColumnWhere? Where, Indexes.ColumnBlocks? Blocks)[]> ReadBlockColumnsAsync(
+        ObjectEntry entry, IReadOnlyList<int> fields, bool stats, CancellationToken cancellationToken)
+    {
+        (Indexes.ColumnWhere?, Indexes.ColumnBlocks?)[] columns = new (Indexes.ColumnWhere?, Indexes.ColumnBlocks?)[fields.Count];
+        if (entry.Contents is not { BlockStats.Count: > 0 } contents)
+        {
+            return columns;
+        }
+
+        object?[] read = new object?[2 * fields.Count];
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[read.Length];
+        for (int i = 0; i < fields.Count; i++)
+        {
+            regions[2 * i] = contents.WhereOf(fields[i]);
+            regions[(2 * i) + 1] = stats ? contents.BlockStatsOf(fields[i]) : null;
+        }
+
+        await ReadSynopsesAsync(entry, contents, regions, read, WhereOrBlocks, cancellationToken).ConfigureAwait(false);
+        for (int i = 0; i < fields.Count; i++)
+        {
+            columns[i] = (read[2 * i] as Indexes.ColumnWhere, read[(2 * i) + 1] as Indexes.ColumnBlocks);
+        }
+
+        return columns;
+    }
+
+    /// <summary>Where a column's values live, at an even position, or its statistics over the blocks, at an odd one, and the bytes they hold in memory.</summary>
+    private static (object Synopsis, long Bytes) WhereOrBlocks(int position, ReadOnlySpan<byte> bytes)
+    {
+        if (position % 2 == 0)
+        {
+            Indexes.ColumnWhere where = Indexes.ColumnWhere.From(bytes)
+                ?? throw new VortexFormatException("Where an object's values live does not decode as an index of them.");
+            return (where, where.Bytes);
+        }
+
+        Indexes.ColumnBlocks blocks = Indexes.ColumnBlocks.From(bytes)
+            ?? throw new VortexFormatException("A column's statistics over an object's blocks do not decode as statistics.");
+        return (blocks, blocks.Bytes);
     }
 
     /// <summary>The counts, at the first position, or their sketches, at the second, and the bytes they hold in memory.</summary>

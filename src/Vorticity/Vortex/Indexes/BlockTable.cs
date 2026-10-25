@@ -5,7 +5,7 @@ using Vorticity.Serialization.Protobuf;
 namespace Vorticity.Indexes;
 
 /// <summary>
-/// The blocks of a file whose rows follow a key (<see cref="IndexKinds.BlockStats"/>): runs of rows of one value of the
+/// The blocks of a file whose rows follow a key (<see cref="IndexKinds.BlockTable"/>): runs of rows of one value of the
 /// key's first column, each its rows and the first and the last key it holds, which the statistics of each column of
 /// each block extend. The blocks cover the file's rows once, in order, and their keys follow the key.
 /// </summary>

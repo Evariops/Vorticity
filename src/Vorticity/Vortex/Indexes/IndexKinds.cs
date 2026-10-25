@@ -98,9 +98,23 @@ internal static class IndexKinds
     /// <summary>
     /// The blocks of a file whose rows follow a key, on its first column: runs of rows of one value of it, each its rows and
     /// the first and the last key it holds, in one payload region that a table of contents names, which the statistics of
-    /// each column of each block extend (<see cref="BlockTable"/>).
+    /// each column of each block extend (<see cref="Indexes.BlockTable"/>).
+    /// </summary>
+    public const string BlockTable = "vorticity.block.table.v1";
+
+    /// <summary>
+    /// One column's statistics over the blocks of <see cref="BlockTable"/>: each block's rows, nulls, values and their
+    /// rows, and a measure's count, exact sum and extremes, in one payload region that a table of contents names
+    /// (<see cref="ColumnBlocks"/>).
     /// </summary>
     public const string BlockStats = "vorticity.block.stats.v1";
+
+    /// <summary>
+    /// Where each value of a column lives: its values by their bytes, each with the ranges of rows of the blocks it appears
+    /// in, or none where it lives everywhere, in one payload region that a table of contents names
+    /// (<see cref="Indexes.ColumnWhere"/>).
+    /// </summary>
+    public const string ColumnWhere = "vorticity.column.where.v1";
 
     /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
@@ -113,7 +127,7 @@ internal static class IndexKinds
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
                 or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks
-                or ColumnSheet or ColumnCounts or ColumnSketches or BlockStats => true,
+                or ColumnSheet or ColumnCounts or ColumnSketches or BlockTable or BlockStats or ColumnWhere => true,
             _ => false,
         };
 

@@ -1851,6 +1851,36 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
+    /// Gives every top-level column with a sheet its statistics over the blocks <paramref name="cuts"/> end, fed right after
+    /// its counts, from the values its sheet numbers and the measures the counts' plan reads; nothing for a file that keeps
+    /// no counts.
+    /// </summary>
+    internal void AddBlockStats(BlockCuts cuts)
+    {
+        for (int field = 0; _counts is { } plan && _isTabular && field < _fieldCount; field++)
+        {
+            if (SheetOf(field) is { } sheet)
+            {
+                _builders[field].Add(new ColumnBlocksBuilder(sheet, plan, field, cuts));
+            }
+        }
+    }
+
+    /// <summary>The builder of column <paramref name="field"/>'s statistics over the blocks, or null when it has none.</summary>
+    internal ColumnBlocksBuilder? BlockStatsOf(int field)
+    {
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            if (builder is ColumnBlocksBuilder blocks)
+            {
+                return blocks;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Once a batch of <paramref name="rows"/> is in, every column's sheet having hashed its rows: the wide columns settled,
     /// and each column of few values's registers of them raised.
     /// </summary>

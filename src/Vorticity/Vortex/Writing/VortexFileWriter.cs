@@ -182,7 +182,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private ObjectContents Contents(
         SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
-        List<(int Field, IndexSegment Region)> blocks) =>
+        List<(int Field, IndexSegment Region)> blocks, List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
@@ -190,6 +190,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Counts = counts,
             Sketches = sketches,
             Blocks = blocks,
+            BlockStats = blockStats,
+            Wheres = wheres,
         };
 
     /// <summary>
@@ -411,6 +413,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     // The blocks the caller declared on its key's first column, written after the counts at completion; null for none.
     private (int Field, BlockTable Table)? _blocks;
+
+    // Where the blocks end, which the caller declares as it writes and every column's statistics over them read; null for
+    // a file that keeps none.
+    private BlockCuts? _cuts;
+
+    /// <summary>
+    /// Declares that a block ends after the file's first <paramref name="rows"/> rows, before the rows it ends in are
+    /// written: every column's statistics over the blocks cut there (<see cref="VortexWriteOptions.Blocked"/>). The
+    /// blocks declared at completion (<see cref="DeclareBlocks"/>) must end at the same rows, or the file keeps no
+    /// statistics over them. Nothing for a file that keeps none.
+    /// </summary>
+    internal void EndBlock(long rows) => _cuts?.Add(rows);
 
     /// <summary>
     /// Declares the file's blocks on its key's first column <paramref name="column"/>, which completion writes in a region
@@ -865,6 +879,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (options.Counted && CountsPlan.For(schema) is { } plan)
             {
                 writer._indexes?.AddCounts(plan);
+
+                // And each column's statistics over the blocks the caller declares, with where each value lives.
+                if (options.Blocked && writer._indexes is { } blocked)
+                {
+                    writer._cuts = new BlockCuts();
+                    blocked.AddBlockStats(writer._cuts);
+                }
             }
         }
 
@@ -2428,6 +2449,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             List<(int Field, IndexSegment Region)> counts = [];
             List<(int Field, IndexSegment Region)> sketches = [];
             List<(int Field, IndexSegment Region)> blocks = [];
+            List<(int Field, IndexSegment Region)> stated = [];
+            List<(int Field, IndexSegment Region)> wheres = [];
             bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
             for (int field = 0; keepsSheets && field < _fieldCount; field++)
             {
@@ -2463,7 +2486,24 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
 
                 blocks.Add((declared.Field, await closed.AddColumnRegionAsync(
-                    _sink, IndexKinds.BlockStats, declared.Field, declared.Table.ToBytes(), _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    _sink, IndexKinds.BlockTable, declared.Field, declared.Table.ToBytes(), _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+
+                // Each column's statistics over the blocks, right after where its values live, which a question on a value
+                // reads with them in one request.
+                for (int field = 0; _cuts is not null && field < _fieldCount; field++)
+                {
+                    if (closed.BlockStatsOf(field)?.Finish(declared.Table) is ({ } statistics, var where))
+                    {
+                        if (where is not null)
+                        {
+                            wheres.Add((field, await closed.AddColumnRegionAsync(
+                                _sink, IndexKinds.ColumnWhere, field, where, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                        }
+
+                        stated.Add((field, await closed.AddColumnRegionAsync(
+                            _sink, IndexKinds.BlockStats, field, statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    }
+                }
             }
 
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
@@ -2513,7 +2553,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // A sliced file's table of contents, now that every region it names is written.
             if (_slices is { } sliced)
             {
-                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, blocks);
+                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, blocks, stated, wheres);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

@@ -256,12 +256,16 @@ a question of counts, sums and extremes does not read: on the design's requests,
 
 ### 5.3 Block statistics, and settling blocks
 
-For each block of section 3.3 and each column (`vorticity.block.stats.v1`):
+For each block of section 3.3 and each column, a region a column (`vorticity.block.stats.v1`), beside
+the blocks' rows and range of the key (`vorticity.block.table.v1`):
 
-- the block's rows and range of the key;
-- the values present and their rows, as long as they fit in little room (at most 256 values);
-  otherwise the least, the greatest and the distinct count;
-- for each number column, the count, sum, least and greatest.
+- the block's rows and nulls;
+- the values present, each by its number in the column's index of section 5.4, and their rows, as long
+  as they fit in little room (at most 256 values); otherwise their count;
+- for each number column the counts carry as a measure, the count, exact sum, least and greatest.
+
+A column whose values hardly repeat and that is no measure, an identifier, keeps none
+([10-indexes.md](10-indexes.md#412-vorticityblockstatsv1-a-column-over-the-blocks)).
 
 The engine already settles a block from its zone maps when its key maps to a single group and every
 aggregate is a count, a least or a greatest ([16-queries.md](16-queries.md#93-statistics-and-zone-maps)),
@@ -277,19 +281,26 @@ question, block by block, with nothing computed for a pair of columns:
 
 A block no delete touches settles as a file's does; a block a delete touches is decoded, or settled
 from the negative statistics the delete wrote (section 6). For the reference table clustered by
-emitter: 3.5 × 10⁵ blocks a day, about 200 bytes each, 70 MB a day kept in each object, 27.7 GB in 13
-months *(computed)*; summed into the rollups as the counts are.
-Writing costs about 15 ns a row. Aggregates per value for the columns of at most 16 values a block are
-left out of the first version, and weighed again against the size test.
+emitter: 3.5 × 10⁵ blocks a day, about 340 bytes each on the design's requests, where this design first
+reckoned 200: a service's block lists its endpoints and hosts, 129 and 83 bytes. That is 118 MB a day
+kept in each object, 47 GB in 13 months *(337 bytes a block measured, `--micro blocks`; extrapolated)*.
+The rollups sum none of them: their buckets are the clustering values, not the key's first column.
+Writing costs 11.4 ns a row, every column's statistics and their indexes together *(measured, one
+thread)*. Aggregates per value for the columns of at most 16 values a block are left out of the first
+version, and weighed again against the size test.
 
 ### 5.4 Where each value lives
 
-For each column of each object (`vorticity.column.where.v1`): the values, sorted, each with the ranges
-of blocks it appears in, or `everywhere`. The threshold is on the blocks a value actually touches,
-measured when the object is written, never on a count of rows assumed spread at random. A filter on a
-value of the key's first column, or of a column that depends on it, reads that value's blocks only; the
-same structure answers ranges and prefixes. About 0.5 MB a day, 0.2 GB in 13 months *(computed)*,
-5 ns a row to write.
+For each column of each object whose blocks list values (`vorticity.column.where.v1`): the values,
+sorted by their bytes, each with its number and the ranges of rows of the blocks it appears in, or
+`everywhere`. The threshold is on the blocks a value actually touches, measured when the object is
+written, never on a count of rows assumed spread at random: more than half the blocks, or more ranges
+than a sixteenth of them. A filter on a value of the key's first column, or of a column that depends on
+it, reads that value's blocks only; the same structure answers ranges and prefixes. The index holds the
+column's values once an object, 6.2 bytes a value for the design's endpoints and hosts, their names
+sharing their prefixes *(measured)*: some 270 KB an object of an hour of the reference table, whose
+30 000 endpoints and 10 200 hosts it holds all, 6.6 MB a day, 2.6 GB in 13 months *(computed)*, where
+this design first reckoned 0.5 MB a day. Its writing is in the 11.4 ns of section 5.3.
 
 ### 5.5 Identifiers' postings
 
@@ -464,7 +475,7 @@ them.
 |---|---|---|
 | appends | the data, once | 3 to 5 PUT each: the object, the commit, the pages of the tree; how often is the application's choice |
 | compaction: level 0's exit and the leveled merges | each row rewritten 2 to 4 times: 4 to 8 MB/s written, a little less read | under one PUT and one GET a second, in parts of 16 to 64 MB |
-| synopses in the objects | about 120 MB a day, 0.07 % of the data | within the objects' parts |
+| synopses in the objects | about 176 MB a day, 0.1 % of the data | within the objects' parts |
 | rollups | a few MB a column and a run of 64 objects | a PUT a rollup, once the objects of its run stand |
 | listings | none: the commit tree is the catalog | none |
 
@@ -477,12 +488,11 @@ The composite tables this design replaces wrote 7.7 GB a day, 4.4 % of the data.
 | work | ns a row |
 |---|---|
 | clustering at level 0's exit, sorted merges | ~40 |
-| block statistics | ~15 |
-| where each value lives | ~5 |
+| block statistics, and where each value lives | 11.4 *(measured)* |
 | counts, seven columns | ~56 |
 | quantile and distinct sketches | ~67 |
 | column sheets, seven columns | ~42 |
-| **total** | **~225**, plus ~30 for each learned family kept up |
+| **total** | **~216**, plus ~30 for each learned family kept up |
 
 At the design rate that is 0.011 of a core *(computed)*.
 
@@ -492,14 +502,14 @@ At the design rate that is 0.011 of a core *(computed)*.
 |---|---|---|---|
 | column sheets | 0.08 MB | — | 0.03 GB |
 | counts, sketches | 51 MB | 2.7 MB | 21 GB |
-| block statistics | 70 MB | 3 MB | 29 GB |
-| where each value lives | 0.5 MB | — | 0.2 GB |
+| block statistics | 118 MB | — | 47 GB |
+| where each value lives | 6.6 MB | — | 2.6 GB |
 | learned partials | what is asked | what is asked | 2 GiB budget |
-| **total** | **~120 MB** | **~6 MB** | **~50 GB** |
+| **total** | **~176 MB** | **~3 MB** | **~71 GB** |
 
-The synopses weigh 0.07 % of the data. The design this one replaces kept 7.7 GB a day of synopsis
+The synopses weigh 0.1 % of the data. The design this one replaces kept 7.7 GB a day of synopsis
 tables for this table, 4.4 % of the data and about 3 TB in 13 months *(measured)*. For a petabyte of
-data, fifteen such tables kept 13 months, the synopses weigh about 750 GB on the store, of which the
+data, fifteen such tables kept 13 months, the synopses weigh about 1.1 TB on the store, of which the
 local cache's working set is about 60 GB, the last 30 days and the coarser grains; the sheets and
 directories take under 1 GB of memory *(computed)*. The coarser grains were computed for monthly files of
 days and months, which rollups replaced.
@@ -511,8 +521,9 @@ days and months, which rollups replaced.
 | `vorticity.column.sheet.v1` | an object's region, which its table of contents names | the column sheets |
 | `vorticity.column.counts.v1` | an object's region, which its table of contents names; a rollup's | the counts of each value, kept by bucket in a rollup whose run spans several clustering values |
 | `vorticity.column.sketches.v1` | an object's region right after the counts, which its table of contents names; a rollup's | the counts' quantile sketches and distinct registers |
-| `vorticity.block.stats.v1` | an object's region right after the counts, which its table of contents names; summed into the rollups | blocks, their rows and keys, then their per-column statistics |
-| `vorticity.column.where.v1` | an object's index region | where each value lives |
+| `vorticity.block.table.v1` | an object's region right after the counts, which its table of contents names | its blocks, their rows and keys |
+| `vorticity.block.stats.v1` | an object's region a column, right after the column's index of where its values live, which its table of contents names | each block's rows, nulls, values by their numbers and their rows, and a measure's states |
+| `vorticity.column.where.v1` | an object's region a column, which its table of contents names | where each value lives: the values, their numbers and their ranges of rows |
 | `vorticity.partials.v1` | the local cache; beside the rollups | learned partials |
 
 Readers skip a kind they do not know, as they do now. The kinds of the former synopsis tables are no

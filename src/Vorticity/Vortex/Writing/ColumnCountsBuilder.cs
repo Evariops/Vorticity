@@ -717,7 +717,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// Folds the rows' floats into the states that start at <paramref name="states"/> past each row's entry: the values,
     /// the exact sum from the parts each value was split into once, the least and the greatest, a NaN's aside.
     /// </summary>
-    private static void FoldFloats(ref long states, ReadOnlySpan<int> entries, ReadOnlySpan<IndexedSum.Split> splits, ReadOnlySpan<double> floats, ReadOnlySpan<byte> valid)
+    internal static void FoldFloats(ref long states, ReadOnlySpan<int> entries, ReadOnlySpan<IndexedSum.Split> splits, ReadOnlySpan<double> floats, ReadOnlySpan<byte> valid)
     {
         for (int i = 0; i < entries.Length; i++)
         {
@@ -748,7 +748,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     }
 
     /// <summary>Folds the rows' signed integers into the states that start at <paramref name="states"/> past each row's entry.</summary>
-    private static void FoldSigned(ref long states, ReadOnlySpan<int> entries, ReadOnlySpan<long> integers, ReadOnlySpan<byte> valid)
+    internal static void FoldSigned(ref long states, ReadOnlySpan<int> entries, ReadOnlySpan<long> integers, ReadOnlySpan<byte> valid)
     {
         for (int i = 0; i < entries.Length; i++)
         {
@@ -773,7 +773,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     }
 
     /// <summary>Folds the rows' unsigned integers, as their bits, into the states that start at <paramref name="states"/> past each row's entry.</summary>
-    private static void FoldUnsigned(ref long states, ReadOnlySpan<int> entries, ReadOnlySpan<long> integers, ReadOnlySpan<byte> valid)
+    internal static void FoldUnsigned(ref long states, ReadOnlySpan<int> entries, ReadOnlySpan<long> integers, ReadOnlySpan<byte> valid)
     {
         for (int i = 0; i < entries.Length; i++)
         {
@@ -919,23 +919,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
                 int length = MeasureLayout.Words(kinds[c] == MeasureKind.Float);
                 Span<long> into = state.Slice(at, length);
                 record.Slice(_at[carried[c]], length).CopyTo(into);
-
-                // A measure that met no value holds what StateWords clears it to, not the ends its extremes start from; and a
-                // float's extremes that met no number but a NaN are NaN.
-                bool none = into[MeasureLayout.Values] == 0;
-                if (none)
-                {
-                    into.Clear();
-                }
-
-                if (kinds[c] == MeasureKind.Float && (none
-                    || (into[MeasureLayout.FloatLeast] == BitConverter.DoubleToInt64Bits(double.PositiveInfinity)
-                        && into[MeasureLayout.FloatGreatest] == BitConverter.DoubleToInt64Bits(double.NegativeInfinity))))
-                {
-                    into[MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(double.NaN);
-                    into[MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(double.NaN);
-                }
-
+                CloseState(into, kinds[c]);
                 at += length;
             }
 
@@ -1078,22 +1062,48 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         record.Clear();
         for (int k = 0; k < _kinds.Length; k++)
         {
-            Span<long> state = record[_at[k]..];
-            switch (_kinds[k])
-            {
-                case MeasureKind.Float:
-                    state[MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(double.PositiveInfinity);
-                    state[MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(double.NegativeInfinity);
-                    break;
-                case MeasureKind.Signed:
-                    state[MeasureLayout.IntegerLeast] = long.MaxValue;
-                    state[MeasureLayout.IntegerGreatest] = long.MinValue;
-                    break;
-                default:
-                    state[MeasureLayout.IntegerLeast] = -1L;
-                    state[MeasureLayout.IntegerGreatest] = 0L;
-                    break;
-            }
+            OpenState(record[_at[k]..], _kinds[k]);
+        }
+    }
+
+    /// <summary>
+    /// Ends a measure's states of <paramref name="kind"/> as <see cref="StateWords"/> holds them: one that met no value
+    /// cleared, not at the ends its extremes start from, and a float's extremes that met no number but a NaN, NaN.
+    /// </summary>
+    internal static void CloseState(Span<long> state, MeasureKind kind)
+    {
+        bool none = state[MeasureLayout.Values] == 0;
+        if (none)
+        {
+            state.Clear();
+        }
+
+        if (kind == MeasureKind.Float && (none
+            || (state[MeasureLayout.FloatLeast] == BitConverter.DoubleToInt64Bits(double.PositiveInfinity)
+                && state[MeasureLayout.FloatGreatest] == BitConverter.DoubleToInt64Bits(double.NegativeInfinity))))
+        {
+            state[MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(double.NaN);
+            state[MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(double.NaN);
+        }
+    }
+
+    /// <summary>Starts a measure's states of <paramref name="kind"/>, cleared: its extremes at the ends no value passes.</summary>
+    internal static void OpenState(Span<long> state, MeasureKind kind)
+    {
+        switch (kind)
+        {
+            case MeasureKind.Float:
+                state[MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(double.PositiveInfinity);
+                state[MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(double.NegativeInfinity);
+                break;
+            case MeasureKind.Signed:
+                state[MeasureLayout.IntegerLeast] = long.MaxValue;
+                state[MeasureLayout.IntegerGreatest] = long.MinValue;
+                break;
+            default:
+                state[MeasureLayout.IntegerLeast] = -1L;
+                state[MeasureLayout.IntegerGreatest] = 0L;
+                break;
         }
     }
 

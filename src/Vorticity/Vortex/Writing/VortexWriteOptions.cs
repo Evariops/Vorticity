@@ -302,6 +302,13 @@ public sealed record VortexWriteOptions
     internal bool Counted { get; init; }
 
     /// <summary>
+    /// Whether a file that counts its columns also keeps each one's statistics over the blocks its writer declares as it
+    /// writes (<see cref="VortexFileWriter.EndBlock"/>, <see cref="Indexes.ColumnBlocks"/>) and where each value lives
+    /// (<see cref="Indexes.ColumnWhere"/>); false, the default, for none. A dataset's objects written in its key's order keep them.
+    /// </summary>
+    internal bool Blocked { get; init; }
+
+    /// <summary>
     /// What each top-level variant column shreds, by its name: its chunks are written as the reference
     /// stores a shredded variant, the values the shredding names in typed columns. A column not named
     /// is written whole.
