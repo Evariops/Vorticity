@@ -3,7 +3,8 @@
 // WHAT IS HELD: past its budget of entries, a column keeps the values whose rows are most, each exact, and counts the
 // others together, exact too, so that every row is counted once; and what the counts write reads back word for word:
 // signed and unsigned extremes, sums past 64 bits, float sums and the extremes of a measure that met no value; and their
-// sketches byte for byte, whatever the order the rows of a value came in.
+// sketches byte for byte, whatever the order the rows of a value came in. Kept with a checksum a chunk, as a rollup keeps
+// them, the chunks of a few values read alone give their entries as the whole does.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -172,6 +173,182 @@ public sealed class ColumnCountsTests
             Assert.Equal(Sketch(held.Select(r => (double)r.Amount)), sketches!.SketchOf(e, 0));
             Assert.Equal(Sketch(held.Select(r => r.Price)), sketches.SketchOf(e, 1));
         }
+    }
+
+    // Counts of 2,000 values and a null, kept with a checksum a chunk as a rollup keeps them: the header alone gives the chunks, and
+    // the chunks of a few values, read alone, give their entries and their sketches as the counts read whole do; a byte
+    // changed in a chunk or in the header is caught.
+    [Fact]
+    public void TheChunksOfSomeValuesReadAloneGiveTheirEntries()
+    {
+        Random random = new Random(11);
+        ColumnCounts counts = Synthetic(random, values: 2_000, buckets: 0, valuesOf: _ => (0, 1));
+        byte[]?[] held = new byte[]?[counts.Entries * 2];
+        for (int i = 0; i < held.Length; i++)
+        {
+            held[i] = random.Next(8) == 0 ? null : [.. Enumerable.Range(0, random.Next(4, 40)).Select(_ => (byte)random.Next(256))];
+        }
+
+        ColumnSketches sketches = new ColumnSketches(counts.Entries, 2, held, 0, null);
+        counts.ChunkSums = true;
+        sketches.ChunkSums = true;
+        byte[] bytes = counts.ToBytes();
+        byte[] sketchBytes = sketches.ToBytes();
+        Assert.True(ColumnCounts.From(bytes).ChunkSums);
+        Assert.Equal(counts.Words, ColumnCounts.From(bytes).Words);
+        Assert.Equal(sketches.Sketches, ColumnSketches.From(sketchBytes).Sketches);
+
+        // The header alone, its size what a rollup's entry records; a byte short is none.
+        CountsDirectory directory = ColumnCounts.ReadDirectory(bytes);
+        Assert.Equal(directory, ColumnCounts.ReadDirectory(bytes.AsSpan(0, directory.HeaderBytes)), DirectoryComparer.Instance);
+        Assert.Throws<VortexFormatException>(() => ColumnCounts.ReadDirectory(bytes.AsSpan(0, directory.HeaderBytes - 1)));
+        Assert.True(directory.Chunks.Count > 4, $"{directory.Chunks.Count} chunks");
+        Assert.All(directory.Chunks, chunk => Assert.NotNull(chunk.Checksum));
+
+        // Three values held and one not: their chunks alone.
+        byte[][] asked = [Key(5), Key(1_000), Key(1_999), Key(5_000)];
+        List<int> chunks = ColumnCounts.ChunksOf(directory, asked, leading: false);
+        Assert.InRange(chunks.Count, 1, 4);
+        ReadOnlyMemory<byte>[] read = [.. chunks.Select(c => bytes.AsMemory(directory.HeaderBytes + directory.Chunks[c].Offset, directory.Chunks[c].Length))];
+        ColumnCounts partial = ColumnCounts.FromChunks(directory, chunks, read, out int[] entries);
+        Assert.True(partial.Groups.Length < counts.Groups.Length);
+        Console.WriteLine($"PARTIAL counts of {bytes.Length} bytes: a header of {directory.HeaderBytes} and {directory.Chunks.Count} chunks; three values read {read.Sum(r => r.Length)} bytes of {chunks.Count} chunks");
+
+        SketchesDirectory sketchDirectory = ColumnSketches.ReadDirectory(sketchBytes);
+        List<int> sketchChunks = ColumnSketches.ChunksOf(sketchDirectory, entries);
+        ReadOnlyMemory<byte>[] sketchRead = [.. sketchChunks.Select(c =>
+            sketchBytes.AsMemory(sketchDirectory.HeaderBytes + sketchDirectory.Chunks[c].Offset, sketchDirectory.Chunks[c].Length))];
+        ColumnSketches partialSketches = ColumnSketches.FromEntries(sketchDirectory, sketchChunks, sketchRead, entries);
+        Assert.Equal(partial.Entries, partialSketches.Entries);
+        foreach (byte[] value in asked[..3])
+        {
+            CountGroup whole = counts.Groups.Single(g => g.Value is { } held && held.AsSpan().SequenceEqual(value));
+            CountGroup part = partial.Groups.Single(g => g.Value is { } held && held.AsSpan().SequenceEqual(value));
+            Assert.Equal(whole.Entries, part.Entries);
+            for (int e = 0; e < part.Entries; e++)
+            {
+                Assert.Equal(whole.FirstEntry + e, entries[part.FirstEntry + e]);
+                Assert.Equal(counts.WordsOf(whole.FirstEntry + e).ToArray(), partial.WordsOf(part.FirstEntry + e).ToArray());
+                Assert.Equal(sketches.SketchOf(whole.FirstEntry + e, 0), partialSketches.SketchOf(part.FirstEntry + e, 0));
+                Assert.Equal(sketches.SketchOf(whole.FirstEntry + e, 1), partialSketches.SketchOf(part.FirstEntry + e, 1));
+            }
+        }
+
+        Assert.DoesNotContain(partial.Groups, g => g.Value is { } held && held.AsSpan().SequenceEqual(asked[3]));
+
+        // A byte changed in a chunk read, or in the header, fails its checksum.
+        byte[] changed = read[0].ToArray();
+        changed[changed.Length / 2] ^= 1;
+        Assert.Throws<VortexFormatException>(() => ColumnCounts.FromChunks(directory, chunks, [changed, .. read[1..]], out _));
+        byte[] header = bytes[..directory.HeaderBytes];
+        header[3] ^= 1;
+        Assert.Throws<VortexFormatException>(() => ColumnCounts.ReadDirectory(header));
+        byte[] sketchHeader = sketchBytes[..sketchDirectory.HeaderBytes];
+        sketchHeader[2] ^= 1;
+        Assert.Throws<VortexFormatException>(() => ColumnSketches.ReadDirectory(sketchHeader));
+    }
+
+    // Counts kept by bucket, three of them put together with a checksum a chunk: a value read by its chunks alone gives
+    // each of its entries and the bucket each is of, as the counts read whole do.
+    [Fact]
+    public void TheChunksOfAValueKeptByBucketGiveItsEntryInEachBucket()
+    {
+        // Bucket b holds values 100 b to 1,500 + 100 b.
+        ColumnCounts together = Synthetic(new Random(13), values: 1_700, buckets: 3, valuesOf: v => (v < 1_500 ? 0 : ((v - 1_500) / 100) + 1, Math.Min(2, v / 100)));
+        together.ChunkSums = true;
+        byte[] bytes = together.ToBytes();
+        CountsDirectory directory = ColumnCounts.ReadDirectory(bytes);
+        Assert.Equal(3, directory.Buckets);
+        Assert.True(directory.Chunks.Count > 2, $"{directory.Chunks.Count} chunks");
+
+        // Value 150 has rows in the first two buckets, value 1,550 in the last two.
+        byte[][] asked = [Key(150), Key(1_550)];
+        List<int> chunks = ColumnCounts.ChunksOf(directory, asked, leading: false);
+        ColumnCounts partial = ColumnCounts.FromChunks(
+            directory, chunks, [.. chunks.Select(c => (ReadOnlyMemory<byte>)bytes.AsMemory(directory.HeaderBytes + directory.Chunks[c].Offset, directory.Chunks[c].Length))], out int[] entries);
+        foreach ((byte[] value, int[] buckets) in (IEnumerable<(byte[], int[])>)[(asked[0], [0, 1]), (asked[1], [1, 2])])
+        {
+            CountGroup whole = together.Groups.Single(g => g.Value is { } held && held.AsSpan().SequenceEqual(value));
+            CountGroup part = partial.Groups.Single(g => g.Value is { } held && held.AsSpan().SequenceEqual(value));
+            Assert.Equal(buckets, Enumerable.Range(part.FirstEntry, part.Entries).Select(e => partial.EntryBuckets![e]));
+            for (int e = 0; e < part.Entries; e++)
+            {
+                Assert.Equal(whole.FirstEntry + e, entries[part.FirstEntry + e]);
+                Assert.Equal(together.WordsOf(whole.FirstEntry + e).ToArray(), partial.WordsOf(part.FirstEntry + e).ToArray());
+            }
+        }
+    }
+
+    /// <summary>
+    /// Counts of a null and of <paramref name="values"/> values, each a key of 8 bytes in their order, of a signed and a
+    /// float measure: value v an entry in each bucket of <paramref name="valuesOf"/>'s range, under
+    /// <paramref name="buckets"/> buckets, or one; each entry's states drawn.
+    /// </summary>
+    private static ColumnCounts Synthetic(Random random, int values, int buckets, Func<int, (int First, int Last)> valuesOf)
+    {
+        MeasureKind[] kinds = [MeasureKind.Signed, MeasureKind.Float];
+        int width = StateWords.Count(kinds);
+        List<CountGroup> groups = [new CountGroup(CountedValue.Null, null, 0, 1)];
+        List<int> entryBuckets = [0];
+        for (int v = 0; v < values; v++)
+        {
+            (int first, int last) = buckets == 0 ? (0, 0) : valuesOf(v);
+            groups.Add(new CountGroup(CountedValue.Value, Key(v), entryBuckets.Count, last - first + 1));
+            entryBuckets.AddRange(Enumerable.Range(first, last - first + 1));
+        }
+
+        long[] words = new long[entryBuckets.Count * width];
+        for (int e = 0; e < entryBuckets.Count; e++)
+        {
+            Span<long> entry = words.AsSpan(e * width, width);
+            StateWords.Clear(entry, kinds);
+            long rows = random.NextInt64(1, 1_000);
+            long least = random.NextInt64(-1_000, 1_000);
+            entry[0] = rows;
+            entry[1 + MeasureLayout.Values] = rows;
+            StateWords.Write((Int128)least * rows, entry, 1 + MeasureLayout.Sum);
+            entry[1 + MeasureLayout.IntegerLeast] = least;
+            entry[1 + MeasureLayout.IntegerGreatest] = least + random.Next(1_000);
+            int price = 1 + MeasureLayout.IntegerWords;
+            WideIndexedSum sum = default;
+            sum.Add(random.NextDouble() * rows);
+            entry[price + MeasureLayout.Values] = rows;
+            StateWords.Write(in sum, entry, price + MeasureLayout.Sum);
+            entry[price + MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(random.NextDouble());
+            entry[price + MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(1 + random.NextDouble());
+        }
+
+        return new ColumnCounts([2, 3], kinds, [.. groups], words)
+        {
+            Sketched = true,
+            Buckets = buckets,
+            EntryBuckets = buckets == 0 ? null : [.. entryBuckets],
+        };
+    }
+
+    /// <summary>Value <paramref name="value"/>'s key, its 8 bytes big-endian, whose order is the values'.</summary>
+    private static byte[] Key(long value)
+    {
+        byte[] key = new byte[sizeof(long)];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(key, value);
+        return key;
+    }
+
+    /// <summary>Directories equal field by field, their arrays and chunks by their contents.</summary>
+    private sealed class DirectoryComparer : IEqualityComparer<CountsDirectory>
+    {
+        internal static readonly DirectoryComparer Instance = new DirectoryComparer();
+
+        public bool Equals(CountsDirectory? x, CountsDirectory? y) =>
+            x is not null && y is not null && x.HeaderBytes == y.HeaderBytes && x.MeasureFields.SequenceEqual(y.MeasureFields)
+            && x.Kinds.SequenceEqual(y.Kinds) && x.Sketched == y.Sketched && x.AttachedFields.SequenceEqual(y.AttachedFields)
+            && x.Buckets == y.Buckets && x.Entries == y.Entries && x.Groups == y.Groups
+            && x.Chunks.Select(Shown).SequenceEqual(y.Chunks.Select(Shown));
+
+        public int GetHashCode(CountsDirectory obj) => obj.HeaderBytes;
+
+        private static string Shown(CountsChunk chunk) =>
+            $"{chunk.Offset}/{chunk.Length}/{chunk.FirstGroup}/{chunk.FirstEntry}/{chunk.Kind}/{(chunk.Value is null ? "" : Convert.ToHexString(chunk.Value))}/{chunk.Checksum}";
     }
 
     /// <summary>The encoded quantile sketch, at 1 % as the counts keep them, of <paramref name="values"/>.</summary>

@@ -30,6 +30,33 @@ internal enum CountedValue : byte
 internal readonly record struct CountGroup(CountedValue Kind, byte[]? Value, int FirstEntry, int Entries);
 
 /// <summary>
+/// What a reader of some values of a column's counts reads first (<see cref="ColumnCounts.ReadDirectory"/>): the counts'
+/// header, their measures, and the directory of their chunks, the chunks starting at <paramref name="HeaderBytes"/>.
+/// </summary>
+/// <param name="HeaderBytes">The bytes before the first chunk.</param>
+/// <param name="MeasureFields">The measures each entry holds.</param>
+/// <param name="Kinds">How each is summed.</param>
+/// <param name="Sketched">Whether the counts' sketches keep a quantile sketch of each measure.</param>
+/// <param name="AttachedFields">The wide columns whose registers the sketches keep.</param>
+/// <param name="Buckets">The buckets the counts keep apart, 0 for none.</param>
+/// <param name="Entries">The counts' entries.</param>
+/// <param name="Groups">Their groups.</param>
+/// <param name="Chunks">The chunks, in their order.</param>
+internal sealed record CountsDirectory(
+    int HeaderBytes, int[] MeasureFields, MeasureKind[] Kinds, bool Sketched, int[] AttachedFields, int Buckets, int Entries, int Groups,
+    IReadOnlyList<CountsChunk> Chunks);
+
+/// <summary>One chunk of a column's counts, as their directory names it.</summary>
+/// <param name="Offset">Where it starts past the header.</param>
+/// <param name="Length">Its bytes.</param>
+/// <param name="FirstGroup">Its first group.</param>
+/// <param name="FirstEntry">Its first entry.</param>
+/// <param name="Kind">What its first group stands for.</param>
+/// <param name="Value">Its first group's value, for a value.</param>
+/// <param name="Checksum">The XXH3-64 of its bytes, when the counts keep one a chunk.</param>
+internal readonly record struct CountsChunk(int Offset, int Length, int FirstGroup, int FirstEntry, CountedValue Kind, byte[]? Value, ulong? Checksum);
+
+/// <summary>
 /// A column's counts in an object (<see cref="IndexKinds.ColumnCounts"/>): for each of its values, its nulls, and past an
 /// absolute budget the values left out together, an entry over the whole object that holds the rows with that value and
 /// the states of every measure column over them, its values, their exact sum, their least and their greatest, in the
@@ -54,6 +81,13 @@ internal readonly record struct CountGroup(CountedValue Kind, byte[]? Value, int
 /// the buckets ascending, each entry its bucket's number before its words: a reader of one value finds all its buckets'
 /// entries in the chunk that holds it.
 /// </para>
+/// <para>
+/// A rollup's counts, which weigh megabytes, are kept with a checksum a chunk (<see cref="ChunkSums"/>, a flag of the
+/// header): the directory gives each chunk its first entry and the XXH3-64 of its bytes, and the header ends with its
+/// own. A reader of some values reads the header, of the size the rollup's entry records, then their chunks alone
+/// (<see cref="ReadDirectory"/>, <see cref="ChunksOf"/>, <see cref="FromChunks"/>). An object's counts keep none: they
+/// are read whole, the region's checksum checking them.
+/// </para>
 /// </remarks>
 internal sealed class ColumnCounts
 {
@@ -74,6 +108,9 @@ internal sealed class ColumnCounts
 
     /// <summary>The header's flag of counts kept by bucket (<see cref="Buckets"/>).</summary>
     private const byte BucketsFlag = 4;
+
+    /// <summary>The header's flag of counts whose directory gives each chunk's first entry and checksum (<see cref="ChunkSums"/>).</summary>
+    private const byte ChunkSumsFlag = 8;
 
     /// <param name="measureFields">The top-level columns whose states each entry holds, in their order.</param>
     /// <param name="kinds">How each is summed.</param>
@@ -109,6 +146,13 @@ internal sealed class ColumnCounts
     /// <summary>The bucket of each entry, ascending within a group, when <see cref="Buckets"/> is past 0; null otherwise.</summary>
     internal int[]? EntryBuckets { get; init; }
 
+    /// <summary>
+    /// Whether the directory gives each chunk's first entry and checksum, and the header its own, so that a reader of some
+    /// values reads the header, then their chunks alone, and checks each (<see cref="FromChunks"/>): a rollup's, whose
+    /// counts weigh megabytes. Set before <see cref="ToBytes"/>.
+    /// </summary>
+    internal bool ChunkSums { get; set; }
+
     /// <summary>The bytes the counts hold in memory, about: their words and their groups.</summary>
     internal long Bytes => (Words.Length * (long)sizeof(long)) + (Groups.Length * 64L) + ((EntryBuckets?.Length ?? 0) * (long)sizeof(int));
 
@@ -137,7 +181,7 @@ internal sealed class ColumnCounts
     internal byte[] ToBytes()
     {
         Output chunks = new Output(ChunkBytes);
-        List<(int Offset, int Length, int FirstGroup)> directory = [];
+        List<(int Offset, int Length, int FirstGroup, int FirstEntry, ulong Checksum)> directory = [];
         int chunkStart = 0;
         int chunkGroup = 0;
         for (int group = 0; group < Groups.Length; group++)
@@ -145,7 +189,9 @@ internal sealed class ColumnCounts
             WriteGroup(ref chunks, Groups[group]);
             if (chunks.Length - chunkStart >= ChunkBytes || group == Groups.Length - 1)
             {
-                directory.Add((chunkStart, chunks.Length - chunkStart, chunkGroup));
+                int length = chunks.Length - chunkStart;
+                ulong checksum = ChunkSums ? System.IO.Hashing.XxHash3.HashToUInt64(chunks.Span.Slice(chunkStart, length)) : 0;
+                directory.Add((chunkStart, length, chunkGroup, Groups[chunkGroup].FirstEntry, checksum));
                 chunkStart = chunks.Length;
                 chunkGroup = group + 1;
             }
@@ -153,7 +199,8 @@ internal sealed class ColumnCounts
 
         Output head = new Output(256);
         head.Byte(Version);
-        head.Byte((byte)((Sketched ? SketchesFlag : 0) | (AttachedFields.Length == 0 ? 0 : DistinctFlag) | (Buckets == 0 ? 0 : BucketsFlag)));
+        head.Byte((byte)((Sketched ? SketchesFlag : 0) | (AttachedFields.Length == 0 ? 0 : DistinctFlag) | (Buckets == 0 ? 0 : BucketsFlag)
+            | (ChunkSums ? ChunkSumsFlag : 0)));
         head.Varint((ulong)MeasureFields.Length);
         for (int i = 0; i < MeasureFields.Length; i++)
         {
@@ -178,12 +225,24 @@ internal sealed class ColumnCounts
 
         head.Varint((ulong)Groups.Length);
         head.Varint((ulong)directory.Count);
-        foreach ((int offset, int length, int firstGroup) in directory)
+        foreach ((int offset, int length, int firstGroup, int firstEntry, ulong checksum) in directory)
         {
             head.Varint((ulong)offset);
             head.Varint((ulong)length);
             head.Varint((ulong)firstGroup);
+            if (ChunkSums)
+            {
+                head.Varint((ulong)firstEntry);
+                head.Long((long)checksum);
+            }
+
             Key(ref head, Groups[firstGroup]);
+        }
+
+        if (ChunkSums)
+        {
+            // The header's own checksum closes it, which a reader of the header alone checks.
+            head.Long((long)System.IO.Hashing.XxHash3.HashToUInt64(head.Span));
         }
 
         byte[] bytes = new byte[head.Length + chunks.Length];
@@ -192,16 +251,157 @@ internal sealed class ColumnCounts
         return bytes;
     }
 
-    /// <summary>The counts <see cref="ToBytes"/> wrote.</summary>
-    /// <exception cref="VortexFormatException">The bytes are no counts this library reads.</exception>
-    internal static ColumnCounts From(ReadOnlySpan<byte> bytes)
+    /// <summary>
+    /// The header and the directory of the counts whose first bytes are <paramref name="head"/>, which a reader of some of
+    /// their values reads before the chunks that hold them: the counts' header whole, or more of their bytes.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The bytes are no counts' header this library reads, or fail its checksum.</exception>
+    internal static CountsDirectory ReadDirectory(ReadOnlySpan<byte> head)
+    {
+        int at = 0;
+        return Head(head, ref at);
+    }
+
+    /// <summary>
+    /// The chunks of <paramref name="directory"/> that hold the groups of <paramref name="values"/>, ascending, and the first
+    /// when <paramref name="leading"/> asks the nulls' and the values left out's groups, which lead the counts.
+    /// </summary>
+    internal static List<int> ChunksOf(CountsDirectory directory, IReadOnlyList<byte[]> values, bool leading)
+    {
+        SortedSet<int> chunks = [];
+        if (leading && directory.Chunks.Count > 0)
+        {
+            chunks.Add(0);
+        }
+
+        foreach (byte[] value in values)
+        {
+            // The last chunk whose first group comes at or before the value's.
+            CountGroup asked = new CountGroup(CountedValue.Value, value, 0, 1);
+            int low = 0;
+            int high = directory.Chunks.Count - 1;
+            int found = -1;
+            while (low <= high)
+            {
+                int middle = low + ((high - low) >> 1);
+                CountsChunk chunk = directory.Chunks[middle];
+                CountGroup first = new CountGroup(chunk.Kind, chunk.Value, 0, 1);
+                if (!Precedes(asked, first))
+                {
+                    found = middle;
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle - 1;
+                }
+            }
+
+            if (found >= 0)
+            {
+                chunks.Add(found);
+            }
+        }
+
+        return [.. chunks];
+    }
+
+    /// <summary>
+    /// The counts of chunks <paramref name="chunks"/> of <paramref name="directory"/>, ascending, whose bytes are
+    /// <paramref name="bytes"/>, each checked against its checksum: their groups alone, their entries from 0,
+    /// <paramref name="entries"/> each one's place among all the counts' entries, which their sketches take.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A chunk is not the length or the checksum its directory says, or no counts.</exception>
+    internal static ColumnCounts FromChunks(CountsDirectory directory, IReadOnlyList<int> chunks, IReadOnlyList<ReadOnlyMemory<byte>> bytes, out int[] entries)
+    {
+        int groups = 0;
+        int held = 0;
+        foreach (int chunk in chunks)
+        {
+            (int chunkGroups, int chunkEntries) = Sizes(directory, chunk);
+            groups += chunkGroups;
+            held += chunkEntries;
+        }
+
+        ColumnCounts counts = new ColumnCounts(directory.MeasureFields, directory.Kinds, new CountGroup[groups], new long[held * StateWords.Count(directory.Kinds)])
+        {
+            Sketched = directory.Sketched,
+            AttachedFields = directory.AttachedFields,
+            Buckets = directory.Buckets,
+            EntryBuckets = directory.Buckets == 0 ? null : new int[held],
+        };
+        entries = new int[held];
+        int group = 0;
+        int entry = 0;
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            CountsChunk chunk = directory.Chunks[chunks[i]];
+            ReadOnlySpan<byte> span = bytes[i].Span;
+            if (span.Length != chunk.Length || (chunk.Checksum is { } checksum && System.IO.Hashing.XxHash3.HashToUInt64(span) != checksum))
+            {
+                throw new VortexFormatException($"A chunk of a column's counts is not the {chunk.Length} bytes its directory checks.");
+            }
+
+            (int chunkGroups, int _) = Sizes(directory, chunks[i]);
+            int at = 0;
+            int start = entry;
+            for (int g = 0; g < chunkGroups; g++)
+            {
+                CountGroup read = counts.ReadGroup(span, ref at, entry);
+                counts.Groups[group++] = read;
+                entry += read.Entries;
+            }
+
+            for (int e = start; e < entry; e++)
+            {
+                entries[e] = chunk.FirstEntry + (e - start);
+            }
+
+            if (at != span.Length)
+            {
+                throw new VortexFormatException($"A chunk of a column's counts ends at {at} where its directory says {span.Length}.");
+            }
+        }
+
+        return counts;
+    }
+
+    /// <summary>The entries chunks <paramref name="chunks"/> of <paramref name="directory"/> hold, ascending: those whose sketches a reader of them reads.</summary>
+    internal static List<int> EntriesOf(CountsDirectory directory, IReadOnlyList<int> chunks)
+    {
+        List<int> entries = [];
+        foreach (int chunk in chunks)
+        {
+            int first = directory.Chunks[chunk].FirstEntry;
+            (_, int count) = Sizes(directory, chunk);
+            for (int entry = first; entry < first + count; entry++)
+            {
+                entries.Add(entry);
+            }
+        }
+
+        return entries;
+    }
+
+    /// <summary>The groups and the entries chunk <paramref name="chunk"/> of <paramref name="directory"/> holds.</summary>
+    private static (int Groups, int Entries) Sizes(CountsDirectory directory, int chunk)
+    {
+        CountsChunk at = directory.Chunks[chunk];
+        bool last = chunk + 1 == directory.Chunks.Count;
+        return (
+            (last ? directory.Groups : directory.Chunks[chunk + 1].FirstGroup) - at.FirstGroup,
+            (last ? directory.Entries : directory.Chunks[chunk + 1].FirstEntry) - at.FirstEntry);
+    }
+
+    /// <summary>The counts' header and directory, from <paramref name="at"/>, past which the groups start.</summary>
+    private static CountsDirectory Head(ReadOnlySpan<byte> bytes, ref int at)
     {
         if (bytes.Length < 2 || bytes[0] != Version)
         {
             throw new VortexFormatException(bytes.Length < 2 ? "A column's counts end before their header." : $"A column's counts are of version {bytes[0]}, which this library does not read.");
         }
 
-        int at = 2;
+        at = 2;
         int measures = Count(bytes, ref at);
         int[] fields = new int[measures];
         MeasureKind[] kinds = new MeasureKind[measures];
@@ -231,30 +431,61 @@ internal sealed class ColumnCounts
             entries = Count(bytes, ref at);
         }
 
+        bool sums = (bytes[1] & ChunkSumsFlag) != 0;
         int groups = Count(bytes, ref at);
-        int chunks = Count(bytes, ref at);
-        for (int chunk = 0; chunk < chunks; chunk++)
+        int count = Count(bytes, ref at);
+        if (count > bytes.Length)
         {
-            // The directory serves a reader of one value; a reader of them all reads the chunks in their order.
-            Count(bytes, ref at);
-            Count(bytes, ref at);
-            Count(bytes, ref at);
-            SkipKey(bytes, ref at);
+            throw new VortexFormatException($"A column's counts claim {count} chunks in {bytes.Length} bytes.");
         }
 
-        int words = StateWords.Count(kinds);
-        entries = buckets == 0 ? groups : entries;
+        CountsChunk[] chunks = new CountsChunk[count];
+        for (int chunk = 0; chunk < count; chunk++)
+        {
+            int offset = Count(bytes, ref at);
+            int length = Count(bytes, ref at);
+            int firstGroup = Count(bytes, ref at);
+            int firstEntry = sums ? Count(bytes, ref at) : firstGroup;
+            ulong? checksum = sums ? (ulong)Long(bytes, ref at) : null;
+            (CountedValue kind, byte[]? value) = ReadKey(bytes, ref at);
+            chunks[chunk] = new CountsChunk(offset, length, firstGroup, firstEntry, kind, value, checksum);
+        }
+
+        if (sums && (ulong)Long(bytes, ref at) != System.IO.Hashing.XxHash3.HashToUInt64(bytes[..(at - sizeof(long))]))
+        {
+            throw new VortexFormatException("A column's counts' header fails its checksum.");
+        }
+
+        // Without a first entry a chunk, the counts of buckets are read whole.
+        if (buckets > 0 && !sums && count > 0)
+        {
+            chunks = [];
+        }
+
+        return new CountsDirectory(at, fields, kinds, (bytes[1] & SketchesFlag) != 0, attached, buckets, buckets == 0 ? groups : entries, groups, chunks);
+    }
+
+    /// <summary>The counts <see cref="ToBytes"/> wrote.</summary>
+    /// <exception cref="VortexFormatException">The bytes are no counts this library reads.</exception>
+    internal static ColumnCounts From(ReadOnlySpan<byte> bytes)
+    {
+        // The directory serves a reader of some values; a reader of them all reads the chunks in their order.
+        int at = 0;
+        CountsDirectory head = Head(bytes, ref at);
+        int groups = head.Groups;
+        int entries = head.Entries;
         if (entries < groups || entries > bytes.Length)
         {
             throw new VortexFormatException($"A column's counts claim {entries} entries for {groups} groups in {bytes.Length} bytes.");
         }
 
-        ColumnCounts counts = new ColumnCounts(fields, kinds, new CountGroup[groups], new long[entries * words])
+        ColumnCounts counts = new ColumnCounts(head.MeasureFields, head.Kinds, new CountGroup[groups], new long[entries * StateWords.Count(head.Kinds)])
         {
-            Sketched = (bytes[1] & SketchesFlag) != 0,
-            AttachedFields = attached,
-            Buckets = buckets,
-            EntryBuckets = buckets == 0 ? null : new int[entries],
+            Sketched = head.Sketched,
+            AttachedFields = head.AttachedFields,
+            Buckets = head.Buckets,
+            EntryBuckets = head.Buckets == 0 ? null : new int[entries],
+            ChunkSums = (bytes[1] & ChunkSumsFlag) != 0,
         };
 
         // The groups in their order, which a reader of a value searches: the nulls, the values left out, then the values by
@@ -475,8 +706,6 @@ internal sealed class ColumnCounts
         at += length;
         return (kind, value);
     }
-
-    private static void SkipKey(ReadOnlySpan<byte> bytes, ref int at) => ReadKey(bytes, ref at);
 
     private static int Count(ReadOnlySpan<byte> bytes, ref int at)
     {

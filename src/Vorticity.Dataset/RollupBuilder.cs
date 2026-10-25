@@ -169,10 +169,14 @@ internal sealed class RollupBuilder
                 continue;
             }
 
-            IndexSegment counts = Region(written, totals.ToBytes());
-            IndexSegment? totalSketches = sketches is null ? null : Region(written, sketches.ToBytes());
+            // Each region gives each chunk its checksum, and its header its own, so that a reader of some values reads
+            // the header, then their chunks.
+            (IndexSegment counts, int countsHead) = Region(written, totals);
+            (IndexSegment? totalSketches, int sketchesHead) = Region(written, sketches);
             IndexSegment? bucketCounts = null;
             IndexSegment? bucketSketches = null;
+            int bucketCountsHead = 0;
+            int bucketSketchesHead = 0;
             if (buckets.Count > 1)
             {
                 List<(ColumnCounts Counts, ColumnSketches? Sketches)?> parts = [];
@@ -183,8 +187,8 @@ internal sealed class RollupBuilder
 
                 if (CountsBuckets.Together(parts) is ({ } together, var togetherSketches))
                 {
-                    bucketCounts = Region(written, together.ToBytes());
-                    bucketSketches = togetherSketches is null ? null : Region(written, togetherSketches.ToBytes());
+                    (bucketCounts, bucketCountsHead) = Region(written, together);
+                    (bucketSketches, bucketSketchesHead) = Region(written, togetherSketches);
                 }
             }
 
@@ -193,6 +197,10 @@ internal sealed class RollupBuilder
                 MeasureFields = totals.MeasureFields,
                 Sketched = totals.Sketched && sketches?.Sketches is not null,
                 LeavesOut = Array.Exists(totals.Groups, static group => group.Kind == CountedValue.Others),
+                CountsHead = countsHead,
+                SketchesHead = sketchesHead,
+                BucketCountsHead = bucketCountsHead,
+                BucketSketchesHead = bucketSketchesHead,
             });
         }
 
@@ -214,6 +222,27 @@ internal sealed class RollupBuilder
             Columns = columns,
         };
         return (written.WrittenSpan.ToArray(), entry);
+    }
+
+    /// <summary>The region of <paramref name="counts"/>, written with a checksum a chunk, and the bytes of its header.</summary>
+    private static (IndexSegment Region, int Head) Region(ArrayBufferWriter<byte> written, ColumnCounts counts)
+    {
+        counts.ChunkSums = true;
+        byte[] bytes = counts.ToBytes();
+        return (Region(written, bytes), ColumnCounts.ReadDirectory(bytes).HeaderBytes);
+    }
+
+    /// <summary>The region of <paramref name="sketches"/>, written with a checksum a chunk, and the bytes of its header; none for none.</summary>
+    private static (IndexSegment? Region, int Head) Region(ArrayBufferWriter<byte> written, ColumnSketches? sketches)
+    {
+        if (sketches is null)
+        {
+            return (null, 0);
+        }
+
+        sketches.ChunkSums = true;
+        byte[] bytes = sketches.ToBytes();
+        return (Region(written, bytes), ColumnSketches.ReadDirectory(bytes).HeaderBytes);
     }
 
     private static IndexSegment Region(ArrayBufferWriter<byte> written, byte[] bytes)

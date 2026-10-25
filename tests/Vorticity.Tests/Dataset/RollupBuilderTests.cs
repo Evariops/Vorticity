@@ -156,6 +156,18 @@ public sealed class RollupBuilderTests
         Assert.Equal(top.Columns, back.Columns);
         Assert.Equal(top.Summaries, back.Summaries);
         Assert.Equal(upperBytes.Length, back.Bytes);
+
+        // Each region's header, of the size the entry records, reads alone: the directory of chunks a reader of some values
+        // reads first, each chunk with its checksum.
+        foreach (RollupColumn column in back.Columns)
+        {
+            foreach ((IndexSegment? region, int head) in (IEnumerable<(IndexSegment?, int)>)[(column.Counts, column.CountsHead), (column.BucketCounts, column.BucketCountsHead)])
+            {
+                CountsDirectory directory = ColumnCounts.ReadDirectory(upperBytes.AsSpan((int)region!.Value.Offset, head));
+                Assert.Equal(head, directory.HeaderBytes);
+                Assert.All(directory.Chunks, chunk => Assert.NotNull(chunk.Checksum));
+            }
+        }
     }
 
     /// <summary>A bucket's counts of a code: each value, its rows and a measure's one value repeated; and nulls.</summary>
