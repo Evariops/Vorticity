@@ -3341,6 +3341,13 @@ Vorticity.ObjectStorage:     const PutChecksum ContentMd5 = 2
 Vorticity.ObjectStorage:     const PutChecksum Default = 0
 Vorticity.ObjectStorage:     const PutChecksum None = 1
 Vorticity.ObjectStorage:     field int value__
+Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.RequestBudget
+Vorticity.ObjectStorage:     const double DefaultRequestsPerSecond = 2000
+Vorticity.ObjectStorage:     const int DefaultMaxInFlight = 256
+Vorticity.ObjectStorage:     ctor RequestBudget(int = default, double = default)
+Vorticity.ObjectStorage:     property RequestBudget Process { get; }
+Vorticity.ObjectStorage:     property double RequestsPerSecond { get; }
+Vorticity.ObjectStorage:     property int MaxInFlight { get; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.S3ObjectStore : IObjectStore
 Vorticity.ObjectStorage:     ctor S3ObjectStore(S3StoreOptions)
 Vorticity.ObjectStorage:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
@@ -3395,6 +3402,7 @@ Vorticity.ObjectStorage:     method string ToString()
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.StoreTransportOptions
 Vorticity.ObjectStorage:     ctor StoreTransportOptions()
 Vorticity.ObjectStorage:     property IWebProxy Proxy { get; init; }
+Vorticity.ObjectStorage:     property RequestBudget RequestBudget { get; init; }
 Vorticity.ObjectStorage:     property TimeSpan ConnectTimeout { get; init; }
 Vorticity.ObjectStorage:     property TimeSpan FirstByteTimeout { get; init; }
 Vorticity.ObjectStorage:     property TimeSpan StallTimeout { get; init; }

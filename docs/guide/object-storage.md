@@ -145,6 +145,24 @@ requests the store sends at once, once per episode: the requests in flight when 
 halve it again. Once the service has been calm for 10 seconds, each success gives one back, up to
 `StoreTransportOptions.MaxConnections`.
 
+Every store of the process also draws from one budget of requests, `RequestBudget.Process`: 256 in
+flight and 2 000 a second by default, every store and every session together, so that many questions
+and jobs at once stay under what a service sustains on a prefix, at least 5 500 reads a second on S3.
+A throttle halves the rate of the store whose service sent it, under the budget, once per episode, and
+empties that store's bucket, so that the requests sent again wait for their turns; once the service has
+been calm for a second, the store's rate grows back by a sixteenth of the budget's a second. The other
+stores of the process, whose services may not be the one that throttles, keep their pace. A store can be
+given a budget of its own:
+
+```csharp
+RequestBudget budget = new RequestBudget(maxInFlight: 64, requestsPerSecond: 500);
+StoreTransportOptions transport = new StoreTransportOptions { RequestBudget = budget };
+```
+
+Under a service that throttles past 150 reads a second, eight readers under a budget of 1 600 read
+every one of their 400 reads in about 3 seconds, the store's rate ending within twice the service's
+(`RequestBudgetTests`).
+
 ## The stores
 
 `S3ObjectStore` takes its options, or comes from a factory:

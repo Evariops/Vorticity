@@ -602,7 +602,17 @@ The session's bound on reads in flight counts batch reads, 128 by default, on ev
 takes one slot, and the source then issues every coalesced range of the batch at once
 (`SessionReader.cs`, `ReadManyAsync`, and `ObjectSegmentSource.cs`, the reads issued together). Over
 HTTP/1.1 a request in flight is a connection, and the store sends at most `MaxConnections` requests
-at once, so the memory the reads hold and the connections they open are both bounded.
+at once, so the memory the reads hold and the connections they open are both bounded. Every store of
+the process draws besides from one budget of requests (`RequestBudget`, 256 in flight and 2 000 a
+second by default): a request takes a place in flight, then a turn from a bucket of a tenth of a
+second's requests. A throttle halves the rate of the store whose service sent it, under the budget,
+once per episode, and empties that store's bucket, so that the requests sent again wait for their turns
+rather than burst into the next episode; after a second of calm the store's rate grows by a sixteenth of
+the budget's a second. The other stores keep their pace: a budget the process shares does not move, since
+its stores' services may not be the one that throttles. Throttles that come together drop it fast
+to its floor, a sixty-fourth of the ceiling, and the short calm lets it climb back to what the service
+sustains, where ten seconds kept it at its floor: 400 reads under a service that throttles past 150 a
+second took 12 s with a calm of ten seconds and take about 3 with one.
 
 What a link needs in flight is its bandwidth times its latency. At 10 Gb/s and 30 ms that is about
 37 MB, three ranges of 16 MiB or 36 of 1 MiB. A window in bytes, sized from the throughput and the
