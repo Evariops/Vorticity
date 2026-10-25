@@ -70,12 +70,23 @@ cold, on one node *(computed)*:
 | the largest service, 7.4 % | ~40 ms | ~0.3 s | ~9 s | ~2 min |
 | a median service, 0.077 % | ~30 ms | ~35 ms | ~0.13 s | ~1.4 s |
 
-Measured since (section 3.4), `Status` and `Endpoint` take 1.9 bytes a row clustered, not 1.2: the times
-the bytes bound are some 1.6 times longer, and the frontiers below shorter by as much.
+Measured since, on the reference generator's requests (section 8.3), a question by the hour reads the
+instant too, 3.9 bytes a row clustered: a count by status and hour reads 4.8 bytes a row, not 1.2. The
+longest window a second reads exactly, cold, at the design's rate, an object an hour, requests of a
+mebibyte *(computed from the measured bytes, `vortex-queries --micro columns`)*:
 
-A second on the fly covers about five hours of the whole table, three days of the largest service and
-a year of a median one. The synopses exist for the two cases past that frontier: the whole table over
-more than a few hours, and the largest values of the key's first column over more than a few days.
+| question | the whole table | the largest service | a median service |
+|---|---|---|---|
+| a count by status and hour, 4.8 bytes a row | 1.1 h | 15 h | 46 days |
+| 5xx by endpoint and hour, 6.3 bytes a row | 51 min | 12 h | 37 days |
+| the 99th percentile of durations by hour, 7.5 bytes a row | 43 min | 10 h | 32 days |
+
+In the order of arrival, every block holds every service, so a filter on one spares no byte: 38 minutes
+to 1.2 hours, whatever the service.
+
+A second on the fly covers about an hour of the whole table, half a day of the largest service and a
+month of a median one. The synopses exist for the two cases past that frontier: the whole table over
+more than an hour, and the largest values of the key's first column over more than half a day.
 
 ## 3. The layout of the rows
 
@@ -511,6 +522,35 @@ request a mebibyte of chunk. The explanation of each object names the path taken
 and those of the rows it was weighed against: errors by service read 114 bytes in a request from an
 object of 4 MiB, where its rows would take 33 KB in three *(measured, `DatasetBlockAnswerTests`)*.
 
+The price a question announces before a read (`CostAsync`, and the threshold of the exact answer, section
+7) follows each object down the path its explanation names, and counts what that path reads:
+
+- **the rows**: the open, a request for the 64 KiB read from the object's end, or its footer's bytes when
+  more; the bytes of the columns the question reads and filters by; a request a chunk. A column's chunks
+  but its last lie where its writer flushed them; the last chunks of every column lie together at the end
+  of the data, in the columns' order, and a read joins two of them across the last chunks between when
+  those take 256 KiB at most, reading them too. In an object of a few mebibytes every column is one
+  chunk, and a read of the first and fourth column reads the second and third.
+- **the regions** of counts, statistics and indexes: their bytes, and the gaps a read joins between them.
+- **the blocks**: their statistics, and the rows of the blocks they are not expected to answer. A block
+  that holds one value of the key's first column and of the block value may answer; one that gathers
+  short runs varies in the first column, and in every key and filtered column the object does not hold
+  constant, and answers only a question of counts where one column varies. Each object a job writes says
+  in its table of contents how many of its rows lie in blocks of one value, which the job counts as it
+  cuts them; the rest is read as rows. A window on a column of the key, unproven by the object's
+  summaries, cuts the blocks at its bounds: two at most on the first column, every run's on the second,
+  which the price takes whole. An object none of whose blocks would answer is read as rows, without its
+  statistics.
+- **a learned partial**: nothing; the partials of the objects a compaction merged into it, nothing; else
+  the rows of the family's columns.
+
+A bound on another column than the key's, `Status >= 500`, varies in a block like any column: its
+extremes there span the statuses. On the battery of section 8.3, 182 questions, the bytes read are 0.89
+of the price in the order of arrival and 0.61 clustered, at worst 1.12 and 1.00, where they were 2.2 and
+3.0, at worst 12 and 543, before the price counted the filter's columns, the open, the gaps and the
+blocks left; the price is a bound where an index of values or the blocks read less. On objects of a
+mebibyte, every question of `DatasetFormulaTests` reads within a twentieth of its price *(measured)*.
+
 An object read as rows is read in two passes when its sheets say its filter keeps so few rows that most
 chunks of the widest column read would hold none: the columns of the filter first, the rows they keep
 marked, then the other columns for those rows alone, which read only the chunks that hold them. With `k`
@@ -557,6 +597,35 @@ per-column synopsis holds such an answer; only the rows or a crossing kept from 
 and ClickHouse reads the same bytes unless a projection was declared. Such a question gets its estimate
 in one to two seconds, its exact answer newest first (the last day in about 4 s), can be spread over
 nodes, ten of which read its 30 days in about 12 s, and is learned for the next time.
+
+### 8.3 Any column, in either order
+
+The battery "any column" asks, of the reference generator's requests, for each of seven columns a
+count by value and hour, then a filter on its most frequent value and on its rarest grouped by each of
+the six others: 91 questions, of the same rows in the order they arrive (a key on the instant, an object
+an hour) and clustered by service (a key on the service and the instant, blocks ending at each hour,
+objects of the same size). Each question gives the rows' answer, its plan's path, its price and what a
+cold handle reads; 4 hours at 50 rows a second, 720 000 rows, 29.6 MB in arrival order and 26.3 MB
+clustered *(measured, `vortex-queries --micro columns`)*:
+
+| column | its 13 questions, arrival order | clustered by service |
+|---|---|---|
+| `Service` | 23.5 MB | 5.2 MB |
+| `Endpoint` | 22.4 MB | 11.8 MB |
+| `Method` | 17.9 MB | 17.5 MB |
+| `Status` | 19.0 MB | 17.4 MB |
+| `Region` | 20.6 MB | 14.9 MB |
+| `Version` | 17.3 MB | 6.4 MB |
+| `Host` | 33.0 MB | 8.9 MB |
+| all 91, through the plan | 153.6 MB | 82.0 MB |
+| all 91, through the rows | 176.6 MB | 86.3 MB |
+
+Clustering by service divides by two to four the bytes of every question on the service and on the
+columns that depend on it, the version, the host and the endpoint, and leaves those on the method and
+the status, which every service holds, about as they were. A count by value and hour is answered from
+the objects' counts in arrival order, the hour being the object's, where clustered by service it reads
+its rows: the blocks of the small services gather several of them and both hours. A first ask learns
+its family's partial; asked again, any of these questions reads nothing.
 
 ## 9. What the store sees
 
