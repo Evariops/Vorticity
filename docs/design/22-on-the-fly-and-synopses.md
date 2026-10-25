@@ -113,7 +113,9 @@ status, method, duration.
 
 ### 3.3 Blocks
 
-A block is the run of rows of one value of the key's first column in an object, cut at 65 536 rows. An
+A block is the run of rows of one value of the key's first column in an object, cut at 65 536 rows. A
+value's run ends its block only once the block holds 4 096 rows: a first column whose runs are shorter,
+such as an identifier, gives blocks of several values rather than one block per row. An
 object keeps its blocks for its whole life, and their statistics are summed into the rollups over runs
 of objects (section 5.2), without reading a row. Blocks are row
 ranges the block statistics describe (section 5.3), independent of the format's zones and chunks: a
@@ -493,7 +495,7 @@ days and months, which rollups replaced.
 | `vorticity.column.sheet.v1` | an object's region, which its table of contents names | the column sheets |
 | `vorticity.column.counts.v1` | an object's region, which its table of contents names; a rollup's | the counts of each value, kept by bucket in a rollup whose run spans several clustering values |
 | `vorticity.column.sketches.v1` | an object's region right after the counts, which its table of contents names; a rollup's | the counts' quantile sketches and distinct registers |
-| `vorticity.block.stats.v1` | an object's index region; summed into the rollups | blocks and their per-column statistics |
+| `vorticity.block.stats.v1` | an object's region right after the counts, which its table of contents names; summed into the rollups | blocks, their rows and keys, then their per-column statistics |
 | `vorticity.column.where.v1` | an object's index region | where each value lives |
 | `vorticity.partials.v1` | the local cache; beside the rollups | learned partials |
 

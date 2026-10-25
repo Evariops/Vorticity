@@ -181,13 +181,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private ObjectContents Contents(
         SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
-        List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches) =>
+        List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
+        List<(int Field, IndexSegment Region)> blocks) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
             Sheets = sheets,
             Counts = counts,
             Sketches = sketches,
+            Blocks = blocks,
         };
 
     /// <summary>
@@ -406,6 +408,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     // The time slices the caller declared, written with the indexes at completion; null for none.
     private (int Field, SliceTable Table)? _slices;
+
+    // The blocks the caller declared on its key's first column, written after the counts at completion; null for none.
+    private (int Field, BlockTable Table)? _blocks;
+
+    /// <summary>
+    /// Declares the file's blocks on its key's first column <paramref name="column"/>, which completion writes in a region
+    /// its table of contents names: the caller, which writes its rows in the key's order, knows where the column's values
+    /// change. They must cover the file's rows once, which completion checks.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold them.</exception>
+    /// <exception cref="ArgumentException"><paramref name="column"/> names no top-level column.</exception>
+    internal void DeclareBlocks(string column, BlockTable table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        if (_indexes is null)
+        {
+            throw new InvalidOperationException("A file's blocks ride in its index directory, which a writer that builds no index does not write.");
+        }
+
+        int field = _isTabular ? _schema.IndexOfField(column) : -1;
+        _blocks = field >= 0
+            ? (field, table)
+            : throw new ArgumentException($"'{column}' is no top-level column of the file.", nameof(column));
+    }
 
     /// <summary>
     /// Declares the file's time slices on its top-level instant column <paramref name="column"/>, which
@@ -2401,6 +2427,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             List<(int Field, IndexSegment Region)> sheets = [];
             List<(int Field, IndexSegment Region)> counts = [];
             List<(int Field, IndexSegment Region)> sketches = [];
+            List<(int Field, IndexSegment Region)> blocks = [];
             bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
             for (int field = 0; keepsSheets && field < _fieldCount; field++)
             {
@@ -2424,6 +2451,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                             _sink, IndexKinds.ColumnSketches, field, sketched, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
                     }
                 }
+            }
+
+            // The blocks of the key's first column, which a sliced file's table of contents names beside the counts; as its sheets
+            // and counts, kept only by a file large enough for a reader to ask them before it, which a smaller one reads whole.
+            if (_blocks is { } declared && _slices is not null && keepsSheets)
+            {
+                if (declared.Table.TotalRows != _rowCount)
+                {
+                    throw new InvalidOperationException($"The blocks cover {declared.Table.TotalRows} rows of a file of {_rowCount}: they cover each row once.");
+                }
+
+                blocks.Add((declared.Field, await closed.AddColumnRegionAsync(
+                    _sink, IndexKinds.BlockStats, declared.Field, declared.Table.ToBytes(), _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
             }
 
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
@@ -2473,7 +2513,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // A sliced file's table of contents, now that every region it names is written.
             if (_slices is { } sliced)
             {
-                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches);
+                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, blocks);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

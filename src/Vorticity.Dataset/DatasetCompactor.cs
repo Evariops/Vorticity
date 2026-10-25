@@ -11,7 +11,9 @@ using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
+using Vorticity.RowEncoding;
 using Vorticity.Scanning;
+using Vorticity.Types;
 using Vorticity.Types.Variants;
 using Vorticity.Writing;
 
@@ -156,6 +158,7 @@ internal static class DatasetCompactor
                     job.ToLevel, ObjectBound.Of(job.Bytes, doublings, dataset.Options.BoundOutPerIn))
                 {
                     KeySliced = keySliced,
+                    Blocked = keySliced is null ? null : key!.LeadingType,
                     SliceTarget = dataset.Options.SliceTargetRows,
                     Shreddings = shreddings,
                     Values = schema.Cut,
@@ -497,6 +500,7 @@ internal static class DatasetCompactor
                     }
 
                     outputs.Starts(merge.KeyAt(at));
+                    outputs.Block(merge, at, end);
                     outputs.Note(merge.KeyAt(end - 1));
                     await outputs.WriteAsync(at == 0 && end == run.RowCount ? run : run.Window(at, end - at), cancellationToken).ConfigureAwait(false);
                 }
@@ -856,6 +860,151 @@ internal static class DatasetCompactor
         /// <summary>The rows a slice bounded by keys aims at, past which the next key starts another.</summary>
         internal long SliceTarget { get; init; }
 
+        /// <summary>
+        /// The type of the key's first column, whose runs of one value cut the blocks of an object in slices bounded by keys
+        /// (<see cref="BlockTable"/>); null for objects written without them.
+        /// </summary>
+        internal DType? Blocked { get; init; }
+
+        // The blocks of the object being written: each closed block's rows and first and last keys, then the rows of the one
+        // being written, its first key and the key of its last row.
+        private readonly List<long> _blockRows = [];
+        private readonly List<byte[]> _blockLows = [];
+        private readonly List<byte[]> _blockHighs = [];
+        private long _blockFilled;
+        private byte[] _blockLow = [];
+        private byte[] _blockHigh = [];
+        private int _blockHighLength;
+
+        /// <summary>
+        /// Notes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
+        /// key's order: a block ends at the first change of the key's first column once it holds
+        /// <see cref="BlockTable.LeastRows"/> rows, and at <see cref="BlockTable.MostRows"/> rows. The keys of a run follow
+        /// one another, so a bisection finds each change.
+        /// </summary>
+        internal void Block(KeyOrderedMerge merge, int from, int to)
+        {
+            if (Blocked is not { } column)
+            {
+                return;
+            }
+
+            for (int at = from; at < to;)
+            {
+                if (_blockFilled == 0)
+                {
+                    _blockLow = merge.KeyAt(at).ToArray();
+                }
+
+                // The rows up to the least a block holds join it whatever their values; past them, those up to the first
+                // change of the first column, up to the most a block holds.
+                int limit = (int)Math.Min(to, at + (BlockTable.MostRows - _blockFilled));
+                int open = (int)Math.Clamp(BlockTable.LeastRows - _blockFilled, 0, limit - at);
+                int end = limit;
+                int checkFrom = at + open;
+                if (checkFrom < limit)
+                {
+                    ReadOnlySpan<byte> before = checkFrom > at ? merge.KeyAt(checkFrom - 1) : _blockHigh.AsSpan(0, _blockHighLength);
+                    end = FirstChange(merge, column, before, checkFrom, limit);
+                }
+
+                if (end > at)
+                {
+                    ReadOnlySpan<byte> last = merge.KeyAt(end - 1);
+                    if (_blockHigh.Length < last.Length)
+                    {
+                        _blockHigh = new byte[Math.Max(last.Length, _blockHigh.Length * 2)];
+                    }
+
+                    last.CopyTo(_blockHigh);
+                    _blockHighLength = last.Length;
+                    _blockFilled += end - at;
+                    at = end;
+                }
+
+                if (end < limit || _blockFilled == BlockTable.MostRows)
+                {
+                    CloseBlock();
+                }
+            }
+        }
+
+        /// <summary>
+        /// The first row from <paramref name="from"/> to <paramref name="to"/> of the merge's run whose key's first column
+        /// is not <paramref name="before"/>'s, or <paramref name="to"/>.
+        /// </summary>
+        private static int FirstChange(KeyOrderedMerge merge, DType column, ReadOnlySpan<byte> before, int from, int to)
+        {
+            if (SameFirst(before, merge.KeyAt(to - 1), column))
+            {
+                return to;
+            }
+
+            if (!SameFirst(before, merge.KeyAt(from), column))
+            {
+                return from;
+            }
+
+            // Row `low` holds the first column's value of `before`, row `high` another.
+            int low = from;
+            int high = to - 1;
+            while (high - low > 1)
+            {
+                int middle = low + ((high - low) >> 1);
+                if (SameFirst(before, merge.KeyAt(middle), column))
+                {
+                    low = middle;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+
+            return high;
+        }
+
+        /// <summary>Whether two row-encoded keys hold one value of their first column: a value's bytes end where they end.</summary>
+        private static bool SameFirst(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, DType column)
+        {
+            int length = RowEncoder.FirstValueLength(left, column);
+            return right.Length >= length && left[..length].SequenceEqual(right[..length]);
+        }
+
+        /// <summary>Closes the block being written at its last row.</summary>
+        private void CloseBlock()
+        {
+            if (_blockFilled == 0)
+            {
+                return;
+            }
+
+            _blockRows.Add(_blockFilled);
+            _blockLows.Add(_blockLow);
+            _blockHighs.Add(_blockHigh.AsSpan(0, _blockHighLength).ToArray());
+            _blockFilled = 0;
+        }
+
+        /// <summary>
+        /// The blocks of the object being written, its last one closed; null when it was written without them, or when they
+        /// do not cover its rows. The lists start over for the next object.
+        /// </summary>
+        private BlockTable? Blocks()
+        {
+            CloseBlock();
+            long covered = 0;
+            foreach (long rows in _blockRows)
+            {
+                covered += rows;
+            }
+
+            BlockTable? table = Blocked is not null && _blockRows.Count > 0 && covered == _rows ? BlockTable.Of(_blockRows, _blockLows, _blockHighs) : null;
+            _blockRows.Clear();
+            _blockLows.Clear();
+            _blockHighs.Clear();
+            return table;
+        }
+
         // The slices of the object being written, bounded by keys: each closed slice's rows, each slice's first key, and the
         // rows of the one being written.
         private readonly List<long> _sliceRows = [];
@@ -949,6 +1098,7 @@ internal static class DatasetCompactor
             // The object is this method's from here: whatever fails gives it up, its upload included when it streams, since
             // nothing else holds the draft any more. Its slices bounded by keys close at its last key.
             SliceTable? keySlices = KeySlices();
+            BlockTable? blocks = Blocks();
             _draft = null;
             _lastKeyLength = -1;
             WrittenObject? written;
@@ -959,6 +1109,10 @@ internal static class DatasetCompactor
                     if (keySlices is not null)
                     {
                         draft.Writer.DeclareSlices(KeySliced!, keySlices);
+                        if (blocks is not null)
+                        {
+                            draft.Writer.DeclareBlocks(KeySliced!, blocks);
+                        }
                     }
 
                     if (_census is { } census)

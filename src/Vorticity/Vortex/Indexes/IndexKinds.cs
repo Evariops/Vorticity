@@ -96,6 +96,13 @@ internal static class IndexKinds
     public const string ColumnSketches = "vorticity.column.sketches.v1";
 
     /// <summary>
+    /// The blocks of a file whose rows follow a key, on its first column: runs of rows of one value of it, each its rows and
+    /// the first and the last key it holds, in one payload region that a table of contents names, which the statistics of
+    /// each column of each block extend (<see cref="BlockTable"/>).
+    /// </summary>
+    public const string BlockStats = "vorticity.block.stats.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -106,7 +113,7 @@ internal static class IndexKinds
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
                 or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks
-                or ColumnSheet or ColumnCounts or ColumnSketches => true,
+                or ColumnSheet or ColumnCounts or ColumnSketches or BlockStats => true,
             _ => false,
         };
 

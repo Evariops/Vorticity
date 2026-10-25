@@ -2532,6 +2532,25 @@ public sealed class VortexDataset : IAsyncDisposable
         return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
     }
 
+    /// <summary>
+    /// The blocks of the object <paramref name="entry"/> names (<see cref="Indexes.BlockTable"/>), on its key's first
+    /// column <paramref name="field"/>, read with no open of the object: the region its entry's table of contents names, none
+    /// once this handle read it. An object that keeps none, or whose table of contents this library does not read, has none.
+    /// </summary>
+    internal async ValueTask<Indexes.BlockTable?> ReadBlocksAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { Blocks.Count: > 0 } contents)
+        {
+            return null;
+        }
+
+        object?[] read = new object?[1];
+        await ReadSynopsesAsync(entry, contents, [contents.BlocksOf(field)], read, static (_, bytes) => Indexes.BlockTable.From(bytes) is { } table
+            ? (table, table.Bytes)
+            : throw new VortexFormatException("The blocks of an object do not decode as a table of blocks."), cancellationToken).ConfigureAwait(false);
+        return read[0] as Indexes.BlockTable;
+    }
+
     /// <summary>The counts, at the first position, or their sketches, at the second, and the bytes they hold in memory.</summary>
     private static (object Synopsis, long Bytes) CountsOrSketches(int position, ReadOnlySpan<byte> bytes)
     {

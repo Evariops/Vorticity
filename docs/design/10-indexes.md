@@ -146,7 +146,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#411-the-file-level-filter)).
+file-level filter](#412-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -425,7 +425,27 @@ repeat, is no wide column: its distinct values in an entry are the entry's rows.
 merge register by register. The sheet of a wide column hashes each row of a batch for them, and the
 columns of few values raise their entries' registers once the whole batch is in.
 
-### 4.11 The file-level filter
+### 4.11 `vorticity.block.stats.v1`: an object's blocks
+
+An object a compaction job writes in slices bounded by keys keeps its blocks on its key's first column,
+in a region of their own right after the counts, which its table of contents names. As with its sheets
+and counts, only an object of 1 MiB or more keeps them: a smaller one is read whole. A block is a run of
+the object's rows in key order. It ends where the key's first column changes once it holds 4 096 rows,
+and at 65 536 rows whatever its rows hold. A first column whose runs are shorter, such as an identifier,
+gives blocks of several values rather than one block per row: the values of a block change only within
+its first 4 096 rows. Blocks are row ranges, independent of the file's chunks and zones.
+
+The region holds a version byte, the count of blocks, then for each block its rows and its first and
+last keys, as the clustering key encodes them. Each key is written as the bytes it shares with the key
+before it, a count, and the rest. The blocks cover the object's rows once, in order, and their keys
+follow the key. A reader reads the region with no open of the object, in one request, and the statistics
+of each column of each block extend it ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#53-block-statistics-and-settling-blocks)).
+On sixty sources whose runs are a few rows, thousands, or more than two blocks, a block took 46 bytes,
+the keys a source text and an integer. The writer finds the end of a block by halves in the runs it
+merges, one bisection per change of the first column and a key copied per run *(computed: a few dozen
+comparisons per block)*.
+
+### 4.12 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

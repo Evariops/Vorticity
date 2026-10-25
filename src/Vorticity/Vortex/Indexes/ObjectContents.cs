@@ -95,6 +95,15 @@ internal sealed class ObjectContents(
     /// <summary>The region of the sketches of column <paramref name="field"/>'s counts, or null when the object keeps none of it.</summary>
     internal IndexSegment? SketchesOf(int field) => RegionOf(Sketches, field);
 
+    /// <summary>
+    /// The object's blocks (<see cref="BlockTable"/>), on its key's first column, and their region: what a question reads to
+    /// learn the runs of rows of each value of that column. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, IndexSegment Region)> Blocks { get; init; } = [];
+
+    /// <summary>The region of the blocks on column <paramref name="field"/>, or null when the object keeps none on it.</summary>
+    internal IndexSegment? BlocksOf(int field) => RegionOf(Blocks, field);
+
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
         foreach ((int column, IndexSegment region) in regions)
@@ -129,6 +138,7 @@ internal sealed class ObjectContents(
             Sheets = Sheets,
             Counts = Counts,
             Sketches = Sketches,
+            Blocks = Blocks,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -185,6 +195,9 @@ internal sealed class ObjectContents(
 
     // The sketches of a column's counts: its field and its region, as a path directory's.
     private const int TagSketches = 16;
+
+    // The object's blocks: the field of its key's first column and their region, as a path directory's.
+    private const int TagBlocks = 17;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -277,6 +290,11 @@ internal sealed class ObjectContents(
             Declare(region);
         }
 
+        foreach ((int _, IndexSegment region) in Blocks)
+        {
+            Declare(region);
+        }
+
         if (DirectoryRegion is { } directory)
         {
             Declare(directory);
@@ -360,6 +378,13 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
+            foreach ((int field, IndexSegment region) in Blocks)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagBlocks);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
             if (DirectoryRegion is { } directoryRegion)
             {
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
@@ -407,6 +432,7 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> sheets = [];
             List<(int, IndexSegment)> counts = [];
             List<(int, IndexSegment)> sketches = [];
+            List<(int, IndexSegment)> blocks = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -470,6 +496,14 @@ internal sealed class ObjectContents(
 
                         sketches.Add(sketched);
                         break;
+                    case (TagBlocks, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } blocked)
+                        {
+                            return null;
+                        }
+
+                        blocks.Add(blocked);
+                        break;
                     case (TagLocating, ProtoWireType.LengthDelimited):
                         if (Located(reader.ReadMessage()) is not { } located)
                         {
@@ -506,6 +540,7 @@ internal sealed class ObjectContents(
                     Sheets = sheets,
                     Counts = counts,
                     Sketches = sketches,
+                    Blocks = blocks,
                 }
                 : null;
         }
