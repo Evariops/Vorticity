@@ -36,6 +36,9 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>Its objects are read from its store, a request each.</summary>
     internal override bool ReadsRoundTrips => true;
 
+    /// <summary>It settles each object's blocks as it reads it, those no delete marked a row of (<see cref="ScanSpec.Settles"/>).</summary>
+    internal override bool SettlesBlocks => true;
+
     /// <summary>The version every sink of the scan reads.</summary>
     internal ulong Version => _version.Version;
 
@@ -575,6 +578,11 @@ internal sealed class DatasetScanSource : ScanSource
         if (spec.States is { } states && options.UseSynopses)
         {
             builder.WithStates(states);
+        }
+
+        if (spec.Settles is { } plan)
+        {
+            builder.WithSettles(plan);
         }
 
         return counters is null ? builder : builder.WithCounters(counters);

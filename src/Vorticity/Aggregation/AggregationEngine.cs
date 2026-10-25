@@ -3610,6 +3610,13 @@ internal static class AggregationEngine
         // The blocks the zone maps answer are not read: the pass's mask has them dead, and each
         // partition folds them as its rows reach them.
         ZoneSettling? settling = await ZoneSettling.PlanAsync(source, pass, plan, metrics, cancellationToken).ConfigureAwait(false);
+        if (settling is null && source.SettlesBlocks && ZoneSettling.Applies(pass, plan))
+        {
+            // A dataset settles each object's blocks as it reads it, those no delete marked a row of, and the rows of the
+            // others as before, states or rows: the pass names the aggregation, and its mask is the dataset's.
+            pass = pass with { Settles = plan };
+        }
+
         if (settling is not null)
         {
             pass = settling.Pass(pass);

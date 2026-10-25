@@ -917,8 +917,14 @@ dataset's object are chunked apart, and their chunks end together at its slices 
 first column, an object in slices counts for the rows of the slices the range reaches, which its entry
 names, and is cut between their chunks alone. The objects that are cut are opened side by side to learn
 where their chunks end, and the ranges then find them already open.
-No object settles ([statistics and zone maps](#93-statistics-and-zone-maps), and see
-[13-dataset.md](13-dataset.md)). A group by that streams runs as [in parallel, in
+An object's blocks settle as a file's do ([statistics and zone maps](#93-statistics-and-zone-maps)), but
+that the dataset settles each object as it reads it: a block that holds a row a delete marked, which its
+file's statistics still count, is read as rows, and so is every block under a filter that reads another
+column than the key's first, or that the object's summaries do not prove true over its every row; a
+settled block comes in the object's batches, at its place among the dataset's rows, as a block of its
+zones' bounds. A count by day, with its extremes, over an object of ten days and a million rows, five of
+them deleted far apart, decodes 14 blocks, the five a delete marked and the nine a midnight cuts, where a
+read without statistics decodes 123 (`DatasetSettlingTests`). A group by that streams runs as [in parallel, in
 order](#25-in-parallel-in-order) describes, its ranges grouped side by side and followed in row order,
 and a top-k on the key as [`Skip` and `Take`](#64-skip-and-take) describes. An integer key's groups are
 numbered by value as over a file. The summaries of the version's roots bound its values over every

@@ -246,8 +246,8 @@ For each block of section 3.3 and each column (`vorticity.block.stats.v1`):
 
 The engine already settles a block from its zone maps when its key maps to a single group and every
 aggregate is a count, a least or a greatest ([16-queries.md](16-queries.md#93-statistics-and-zone-maps)),
-but never on a dataset's objects, whose files still count the rows a delete removed, and never for a
-sum, which zone maps do not hold. With block statistics, any combination of columns composes at the
+on a dataset's objects too, but for the blocks that hold a row a delete marked, which their files still
+count, and never for a sum, which zone maps do not hold. With block statistics, any combination of columns composes at the
 question, block by block, with nothing computed for a pair of columns:
 
 | in the block | what the statistics give |

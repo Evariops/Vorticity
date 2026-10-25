@@ -25,8 +25,9 @@ namespace Vorticity.Aggregating;
 /// </summary>
 /// <remarks>
 /// Only a key with a function is worth the zone maps' read: a column's own zone holds one key only
-/// when it holds one value, which its encoding already folds as one. A dataset's objects are not
-/// settled: their file statistics count the rows a deletion removed.
+/// when it holds one value, which its encoding already folds as one. A dataset's objects are settled
+/// by the dataset as it reads each (<see cref="PlanObjectAsync"/>), the blocks that hold a row a delete
+/// marked left to their rows: their file statistics count those rows too.
 /// </remarks>
 internal sealed class ZoneSettling
 {
@@ -66,6 +67,47 @@ internal sealed class ZoneSettling
             return null;
         }
 
+        LayoutTree tree = file.LayoutTree;
+        long blockRows = SplitPlan.NaturalBatchRows(tree);
+        RowRange whole = new RowRange(0, file.RowCount);
+        RowRange rows = pass.Rows is { } asked ? asked.Intersect(whole) : whole;
+        if (blockRows <= 0 || rows.IsEmpty || Crosses(tree, rows, pass, blockRows))
+        {
+            return null;
+        }
+
+        return await PlanAsync(file, rows, pass.Filter, pass.Options.UseIndexes, plan, metrics, excluded: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The settling of the blocks of a dataset's object <paramref name="file"/> within <paramref name="rows"/>, its own,
+    /// for <paramref name="plan"/>, which a pass names (<see cref="ScanSpec.Settles"/>), or null when none settles: as a
+    /// file's, but for the blocks that hold a row <paramref name="excluded"/> leaves out, a row a delete marked, which
+    /// the file's statistics count. The dataset reads the object's other rows itself, so no split crosses a block.
+    /// </summary>
+    /// <param name="file">The object's file, of the dataset's columns.</param>
+    /// <param name="rows">The rows of the file the scan reads.</param>
+    /// <param name="filter">The scan's filter, which must keep a block whole for it to settle.</param>
+    /// <param name="indexes">Whether the filter's structures may be read.</param>
+    /// <param name="plan">The aggregation, whose every aggregate and key the zone maps answer.</param>
+    /// <param name="excluded">The rows of the file a delete marked; null for none.</param>
+    /// <param name="metrics">The scan's sink, to which the zone maps read here are added; null for none.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal static async ValueTask<ZoneSettling?> PlanObjectAsync(
+        VortexFile file, RowRange rows, VortexExpr? filter, bool indexes, AggregationPlan plan, IRowExclusion? excluded, ScanCounters? metrics,
+        CancellationToken cancellationToken)
+    {
+        rows = rows.Intersect(new RowRange(0, file.RowCount));
+        return !file.Schema.RootIsStruct || rows.IsEmpty || SplitPlan.NaturalBatchRows(file.LayoutTree) <= 0
+            ? null
+            : await PlanAsync(file, rows, filter, indexes, plan, metrics, excluded, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The settling of the blocks of <paramref name="file"/> within <paramref name="rows"/>, but those <paramref name="excluded"/> leaves a row out of.</summary>
+    private static async ValueTask<ZoneSettling?> PlanAsync(
+        VortexFile file, RowRange rows, VortexExpr? written, bool indexes, AggregationPlan plan, ScanCounters? metrics, IRowExclusion? excluded,
+        CancellationToken cancellationToken)
+    {
         // The columns the keys and the extremes read, each once, as top-level fields of the file.
         List<Stored> columns = [];
         int[] keys = new int[plan.Keys.Length];
@@ -90,12 +132,6 @@ internal sealed class ZoneSettling
 
         LayoutTree tree = file.LayoutTree;
         long blockRows = SplitPlan.NaturalBatchRows(tree);
-        RowRange whole = new RowRange(0, file.RowCount);
-        RowRange rows = pass.Rows is { } asked ? asked.Intersect(whole) : whole;
-        if (blockRows <= 0 || rows.IsEmpty || Crosses(tree, rows, pass, blockRows))
-        {
-            return null;
-        }
 
         // The zones of those columns, read as a filter on them would read them.
         VortexExpr? every = null;
@@ -118,11 +154,11 @@ internal sealed class ZoneSettling
         }
 
         // The filter's mask, and its zones, which say whether it keeps a block whole.
-        VortexExpr? filter = pass.Filter is { } written ? FunctionFieldExpr.Ranges(written) : null;
+        VortexExpr? filter = written is not null ? FunctionFieldExpr.Ranges(written) : null;
         ZonePruningPlan.PruningPlan pruning = filter is null
             ? default
             : await ZonePruningPlan
-                .PlanAsync(file, tree, filter, cancellationToken, steps: null, metrics, pass.Options.UseIndexes)
+                .PlanAsync(file, tree, filter, cancellationToken, steps: null, metrics, indexes)
                 .ConfigureAwait(false);
         BlockMask live = pruning.Live ?? new BlockMask(file.RowCount, blockRows);
         if (live.BlockRows != blockRows || (filter is not null && pruning.Zones is null))
@@ -135,6 +171,7 @@ internal sealed class ZoneSettling
         {
             RowRange range = live.BlockRange(block);
             if (live.IsLive(block) && range.Start >= rows.Start && range.End <= rows.End
+                && (excluded is null || excluded.ExcludedBefore(range.End) == excluded.ExcludedBefore(range.Start))
                 && (filter is null || pruning.Zones!.MustMatch(range))
                 && Settles(plan, columns, keys, extremes, block, range.Length))
             {
@@ -181,6 +218,9 @@ internal sealed class ZoneSettling
     /// <summary>The row settled block <paramref name="index"/> starts at.</summary>
     internal long Start(int index) => _blocks[index] * _blockRows;
 
+    /// <summary>The rows of the file settled block <paramref name="index"/> holds.</summary>
+    internal RowRange Range(int index) => Live.BlockRange(_blocks[index]);
+
     /// <summary>What a partition folds the settled blocks in, made once for it.</summary>
     internal Scratch NewScratch() => new Scratch(_columns);
 
@@ -188,7 +228,13 @@ internal sealed class ZoneSettling
     /// The block folded in place of settled block <paramref name="index"/>, in
     /// <paramref name="scratch"/>'s arena, emptied first: valid until the next.
     /// </summary>
-    internal RecordBatch Batch(int index, Scratch scratch)
+    internal RecordBatch Batch(int index, Scratch scratch) => Batch(index, scratch, Start(index));
+
+    /// <summary>
+    /// As <see cref="Batch(int, Scratch)"/>, its rows counted from <paramref name="startRow"/>: a dataset's row, for the
+    /// block of one of its objects.
+    /// </summary>
+    internal RecordBatch Batch(int index, Scratch scratch, long startRow)
     {
         CanonicalArena arena = scratch.Arena;
         arena.Reset();
@@ -201,7 +247,7 @@ internal sealed class ZoneSettling
         }
 
         int root = arena.AddStruct(scratch.Root, rows, Validity.NonNullable, fields);
-        return new RecordBatch(arena, root, Start(index));
+        return new RecordBatch(arena, root, startRow);
     }
 
     /// <summary>
@@ -209,7 +255,7 @@ internal sealed class ZoneSettling
     /// file's, one with a function: a count of the rows, and the extremes of a column, which skip
     /// the nulls and the NaN a zone's bounds skip too.
     /// </summary>
-    private static bool Applies(ScanSpec pass, AggregationPlan plan)
+    internal static bool Applies(ScanSpec pass, AggregationPlan plan)
     {
         if (!plan.Grouped || pass.Take is not null || pass.MatchesNothing || !pass.Options.UseStatistics
             || plan.Filters.Filters.Length > 0 || plan.Chosen.Length > 0

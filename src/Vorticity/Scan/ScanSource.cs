@@ -90,6 +90,13 @@ internal sealed record ScanSpec
     /// states.
     /// </summary>
     internal Aggregating.StateRequest? States { get; init; }
+
+    /// <summary>
+    /// The aggregation whose blocks a source of several files, a dataset, settles by their zone maps as it reads each
+    /// file, in place of their rows (<see cref="Aggregating.ZoneSettling.PlanObjectAsync"/>): set when the zone maps answer
+    /// its every aggregate and key, a source that reads one file being settled by the aggregation itself. Null for rows.
+    /// </summary>
+    internal Aggregating.AggregationPlan? Settles { get; init; }
 }
 
 /// <summary>
@@ -145,6 +152,12 @@ internal abstract class ScanSource
     /// stream in, the states coming with their objects.
     /// </summary>
     internal virtual bool KeepsStates => false;
+
+    /// <summary>
+    /// Whether the source settles the blocks of its files by their zone maps itself, as it reads each, when a pass names
+    /// the aggregation (<see cref="ScanSpec.Settles"/>): a dataset, whose objects' marked rows only it knows.
+    /// </summary>
+    internal virtual bool SettlesBlocks => false;
 
     /// <summary>
     /// Whether a pass of <paramref name="spec"/> asking <paramref name="states"/> would take states in place
