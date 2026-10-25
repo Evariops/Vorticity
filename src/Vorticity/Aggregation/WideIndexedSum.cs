@@ -260,6 +260,8 @@ internal readonly struct WideIndexedFloatSum<TValue> : IValueOp<TValue, WideInde
         return true;
     }
 
+    public bool ExportState(in WideIndexedSum state, Span<long> words, bool floats) => StateExports.Sum(words, in state);
+
     /// <remarks>
     /// The rows left out are left out, not counted and taken back as the narrow sum does: a settling
     /// between the two would take back values of an epoch already settled.

@@ -162,7 +162,8 @@ The engine is fed by the dataset's scan, which holds to six rules.
    read and verified again.
 6. **Parts for fan-out.** A question can be cut into independent parts, an object and a range of its
    blocks each, whose partial results merge to the same bits: an application with several nodes spreads
-   a heavy question over them.
+   a heavy question over them. A part's partial is its groups' states, those a synopsis keeps, which the
+   merge folds as a synopsis's ([16-queries.md](16-queries.md#58-parts-of-a-question-merged)).
 
 ## 5. The synopses, all per column
 

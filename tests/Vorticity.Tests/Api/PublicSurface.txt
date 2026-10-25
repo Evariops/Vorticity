@@ -43,22 +43,31 @@ Vorticity:     method Sym<ulong> Sum(Func<Probe<TRecord>, Sym<byte>>)
 Vorticity:     method Sym<ulong> Sum(Func<Probe<TRecord>, Sym<uint>>)
 Vorticity:     method Sym<ulong> Sum(Func<Probe<TRecord>, Sym<ushort>>)
 Vorticity: sealed class Vorticity.Aggregation
+Vorticity:     method Aggregation Merge(IEnumerable<AggregationPartial>)
 Vorticity:     method Aggregation Skip(int)
 Vorticity:     method Aggregation Take(int)
 Vorticity:     method Scan<TRecord> As<TRecord>()
+Vorticity:     method ValueTask<AggregationPartial> PartialAsync(CancellationToken = default)
+Vorticity:     method ValueTask<RowRange[]> PartsAsync(int, CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     property ScanMetrics Metrics { get; }
 Vorticity: sealed class Vorticity.Aggregation<TResult>
+Vorticity:     method Aggregation<TResult> Merge(IEnumerable<AggregationPartial>)
 Vorticity:     method Aggregation<TResult> Skip(int)
 Vorticity:     method Aggregation<TResult> Take(int)
 Vorticity:     method Aggregation<TResult> WithCancellation(CancellationToken)
 Vorticity:     method IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken = default)
 Vorticity:     method IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken = default)
 Vorticity:     method Scan<TRecord> As<TRecord>()
+Vorticity:     method ValueTask<AggregationPartial> PartialAsync(CancellationToken = default)
 Vorticity:     method ValueTask<List<TResult>> ToListAsync(CancellationToken = default)
+Vorticity:     method ValueTask<RowRange[]> PartsAsync(int, CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     method ValueTask<TResult[]> ToArrayAsync(CancellationToken = default)
 Vorticity:     property ScanMetrics Metrics { get; }
+Vorticity: sealed class Vorticity.AggregationPartial
+Vorticity:     method AggregationPartial FromBytes(ReadOnlyMemory<byte>)
+Vorticity:     property ReadOnlyMemory<byte> Bytes { get; }
 Vorticity: sealed class Vorticity.AlignedMemoryPool : MemoryPool<byte>
 Vorticity:     ctor AlignedMemoryPool(int = default, long = default)
 Vorticity:     method IMemoryOwner<byte> Rent(int = default)

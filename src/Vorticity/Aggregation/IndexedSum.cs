@@ -828,6 +828,9 @@ internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
         return true;
     }
 
+    /// <remarks>A narrow sum is a <see cref="WideIndexedSum"/> of no epoch, as a table of states holds every float sum.</remarks>
+    public bool ExportState(in IndexedSum state, Span<long> words, bool floats) => StateExports.Sum(words, new WideIndexedSum { Sum = state });
+
     /// <remarks>The rows left out read as zero, which no bin takes anything of, and come off the count.</remarks>
     [SkipLocalsInit]
     public void AddWords(ref IndexedSum state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)

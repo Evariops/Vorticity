@@ -571,6 +571,53 @@ directory ([the kinds of persisted states](10-indexes.md#56-the-kinds-of-persist
 the words the engine holds, so a state read back merges into a query's as if the query had folded the
 rows itself, and the answer is the same bits whatever the cut between what was kept and what was read.
 
+### 5.8 Parts of a question, merged
+
+A question can run in parts, on several nodes, and merge to the bits the whole question gives. A part
+is a range of the source's rows. `PartsAsync` takes the pieces a pass would hand its lanes: a dataset
+cuts at its objects and inside a large one at its chunks (`ScanSource.PiecesAsync`), and a file at
+its chunks (`AggregationEngine.Ranges`). It gathers them, in row order, into as many ranges as asked
+at most, each about the same number of rows. The ranges follow one another from the start of the
+question's rows to their end, so the rows no piece holds, which the question keeps none of, still lie
+in a part.
+
+A part runs as the same question over its range and gives its groups' states rather than their
+answers. These are the states the counts of a dataset keep ([5.7](#57-states-kept-past-a-scan)),
+written by the slot that holds them, the inverse of the fold of a batch of states (`ExportStates`
+beside `StepStates`). Each group is a row: its keys as their functions gave them, then the rows a
+count of rows folded, then each measure's words where `MeasureLayout` puts them, then a column of
+sketches for each distribution and each approximate distinct count. The words are a count of values,
+an exact sum as an `Int128` or a wide indexed sum, a least and a greatest. A part's rows of states are
+the result's batches with these columns in place of the answers, so a part goes through every delivery
+a question has, a core part by part and its spills included. They are written to a Vortex file in
+memory, which is the partial's bytes.
+
+Two things differ from a question that answers. The file statistics settle nothing in a part, because
+an answer they give, a mean or a least, is no state. The blocks a zone map settles still fold as
+states. And a part leaves out the operators on groups and the window, which apply only at the merge.
+
+The merge is the question over a source of the partials. That source keeps states, and answers the
+pass that asks for them with each partial's batches. The engine folds those batches as it folds a
+synopsis's states. A partial's keys are already computed, so the fold reads each one by its place
+(`RecordBatch.KeysApplied`) rather than through the key's functions again. A key of a column read
+through two functions is two keys, which a synopsis's states could not carry. A count of rows alone
+is the sum of the partials' rows. Since the merge is a question, it can give a partial too, so the
+merges can form a tree.
+
+Only a question whose every aggregate a state answers whole takes parts, the questions
+`StateRequest.Of` accepts, less the exact distinct count, whose states would be the values themselves.
+The others throw `NotSupportedException`. A partial whose columns are not those of the question's
+partials, other keys or measures, throws `InvalidDataException` when the merge opens it.
+
+Tests (`DatasetPartsTests`): six objects of four hours, by region and hour, with counts, sums of
+integers and of floats, a mean, extremes, a quantile and an approximate distinct count. Cut into four
+parts, run apart, read back from their bytes and merged in reverse order, they give each of the 119
+groups the whole question gives, every double the same bits. With a filter on groups, an order on a
+sum and a window of five, the merge gives the same five groups. A merge of two partials, merged again
+with the other two, gives the same answers, and so does a file cut at its chunks. Under a sixth of the
+memory the whole question holds granted everything (`DatasetPartsBudgetTests`), each part and the merge
+of 441 430 groups go through the core and spill its 256 parts, with the same answers.
+
 ## 6. After the group by
 
 ### 6.1 Results: `Select`
@@ -1238,6 +1285,7 @@ early](#24-stopping-early) describes.
 | the same bits for a custom aggregator whose merge is not associative | every native aggregate gives the same bits whatever the caches' capacity, α and the order its states merge in ([how it is tested](#13-how-it-is-tested)), its consolidation made of merges alone. A merge that is not associative depends on that order, as it already depends on the order of the merges at more than one lane |
 | a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, and a third more at a million groups, whose 32 bytes per group leave the cache. It is more accurate, and a second semantics would be a second test matrix |
 | grouping sets | later, as operators of the same pipeline |
+| parts of an exact distinct count | its states are the values themselves, as many as the rows at worst; an approximate distinct count takes parts ([5.8](#58-parts-of-a-question-merged)) |
 
 ## 13. How it is tested
 

@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
@@ -19,6 +20,9 @@ internal interface IGroupSketch<TSelf>
 
     /// <summary>Writes the sketch as words, which a spill reads back.</summary>
     void Write(Action<long> word);
+
+    /// <summary>Writes the sketch in the form a table of sketches keeps it, which <see cref="MergeEncoded"/> reads.</summary>
+    void Encode(IBufferWriter<byte> into);
 }
 
 /// <summary>
@@ -103,6 +107,18 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
         _bytes += grown;
         Stepped(grown, groups.Length);
         return true;
+    }
+
+    /// <summary>Each group's sketch as a table of sketches holds it; an empty one for a group of no value, which merges nothing.</summary>
+    internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into)
+    {
+        ArrayBufferWriter<byte> written = new ArrayBufferWriter<byte>();
+        for (int i = 0; i < groups.Length; i++)
+        {
+            written.ResetWrittenCount();
+            (Held(groups[i]) ?? New()).Encode(written);
+            into.Sketches[i] = written.WrittenSpan.ToArray();
+        }
     }
 
     /// <summary>Merges an encoded sketch into a group's: what it grew by.</summary>

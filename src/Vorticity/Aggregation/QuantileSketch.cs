@@ -251,7 +251,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     /// negative's then the positive's, as their count and each one's index, the gap from the one before, and its count.
     /// A bucket's gap takes a byte where its neighbours hold values, and a count of fewer than 128 another.
     /// </summary>
-    internal void Encode(IBufferWriter<byte> into)
+    public void Encode(IBufferWriter<byte> into)
     {
         Span<byte> head = into.GetSpan(3 * MaxVarint);
         int at = Varint(head, (ulong)Bits);

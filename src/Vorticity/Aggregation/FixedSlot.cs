@@ -23,6 +23,9 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
     private readonly Func<TState, TResult> _finish;
     private readonly TState _seed;
     private readonly TOp _op;
+
+    // Whether the groups start from a seed no row holds, which then says that a group met no value.
+    private readonly bool _seeded;
     private ValuesCache<TValue> _values;
     private MaskCache _rows;
     private int[] _counts = [];
@@ -48,9 +51,8 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
 
     /// <summary>A slot whose groups start from <paramref name="seed"/>: a value no row holds, for an extreme that keeps no flag.</summary>
     internal FixedSlot(StorageKind kind, Func<TState, TResult> finish, TState seed)
-        : this(kind, finish, seed, default)
-    {
-    }
+        : this(kind, finish, seed, default) =>
+        _seeded = true;
 
     private FixedSlot(StorageKind kind, Func<TState, TResult> finish, TState seed, TOp op)
     {
@@ -510,6 +512,26 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
     }
 
     internal override TResult Result(int group) => _finish(State(group));
+
+    /// <summary>Each group's state through the op, as a row of states holds it; a seeded extreme's seed, which no row holds, as no value.</summary>
+    internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into)
+    {
+        TOp op = _op;
+        StateView<TState> states = States;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            TState state = states[groups[i]];
+            if (_seeded && EqualityComparer<TState>.Default.Equals(state, _seed))
+            {
+                continue;
+            }
+
+            if (!op.ExportState(in state, into.Group(i), into.Floats))
+            {
+                throw new NotSupportedException($"The states of {typeof(TOp).Name} have no form a row of states holds.");
+            }
+        }
+    }
 
     /// <summary>The answers of <paramref name="groups"/> under one view of the records: a group at a time, each made its view, cost the reader a third of building a million of them.</summary>
     internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)

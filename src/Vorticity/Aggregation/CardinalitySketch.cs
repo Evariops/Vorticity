@@ -249,7 +249,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
     /// each the gap from the one before and its rank in a byte, behind their count, two bytes a register where they lie
     /// close; or, past half of them set, every register's rank, a byte each.
     /// </summary>
-    internal void Encode(IBufferWriter<byte> into)
+    public void Encode(IBufferWriter<byte> into)
     {
         if (_hashes is { } hashes)
         {

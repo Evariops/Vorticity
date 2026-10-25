@@ -401,6 +401,59 @@ chunks from the last one backwards and stops once the seventh group is out. A to
 such as `OrderByDescending(g => g.Count()).Take(10)`, holds every group until the end, because a
 count is only known then.
 
+## A question in parts, on several nodes
+
+When one process is not enough, a question can be cut into parts that other nodes run, each over a
+range of rows, and merged where the answer is wanted. The question is code, so every node builds the
+same one, over the same version of the same dataset:
+
+```csharp
+static Aggregation Hourly(Scan<Request> scan) => scan
+    .Where(r => r.At >= from && r.At < to)
+    .GroupBy(r => (r.Region, r.At.Truncate(CalendarUnit.Hour)))
+    .Select(g => (g.Key.Region, g.Key.Item2, g.Count(), g.Sum(r => r.Bytes), g.Average(r => r.Latency), g.Quantile(r => r.Latency, 0.9)));
+
+// The coordinator cuts the rows.
+RowRange[] parts = await Hourly(dataset.Scan<Request>()).PartsAsync(nodes);
+
+// Each node runs its part and sends back the bytes of its partial.
+AggregationPartial partial = await Hourly(dataset.Scan<Request>().Rows(part)).PartialAsync();
+ReadOnlyMemory<byte> sent = partial.Bytes;
+
+// The coordinator merges what it received.
+List<HourTotal> answers = await Hourly(dataset.Scan<Request>())
+    .Merge(received.Select(AggregationPartial.FromBytes))
+    .As<HourTotal>().ToRecordsAsync().ToListAsync();
+```
+
+`PartsAsync` cuts a dataset at its objects, and a large object at its chunks, and a file at its
+chunks. It then gathers the pieces into ranges of about as many rows each, which follow one another.
+A partial holds no answers, only each group's states: the rows it counts, each measure's exact sum,
+count of values, least and greatest, and the sketches of its quantiles and approximate distinct
+counts. The merge folds these states the way the whole question folds its rows. Integer and float
+sums are exact, and a sketch's buckets are integer counts, so the merged answers are the same bits as
+the whole question's, whatever order the partials arrive in.
+
+The filters on groups, the order and the window (`Where` on `g`, `OrderBy`, `Take`) apply at the
+merge, never in a part: a part cannot know which groups the whole question keeps. A node can also
+merge a few partials and send on their partial, `Merge(partials).PartialAsync()`, so the merges can
+form a tree.
+
+The size of a partial follows its groups. In the tests, a question by region and hour with a
+quantile and an approximate distinct count wrote partials of 68 to 81 KB for 28 to 35 groups each, the
+sketches taking most of that. A question by key over 800 000 rows gave partials of 2.2 to 3.8 MB for
+about 170 000 to 290 000 groups. A part runs under its session's memory budget like any question, and a part
+whose groups do not fit spills them and still gives its states. The merge does the same.
+
+A question takes parts when every aggregate in it is one a state answers whole: a count of rows, a
+sum, least, greatest or mean of a number column, a distribution or quantile of one, or an approximate
+distinct count. `PartsAsync`, `PartialAsync` and `Merge` throw `NotSupportedException` for any other
+aggregate, such as an exact distinct count, a filtered aggregate, a chosen row, a variance, a decimal
+sum or an aggregator of your own. A partial whose keys or measures are not the question's throws
+`InvalidDataException` when the merge reads it. A partial of the same shape but another filter cannot
+be told apart, so the question on each node is yours to keep the same. To keep the version the same,
+open the dataset at the version the coordinator cut (`VortexDataset.OpenAsync(store, version)`).
+
 ## Decimals at any precision
 
 A decimal column sums exactly, whatever its precision and its row count. The total is kept in 320

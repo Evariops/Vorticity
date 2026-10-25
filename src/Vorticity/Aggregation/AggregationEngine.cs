@@ -2579,7 +2579,9 @@ internal sealed class AggregationPartition
         {
             for (int c = 0; c < _keyCount; c++)
             {
-                int node = FilterEvaluator.Resolve(arena, root, StateRequest.KeyField(_columns[c].Field), rows);
+                // A partial's keys are as the functions gave them, under names of their places.
+                FieldExpr key = batch.KeysApplied ? StateRequest.PartialField(c) : StateRequest.KeyField(_columns[c].Field);
+                int node = FilterEvaluator.Resolve(arena, root, key, rows);
                 while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
                 {
                     node = arena.GetNode(node).StorageIndex;
@@ -3472,7 +3474,7 @@ internal abstract class AggregationHost
 
             // With no order nor window over the groups, a core delivers them part by part.
             bool parted = query.Plan.CoreParted && top is null && !Array.Exists(query.Operators, op => op is GroupOrder or GroupWindow);
-            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Counters, query.Plan, cancellationToken, top, parted, builder).ConfigureAwait(false);
+            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Counters, query.Plan, cancellationToken, top, parted, builder, query.Exports).ConfigureAwait(false);
             query.PeakGroups = Math.Max(top?.Peak ?? 0, outcome.Keys?.Count ?? 1);
             if (outcome.Parts is not null && Array.Exists(query.Operators, op => op is GroupOrder))
             {
@@ -3559,11 +3561,14 @@ internal static class AggregationEngine
 {
     internal static async ValueTask<AggregationOutcome> RunAsync(
         ScanSource source, ScanSpec spec, ScanCounters metrics, AggregationPlan plan, CancellationToken cancellationToken, KeyTop? top = null, bool parted = false,
-        PartBuilder? builder = null)
+        PartBuilder? builder = null, bool exports = false)
     {
         IAggregateNode[] aggregates = plan.Aggregates;
         AggregateSlot?[] settled = new AggregateSlot?[aggregates.Length];
-        if (!plan.Grouped && StatisticsView.For(source, spec) is { } statistics)
+
+        // A run that gives its states rather than its answers (AggregationQuery.Exports) takes none from the file statistics,
+        // an answer they give being no state; a count of rows from the structures is one.
+        if (!exports && !plan.Grouped && StatisticsView.For(source, spec) is { } statistics)
         {
             for (int i = 0; i < aggregates.Length; i++)
             {
@@ -3589,7 +3594,7 @@ internal static class AggregationEngine
                 if (filter is null)
                 {
                     count = count >= 0 ? count : await source.CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
-                    answers[i] = new SettledSlot<long>(count);
+                    answers[i] = new SettledSlot<long>(count) { CountsRows = true };
                     continue;
                 }
 

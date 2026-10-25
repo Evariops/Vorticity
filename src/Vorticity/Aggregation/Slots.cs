@@ -122,6 +122,14 @@ internal abstract class AggregateSlot
     /// </summary>
     internal virtual bool StepStates(in StateInput input, ReadOnlySpan<ulong> selection, ReadOnlySpan<int> groups) => false;
 
+    /// <summary>
+    /// Writes the states of <paramref name="groups"/>, in order, as rows of states hold them (<see cref="StateExport"/>),
+    /// a row a group: what <see cref="StepStates"/> folds back to the same states, in another partition or another process.
+    /// </summary>
+    /// <exception cref="NotSupportedException">The slot's states have no form a row of states holds.</exception>
+    internal virtual void ExportStates(ReadOnlySpan<int> groups, in StateExport into) =>
+        throw new NotSupportedException($"The states of {GetType().Name} have no form a row of states holds.");
+
     /// <summary>Merges the same aggregate of another partition, whose group <c>g</c> is this one's <c>map[g]</c>.</summary>
     internal void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map) => MergeFrom(other, Numbers.Upto(map.Length), map);
 
@@ -478,6 +486,35 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
     }
 
+    /// <summary>The groups' states a run at a time of one part, their numbers in it, as <see cref="Results"/> reads them.</summary>
+    internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into)
+    {
+        int[] local = ArrayShelf.Rent<int>(groups.Length);
+        try
+        {
+            int start = 0;
+            while (start < groups.Length)
+            {
+                int part = JoinedParts.PartOf(offsets, groups[start]);
+                int low = offsets[part];
+                int high = part + 1 < offsets.Length ? offsets[part + 1] : int.MaxValue;
+                int end = start;
+                while (end < groups.Length && groups[end] >= low && groups[end] < high)
+                {
+                    local[end] = groups[end] - low;
+                    end++;
+                }
+
+                parts[part].ExportStates(local.AsSpan(start, end - start), into.Slice(start, end - start));
+                start = end;
+            }
+        }
+        finally
+        {
+            ArrayShelf.Return(local);
+        }
+    }
+
     public double? Mean(int group)
     {
         int part = JoinedParts.PartOf(offsets, group);
@@ -669,6 +706,9 @@ internal sealed class MeanView(IMeanSlot sum) : AggregateSlot<double?>
     internal override double? Result(int group) => sum.Mean(group);
 
     internal override void Results(ReadOnlySpan<int> groups, Span<double?> into) => sum.Means(groups, into);
+
+    /// <summary>The sum's states, which hold the mean's.</summary>
+    internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into) => ((AggregateSlot)sum).ExportStates(groups, into);
 }
 
 /// <summary>An aggregate answered before the scan, from the file statistics or a count: nothing to step.</summary>
@@ -677,6 +717,9 @@ internal sealed class SettledSlot<TResult> : AggregateSlot<TResult>
     private readonly TResult _value;
 
     internal SettledSlot(TResult value) => _value = value;
+
+    /// <summary>Whether the answer is a count of rows, which a row of states holds as its rows; the other answers hold no state.</summary>
+    internal bool CountsRows { get; init; }
 
     internal override void EnsureGroups(int groups)
     {
@@ -699,6 +742,18 @@ internal sealed class SettledSlot<TResult> : AggregateSlot<TResult>
     }
 
     internal override TResult Result(int group) => _value;
+
+    /// <summary>A count of rows as the rows of each group, the one of a scalar aggregation.</summary>
+    internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into)
+    {
+        if (!CountsRows || _value is not long rows)
+        {
+            base.ExportStates(groups, into);
+            return;
+        }
+
+        into.Rows[..groups.Length].Fill(rows);
+    }
 }
 
 /// <summary>
@@ -807,6 +862,8 @@ internal sealed class CountSlot<TCount> : RecordSlot<TCount, long>
             into[i] = long.CreateTruncating(counts[groups[i]]);
         }
     }
+
+    internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into) => Results(groups, into.Rows);
 }
 
 /// <summary>

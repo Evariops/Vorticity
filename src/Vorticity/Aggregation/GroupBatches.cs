@@ -34,13 +34,14 @@ internal sealed class AggregationQuery : ResultQuery
 
     private AggregationQuery(
         AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, (VortexSchema Record, Type Type)? typed, long skip, long take, VortexExpr? rows,
-        GroupOperator[] operators)
+        GroupOperator[] operators, bool exports = false)
     {
         Host = host;
         Plan = plan;
         Nodes = nodes;
         Keys = keys;
         _typed = typed;
+        Exports = exports;
         Columns = NewColumns();
         Skip = skip;
         Take = take;
@@ -51,6 +52,26 @@ internal sealed class AggregationQuery : ResultQuery
 
     /// <summary>The conjuncts of the filters on groups that name only the key: they filter the rows.</summary>
     internal VortexExpr? RowFilter { get; }
+
+    /// <summary>
+    /// Whether the query gives its groups' states rather than their answers: a part's (<see cref="Partial"/>), whose columns
+    /// are those of rows of states (<see cref="AggregationPartials.Columns"/>), and which the file statistics settle nothing of.
+    /// </summary>
+    internal bool Exports { get; }
+
+    /// <summary>
+    /// The same query giving its groups' states, a part's: no operator on its groups nor window, which the merge applies,
+    /// its columns those of rows of states.
+    /// </summary>
+    /// <exception cref="NotSupportedException">A state does not answer one of its aggregates whole.</exception>
+    internal AggregationQuery Partial()
+    {
+        AggregationPartials.Check(Plan);
+        return new AggregationQuery(Host, Plan, Nodes, Keys, null, 0, long.MaxValue, RowFilter, [], exports: true);
+    }
+
+    /// <summary>The same query over <paramref name="host"/>, a merge of its parts' partials, which applied its filter on the rows.</summary>
+    internal AggregationQuery Merged(PartialsHost host) => new AggregationQuery(host, Plan, Nodes, Keys, _typed, Skip, Take, null, Operators);
 
     /// <summary>
     /// The first operator on groups that reads a column of a chosen row, before which those columns
@@ -143,6 +164,11 @@ internal sealed class AggregationQuery : ResultQuery
     /// </summary>
     internal ResultColumn[] NewColumns()
     {
+        if (Exports)
+        {
+            return AggregationPartials.Columns(Plan, Keys);
+        }
+
         if (_typed is not { } typed)
         {
             return Natural(Nodes, Keys);
