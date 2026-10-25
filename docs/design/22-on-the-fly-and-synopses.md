@@ -385,8 +385,21 @@ holds theirs, all and no other, and the handle and the session's cache keep its 
 question that finds no partial of the output sums its inputs' (`LearnedFamily.MergeAsync`, the
 family's plan over their states, to the bits their rows would give), found so in turn up to eight merges
 deep, and keeps the sum as the output's: an object rewritten into the next level is answered with no row
-read *(measured)*. Not built yet: the families kept up as objects are written (F3), the store beside
-the rollups.
+read *(measured)*.
+
+Each object makes its own family (`FamilyProof`): the conjuncts its summaries prove true over its every
+row leave it, so that a window that moves keeps the partials of the objects it holds whole; an object a
+conjunct on the key's first column alone neither proves nor refutes, an edge of such a window, is read as
+the question reads it and learns nothing, since it would learn a partial each time the window moves. The
+handle keeps up the families its questions asked in the last hour, sixteen at most: each object it
+appends learns their partials as it is written, read back from where the append left it, so that a
+monitor, the same question after each append, answers every object appended after it first asked from
+its partial (*measured*: the plan says so of each, minute after minute). An appended object, which keeps
+no table of contents, answers from such a partial and learns none from its rows. Keeping a family up
+costs an appended object some 1.5 ms whatever its rows, the family's run and its partial's file: 75 ns
+a row of a minute of 20 000 rows, 912 of one of 2 000, under 30 past some 50 000 *(measured)*. Not built
+yet: the store beside the rollups, the families kept up across processes, which would ask the families
+written down, and a budget by the savings each family makes.
 
 ### 5.7 The caches
 

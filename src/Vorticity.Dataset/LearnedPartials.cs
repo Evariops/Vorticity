@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO.Hashing;
 using System.Threading;
@@ -127,6 +128,48 @@ internal sealed class LearnedPartials
     internal const int MaxInputs = 4_096;
 
     private static string LineageName(UInt128 uid) => string.Create(CultureInfo.InvariantCulture, $"{uid:x32}-lineage");
+
+    /// <summary>The families the handle keeps up at most: those its questions asked last.</summary>
+    internal const int MaxLive = 16;
+
+    // The families the handle's questions asked, by their identity, with when each was asked last: an object it appends learns
+    // their partials as it is written (KeptUpAsync).
+    private readonly ConcurrentDictionary<UInt128, (Aggregating.LearnedFamily Family, long Ticks)> _live = new();
+
+    /// <summary>Notes that a question asked <paramref name="family"/> at <paramref name="ticks"/>, the least recent of the families kept up let go past <see cref="MaxLive"/>.</summary>
+    internal void Asked(Aggregating.LearnedFamily family, long ticks)
+    {
+        _live[family.Identity] = (family, ticks);
+        if (_live.Count > MaxLive)
+        {
+            UInt128 oldest = default;
+            long least = long.MaxValue;
+            foreach (KeyValuePair<UInt128, (Aggregating.LearnedFamily Family, long Ticks)> live in _live)
+            {
+                if (live.Value.Ticks < least)
+                {
+                    (oldest, least) = (live.Key, live.Value.Ticks);
+                }
+            }
+
+            _live.TryRemove(oldest, out _);
+        }
+    }
+
+    /// <summary>The families the handle keeps up: asked at or after <paramref name="since"/>, in ticks.</summary>
+    internal List<Aggregating.LearnedFamily> Live(long since)
+    {
+        List<Aggregating.LearnedFamily> live = [];
+        foreach ((Aggregating.LearnedFamily family, long ticks) in _live.Values)
+        {
+            if (ticks >= since)
+            {
+                live.Add(family);
+            }
+        }
+
+        return live;
+    }
 
     /// <summary>Whether the handle or the cache holds the partial of family <paramref name="family"/> of the object <paramref name="uid"/>, with no read of it.</summary>
     internal bool Holds(UInt128 uid, UInt128 family, SynopsisCache? cache) =>

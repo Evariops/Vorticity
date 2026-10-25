@@ -122,6 +122,139 @@ public sealed partial class DatasetLearnedPartialsTests
         Assert.True(store.BytesRead == 0, $"{store.BytesRead} bytes in {store.Requests} requests after the rewrites, where the inputs' partials hold the answer");
     }
 
+    /// <summary>
+    /// A window that moves: the objects it holds whole prove its bound, which leaves their family, so that they answer from
+    /// the partials they learned under the window before, another status included; the object its edge cuts is read as the
+    /// question reads it, learning nothing.
+    /// </summary>
+    [Fact]
+    public async Task AMovingWindowKeepsThePartialsOfTheObjectsItHoldsWhole()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Call.At)],
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            ContentsObjectBytes = 1,
+            SheetObjectBytes = 0,
+        }, Ct);
+        Random random = new Random(0xF3);
+        for (int hour = 0; hour < 4; hour++)
+        {
+            Call[] rows = [.. Enumerable.Range(0, 4_000).Select(i => new Call(
+                $"svc-{random.Next(4)}",
+                Noon.AddHours(hour).AddTicks(random.NextInt64(TimeSpan.FromHours(1).Ticks)),
+                $"h-{random.Next(12)}",
+                $"/r{random.Next(6)}",
+                (short)(random.Next(20) switch { < 14 => 200, < 17 => 404, < 19 => 500, _ => 503 }),
+                random.Next(4_000) / 4.0,
+                random.Next(1_000_000)))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Call>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, Ct) is not null)
+            {
+            }
+        }
+
+        string[] keys = ["Route"];
+        string[] results = ["Route", "count()", "sum(Size)"];
+        long[] bytes = new long[2];
+        string[] filters = ["Status = 404 and At >= '2026-10-25T12:30:00.0000000+00:00'", "Status = 500 and At >= '2026-10-25T12:40:00.0000000+00:00'"];
+        for (int ask = 0; ask < 2; ask++)
+        {
+            List<string> rows = await DatasetPlannerTests.AskAsync(dataset, keys, results, filters[ask], synopses: false);
+            store.Reset();
+            Assert.Equal(rows, await DatasetPlannerTests.AskAsync(dataset, keys, results, filters[ask], synopses: true));
+            bytes[ask] = store.BytesRead;
+        }
+
+        Console.WriteLine($"PARTIALS a moving window: {bytes[0]:N0} bytes the first time, {bytes[1]:N0} once it moved");
+        Assert.True(bytes[1] < bytes[0], $"{bytes[1]} bytes once the window moved, {bytes[0]} the first time");
+
+        // The objects past the edge answer from the partials they learned: three hours, the edge's own read as rows.
+        ScanPlan plan = await dataset.Scan<Call>().With(new ScanOptions { UseSynopses = true }).Where(c => c.Status == 503 && c.At >= Noon.AddMinutes(50))
+            .GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))).ExplainAsync(Ct);
+        Assert.Equal(3, plan.States.Count(step => step.Read == "partial" && step.Detail == "the partial of the question's family it learned"));
+    }
+
+    /// <summary>
+    /// A monitor: the same question after each append of a minute's calls, over the hour so far. Once asked, the family is
+    /// kept up, and each object appended after learns its partial as it is written: the question answers every minute's
+    /// object but the first, appended before it asked, from its partial, however many minutes come, and answers as the rows
+    /// do. The append's cost of keeping it up is measured against a dataset no question asks.
+    /// </summary>
+    [Theory]
+    [InlineData(2_000)]
+    [InlineData(20_000)]
+    public async Task AMonitorAnswersTheObjectsAppendedAfterItAskedFromTheirPartials(int rowsAMinute)
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using MemoryObjectStore quiet = new MemoryObjectStore();
+        DatasetOptions options = new DatasetOptions
+        {
+            ClusteringKey = [nameof(Call.At)],
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            ContentsObjectBytes = 1,
+            SheetObjectBytes = 0,
+        };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, options, Ct);
+        await using VortexDataset control = await VortexDataset.CreateAsync(quiet, Call.Schema, options, Ct);
+        Random random = new Random(0xF4);
+        Call[] Calls(DateTimeOffset from, TimeSpan span, int count) => [.. Enumerable.Range(0, count).Select(i => new Call(
+            $"svc-{random.Next(4)}",
+            from.AddTicks(random.NextInt64(span.Ticks)),
+            $"h-{random.Next(12)}",
+            $"/r{random.Next(6)}",
+            (short)(random.Next(20) switch { < 14 => 200, < 17 => 404, < 19 => 500, _ => 503 }),
+            random.Next(4_000) / 4.0,
+            random.Next(1_000_000)))];
+
+        // Two hours of history a job wrote, then the monitor's hour, a minute at a time.
+        foreach (VortexDataset written in (VortexDataset[])[dataset, control])
+        {
+            await using ObjectDraft draft = written.StartObject();
+            await draft.Writer.WriteAsync<Call>(Calls(Noon, TimeSpan.FromHours(2), 8_000), Ct);
+            await written.AppendAsync(draft, Ct);
+            while (await written.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, Ct) is not null)
+            {
+            }
+        }
+
+        string[] keys = ["Route"];
+        string[] results = ["Route", "count()", "sum(Size)"];
+        string filter = "Status = 404 and At >= '2026-10-25T14:00:00.0000000+00:00'";
+        TimeSpan kept = TimeSpan.Zero;
+        TimeSpan plain = TimeSpan.Zero;
+        const int Minutes = 12;
+        for (int minute = 0; minute < Minutes; minute++)
+        {
+            Call[] rows = Calls(Noon.AddHours(2).AddMinutes(minute), TimeSpan.FromMinutes(1), rowsAMinute);
+            foreach ((VortexDataset written, bool timed) in (ValueTuple<VortexDataset, bool>[])[(dataset, true), (control, false)])
+            {
+                await using ObjectDraft draft = written.StartObject();
+                await draft.Writer.WriteAsync<Call>(rows, Ct);
+                System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+                await written.AppendAsync(draft, Ct);
+                if (minute > 0)
+                {
+                    (kept, plain) = timed ? (kept + clock.Elapsed, plain) : (kept, plain + clock.Elapsed);
+                }
+            }
+
+            List<string> answer = await DatasetPlannerTests.AskAsync(dataset, keys, results, filter, synopses: false);
+            Assert.Equal(answer, await DatasetPlannerTests.AskAsync(dataset, keys, results, filter, synopses: true));
+            ScanPlan plan = await dataset.Scan<Call>().With(new ScanOptions { UseSynopses = true })
+                .Where(c => c.Status == 404 && c.At >= Noon.AddHours(2)).GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))).ExplainAsync(Ct);
+            Assert.Equal(minute, plan.States.Count(step => step.Read == "partial" && step.Detail == "the partial of the question's family it learned"));
+        }
+
+        double nanoseconds = (kept - plain).TotalNanoseconds / ((Minutes - 1) * rowsAMinute);
+        Console.WriteLine($"PARTIALS a monitor of {rowsAMinute:N0} rows a minute: keeping its family up cost {nanoseconds:N0} ns a row appended");
+    }
+
     /// <summary>Quantiles and approximate distinct counts, whose states are sketches, are learned and answered as the rows give them.</summary>
     [Fact]
     public async Task SketchesAreLearnedToo()

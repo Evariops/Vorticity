@@ -29,14 +29,43 @@ namespace Vorticity.Aggregating;
 /// </remarks>
 internal sealed class LearnedFamily
 {
-    private LearnedFamily(AggregationPlan plan, ColumnShape[] keys, VortexExpr? filter, VortexExpr? selection, UInt128 identity, int added)
+    private LearnedFamily(AggregationPlan plan, ColumnShape[] keys, VortexExpr[] conjuncts, VortexExpr? selection, int added)
     {
         Plan = plan;
         Keys = keys;
-        Filter = filter;
+        Conjuncts = conjuncts;
+        Filter = GroupPredicates.And(null, [.. conjuncts]);
         Selection = selection;
-        Identity = identity;
+        Identity = IdentityOf(plan, Filter);
         Added = added;
+    }
+
+    /// <summary>The conjuncts of <see cref="Filter"/>, in the question's order.</summary>
+    internal VortexExpr[] Conjuncts { get; }
+
+    /// <summary>
+    /// The family of an object whose summaries prove the conjuncts <paramref name="proven"/> sets, by their places among
+    /// <see cref="Conjuncts"/>, true over its every row: the same, those conjuncts left out, under an identity of its own,
+    /// which every question whose other conjuncts are the same shares, whatever the proven ones were. A window that moves
+    /// keeps the partials of the objects it holds whole.
+    /// </summary>
+    internal LearnedFamily Without(ulong proven)
+    {
+        if (proven == 0)
+        {
+            return this;
+        }
+
+        List<VortexExpr> kept = [];
+        for (int i = 0; i < Conjuncts.Length; i++)
+        {
+            if (i >= 64 || ((proven >> i) & 1) == 0)
+            {
+                kept.Add(Conjuncts[i]);
+            }
+        }
+
+        return new LearnedFamily(Plan, Keys, [.. kept], Selection, Added);
     }
 
     /// <summary>The family's plan: the question's aggregates, by the question's keys then the columns added.</summary>
@@ -128,8 +157,7 @@ internal sealed class LearnedFamily
 
         ColumnShape[] all = [.. keys];
         AggregationPlan family = new AggregationPlan(results, all);
-        VortexExpr? remaining = GroupPredicates.And(null, rest);
-        return new LearnedFamily(family, all, remaining, GroupPredicates.And(null, kept), IdentityOf(family, remaining), all.Length - plan.Keys.Length);
+        return new LearnedFamily(family, all, [.. rest], GroupPredicates.And(null, kept), all.Length - plan.Keys.Length);
     }
 
     /// <summary>The XXH3-128 of the family's keys, its aggregates and its filter, each as its canonical text.</summary>

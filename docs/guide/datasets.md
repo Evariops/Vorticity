@@ -256,6 +256,11 @@ them. The handle keeps these partials, and so does the session's `SynopsisCache`
 the handles and processes after. A question whose aggregates a state answers whole learns them: counts,
 sums, means, extremes, quantiles and approximate distinct counts. A value of the key's first column is
 not made a key where an object holds it with others, since learning would read every value's rows.
+A window on the key's first column that moves, `r.At >= now - 15 minutes`, keeps the partials of the
+objects it holds whole, and reads the one its edge cuts. The handle keeps up the families its questions
+asked in the last hour: each object it appends learns their partials as it is written, which costs the
+append some 1.5 ms an object and family, so that a monitor asking the same question after each append
+reads none of the objects appended since it first asked.
 
 Over a long range, an object's counts still cost a request an object. `RollUpAsync` sums the counts of
 runs of about `DatasetOptions.RollupFanout` consecutive objects (64 by default) into rollups, then as

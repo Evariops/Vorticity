@@ -976,9 +976,61 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(draft);
         List<WrittenObject> written = await WrittenAsync(draft, cancellationToken).ConfigureAwait(false);
-        return written.Count > 0
-            ? await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false)
-            : Version;
+        if (written.Count == 0)
+        {
+            return Version;
+        }
+
+        ulong version = await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false);
+        await KeptUpAsync(written, cancellationToken).ConfigureAwait(false);
+        return version;
+    }
+
+    /// <summary>How long a family this handle's questions asked is kept up: the objects it appends learn its partials as they are written.</summary>
+    internal static readonly TimeSpan KeptUpFor = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Learns, of each object an append wrote, the partial of each family this handle's questions asked in the last
+    /// <see cref="KeptUpFor"/> (<see cref="LearnedPartials.Asked"/>), as the object makes it (<see cref="FamilyProof"/>): the
+    /// family run over the object's rows as the append left them, so that a question of it answers the object with no read.
+    /// </summary>
+    private async ValueTask KeptUpAsync(List<WrittenObject> written, CancellationToken cancellationToken)
+    {
+        List<Aggregating.LearnedFamily> live = Partials.Live(_options.TimeProvider.GetUtcNow().UtcTicks - KeptUpFor.Ticks);
+        if (live.Count == 0)
+        {
+            return;
+        }
+
+        DatasetSchema schema = Snapshot.Schema;
+        SynopsisCache? cache = Session.Options.SynopsisCache;
+        foreach (WrittenObject made in written)
+        {
+            ObjectEntry entry = made.Entry;
+            ObjectLease? lease = null;
+            try
+            {
+                foreach (Aggregating.LearnedFamily family in live)
+                {
+                    if (new FamilyProof(family, schema).Of(entry.Summaries, entry.PhysicalRows) is not { } own || Partials.Holds(entry.Uid, own.Key, cache))
+                    {
+                        continue;
+                    }
+
+                    lease ??= await RentAsync(entry, cancellationToken).ConfigureAwait(false);
+                    AggregationPartial partial = await own.Family.LearnAsync(
+                        new FileScanSource(lease.File), new RowRange(0, lease.File.RowCount), ScanOptions.Default, cancellationToken).ConfigureAwait(false);
+                    Partials.Keep(entry.Uid, own.Key, partial, cache);
+                }
+            }
+            finally
+            {
+                if (lease is not null)
+                {
+                    await lease.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+        }
     }
 
     /// <summary>The objects an append of <paramref name="draft"/> adds: the draft's own, completed and put.</summary>
@@ -1035,9 +1087,14 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(batches);
         List<WrittenObject> written = await WrittenAsync(batches, cancellationToken).ConfigureAwait(false);
-        return written.Count > 0
-            ? await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false)
-            : Version;
+        if (written.Count == 0)
+        {
+            return Version;
+        }
+
+        ulong version = await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false);
+        await KeptUpAsync(written, cancellationToken).ConfigureAwait(false);
+        return version;
     }
 
     /// <summary>

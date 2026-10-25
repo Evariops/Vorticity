@@ -331,8 +331,15 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     private bool Learns(in PositionedObject held)
     {
-        if (_family is not { } family || Covered(held) != held.Entry.Rows || held.Entry.HasDeletions || !_version.Schema.Holds(held.Entry)
-            || _dataset.Partials.TooLarge(held.Entry.Uid, FamilyKey))
+        if (_family is not { } family || Covered(held) != held.Entry.Rows || held.Entry.HasDeletions
+            || FamilyOf(held) is not { } own || _dataset.Partials.TooLarge(held.Entry.Uid, own.Key))
+        {
+            return false;
+        }
+
+        // An object of an earlier schema, or one an append wrote, which keeps no table of contents, answers from a partial
+        // it holds, one written as it was appended (VortexDataset.KeptUpAsync), and learns none from its rows.
+        if (!_version.Schema.Holds(held.Entry) && !_dataset.Partials.Holds(held.Entry.Uid, own.Key, _dataset.Session.Options.SynopsisCache))
         {
             return false;
         }
@@ -353,6 +360,12 @@ internal sealed class DatasetScanBuilder
 
         return true;
     }
+
+    /// <summary>The scan's family as the object <paramref name="held"/> makes it, and the key its partial is kept under (<see cref="FamilyProof"/>); null for an edge.</summary>
+    private (LearnedFamily Family, UInt128 Key)? FamilyOf(in PositionedObject held) =>
+        (_proof ??= new FamilyProof(_family!, _version.Schema)).Of(held.Summaries(_version.Schema.Key), held.Entry.PhysicalRows);
+
+    private FamilyProof? _proof;
 
     /// <summary>The top-level columns <paramref name="family"/> reads, by their places: its keys', its aggregates' and its filter's.</summary>
     private int[] FieldsOf(LearnedFamily family)
@@ -391,14 +404,14 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> LearnedAsync(PositionedObject held, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        LearnedFamily family = _family!;
+        (LearnedFamily family, UInt128 key) = FamilyOf(held)!.Value;
         SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
-        if (!_dataset.Partials.TryGet(held.Entry.Uid, FamilyKey, cache, out AggregationPartial partial))
+        if (!_dataset.Partials.TryGet(held.Entry.Uid, key, cache, out AggregationPartial partial))
         {
-            partial = await InheritedAsync(held.Entry.Uid, family, 0, cancellationToken).ConfigureAwait(false)
+            partial = await InheritedAsync(held.Entry.Uid, family, key, 0, cancellationToken).ConfigureAwait(false)
                 ?? await family.LearnAsync(_familySource!, new RowRange(held.FirstRow, held.FirstRow + held.Entry.Rows), _options, cancellationToken)
                     .ConfigureAwait(false);
-            _dataset.Partials.Keep(held.Entry.Uid, FamilyKey, partial, cache);
+            _dataset.Partials.Keep(held.Entry.Uid, key, partial, cache);
         }
 
         await foreach (RecordBatch batch in family.ServeAsync(partial, _dataset.Session, held.FirstRow, cancellationToken).ConfigureAwait(false))
@@ -412,10 +425,10 @@ internal sealed class DatasetScanBuilder
     /// or the sum of those of the objects a compaction merged into it alone (<see cref="LearnedPartials.Inherit"/>), each found
     /// so in turn, a few merges deep; null when one of them has none.
     /// </summary>
-    private async ValueTask<AggregationPartial?> InheritedAsync(UInt128 uid, LearnedFamily family, int depth, CancellationToken cancellationToken)
+    private async ValueTask<AggregationPartial?> InheritedAsync(UInt128 uid, LearnedFamily family, UInt128 key, int depth, CancellationToken cancellationToken)
     {
         SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
-        if (_dataset.Partials.TryGet(uid, FamilyKey, cache, out AggregationPartial held))
+        if (_dataset.Partials.TryGet(uid, key, cache, out AggregationPartial held))
         {
             return held;
         }
@@ -428,7 +441,7 @@ internal sealed class DatasetScanBuilder
         AggregationPartial[] parts = new AggregationPartial[inputs.Length];
         for (int i = 0; i < parts.Length; i++)
         {
-            if (await InheritedAsync(inputs[i], family, depth + 1, cancellationToken).ConfigureAwait(false) is not { } part)
+            if (await InheritedAsync(inputs[i], family, key, depth + 1, cancellationToken).ConfigureAwait(false) is not { } part)
             {
                 return null;
             }
@@ -442,13 +455,6 @@ internal sealed class DatasetScanBuilder
     /// <summary>The merges a partial is summed through at most, an object's of objects merged into it before.</summary>
     private const int MergesDeep = 8;
 
-    /// <summary>
-    /// What keys the scan family's partials: its identity and the version's columns, so that a change of the schema, a column
-    /// dropped and added again under its name, learns them afresh.
-    /// </summary>
-    private UInt128 FamilyKey => _familyKey ??= _family!.Identity ^ System.IO.Hashing.XxHash128.HashToUInt128(_version.Schema.Bytes.Span);
-
-    private UInt128? _familyKey;
 
     /// <summary>
     /// Says that the variant columns of <paramref name="keys"/>, by name, are read only through those
@@ -801,6 +807,12 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> StatesAsync(CountsAnswer answer, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        // The question's family is kept up by the handle a while: the objects it appends learn its partials as they are written.
+        if (_family is { } asked)
+        {
+            _dataset.Partials.Asked(asked, _dataset.Options.TimeProvider.GetUtcNow().UtcTicks);
+        }
+
         // The rollups a scan of the whole version takes, each standing for the objects it covers, which the walk passes
         // over; then the objects the walk meets that no rollup covers. The rollups come first, as many as rolled holds.
         RollupChoice? rollups = await RollupsAsync(answer, cancellationToken).ConfigureAwait(false);
@@ -1961,7 +1973,7 @@ internal sealed class DatasetScanBuilder
             {
                 // An object a compaction merged others into alone sums their partials when each has one, else learns its own.
                 SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
-                bool learned = _dataset.Partials.Holds(held.Entry.Uid, FamilyKey, cache);
+                bool learned = _dataset.Partials.Holds(held.Entry.Uid, FamilyOf(held)!.Value.Key, cache);
                 bool merged = !learned && _dataset.Partials.MergedInto(held.Entry.Uid, cache) is not null;
                 PathCosts.Cost rows = learned || merged ? default : PathCosts.Rows(held.Entry, FieldsOf(_family!));
                 states.Add(new StatesStep(
