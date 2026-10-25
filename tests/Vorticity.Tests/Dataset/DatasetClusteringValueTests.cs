@@ -13,7 +13,9 @@ using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.IO;
+using Vorticity.Keys;
 using Vorticity.Scanning;
 using Xunit;
 
@@ -362,6 +364,40 @@ public sealed partial class DatasetClusteringValueTests
             found && column.HasMin && column.HasMax,
             $"an object states no bounds on '{path}': found {found}, min {column.HasMin}, max {column.HasMax}, exact {column.IsExact}, nulls {column.HasNullCount}, rows {entry.Rows}, columns {entry.Summaries.Count}");
         return (column.Min, column.Max);
+    }
+
+    // A key of one instant, which holds no null: the objects a job writes in its order carry no sorted run, which would
+    // repeat the column, and a walk of the key, a seek on it and the rows read in its order go through the column itself.
+    [Fact]
+    public async Task AKeyOfOneInstantWalksItsSortedColumnAndKeepsNoRun()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, Event.Schema, Options([nameof(Event.At)], ClusteringValue.Truncate(CalendarUnit.Day)), Ct);
+        Random random = new Random(0x50C);
+        List<Event> appended = [];
+        for (int append = 0; append < 4; append++)
+        {
+            Event[] rows = [.. Enumerable.Range(0, 300).Select(i => new Event(Midnight.AddSeconds(random.Next(2 * 86_400)), $"a{append}-{i}"))];
+            appended.AddRange(rows);
+            await AppendAsync(dataset, rows);
+        }
+
+        await DrainAsync(dataset, Compaction());
+        foreach ((int level, ObjectEntry entry) in await ObjectsAsync(dataset))
+        {
+            Assert.True(level > 0, "every row has left level 0");
+            await using ObjectLease lease = await dataset.RentAsync(entry, Ct);
+            IndexDirectory? directory = await lease.File.ReadIndexDirectoryAsync(Ct);
+            Assert.DoesNotContain(directory?.Entries ?? [], index => index.Kind == IndexKinds.SortedRuns);
+            Assert.Equal(KeySourceKind.SortedColumn, (await lease.File.Keys(nameof(Event.At)).ExplainAsync(Ct)).Source);
+        }
+
+        DateTimeOffset from = Midnight.AddHours(30);
+        List<Event> later = await dataset.Scan<Event>().Where(r => r.At >= from).ToRecordsAsync(Ct).ToListAsync(Ct);
+        Assert.Equal(appended.Count(r => r.At >= from), later.Count);
+        List<Event> ordered = await RowsAsync<Event>(dataset);
+        Assert.Equal([.. appended.Select(r => r.At).Order()], ordered.Select(r => r.At));
     }
 
     private static DateTime DayOf(FilterLiteral micros) => DateTimeOffset.UnixEpoch.AddTicks(micros.SignedValue * 10).UtcDateTime.Date;

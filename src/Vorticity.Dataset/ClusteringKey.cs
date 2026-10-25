@@ -179,16 +179,28 @@ internal sealed class ClusteringKey
 
     /// <summary>
     /// Whether an object whose rows come in key order needs no run to be walked by key: one
-    /// top-level column of integers that holds no null. Its file statistics then say the column is
-    /// sorted, and a sorted column is the source a key cursor and a key-ordered read take before any
-    /// run, with the zone map as its index, so a run beside it is bytes nobody reads.
+    /// top-level column of integers that holds no null, or of an extension stored as integers, an
+    /// instant or a date. Its file statistics then say the column is sorted, and a sorted column is
+    /// the source a key cursor and a key-ordered read take before any run, with the zone map as its
+    /// index, so a run beside it is bytes nobody reads: as much as the column itself.
     /// </summary>
-    public bool OrdersBySortedColumn =>
-        !IsComposite
-        && !_paths[0].Contains('.', StringComparison.Ordinal)
-        && _dtypes[0].Kind == DTypeKind.Primitive
-        && _dtypes[0].PType.IsInteger()
-        && !_dtypes[0].IsNullable;
+    public bool OrdersBySortedColumn
+    {
+        get
+        {
+            DType storage = _dtypes[0];
+            while (storage.Kind == DTypeKind.Extension)
+            {
+                storage = storage.StorageType;
+            }
+
+            return !IsComposite
+                && !_paths[0].Contains('.', StringComparison.Ordinal)
+                && storage.Kind == DTypeKind.Primitive
+                && storage.PType.IsInteger()
+                && !_dtypes[0].IsNullable;
+        }
+    }
 
     /// <summary>The caller's write options, with the mandatory sorted run on the key added.</summary>
     public VortexWriteOptions Applied(VortexWriteOptions options)
