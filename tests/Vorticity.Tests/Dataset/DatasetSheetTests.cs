@@ -110,7 +110,7 @@ public sealed partial class DatasetSheetTests : IClassFixture<DatasetSheetTests.
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(Call.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
         }, Ct);
         for (int part = 0; part < 24; part++)
         {
@@ -169,7 +169,7 @@ public sealed partial class DatasetSheetTests : IClassFixture<DatasetSheetTests.
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Call.Schema, Options() with
             {
                 ClusteringKey = [nameof(Call.At)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
             });
             for (int part = 0; part < Hours * 12; part++)
             {

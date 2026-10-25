@@ -135,7 +135,7 @@ public sealed partial class LaneReadTests : IClassFixture<LaneReadTests.Fixture>
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Call.Schema, new DatasetOptions
             {
                 ClusteringKey = [nameof(Call.At)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 10_000 },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 10_000,
                 Write = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 4_096 },
                 SheetObjectBytes = long.MaxValue,
             });

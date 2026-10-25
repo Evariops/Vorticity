@@ -437,7 +437,7 @@ public sealed class DatasetCountsTests
         WriteAsync(store, columns, rows, new DatasetOptions
         {
             ClusteringKey = ["At"],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
             SheetObjectBytes = 0,
         });
 

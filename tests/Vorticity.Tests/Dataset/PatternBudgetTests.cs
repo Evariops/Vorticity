@@ -42,12 +42,12 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361236, 4, 98960, 79824),
-        ["QP-2 the pods of a route"] = new(4, 262276, 0, 0, 68784),
-        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262276, 0, 0, 168752),
-        ["QP-4 the spans of a trace"] = new(5, 287016, 1, 24740, 73760),
-        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90309, 1, 24740, 294560),
-        ["QP-10 the services of a residual key"] = new(4, 262276, 0, 0, 162592),
+        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361216, 4, 98960, 79824),
+        ["QP-2 the pods of a route"] = new(4, 262256, 0, 0, 68784),
+        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262256, 0, 0, 168752),
+        ["QP-4 the spans of a trace"] = new(5, 286996, 1, 24740, 73760),
+        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90304, 1, 24740, 294560),
+        ["QP-10 the services of a residual key"] = new(4, 262256, 0, 0, 162592),
     };
 
     private readonly Fixture _fixture;
@@ -142,9 +142,9 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     private readonly record struct Budget(long ColdRequests, long ColdBytes, long WarmRequests, long WarmBytes, long Allocated);
 
     /// <summary>
-    /// Four hours of spans from 20:00, 6,000 an hour, appended in parts of five minutes and compacted under periods of an
-    /// hour: the sealed hours in time slices, the HTTP status of the attributes shredded, a key one span in five hundred
-    /// holds left in the residual, the trace ids indexed.
+    /// Four hours of spans from 20:00, 6,000 an hour, appended in parts of five minutes and compacted, cut by the hour:
+    /// each hour in slices bounded by its keys, the HTTP status of the attributes shredded, a key one span in five
+    /// hundred holds left in the residual, the trace ids indexed.
     /// </summary>
     public sealed class Fixture : IAsyncLifetime
     {
@@ -161,7 +161,7 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
                 ClusteringKey = [nameof(Spanned.At)],
                 Identifiers = [nameof(Spanned.TraceId)],
                 ShreddedPaths = ["Attributes['http.status_code'].AsInt64()"],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(10_000) },
             });
             Random random = new Random(67);

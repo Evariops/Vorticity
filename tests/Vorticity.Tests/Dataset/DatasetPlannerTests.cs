@@ -125,7 +125,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, Options() with
         {
             ClusteringKey = [nameof(Call.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(87);
         for (int part = 0; part < 24; part++)
@@ -307,7 +307,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Call.Schema, Options() with
             {
                 ClusteringKey = [nameof(Call.At)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
             });
             Random random = new Random(83);
             int row = 0;
