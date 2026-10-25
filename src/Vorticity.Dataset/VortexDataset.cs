@@ -2789,25 +2789,26 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>
     /// The counts of column <paramref name="field"/> a rollup (<see cref="RollupEntry"/>) keeps over its objects, and when
     /// <paramref name="sketches"/> asks their sketches, side by side in one round trip with no open, none once this handle
-    /// read them: (null, null) for a column it keeps none of, or whose bytes fail a checksum. Under
-    /// <paramref name="values"/>, the values a question reads alone, a large region (<see cref="ReadsInPart"/>) gives the
-    /// groups of the chunks that hold them alone, read after its header (<see cref="ReadRollupValuesAsync"/>).
+    /// read them: (null, null) for a column it keeps none of, or whose bytes fail a checksum. Its counts by bucket in
+    /// place of its totals under <paramref name="buckets"/>. Under <paramref name="values"/>, the values a question reads
+    /// alone, a large region (<see cref="ReadsInPart"/>) gives the groups of the chunks that hold them alone, read after its
+    /// header (<see cref="ReadRollupValuesAsync"/>).
     /// </summary>
     internal async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadRollupCountsAsync(
-        RollupEntry rollup, int field, bool sketches, IReadOnlyList<byte[]>? values, CancellationToken cancellationToken)
+        RollupEntry rollup, int field, bool sketches, IReadOnlyList<byte[]>? values, bool buckets, CancellationToken cancellationToken)
     {
-        if (rollup.ColumnOf(field) is not { } column)
+        if (rollup.ColumnOf(field) is not { } column || column.Regions(buckets) is not ({ } counted, var sketched, _, _))
         {
             return (null, null);
         }
 
-        if (ReadsInPart(column, sketches, values) && !_synopses.TryGet(rollup.Uid, column.Counts.Offset, out Indexes.ColumnCounts? _))
+        if (ReadsInPart(column, sketches, values, buckets) && !_synopses.TryGet(rollup.Uid, counted.Offset, out Indexes.ColumnCounts? _))
         {
-            return await ReadRollupValuesAsync(rollup, column, sketches, values!, cancellationToken).ConfigureAwait(false);
+            return await ReadRollupValuesAsync(rollup, column, sketches, values!, buckets, cancellationToken).ConfigureAwait(false);
         }
 
         object?[] read = new object?[2];
-        Indexes.IndexSegment?[] regions = [column.Counts, sketches ? column.Sketches : null];
+        Indexes.IndexSegment?[] regions = [counted, sketches ? sketched : null];
         if (Recalled(rollup.Uid, regions, read, 0) > 0)
         {
             await ReadRollupRegionsAsync(rollup, regions, read, CountsOrSketches, 0, cancellationToken).ConfigureAwait(false);
@@ -2817,33 +2818,37 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// Whether a reader of <paramref name="values"/> alone reads the totals <paramref name="column"/> by their header, then
-    /// the chunks that hold them: totals of more than <see cref="PartialChunks"/> chunks, each chunk and the header
-    /// checksummed, and their sketches too when <paramref name="sketches"/> asks them.
+    /// Whether a reader of <paramref name="values"/> alone reads the totals <paramref name="column"/>, or its counts by
+    /// bucket under <paramref name="buckets"/>, by their header, then the chunks that hold them: counts of more than
+    /// <see cref="PartialChunks"/> chunks, each chunk and the header checksummed, and their sketches too when
+    /// <paramref name="sketches"/> asks them.
     /// </summary>
-    internal static bool ReadsInPart(RollupColumn column, bool sketches, IReadOnlyList<byte[]>? values) =>
-        values is not null && column.CountsHead > 0
-        && column.Counts.Length - column.CountsHead > PartialChunks * Indexes.ColumnCounts.ChunkBytes
-        && (!sketches || column.Sketches is null || column.SketchesHead > 0);
+    internal static bool ReadsInPart(RollupColumn column, bool sketches, IReadOnlyList<byte[]>? values, bool buckets) =>
+        values is not null && column.Regions(buckets) is ({ } counts, var sketched, int countsHead, int sketchesHead)
+        && countsHead > 0 && counts.Length - countsHead > PartialChunks * Indexes.ColumnCounts.ChunkBytes
+        && (!sketches || sketched is null || sketchesHead > 0);
 
     /// <summary>
-    /// The groups of <paramref name="values"/> in a rollup's totals <paramref name="column"/>, and when
-    /// <paramref name="sketches"/> asks their sketches: the headers side by side in a round trip, then the chunks that hold
+    /// The groups of <paramref name="values"/> in a rollup's totals <paramref name="column"/>, or its counts by bucket under
+    /// <paramref name="buckets"/>, and when <paramref name="sketches"/> asks their sketches: the headers side by side in a
+    /// round trip, then the chunks that hold
     /// the values and their entries' sketches in another, each checked against its checksum, none once this handle read
     /// them. The counts hold those chunks' groups alone, their entries from 0, and the sketches as many entries; (null,
     /// null) when a header or a chunk fails its checksum.
     /// </summary>
     private async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadRollupValuesAsync(
-        RollupEntry rollup, RollupColumn column, bool sketches, IReadOnlyList<byte[]> values, CancellationToken cancellationToken)
+        RollupEntry rollup, RollupColumn column, bool sketches, IReadOnlyList<byte[]> values, bool buckets, CancellationToken cancellationToken)
     {
-        Indexes.IndexSegment? sketched = sketches ? column.Sketches : null;
+        (Indexes.IndexSegment? regionOfCounts, Indexes.IndexSegment? regionOfSketches, int countsHead, int sketchesHead) = column.Regions(buckets);
+        Indexes.IndexSegment counted = regionOfCounts!.Value;
+        Indexes.IndexSegment? sketched = sketches ? regionOfSketches : null;
         try
         {
             object?[] heads = new object?[2];
             Indexes.IndexSegment?[] headRegions =
             [
-                new Indexes.IndexSegment(column.Counts.Offset, (uint)column.CountsHead, 0),
-                sketched is { } region ? new Indexes.IndexSegment(region.Offset, (uint)column.SketchesHead, 0) : null,
+                new Indexes.IndexSegment(counted.Offset, (uint)countsHead, 0),
+                sketched is { } region ? new Indexes.IndexSegment(region.Offset, (uint)sketchesHead, 0) : null,
             ];
             if (Recalled(rollup.Uid, headRegions, heads, HeadKey) > 0)
             {
@@ -2864,7 +2869,7 @@ public sealed class VortexDataset : IAsyncDisposable
             for (int i = 0; i < chunks.Count; i++)
             {
                 Indexes.CountsChunk chunk = directory.Chunks[chunks[i]];
-                pieces[i] = new Indexes.IndexSegment(column.Counts.Offset + (ulong)(directory.HeaderBytes + chunk.Offset), (uint)chunk.Length, 0);
+                pieces[i] = new Indexes.IndexSegment(counted.Offset + (ulong)(directory.HeaderBytes + chunk.Offset), (uint)chunk.Length, 0);
             }
 
             for (int i = 0; i < sketchChunks.Count; i++)

@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Indexes;
+using Vorticity.IO;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
@@ -10,7 +12,8 @@ namespace Vorticity.Dataset;
 /// The rollups (<see cref="RollupEntry"/>) an aggregation takes in place of the objects they cover: of the highest rank
 /// first, those the counts answer for as they answer for an object (<see cref="CountsAnswer.FieldOf(RollupEntry)"/>), its
 /// union of summaries proving the filter and the keys, none covering another; under a rollup that does not answer, those
-/// of the rank below; under them, the objects. Each is taken with the column whose totals answer.
+/// of the rank below; under them, the objects. Each is taken with the column whose totals answer, or whose counts by bucket
+/// answer bucket by bucket (<see cref="CountsAnswer.BucketsOf"/>), with the summaries of each bucket.
 /// </summary>
 /// <remarks>
 /// A rollup's rows are its objects', which the scan must cover whole and which no other part of it may read: only a scan of
@@ -19,13 +22,16 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal sealed class RollupChoice
 {
-    // The rollups taken, with their columns, by their levels and their first tree keys.
-    private readonly List<(RollupEntry Rollup, int Field)> _chosen;
+    // The rollups taken, with their columns and their buckets' summaries, by their levels and their first tree keys.
+    private readonly List<(RollupEntry Rollup, int Field, ObjectSummaries?[]? Buckets)> _chosen;
 
-    private RollupChoice(List<(RollupEntry Rollup, int Field)> chosen) => _chosen = chosen;
+    private RollupChoice(List<(RollupEntry Rollup, int Field, ObjectSummaries?[]? Buckets)> chosen) => _chosen = chosen;
 
-    /// <summary>The rollups taken, each with the column whose totals answer, by level and first tree key.</summary>
-    internal IReadOnlyList<(RollupEntry Rollup, int Field)> Chosen => _chosen;
+    /// <summary>
+    /// The rollups taken, by level and first tree key, each with the column whose totals answer, or whose counts by bucket
+    /// do with each bucket's summaries, null for a bucket the filter refutes.
+    /// </summary>
+    internal IReadOnlyList<(RollupEntry Rollup, int Field, ObjectSummaries?[]? Buckets)> Chosen => _chosen;
 
     /// <summary>
     /// The rollups <paramref name="answer"/> takes over <paramref name="version"/>, those <paramref name="pruner"/> refutes
@@ -54,12 +60,22 @@ internal sealed class RollupChoice
             left.Rank != right.Rank ? right.Rank.CompareTo(left.Rank)
             : left.Level != right.Level ? left.Level.CompareTo(right.Level)
             : left.FirstKey.Span.SequenceCompareTo(right.FirstKey.Span));
-        List<(RollupEntry Rollup, int Field)> chosen = [];
+        ClusteringKey? key = version.Schema.Key;
+        List<(RollupEntry Rollup, int Field, ObjectSummaries?[]? Buckets)> chosen = [];
         foreach (RollupEntry rollup in candidates)
         {
-            if (!Overlaps(chosen, rollup) && answer.FieldOf(rollup) is int field)
+            if (Overlaps(chosen, rollup))
             {
-                chosen.Add((rollup, field));
+                continue;
+            }
+
+            if (answer.FieldOf(rollup) is int field)
+            {
+                chosen.Add((rollup, field, null));
+            }
+            else if (key is not null && answer.BucketsOf(rollup, key, pruner) is (int byBucket, var buckets) && ByBucket(rollup, byBucket, buckets, answer))
+            {
+                chosen.Add((rollup, byBucket, buckets));
             }
         }
 
@@ -113,10 +129,48 @@ internal sealed class RollupChoice
         return found >= 0 && _chosen[found].Rollup.Level == level ? found : -1;
     }
 
-    /// <summary>Whether <paramref name="rollup"/> covers a key of its level a rollup of <paramref name="chosen"/> covers.</summary>
-    private static bool Overlaps(List<(RollupEntry Rollup, int Field)> chosen, RollupEntry rollup)
+    /// <summary>
+    /// Whether reading the counts by bucket of column <paramref name="field"/> of <paramref name="rollup"/> costs no more
+    /// than descending to the rollups below it, about: the bytes read, and for each request the bytes a read bridges
+    /// rather than ask again (<see cref="SegmentReadOptions.DefaultCoalesceGapBytes"/>), against the totals of as many
+    /// children as the buckets answered hold, each taken as large as the rollup's own, which a column of many values comes
+    /// near: a window that keeps a few of a rollup's buckets reads their children.
+    /// </summary>
+    private static bool ByBucket(RollupEntry rollup, int field, ObjectSummaries?[] buckets, CountsAnswer answer)
     {
-        foreach ((RollupEntry taken, int _) in chosen)
+        RollupColumn column = rollup.ColumnOf(field)!.Value;
+        int answered = 0;
+        foreach (ObjectSummaries? bucket in buckets)
+        {
+            answered += bucket is null ? 0 : 1;
+        }
+
+        double children = Math.Max(1.0, (double)rollup.Children / rollup.Buckets.Count);
+        return Cost(column, answer, buckets: true) <= answered * children * Cost(column, answer, buckets: false);
+    }
+
+    /// <summary>
+    /// What reading the totals of <paramref name="column"/>, or its counts by bucket under <paramref name="buckets"/>, costs
+    /// <paramref name="answer"/>, about: its bytes, in part under the values asked, a chunk a value, and a request's.
+    /// </summary>
+    private static double Cost(RollupColumn column, CountsAnswer answer, bool buckets)
+    {
+        const double Request = SegmentReadOptions.DefaultCoalesceGapBytes;
+        (IndexSegment? counts, IndexSegment? sketches, int countsHead, int sketchesHead) = column.Regions(buckets);
+        IndexSegment? sketched = answer.AsksSketches ? sketches : null;
+        if (VortexDataset.ReadsInPart(column, answer.AsksSketches, answer.Values, buckets))
+        {
+            double chunks = (double)answer.Values!.Length * ColumnCounts.ChunkBytes;
+            return countsHead + chunks + (sketched is null ? 0 : sketchesHead + chunks) + (2 * Request);
+        }
+
+        return (counts?.Length ?? 0) + (sketched?.Length ?? 0) + Request;
+    }
+
+    /// <summary>Whether <paramref name="rollup"/> covers a key of its level a rollup of <paramref name="chosen"/> covers.</summary>
+    private static bool Overlaps(List<(RollupEntry Rollup, int Field, ObjectSummaries?[]? Buckets)> chosen, RollupEntry rollup)
+    {
+        foreach ((RollupEntry taken, int _, ObjectSummaries?[]? _) in chosen)
         {
             if (taken.Level == rollup.Level
                 && taken.FirstKey.Span.SequenceCompareTo(rollup.LastKey.Span) <= 0

@@ -271,12 +271,9 @@ internal sealed class CountsAnswer
             return null;
         }
 
-        foreach ((_, string path, FieldExpr key) in _constants)
+        if (!Constant(rollup.Summaries))
         {
-            if (ConstantOf(rollup.Summaries, path, key) is null)
-            {
-                return null;
-            }
+            return null;
         }
 
         // The column asked, or the least whose totals answer; its totals carry every measure the request reads, sketched
@@ -284,26 +281,91 @@ internal sealed class CountsAnswer
         RollupColumn? counted = null;
         foreach (RollupColumn column in rollup.Columns)
         {
-            if ((Column is null || column.Field == Column) && Answers(column) && (counted is not { } least || column.Counts.Length < least.Counts.Length))
+            if ((Column is null || column.Field == Column) && Answers(column, buckets: false) && (counted is not { } least || column.Counts.Length < least.Counts.Length))
             {
                 counted = column;
             }
         }
 
         return counted?.Field;
+    }
 
-        bool Answers(RollupColumn column)
+    /// <summary>
+    /// The column whose counts by bucket answer for the rollup <paramref name="rollup"/> bucket by bucket, where its totals
+    /// do not (<see cref="FieldOf(RollupEntry)"/>), and the summaries of each bucket: the rollup's, the key's first column
+    /// bounded by the bucket's (<see cref="ClusteringKey.Within"/>), which prove every conjunct the counts do not hold true
+    /// over the bucket's rows and every other key constant; null for a bucket they refute the filter over
+    /// (<paramref name="pruner"/>), which gives no row. Null when a bucket does neither, or the rollup keeps no buckets.
+    /// </summary>
+    internal (int Field, ObjectSummaries?[] Buckets)? BucketsOf(RollupEntry rollup, ClusteringKey key, SummaryPruner? pruner)
+    {
+        if (rollup.Buckets.Count < 2)
         {
-            foreach ((_, int field, _, bool sketch) in Measures)
+            return null;
+        }
+
+        ObjectSummaries?[] buckets = new ObjectSummaries?[rollup.Buckets.Count];
+        for (int b = 0; b < buckets.Length; b++)
+        {
+            RollupBucket bucket = rollup.Buckets[b];
+            ObjectSummaries summaries = key.Within(rollup.Summaries, bucket.Low, bucket.High);
+            if (pruner is not null && !pruner.MayMatch(summaries.Columns, bucket.Rows))
             {
-                if (Array.IndexOf(column.MeasureFields, field) < 0 || (sketch && (!column.Sketched || _request.SketchBits > ColumnCountsBuilder.SketchBits)))
-                {
-                    return false;
-                }
+                continue;
             }
 
-            return !column.LeavesOut || (!Keyed && Values is null);
+            if ((_rest is { } rest && !rest.MustMatch(summaries.Columns, bucket.Rows)) || !Constant(summaries))
+            {
+                return null;
+            }
+
+            buckets[b] = summaries;
         }
+
+        RollupColumn? counted = null;
+        foreach (RollupColumn column in rollup.Columns)
+        {
+            if (column.BucketCounts is { } region && (Column is null || column.Field == Column) && Answers(column, buckets: true)
+                && (counted is not { } least || region.Length < least.BucketCounts!.Value.Length))
+            {
+                counted = column;
+            }
+        }
+
+        return counted is { } chosen ? (chosen.Field, buckets) : null;
+    }
+
+    /// <summary>
+    /// Whether the totals of <paramref name="column"/>, or its counts by bucket under <paramref name="buckets"/>, carry
+    /// every measure the request reads, sketched when a quantile asks, and keep every value when a key or the values asked
+    /// read them.
+    /// </summary>
+    private bool Answers(RollupColumn column, bool buckets)
+    {
+        foreach ((_, int field, _, bool sketch) in Measures)
+        {
+            if (Array.IndexOf(column.MeasureFields, field) < 0
+                || (sketch && (!column.Sketched || (buckets && column.BucketSketches is null) || _request.SketchBits > ColumnCountsBuilder.SketchBits)))
+            {
+                return false;
+            }
+        }
+
+        return !column.LeavesOut || (!Keyed && Values is null);
+    }
+
+    /// <summary>Whether <paramref name="summaries"/> prove every key of another column, or of a function of one, constant.</summary>
+    private bool Constant(ObjectSummaries summaries)
+    {
+        foreach ((_, string path, FieldExpr key) in _constants)
+        {
+            if (ConstantOf(summaries, path, key) is null)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

@@ -150,6 +150,27 @@ internal sealed class ClusteringKey
         return ObjectSummaries.From(columns);
     }
 
+    /// <summary>
+    /// <paramref name="summaries"/> with the key's first column bounded by <paramref name="low"/> and <paramref name="high"/>,
+    /// those of a part of the rows they summarize, a rollup's bucket of one clustering value, a function of that column:
+    /// what a filter or a key on the column is then proven by over the part. The other columns keep the whole's bounds,
+    /// which hold over any part of it.
+    /// </summary>
+    internal ObjectSummaries Within(ObjectSummaries summaries, FilterLiteral low, FilterLiteral high)
+    {
+        bool held = summaries.TryGet(_paths[0], out ColumnSummary whole);
+        List<ColumnSummary> columns = [new ColumnSummary(_paths[0], low, true, high, true, held && whole.IsExact, held ? whole.NullCount : 0, held && whole.HasNullCount)];
+        foreach (ColumnSummary column in summaries.Columns)
+        {
+            if (!string.Equals(column.Path, _paths[0], StringComparison.Ordinal))
+            {
+                columns.Add(column);
+            }
+        }
+
+        return ObjectSummaries.From(columns);
+    }
+
     /// <summary>The key's columns, in key order.</summary>
     public IReadOnlyList<string> Paths => _paths;
 

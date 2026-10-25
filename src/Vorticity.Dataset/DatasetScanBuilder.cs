@@ -566,11 +566,11 @@ internal sealed class DatasetScanBuilder
         // The rollups a scan of the whole version takes, each standing for the objects it covers, which the walk passes
         // over; then the objects the walk meets that no rollup covers. The rollups come first, as many as rolled holds.
         RollupChoice? rollups = await RollupsAsync(answer, cancellationToken).ConfigureAwait(false);
-        List<RollupEntry>? rolled = rollups is null ? null : Rolled(rollups);
+        List<(RollupEntry Rollup, ObjectSummaries?[]? Buckets)>? rolled = rollups is null ? null : Rolled(rollups);
         List<(PositionedObject Held, int? Field)> objects = [];
         if (rollups is not null)
         {
-            foreach ((RollupEntry _, int field) in rollups.Chosen)
+            foreach ((RollupEntry _, int field, ObjectSummaries?[]? _) in rollups.Chosen)
             {
                 objects.Add((default, field));
             }
@@ -597,23 +597,34 @@ internal sealed class DatasetScanBuilder
                 for (int ahead = o; ahead < objects.Count && ahead < o + width; ahead++)
                 {
                     reads[ahead] ??= objects[ahead].Field is not { } next ? NoCounts
-                        : ahead < rolled?.Count ? _dataset.ReadRollupCountsAsync(rolled[ahead], next, answer.AsksSketches, answer.Values, stopped.Token).AsTask()
+                        : ahead < rolled?.Count
+                            ? _dataset.ReadRollupCountsAsync(rolled[ahead].Rollup, next, answer.AsksSketches, answer.Values, rolled[ahead].Buckets is not null, stopped.Token).AsTask()
                         : _dataset.ReadCountsAsync(objects[ahead].Held.Entry, next, answer.AsksSketches, stopped.Token).AsTask();
                 }
 
+                // A rollup taken by bucket gives the states of each bucket the filter does not refute.
                 PositionedObject held = objects[o].Held;
-                RollupEntry? taken = o < rolled?.Count ? rolled[o] : null;
+                RollupEntry? taken = o < rolled?.Count ? rolled[o].Rollup : null;
+                ObjectSummaries?[]? buckets = o < rolled?.Count ? rolled[o].Buckets : null;
                 StateRows? rows = null;
+                List<StateRows>? byBucket = null;
                 if (reads[o] is { } read && read != NoCounts)
                 {
                     reads[o] = NoCounts;
                     if (await read.ConfigureAwait(false) is ({ } counts, var sketched))
                     {
-                        rows = answer.Rows(counts, sketched, taken is not null ? taken.Summaries : answer.SummariesOf(held));
+                        if (buckets is null)
+                        {
+                            rows = answer.Rows(counts, sketched, taken is not null ? taken.Summaries : answer.SummariesOf(held));
+                        }
+                        else
+                        {
+                            byBucket = BucketRows(answer, counts, sketched, buckets);
+                        }
                     }
                 }
 
-                if (rows is null && taken is not null)
+                if (rows is null && byBucket is null && taken is not null)
                 {
                     // A rollup whose totals did not answer after all: its objects, one by one, after the others, the rollups
                     // left first; their reads begin as the loop meets them, the reads begun before them kept.
@@ -629,7 +640,7 @@ internal sealed class DatasetScanBuilder
                     continue;
                 }
 
-                if (rows is null)
+                if (rows is null && byBucket is null)
                 {
                     // This object's rows and those of the objects after it the counts do not answer, up to the next they may:
                     // a part of the scan, which reads them as it would, ahead and past their sheets. Under rollups, a part
@@ -656,13 +667,31 @@ internal sealed class DatasetScanBuilder
                 {
                     metrics.ObjectsAnswered += taken?.Objects ?? 1;
                     metrics.RollupsAnswered += taken is null ? 0 : 1;
-                    metrics.StateRows += rows.Count;
+                    metrics.StateRows += rows?.Count ?? 0;
+                    for (int b = 0; b < (byBucket?.Count ?? 0); b++)
+                    {
+                        metrics.StateRows += byBucket![b].Count;
+                    }
                 }
 
-                for (int at = 0; at < rows.Count; at += StateRows.BatchRows)
+                if (rows is not null)
                 {
-                    arena.Reset();
-                    yield return rows.Batch(arena, at, Math.Min(StateRows.BatchRows, rows.Count - at), held.FirstRow);
+                    for (int at = 0; at < rows.Count; at += StateRows.BatchRows)
+                    {
+                        arena.Reset();
+                        yield return rows.Batch(arena, at, Math.Min(StateRows.BatchRows, rows.Count - at), held.FirstRow);
+                    }
+
+                    continue;
+                }
+
+                for (int b = 0; b < byBucket!.Count; b++)
+                {
+                    for (int at = 0; at < byBucket[b].Count; at += StateRows.BatchRows)
+                    {
+                        arena.Reset();
+                        yield return byBucket[b].Batch(arena, at, Math.Min(StateRows.BatchRows, byBucket[b].Count - at), held.FirstRow);
+                    }
                 }
             }
         }
@@ -695,16 +724,47 @@ internal sealed class DatasetScanBuilder
     private static long InPart(Indexes.IndexSegment region, int head, int values) =>
         head + Math.Min(region.Length - (long)head, (long)values * Indexes.ColumnCounts.ChunkBytes);
 
-    /// <summary>The rollups <paramref name="rollups"/> takes, in their order.</summary>
-    private static List<RollupEntry> Rolled(RollupChoice rollups)
+    /// <summary>The rollups <paramref name="rollups"/> takes, in their order, each with its buckets' summaries when taken by bucket.</summary>
+    private static List<(RollupEntry Rollup, ObjectSummaries?[]? Buckets)> Rolled(RollupChoice rollups)
     {
-        List<RollupEntry> rolled = new List<RollupEntry>(rollups.Chosen.Count);
-        foreach ((RollupEntry rollup, int _) in rollups.Chosen)
+        List<(RollupEntry Rollup, ObjectSummaries?[]? Buckets)> rolled = new List<(RollupEntry Rollup, ObjectSummaries?[]? Buckets)>(rollups.Chosen.Count);
+        foreach ((RollupEntry rollup, int _, ObjectSummaries?[]? buckets) in rollups.Chosen)
         {
-            rolled.Add(rollup);
+            rolled.Add((rollup, buckets));
         }
 
         return rolled;
+    }
+
+    /// <summary>
+    /// The states of each bucket of <paramref name="counts"/>, kept by bucket, with <paramref name="sketches"/> their
+    /// sketches, each bucket with its summaries of <paramref name="buckets"/>, none for a bucket the filter refutes; null
+    /// when a bucket's counts do not answer, or the counts are not of those buckets.
+    /// </summary>
+    private static List<StateRows>? BucketRows(CountsAnswer answer, Indexes.ColumnCounts counts, Indexes.ColumnSketches? sketches, ObjectSummaries?[] buckets)
+    {
+        if (counts.Buckets != buckets.Length)
+        {
+            return null;
+        }
+
+        List<StateRows> rows = [];
+        for (int b = 0; b < buckets.Length; b++)
+        {
+            if (buckets[b] is not { } summaries || Indexes.CountsBuckets.Apart(counts, sketches, b) is not ({ } apart, var apartSketches))
+            {
+                continue;
+            }
+
+            if (answer.Rows(apart, apartSketches, summaries) is not { } held)
+            {
+                return null;
+            }
+
+            rows.Add(held);
+        }
+
+        return rows;
     }
 
     /// <summary>The objects <paramref name="rollup"/> covers, each with the column whose counts answer for it, in key order.</summary>
@@ -1299,26 +1359,38 @@ internal sealed class DatasetScanBuilder
         // A rollup the scan takes reads its column's totals, and their sketches beside them for a quantile, in a request,
         // for the objects it covers, which the walk passes over.
         RollupChoice? rollups = answer is null ? null : await RollupsAsync(answer, cancellationToken).ConfigureAwait(false);
-        foreach ((RollupEntry rollup, int field) in rollups?.Chosen ?? [])
+        foreach ((RollupEntry rollup, int field, ObjectSummaries?[]? buckets) in rollups?.Chosen ?? [])
         {
-            // Under values asked, large totals read their header, then the chunks of the values, a chunk each at most.
-            RollupColumn totals = rollup.ColumnOf(field)!.Value;
-            Indexes.IndexSegment? sketched = answer!.AsksSketches ? totals.Sketches : null;
+            // Under values asked, large counts read their header, then the chunks of the values, a chunk each at most. A
+            // rollup taken by bucket reads its counts by bucket, and answers for the rows of the buckets the filter keeps.
+            RollupColumn kept = rollup.ColumnOf(field)!.Value;
+            (Indexes.IndexSegment? counted, Indexes.IndexSegment? sketches, int countsHead, int sketchesHead) = kept.Regions(buckets is not null);
+            Indexes.IndexSegment? sketched = answer!.AsksSketches ? sketches : null;
             string column = _version.Schema.Columns[field].Name;
-            bool inPart = VortexDataset.ReadsInPart(totals, answer.AsksSketches, answer.Values);
+            bool inPart = VortexDataset.ReadsInPart(kept, answer.AsksSketches, answer.Values, buckets is not null);
             int regions = (sketched is null ? 1 : 2) * (inPart ? 2 : 1);
-            string read = inPart ? $"the header of the totals of {column} and the chunks of {answer.Values!.Length} values" : $"the totals of {column}";
+            string what = buckets is null ? $"totals of {column}" : $"counts by bucket of {column}";
+            string read = inPart ? $"the header of the {what} and the chunks of {answer.Values!.Length} values" : $"the {what}";
+            long rows = buckets is null ? rollup.Rows : 0;
+            int answered = 0;
+            for (int b = 0; b < (buckets?.Length ?? 0); b++)
+            {
+                answered += buckets![b] is null ? 0 : 1;
+                rows += buckets[b] is null ? 0 : rollup.Buckets[b].Rows;
+            }
+
             states.Add(new StatesStep(
                 rollup.Key,
                 "rollup",
-                $"{read}{(sketched is null ? string.Empty : " and their sketches")} over {rollup.Objects} objects, rank {rollup.Rank}",
+                $"{read}{(sketched is null ? string.Empty : " and their sketches")} over {rollup.Objects} objects, rank {rollup.Rank}"
+                    + (buckets is null ? string.Empty : $", {answered} of its {buckets.Length} buckets"),
                 regions));
-            keptRows += rollup.Rows;
+            keptRows += rows;
             segments += regions;
             bytes += inPart
-                ? InPart(totals.Counts, totals.CountsHead, answer.Values!.Length) + (sketched is { } some ? InPart(some, totals.SketchesHead, answer.Values.Length) : 0)
-                : totals.Counts.Length + (sketched?.Length ?? 0);
-            mayMatch = true;
+                ? InPart(counted!.Value, countsHead, answer.Values!.Length) + (sketched is { } some ? InPart(some, sketchesHead, answer.Values.Length) : 0)
+                : counted!.Value.Length + (sketched?.Length ?? 0);
+            mayMatch |= rows > 0;
         }
 
         await foreach (PositionedObject held in WalkAsync(cancellationToken, answer, rollups).ConfigureAwait(false))

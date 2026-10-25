@@ -163,12 +163,19 @@ public sealed partial class DatasetRollupsTests
         ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
         int rollups = plan.States.Count(step => step.Read == "rollup");
         int objects = plan.States.Count(step => step.Read == "states");
-        Console.WriteLine($"ROLLUPS {question}: {rollups} rollups and {objects} objects' counts answer, {plan.States.Length - rollups - objects} other steps");
+        int byBucket = plan.States.Count(step => step.Read == "rollup" && step.Detail.Contains("by bucket", StringComparison.Ordinal));
+        Console.WriteLine($"ROLLUPS {question}: {rollups} rollups, {byBucket} of them by bucket, and {objects} objects' counts answer, {plan.States.Length - rollups - objects} other steps");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
         if (question is "count by service" or "measures by service, hours two to eight" or "median bytes by service" or "count by service and hour")
         {
             Assert.True(rollups > 0, $"{question}: no rollup answered");
+        }
+
+        // A rollup of rank 2 or more keeps its hours apart, which answer a question by the hour bucket by bucket.
+        if (question == "count by service and hour")
+        {
+            Assert.True(byBucket > 0, $"{question}: no rollup answered by bucket");
         }
     }
 

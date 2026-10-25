@@ -52,6 +52,13 @@ internal readonly record struct RollupColumn(int Field, IndexSegment Counts, Ind
     /// <summary>The bytes of the header and directory of their sketches, as <see cref="CountsHead"/>; 0 for none.</summary>
     public int BucketSketchesHead { get; init; }
 
+    /// <summary>
+    /// The regions a reader of the totals reads, or of the counts by bucket under <paramref name="buckets"/>, with the
+    /// bytes of their headers: the counts, which a column always keeps of its totals, and their sketches.
+    /// </summary>
+    internal (IndexSegment? Counts, IndexSegment? Sketches, int CountsHead, int SketchesHead) Regions(bool buckets) =>
+        buckets ? (BucketCounts, BucketSketches, BucketCountsHead, BucketSketchesHead) : (Counts, Sketches, CountsHead, SketchesHead);
+
     /// <inheritdoc/>
     public bool Equals(RollupColumn other) =>
         Field == other.Field && Counts == other.Counts && Sketches == other.Sketches && BucketCounts == other.BucketCounts
