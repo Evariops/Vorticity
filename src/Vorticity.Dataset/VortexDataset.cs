@@ -2551,6 +2551,19 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The batches where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
     internal PredicatePages Predicates { get; } = new PredicatePages();
 
+    /// <summary>What a clustering of each column the filters of this handle's questions read would have spared them (<see cref="ClusteringAdvisor"/>).</summary>
+    internal ClusteringAdvisor Advisor { get; } = new ClusteringAdvisor();
+
+    /// <summary>
+    /// The columns a clustering by which would have spared the questions this handle asked the most bytes, the most first: of
+    /// each object read as rows under a filter, its bytes of the columns read, by the cost formula, times the share of its rows
+    /// the filter left out, credited to each top-level column the filter reads but the key's first. A diagnostic, which
+    /// the telemetry counts too (<c>vortex.dataset.clustering.avoidable_bytes</c>, by column): the library never clusters by
+    /// a column on its own, a clustering being declared when the dataset is created.
+    /// </summary>
+    /// <returns>The columns credited, ranked; empty before a question read an object as rows under a filter.</returns>
+    public IReadOnlyList<ClusteringAdvice> RecommendClustering() => Advisor.Ranked();
+
     /// <summary>A synopsis read from the bytes of the region at <paramref name="position"/> of those asked, and the bytes it holds in memory.</summary>
     private delegate (object Synopsis, long Bytes) SynopsisReader(int position, ReadOnlySpan<byte> bytes);
 

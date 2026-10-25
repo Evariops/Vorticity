@@ -82,6 +82,18 @@ follows it. A question bounded on the key's first column then reads whole object
 expiry by such a bound drops whole objects, and a long range can be asked a value at a time, as
 [Reading](#reading) shows.
 
+Which column to lead the key with is the application's choice, and the questions it asks tell. A handle
+keeps count: `RecommendClustering()` ranks the columns its questions' filters read by the bytes a
+clustering by each would have spared the objects it read as rows, and the telemetry counts the same
+(`vortex.dataset.clustering.avoidable_bytes`). It is advice for the next dataset, never applied.
+
+```csharp
+foreach (ClusteringAdvice advice in dataset.RecommendClustering())
+{
+    Console.WriteLine($"{advice.Column}: {advice.BytesAvoided:N0} bytes over {advice.Objects} objects");
+}
+```
+
 ## Adding rows
 
 `StartObject()` returns an `ObjectDraft`, which is a key in the store plus a `VortexFileWriter` with

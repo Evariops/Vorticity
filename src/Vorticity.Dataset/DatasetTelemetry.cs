@@ -100,6 +100,19 @@ internal static class DatasetTelemetry
     private static readonly Counter<long> VacuumDeleted = VortexTelemetry.Meter.CreateCounter<long>(
         "vortex.dataset.vacuum.objects_deleted", "{object}", "Objects vacuums deleted.");
 
+    private static readonly Counter<long> ClusteringAvoidableBytes = VortexTelemetry.Meter.CreateCounter<long>(
+        "vortex.dataset.clustering.avoidable_bytes", "By",
+        "Bytes the objects read as rows under a filter would have been spared by a clustering of the filter's column, by column (ClusteringAdvice).");
+
+    /// <summary>Counts the bytes a clustering by <paramref name="column"/> would have spared an object read as rows, once an object.</summary>
+    internal static void ClusteringAvoidable(string column, long bytes)
+    {
+        if (ClusteringAvoidableBytes.Enabled)
+        {
+            ClusteringAvoidableBytes.Add(bytes, new KeyValuePair<string, object?>("vortex.column", column));
+        }
+    }
+
     /// <summary>Starts the activity of one commit, or returns null when nothing listens.</summary>
     internal static Activity? StartCommit(CommitKind kind, string? location)
     {

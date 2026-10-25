@@ -367,6 +367,54 @@ internal sealed class DatasetScanBuilder
 
     private FamilyProof? _proof;
 
+    /// <summary>The top-level columns the scan's filter reads but the key's first, by name, which a clustering by would narrow; found once.</summary>
+    private List<string> FilterColumns()
+    {
+        if (_filterColumns is null)
+        {
+            HashSet<string> paths = [];
+            _filter!.CollectFields(paths);
+            string? leading = _version.Schema.Key?.InstantPath;
+            List<string> columns = [];
+            foreach (string path in paths)
+            {
+                int dot = path.IndexOf('.', StringComparison.Ordinal);
+                string top = dot < 0 ? path : path[..dot];
+                if (!string.Equals(top, leading, StringComparison.Ordinal) && _version.Schema.DType.IndexOfField(top) >= 0 && !columns.Contains(top))
+                {
+                    columns.Add(top);
+                }
+            }
+
+            columns.Sort(StringComparer.Ordinal);
+            _filterColumns = columns;
+        }
+
+        return _filterColumns;
+    }
+
+    private List<string>? _filterColumns;
+
+    /// <summary>The top-level columns the scan reads, by their places: those its mask selects, or every one; found once.</summary>
+    private int[] FieldsRead()
+    {
+        if (_fieldsRead is null)
+        {
+            int count = _version.Schema.DType.IsDefault ? 0 : _version.Schema.DType.FieldCount;
+            int[] fields = new int[_mask is { } mask ? mask.SelectedCount(count) : count];
+            for (int i = 0; i < fields.Length; i++)
+            {
+                fields[i] = _mask is { } selected ? selected.SelectedField(i) : i;
+            }
+
+            _fieldsRead = fields;
+        }
+
+        return _fieldsRead;
+    }
+
+    private int[]? _fieldsRead;
+
     /// <summary>What keys the scan filter's pages (<see cref="PredicatePages"/>): its canonical text and the version's columns.</summary>
     private UInt128 PredicateKey => _predicateKey ??=
         System.IO.Hashing.XxHash128.HashToUInt128(System.Runtime.InteropServices.MemoryMarshal.AsBytes(ExprText.Format(_filter!).AsSpan()))
@@ -1614,6 +1662,7 @@ internal sealed class DatasetScanBuilder
                 // The object's own scan, which every object of the version's schema with no row
                 // marked is read by, rebased into one view for the whole object.
                 List<RowRange>? kept = predicate != default && !_dataset.Predicates.Wide(held.Entry.Uid, predicate) ? [] : null;
+                long selected = 0;
                 RecordBatch? view = null;
                 ScanBuilder scan = Of(lease.File, held);
                 using QueryMemory? ahead = ReadsAhead(scan, lease.File);
@@ -1632,12 +1681,19 @@ internal sealed class DatasetScanBuilder
                         }
                     }
 
+                    selected += batch.SelectedRows;
                     yield return InDataset(batch, held.FirstRow, ref view);
                 }
 
                 if (kept is not null)
                 {
                     _dataset.Predicates.Keep(held.Entry.Uid, predicate, kept, held.Entry.Rows, cache);
+                }
+
+                // What a clustering by each column of the filter would have spared the object, read whole as rows.
+                if (_filter is not null && Covered(held) == held.Entry.Rows && FilterColumns() is { Count: > 0 } credited)
+                {
+                    _dataset.Advisor.Read(credited, PathCosts.Rows(held.Entry, FieldsRead()).Bytes, selected, held.Entry.Rows);
                 }
 
                 yield break;

@@ -2807,6 +2807,19 @@ Vorticity:     property ImmutableArray<int> ChunkRows { get; init; }
 Vorticity:     property WriteBytes Bytes { get; init; }
 Vorticity:     property int BlockRows { get; init; }
 Vorticity:     property long RowCount { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.ClusteringAdvice : IEquatable<ClusteringAdvice>
+Vorticity.Dataset:     ctor ClusteringAdvice(string, long, long)
+Vorticity.Dataset:     method ClusteringAdvice <Clone>$()
+Vorticity.Dataset:     method bool Equals(ClusteringAdvice)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(ClusteringAdvice, ClusteringAdvice)
+Vorticity.Dataset:     method bool op_Inequality(ClusteringAdvice, ClusteringAdvice)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     method void Deconstruct(out string, out long, out long)
+Vorticity.Dataset:     property long BytesAvoided { get; init; }
+Vorticity.Dataset:     property long Objects { get; init; }
+Vorticity.Dataset:     property string Column { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.ClusteringOptions : IEquatable<ClusteringOptions>
 Vorticity.Dataset:     ctor ClusteringOptions()
 Vorticity.Dataset:     method ClusteringOptions <Clone>$()
@@ -3206,6 +3219,7 @@ Vorticity.Dataset:     property double Covered { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.VortexDataset : IAsyncDisposable
 Vorticity.Dataset:     method IAsyncEnumerable<DataObject> ListObjectsAsync(CancellationToken = default)
 Vorticity.Dataset:     method IAsyncEnumerable<ValuePart<TValue, TAnswer>> AskByValuesAsync<TValue, TAnswer>(TValue, TValue, Func<TValue, TValue, CancellationToken, ValueTask<TAnswer>>, bool = default, CancellationToken = default)
+Vorticity.Dataset:     method IReadOnlyList<ClusteringAdvice> RecommendClustering()
 Vorticity.Dataset:     method ObjectDraft StartObject()
 Vorticity.Dataset:     method Scan Scan(ReadOnlySpan<string>)
 Vorticity.Dataset:     method Scan<TRecord> Scan<TRecord>()
