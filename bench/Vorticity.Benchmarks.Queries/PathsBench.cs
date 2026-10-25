@@ -89,7 +89,7 @@ internal static partial class PathsBench
         /// <summary>Whether the bench asks the client's questions, QP-1 to QP-10, over the requests and the client's spans and log records (<c>--qp</c>).</summary>
         internal bool Qp { get; init; }
 
-        /// <summary>The hours of the client's spans and log records (<c>--qp-hours</c>): a day sealed, and the hours of the next fresh.</summary>
+        /// <summary>The hours of the client's spans and log records (<c>--qp-hours</c>): a day in objects of its own, and the hours of the next still being compacted.</summary>
         internal int QpHours { get; init; } = 30;
 
         /// <summary>Their rows a second (<c>--qp-rate</c>): a tenth of the design's.</summary>
@@ -365,8 +365,8 @@ internal static partial class PathsBench
     private sealed record Question(string Set, string Name, bool Aggregates, Func<VortexDataset, ScanOptions, Asking> Ask)
     {
         /// <summary>
-        /// The window a newest-first asking cuts at its periods' starts, and the question asked over a part of it; null when the
-        /// question has no first result to time (<see cref="FirstAsync"/>).
+        /// The window an asking by values cuts where the clustering value changes, and the question asked over a part of it; null
+        /// when the question has no first result to time (<see cref="FirstAsync"/>).
         /// </summary>
         internal (DateTimeOffset From, DateTimeOffset To, Func<VortexDataset, ScanOptions, DateTimeOffset, DateTimeOffset, Asking> Ask)? Window { get; init; }
     }

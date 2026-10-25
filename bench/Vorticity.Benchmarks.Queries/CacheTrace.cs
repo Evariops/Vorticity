@@ -10,7 +10,7 @@ namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// The regions a run of questions asks of the synopsis cache, replayed through three eviction policies
-/// (<c>--micro cachetrace</c>): requests over hours of periods, tables kept up to the data's own bytes, and a run of
+/// (<c>--micro cachetrace</c>): requests over hours clustered by hour, tables kept up to the data's own bytes, and a run of
 /// questions of six kinds, the first asked most, over windows that end at a now moving through the data, so that
 /// what was asked often ages, with a sweep of everything up to now one time in twenty. The cache records each region
 /// asked, held or not; the replay gives each policy's hits, by bytes and by asks, at capacities from a hundredth of
@@ -23,7 +23,7 @@ internal static class CacheTrace
         await using MemoryObjectStore store = new MemoryObjectStore();
         long begin = Stopwatch.GetTimestamp();
         (long rows, _) = await QuestionBench.FillRequestsAsync(store, hours, rate, new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(1_000) });
-        Console.WriteLine($"{rows} requests over {hours} periods of an hour, written and compacted in {Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s");
+        Console.WriteLine($"{rows} requests over {hours} hours clustered by hour, written and compacted in {Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s");
 
         List<CacheAccess> trace = [];
         string directory = System.IO.Directory.CreateTempSubdirectory("vortex-cachetrace-").FullName;

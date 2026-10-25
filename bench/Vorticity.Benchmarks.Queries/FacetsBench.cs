@@ -46,7 +46,7 @@ internal static class FacetsBench
         }
 
         Console.WriteLine(
-            $"{rows} spans over {hours} periods of an hour, written and compacted in {Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s; " +
+            $"{rows} spans over {hours} hours clustered by hour, written and compacted in {Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s; " +
             $"indexes up to {budget} ‰ of the data; {latency} ms a round trip; warm is the best of {rounds}");
         bytes.Latency = TimeSpan.FromMilliseconds(latency);
         Console.WriteLine($"{"question",-58} {"path",-8} {"",-4} {"requests",8} {"steps",6} {"MB",8} {"states",9} {"rows",9} {"ms",9} {"cpu ms",8}");
