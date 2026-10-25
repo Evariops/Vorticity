@@ -613,7 +613,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// Asks <paramref name="question"/> over the values of the clustering key's first column from <paramref name="from"/>
     /// up to <paramref name="to"/> part by part, a part a clustering value (<see cref="ClusteringOptions.Value"/>), the last
     /// part first unless <paramref name="descending"/> is false: each part's answer delivered once it and every part before
-    /// it are in.
+    /// it are in, with the share of the range they cover (<see cref="ValuePart{TValue, TAnswer}.Covered"/>).
     /// </summary>
     /// <typeparam name="TValue">The values of the key's first column: an instant, a date, an integer.</typeparam>
     /// <typeparam name="TAnswer">What the question answers.</typeparam>
@@ -625,7 +625,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </param>
     /// <param name="descending">Whether the last part comes first, as a page that shows the newest of its values does; true by default.</param>
     /// <param name="cancellationToken">Cancels the questions in flight.</param>
-    /// <returns>The parts, in the order asked, each with its bounds and its answer.</returns>
+    /// <returns>The parts, in the order asked, each with its bounds, its answer and the share of the range covered so far.</returns>
     /// <exception cref="InvalidOperationException">
     /// The dataset declares no clustering value, or one of a column whose next value no function tells, a text's or a
     /// float's.
@@ -647,7 +647,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ValueParts.Of(Snapshot.Schema, Session.Options.Extensions, from, to, descending),
             Math.Min(Session.Options.MaxConcurrentReads, WindowParts.Width),
             question,
-            static (lower, upper, answer) => new ValuePart<TValue, TAnswer>(lower, upper, answer),
+            static (lower, upper, covered, answer) => new ValuePart<TValue, TAnswer>(lower, upper, answer) { Covered = covered },
             cancellationToken);
     }
 

@@ -3162,6 +3162,7 @@ Vorticity.Dataset:     method void Deconstruct(out TValue, out TValue, out TAnsw
 Vorticity.Dataset:     property TAnswer Answer { get; init; }
 Vorticity.Dataset:     property TValue From { get; init; }
 Vorticity.Dataset:     property TValue To { get; init; }
+Vorticity.Dataset:     property double Covered { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.VortexDataset : IAsyncDisposable
 Vorticity.Dataset:     method IAsyncEnumerable<DataObject> ListObjectsAsync(CancellationToken = default)
 Vorticity.Dataset:     method IAsyncEnumerable<ValuePart<TValue, TAnswer>> AskByValuesAsync<TValue, TAnswer>(TValue, TValue, Func<TValue, TValue, CancellationToken, ValueTask<TAnswer>>, bool = default, CancellationToken = default)

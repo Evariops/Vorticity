@@ -85,10 +85,16 @@ public sealed partial class DatasetValueRangeTests
         Assert.All(parts, part => Assert.Equal(appended.Count(row => row.At >= part.From && row.At < part.To), part.Answer));
         Assert.Equal(appended.Count(row => row.At >= from && row.At < to), parts.Sum(part => part.Answer));
 
-        // The first part first.
+        // Each part covers the range from its start to the range's end, in the instant's microseconds.
+        double range = (to - from).Ticks;
+        Assert.All(parts, part => Assert.Equal((to - part.From).Ticks / range, part.Covered, 12));
+        Assert.Equal(1.0, parts[^1].Covered);
+
+        // The first part first, each covering the range from its start to the part's end.
         List<ValuePart<DateTimeOffset, long>> ascending = await dataset.AskByValuesAsync<DateTimeOffset, long>(
             from, to, (lower, upper, ct) => ValueTask.FromResult(0L), descending: false, Ct).ToListAsync(Ct);
         Assert.Equal(parts.Select(part => (part.From, part.To)).Reverse(), ascending.Select(part => (part.From, part.To)));
+        Assert.All(ascending, part => Assert.Equal((part.To - from).Ticks / range, part.Covered, 12));
     }
 
     [Fact]

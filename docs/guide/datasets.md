@@ -227,7 +227,7 @@ await foreach (ValuePart<DateTimeOffset, List<ServiceTotals>> part in dataset.As
         .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)))
         .As<ServiceTotals>().ToRecordsAsync(ct).ToListAsync(ct)))
 {
-    Show(part.From, part.To, part.Answer);
+    Show(part.From, part.To, part.Answer, part.Covered);
 }
 ```
 
@@ -237,7 +237,10 @@ part 10-01 to 10-02: 17280 requests
 ```
 
 Each part's answer is final for its values, so once a part arrives, the range from its start to the
-range's end is answered. Counts and sums over the parts add up, and so do minimums and maximums. A mean
+range's end is answered, and `Covered` says which share of the range's values that is, 1 for the last
+part. The newest part arrives as soon as its own objects are read, whatever the older parts still read,
+and a consumer that stops, or cancels, cancels the questions asked ahead of it, which read no further.
+Counts and sums over the parts add up, and so do minimums and maximums. A mean
 over the whole range is the sum of the parts' sums over the sum of their counts. A value whose next
 value no function tells, a text's or a float's, has no part to cut, and the call refuses it.
 

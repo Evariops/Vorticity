@@ -239,8 +239,9 @@ A page that shows a long range can show its last part first. `VortexDataset.AskB
 range of the key's first column where the clustering value changes, asks the caller's question over
 each part, sixteen at once at most, and delivers each part's answer, the last first by default, once it
 and every part before it are in. The engine still folds every object of one question before it
-delivers a group, so the parts are what makes the delivery progressive, and merging them is the
-caller's: counts and sums add, extremes compare, a mean is a sum over a count. A value whose next value
+delivers a group, so the parts are what makes the delivery progressive, each with the share of the
+range the answers so far cover (`ValuePart.Covered`), and merging them is the caller's: counts and sums
+add, extremes compare, a mean is a sum over a count. A value whose next value
 no function tells, a text's or a float's, cuts no part, and the call refuses it.
 
 ## 5. Rows in key order

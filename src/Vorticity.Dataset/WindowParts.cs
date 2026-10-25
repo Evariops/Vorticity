@@ -21,35 +21,35 @@ internal static class WindowParts
     /// <summary>
     /// Asks <paramref name="question"/> over each of <paramref name="parts"/>, taken as they are asked, as many at once as
     /// <paramref name="width"/> says, and delivers the answers in the parts' order, each once it and every part before it
-    /// are in, as the part <paramref name="part"/> makes of it.
+    /// are in, as the part <paramref name="part"/> makes of it with the share of the range covered.
     /// </summary>
     internal static async IAsyncEnumerable<TPart> AskAsync<TBound, TAnswer, TPart>(
-        IEnumerable<(TBound From, TBound To)> parts, int width,
+        IEnumerable<(TBound From, TBound To, double Covered)> parts, int width,
         Func<TBound, TBound, CancellationToken, ValueTask<TAnswer>> question,
-        Func<TBound, TBound, TAnswer, TPart> part,
+        Func<TBound, TBound, double, TAnswer, TPart> part,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        using IEnumerator<(TBound From, TBound To)> next = parts.GetEnumerator();
-        Queue<(TBound From, TBound To, Task<TAnswer> Answer)> ahead = new(width);
+        using IEnumerator<(TBound From, TBound To, double Covered)> next = parts.GetEnumerator();
+        Queue<(TBound From, TBound To, double Covered, Task<TAnswer> Answer)> ahead = new(width);
         try
         {
             while (true)
             {
                 while (ahead.Count < width && next.MoveNext())
                 {
-                    (TBound from, TBound to) = next.Current;
-                    ahead.Enqueue((from, to, question(from, to, stopped.Token).AsTask()));
+                    (TBound from, TBound to, double covered) = next.Current;
+                    ahead.Enqueue((from, to, covered, question(from, to, stopped.Token).AsTask()));
                 }
 
-                if (!ahead.TryDequeue(out (TBound From, TBound To, Task<TAnswer> Answer) turn))
+                if (!ahead.TryDequeue(out (TBound From, TBound To, double Covered, Task<TAnswer> Answer) turn))
                 {
                     yield break;
                 }
 
                 // The question was asked by this walk, a few parts before.
 #pragma warning disable VSTHRD003
-                yield return part(turn.From, turn.To, await turn.Answer.ConfigureAwait(false));
+                yield return part(turn.From, turn.To, turn.Covered, await turn.Answer.ConfigureAwait(false));
 #pragma warning restore VSTHRD003
             }
         }
@@ -57,7 +57,7 @@ internal static class WindowParts
         {
             // The questions asked ahead of a consumer that stopped, or of a failure, are nobody's.
             await stopped.CancelAsync().ConfigureAwait(false);
-            foreach ((_, _, Task<TAnswer> answer) in ahead)
+            foreach ((_, _, _, Task<TAnswer> answer) in ahead)
             {
                 try
                 {
