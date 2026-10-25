@@ -246,6 +246,13 @@ library knows nothing of what they mean: a day, a tenant at the head of the key,
 The header carries them, so every writer cuts alike, and a handle opened on the dataset follows them
 whatever its own options say.
 
+A dataset may also declare a block value (`ClusteringOptions.BlockValue`): a function of the key's second
+column, of the same kinds, where a job also ends a block, the runs of rows each column's statistics
+describe ([blocks](22-on-the-fly-and-synopses.md#33-blocks)). The rows of a run of the first column follow
+the second, so the pair of values never decreases along a merge's run, and the same bisection finds
+where it changes. The header carries it in the clustering's message, a field a reader that knows none
+skips: it changes how blocks are written, never how an object is read.
+
 The style stays leveled, and every rule above holds. Two things change in what a job writes. A merge
 cuts its outputs where the value changes, as it cuts them at the first key change past their target:
 the rows of one value lie together in the key's order, so a bisection of each run of the merge, on the

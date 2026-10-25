@@ -159,6 +159,7 @@ internal static class DatasetCompactor
                 {
                     KeySliced = keySliced,
                     Blocked = keySliced is null ? null : key!.LeadingType,
+                    BlockValues = keySliced is null ? null : schema.BlockCut,
                     SliceTarget = dataset.Options.SliceTargetRows,
                     Shreddings = shreddings,
                     Values = schema.Cut,
@@ -874,6 +875,12 @@ internal static class DatasetCompactor
         /// </summary>
         internal DType? Blocked { get; init; }
 
+        /// <summary>
+        /// Where a block also ends, by the declared block value of the key's second column
+        /// (<see cref="ClusteringOptions.BlockValue"/>); null for none.
+        /// </summary>
+        internal ValueCut? BlockValues { get; init; }
+
         // The blocks of the object being written: each closed block's rows and first and last keys, then the rows of the one
         // being written, its first key and the key of its last row.
         private readonly List<long> _blockRows = [];
@@ -890,9 +897,10 @@ internal static class DatasetCompactor
 
         /// <summary>
         /// Notes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
-        /// key's order: a block ends at the first change of the key's first column once it holds
-        /// <see cref="BlockTable.LeastRows"/> rows, and at <see cref="BlockTable.MostRows"/> rows. The keys of a run follow
-        /// one another, so a bisection finds each change.
+        /// key's order: a block ends at the first change of the key's first column, or of the declared block value of its
+        /// second (<see cref="BlockValues"/>), once it holds <see cref="BlockTable.LeastRows"/> rows, and at
+        /// <see cref="BlockTable.MostRows"/> rows. The keys of a run follow one another, and so the pairs of values, so a
+        /// bisection finds each change.
         /// </summary>
         internal void Block(KeyOrderedMerge merge, int from, int to)
         {
@@ -917,7 +925,7 @@ internal static class DatasetCompactor
                 if (checkFrom < limit)
                 {
                     ReadOnlySpan<byte> before = checkFrom > at ? merge.KeyAt(checkFrom - 1) : _blockHigh.AsSpan(0, _blockHighLength);
-                    end = FirstChange(merge, column, before, checkFrom, limit);
+                    end = FirstChange(merge, column, BlockValues, before, checkFrom, limit);
                 }
 
                 if (end > at)
@@ -942,17 +950,18 @@ internal static class DatasetCompactor
         }
 
         /// <summary>
-        /// The first row from <paramref name="from"/> to <paramref name="to"/> of the merge's run whose key's first column
-        /// is not <paramref name="before"/>'s, or <paramref name="to"/>.
+        /// The first row from <paramref name="from"/> to <paramref name="to"/> of the merge's run whose key's first column,
+        /// or the block value of its second under <paramref name="values"/>, is not <paramref name="before"/>'s, or
+        /// <paramref name="to"/>.
         /// </summary>
-        private static int FirstChange(KeyOrderedMerge merge, DType column, ReadOnlySpan<byte> before, int from, int to)
+        private static int FirstChange(KeyOrderedMerge merge, DType column, ValueCut? values, ReadOnlySpan<byte> before, int from, int to)
         {
-            if (SameFirst(before, merge.KeyAt(to - 1), column))
+            if (SameRun(before, merge.KeyAt(to - 1), column, values))
             {
                 return to;
             }
 
-            if (!SameFirst(before, merge.KeyAt(from), column))
+            if (!SameRun(before, merge.KeyAt(from), column, values))
             {
                 return from;
             }
@@ -963,7 +972,7 @@ internal static class DatasetCompactor
             while (high - low > 1)
             {
                 int middle = low + ((high - low) >> 1);
-                if (SameFirst(before, merge.KeyAt(middle), column))
+                if (SameRun(before, merge.KeyAt(middle), column, values))
                 {
                     low = middle;
                 }
@@ -975,6 +984,10 @@ internal static class DatasetCompactor
 
             return high;
         }
+
+        /// <summary>Whether two row-encoded keys hold one value of their first column, and one block value of their second under <paramref name="values"/>.</summary>
+        private static bool SameRun(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, DType column, ValueCut? values) =>
+            SameFirst(left, right, column) && (values is null || values.Same(left, right));
 
         /// <summary>Whether two row-encoded keys hold one value of their first column: a value's bytes end where they end.</summary>
         private static bool SameFirst(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, DType column)

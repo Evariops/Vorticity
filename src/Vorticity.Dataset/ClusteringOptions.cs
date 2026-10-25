@@ -29,6 +29,16 @@ public sealed record ClusteringOptions
     public ClusteringValue? Value { get; init; }
 
     /// <summary>
+    /// The value of the key's second column where a job also ends a block, the runs of rows of one value of the key's first
+    /// column that each column's statistics describe: a block holds rows of one value of both once it holds its least
+    /// rows, so that a function of the second column holds one group over it, which a question's blocks then answer
+    /// whole. Null, the default, ends blocks where the first column changes alone. The dataset knows nothing of what the
+    /// values mean: the application picks the function, the column itself, a truncation or a bucket. A block value needs
+    /// a clustering key of two columns or more.
+    /// </summary>
+    public ClusteringValue? BlockValue { get; init; }
+
+    /// <summary>
     /// The bytes an object a job writes aims at, past which the job starts another, never splitting a key: the bound of
     /// every level's target, for every writer of the dataset (<see cref="CompactionOptions.MaxObjectBytes"/>, which it
     /// replaces). An object goes past it by the rows of one run at most. 0, the default, leaves the compaction's own bound.
@@ -195,12 +205,25 @@ internal sealed class ValueCut
     private readonly string _path;
     private readonly bool _mayHoldNull;
 
+    // The key's first column, which a cut of its second skips; null for a cut of the first.
+    private readonly DType? _before;
+
     private ValueCut(ClusteringValue value, ClusteringKey key)
     {
         Value = value;
         _column = key.LeadingType;
         _path = key.InstantPath;
         _mayHoldNull = key.MayHoldNull;
+        _function = value.Resolve(_column, _path);
+    }
+
+    private ValueCut(ClusteringValue value, ClusteringKey key, int position)
+    {
+        Value = value;
+        _column = key.TypeAt(position);
+        _path = key.Paths[position];
+        _mayHoldNull = key.MayHoldNull;
+        _before = key.LeadingType;
         _function = value.Resolve(_column, _path);
     }
 
@@ -216,6 +239,23 @@ internal sealed class ValueCut
         return key is null
             ? throw new ArgumentException("A clustering value is a function of the clustering key's first column: declare a clustering key.", nameof(clustering))
             : new ValueCut(value, key);
+    }
+
+    /// <summary>
+    /// The cut of the blocks a dataset's clustering declares over its key's second column
+    /// (<see cref="ClusteringOptions.BlockValue"/>); null when it declares none.
+    /// </summary>
+    /// <exception cref="ArgumentException">The key has fewer than two columns, or the value does not apply to the second.</exception>
+    internal static ValueCut? OfBlocks(ClusteringOptions? clustering, ClusteringKey? key)
+    {
+        if (clustering?.BlockValue is not { } value)
+        {
+            return null;
+        }
+
+        return key is { IsComposite: true }
+            ? new ValueCut(value, key, 1)
+            : throw new ArgumentException("A block value is a function of the clustering key's second column: declare a key of two columns or more.", nameof(clustering));
     }
 
     /// <summary>The value declared.</summary>
@@ -266,6 +306,13 @@ internal sealed class ValueCut
     /// <summary>Whether two row-encoded keys of the clustering key, in ascending order, hold one clustering value.</summary>
     internal bool Same(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right)
     {
+        if (_before is { } first)
+        {
+            // A cut of the second column reads past the first's bytes of each key; the caller holds the first the same.
+            left = left[RowEncoder.FirstValueLength(left, first)..];
+            right = right[RowEncoder.FirstValueLength(right, first)..];
+        }
+
         if (_function is null)
         {
             // A value's bytes end where they end whatever follows them, so the same bytes from the start are the same value.

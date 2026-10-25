@@ -35,12 +35,24 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
 
     public static TheoryData<string> Questions() => [.. Named];
 
-    /// <summary>Each question gives the rows' answer through its blocks.</summary>
-    [Theory]
-    [MemberData(nameof(Questions))]
-    public async Task AQuestionAnswersAsItsRowsDo(string question)
+    public static TheoryData<string, bool> QuestionsByLayout()
     {
-        await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.Store, new DatasetOptions(), Ct);
+        TheoryData<string, bool> questions = [];
+        foreach (string question in Named)
+        {
+            questions.Add(question, false);
+            questions.Add(question, true);
+        }
+
+        return questions;
+    }
+
+    /// <summary>Each question gives the rows' answer through its blocks, whether they end at each hour or not.</summary>
+    [Theory]
+    [MemberData(nameof(QuestionsByLayout))]
+    public async Task AQuestionAnswersAsItsRowsDo(string question, bool hourly)
+    {
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(hourly ? _fixture.Hourly : _fixture.Store, new DatasetOptions(), Ct);
         List<string> rows = await AskAsync(dataset, question, synopses: false);
         List<string> blocks = await AskAsync(dataset, question, synopses: true);
         Assert.NotEmpty(rows);
@@ -54,11 +66,13 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
     /// are read as rows: never more than the rows take.
     /// </summary>
     [Theory]
-    [InlineData("5xx by service", 4)]
-    [InlineData("5xx by service and hour", 1)]
-    public async Task ErrorsByServiceReadTheirBlocksStatistics(string question, int fewer)
+    [InlineData("5xx by service", 4, false)]
+    [InlineData("5xx by service and hour", 1, false)]
+    [InlineData("5xx by service and hour", 4, true)]
+    [InlineData("measures by service and hour", 4, true)]
+    public async Task ErrorsByServiceReadTheirBlocksStatistics(string question, int fewer, bool hourly)
     {
-        await using CountingObjectStore store = new CountingObjectStore(_fixture.Store);
+        await using CountingObjectStore store = new CountingObjectStore(hourly ? _fixture.Hourly : _fixture.Store);
         long rowBytes;
         long blockBytes;
         await using (VortexSession session = VortexSession.Create(_ => { }))
@@ -77,7 +91,7 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             blockBytes = store.BytesRead;
         }
 
-        Console.WriteLine($"BLOCK ANSWER {question}: {blockBytes:N0} bytes through the blocks, {rowBytes:N0} through the rows");
+        Console.WriteLine($"BLOCK ANSWER {question}{(hourly ? ", blocks ending at each hour" : string.Empty)}: {blockBytes:N0} bytes through the blocks, {rowBytes:N0} through the rows");
         Assert.True(blockBytes * fewer < rowBytes, $"{question}: {blockBytes} bytes through the blocks, {rowBytes} through the rows");
     }
 
@@ -101,7 +115,7 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             "Status >= 500", "Status = 404", "Route = '/svc1/r2'", "Service = 'svc-2'", "Host in ('h-1-0', 'h-2-1')",
             "Latency >= 100 and Latency < 200", "Service = 'svc-3' and Status >= 500", "Status = 503 or Route = '/svc0/r1'",
         ];
-        await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.Store, new DatasetOptions(), Ct);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(seed % 2 == 0 ? _fixture.Hourly : _fixture.Store, new DatasetOptions(), Ct);
         for (int question = 0; question < 12; question++)
         {
             string[] keys = [.. columns.OrderBy(_ => random.Next()).Take(random.Next(3))];
@@ -158,13 +172,23 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
     /// <summary>
     /// Four services, each 150 000 calls over two hours from noon, from three hosts of its own, on six routes, keyed by the
     /// service then the instant, appended in parts and compacted into objects of 4 MiB: each service a run of blocks of
-    /// some 65 000 rows, about twenty minutes each.
+    /// some 65 000 rows, about fifty minutes each. The same calls again in a dataset whose clustering declares a block
+    /// value, the instant's hour, the application's choice: its blocks end at each hour too.
     /// </summary>
     public sealed class Fixture : IAsyncLifetime
     {
         internal MemoryObjectStore Store { get; } = new MemoryObjectStore();
 
+        internal MemoryObjectStore Hourly { get; } = new MemoryObjectStore();
+
         public async ValueTask InitializeAsync()
+        {
+            List<Call> rows = Draw();
+            await FillAsync(Store, rows, new ClusteringOptions { ObjectBytes = 4 << 20 });
+            await FillAsync(Hourly, rows, new ClusteringOptions { ObjectBytes = 4 << 20, BlockValue = ClusteringValue.Truncate(CalendarUnit.Hour) });
+        }
+
+        private static List<Call> Draw()
         {
             Random random = new Random(0xD4B);
             List<Call> rows = [];
@@ -184,13 +208,18 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             }
 
             random.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rows));
+            return rows;
+        }
+
+        private static async Task FillAsync(MemoryObjectStore store, List<Call> rows, ClusteringOptions clustering)
+        {
             DatasetOptions options = new DatasetOptions
             {
                 ClusteringKey = [nameof(Call.Service), nameof(Call.At)],
-                Clustering = new ClusteringOptions { ObjectBytes = 4 << 20 },
+                Clustering = clustering,
                 ContentsObjectBytes = 1,
             };
-            await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Call.Schema, options, Ct);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, options, Ct);
             for (int from = 0; from < rows.Count; from += 100_000)
             {
                 await using ObjectDraft draft = dataset.StartObject();
@@ -203,7 +232,11 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             }
         }
 
-        public async ValueTask DisposeAsync() => await Store.DisposeAsync();
+        public async ValueTask DisposeAsync()
+        {
+            await Store.DisposeAsync();
+            await Hourly.DisposeAsync();
+        }
     }
 
     [VortexRecord]

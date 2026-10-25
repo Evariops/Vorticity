@@ -50,6 +50,7 @@ internal sealed class DatasetSchema
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
         Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType);
         Cut = ValueCut.Of(declared, Key);
+        BlockCut = ValueCut.OfBlocks(declared, Key);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);
@@ -77,6 +78,9 @@ internal sealed class DatasetSchema
 
     /// <summary>The clustering value the dataset's jobs cut their objects by, over <see cref="Key"/>; null when it declares none.</summary>
     internal ValueCut? Cut { get; }
+
+    /// <summary>Where a job also ends a block, by the declared block value of the key's second column; null for none.</summary>
+    internal ValueCut? BlockCut { get; }
 
     /// <summary>Every name a column of the dataset gave up, in the order they were given up.</summary>
     internal IReadOnlyList<RetiredColumn> Retired { get; }

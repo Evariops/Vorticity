@@ -115,6 +115,99 @@ public sealed partial class DatasetBlocksTests
         Assert.True(single > blocks / 2, $"{single} of {blocks} blocks hold one source");
     }
 
+    /// <summary>
+    /// The same sources under a block value, a bucket of a hundred million of the key's second column, which the
+    /// application declares: past a block's least rows, it holds one source and one bucket, and it ends where either
+    /// changes; the header keeps the block value for every handle.
+    /// </summary>
+    [Fact]
+    public async Task ABlockValueEndsBlocksWhereTheSecondColumnsValueChanges()
+    {
+        Random random = new Random(0xB10D);
+        List<Event> rows = [];
+        for (int source = 0; source < 30; source++)
+        {
+            int runs = (source % 3) switch
+            {
+                0 => random.Next(1, 40),
+                1 => random.Next(500, 6_000),
+                _ => random.Next(20_000, 150_000),
+            };
+
+            for (int i = 0; i < runs; i++)
+            {
+                rows.Add(new Event($"source-{source:D3}", random.NextInt64(1_000_000_000), i));
+            }
+        }
+
+        random.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rows));
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        ClusteringOptions clustering = new ClusteringOptions { ObjectBytes = 2 << 20, BlockValue = ClusteringValue.Bucket(100_000_000L) };
+        await using (VortexDataset writing = await VortexDataset.CreateAsync(
+            store, Event.Schema, new DatasetOptions { ClusteringKey = [nameof(Event.Source), nameof(Event.At)], Clustering = clustering, ContentsObjectBytes = 1 }, Ct))
+        {
+            for (int from = 0; from < rows.Count; from += 100_000)
+            {
+                await using ObjectDraft draft = writing.StartObject();
+                await draft.Writer.WriteAsync<Event>(rows.Skip(from).Take(100_000).ToArray(), Ct);
+                await writing.AppendAsync(draft, Ct);
+            }
+
+            while (await writing.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+            {
+            }
+        }
+
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
+        Assert.Equal(clustering.BlockValue, dataset.Options.Clustering?.BlockValue);
+        int objects = 0;
+        int blocks = 0;
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            if (held.Entry.Contents is not { Blocks.Count: > 0 })
+            {
+                continue;
+            }
+
+            objects++;
+            BlockTable table = Assert.IsType<BlockTable>(await dataset.ReadBlocksAsync(held.Entry, 0, Ct));
+            await using ObjectLease lease = await dataset.RentAsync(held.Entry, Ct);
+            string[] runs = [.. (await lease.File.Scan<Event>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(row => $"{row.Source}/{row.At / 100_000_000}")];
+            for (int b = 0; b < table.Count; b++)
+            {
+                int start = (int)table.FirstRow(b);
+                int count = (int)table.Rows[b];
+                for (int offset = BlockTable.LeastRows; offset < count; offset++)
+                {
+                    Assert.True(runs[start + offset] == runs[start + offset - 1], $"block {b} changes source or bucket at row {offset} of {count}");
+                }
+
+                int next = start + count;
+                Assert.True(
+                    next == runs.Length || count == BlockTable.MostRows || (count >= BlockTable.LeastRows && runs[next] != runs[next - 1]),
+                    $"block {b} of {count} rows ends inside a run of one source and bucket");
+            }
+
+            blocks += table.Count;
+        }
+
+        Console.WriteLine($"BLOCK VALUE: {objects} objects, {blocks} blocks");
+        Assert.True(objects >= 2, $"{objects} objects keep blocks");
+    }
+
+    /// <summary>A block value is a function of the key's second column: a key of one column, or none, refuses it before anything is written.</summary>
+    [Fact]
+    public async Task ABlockValueNeedsASecondKeyColumn()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        ClusteringOptions clustering = new ClusteringOptions { BlockValue = ClusteringValue.Bucket(1_000L) };
+        await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(
+            store, Event.Schema, new DatasetOptions { ClusteringKey = [nameof(Event.Source)], Clustering = clustering }, Ct));
+        await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(
+            store, Event.Schema, new DatasetOptions { ClusteringKey = [nameof(Event.Source), nameof(Event.At)], Clustering = clustering with { BlockValue = ClusteringValue.Truncate(CalendarUnit.Hour) } }, Ct));
+        Assert.Empty(await store.ListAsync(string.Empty, null, Ct).ToListAsync(Ct));
+    }
+
     /// <summary>The source of each of the object's rows, in its order.</summary>
     private static async Task<string[]> SourcesAsync(VortexDataset dataset, ObjectEntry entry)
     {

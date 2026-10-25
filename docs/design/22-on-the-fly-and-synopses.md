@@ -118,12 +118,13 @@ status, method, duration.
 
 A block is the run of rows of one value of the key's first column in an object, cut at 65 536 rows. A
 value's run ends its block only once the block holds 4 096 rows: a first column whose runs are shorter,
-such as an identifier, gives blocks of several values rather than one block per row. An
-object keeps its blocks for its whole life, and their statistics are summed into the rollups over runs
-of objects (section 5.2), without reading a row. Blocks are row
+such as an identifier, gives blocks of several values rather than one block per row. An application may
+declare a block value, a function of the key's second column (`ClusteringOptions.BlockValue`): a block
+then ends where either value changes, past the same 4 096 rows, so that the function holds one group in
+each block whose runs are long enough. An object keeps its blocks for its whole life. Blocks are row
 ranges the block statistics describe (section 5.3), independent of the format's zones and chunks: a
-block a question settles has its rows taken out of the scan's selection, and a zone partly settled is
-decoded for its other rows only.
+question settles some blocks of an object from their statistics and reads the rows of the others, each
+run of them a part of its scan.
 
 ### 3.4 What clustering changes
 
@@ -295,10 +296,16 @@ service, errors by service read 86.8 KB through the blocks where the rows took 4
 not given yet; they belong with the estimates the planner chooses (section 8).
 
 The truncation of an instant holds one group over a block only when the block is short in time: blocks
-end where the key's first column changes and at 65 536 rows, never where an hour does, as nothing here
-knows a time. Errors by service and hour settle the blocks that fall in one hour; with blocks of some
-fifty minutes, the measured question read 2.7 MB through them where the rows took 3.4 MB. For the
-reference table led by its emitter, whose blocks span hours, they mostly would not.
+end where the key's first column changes and at 65 536 rows, and an hour means nothing here. Errors by
+service and hour settle the blocks that fall in one hour; with blocks of some fifty minutes, the
+measured question read 2.7 MB through them where the rows took 3.4 MB. For the reference table led by
+its emitter, whose blocks span hours, they mostly would not. The application that asks such questions
+declares a block value of its instant (section 3.3), the function it groups by, and the blocks end where
+it changes: the same question then read 438 KB where the rows took 3.4 MB, and measures by service and
+hour 752 KB where the rows took 5.9 MB *(measured, `DatasetBlockAnswerTests`)*. For the reference table,
+a block value of the hour makes each block a run of one emitter's hour, some 14 700 rows: about
+4.9 × 10⁵ blocks a day where they were 3.5 × 10⁵, and 180 MB of statistics a day where they were
+129 *(computed)*.
 
 A block no delete touches settles as a file's does; a block a delete touches is decoded, or settled
 from the negative statistics the delete wrote (section 6). For the reference table clustered by

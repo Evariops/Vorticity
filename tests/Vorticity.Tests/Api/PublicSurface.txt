@@ -2812,6 +2812,7 @@ Vorticity.Dataset:     method bool op_Equality(ClusteringOptions, ClusteringOpti
 Vorticity.Dataset:     method bool op_Inequality(ClusteringOptions, ClusteringOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property ClusteringValue BlockValue { get; init; }
 Vorticity.Dataset:     property ClusteringValue Value { get; init; }
 Vorticity.Dataset:     property long ObjectBytes { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.ClusteringValue : IEquatable<ClusteringValue>

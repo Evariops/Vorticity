@@ -69,6 +69,14 @@ await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reque
 });
 ```
 
+Its `BlockValue` does the same inside an object, for the key's second column. A job's objects keep,
+for each column, statistics over runs of rows called blocks, which a question can answer from without
+reading the rows (see [Reading](#reading)); a block ends where the key's first column changes, and with a
+block value, where that value of the second column changes too. A function of the second column then
+holds one group in each block: with a key `[Service, At]` and a `BlockValue` of
+`Truncate(CalendarUnit.Hour)`, a question by service and hour answers from the blocks. As with `Value`,
+the library only compares the function's values: the hour is the application's choice.
+
 The clustering is fixed when the dataset is created, every commit carries it, and every writer
 follows it. A question bounded on the key's first column then reads whole objects but at its ends, an
 expiry by such a bound drops whole objects, and a long range can be asked a value at a time, as
@@ -222,7 +230,8 @@ counts alone. The other blocks are read as rows. Under a key that leads with the
 service read the statistics of the service and the status, `r.Status >= 500` judged value by value:
 on four services of 150 000 rows, 86.8 KB where the rows took 480.7 KB. By the hour as well, a block
 answers when its instants fall in one hour, which takes blocks short in time: here each held some fifty
-minutes, and the question read 2.7 MB where the rows took 3.4 MB.
+minutes, and the question read 2.7 MB where the rows took 3.4 MB. With a `BlockValue` of the hour, its
+blocks end at each hour, and it read 438 KB where the rows took 3.4 MB.
 `ScanOptions.AlignWindow` widens the window to the bounds of the objects its ends fall in, so that
 they are answered from their counts too: the answer is then the exact answer of the window applied,
 which `ScanMetrics.Window` gives. The other synopses are designed in

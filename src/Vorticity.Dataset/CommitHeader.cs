@@ -245,6 +245,7 @@ internal sealed record CommitHeader
         internal const int Width = 3;
         internal const int FloatWidth = 4;
         internal const int ObjectBytes = 5;
+        internal const int BlockValue = 6;
     }
 
     internal static class LevelField
@@ -357,13 +358,25 @@ internal sealed record CommitHeader
         {
             if (clustering.Value is { } value)
             {
-                inner.WriteUInt64Always(ClusteringField.Function, (ulong)value.Function);
-                inner.WriteUInt64(ClusteringField.Unit, (ulong)value.Unit);
-                inner.WriteSInt64(ClusteringField.Width, value.Width);
-                inner.WriteDouble(ClusteringField.FloatWidth, value.FloatWidth);
+                WriteValue(ref inner, value);
             }
 
             inner.WriteUInt64(ClusteringField.ObjectBytes, (ulong)clustering.ObjectBytes);
+            if (clustering.BlockValue is { } block)
+            {
+                // The block value, a message of the same fields as the value's, which a reader that knows none skips.
+                ProtoWriter nested = new ProtoWriter();
+                try
+                {
+                    WriteValue(ref nested, block);
+                    inner.WriteBytesAlways(ClusteringField.BlockValue, nested.WrittenSpan);
+                }
+                finally
+                {
+                    nested.Dispose();
+                }
+            }
+
             writer.WriteBytesAlways(Field.Clustering, inner.WrittenSpan);
         }
         finally
@@ -689,8 +702,18 @@ internal sealed record CommitHeader
         };
     }
 
+    /// <summary>A clustering value's fields: its function, then its unit and widths where they are not nought.</summary>
+    private static void WriteValue(ref ProtoWriter writer, ClusteringValue value)
+    {
+        writer.WriteUInt64Always(ClusteringField.Function, (ulong)value.Function);
+        writer.WriteUInt64(ClusteringField.Unit, (ulong)value.Unit);
+        writer.WriteSInt64(ClusteringField.Width, value.Width);
+        writer.WriteDouble(ClusteringField.FloatWidth, value.FloatWidth);
+    }
+
     private static ClusteringOptions ReadClustering(ReadOnlySpan<byte> bytes)
     {
+        ClusteringValue? block = null;
         ulong? function = null;
         ulong unit = 0;
         long width = 0;
@@ -716,6 +739,9 @@ internal sealed record CommitHeader
                 case (ClusteringField.ObjectBytes, ProtoWireType.Varint):
                     objectBytes = reader.ReadVarint();
                     break;
+                case (ClusteringField.BlockValue, ProtoWireType.LengthDelimited):
+                    block = ReadClustering(reader.ReadLengthDelimited()).Value;
+                    break;
                 default:
                     reader.SkipField(wire);
                     break;
@@ -731,6 +757,7 @@ internal sealed record CommitHeader
         {
             Value = function is { } named ? ClusteringValue.Of(named, unit, width, floatWidth) : null,
             ObjectBytes = (long)objectBytes,
+            BlockValue = block,
         };
     }
 

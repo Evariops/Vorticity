@@ -113,6 +113,9 @@ internal sealed class ClusteringKey
     /// <summary>The dtype of the key's first column.</summary>
     internal DType LeadingType => _dtypes[0];
 
+    /// <summary>The dtype of the key's column at <paramref name="position"/>.</summary>
+    internal DType TypeAt(int position) => _dtypes[position];
+
     /// <summary>
     /// <paramref name="summaries"/> with the key's first column bounded by an object's smallest key <paramref name="first"/>
     /// and its largest <paramref name="last"/>, where they do not bound it: a text's, which a file's statistics leave

@@ -2011,6 +2011,7 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             // Resolved once here, so that a value the key's first column does not take is refused before anything is written.
             _ = ValueCut.Of(clustering, key);
+            _ = ValueCut.OfBlocks(clustering, key);
             features |= DatasetFeatures.Clustering;
         }
 

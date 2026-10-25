@@ -433,7 +433,9 @@ and counts, only an object of 1 MiB or more keeps them: a smaller one is read wh
 the object's rows in key order. It ends where the key's first column changes once it holds 4 096 rows,
 and at 65 536 rows whatever its rows hold. A first column whose runs are shorter, such as an identifier,
 gives blocks of several values rather than one block per row: the values of a block change only within
-its first 4 096 rows. Blocks are row ranges, independent of the file's chunks and zones.
+its first 4 096 rows. Under a block value the application declares, a function of the key's second
+column, a block ends where that value changes too, past the same rows. Blocks are row ranges,
+independent of the file's chunks and zones.
 
 The region holds a version byte, the count of blocks, then for each block its rows and its first and
 last keys, as the clustering key encodes them. Each key is written as the bytes it shares with the key
