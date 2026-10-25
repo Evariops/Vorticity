@@ -35,7 +35,7 @@ public sealed partial class ObjectContentsTests
         {
             Session = session,
             ClusteringKey = [nameof(Call.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
             Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },
         }, Ct);
         Random random = new Random(5);
@@ -53,12 +53,12 @@ public sealed partial class ObjectContentsTests
         }
 
         List<ObjectEntry> periods = [];
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
         {
             periods.Add(ObjectEntry.FromBytes(leaf.Value.Span));
         }
 
-        Assert.Equal(2, periods.Count);
+        Assert.Equal(3, periods.Count);
         ObjectContents contents = ObjectContents.From(periods[0].TableOfContents.Span)!;
 
         // A slice: its columns' chunk directories, then its chunks. A latency longer than what readying a read takes,
@@ -121,7 +121,7 @@ public sealed partial class ObjectContentsTests
         {
             Session = session,
             ClusteringKey = [nameof(Tagged.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
         }, Ct);
         Random random = new Random(3);
         for (int part = 0; part < 16; part++)
@@ -146,7 +146,7 @@ public sealed partial class ObjectContentsTests
         }
 
         ObjectEntry hour = default!;
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
         {
             hour = ObjectEntry.FromBytes(leaf.Value.Span);
             break;

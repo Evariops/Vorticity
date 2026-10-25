@@ -106,7 +106,7 @@ public sealed partial class IdentifierPostingsTests
         {
             ClusteringKey = [nameof(Request.At)],
             Identifiers = [nameof(Request.RequestId)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
             LookupFooterBytes = 0,
         }, Ct);
         Random random = new Random(seed);

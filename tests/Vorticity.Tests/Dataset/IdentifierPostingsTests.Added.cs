@@ -14,9 +14,9 @@ namespace Vorticity.Tests.Dataset;
 public sealed partial class IdentifierPostingsTests
 {
     /// <summary>
-    /// The hour of noon sealed before the id is declared an identifier, the next one after: the hour of before carries no
-    /// postings and is read as rows, every object written since carries them and is looked up; a scan for an id of either
-    /// hour finds its row, and a count that leaves an id out counts every other row, from the synopses and from the rows.
+    /// The hour of noon compacted before the id is declared an identifier, the rest after: the objects of before carry no
+    /// postings and are read as rows, every object written since carries them and is looked up; a scan for an id of either
+    /// finds its row, and a count that leaves an id out counts every other row, from the synopses and from the rows.
     /// </summary>
     [Fact]
     public async Task AnIdentifierAddedLaterIndexesTheObjectsWrittenSince()
@@ -25,51 +25,52 @@ public sealed partial class IdentifierPostingsTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(Request.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
             LookupFooterBytes = 0,
         }, Ct);
         Random random = new Random(37);
         List<Request> appended = [];
 
-        // Nine parts to a quarter past one, which seals the hour of noon, then seven to past two, which seals the next.
+        // Nine parts to a quarter past one, compacted, then seven to past two, which rewrite the hour past one.
         await AppendRequestsAsync(dataset, random, appended, 0, 9);
-        ulong before = dataset.Version;
+        HashSet<string> before = [];
+        for (int level = 0; level < dataset.Levels.Count; level++)
+        {
+            await foreach (TreeEntry leaf in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
+            {
+                before.Add(ObjectEntry.FromBytes(leaf.Value.Span).Key);
+            }
+        }
+
+        ulong version = dataset.Version;
         ulong added = await dataset.AddIdentifiersAsync([nameof(Request.RequestId)], Ct);
-        Assert.Equal(before + 1, added);
+        Assert.Equal(version + 1, added);
         Assert.Equal([nameof(Request.RequestId)], dataset.Snapshot.Header.Identifiers);
         Assert.Equal(DatasetFeatures.Identifiers, dataset.Snapshot.Header.Features & DatasetFeatures.Identifiers);
         Assert.Equal(added, await dataset.AddIdentifiersAsync([nameof(Request.RequestId)], Ct));
         await AppendRequestsAsync(dataset, random, appended, 9, 16);
 
-        // The hour of noon, sealed before, has no postings and no lookup; every object written since has postings.
-        List<ObjectEntry> hours = [];
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
-        {
-            hours.Add(ObjectEntry.FromBytes(leaf.Value.Span));
-        }
-
-        Assert.Equal(2, hours.Count);
-        Assert.False(await PostingsAsync(dataset, hours[0], nameof(Request.RequestId)));
+        // The objects of before, the hour of noon among them, have no postings and no lookup; every object written since
+        // has postings.
+        ObjectEntry? noon = null;
         int indexed = 0;
         for (int level = 0; level < dataset.Levels.Count; level++)
         {
             await foreach (TreeEntry leaf in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
             {
                 ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
-                if (string.Equals(entry.Key, hours[0].Key, StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                Assert.True(await PostingsAsync(dataset, entry, nameof(Request.RequestId)), $"an object of level {level} without postings");
-                indexed += entry.Contents is { DirectoryRegion: not null } && !entry.HasDeletions ? 1 : 0;
+                bool old = before.Contains(entry.Key);
+                noon ??= old ? entry : null;
+                Assert.True(old != await PostingsAsync(dataset, entry, nameof(Request.RequestId)), $"an object of level {level} {(old ? "with" : "without")} postings");
+                indexed += !old && entry.Contents is { DirectoryRegion: not null } && !entry.HasDeletions ? 1 : 0;
             }
         }
 
+        Assert.NotNull(noon);
         Assert.True(indexed >= 2, $"{indexed} objects indexed since");
         Request early = appended[1_234];
         Request late = appended[5_678];
-        Assert.Null(await dataset.LookupAsync(hours[0], VortexExpr.Parse($"RequestId = '{early.RequestId}'"), null, Ct));
+        Assert.Null(await dataset.LookupAsync(noon, VortexExpr.Parse($"RequestId = '{early.RequestId}'"), null, Ct));
 
         // Each id found, that of before among the rows of its hour, read whole, that of after by the postings.
         foreach (Request needle in new[] { early, late })

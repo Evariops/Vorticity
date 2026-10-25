@@ -30,7 +30,7 @@ public sealed partial class IdentifierPostingsTests
             {
                 ClusteringKey = [nameof(Visit.At)],
                 ShreddedPaths = declared ? ["Attributes['rare'].AsInt64()"] : null,
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
             }, Ct))
             {
                 for (int part = 0; part < 16; part++)
@@ -52,7 +52,7 @@ public sealed partial class IdentifierPostingsTests
 
                 int field = Visit.Schema.IndexOf(nameof(Visit.Attributes));
                 int hours = 0;
-                await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+                await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
                 {
                     VariantDirectory directory = (await dataset.ReadPathDirectoryAsync(ObjectEntry.FromBytes(leaf.Value.Span), field, Ct))!;
                     PathEntry rare = Assert.Single(directory.Of(["rare"]).ToArray(), entry => entry.Class == PathClass.Integer);
@@ -60,7 +60,7 @@ public sealed partial class IdentifierPostingsTests
                     hours++;
                 }
 
-                Assert.Equal(2, hours);
+                Assert.Equal(3, hours);
                 Assert.Equal(rows.Count(r => r.Attributes["rare"] is not null), await dataset.Scan<Visit>().Where(r => r.Attributes["rare"].AsInt64() >= 0).CountAsync(Ct));
             }
 
@@ -117,10 +117,10 @@ public sealed partial class IdentifierPostingsTests
     }
 
     /// <summary>
-    /// The key one row in five hundred holds, declared shredded once the hour of noon is sealed and taken back once the
-    /// next is: the hour of noon keeps it in the residual, the next in a typed column, the one after in the residual again,
-    /// each job shredding the paths of the version it starts from on a handle opened before any change; a question on the
-    /// key counts what the rows hold over the three. A change worked out against paths another writer changed first is
+    /// The key one row in five hundred holds, declared shredded once the hour of noon is compacted and taken back an hour
+    /// later: the objects written while it is declared keep it in a typed column, every other in the residual, each job
+    /// shredding the paths of the version it starts from on a handle opened before any change; a question on the key
+    /// counts what the rows hold over them all. A change worked out against paths another writer changed first is
     /// refused, one that asks for the paths the dataset has is done, and a path that names no such key is refused.
     /// </summary>
     [Fact]
@@ -130,7 +130,7 @@ public sealed partial class IdentifierPostingsTests
         DatasetOptions options = new DatasetOptions
         {
             ClusteringKey = [nameof(Visit.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
         };
         await using VortexDataset writer = await VortexDataset.CreateAsync(store, Visit.Schema, options, Ct);
         await using VortexDataset compactor = await VortexDataset.OpenAsync(store, options, Ct);
@@ -138,8 +138,8 @@ public sealed partial class IdentifierPostingsTests
         const string Rare = "Attributes['rare'].AsInt64()";
         List<Visit> rows = [];
 
-        // Nine parts of 400 visits a second and a quarter apart take the rows a quarter of an hour past the hour that
-        // follows, which seals the hour before.
+        // Nine parts of 400 visits a second and a quarter apart take the rows to a quarter of an hour past the hour that
+        // follows; the rows after that come as objects of their own, beside those of their hour.
         async Task AppendAsync(int from, int to)
         {
             for (int part = from; part < to; part++)
@@ -171,22 +171,44 @@ public sealed partial class IdentifierPostingsTests
         ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await writer.SetShreddedPathsAsync([nameof(Visit.At)], Ct));
         Assert.Equal("paths", refused.ParamName);
 
+        HashSet<string> undeclared = await KeysAsync();
         await AppendAsync(9, 18);
+        HashSet<string> declaredSince = await KeysAsync();
+        declaredSince.ExceptWith(undeclared);
         await writer.SetShreddedPathsAsync([], Ct);
         Assert.Empty(writer.Snapshot.Header.ShreddedPaths);
         await AppendAsync(18, 27);
 
+        // Each object keeps the key where the paths of the version its job started from put it.
         int field = Visit.Schema.IndexOf(nameof(Visit.Attributes));
-        List<PathPlace> places = [];
-        await foreach (TreeEntry leaf in compactor.Levels[PeriodLevels.Periods].EnumerateAsync(compactor.Pages, Ct))
+        List<(PathPlace Place, PathPlace Expected)> places = [];
+        await foreach (TreeEntry leaf in compactor.AboveLevelZeroAsync(Ct))
         {
-            VariantDirectory directory = (await compactor.ReadPathDirectoryAsync(ObjectEntry.FromBytes(leaf.Value.Span), field, Ct))!;
-            places.Add(Assert.Single(directory.Of(["rare"]).ToArray(), entry => entry.Class == PathClass.Integer).Place);
+            ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
+            VariantDirectory directory = (await compactor.ReadPathDirectoryAsync(entry, field, Ct))!;
+            if (directory.Of(["rare"]).ToArray() is { Length: > 0 } rare)
+            {
+                places.Add((Assert.Single(rare, held => held.Class == PathClass.Integer).Place, declaredSince.Contains(entry.Key) ? PathPlace.Typed : PathPlace.Residual));
+            }
         }
 
-        Assert.Equal([PathPlace.Residual, PathPlace.Typed, PathPlace.Residual], places);
+        Assert.Contains(places, place => place.Expected == PathPlace.Typed);
+        Assert.Contains(places, place => place.Expected == PathPlace.Residual);
+        Assert.All(places, place => Assert.Equal(place.Expected, place.Place));
         await writer.RefreshAsync(Ct);
         Assert.Equal(rows.Count(r => r.Attributes["rare"] is not null), await writer.Scan<Visit>().Where(r => r.Attributes["rare"].AsInt64() >= 0).CountAsync(Ct));
+
+        // The keys of the objects above level 0 the compactor's handle holds.
+        async Task<HashSet<string>> KeysAsync()
+        {
+            HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
+            await foreach (TreeEntry leaf in compactor.AboveLevelZeroAsync(Ct))
+            {
+                keys.Add(ObjectEntry.FromBytes(leaf.Value.Span).Key);
+            }
+
+            return keys;
+        }
     }
 
     [Theory]

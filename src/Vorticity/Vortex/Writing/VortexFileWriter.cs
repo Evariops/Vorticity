@@ -429,6 +429,24 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
+    /// Declares the path directory of the top-level variant column <paramref name="column"/> before the file completes,
+    /// as <see cref="VortexWriteOptions.VariantDirectories"/> does before its first row: a caller that counts the paths as
+    /// it writes the rows, and the slices they fall in, declares it once the last is written.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="column"/> is no top-level variant column of the file.</exception>
+    internal void DeclareDirectory(string column, VariantDirectory directory)
+    {
+        ArgumentNullException.ThrowIfNull(directory);
+        int field = _isTabular ? _schema.IndexOfField(column) : -1;
+        if (field < 0 || _schema.GetField(field).Kind != DTypeKind.Variant)
+        {
+            throw new ArgumentException($"'{column}' is no top-level variant column of the file, and only those have a path directory.", nameof(column));
+        }
+
+        (_directories ??= new VariantDirectory?[_fieldCount])[field] = directory;
+    }
+
+    /// <summary>
     /// Declares the most rows the file will hold (<see cref="VortexWriteOptions.RowBound"/>) before its first row: a caller
     /// that learns it from its first rows, as a load in one pass does from the pace of its first slice, sizes the file's
     /// chunks and its hashed postings' buckets by it.

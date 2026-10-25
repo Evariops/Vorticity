@@ -425,6 +425,16 @@ internal static class DatasetCompactor
         string? keySliced = merge && job.Cut is null && job.TargetBytes >= dataset.Options.ContentsObjectBytes
             && !key!.InstantPath.Contains('.') ? key.InstantPath : null;
 
+        // Such a job over a schema with a variant column counts, in a first pass, the paths of each clustering value's
+        // rows, and its objects of a value shred what those rows pay for; each object then lists its paths and the slices
+        // that hold them, counted as its rows are written.
+        IReadOnlyList<ValueShredding>? shreddings = null;
+        if (keySliced is not null && plans is null && streamed is null && VariantColumns(schema.DType).Length > 0)
+        {
+            using Activity? planning = DatasetTelemetry.StartCompactionPass("plan");
+            shreddings = await PlanValuesAsync(dataset, schema, job, key!, cancellationToken).ConfigureAwait(false);
+        }
+
         // Each object it streams is announced to the store as at most what the job reads, times what a job
         // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
         ObjectStream outputs;
@@ -443,6 +453,8 @@ internal static class DatasetCompactor
                     InstantPath = plans is null && streamed is null ? null : key!.InstantPath,
                     KeySliced = keySliced,
                     SliceTarget = dataset.Options.SliceTargetRows,
+                    Shreddings = shreddings,
+                    Values = schema.Cut,
                 };
                 try
                 {
@@ -1063,6 +1075,76 @@ internal static class DatasetCompactor
     }
 
     /// <summary>
+    /// The first pass of a job whose objects carry slices bounded by keys, over a schema with a variant column: its rows
+    /// merged once, through a projection of the key and the variant columns, the paths of each clustering value's rows
+    /// counted, in the order of the values, and what each variant column shreds in the objects of each chosen from them
+    /// (<see cref="ShreddingChoice"/>), the keys the dataset declares shredded wherever a row holds one. Without a
+    /// clustering value, the job's rows are counted together.
+    /// </summary>
+    private static async ValueTask<IReadOnlyList<ValueShredding>> PlanValuesAsync(
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
+    {
+        int[] variants = VariantColumns(schema.DType);
+        int[]? counted = PeriodPlanner.Counted(schema, key);
+        int[] read = counted is null ? variants : [.. variants.Select(field => Array.BinarySearch(counted, field))];
+        int textBound = dataset.Options.Write.StringBoundBytes;
+        ValueCut? values = schema.Cut;
+        List<PathCensus[]> censuses = [];
+        byte[]? last = null;
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken, counted);
+        await using (merge.ConfigureAwait(false))
+        {
+            while (await merge.MoveNextAsync().ConfigureAwait(false))
+            {
+                RecordBatch run = merge.Current;
+                for (int at = 0, end; at < run.RowCount; at = end)
+                {
+                    // A value starts the job's rows, or follows the last counted where the key's value changes.
+                    if (censuses.Count == 0 || (values is not null && !values.Same(last, merge.KeyAt(at))))
+                    {
+                        censuses.Add([.. variants.Select(_ => new PathCensus(textBound))]);
+                    }
+
+                    end = values is null ? run.RowCount : values.EndOfValue(merge, at, run.RowCount);
+                    RecordBatch part = at == 0 && end == run.RowCount ? run : run.Window(at, end - at);
+                    for (int v = 0; v < variants.Length; v++)
+                    {
+                        censuses[^1][v].Add(part, read[v]);
+                    }
+
+                    last = merge.KeyAt(end - 1).ToArray();
+                }
+            }
+        }
+
+        List<ValueShredding> shreddings = new List<ValueShredding>(censuses.Count);
+        foreach (PathCensus[] paths in censuses)
+        {
+            ImmutableDictionary<string, VariantShredding> shredded = ImmutableDictionary<string, VariantShredding>.Empty;
+            ImmutableDictionary<string, int> chunks = ImmutableDictionary<string, int>.Empty;
+            for (int v = 0; v < variants.Length; v++)
+            {
+                if (ShreddingChoice.Choose(paths[v], required: IdentifierKeys(schema, variants[v])) is { } chosen)
+                {
+                    string name = schema.DType.GetFieldName(variants[v]);
+                    shredded = shredded.SetItem(name, chosen);
+                    chunks = chunks.SetItem(name, ShreddingChoice.ChunkTargetBytes(paths[v]));
+                }
+            }
+
+            shreddings.Add(new ValueShredding(shredded, chunks));
+        }
+
+        return shreddings;
+    }
+
+    /// <summary>
+    /// What the objects of one clustering value of a job shred (<see cref="PlanValuesAsync"/>): each variant column's
+    /// shredding, with its chunk target.
+    /// </summary>
+    internal sealed record ValueShredding(ImmutableDictionary<string, VariantShredding> Shredded, ImmutableDictionary<string, int> VariantChunks);
+
+    /// <summary>
     /// The keys of the variant column <paramref name="field"/> the dataset declares as identifiers or as shredded paths,
     /// each with the class it is read in, which every object shreds wherever a row holds one; null for none. A key
     /// declared both ways keeps its identifier's class, the one its index holds.
@@ -1372,9 +1454,11 @@ internal static class DatasetCompactor
                     // An object of a dataset of periods is written as its plan says: its slices, and what its
                     // variant columns shred.
                     ObjectPlan? plan = Plans?[(_level, _period)];
+                    ValueShredding? shredding = Shreddings is { } shreddings ? shreddings[Math.Clamp(_value, 0, shreddings.Count - 1)] : null;
                     _draft = _dataset.StartObjectUnder(
-                        _schema, _inKeyOrder, _rowBound, sliced: plan is not null || KeySliced is not null, shredded: plan?.Shredded,
-                        variantChunks: plan?.VariantChunks, directories: plan?.Directories, byteBound: _byteBound);
+                        _schema, _inKeyOrder, _rowBound, sliced: plan is not null || KeySliced is not null, shredded: plan?.Shredded ?? shredding?.Shredded,
+                        variantChunks: plan?.VariantChunks ?? shredding?.VariantChunks, directories: plan?.Directories, byteBound: _byteBound);
+                    _census = shredding is null ? null : [.. VariantColumns(_schema.DType).Select(_ => new PathCensus(_dataset.Options.Write.StringBoundBytes, SliceTarget))];
                     if (plan is not null)
                     {
                         _sorter = new SortedSlices(plan.Slices, _schema.DType.IndexOfField(InstantPath!), _schema.DType)
@@ -1396,7 +1480,58 @@ internal static class DatasetCompactor
             }
 
             _sliceFilled += batch.RowCount;
+            if (_census is { } census)
+            {
+                // Each row counted at its place in the object, which the slices' rows tell apart.
+                Count(census, batch, _rows - batch.RowCount);
+            }
+
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>Counts the paths of each variant column of <paramref name="batch"/>, its first row at <paramref name="first"/> of the object.</summary>
+        private void Count(PathCensus[] census, RecordBatch batch, long first)
+        {
+            if (_places.Length < batch.RowCount)
+            {
+                _places = new long[Math.Max(batch.RowCount, _places.Length * 2)];
+            }
+
+            Span<long> places = _places.AsSpan(0, batch.RowCount);
+            for (int row = 0; row < places.Length; row++)
+            {
+                places[row] = first + row;
+            }
+
+            int[] variants = VariantColumns(_schema.DType);
+            for (int v = 0; v < variants.Length; v++)
+            {
+                census[v].Add(batch, variants[v], places);
+            }
+        }
+
+        /// <summary>
+        /// Declares to <paramref name="writer"/> each variant column's path directory, of what <paramref name="census"/>
+        /// counted, each path naming the slices of <paramref name="slices"/> that hold it, told apart by their rows.
+        /// </summary>
+        private void DeclareDirectories(VortexFileWriter writer, PathCensus[] census, SliceTable? slices, ImmutableDictionary<string, VariantShredding> shredded)
+        {
+            List<TimeSlice>? places = null;
+            if (slices is not null)
+            {
+                places = new List<TimeSlice>(slices.Slices.Count);
+                foreach (TimeSlice slice in slices.Slices)
+                {
+                    places.Add(new TimeSlice(slice.FirstRow, slice.FirstRow + slice.Rows, slice.FirstRow, slice.Rows));
+                }
+            }
+
+            int[] variants = VariantColumns(_schema.DType);
+            for (int v = 0; v < variants.Length; v++)
+            {
+                string name = _schema.DType.GetFieldName(variants[v]);
+                writer.DeclareDirectory(name, VariantDirectory.From(census[v], shredded.GetValueOrDefault(name), places));
+            }
         }
 
         /// <summary>
@@ -1417,12 +1552,37 @@ internal static class DatasetCompactor
         /// <summary>Whether the slice being written, bounded by keys, holds its target, so that the next key starts another.</summary>
         internal bool WantsSlice => KeySliced is not null && _sliceFilled >= SliceTarget;
 
-        /// <summary>Records the first key of the rows written next, which starts a slice bounded by keys when they do.</summary>
+        /// <summary>
+        /// What the objects of each clustering value shred, in the order of the values, which the rows come in; null for
+        /// objects that shred nothing, and list no path.
+        /// </summary>
+        internal IReadOnlyList<ValueShredding>? Shreddings { get; init; }
+
+        /// <summary>The clustering value the objects are cut by, which tells <see cref="Shreddings"/> apart; null for one.</summary>
+        internal ValueCut? Values { get; init; }
+
+        // The place among the shreddings of the value being written and its first key; the paths of the object being
+        // written, a census a variant column, counted at each row's place in the object.
+        private int _value = -1;
+        private byte[]? _valueKey;
+        private PathCensus[]? _census;
+        private long[] _places = [];
+
+        /// <summary>
+        /// Records the first key of the rows written next, which starts a slice bounded by keys when they do, and the next
+        /// clustering value's shredding when they start an object of another value.
+        /// </summary>
         internal void Starts(ReadOnlySpan<byte> key)
         {
             if (KeySliced is not null && _sliceFilled == 0)
             {
                 _sliceLows.Add(key.ToArray());
+            }
+
+            if (Shreddings is not null && _draft is null && (_value < 0 || (Values is { } values && !values.Same(_valueKey, key))))
+            {
+                _value++;
+                _valueKey = key.ToArray();
             }
         }
 
@@ -1552,6 +1712,13 @@ internal static class DatasetCompactor
                     if (keySlices is not null)
                     {
                         draft.Writer.DeclareSlices(KeySliced!, keySlices);
+                    }
+
+                    if (_census is { } census)
+                    {
+                        _census = null;
+                        DeclareDirectories(
+                            draft.Writer, census, keySlices, Shreddings![Math.Clamp(_value, 0, Shreddings.Count - 1)].Shredded);
                     }
 
                     if (_sorter is { } sorter)

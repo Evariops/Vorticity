@@ -43,8 +43,9 @@ public sealed partial class IdentifierPostingsTests
                 Session = session,
                 ClusteringKey = [nameof(Request.At)],
                 Identifiers = [nameof(Request.RequestId)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
                 Write = paged ? new VortexWriteOptions { BlockRows = 16, ChunkTargetBytes = 1, ChunkPageEntries = 4 } : VortexWriteOptions.Default,
+                ChunkBytes = paged ? 1 : 1 << 20,
             }, Ct);
             Random random = new Random(31);
             List<Request> appended = [];
@@ -63,12 +64,12 @@ public sealed partial class IdentifierPostingsTests
             }
 
             List<ObjectEntry> hours = [];
-            await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+            await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
             {
                 hours.Add(ObjectEntry.FromBytes(leaf.Value.Span));
             }
 
-            Assert.Equal(2, hours.Count);
+            Assert.True(hours.Count >= 3, $"{hours.Count} objects above level 0");
             Request needle = appended[1_234];
             VortexExpr filter = VortexExpr.Parse($"RequestId = '{needle.RequestId}'");
             List<RecordBatch>?[] found = new List<RecordBatch>?[hours.Count];
