@@ -362,6 +362,23 @@ the same columns, with its equality filters on columns of few values in the obje
 - Partials live in the local cache, and may be written beside the rollups on the store, under a
   budget of 2 GiB per dataset by default; the one that saves the least per byte goes first.
 
+Built so far (`LearnedFamily`, `LearnedPartials`): the core forms the family of a question whose
+aggregates a part's states answer whole, the plan's keys followed by a key for each conjunct that asks a
+top-level column for a value or a few, and names it on the pass that asks states (`ScanSpec.Family`).
+The dataset learns the partial of each object it would read as rows, one with no row marked whose added
+keys widen no read: a value of the key's first column that the object holds with others is read as the
+question reads it, since the family would read every value's rows. It runs the family over the object's
+rows as a part (`AggregationPartials.ExportAsync`), with the synopses off, keeps the partial in the
+handle (64 MiB) and the session's synopsis cache, under the object's identity and the family's, its
+bytes checked by their XXH3-128, and serves it as a partial's states, the groups of the values asked
+selected; a partial past 1 MiB, some 10⁴ groups, answers its question and is not kept, and the object
+learns that family no more. The plan says `partial`, learned or to learn. Learning reads the object's
+rows of the family's columns, which a question with a scattered column's value reads anyway: on four
+services of 20 000 calls, counts and sums by route under one status read 542 KB the first time, as the
+rows do, and nothing under another status, nor from a handle opened later on the same cache
+*(measured, `DatasetLearnedPartialsTests`)*. Not built yet: the sum of partials through a compaction
+(F2), the families kept up as objects are written (F3), the store beside the rollups.
+
 ### 5.7 The caches
 
 On the local disk, shared between processes: the data pages; the synopses; the partials; and, for a

@@ -309,6 +309,104 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
+    /// Learns, for <paramref name="family"/>, the partial of each object it would read as rows that may learn one, run over
+    /// <paramref name="source"/>, or answers the object from the one it learned (<see cref="LearnedPartials"/>).
+    /// </summary>
+    internal DatasetScanBuilder WithFamily(LearnedFamily family, ScanSource source)
+    {
+        _family = family;
+        _familySource = source;
+        return this;
+    }
+
+    // The family of the aggregation the scan asks states for, whose partials it learns, and the source its runs read.
+    private LearnedFamily? _family;
+    private ScanSource? _familySource;
+
+    /// <summary>
+    /// Whether the object <paramref name="held"/> learns its partial of the scan's family, or answers from it: one the scan
+    /// covers whole, with no row marked, of the version's columns, whose added keys widen no read. A column the family adds
+    /// that is the key's first, which the object holds more than one value of, would read every value's rows where the
+    /// question reads its own, and the object is read as the question reads it.
+    /// </summary>
+    private bool Learns(in PositionedObject held)
+    {
+        if (_family is not { } family || Covered(held) != held.Entry.Rows || held.Entry.HasDeletions || !_version.Schema.Holds(held.Entry)
+            || _dataset.Partials.TooLarge(held.Entry.Uid, family.Identity))
+        {
+            return false;
+        }
+
+        if (_version.Schema.Key is { } key)
+        {
+            string leading = key.InstantPath;
+            ObjectSummaries summaries = held.Summaries(key);
+            for (int i = family.Keys.Length - family.Added; i < family.Keys.Length; i++)
+            {
+                if (string.Equals(family.Keys[i].Path, leading, StringComparison.Ordinal)
+                    && CountsAnswer.ConstantOf(summaries, leading, family.Keys[i].Field) is null)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>The top-level columns <paramref name="family"/> reads, by their places: its keys', its aggregates' and its filter's.</summary>
+    private int[] FieldsOf(LearnedFamily family)
+    {
+        HashSet<string> paths = [];
+        foreach (ColumnShape key in family.Keys)
+        {
+            paths.Add(key.Path);
+        }
+
+        foreach (IAggregateNode aggregate in family.Plan.Aggregates)
+        {
+            if (aggregate.Input is { } input)
+            {
+                paths.Add(input.Path);
+            }
+        }
+
+        family.Filter?.CollectFields(paths);
+        SortedSet<int> fields = [];
+        foreach (string path in paths)
+        {
+            int dot = path.IndexOf('.', StringComparison.Ordinal);
+            if (_version.Schema.DType.IndexOfField(dot < 0 ? path : path[..dot]) is int field and >= 0)
+            {
+                fields.Add(field);
+            }
+        }
+
+        return [.. fields];
+    }
+
+    /// <summary>
+    /// The states of the object <paramref name="held"/> under the scan's family: its partial, from the handle or the
+    /// session's cache, or learned now from its rows and kept; the groups of the values the question asks.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> LearnedAsync(PositionedObject held, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        LearnedFamily family = _family!;
+        SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
+        if (!_dataset.Partials.TryGet(held.Entry.Uid, family.Identity, cache, out AggregationPartial partial))
+        {
+            partial = await family.LearnAsync(_familySource!, new RowRange(held.FirstRow, held.FirstRow + held.Entry.Rows), _options, cancellationToken)
+                .ConfigureAwait(false);
+            _dataset.Partials.Keep(held.Entry.Uid, family.Identity, partial, cache);
+        }
+
+        await foreach (RecordBatch batch in family.ServeAsync(partial, _dataset.Session, held.FirstRow, cancellationToken).ConfigureAwait(false))
+        {
+            yield return batch;
+        }
+    }
+
+    /// <summary>
     /// Says that the variant columns of <paramref name="keys"/>, by name, are read only through those
     /// top-level keys, which each object's path map lets its scan read alone.
     /// </summary>
@@ -783,11 +881,22 @@ internal sealed class DatasetScanBuilder
 
                 if (rows is null && byBucket is null)
                 {
+                    // An object of the question's family answers from the partial it learned, or learns it from its rows.
+                    if (Learns(held))
+                    {
+                        await foreach (RecordBatch batch in LearnedAsync(held, cancellationToken).ConfigureAwait(false))
+                        {
+                            yield return batch;
+                        }
+
+                        continue;
+                    }
+
                     // This object's rows and those of the objects after it the counts do not answer, up to the next they may:
                     // a part of the scan, which reads them as it would, ahead and past their sheets. Under rollups, a part
                     // stops where the rows the walk passed over begin, which a rollup answers.
                     int last = o;
-                    while (last + 1 < objects.Count && objects[last + 1].Field is null && !BlocksAnswer(objects[last + 1].Held)
+                    while (last + 1 < objects.Count && objects[last + 1].Field is null && !BlocksAnswer(objects[last + 1].Held) && !Learns(objects[last + 1].Held)
                         && (rollups is null || objects[last + 1].Held.FirstRow == objects[last].Held.FirstRow + objects[last].Held.Entry.Rows))
                     {
                         last++;
@@ -1544,28 +1653,7 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>Selects the rows of <paramref name="batch"/> <paramref name="filter"/> holds for.</summary>
-    private static void SelectBy(RecordBatch batch, VortexExpr filter)
-    {
-        int rows = batch.RowCount;
-        byte[] states = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
-        try
-        {
-            FilterEvaluator.Evaluate(filter, batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
-            int words = Math.Max((rows + 63) >> 6, 1);
-            Buffers.VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
-            Span<ulong> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
-
-            // The states compared 64 at a time, each word of the selection written whole, and counted by its popcount; the
-            // one word of a batch of no row, which no compare writes, cleared.
-            kept[^1] = 0;
-            int selected = Trilean.ToWords(states.AsSpan(0, rows), Trilean.True, equal: true, kept);
-            batch.Select(selection, selected);
-        }
-        finally
-        {
-            System.Buffers.ArrayPool<byte>.Shared.Return(states);
-        }
-    }
+    private static void SelectBy(RecordBatch batch, VortexExpr filter) => FilterEvaluator.Select(batch, filter);
 
     /// <summary>
     /// The rows the scan selects, without materialising them, cheapest proof first: an object whose
@@ -1819,6 +1907,24 @@ internal sealed class DatasetScanBuilder
                 keptRows += covered;
                 segments += (sketched is null ? 1 : 2) + less;
                 bytes += contents.CountsOf(field)!.Value.Length + (sketched?.Length ?? 0) + (less > 0 ? held.Entry.NegativesAt.Length : 0);
+                mayMatch = true;
+                continue;
+            }
+
+            // An object of the question's family answers from the partial it learned, with no request, or learns it from its
+            // rows, which it reads under the family's filter.
+            if (answer is not null && Learns(held))
+            {
+                bool learned = _dataset.Partials.Holds(held.Entry.Uid, _family!.Identity, _dataset.Session.Options.SynopsisCache);
+                PathCosts.Cost rows = learned ? default : PathCosts.Rows(held.Entry, FieldsOf(_family));
+                states.Add(new StatesStep(
+                    held.Entry.Key,
+                    "partial",
+                    learned ? "the partial of the question's family it learned" : $"its rows, {rows.Bytes} bytes in {rows.Requests} requests, the partial of the question's family learned from them",
+                    rows.Requests));
+                keptRows += covered;
+                segments += rows.Requests;
+                bytes += rows.Bytes;
                 mayMatch = true;
                 continue;
             }

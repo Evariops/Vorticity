@@ -248,6 +248,15 @@ they are answered from their counts too: the answer is then the exact answer of 
 which `ScanMetrics.Window` gives. The other synopses are designed in
 [22-on-the-fly-and-synopses.md](../design/22-on-the-fly-and-synopses.md).
 
+An object read as rows leaves what it gave the question, so that the question asked again reads
+nothing of it. What it keeps is the question's family: the same keys and aggregates, each filter that
+asks a column for a value or a few made a key of its own. Counts by route where `r.Status == 404`
+learn the counts by route and status, and the same question under `r.Status == 500` answers from
+them. The handle keeps these partials, and so does the session's `SynopsisCache` when it has one, for
+the handles and processes after. A question whose aggregates a state answers whole learns them: counts,
+sums, means, extremes, quantiles and approximate distinct counts. A value of the key's first column is
+not made a key where an object holds it with others, since learning would read every value's rows.
+
 Over a long range, an object's counts still cost a request an object. `RollUpAsync` sums the counts of
 runs of about `DatasetOptions.RollupFanout` consecutive objects (64 by default) into rollups, then as
 many rollups into one of the rank above, with no row read, and `RunCompactionAsync` calls it once no

@@ -97,6 +97,12 @@ internal sealed record ScanSpec
     /// its every aggregate and key, a source that reads one file being settled by the aggregation itself. Null for rows.
     /// </summary>
     internal Aggregating.AggregationPlan? Settles { get; init; }
+
+    /// <summary>
+    /// The family of the aggregation a pass asks states for, whose partials a source that learns them (<see cref="ScanSource.LearnsPartials"/>)
+    /// keeps of the rows it reads and answers the family's questions from after (<see cref="Aggregating.LearnedFamily"/>); null for none.
+    /// </summary>
+    internal Aggregating.LearnedFamily? Family { get; init; }
 }
 
 /// <summary>
@@ -158,6 +164,12 @@ internal abstract class ScanSource
     /// the aggregation (<see cref="ScanSpec.Settles"/>): a dataset, whose objects' marked rows only it knows.
     /// </summary>
     internal virtual bool SettlesBlocks => false;
+
+    /// <summary>
+    /// Whether the source learns the partials of an aggregation's family from the rows it reads, a pass that asks states
+    /// naming the family (<see cref="ScanSpec.Family"/>): a dataset, which knows its objects and keeps their partials.
+    /// </summary>
+    internal virtual bool LearnsPartials => false;
 
     /// <summary>
     /// Whether a pass of <paramref name="spec"/> asking <paramref name="states"/> would take states in place

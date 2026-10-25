@@ -39,6 +39,9 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>It settles each object's blocks as it reads it, those no delete marked a row of (<see cref="ScanSpec.Settles"/>).</summary>
     internal override bool SettlesBlocks => true;
 
+    /// <summary>It learns the partials of an aggregation's family from the objects it reads as rows (<see cref="ScanSpec.Family"/>).</summary>
+    internal override bool LearnsPartials => true;
+
     /// <summary>The version every sink of the scan reads.</summary>
     internal ulong Version => _version.Version;
 
@@ -48,7 +51,7 @@ internal sealed class DatasetScanSource : ScanSource
     internal override async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
         KeepsStates && spec.Options.UseSynopses && !spec.MatchesNothing
         && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
-        && await Builder(spec with { States = states }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false);
+        && (spec.Family is not null || await Builder(spec with { States = states }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false));
 
     /// <summary>
     /// The filter grown so that its range on the key's first column covers whole the objects it cuts whose counts would
@@ -589,6 +592,11 @@ internal sealed class DatasetScanSource : ScanSource
         if (spec.Settles is { } plan)
         {
             builder.WithSettles(plan);
+        }
+
+        if (spec.Family is { } family && spec.States is not null && options.UseSynopses)
+        {
+            builder.WithFamily(family, this);
         }
 
         return counters is null ? builder : builder.WithCounters(counters);

@@ -387,7 +387,7 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
     /// A batch of a partial's file as a batch of its states: each column as its values lie, a constant, a dictionary or runs
     /// made whole, as the words of states are read.
     /// </summary>
-    private static RecordBatch Canonical(RecordBatch batch, long row)
+    internal static RecordBatch Canonical(RecordBatch batch, long row)
     {
         CanonicalArena arena = batch.Arena;
         CanonicalNode root = arena.GetNode(batch.RootIndex);

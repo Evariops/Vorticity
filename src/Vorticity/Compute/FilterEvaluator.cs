@@ -256,6 +256,33 @@ internal sealed class FilterEvaluator
     }
 
     /// <summary>
+    /// Selects the rows of <paramref name="batch"/> <paramref name="filter"/> is true for, its selection replaced by theirs,
+    /// written in its own arena: a batch found whole that a filter then keeps rows of.
+    /// </summary>
+    internal static void Select(RecordBatch batch, VortexExpr filter)
+    {
+        int rows = batch.RowCount;
+        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+        try
+        {
+            Evaluate(filter, batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
+            int words = Math.Max((rows + 63) >> 6, 1);
+            VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
+            Span<ulong> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
+
+            // The states compared 64 at a time, each word of the selection written whole, and counted by its popcount; the
+            // one word of a batch of no row, which no compare writes, cleared.
+            kept[^1] = 0;
+            int selected = Trilean.ToWords(states.AsSpan(0, rows), Trilean.True, equal: true, kept);
+            batch.Select(selection, selected);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(states);
+        }
+    }
+
+    /// <summary>
     /// Evaluates this evaluator's filter over the batch rooted at <paramref name="rootIndex"/>.
     /// </summary>
     /// <param name="arena">The arena holding the decoded batch.</param>

@@ -64,6 +64,10 @@ internal sealed class AggregationQuery : ResultQuery
     /// its columns those of rows of states.
     /// </summary>
     /// <exception cref="NotSupportedException">A state does not answer one of its aggregates whole.</exception>
+    /// <summary>A query of <paramref name="plan"/>'s groups' states by <paramref name="keys"/> over <paramref name="host"/>: a learned family's (<see cref="LearnedFamily"/>).</summary>
+    internal static AggregationQuery StatesOf(AggregationHost host, AggregationPlan plan, ColumnShape[] keys) =>
+        new AggregationQuery(host, plan, [], keys, null, 0, long.MaxValue, null, [], exports: true);
+
     internal AggregationQuery Partial()
     {
         AggregationPartials.Check(Plan);

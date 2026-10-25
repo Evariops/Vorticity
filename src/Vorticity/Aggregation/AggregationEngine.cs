@@ -3517,7 +3517,7 @@ internal abstract class AggregationHost
         // The states the pass would ask for, so that a source that keeps them says per object what it reads.
         if (pass.Options.UseSynopses && Source.KeepsStates && StateRequest.Of(plan, settled, top: null) is { } states)
         {
-            pass = pass with { States = states };
+            pass = pass with { States = states, Family = Source.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, Source) : null };
         }
 
         ScanPlan explained = await Source.ExplainAsync(pass, cancellationToken).ConfigureAwait(false);
@@ -3638,7 +3638,7 @@ internal static class AggregationEngine
         // that the cut leaves whole what states answer.
         else if (pass.Options.UseSynopses && source.KeepsStates && StateRequest.Of(plan, settled, top) is { } states)
         {
-            pass = pass with { States = states };
+            pass = pass with { States = states, Family = source.LearnsPartials && top is null ? LearnedFamily.Of(plan, pass.Filter, source) : null };
         }
 
         // On several lanes the structures are read once, before the rows are cut, so that the cut
