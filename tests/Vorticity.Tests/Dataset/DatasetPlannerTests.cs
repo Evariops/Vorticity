@@ -116,6 +116,58 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         Assert.True(answered >= Questions / 3, $"seed {seed}: the counts answered {answered} questions of {Questions}");
     }
 
+    // The same questions drawn at random under a key led by a drawn column, a code of a few values, the rows of each value
+    // together in the key's order, and a block value of the instant's hour, the application's choice:
+    // where an object's counts do not answer, its blocks may, by their statistics, and every answer is the rows'.
+    [Theory]
+    [InlineData(31)]
+    [InlineData(32)]
+    [InlineData(33)]
+    [InlineData(34)]
+    public async Task AQuestionDrawnAtRandomUnderAKeyLedByAColumnAnswersAsItsRowsDo(int seed)
+    {
+        // The code leads the key, which a composite key takes with no null.
+        Random random = new Random(seed);
+        DatasetCountsTests.Drawn[] columns = DatasetCountsTests.Draw(random);
+        columns[1] = columns[1] with { Nullable = false };
+        object?[][] rows = DatasetCountsTests.Rows(columns, random);
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using VortexDataset dataset = await DatasetCountsTests.WriteAsync(store, columns, rows, new DatasetOptions
+        {
+            ClusteringKey = ["c1", "At"],
+            Clustering = new ClusteringOptions { BlockValue = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            ContentsObjectBytes = 0,
+            SheetObjectBytes = 0,
+        });
+        const int Questions = 24;
+        int answered = 0;
+        for (int question = 0; question < Questions; question++)
+        {
+            (string[] keys, string[] results, string? filter) = Draw(random, columns, rows);
+            string asked = $"seed {seed}: by ({string.Join(", ", keys)}) {string.Join(", ", results)} where {filter ?? "true"}";
+            List<string> read = await AskAsync(dataset, keys, results, filter, synopses: false);
+            List<string> answers = await AskAsync(dataset, keys, results, filter, synopses: true);
+            Assert.True(read.SequenceEqual(answers), $"{asked}: {read.Count} groups as rows, {answers.Count} with the synopses, " +
+                $"first apart: '{read.Except(answers).FirstOrDefault()}' against '{answers.Except(read).FirstOrDefault()}'");
+            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
+            answered += plan.States.Any(step => step.Read == "blocks") ? 1 : 0;
+        }
+
+        Console.WriteLine($"PLANNER BY A COLUMN seed {seed}: the blocks answered objects of {answered} questions of {Questions}");
+        Assert.True(answered > 0, $"seed {seed}: the blocks answered no question");
+
+        // Every object that keeps its blocks keeps each column's statistics over them: merged from several inputs, its
+        // blocks end where its writes do too, which its columns' statistics must cut alike.
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            if (held.Entry.Contents is { Blocks.Count: > 0 } contents)
+            {
+                Assert.True(contents.BlockStats.Count > 0, $"seed {seed}: an object of {held.Entry.Rows} rows keeps its blocks and no statistics over them");
+            }
+        }
+    }
+
     // An object written before the schema moved its columns holds its synopses by its own columns' places: its sheets and
     // its counts answer for none of the version's columns, and it is read as rows.
     [Fact]

@@ -44,6 +44,10 @@ internal sealed class BlockAnswer
     private int[] _filtered = [];
     private int[]? _fields;
 
+    // The columns of the filter that only compare it to a bound: a block's extremes decide those whole, mostly, with no
+    // list of its values, so that they never make a block vary for the planner's count.
+    private int[] _ranged = [];
+
     private BlockAnswer(CountsAnswer counts, DatasetSchema version, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, int[] measured, int leading)
     {
         _schema = version;
@@ -75,18 +79,28 @@ internal sealed class BlockAnswer
         }
 
         List<int> filtered = [];
+        List<int> ranged = [];
         if (_asked is { } filter)
         {
             _filter = new SummaryPruner(filter);
+            HashSet<string> bounded = new HashSet<string>(StringComparer.Ordinal);
+            HashSet<string> other = new HashSet<string>(StringComparer.Ordinal);
+            Bounded(filter, bounded, other);
             foreach (string path in _filter.Paths)
             {
                 if (_schema.DType.IndexOfField(path) is int field and >= 0)
                 {
                     Add(filtered, field);
                     Add(fields, field);
+                    if (bounded.Contains(path) && !other.Contains(path))
+                    {
+                        Add(ranged, field);
+                    }
                 }
             }
         }
+
+        _ranged = [.. ranged];
 
         foreach (int field in _measured)
         {
@@ -167,6 +181,27 @@ internal sealed class BlockAnswer
         return new BlockAnswer(counts, version.Schema, filter, keys, [.. measured], leading);
     }
 
+    /// <summary>
+    /// Sorts the columns <paramref name="filter"/> reads: those a comparison to a bound reads, through <c>AND</c> and
+    /// <c>OR</c>, into <paramref name="bounded"/>, and those any other predicate reads into <paramref name="other"/>.
+    /// </summary>
+    private static void Bounded(VortexExpr filter, HashSet<string> bounded, HashSet<string> other)
+    {
+        switch (filter)
+        {
+            case LogicalExpr logical:
+                Bounded(logical.Left, bounded, other);
+                Bounded(logical.Right, bounded, other);
+                break;
+            case ComparisonExpr { Op: ComparisonOp.Less or ComparisonOp.LessOrEqual or ComparisonOp.Greater or ComparisonOp.GreaterOrEqual, Field: ColumnFieldExpr column }:
+                bounded.Add(column.Path);
+                break;
+            default:
+                other.UnionWith(new SummaryPruner(filter).Paths);
+                break;
+        }
+    }
+
     private static void Add(List<int> fields, int field)
     {
         if (!fields.Contains(field))
@@ -220,7 +255,7 @@ internal sealed class BlockAnswer
         {
             foreach (int field in _filtered)
             {
-                free += field != _leading && !Keyed(field) ? 1 : 0;
+                free += field != _leading && !Keyed(field) && Array.IndexOf(_ranged, field) < 0 ? 1 : 0;
             }
         }
 

@@ -31,12 +31,16 @@ internal sealed class BlockCuts
         }
     }
 
-    /// <summary>The first end declared past <paramref name="row"/>, from the cut <paramref name="from"/> on, and its place; <see cref="long.MaxValue"/> for none yet.</summary>
-    internal (long End, int Cut) After(long row, int from)
+    /// <summary>
+    /// The first end declared at <paramref name="row"/> or past it, from the cut <paramref name="from"/> on, and its place;
+    /// <see cref="long.MaxValue"/> for none yet. An end at the row itself is one the caller declared after the rows before
+    /// it went in, where a write ends: the block ends there.
+    /// </summary>
+    internal (long End, int Cut) AtOrAfter(long row, int from)
     {
         lock (_gate)
         {
-            while (from < _ends.Count && _ends[from] <= row)
+            while (from < _ends.Count && _ends[from] < row)
             {
                 from++;
             }
@@ -188,9 +192,17 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
         _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
         for (int at = 0; at < count;)
         {
-            if (_nextEnd <= _row || _nextEnd == long.MaxValue)
+            if (_nextEnd < _row || _nextEnd == long.MaxValue)
             {
-                (_nextEnd, _nextCut) = _cuts.After(_row, _nextCut);
+                (_nextEnd, _nextCut) = _cuts.AtOrAfter(_row, _nextCut);
+            }
+
+            if (_nextEnd == _row)
+            {
+                // A block that ends where the rows before these did, declared since: it ends before them.
+                End();
+                (_nextEnd, _nextCut) = (-1, _nextCut + 1);
+                continue;
             }
 
             int take = (int)Math.Min(count - at, _nextEnd - _row);
