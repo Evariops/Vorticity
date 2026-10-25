@@ -167,8 +167,12 @@ The engine is fed by the dataset's scan, which holds to six rules.
 2. **Filter columns first.** The zone maps drop pages; the filtered columns of the pages left are read,
    cheapest filter first (the column's bytes times its selectivity, which the column sheets estimate);
    the other columns are read only for the pages where rows are left.
-3. **Ranges joined.** The pages kept of one object and one column that lie side by side are read in
-   one request, up to a cap, and the next part of each lane is read ahead.
+3. **Ranges joined.** The segments of one object that lie close are read in one request, across a gap
+   of 256 KiB at most and up to 8 MiB, and the next part of each lane is read ahead. Under the cost model
+   of section 9, a request more costs about 290 KB of transfer (30 ms among 128 in flight, at
+   1.25 GB/s): a gap wider than that costs more to bridge than to ask apart. A column's chunks of about
+   a mebibyte already carry some 3.5 times what their request costs, and lie among the other columns'
+   chunks, so a read of a few columns asks for each chunk apart rather than bridging the others'.
 4. **Newest first.** A question over a window reads its objects from the newest to the oldest, and may
    return partial results with the share of the window they cover. A cancellation stops the reads.
 5. **A local cache of data pages**, beside the cache of synopses, shared between processes, with its

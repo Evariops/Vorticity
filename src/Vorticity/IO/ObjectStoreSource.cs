@@ -48,7 +48,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
     /// <param name="store">The store.</param>
     /// <param name="key">The object's key.</param>
     /// <param name="length">The object's length when the caller knows it, which spares its request; -1 otherwise.</param>
-    /// <param name="options">The coalescing budgets, the defaults when null.</param>
+    /// <param name="options">The coalescing budgets, an object store's when null (<see cref="SegmentReadOptions.Remote"/>).</param>
     /// <param name="ownsStore">Whether disposing the source disposes the store.</param>
     internal ObjectStoreSource(IObjectStore store, string key, long length = -1, SegmentReadOptions? options = null, bool ownsStore = false)
     {
@@ -59,7 +59,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
         _key = key;
         _length = length;
         _givenLength = length;
-        _options = options ?? SegmentReadOptions.Default;
+        _options = options ?? SegmentReadOptions.Remote;
         _ownsStore = ownsStore;
     }
 

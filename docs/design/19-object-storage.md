@@ -30,7 +30,7 @@ Five requirements, each of which becomes a test or a ratchet once built:
 |---|---|
 | the same API | a file opens, scans and is written with the calls it has on a path, given a location instead, though an object takes no append. A dataset takes a store, or a location. Nothing else in the public API changes, whichever provider holds the bytes |
 | few round trips | every operation has a count of requests and of dependent steps, written in [the budget](#5-requests-per-operation), and counting tests hold it. Opening a file is one request on a store that reads suffixes, and opening an object of a dataset is one request on any store. Nothing that a response already said is asked again |
-| the bandwidth of the link | reads run in parallel on many connections, coalesced into ranges of up to 16 MiB, and large objects go up in parts sent in parallel |
+| the bandwidth of the link | reads run in parallel on many connections, coalesced into ranges of up to 8 MiB across gaps of up to 256 KiB, and large objects go up in parts sent in parallel |
 | bounded allocation, one copy | a request allocates a constant amount, never a buffer the size of its body, and this library's own code allocates nothing per batch. A response body reaches the block the scan decodes from with no copy but the one TLS makes |
 | secure by default | HTTPS only, credentials from the platform's identity where the platform offers one, no secret in a message, a log or a trace, and a conditional write whose outcome cannot be proven reported as unknown, never as lost |
 

@@ -113,7 +113,7 @@ Dispose every file opened through the session before the session itself.
 | operation | requests |
 |---|---|
 | open a file at a location | 1 on Amazon S3: the last 64 KiB and the object's length in one answer. 2 on Azure, which reads no suffix, and elsewhere until a test against the service proves that it answers one: the object's metadata, then the tail |
-| a batch of a scan | the batch's segments coalesced into ranges of up to 16 MiB, issued together |
+| a batch of a scan | the batch's segments coalesced into ranges of up to 8 MiB, across gaps of up to 256 KiB, issued together |
 | open an object of a dataset | 1, its length known from the dataset's entry |
 | write a file up to 32 MiB | 1, sent at completion |
 | write a larger file | 1 to start an upload, its parts of 16 MiB sent in parallel as they fill, 1 to complete it |
