@@ -49,6 +49,18 @@ public sealed partial class DatasetRollupsTests
         Assert.Contains(rollups, r => r.Rank == 2 && r.Buckets.Count > 1);
         await HoldsAsync(dataset, rollups);
 
+        // Each rank covers the rollups of the rank below but those of its last run, which stays open until more objects
+        // come: the rollups it leaves are the last ones.
+        for (int rank = 2; rank <= rollups.Max(r => r.Rank); rank++)
+        {
+            List<RollupEntry> lower = [.. rollups.Where(r => r.Rank == rank - 1).OrderBy(r => Convert.ToHexString(r.FirstKey.Span), StringComparer.Ordinal)];
+            List<RollupEntry> upper = [.. rollups.Where(r => r.Rank == rank)];
+            bool[] covered = [.. lower.Select(child => upper.Any(parent =>
+                parent.FirstKey.Span.SequenceCompareTo(child.FirstKey.Span) <= 0 && child.LastKey.Span.SequenceCompareTo(parent.LastKey.Span) <= 0))];
+            int left = Array.IndexOf(covered, false);
+            Assert.True(left < 0 || covered[left..].All(held => !held), $"rank {rank} leaves rollup {left} of rank {rank - 1} out, and covers one after it");
+        }
+
         // A rollup of rank 1's totals of the service are its objects' counts, summed.
         RollupEntry one = rollups.First(r => r.Rank == 1 && r.Children > 1);
         Dictionary<string, long> expected = [];

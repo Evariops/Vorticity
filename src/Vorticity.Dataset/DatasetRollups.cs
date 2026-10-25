@@ -302,7 +302,7 @@ internal static class DatasetRollups
         for (int i = run.First; i < run.First + run.Count; i++)
         {
             // The child's rollup, by the first object its run covers, over as many children as its run, and all its regions.
-            ReadOnlyMemory<byte> first = objects[FirstObject(ranks, rank - 1, i)].TreeKey;
+            ReadOnlyMemory<byte> first = objects[FirstObject(ranks, rank, i)].TreeKey;
             if (!below.TryGetValue(Convert.ToHexString(first.Span), out RollupEntry? child) || child.Children != ranks[rank - 2][i].Count)
             {
                 return null;
