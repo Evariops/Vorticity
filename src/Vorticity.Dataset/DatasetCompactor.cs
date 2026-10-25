@@ -1082,7 +1082,20 @@ internal static class DatasetCompactor
                 covered += rows;
             }
 
-            BlockTable? table = Blocked is not null && _blockRows.Count > 0 && covered == _rows ? BlockTable.Of(_blockRows, _blockLows, _blockHighs) : null;
+            BlockTable? table = null;
+            if (Blocked is { } column && _blockRows.Count > 0 && covered == _rows)
+            {
+                // The rows of the blocks whose first and last keys hold one value of the first column and one block value: the
+                // keys follow one another, so every row between holds them too.
+                long pure = 0;
+                for (int b = 0; b < _blockRows.Count; b++)
+                {
+                    pure += SameRun(_blockLows[b], _blockHighs[b], column, BlockValues) ? _blockRows[b] : 0;
+                }
+
+                table = BlockTable.Of(_blockRows, _blockLows, _blockHighs, pure);
+            }
+
             _declaredBlocks = 0;
             _declaredEnd = 0;
             _blockRows.Clear();

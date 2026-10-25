@@ -134,6 +134,13 @@ internal sealed class ObjectContents(
     /// </summary>
     internal IReadOnlyList<long> ColumnChunks { get; init; } = [];
 
+    /// <summary>
+    /// The rows of the object's blocks (<see cref="Blocks"/>) that hold one value of the key's first column, and of the block
+    /// value its writer declared: those a question grouped by both may answer from their statistics, where a block that holds
+    /// several reads its rows. -1 when the object does not say.
+    /// </summary>
+    internal long PureBlockRows { get; init; } = -1;
+
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
         foreach ((int column, IndexSegment region) in regions)
@@ -173,6 +180,7 @@ internal sealed class ObjectContents(
             Wheres = Wheres,
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
+            PureBlockRows = PureBlockRows,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -244,6 +252,9 @@ internal sealed class ObjectContents(
 
     // The chunks of each top-level column's data, packed, by the column's place.
     private const int TagColumnChunks = 21;
+
+    // The rows of the blocks that hold one value of the key's first column and of the block value.
+    private const int TagPureBlockRows = 22;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -473,6 +484,11 @@ internal sealed class ObjectContents(
                 }
             }
 
+            if (PureBlockRows >= 0)
+            {
+                writer.WriteUInt64Always(TagPureBlockRows, (ulong)PureBlockRows);
+            }
+
             if (DirectoryRegion is { } directoryRegion)
             {
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
@@ -525,6 +541,7 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> wheres = [];
             List<long> columnBytes = [];
             List<long> columnChunks = [];
+            long pureBlockRows = -1;
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -620,6 +637,9 @@ internal sealed class ObjectContents(
                         }
 
                         break;
+                    case (TagPureBlockRows, ProtoWireType.Varint):
+                        pureBlockRows = checked((long)reader.ReadVarint());
+                        break;
                     case (TagWhere, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } placed)
                         {
@@ -669,6 +689,7 @@ internal sealed class ObjectContents(
                     Wheres = wheres,
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,
+                    PureBlockRows = pureBlockRows,
                 }
                 : null;
         }

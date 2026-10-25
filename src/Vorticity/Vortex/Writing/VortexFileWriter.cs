@@ -207,6 +207,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Wheres = wheres,
             ColumnBytes = columnBytes,
             ColumnChunks = columnChunks,
+            PureBlockRows = blocks.Count > 0 && _blocks is { } declared ? declared.Table.PureRows : -1,
         };
 
     /// <summary>

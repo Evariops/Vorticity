@@ -372,11 +372,9 @@ internal sealed class DatasetScanBuilder
     {
         if (_filterColumns is null)
         {
-            HashSet<string> paths = [];
-            _filter!.CollectFields(paths);
             string? leading = _version.Schema.Key?.InstantPath;
             List<string> columns = [];
-            foreach (string path in paths)
+            foreach (string path in FilterPaths())
             {
                 int dot = path.IndexOf('.', StringComparison.Ordinal);
                 string top = dot < 0 ? path : path[..dot];
@@ -395,22 +393,67 @@ internal sealed class DatasetScanBuilder
 
     private List<string>? _filterColumns;
 
-    /// <summary>The top-level columns the scan reads, by their places: those its mask selects, or every one; found once.</summary>
+    /// <summary>The paths the scan's filter reads, none without one; found once.</summary>
+    private HashSet<string> FilterPaths()
+    {
+        if (_filterPaths is null)
+        {
+            HashSet<string> paths = [];
+            _filter?.CollectFields(paths);
+            _filterPaths = paths;
+        }
+
+        return _filterPaths;
+    }
+
+    private HashSet<string>? _filterPaths;
+
+    /// <summary>The top-level columns the scan reads, by their places: those its mask selects and those its filter reads, or every one; found once.</summary>
     private int[] FieldsRead()
     {
         if (_fieldsRead is null)
         {
             int count = _version.Schema.DType.IsDefault ? 0 : _version.Schema.DType.FieldCount;
-            int[] fields = new int[_mask is { } mask ? mask.SelectedCount(count) : count];
-            for (int i = 0; i < fields.Length; i++)
+            if (_mask is not { } mask)
             {
-                fields[i] = _mask is { } selected ? selected.SelectedField(i) : i;
+                _fieldsRead = [.. System.Linq.Enumerable.Range(0, count)];
+                return _fieldsRead;
+            }
+
+            Span<bool> read = count <= 256 ? stackalloc bool[count] : new bool[count];
+            int total = 0;
+            for (int i = 0; i < mask.SelectedCount(count); i++)
+            {
+                total += Read(read, mask.SelectedField(i));
+            }
+
+            foreach (string path in _filter is null ? [] : FilterPaths())
+            {
+                int dot = path.IndexOf('.', StringComparison.Ordinal);
+                total += _version.Schema.DType.IndexOfField(dot < 0 ? path : path[..dot]) is int field and >= 0 ? Read(read, field) : 0;
+            }
+
+            int[] fields = new int[total];
+            for (int field = 0, at = 0; field < count; field++)
+            {
+                if (read[field])
+                {
+                    fields[at++] = field;
+                }
             }
 
             _fieldsRead = fields;
         }
 
         return _fieldsRead;
+
+        // Marks a column read, 1 the first time.
+        static int Read(Span<bool> read, int field)
+        {
+            int first = read[field] ? 0 : 1;
+            read[field] = true;
+            return first;
+        }
     }
 
     private int[]? _fieldsRead;
@@ -814,27 +857,15 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>
     /// What the scan would cost, by the formula, before reading anything: each object it covers through the path its read
-    /// takes, its column's counts, its blocks' statistics, or the rows of the columns it reads (<see cref="PathCosts"/>). An
-    /// object a sheet or an index would pass over counts whole: the cost is a bound.
+    /// takes, as its explanation says: its column's counts, its blocks' statistics and the rows of the blocks they are not
+    /// expected to answer, the partial its family learned, or the rows of the columns it reads and filters by
+    /// (<see cref="PathCosts"/>). An object a sheet or an index would pass over counts whole: the cost is a bound.
     /// </summary>
     internal async ValueTask<PathCosts.Cost> CostAsync(CancellationToken cancellationToken)
     {
         CountsAnswer? answer = Answer() is { } asked && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false) ? asked : null;
-        int fieldCount = _version.Schema.DType.IsDefault ? 0 : _version.Schema.DType.FieldCount;
-        int[] fields;
-        if (_mask is { } mask)
-        {
-            fields = new int[mask.SelectedCount(fieldCount)];
-            for (int i = 0; i < fields.Length; i++)
-            {
-                fields[i] = mask.SelectedField(i);
-            }
-        }
-        else
-        {
-            fields = [.. System.Linq.Enumerable.Range(0, fieldCount)];
-        }
-
+        int[] fields = FieldsRead();
+        SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
         long requests = 0;
         long bytes = 0;
         await foreach (PositionedObject held in _version.WalkAsync(Pruner(), _from, _to, null, cancellationToken).ConfigureAwait(false))
@@ -844,9 +875,28 @@ internal sealed class DatasetScanBuilder
                 continue;
             }
 
-            PathCosts.Cost cost = answer is not null && AnsweredBy(answer, held) is int field
-                ? PathCosts.Regions([held.Entry.Contents!.CountsOf(field), answer.AsksSketches ? held.Entry.Contents.SketchesOf(field) : null])
-                : BlocksAnswer(held) ? BlockAnswer()!.Costs(held).Blocks : PathCosts.Rows(held.Entry, fields);
+            PathCosts.Cost cost;
+            if (answer is not null && AnsweredBy(answer, held) is int field)
+            {
+                cost = PathCosts.Regions([held.Entry.Contents!.CountsOf(field), answer.AsksSketches ? held.Entry.Contents.SketchesOf(field) : null]);
+            }
+            else if (answer is not null && BlocksAnswer(held))
+            {
+                (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = BlockAnswer()!.Costs(held);
+                cost = new PathCosts.Cost(statistics.Requests + unanswered.Requests, statistics.Bytes + unanswered.Bytes);
+            }
+            else if (answer is not null && Learns(held))
+            {
+                // A partial learned, or the partials of the objects a compaction merged into it, read nothing; else its rows.
+                cost = _dataset.Partials.Holds(held.Entry.Uid, FamilyOf(held)!.Value.Key, cache) || _dataset.Partials.MergedInto(held.Entry.Uid, cache) is not null
+                    ? default
+                    : PathCosts.Rows(held.Entry, FieldsOf(_family!));
+            }
+            else
+            {
+                cost = PathCosts.Rows(held.Entry, fields);
+            }
+
             requests += cost.Requests;
             bytes += cost.Bytes;
         }
@@ -2033,15 +2083,15 @@ internal sealed class DatasetScanBuilder
                 // An object whose blocks may answer reads its columns' statistics over them and their indexes, in as many
                 // requests as runs of them lie apart; the blocks they do not answer are read as rows. The formula's costs of
                 // both paths say why.
-                (PathCosts.Cost statistics, PathCosts.Cost read) = BlockAnswer()!.Costs(held);
+                (PathCosts.Cost statistics, PathCosts.Cost unanswered, PathCosts.Cost read) = BlockAnswer()!.Costs(held);
                 states.Add(new StatesStep(
                     held.Entry.Key,
                     "blocks",
-                    $"the statistics over the blocks of {BlockAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests where the rows would take {read.Bytes} in {read.Requests}, and the rows of the blocks they do not answer",
-                    statistics.Requests));
+                    $"the statistics over the blocks of {BlockAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests where the rows would take {read.Bytes} in {read.Requests}, and the rows of the blocks they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}",
+                    statistics.Requests + unanswered.Requests));
                 keptRows += covered;
-                segments += statistics.Requests;
-                bytes += statistics.Bytes;
+                segments += statistics.Requests + unanswered.Requests;
+                bytes += statistics.Bytes + unanswered.Bytes;
                 mayMatch = true;
                 continue;
             }

@@ -56,6 +56,12 @@ internal sealed class BlockTable
     /// <summary>Each block's last key, as the clustering key encodes it.</summary>
     internal byte[][] Highs { get; }
 
+    /// <summary>
+    /// The rows of the blocks that hold one value of the key's first column, and of the block value the writer cuts by, as the
+    /// writer that cut them counted; -1 when it did not say. Carried to the file's table of contents, not in the region.
+    /// </summary>
+    internal long PureRows { get; init; } = -1;
+
     /// <summary>The first row of block <paramref name="block"/> in the file.</summary>
     internal long FirstRow(int block) => _starts[block];
 
@@ -77,11 +83,14 @@ internal sealed class BlockTable
         }
     }
 
-    /// <summary>A table of <paramref name="rows"/> a block, each from its first key to its last.</summary>
+    /// <summary>
+    /// A table of <paramref name="rows"/> a block, each from its first key to its last, <paramref name="pureRows"/> of them in
+    /// blocks of one value (<see cref="PureRows"/>).
+    /// </summary>
     /// <exception cref="ArgumentException">The lists differ in length, a block holds no row, or the keys do not follow one another.</exception>
-    internal static BlockTable Of(IReadOnlyList<long> rows, IReadOnlyList<byte[]> lows, IReadOnlyList<byte[]> highs)
+    internal static BlockTable Of(IReadOnlyList<long> rows, IReadOnlyList<byte[]> lows, IReadOnlyList<byte[]> highs, long pureRows = -1)
     {
-        BlockTable table = new BlockTable([.. rows], [.. lows], [.. highs]);
+        BlockTable table = new BlockTable([.. rows], [.. lows], [.. highs]) { PureRows = pureRows };
         return table.Problem() is { } problem ? throw new ArgumentException(problem, nameof(rows)) : table;
     }
 

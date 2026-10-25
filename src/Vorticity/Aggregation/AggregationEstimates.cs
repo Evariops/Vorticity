@@ -106,7 +106,13 @@ internal sealed class EstimateRun
     /// paths before reading anything, at the price of a request and a byte (<see cref="ReadCost"/>); null for a source that
     /// cannot say.
     /// </summary>
-    internal static async ValueTask<TimeSpan?> CostOfAsync(AggregationQuery question, CancellationToken cancellationToken)
+    internal static async ValueTask<TimeSpan?> CostOfAsync(AggregationQuery question, CancellationToken cancellationToken) =>
+        await ReadsOfAsync(question, cancellationToken).ConfigureAwait(false) is (long requests, long bytes)
+            ? ReadCost.Time(requests, bytes)
+            : null;
+
+    /// <summary>The requests and bytes the exact answer to <paramref name="question"/> reads, as its source's planner prices them; null for a source that cannot say.</summary>
+    internal static ValueTask<(long Requests, long Bytes)?> ReadsOfAsync(AggregationQuery question, CancellationToken cancellationToken)
     {
         AggregationHost host = question.Host;
         AggregationPlan plan = question.Plan;
@@ -114,9 +120,8 @@ internal sealed class EstimateRun
         (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, settled);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(question.RowFilter), columns, plan, host.Source.Schema);
         StateRequest? states = host.Source.KeepsStates && pass.Options.UseSynopses ? StateRequest.Of(plan, settled, null) : null;
-        return await host.Source.CostAsync(pass with { States = states }, cancellationToken).ConfigureAwait(false) is (long requests, long bytes)
-            ? ReadCost.Time(requests, bytes)
-            : null;
+        LearnedFamily? family = states is not null && host.Source.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, host.Source) : null;
+        return host.Source.CostAsync(pass with { States = states, Family = family }, cancellationToken);
     }
 
     /// <summary>The tiers: one a share of the ranges, each reading those the share adds, then the exact answer.</summary>

@@ -44,8 +44,9 @@ internal sealed class BlockAnswer
     private int[] _filtered = [];
     private int[]? _fields;
 
-    // The columns of the filter that only compare it to a bound: a block's extremes decide those whole, mostly, with no
-    // list of its values, so that they never make a block vary for the planner's count.
+    // The columns of the clustering key the filter only compares to a bound, a window: a block holds their values in order,
+    // or within one value of the first column, so its extremes decide those whole, mostly, and they never make a block vary
+    // for the planner's count. A bound on another column, whose values a block holds in any order, varies like any.
     private int[] _ranged = [];
 
     private BlockAnswer(CountsAnswer counts, DatasetSchema version, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, int[] measured, int leading)
@@ -92,7 +93,7 @@ internal sealed class BlockAnswer
                 {
                     Add(filtered, field);
                     Add(fields, field);
-                    if (bounded.Contains(path) && !other.Contains(path))
+                    if (bounded.Contains(path) && !other.Contains(path) && _schema.Key is { } key && System.Linq.Enumerable.Contains(key.Paths, path, StringComparer.Ordinal))
                     {
                         Add(ranged, field);
                     }
@@ -274,16 +275,18 @@ internal sealed class BlockAnswer
             }
         }
 
-        // And the statistics cost less than the rows they would spare, both by the formula.
-        (PathCosts.Cost blocks, PathCosts.Cost rows) = Costs(held);
-        return blocks.Weight < rows.Weight;
+        // And the statistics cost less than the rows they would spare, both by the formula; an object whose every block holds
+        // several values that the question needs one of reads its rows, the statistics a request for nothing.
+        (PathCosts.Cost statistics, _, PathCosts.Cost rows) = Costs(held);
+        return Unanswered(held) < 1 && statistics.Weight < rows.Weight;
     }
 
     /// <summary>
-    /// What the object <paramref name="held"/> costs through its blocks' statistics and their indexes, its blocks all
-    /// answered, and through the rows of the question's columns (<see cref="PathCosts"/>).
+    /// What the object <paramref name="held"/> costs through its blocks' statistics and their indexes, then through the rows of
+    /// the blocks they would not answer, as their share of the object's rows estimates them (<see cref="Unanswered"/>), and
+    /// through the rows of the question's columns alone (<see cref="PathCosts"/>).
     /// </summary>
-    internal (PathCosts.Cost Blocks, PathCosts.Cost Rows) Costs(in PositionedObject held)
+    internal (PathCosts.Cost Statistics, PathCosts.Cost Unanswered, PathCosts.Cost Rows) Costs(in PositionedObject held)
     {
         ObjectContents contents = held.Entry.Contents!;
         int[] fields = Fields;
@@ -293,7 +296,57 @@ internal sealed class BlockAnswer
             (regions[2 * i], regions[(2 * i) + 1]) = (contents.WhereOf(fields[i]), contents.BlockStatsOf(fields[i]));
         }
 
-        return (PathCosts.Regions(regions), PathCosts.Rows(held.Entry, fields));
+        return (PathCosts.Regions(regions), PathCosts.Share(held.Entry, fields, Unanswered(held, edges: true)), PathCosts.Rows(held.Entry, fields));
+    }
+
+    /// <summary>
+    /// The share of the rows of the object <paramref name="held"/> whose blocks its statistics are not expected to answer:
+    /// those of the blocks that hold several values of the key's first column or of the block value
+    /// (<see cref="ObjectContents.PureBlockRows"/>), short runs gathered, unless the question would answer such a block too,
+    /// every column it keys or filters but one, under counts alone, constant over the object; none when the object does not
+    /// say, the blocks then taken to answer, as before it said. With <paramref name="edges"/>, for a price that bounds what
+    /// is read, those a window on a column of the key cuts too, which the choice of the path need not weigh: a window on
+    /// the block value cuts no block of one value.
+    /// </summary>
+    internal double Unanswered(in PositionedObject held, bool edges = false)
+    {
+        ObjectEntry entry = held.Entry;
+        if (entry.PhysicalRows <= 0)
+        {
+            return 0;
+        }
+
+        ObjectSummaries summaries = held.Summaries(_schema.Key);
+        _ = Fields;
+        bool proven = _filter is not { } filter || filter.MustMatch(summaries.Columns, entry.PhysicalRows);
+        double share = 0;
+        if (entry.Contents is { PureBlockRows: >= 0 } contents)
+        {
+            // In a block of several runs, the first column varies, and so does every key and filtered column the object's
+            // summaries do not hold constant.
+            int varying = 0;
+            foreach ((int field, FieldExpr key) in _keys)
+            {
+                varying += CountsAnswer.ConstantOf(summaries, _schema.Columns[field].Name, key) is null ? 1 : 0;
+            }
+
+            foreach (int field in proven ? [] : _filtered)
+            {
+                varying += !Keyed(field) && Array.IndexOf(_ranged, field) < 0 ? 1 : 0;
+            }
+
+            share = varying <= (CountsOnly ? 1 : 0) ? 0 : 1 - Math.Clamp(contents.PureBlockRows / (double)entry.PhysicalRows, 0, 1);
+        }
+
+        // A window the object's summaries do not prove cuts the blocks at its bounds, read as rows: two at most on the first
+        // column, whose values the object holds in order; on another column of the key, a block of each run of the first,
+        // every block at most.
+        foreach (int field in edges && !proven ? _ranged : [])
+        {
+            share += field == _leading ? Math.Min(1, 2.0 * BlockTable.MostRows / entry.PhysicalRows) : 1;
+        }
+
+        return Math.Min(1, share);
     }
 
     private bool Keyed(int field)
