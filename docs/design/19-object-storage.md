@@ -865,23 +865,25 @@ bounds what the store keeps, unbounded by default). The commit completes the pip
 upload.
 
 A rewrite, a compaction's or a delete's that keeps some of an object's rows, announces a bound with
-that put (`ObjectBound`): what it reads, times 1.03, the most bytes a rewrite wrote for each byte it read
-on the lifecycle bench (1.024 at worst over periods of a day and of an hour and the leveled style,
-1.000 for a seal). Without it, parts sized for an unknown length reach about a terabyte on S3, but
-168 GB on R2, whose parts keep one size, and 106 GB on Scaleway, which takes a thousand parts, short of
-a period of a day at a few thousand rows a second, which would fail at its end, every time it ran. With
-it, the parts are sized for the bound from the first. Content that runs past the bound is what the
-store refuses, so the sink checks it at each write, before the put has sent the bytes past it, and the
-rewrite gives its objects up and starts again under a bound twice as large; a delete does so without
-taking one of its attempts, since no other writer caused it. An append has no inputs to bound it and
-goes with an unknown length, so an append of one object past those reaches needs the spool there. The
-parts in flight are the bound's share of the service's parts: a period of 173 GB on Scaleway sends parts
-of about 180 MB, four at a time by default, where a period of an hour, 7 GB, keeps the parts of 16 MiB. The object's statistics and first key are then read from the store, its footer in one request
-when its entry records the footer's length, which an object past the threshold takes as a few requests
-among the dozens its parts took. An object given up completes its pipe with an error, and the store
-gives its upload up. A data object's key ends with a fresh uid and is never taken, so its put carries
-no condition, whole or in parts, on every service, and a lost answer needs no head: sent again, it
-writes the same bytes. A commit object keeps its condition everywhere.
+that put (`ObjectBound`): what it reads, times 1.03, the most bytes a rewrite wrote for each byte it
+read on the lifecycle bench, measured when the library compacted by periods too (1.024 at worst over
+periods of a day and of an hour and the leveled style, 1.000 for a seal). Without it, parts sized for
+an unknown length reach about a terabyte on S3, but 168 GB on R2, whose parts keep one size, and 106 GB
+on Scaleway, which takes a thousand parts, short of an object of a day at a few thousand rows a second,
+which would fail at its end, every time it ran. With it, the parts are sized for the bound from the
+first. Content that runs past the bound is what the store refuses, so the sink checks it at each write,
+before the put has sent the bytes past it, and the rewrite gives its objects up and starts again under
+a bound twice as large; a delete does so without taking one of its attempts, since no other writer
+caused it. An append has no inputs to bound it and goes with an unknown length, so an append of one
+object past those reaches needs the spool there. The parts in flight are the bound's share of the
+service's parts: an object of a day, 173 GB, on Scaleway sends parts of about 180 MB, four at a time by
+default, where an object of an hour, 7 GB, keeps the parts of 16 MiB. The object's statistics and first
+key are then read from the store, its footer in one request when its entry records the footer's length,
+which an object past the threshold takes as a few requests among the dozens its parts took. An object
+given up completes its pipe with an error, and the store gives its upload up. A data object's key ends
+with a fresh uid and is never taken, so its put carries no condition, whole or in parts, on every
+service, and a lost answer needs no head: sent again, it writes the same bytes. A commit object keeps
+its condition everywhere.
 
 ### 11.3 Checksums
 

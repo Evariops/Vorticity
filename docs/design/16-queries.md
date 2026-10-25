@@ -199,13 +199,14 @@ On such a key:
 A group by does not stream on a key with no such component, under an order by an aggregate, or on a
 sorted column that holds a NaN, which is not sorted at all (see [key order per
 dtype](12-index-reads.md#34-key-order-per-dtype)). On a dataset it only streams on the first column of
-the clustering key, or a function of it, where the dataset reads its rows in key order, merging the
-objects and opening each one once it may hold the next row (see [order beyond the
-lookup](13-dataset.md#66-order-beyond-the-lookup)). An object a dataset of periods sorted slice by
-slice is read the same way, slice after slice in time order, each slice decoded once and its rows
-gathered in key order ([rows in key order](12-index-reads.md#5-rows-in-key-order)), so the groups are
-those a dataset in time order gives. The null group of the streaming component is final at the end,
-and comes last.
+the clustering key, or a function of it, under a take that stops the read early, where the dataset
+reads its rows in key order, merging the objects and opening each one once it may hold the next row;
+without a take, a read in key order would go one object at a time, and the objects are read side by
+side (see [order beyond the lookup](13-dataset.md#66-order-beyond-the-lookup)). An object an earlier
+release's dataset of periods sorted slice by slice is read the same way, slice after slice in time
+order, each slice decoded once and its rows gathered in key order ([rows in key
+order](12-index-reads.md#5-rows-in-key-order)), so the groups are those a dataset in time order gives.
+The null group of the streaming component is final at the end, and comes last.
 
 Under a descending order of the component, a group by streams backwards when a window follows the
 order, which stops the read: `orderby g.Key descending take 7` reads the last seven days of a year,
@@ -562,7 +563,7 @@ writes it as its buckets. A quantile of a decimal column is not taken yet.
 
 ### 5.7 States kept past a scan
 
-A dataset of periods keeps aggregates past a scan, for its runs and its tables, and merges them later
+A dataset keeps aggregates past a scan, for its runs and its tables, and merges them later
 with the states of a query. What it keeps is the engine's own state, in its widest form: a count, an
 integer sum as an `Int128`, a decimal sum in its 320 bits, a float sum as the wide indexed sum, which
 takes some 35 trillion values, and an extreme with whether there is one. Each is a kind of the index
@@ -864,10 +865,12 @@ states, a row per group of keys with the rows it stands for and each measure's s
 gives each row its group through the same keys and functions as rows, and each aggregate folds the row's
 state into it, an exact sum merged, an extreme compared and a sketch merged, to the bits the rows would
 give. A path's states carry the path's text as their name. A dataset gives states where its objects'
-counts by hour answer the pass, a question on one column, the time and the measures, and rows everywhere
-else ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#8-the-planner)).
-`ScanOptions.UseSynopses` chooses them, true by default; `ScanOptions.AlignWindow`, which would move a
-window to the hours they answer whole, does nothing yet: a window that cuts an hour reads its rows.
+counts or its rollups answer the pass, a question on one column and the measures whose other keys an
+object holds constant, and rows everywhere else
+([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#8-the-planner)).
+`ScanOptions.UseSynopses` chooses them, true by default; `ScanOptions.AlignWindow` moves a range on the
+key's first column out to the bounds of the objects its ends fall in, so that they answer whole, and
+the scan reports the range applied.
 
 ### 9.4 Parallelism and the merge
 
@@ -910,8 +913,8 @@ chosen row and a tie keep the earlier range's.
 On a dataset, a range is an object, and an object holding two shares of the rows or more is cut where
 a chunk of every column the pass reads starts, so no chunk is read by two ranges: the columns of a
 dataset's object are chunked apart, and their chunks end together at its slices and its groups of rows
-([time slices](11-write-strategy.md#9-time-slices-and-shredded-variants)). Under a window on the
-instant, an object of time slices counts for the rows of the slices the window reaches, which its entry
+([key slices](11-write-strategy.md#9-key-slices-and-shredded-variants)). Under a range of the key's
+first column, an object in slices counts for the rows of the slices the range reaches, which its entry
 names, and is cut between their chunks alone. The objects that are cut are opened side by side to learn
 where their chunks end, and the ranges then find them already open.
 No object settles ([statistics and zone maps](#93-statistics-and-zone-maps), and see

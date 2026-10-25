@@ -213,25 +213,29 @@ own rows, a lane's part of an object its part's, and reads them together, 32 MiB
 chunk's values are looked up among the literals, sorted once, where they lie, nothing sorted per
 chunk, and a chunk that is not a dictionary claims nothing.
 
-### 4.4 `vorticity.slices.v1`: the time slices of a file
+### 4.4 `vorticity.slices.v1`: the slices of a file
 
-A file a dataset of periods writes in time slices carries its slice table: per slice, its bounds on the
-instant, its first row and its row count, in time order, covering every row once. Like the dictionary
-probe it has no payload. The entry is on the instant column, one run over every block, and its options
-hold the table behind a version byte: the instant's unit, then per slice the gap from the previous
-slice's end, its width and its rows, each a varint, a few bytes a slice (version 5). Version 4 followed
-the slices with the columns each slice's rows were sorted by and the paths the file's synopsis counted,
-which a reader skips, so that a file written then is still walked by its slices; the three before it,
-which only the first writers of the format made and no store keeps, are not read. A table that does
-not decode, or whose rows are not the file's, is not read. The writer declares the slices before it
-completes the file, which checks that they cover its rows ([time
-slices](11-write-strategy.md#9-time-slices-and-shredded-variants)), and writes an index directory for
-them even when its policy asks for no index. The table is also the
-instant's key source, so an object of a dataset of periods carries no sorted run on a key of its
-instant alone ([sources of order](12-index-reads.md#2-sources-of-order)). A scan of an object's rows
-under a window on the instant covers the rows of the slices the window reaches, which the table of the
-object's entry names before any read: its plan, its zone maps and its walk then count those slices'
-blocks alone, where they went over the object's every block at every question.
+A file a dataset's job writes in slices carries its slice table: per slice, its first row and its row
+count, in order, covering every row once, and its bounds. Like the dictionary probe it has no payload.
+The entry is on the column the bounds are on, one run over every block, and its options hold the table
+behind a version byte. A key table (version 6), which a job writes into each object of a mebibyte or
+more, holds the slice count, then per slice its rows and its first key, row-encoded as the key orders
+it and kept as the bytes it shares with the first key before it and the rest, then the last key of the
+last slice the same way; its entry is on the key's first column, and a job cuts a slice only at a
+change of key, so that a key lies in one slice. A time table (version 5) holds the instant's unit, then
+per slice the gap from the previous slice's end, its width and its rows, each a varint, a few bytes a
+slice: the datasets an earlier release compacted by periods wrote their objects in time slices, which
+a reader still walks. Version 4 followed the time slices with the columns each slice's rows were sorted
+by and the paths the file's synopsis counted, which a reader skips; the three before it, which only the
+first writers of the format made and no store keeps, are not read. A table that does not decode, or
+whose rows are not the file's, is not read. The writer declares the slices before it completes the
+file, which checks that they cover its rows ([key
+slices](11-write-strategy.md#9-key-slices-and-shredded-variants)), and writes an index directory for
+them even when its policy asks for no index. A time table is also the instant's key source for those
+objects of periods ([sources of order](12-index-reads.md#2-sources-of-order)). A scan of an object's
+rows under a range of the key's first column, or under a window on a time table's instant, covers the
+rows of the slices the range reaches, which the table of the object's entry names before any read: its
+plan, its zone maps and its walk then count those slices' blocks alone.
 
 A sliced file also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
 root. Its options hold the file's table of array encodings, and its one run has a payload region per
@@ -240,8 +244,8 @@ its offset, length, alignment and rows as varints. That is about ten bytes a chu
 for a day of 10⁹ rows, so the regions are read when needed rather than kept in the options every open
 reads, and a read of one column, the instant at the edges of a window, fetches that column's region
 alone. With it a reader decodes the chunks that hold a slice from their own bytes, since a chunk's
-segment ends with its encoding tree, and never reads the footer ([the rows of a time
-slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer)). An append drops both slice
+segment ends with its encoding tree, and never reads the footer ([the rows of a
+slice](12-index-reads.md#51-the-rows-of-a-slice-without-the-footer)). An append drops both slice
 kinds, since they describe the file as its writer cut it.
 
 A column of more chunks than a page lays its region out in pages instead (version 2,
@@ -276,19 +280,20 @@ drops the entry.
 
 ### 4.6 `vorticity.variant.directory.v1`: every path a variant holds
 
-A job of a dataset of periods counts the paths of each variant column as it cuts the object's slices
-([shredded variants](11-write-strategy.md#9-time-slices-and-shredded-variants)), and the object carries what it
-counted: for every path and class of value the rows hold there (a boolean, an integer, a number, a
-text, a timestamp, an object, a list, a null, anything else), how many values, where they lie (the
-typed column a shredded path keeps, the values of other classes beside it, or the residual), and their
-bounds. An integer or a timestamp keeps its least and greatest, a number its least and greatest and
-whether one was NaN, a boolean which of the two it saw, and a text its least and greatest cut to the
-bytes a text column's zones keep, the greatest one past its cut when a longer text shares it. Each path
-also names, a bit each, the time slices of the object it may hold a value in, from the spans of time
-its values lie in as the rows stream past in time order: two values closer than a slice is wide share
-a span, so a path keeps about a span per slice at most, and the bits are a superset of the slices
-that hold it. The entry is on the variant column. Its one run holds one region, behind a version byte
-and the body's length, the body one zstd frame.
+A job that writes an object in key slices counts the paths of each variant column as the object's rows
+are written ([shredded variants](11-write-strategy.md#9-key-slices-and-shredded-variants)), and the
+object carries what it counted: for every path and class of value the rows hold there (a boolean, an
+integer, a number, a text, a timestamp, an object, a list, a null, anything else), how many values, where
+they lie (the typed column a shredded path keeps, the values of other classes beside it, or the
+residual), and their bounds. An integer or a timestamp keeps its least and greatest, a number its least
+and greatest and whether one was NaN, a boolean which of the two it saw, and a text its least and
+greatest cut to the bytes a text column's zones keep, the greatest one past its cut when a longer text
+shares it. Each path also names, a bit each, the slices of the object it may hold a value in, from the
+spans of rows its values lie in as the rows are written: two values closer than a slice is long share a
+span, so a path keeps about a span per slice at most, and the bits are a superset of the slices that hold
+it. An object of an earlier release's period counted the spans by time, its rows in time order. The entry
+is on the variant column. Its one run holds one region, behind a version byte and the body's length, the
+body one zstd frame.
 
 The directory fits the file's index budget. Over it, the paths of the residual held least are left
 out first, and the directory says it is partial, after which a path's absence proves nothing.
@@ -340,7 +345,7 @@ path takes for now. An object that does not shred the key has no slot for it, an
 
 ### 4.8 `vorticity.column.sheet.v1`: what a column holds
 
-A dataset's object in time slices of a mebibyte or more keeps a sheet of each top-level column an index
+A dataset's object in slices, of a mebibyte or more, keeps a sheet of each top-level column an index
 keys, an integer, a float, a string or a binary through any extension: its rows and nulls, its distinct
 values, a sketch of them, its most frequent values, and a filter of its values when they repeat
 ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#51-the-column-sheet)); a smaller object,
@@ -363,33 +368,37 @@ side, and passes over an object whose filter lacks every value asked, under the 
 disjunctions (`DatasetScanCounters.ObjectsRefutedBySheets`). Writing the sheets costs 5.6 to 5.9 ns a
 column a row on the design's requests, eleven columns, one thread (`vortex-queries --micro sheets`).
 
-### 4.9 `vorticity.column.counts.v1`: a column's counts by hour
+### 4.9 `vorticity.column.counts.v1`: a column's counts
 
 The same objects keep, for each top-level column whose sheet counts its values and whose values repeat,
-its counts by the hours of the period's instant: for each value, for its nulls, and for the values its
-budget left out together, an entry an hour that holds the rows of that value in that hour and, for each
-measure column, their values, their exact sum, their least and their greatest, in the words the engine's
-states take ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#52-the-counts-of-a-column-by-bucket-of-time)).
+its counts: for each value, for its nulls, and for the values its budget left out together, an entry over
+the whole object that holds the rows of that value and, for each measure column, their values, their
+exact sum, their least and their greatest, in the words the engine's states take
+([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#52-the-counts-of-a-column-and-their-rollups)).
 The measures are the top-level integer and float columns of more than 64 values; a number column of 64
 values or fewer, a status or a code, is counted as a column and carried by no other. A column whose
 distinct values pass a quarter of its valid rows keeps no counts, nor one whose sheet gave its counts up.
 
 The budget is absolute: 2^20 entries a column, fewer for a table of many number columns, whose states
 take at most 128 MiB a column while the object is written. Past it, the values whose rows are fewest so
-far are left out, their entries merged into an entry of the values left out an hour, exact, and a value
+far are left out, their entries merged into the entry of the values left out, exact, and a value
 left out stays out, so that a value kept is counted from its first row.
 
 The entry is on the column, its one run a region the object's table of contents names: a header, the
-measures, whether the entries have sketches and the wide columns whose registers they keep (section 4.10),
-a directory of chunks of about 16 KB, each naming its first value, then the chunks. The nulls come
-first, then the values left out, then the values in the order of their bytes, and each one's entries in
-the order of their hours: an entry's rows and each measure's states as varints, a float sum as its three
-bins, the values it skipped, its top and its high part, and a float's extremes as their eight bytes. A
-reader refuses groups out of that order, which it searches a value in. Entries of two objects of the same
-value and hour merge word for word. The sheets and the counts of an object lie right after its data, where
-no read of the structures a scan reads together bridges them. On the design's requests, two measures one
-of them a float, an entry takes 52 to 61 bytes, and the counts cost the writer 9.4 to 12.0 ns a counted
-column a row, one thread (`vortex-queries --micro counts`).
+measures, whether the entries have sketches and the wide columns whose registers they keep (section
+4.10), a directory of chunks of about 16 KB, each naming its first value and its first entry, with the
+XXH3 of its bytes, then the header's own XXH3, then the chunks (version 2). The nulls come first, then
+the values left out, then the values in the order of their bytes, each one's entry after it, or, in a
+rollup's counts kept by bucket, its entry for each bucket its rows lie in: an entry's rows and each
+measure's states as varints, a float sum as its three bins, the values it skipped, its top and its high
+part, and a float's extremes as their eight bytes. A reader refuses groups out of that order, which it
+searches a value in, and one that wants a few values reads the header, then their chunks, each checked
+against its sum. Entries of two objects of the same value merge word for word, which is how a rollup's
+are summed ([rollups](15-compaction.md#rollups)). The counts of version 1, by the hours of a period's
+instant, which an earlier writer of this branch kept, are read as no counts. The sheets and the counts of
+an object lie right after its data, where no read of the structures a scan reads together bridges them.
+On the design's requests, two measures one of them a float, an entry takes 52 to 61 bytes, and the counts
+cost the writer 9.4 to 12.0 ns a counted column a row, one thread (`vortex-queries --micro counts`).
 
 ### 4.10 `vorticity.column.sketches.v1`: the sketches of a column's counts
 
@@ -404,9 +413,7 @@ sketches 2.4 MB, which a count by service no longer reads.
 A column of at most 1 000 values keeps, for each entry, a quantile sketch of each measure: the engine's
 log-linear grid at 1 % of relative error, which a quantile asked with no error takes, its buckets as the
 engine merges them. Sketches of two objects merge bucket by bucket into the sketch of their rows together.
-While an object is written, an hour's sketches are encoded and let go once a batch of a later hour comes,
-the slices coming in the order of their time, and opened again by a row of that hour that comes late. A
-sketch of a measure spanning 3.7 decades fills some 790 buckets: an entry's two sketched measures take 1
+A sketch of a measure spanning 3.7 decades fills some 790 buckets: an entry's two sketched measures take 1
 to 3.4 KB on the design's requests, and the sketches cost the writer some 12 to 18 ns more a sketched
 column a row.
 
@@ -491,7 +498,7 @@ lists its key columns in its options together with the name of the encoding its 
 
 ### 5.6 The kinds of persisted states
 
-The aggregates a dataset of periods keeps past a scan, for runs and for its tables, are kinds of their
+The aggregates a dataset keeps past a scan, for runs and for its tables, are kinds of their
 own, each a version in its name ([states](16-queries.md#57-states-kept-past-a-scan)). A state is
 integers on every machine, stored as columns of 64-bit integers that hold its words as the engine
 keeps them, so a state read back is the same bits and merges as the engine merges, in any order:

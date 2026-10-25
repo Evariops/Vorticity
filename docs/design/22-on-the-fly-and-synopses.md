@@ -2,9 +2,9 @@
 
 How a dataset answers any question, over any columns, by computing it from its rows with the group-by
 engine, and the synopses it keeps beside the rows so that the questions the rows cannot answer in time
-are still answered: a fast path of per-column structures only, a single optional cluster column, and
-answers learned after a question has asked them. This document replaces the time-window design that
-came before it: its composite synopsis tables give way to synopses per column.
+are still answered: a fast path of per-column structures only, objects cut by a value and a size the
+application chooses, and answers learned after a question has asked them. This document replaces the
+time-window design that came before it: its composite synopsis tables give way to synopses per column.
 
 Figures marked *computed* come from the cost model of section 2 and the reference table of section
 1.2. Figures marked *measured* come from the bench and from the comparison with DuckDB
@@ -72,46 +72,50 @@ cold, on one node *(computed)*:
 
 A second on the fly covers about five hours of the whole table, three days of the largest service and
 a year of a median one. The synopses exist for the two cases past that frontier: the whole table over
-more than a few hours, and the largest values of the cluster column over more than a few days.
+more than a few hours, and the largest values of the key's first column over more than a few days.
 
 ## 3. The layout of the rows
 
 ### 3.1 The order of arrival
 
-Without a cluster column, a dataset never reorders rows by their values. Its merges put the appended
+Without a clustering key, a dataset never reorders rows by their values. Its merges put the appended
 objects end to end in the order of time rather than interleaving their rows, so that an application
 that appends its rows in groups, a source or a tenant at a time, keeps blocks homogeneous on what
 defines its groups.
 
-### 3.2 The cluster column
+### 3.2 The clustering
 
-A dataset may declare one cluster column (`DatasetOptions.ClusterColumn`), any column, or none.
+A dataset may declare how its objects are cut (`DatasetOptions.Clustering`): by a value of its key's
+first column, the column itself or a function of it that never decreases, by a size an object aims at,
+or by both ([clustering](15-compaction.md#clustering-by-a-value-and-a-size)). Nothing in it knows a
+time: an hour or a day is a truncation the application picks, as a tenant is a column it leads its key
+with.
 
-- From level 0's exit on, the rows of one value of the column follow each other, in the order of
-  time. The fresh merges and the seal merge sorted runs as a stream, in bounded memory. The current
-  hour, in level 0, keeps the order of arrival.
-- The column is fixed per period: the dataset's header records it with the period it starts from, and
-  a change takes effect at the next period. Every object records the column its rows follow.
-- The library recommends a column from the questions it has answered: the one whose clustering would
-  have saved the most bytes read ([section 10.4](#104-the-recommendation-of-the-cluster-column)). It
-  never applies one by itself.
+- From level 0's exit on, the rows follow the key: those of one value of its first column together, in
+  the order of the key's later columns. Level 0 keeps the order of arrival.
+- The clustering is fixed when the dataset is created, and every header carries it, so that every
+  writer cuts alike.
+- The library recommends a key's leading column from the questions it has answered: the one whose
+  clustering would have saved the most bytes read ([section
+  10.4](#104-the-recommendation-of-a-leading-column)). It never applies one by itself.
 
-The cluster column is not a composite key. No read goes through a prefix of it: every column keeps
-its own synopses, and a column that does not depend on the cluster column is never served worse than
-in the order of arrival. What clustering does is make the column, and every column that depends on it,
-nearly constant in each block, which the synopses of section 5 measure column by column. Its price
-falls on reads of rows by a window of time with no filter, on old objects, which meet more ranges; an
-aggregation over such a window settles its blocks instead.
+The clustering is no composite index. No synopsis goes through a prefix of the key: every column keeps
+its own synopses, and a column that does not depend on the key's first column is never served worse
+than in the order of arrival. What clustering does is make that column, and every column that depends
+on it, nearly constant in each block, which the synopses of section 5 measure column by column. Its
+price falls on reads of rows by a window of time with no filter, on old objects, which meet more
+ranges; an aggregation over such a window settles its blocks instead.
 
-o11y-line, for instance, declares its emitter as the cluster column, written as `service/version/host`
-so that the emitters of a service follow each other. Every resource attribute is then constant in a
-block, and only the attributes of an event vary: route, status, method, duration.
+o11y-line, for instance, leads its key with its emitter, written as `service/version/host` so that the
+emitters of a service follow each other, then its instant, and cuts its objects by size. Every
+resource attribute is then constant in a block, and only the attributes of an event vary: route,
+status, method, duration.
 
 ### 3.3 Blocks
 
-A block is the run of rows of one cluster value and one hour, cut at 65 536 rows. An object keeps its
-blocks of an hour for its whole life; past 30 days, the statistics of the blocks of one cluster value
-and one day are merged into the monthly files (section 5.2), without reading a row. Blocks are row
+A block is the run of rows of one value of the key's first column in an object, cut at 65 536 rows. An
+object keeps its blocks for its whole life, and their statistics are summed into the rollups over runs
+of objects (section 5.2), without reading a row. Blocks are row
 ranges the block statistics describe (section 5.3), independent of the format's zones and chunks: a
 block a question settles has its rows taken out of the scan's selection, and a zone partly settled is
 decoded for its other rows only.
@@ -131,12 +135,12 @@ The clustered figures are estimates, which a size test checks before any synopsi
 ### 3.5 Each column in segments of its own
 
 A dataset's object chunks each column apart, in segments of about 1 MiB encoded, and ends the chunks of
-every column together at each time slice and at least every 2²² rows, where lanes cut the object. A
+every column together at each slice and at least every 2²² rows, where lanes cut the object. A
 question reading two columns of 30 days of the reference table then asks for about 150 000 segments of
 a megabyte *(computed)*, where segments laid out chunk by chunk, every column of 32 000 rows side by
 side, meant either about 8 × 10⁶ requests of a few dozen kilobytes or every column's bytes read to
 bridge them. A file written alone keeps its columns chunked together, the default a local read prefers
-([11-write-strategy.md](11-write-strategy.md#9-time-slices-and-shredded-variants)).
+([11-write-strategy.md](11-write-strategy.md#9-key-slices-and-shredded-variants)).
 
 ## 4. The dataset's read path
 
@@ -164,9 +168,9 @@ The engine is fed by the dataset's scan, which holds to six rules.
 
 The fast path: structures that answer without reading rows, so that a question over months of a large
 table reads megabytes rather than terabytes. Each describes one column; none crosses two, and a
-crossing a question asks is learned after it (section 5.6). An object keeps its synopses at the hour
-for its whole life; the coarser grains go to monthly files outside the data objects, so that no data
-object is ever rewritten to change a grain.
+crossing a question asks is learned after it (section 5.6). An object keeps its synopses for its whole
+life, at its own grain, the clustering value it holds; the coarser grains are rollups, which sum runs
+of objects outside them, so that no data object is ever rewritten to change a grain.
 
 ### 5.1 The column sheet
 
@@ -187,20 +191,23 @@ without reading it. An object under a mebibyte keeps none: a question reads it i
 would take, and its sheets, some 13 KB for an object of 42 KB, would only add to that read. Writing one
 costs 5.6 to 5.9 ns a column a row *(measured)*.
 
-### 5.2 The counts of a column by bucket of time
+### 5.2 The counts of a column, and their rollups
 
-For the questions on one column, the time and the measures, past the frontier of section 2.1. Each
-column has entries (value, bucket) holding the rows, and the sum, least and greatest of each measure,
-sorted by value then time, in chunks of 16 KB with a directory (`vorticity.column.counts.v1`); the
+For the questions on one column and the measures, past the frontier of section 2.1. Each column of an
+object has an entry a value holding the rows, and the sum, least and greatest of each measure, sorted
+by value, in chunks of 16 KB with a directory (`vorticity.column.counts.v1`); the
 entries' sketches lie in a region of their own right after them (`vorticity.column.sketches.v1`), which
 a question of counts, sums and extremes does not read: on the design's requests, Service's counts take
 136 KB and their sketches 2.4 MB *(measured)*.
 
-- **Grains.** The hour, in the object, for its whole life. The day and the month in monthly files
-  outside the data objects, one a column and a month, summed from the objects' hours with no row read
-  and rewritten when a day of the month changes: a sealed day is an object of about 173 GB at the
-  design rate (section 9), which merging its synopses into coarser grains must not rewrite. A grain
-  becomes the next by adding entries. The minute is not kept: recent windows are computed on the fly.
+- **Grains.** The object, for its whole life: the clustering value it holds, an hour or a day as the
+  application cuts it. Coarser grains are rollups beside the levels (`RollUpAsync`): a rollup sums the
+  counts of about 64 consecutive objects of the deepest level, cut where the clustering value changes,
+  and keeps them by bucket of clustering value as well when its run spans several; a rollup of the rank
+  above sums 64 of them, with no row read. A commit that changes an object takes away the rollups over
+  it, which are summed again. A day at the design rate is an object of about 173 GB (section 9), which
+  summing its synopses into coarser grains must not rewrite. A grain becomes the next by adding
+  entries. The minute is not kept: recent windows are computed on the fly.
 - **Sketches.** Quantile sketches at 1 % of relative error, the engine's grid, for the columns of at
   most 1 000 values, on every measure an entry carries; distinct-count sketches of the wide columns, text
   columns of more than 1 000 values that repeat, attached to the columns of at most 100 values, a
@@ -213,12 +220,14 @@ a question of counts, sums and extremes does not read: on the design's requests,
   or a code, is counted as a column and carried by none. A column whose values hardly repeat, distinct
   values past a quarter of its rows, keeps no counts: an identifier, an instant, a measure.
 - **Budget.** An absolute budget per column and object, 2^20 entries; past it the most frequent values
-  are kept, with an exact `others` entry an hour, and a value left out stays out.
+  are kept, with an exact `others` entry, and a value left out stays out.
 - **Size.** An entry of an integer and a float measure takes 52 to 61 bytes, most of them the float's
-  exact sum and extremes. The reference table's 1.0 × 10⁶ entries a day make about 60 MB of hourly counts
-  in the objects *(measured on the design's requests, extrapolated)*, where this design first reckoned
-  51 MB for the counts and their sketches together; the sketches add to it. 2.7 MB a day of daily and
-  monthly ones in the monthly files, 1.1 GB *(computed)*.
+  exact sum and extremes. The reference table's 1.0 × 10⁶ entries a day make about 60 MB of counts in
+  objects of an hour *(measured on the design's requests, extrapolated)*, where this design first
+  reckoned 51 MB for the counts and their sketches together; the sketches add to it. A rollup holds an
+  entry a value over its run, and one a value and bucket where its run spans several clustering values:
+  over thirty days of 2 000 routes, an object a day and rollups of four, a count of every route reads 4
+  requests and 262 KB, against 30 requests and 1.9 MB of the objects' counts *(measured)*.
 - **Writing.** 9.4 to 10.2 ns a counted column a row at 12 million rows an hour, 10.0 to 12.0 at 750 000,
   where each entry holds fewer rows *(measured, one thread)*: a row's float is split into its bins'
   parts once for the entries of every column it falls in. The quantile sketches add 12 to 18 ns a
@@ -230,7 +239,7 @@ a question of counts, sums and extremes does not read: on the design's requests,
 
 For each block of section 3.3 and each column (`vorticity.block.stats.v1`):
 
-- the block's rows and range of time;
+- the block's rows and range of the key;
 - the values present and their rows, as long as they fit in little room (at most 256 values);
   otherwise the least, the greatest and the distinct count;
 - for each number column, the count, sum, least and greatest.
@@ -250,7 +259,7 @@ question, block by block, with nothing computed for a pair of columns:
 A block no delete touches settles as a file's does; a block a delete touches is decoded, or settled
 from the negative statistics the delete wrote (section 6). For the reference table clustered by
 emitter: 3.5 × 10⁵ blocks a day, about 200 bytes each, 70 MB a day kept in each object, 27.7 GB in 13
-months; merged by (cluster value, day) into the monthly files, 3 MB a day, 1.2 GB *(computed)*.
+months *(computed)*; summed into the rollups as the counts are.
 Writing costs about 15 ns a row. Aggregates per value for the columns of at most 16 values a block are
 left out of the first version, and weighed again against the size test.
 
@@ -259,7 +268,7 @@ left out of the first version, and weighed again against the size test.
 For each column of each object (`vorticity.column.where.v1`): the values, sorted, each with the ranges
 of blocks it appears in, or `everywhere`. The threshold is on the blocks a value actually touches,
 measured when the object is written, never on a count of rows assumed spread at random. A filter on a
-value of the cluster column, or of a column that depends on it, reads that value's blocks only; the
+value of the key's first column, or of a column that depends on it, reads that value's blocks only; the
 same structure answers ranges and prefixes. About 0.5 MB a day, 0.2 GB in 13 months *(computed)*,
 5 ns a row to write.
 
@@ -279,11 +288,11 @@ the same columns, with its equality filters on columns of few values in the obje
 
 - A partial is keyed by the object, the version of its deletes and the family. An object never changes,
   so a partial stays exact as long as the object lives.
-- Objects replaced without removing rows, by a fresh merge or a seal, have the sum of their partials:
+- Objects replaced without removing rows, by a merge, have the sum of their partials:
   the commit already says which objects an output replaces.
 - While its family is asked, a partial is computed when a new object is written, so that monitors and
   sliding windows stay exact and cheap. A family not asked for a while stops being kept up.
-- Partials live in the local cache, and may be written beside the monthly files on the store, under a
+- Partials live in the local cache, and may be written beside the rollups on the store, under a
   budget of 2 GiB per dataset by default; the one that saves the least per byte goes first.
 
 ### 5.7 The caches
@@ -301,29 +310,29 @@ object), which a later question with the same filter reads alone.
   value leaving a group only when its last row there is excluded.
 - Late rows add their own entries, which merges add up.
 - A window edge that cuts a block or a bucket is exact by default: that block's rows are read. With
-  `ScanOptions.AlignWindow` the edge moves to the grain kept at that age, and the scan reports the
-  window applied.
+  `ScanOptions.AlignWindow` the edge moves out to the bounds, on the key's first column, of the objects
+  it falls in, and the scan reports the window applied.
 
 ## 7. Estimates, then the exact answer
 
 Rather than a stored sample, the engine reads a fraction of the data: 0.1 %, 1 %, then 10 %, then the
 whole. It draws ranges of consecutive blocks, at least 1 MiB of each column read, at random in each
-object and in each cluster value, a value's share of the ranges growing with its rows; a value smaller
-than a range in an object is read whole when it is drawn. Each tier returns estimates with their
-margin, a stratified cluster sample, which narrow until the exact answer. The unit is a range rather
-than a block because a block holds about 15 KB of two columns: drawn one by one, 1 % of 30 days would
-be some 10⁵ requests, about 50 s at 128 in flight and past the rate S3 sustains on a prefix
-(section 9). "5xx by endpoint, every service, 30 days" at 1 % reads 1.5 GB in about 1 500 ranges, in
-about 1.6 s cold *(computed)*. A scan option says whether the caller wants the exact answer only,
-accepts estimates, or sets a cost threshold, one second by default; the cost of the exact answer is
-announced before it is read.
+object and in each value of the key's first column, a value's share of the ranges growing with its
+rows; a value smaller than a range in an object is read whole when it is drawn. Each tier returns
+estimates with their margin, a stratified cluster sample, which narrow until the exact answer. The unit
+is a range rather than a block because a block holds about 15 KB of two columns: drawn one by one, 1 %
+of 30 days would be some 10⁵ requests, about 50 s at 128 in flight and past the rate S3 sustains on a
+prefix (section 9). "5xx by endpoint, every service, 30 days" at 1 % reads 1.5 GB in about 1 500
+ranges, in about 1.6 s cold *(computed)*. A scan option says whether the caller wants the exact answer
+only, accepts estimates, or sets a cost threshold, one second by default; the cost of the exact answer
+is announced before it is read.
 
 ## 8. The planner
 
 1. Time and the column sheets drop objects.
 2. Where each value lives narrows the read to the blocks of the filtered values.
-3. For each object, the cheapest of: a learned partial; the counts by bucket of time, for a question on
-   one column; the block statistics, for the blocks they settle; reading the question's columns on the
+3. For each object, the cheapest of: a learned partial; its counts, or a rollup's over it, for a question
+   on one column; the block statistics, for the blocks they settle; reading the question's columns on the
    blocks left.
 4. The cost follows the formula of section 2. Under the threshold the question runs and answers
    exactly; over it, the estimates come first, then the exact answer from the newest data to the oldest.
@@ -331,17 +340,21 @@ announced before it is read.
 
 Each object's choice is explained: the path taken, and its requests and bytes computed.
 
-The first planner, built before the blocks, chooses between the hourly counts and the rows. A question on
-one column, the time and the measures (its keys the column, functions of it, and the instant truncated
-to the hour or coarser in UTC; its aggregates counts, sums, extremes, means, quantiles and distributions
-of the measures the counts carry, and the column's distinct values; its filter a window of the instant
-and values of the column by equality or a set) is worked out once. Then each object a job wrote and no
-delete marked reads its column's counts, with their sketches for a quantile, in one request: no sheet of
-it, the counts saying which values it holds; read ahead as many objects as the session reads at once;
-kept parsed by the handle, so that the question asked again reads nothing. The rows of the hours its
-window cuts are read as the rows' scan reads them, and so is every other object, the objects side by side
-one part of the scan with its read-ahead. On the planner's dataset, four objects of an hour and two
-appended after, a count by service reads 6 requests and 41.7 KB cold, none warm, where its rows take
+The first planner, built before the blocks, chooses between the counts and the rows. A question on one
+column and the measures (its keys the column, functions of it, and columns or functions of them that an
+object holds constant; its aggregates counts, sums, extremes, means, quantiles and distributions of the
+measures the counts carry, and the column's distinct values; its filter values of the column by
+equality or a set, and conjuncts an object's summaries prove true over its every row) is worked out
+once. Nothing in it knows a time: a window on an instant is a conjunct like any, and a truncation of an
+instant a function like any. Then each object a job wrote and no delete marked, whose summaries prove
+the other conjuncts and keys, reads its column's counts, with their sketches for a quantile, in one
+request: no sheet of it, the counts saying which values it holds; read ahead as many objects as the
+session reads at once; kept parsed by the handle, so that the question asked again reads nothing. A
+rollup whose objects would all answer is read in their place, the highest rank first, or bucket by
+bucket where that costs less ([rollups](15-compaction.md#rollups)). Every other object is read as rows,
+the objects side by side one part of the scan with its read-ahead. On the planner's dataset, four
+objects of an hour and two appended after, a count by service reads 6 requests and 41.6 KB cold, none
+warm, where its rows take
 323 KB; a quantile by service reads 74.4 KB; questions drawn at random on tables drawn at random answer as
 their rows do *(measured)*.
 
@@ -352,9 +365,9 @@ At the design rate, S3 profile, cold, one node, on the reference table clustered
 
 | question | on the fly, no synopsis | with the synopses | asked again |
 |---|---|---|---|
-| top 100 endpoints over 13 months | ~17 min (1.3 TB) | ~50 ms, monthly counts | ~11 ms |
-| one endpoint per day over 13 months | ~0.9 s for a median service, ~80 s for the largest | ~50 ms, daily counts of the monthly files | ~4 ms |
-| errors per hour over 30 days | ~45 s (52 GB) | ~35 ms, hourly counts | ~1 ms |
+| top 100 endpoints over 13 months | ~17 min (1.3 TB) | ~50 ms, the rollups' counts | ~11 ms |
+| one endpoint per day over 13 months | ~0.9 s for a median service, ~80 s for the largest | ~50 ms, the rollups' counts by bucket | ~4 ms |
+| errors per hour over 30 days | ~45 s (52 GB) | ~35 ms, the counts of objects of an hour | ~1 ms |
 | 5xx per service per hour, 30 days | ~45 s | ~0.3 s, block statistics | ~20 ms |
 | a service's routes under 5xx per hour, 30 h | ~40 ms, median service; ~0.45 s, the largest | the same | ~10 ms |
 | per endpoint for version X, 30 days | ~0.1 s, median service; ~5.5 s, the largest | ~50 ms, block statistics | ~10 ms |
@@ -362,26 +375,30 @@ At the design rate, S3 profile, cold, one node, on the reference table clustered
 | distinct hosts per region, 30 days | seconds: blocks at the emitters' boundaries | ~0.1 s, exact, block statistics | ~10 ms |
 | the rows of a request | — | 0.1 to 0.2 s, postings | ~5 ms |
 | the 99th percentile per service, last 15 minutes | ~0.2 s | the same | ~10 ms |
-| the 99th percentile per service over 30 days | ~7 min (520 GB) | ~0.1 s, hourly sketches | ~5 ms |
+| the 99th percentile per service over 30 days | ~7 min (520 GB) | ~0.1 s, the objects' sketches | ~5 ms |
 | 5xx per endpoint, every service, 30 days | ~2 min (150 GB); estimate at 1 % in ~1.6 s | none | ~50 ms, learned partial |
 | per endpoint where `Weight` > 0.37, 30 days | ~8 min (620 GB); estimate in seconds | none | ~50 ms for the same threshold |
+
+The coarse paths were computed for monthly files of counts by day and month, which rollups replaced:
+their requests are bounded the same way, a header and the chunks of the values asked for each rollup a
+question takes.
 
 ### 8.2 What stays costly the first time
 
 Crossing two columns that vary from row to row, or filtering a raw measure, over days, without
-narrowing to a cluster value: about two to eight minutes for 30 days on one node. No per-column
-synopsis holds such an answer; only the rows or a crossing kept from an earlier question do, and
-ClickHouse reads the same bytes unless a projection was declared. Such a question gets its estimate in
-one to two seconds, its exact answer newest first (the last day in about 4 s), can be spread over
+narrowing to a value of the key's first column: about two to eight minutes for 30 days on one node. No
+per-column synopsis holds such an answer; only the rows or a crossing kept from an earlier question do,
+and ClickHouse reads the same bytes unless a projection was declared. Such a question gets its estimate
+in one to two seconds, its exact answer newest first (the last day in about 4 s), can be spread over
 nodes, ten of which read its 30 days in about 12 s, and is learned for the next time.
 
 ## 9. What the store sees
 
-At the design rate a period is a day, the longest unit whose footer keeps a selective read's chunk
-under 16 MB when an object's bytes have no cap: one sealed object of about 173 GB a day, about 395
-over 13 months, and for the current day at most eight objects of level 0 and a few fresh ones. A
-question's requests are bounded by the objects its window touches, or by the months it spans when the
-monthly files answer it, never by its rows.
+At the design rate, clustered by day, an object holds a day, the longest unit whose footer keeps a
+selective read's chunk under 16 MB: one object of about 173 GB a day, about 395 over 13 months, and for
+the current day at most eight objects of level 0 and the few its jobs left. A question's requests are
+bounded by the objects its window touches, or by the rollups over them when theirs answer it, never by
+its rows.
 
 ### 9.1 Reads
 
@@ -389,9 +406,9 @@ Cold, S3 profile, one node *(computed)*:
 
 | question | path | requests | bytes | time |
 |---|---|---|---|---|
-| top 100 endpoints over 13 months | monthly counts | 20 to 40 | 10 to 25 MB | ~50 ms |
-| one endpoint per day over 13 months | daily counts of the monthly files | 20 to 40 | ~1 MB | ~50 ms |
-| errors per hour over 30 days | hourly counts | 30 to 50 | under 2 MB | ~35 ms |
+| top 100 endpoints over 13 months | the rollups' counts | 20 to 40 | 10 to 25 MB | ~50 ms |
+| one endpoint per day over 13 months | the rollups' counts by bucket | 20 to 40 | ~1 MB | ~50 ms |
+| errors per hour over 30 days | the counts of objects of an hour | 30 to 50 | under 2 MB | ~35 ms |
 | 5xx per service per hour, 30 days | block statistics | 50 to 80 | 0.2 to 0.4 GB | ~0.3 s |
 | a service's routes under 5xx per hour, 30 h | the service's rows | 10 to 60 | 5 MB to 0.5 GB | 40 to 450 ms |
 | the rows of a request, 30 days | postings | ~60 | ~2 MB | 0.1 to 0.2 s |
@@ -413,17 +430,18 @@ them.
   it; a `SlowDown` halves the rate, which then grows back by steps.
 - An object's key starts with its random identifier, which lets S3 split the dataset's prefix as its
   load grows.
-- The monthly files turn the 395 reads of a question by day over 13 months into about 13, and the
-  estimates read ranges rather than blocks (section 7).
+- The rollups turn the 395 reads of a question by day over 13 months into about 14, a header and the
+  chunks of the values asked for each of the 7 rollups of 64 days *(computed)*, and the estimates read
+  ranges rather than blocks (section 7).
 
 ### 9.3 Writes
 
 | work | bytes | requests |
 |---|---|---|
 | appends | the data, once | 3 to 5 PUT each: the object, the commit, the pages of the tree; how often is the application's choice |
-| compaction: level 0's exit, the fresh merges, the seal | each row rewritten 2 to 4 times: 4 to 8 MB/s written, a little less read | under one PUT and one GET a second, in parts of 16 to 64 MB |
+| compaction: level 0's exit and the leveled merges | each row rewritten 2 to 4 times: 4 to 8 MB/s written, a little less read | under one PUT and one GET a second, in parts of 16 to 64 MB |
 | synopses in the objects | about 120 MB a day, 0.07 % of the data | within the objects' parts |
-| monthly files | a few MB a column and a month | about one PUT a column when a day is sealed |
+| rollups | a few MB a column and a run of 64 objects | a PUT a rollup, once the objects of its run stand |
 | listings | none: the commit tree is the catalog | none |
 
 The composite tables this design replaces wrote 7.7 GB a day, 4.4 % of the data.
@@ -437,7 +455,7 @@ The composite tables this design replaces wrote 7.7 GB a day, 4.4 % of the data.
 | clustering at level 0's exit, sorted merges | ~40 |
 | block statistics | ~15 |
 | where each value lives | ~5 |
-| counts by bucket of time, seven columns | ~56 |
+| counts, seven columns | ~56 |
 | quantile and distinct sketches | ~67 |
 | column sheets, seven columns | ~42 |
 | **total** | **~225**, plus ~30 for each learned family kept up |
@@ -446,10 +464,10 @@ At the design rate that is 0.011 of a core *(computed)*.
 
 ### 10.2 Sizes
 
-| structure | in an object, a day | in the monthly files, a day | 13 months |
+| structure | in an object, a day | coarser grains, a day | 13 months |
 |---|---|---|---|
 | column sheets | 0.08 MB | — | 0.03 GB |
-| counts by bucket of time, sketches | 51 MB | 2.7 MB | 21 GB |
+| counts, sketches | 51 MB | 2.7 MB | 21 GB |
 | block statistics | 70 MB | 3 MB | 29 GB |
 | where each value lives | 0.5 MB | — | 0.2 GB |
 | learned partials | what is asked | what is asked | 2 GiB budget |
@@ -458,19 +476,20 @@ At the design rate that is 0.011 of a core *(computed)*.
 The synopses weigh 0.07 % of the data. The design this one replaces kept 7.7 GB a day of synopsis
 tables for this table, 4.4 % of the data and about 3 TB in 13 months *(measured)*. For a petabyte of
 data, fifteen such tables kept 13 months, the synopses weigh about 750 GB on the store, of which the
-local cache's working set is about 60 GB, the last 30 days and the monthly files; the sheets and
-directories take under 1 GB of memory *(computed)*.
+local cache's working set is about 60 GB, the last 30 days and the coarser grains; the sheets and
+directories take under 1 GB of memory *(computed)*. The coarser grains were computed for monthly files of
+days and months, which rollups replaced.
 
 ### 10.3 Index kinds
 
 | kind | where | what |
 |---|---|---|
 | `vorticity.column.sheet.v1` | an object's region, which its table of contents names | the column sheets |
-| `vorticity.column.counts.v1` | an object's region, by hour, which its table of contents names; the monthly files, by day and month | counts by bucket of time |
-| `vorticity.column.sketches.v1` | an object's region right after the counts, which its table of contents names; the monthly files | the counts' quantile sketches and distinct registers |
-| `vorticity.block.stats.v1` | an object's index region, by hour; the monthly files, merged by cluster value and day | blocks and their per-column statistics |
+| `vorticity.column.counts.v1` | an object's region, which its table of contents names; a rollup's | the counts of each value, kept by bucket in a rollup whose run spans several clustering values |
+| `vorticity.column.sketches.v1` | an object's region right after the counts, which its table of contents names; a rollup's | the counts' quantile sketches and distinct registers |
+| `vorticity.block.stats.v1` | an object's index region; summed into the rollups | blocks and their per-column statistics |
 | `vorticity.column.where.v1` | an object's index region | where each value lives |
-| `vorticity.partials.v1` | the local cache; beside the monthly files | learned partials |
+| `vorticity.partials.v1` | the local cache; beside the rollups | learned partials |
 
 Readers skip a kind they do not know, as they do now. The kinds of the former synopsis tables are no
 longer written nor read. The leaf entry keeps its table of contents, at a second version that holds
@@ -478,12 +497,13 @@ them no more and names the regions of the column sheets, counts and sketches. An
 version is read through its object's directory, so a dataset written before stays readable and the
 commit format's version does not rise.
 
-### 10.4 The recommendation of the cluster column
+### 10.4 The recommendation of a leading column
 
 The planner counts each shape of question in bounded counters, which a process pours into the dataset
 now and then rather than committing per question, and which several processes add up. From them the
-library recommends the column whose clustering would have saved the most bytes read, through a
-diagnostic call and telemetry. The application declares the column; the library never does.
+library recommends the column to lead the key with, whose clustering would have saved the most bytes
+read, through a diagnostic call and telemetry. The application declares its key and its clustering;
+the library never does.
 
 ## 11. Decisions, and the alternatives weighed
 
@@ -491,12 +511,12 @@ diagnostic call and telemetry. The application declares the column; the library 
 |---|---|---|
 | the core | the group-by engine on the rows, every question | precomputed synopses as the main path, which answer only what they were built for |
 | the fast path | synopses, per column only, with absolute budgets | composite synopsis tables under a budget as a share of the data, wrong both ways: 47 to 88 TB per petabyte, and nothing for a small dataset |
-| layout | one optional cluster column, declared by the application | a composite sort key, which privileges its prefix; a sort key chosen per object, whose cost per question no one can predict |
+| layout | a clustering the application declares: a value of its key's first column, of any type, a size, or both | one cluster column beside the key, which the first version of this design had; a composite sort key, which privileges its prefix; a sort key chosen per object, whose cost per question no one can predict |
 | crossings of columns | learned after a question asks them, per object and family | tables of fixed crossings, built before any question, which miss the next crossing asked and grow with every column added |
-| coarser grains | in monthly files beside the objects, which keep the hour | regraining inside the objects, which rewrites a sealed day's 173 GB to merge its 120 MB of synopses |
-| approximate answers | ranges of at least 1 MiB drawn on the fly, stratified by cluster value | a stored sample, 4.4 GB for 13 months of the reference table, only a fixed fraction; blocks drawn one by one, some 10⁵ requests for 1 % of 30 days |
+| coarser grains | rollups beside the levels, which sum runs of objects' counts with no row read | monthly files of days and months, a calendar the library would have had to know; regraining inside the objects, which rewrites a day's 173 GB to merge its 120 MB of synopses |
+| approximate answers | ranges of at least 1 MiB drawn on the fly, stratified by value of the key's first column | a stored sample, 4.4 GB for 13 months of the reference table, only a fixed fraction; blocks drawn one by one, some 10⁵ requests for 1 % of 30 days |
 | requests to the store | one budget per process, shared by its questions and jobs | 128 in flight per question with no ceiling: about 4 000 requests a second from a single question |
 | recent windows | computed on the fly | counts per minute, 1.27 GB a day for the reference table |
-| the cluster column's name | `ClusterColumn` | words that say "sort" or "key", which suggest a composite |
-| blocks | a cluster value and an hour, 65 536 rows at most; their statistics merged by day into the monthly files past 30 days | blocks aligned on the format's zones, which straddle cluster values and hours |
+| the clustering's name | `ClusteringOptions`, a value and a size | a cluster column of its own, which the key's first column already is |
+| blocks | a value of the key's first column in an object, 65 536 rows at most; their statistics summed into the rollups | blocks aligned on the format's zones, which straddle values |
 | tenants | none in the library | partition columns, retired with the joins of small partitions |

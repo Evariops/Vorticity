@@ -126,7 +126,7 @@ select (g.Key, g.Count())
 |---|---|
 | reading both shredded forms, the reference's tree and the Parquet layout, and writing the reference's | [90-registry.md](90-registry.md#1-array-encodings), [01-scope.md](01-scope.md), [04-conformance.md](04-conformance.md) for the corpus the reference writes |
 | the `Variant` type, paths, `As…`, `To…` and `Has` in questions, typed and on the tool path | [07-dotnet-mapping.md](07-dotnet-mapping.md), [14-public-api.md](14-public-api.md), [16-queries.md, variant paths](16-queries.md#36-variant-paths), [08-semantics.md](08-semantics.md) for a path absent or of another type |
-| what an object shreds, the cost model, shapes, bodies, the validity of shredded fields, level 0's variants | [11-write-strategy.md, time slices and shredded variants](11-write-strategy.md#9-time-slices-and-shredded-variants), [90-registry.md, the writer's schemes](90-registry.md#5-the-writers-schemes-and-their-ids) |
+| what an object shreds, the cost model, shapes, bodies, the validity of shredded fields, level 0's variants | [11-write-strategy.md, key slices and shredded variants](11-write-strategy.md#9-key-slices-and-shredded-variants), [90-registry.md, the writer's schemes](90-registry.md#5-the-writers-schemes-and-their-ids) |
 | the path map, the path directory, block statistics and indexes on paths | [10-indexes.md](10-indexes.md#45-vorticityvariantpathsv1-where-each-shredded-key-of-a-variant-lies), and the three kinds after it |
 | the synopses on paths, per column, to come | [22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#5-the-synopses-all-per-column) |
 
@@ -172,23 +172,23 @@ binary for the rest, and the format's own name for both, so a Rust reader reads 
 
 ## 4. The examples
 
-On the example's volumes, thirty periods of a day. Every figure of these tables is an estimate,
+On the example's volumes, thirty days, an object a day. Every figure of these tables is an estimate,
 written before anything was built.
 
 | question | what answers it |
 |---|---|
-| a count per `Attributes["http.route"]` and per day, 30 days, the path shredded | its typed column, as for a declared column; once the synopses come, its counts by bucket of time |
+| a count per `Attributes["http.route"]` and per day, 30 days, the path shredded | its typed column, as for a declared column; once the synopses come, the counts of its objects of a day |
 | `ServiceName` under `Attributes["http.response.status_code"] >= 500`, per minute, the last hour | the two columns over the last hour, the path's typed one and the declared one |
 | the rows holding `Attributes["feature.flag.new-cart"]`, per minute, the last day | the path's typed column, or the residual of the chunks that hold the key |
 | `Attributes["feature.flag.new-cart"] == "on"`, per service and per day, 30 days, the key left in the residual of most objects | the residual of the chunks that hold it, and the partial learned for the next time |
 | the average of `Attributes["http.server.request.duration"]` per route and per day | the typed columns of the two paths |
-| the keys that are data most often held, such as `Attributes["user.4711.score"]` and its siblings, 30 days | the path directories' counts per period |
+| the keys that are data most often held, such as `Attributes["user.4711.score"]` and its siblings, 30 days | the path directories' counts per object |
 | the count per `Attributes["http.route"]` of the first row, cold | two round trips per object, in parallel: the path directory, then the typed column's chunks |
 | `AsInt64() >= 500` on `http.response.status_code`, where one source sends the code as text | the typed column alone: that source's rows answer null, and are never read |
 | the same with `ToInt64()`, which converts the text | the typed column, and the field's `value` on that source's rows, parsed |
 
 The same questions run on generated logs of three sources, at a 2 500th of the example's rate, 24
-periods of an hour, behind a store that counts and waits 30 ms a round trip (`vortex-queries --micro
+hours clustered by hour, behind a store that counts and waits 30 ms a round trip (`vortex-queries --micro
 questions`): every one reads its rows, a path's typed column where its object shreds it. A key the
 application declares shredded (`DatasetOptions.ShreddedPaths`) is a column of every object whatever
 share of the rows holds it. `ToInt64()` reads every class, and `AsDouble()` reads floats too, which the
@@ -255,7 +255,7 @@ double class leaves out, from the field's `value` of the rows that hold them.
 | 9 | paths left in the residual | counted by the path directory, parsed where a question reads them | counted by the synopsis tables of the first design, where their budget admitted them |
 | 10 | the order inside a slice | the order the rows came in, until a cluster column orders them | by the runs each column adds, fixed per object, as the first design did |
 | 11 | what the table of contents names of the paths | each variant column's path directory | the synopsis tables of the first design besides, about 50 bytes each |
-| 12 | where shredding happens | in the jobs that already rewrite every row of a slice, level 0's exit, the fresh merges and the seal, with level 0's variants shredded in memory once per query node; the keys an application declares (`DatasetOptions.ShreddedPaths`) shredded by every job whatever their share of the rows, and at each append too by a handle that asks it (`ShredOnAppend`): 65 ms an append of 100 000 rows of eight keys against 23, for an object 5 % smaller (measured) | in every append, as other writers do, which puts its cost on every ingestion |
+| 12 | where shredding happens | in the jobs that already rewrite every row of a slice, level 0's exit and the leveled merges, with level 0's variants shredded in memory once per query node; the keys an application declares (`DatasetOptions.ShreddedPaths`) shredded by every job whatever their share of the rows, and at each append too by a handle that asks it (`ShredOnAppend`): 65 ms an append of 100 000 rows of eight keys against 23, for an object 5 % smaller (measured) | in every append, as other writers do, which puts its cost on every ingestion |
 | 13 | reading one path | the path map, and only the buffers of the top-level key read | every chunk's segment read whole, every path's bytes with it |
 | 14 | the variant column's chunks | long chunks of its own, about 10⁶ rows | the file's chunks, which multiply the trees |
 | 15 | where what the format lacks for a path lives | the index directory, which Rust never reads, until an edition freezes a layout for paths | a layout of our own, which a strict Rust reader refuses to open ([where an index lives](10-indexes.md#2-where-an-index-lives)) |

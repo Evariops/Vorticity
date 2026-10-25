@@ -423,20 +423,16 @@ outside CI against the twenty column shapes of `--tradeoffs`, it names the choic
 measured as best on every one. Taking the advice by default would change what a write produces and
 its determinism, so it is not done.
 
-## 9. Time slices, and shredded variants
+## 9. Key slices, and shredded variants
 
-A dataset compacted by periods hands the writer rows cut into time slices, ranges of instants of up to
-a few million rows ([13-dataset.md](13-dataset.md#5-levels-and-compaction)). Inside a slice the rows keep
-the order they came in, so that the instant ascends through the whole object, until a cluster column
-orders them by its values ([the cluster
-column](22-on-the-fly-and-synopses.md#32-the-cluster-column)). The slice table records each slice's
-instants and rows.
-
-A slice aims at 3 × 10⁶ rows, a minute of the design's example. The slicer takes the coarsest calendar
-unit, a second, a minute, an hour, a day or a month, whose units hold no more than twice that at the
-median, and cuts a burst finer, a unit past twice the target. At the target itself, the minutes of an
-hour of the example that a few late rows of the next hour took past it went to seconds, every hour of
-a day but the last, sixty times the slices: hence twice the target.
+A job hands the writer its rows in key order, and cuts an object that aims at a mebibyte or more into
+slices of the key: past `SliceTargetRows` rows, 3 × 10⁶ by default, a minute of the design's example,
+the next change of key starts a slice, so that a key's rows lie in one slice ([clustering by a
+value](15-compaction.md#clustering-by-a-value-and-a-size)). The slice table records each slice's rows
+and first key, and the last key of the last ([the slice
+table](10-indexes.md#44-vorticityslicesv1-the-slices-of-a-file)). An earlier release's datasets of periods
+cut their objects into time slices instead, a calendar unit chosen from the rows' pace, which a reader
+still walks.
 
 A dataset's object chunks each column on its own. A column gathers its rows across the object's chunks
 until they would encode to about 1 MiB (`DatasetOptions.ChunkBytes`, internal) at the rate its last
@@ -453,8 +449,8 @@ each on average; QP-1 read 33.9 MB in 75 requests in 123 ms, against 177.7 MB in
 504 MB in 545 requests in 470 ms, against 1 061 MB in 2 688 in 1 291 ms. A needle takes a segment a
 column now, about a megabyte, where it took the small chunk of every column in one: QP-4 read 15.5 MB in
 13 requests in 39 ms, against 0.8 MB in 7 in 18 ms. A load of four hourly periods at 50 000 rows a
-second took 2.07 s against 1.75 (+19 %), its process peaking at 8.0 GB against 6.1, for 4 % fewer bytes
-(`--micro load`).
+second, in the load of periods an earlier release had, took 2.07 s against 1.75 (+19 %), its process
+peaking at 8.0 GB against 6.1, for 4 % fewer bytes.
 
 Chunks of a column do not end at every slice when a column gathers no further: a slice's end closes
 the group, not a chunk of the object's own. Ending the object's chunks around each slice's first row
@@ -462,27 +458,25 @@ was tried before columns gathered: on six hours of requests at twenty a second, 
 objects took five times the requests, a request a chunk, and the rows a cut hour reads took 2.4 times
 the bytes, each small chunk carrying its own dictionaries and encodings.
 
-A slice's rows are copied into a buffer of its own as they come, its columns laid out for all of them,
-then joined and written on a lane of the session's while the next slice fills, two slices held at most;
-the writes keep the slices' order. A job of a schema with a variant column reads its rows twice, once to
-cut each object's slices and choose what its variant columns shred, once to write them; another job,
-and a load of finished periods, cuts its slices as its rows come, at the pace of its first rows.
+A job writes its rows into the object as they come, and ends a slice by flushing the writer at the
+first change of key past the slice's rows. A job of a schema with a variant column reads its rows twice,
+once to count the paths of each clustering value's rows and choose what its variant columns shred, once
+to write them; another job reads them once.
 
 A variant column is written whole by an append, and shredded by the job that rewrites it, so that
 ingestion pays nothing for shredding. Until that job runs, a query node that reads the variants of an
-object of level 0 shreds a copy of them in memory, once per object and under the session's budget,
-and keeps it until the object leaves level 0, so every question after the first reads typed columns
-there too. The job's
-first pass counts each top-level key, its class and its bytes (`PathCensus`). From those counts a cost
-model chooses the keys the object shreds: a key earns a typed column when what its occurrences cost in
-the residual, at the measured price of each class, outweighs the column's overhead of about 200 bytes a
-chunk. The keys chosen are written in the reference's form, the `vortex.variant` encoding with a typed
-tree, integers of every width in one 64-bit column, each key encoded the same way in every chunk, and a
-chunk shreds only the keys its rows hold. The validity of a shredded field goes through the compressor
-as any column does, as runs where it has few of them, as a bitmap otherwise. A path map in each chunk's
-metadata (`vorticity.variant.paths.v1`) says which keys it holds and where. Counting and writing cost
-about 80 ns an attribute: 181 ns a row to count, and 310 ns a row more to write six to eight
-attributes shredded.
+object of level 0 shreds a copy of them in memory, once per object and under the session's budget, and
+keeps it until the object leaves level 0, so every question after the first reads typed columns there
+too. The job's first pass counts each top-level key, its class and its bytes, for each clustering value
+(`PathCensus`). From those counts a cost model chooses the keys the object shreds: a key earns a typed
+column when what its occurrences cost in the residual, at the measured price of each class, outweighs
+the column's overhead of about 200 bytes a chunk. The keys chosen are written in the reference's form,
+the `vortex.variant` encoding with a typed tree, integers of every width in one 64-bit column, each key
+encoded the same way in every chunk, and a chunk shreds only the keys its rows hold. The validity of a
+shredded field goes through the compressor as any column does, as runs where it has few of them, as a
+bitmap otherwise. A path map in each chunk's metadata (`vorticity.variant.paths.v1`) says which keys it
+holds and where. Counting and writing cost about 80 ns an attribute: 181 ns a row to count, and 310 ns
+a row more to write six to eight attributes shredded.
 
 A body is a variant too: a line of text keeps its text, which the trigram indexes search, and an object
 is shredded as attributes are, and shown again from its columns and residual, keys in order.

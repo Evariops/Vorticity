@@ -177,23 +177,23 @@ A leaf entry describes one data object:
   for objects of hundreds of megabytes and wide tables. This field and those like it come after the
   summaries, as a zero where a count of deleted rows would stand, which no earlier entry holds there,
   then their length and their tagged bytes, so an entry without them keeps its bytes
-- for an object in time slices, its table of contents: the object's schema, the encodings its blobs
+- for an object in slices, its table of contents: the object's schema, the encodings its blobs
   name, its slice table and the region of each column's chunk directory, or of its page table with the
-  first row of each page ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)),
+  first row of each page ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-slices-of-a-file)),
   each variant column's path directory, each column's sheet ([the column
-  sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)), counts by hour ([the
-  counts](10-indexes.md#49-vorticitycolumncountsv1-a-columns-counts-by-hour)) and their sketches ([the
+  sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)), its columns' counts ([the
+  counts](10-indexes.md#49-vorticitycolumncountsv1-a-columns-counts)) and their sketches ([the
   sketches](10-indexes.md#410-vorticitycolumnsketchesv1-the-sketches-of-a-columns-counts)), the
   region of the object's index directory, and where in it the entry of each locating index lies ([the
   directory](10-indexes.md#3-the-directory-and-the-runs)). With no open of the object, a reader of a slice
   reads its columns' directories, then its chunks; a question on a value reads the sheets of its columns
   in one request, and passes the object over when they prove the value absent; a question on one column
-  and the time reads that column's counts in one request instead of its rows; and a lookup by a value
+  reads that column's counts in one request instead of its rows; and a lookup by a value
   reads its index entries with its columns' page tables, then its postings, the pages of its rows and its
   chunks, four round trips. A table of contents of the first version, which also
   held the synopsis tables of the time, is ignored, and its object read through its directory. It is a tagged field
-  like the footer's length, about 2.2 KB for a period of an hour, and 19.7 KB for a day, where
-  it took 318 KB while it held every table's chunks
+  like the footer's length, about 2.2 KB for an hour of the design's requests, and 19.7 KB for a
+  day, measured on objects of periods, where it took 318 KB while it held every table's chunks
 
 An internal entry holds a page reference to a child, the sum of its rows, the union of its children's
 summaries, and the tally of the objects under it: their bytes, the largest of them, the rows marked
@@ -256,14 +256,14 @@ library never stalls a writer.
   writes, with its null keys last.
 - Without a clustering key, levels are size tiers. A lookup touches every object the summaries do not
   refute, which is output-sensitive rather than bounded, and the plan says so.
-- A dataset that declares periods lays its levels out for them ([compaction by
-  periods](15-compaction.md#a-dataset-of-periods)). Level 0 is the same.
-  Level 1 is the late level, which holds the rows that were older than the newest fresh instant when
-  they left level 0, in sorted objects that overlap, one per period once merged. Level 2 holds the
-  object of each sealed period, and the fresh levels, from 3 up, hold the rows past every fresh
-  object, `F` adjacent objects of one period merging into the next level. Every level but 0 and 1 is
-  key-disjoint and no object above level 0 spans two periods, so a lookup touches level 0, the late
-  level and one object per other level.
+- A dataset that declares a clustering value (`DatasetOptions.Clustering`) keeps the same levels, and
+  no object above level 0 holds rows of two values: its jobs write the rows of each value into objects
+  of their own ([clustering](15-compaction.md#clustering-by-a-value-and-a-size)). The size an object
+  aims at, when it declares one, bounds every level's objects in place of the cap.
+- A dataset an earlier release compacted by periods keeps level 1 as its late level, whose sorted
+  objects overlap, and its other levels' rows in no key order. It reads as it was written, a lookup
+  touching level 0, the late level and one object per other level, and its compaction plans nothing
+  ([datasets written by periods](15-compaction.md#datasets-written-by-periods)).
 - Inside every object, an index entry has at most four runs, the same rule as for a single file
   appended in place (see [the directory and the runs](10-indexes.md#3-the-directory-and-the-runs)).
 
@@ -287,21 +287,18 @@ and its outputs are sorted by construction. The run is the object's structure ra
 the index budget spares it. On a narrow table it is as large as the column it orders, and a budget of
 a tenth of the data would refuse it on every object past a mebibyte, the merge's outputs included.
 
-A dataset of periods cuts what leaves level 0 in time slices. Its compaction writes every object in
-them, the rows of a slice in the order they came ([a dataset of
-periods](15-compaction.md#a-dataset-of-periods)). On a key of the instant alone such an object carries
-no run: its slice table is the key's source, which finds a key's slice and sorts the slice's instants
-when a read needs them, unless the instant ascends through the file, which a sorted column serves
-([sources of order](12-index-reads.md#2-sources-of-order)). A composite key
-keeps its run. Sealing the object checks that its slice table walks the key.
+A job cuts an object that aims at a mebibyte or more into slices of the key, a slice ending at the
+first change of key past three million rows, and the object's table of contents lists them by their
+first keys ([clustering](15-compaction.md#clustering-by-a-value-and-a-size)), so that a filter on the
+key's first column reads the slices it reaches alone.
 
-An object whose rows come in key order carries no run when the key is a single integer column with
-no nulls, as is the case for a merge's output or its rewrite ([deleting
-rows](#12-deleting-and-updating-rows)). Its statistics say the column is sorted, and a sorted column
-is the source a key cursor and a key-ordered read take before any run, with its zone map as the index,
-so a run next to it would be bytes nobody reads. Sealing the object checks that a key cursor opens on
-the column alone, so an object whose order was lost is refused rather than read as one without the
-key.
+An object whose rows come in key order carries no run when the key is a single column of integers, or
+of instants, which integers store, with no nulls, as is the case for a merge's output or its rewrite
+([deleting rows](#12-deleting-and-updating-rows)). Its statistics say the column is sorted, and a
+sorted column is the source a key cursor and a key-ordered read take before any run, with its zone map
+as the index, so a run next to it would be bytes nobody reads. Sealing the object checks that a key
+cursor opens on the column alone, so an object whose order was lost is refused rather than read as one
+without the key.
 
 Level 0 empties into the first level whose capacity can hold it, not always into level 1. A few
 small commits of a few kilobytes merge into level 1, rewriting a level a few times their size rather
@@ -459,11 +456,11 @@ The trees are ordered by the clustering key, so the order of that one key is bou
 | need | mechanism | cost |
 |---|---|---|
 | walk the objects by key | an in-order walk of a level's tree, with the next pages prefetched eight ahead | O(log N + objects touched), about one dependent round trip per window of eight pages |
-| rows in key order, `OrderBy` | a merge of each object's key-ordered read. Inside a level above 0 the objects are key-disjoint. An object in sorted slices is read slice by slice, each slice decoded once ([rows in key order](12-index-reads.md#5-rows-in-key-order)) | at most 8 + L objects open at once, and a slice of each object in sorted slices |
+| rows in key order, `OrderBy` | a merge of each object's key-ordered read. Inside a level above 0 the objects are key-disjoint. An object of an earlier release's periods, in sorted slices, is read slice by slice, each slice decoded once ([rows in key order](12-index-reads.md#5-rows-in-key-order)) | at most 8 + L objects open at once, and a slice of each object in sorted slices |
 | rows by position, `Rows(a, b)` | the row sums of every node | O(log N) plus the objects the range touches |
 | count and rank on the clustering key | objects whose summaries lie wholly inside the range are counted unopened, and the core's exact cover handles the boundary objects | at most level 0's objects plus two per level opened, and in an object in sorted slices the instants of the slice a bound falls in |
 | an order on another column | no tree helps | one cursor per object the summaries cannot refute |
-| the rows of a time slice, in an object written with its slices | the object's slice table and chunk directory ([the rows of a time slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer)) | a few small requests once per object, then one per slice, and never the object's footer |
+| the rows of a slice, in an object written with its slices | the object's slice table and chunk directory ([the rows of a slice](12-index-reads.md#51-the-rows-of-a-slice-without-the-footer)) | a few small requests once per object, then one per slice, and never the object's footer |
 
 An object opens when it could hold the next row, and not before. Objects are offered in the order of
 a lower bound on their keys (on the clustering key, ascending, a leaf key is the object's exact
@@ -475,8 +472,8 @@ bound, since a zone's minimum and maximum exclude NaN while the key order places
 float objects open before the first row, and an object whose first row lies below the bound it was
 ordered by raises `VortexFormatException` rather than deliver a wrong order. An extension's bounds are
 its storage's, which the key order encodes it as, so the objects of a timestamp open as a read reaches
-them too: the 200 newest rows of a dataset of periods read the fresh tail and never open the sealed
-hours behind it. Ties between objects follow the dataset's order, so a descending read is the exact
+them too: the 200 newest rows of a dataset clustered by hour read the newest objects and never open
+the hours behind them. Ties between objects follow the dataset's order, so a descending read is the exact
 reverse of an ascending one.
 
 A key cursor walks both ways. Walking down is the same merge with a max-heap. The objects of a level
@@ -661,33 +658,21 @@ rows, and refuse it, or worse. So the header names the features of format 4 the 
 such fields. A feature stays named in every header after the one that introduced it, since the pages
 that hold its entries stay in the trees, and a dataset that never uses one is written in format 2 or
 3 as before. The others are settings, most fixed when the dataset is created, which a library that
-does not know them would ignore against what the dataset promises: the erasure delay, compaction by
-periods and its lateness horizon, the identifier columns, and the shredded paths. Two flags, partition
+does not know them would ignore against what the dataset promises: the erasure delay, the identifier
+columns, the shredded paths, the clustering and the tree of rollups. The flag of periods an earlier
+release set stays known, so that its datasets read. Two flags, partition
 columns and joined periods, were retired with them and are never reused. A library refuses a header that names a feature
 it does not know, as it refuses a later format, so that a feature added later is never read as
-nothing; and it refuses one whose flag of periods, lateness horizon and length of a period do not
-come together, reading a dataset's periods from the flag.
+nothing; and it refuses one whose flag of clustering and clustering disagree, or that carries a tree
+of rollups it does not name.
 
-A dataset compacted by periods (`DatasetOptions.Periods`) declares its instant as the first column of
-its clustering key, a timestamp in UTC or naive, which it reads as UTC, and a lateness horizon, how
-late its sources may send a row. The creation refuses a key that does not lead with such a timestamp.
-The header also keeps the length of a period, a calendar unit in UTC, a day at creation, and the
-changes of it the dataset made since. Each seal weighs the period it wrote, its bytes and rows per
-second of data time, and asks in its own commit for the cheapest unit that holds four constraints:
-the object cap, a chunk of the widest column under 16 MiB at the length the footer's cap gives, a
-purge within half the erasure delay, and a tenth of the retention. A change takes effect from the
-next boundary of both units past the newest instant, so the periods already written keep their
-bounds, and a change worked out on a calendar another writer changed first is dropped. The
-constants (the widest chunk, a rewrite rate of 100 MB/s, the share of the retention, one question a
-second over a day at 50 ms an object) are the design's example until the benches measure them, and
-`vortex.dataset.period.load` reports the load each seal weighed.
-The horizon is a property of the sources, which the application declares, kept to the second, and the
-dataset reports the lateness it sees: each append records how far its oldest row came behind the
-newest instant the handle appended before (`vortex.dataset.lateness`, in seconds, zero for rows in
-order), so that a horizon too short shows. A row later than the horizon behind the newest instant
-the dataset held is kept, in the late level, and sealed into its period with the next late rows, and
-the dataset counts it (`vortex.dataset.rows_past_horizon`). A handle created with
-`PeriodOptions.RefuseLateRows` refuses an append that holds one instead, before anything is written.
+A dataset clustered by a value (`DatasetOptions.Clustering`) keeps its clustering in every header
+(field 25, flag 128): the function of the key's first column with its unit or width, and the size an
+object aims at, so that every writer cuts alike. The creation refuses a function that does not apply
+to the column's type, and a value without a key. A header an earlier release wrote for a dataset of
+periods also kept its lateness horizon, the length of a period and the changes of it, in fields 19, 21
+and 22: a reader skips them, reads the dataset's periods from its flag alone, and never reuses the
+fields.
 Identifier columns (`DatasetOptions.Identifiers`) name the
 columns whose values questions look up one at a time; each names a column of the schema, once. An
 identifier whose column a change of the schema drops or renames names nothing the writers hold any
@@ -827,12 +812,14 @@ reads, is removed from the tree without being read, and one whose summaries refu
 opened. Bounds only loosen as rows are marked, so a proof over the physical rows holds for the live
 ones.
 
-A dataset of periods also expires whole periods (`ExpireAsync(before)`). The cutoff is aligned down to
-the start of the period holding `before`, and every object whose instant's maximum lies before it is
-removed in one commit, from what the leaves say, without reading one. Every object above level 0 holds
-one period, so none straddles the cutoff, and an object of level 0 that straddles it stays until its
-exit cuts it by period. A row thus outlives the cutoff by up to a period. `DatasetExpiryTests` counts no
-read of a data object for an expiry of two sealed hours, nor for a delete of the rows before them.
+An expiry (`ExpireAsync(filter)`) removes, in one commit and from what the leaves say, every object the
+filter covers whole, reading none: the delete's path, the objects it does not cover left as they are
+rather than rewritten. Under a clustering value every object above level 0 holds rows of one value, so
+a filter that keeps the values from one on covers whole objects, and a row outlives it by a value at
+most; an object of level 0 that straddles the bound stays until its exit cuts it by value. An object's
+bounds are its summaries', which a number and a time have and a text has not: a filter on a text
+covers no object. `DatasetValueRangeTests` counts no read of a data object for an expiry of two days of
+five, and `DatasetUnreadDeleteTests` none for a delete of the hours before a bound.
 
 A dataset knows no tenant. An application that keeps the rows of several tenants, sources or retentions
 apart opens a dataset for each, which expires on its own schedule, or lays its rows out as it chooses.
