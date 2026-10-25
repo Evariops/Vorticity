@@ -367,8 +367,12 @@ object), which a later question with the same filter reads alone.
 
 ## 6. Deletes, exclusions, late rows, window edges
 
-- A delete writes, beside its marks, the counts of each column and the statistics of the blocks it
-  touches, negated. A question subtracts them; the next compaction rewrites the object without the rows.
+- A delete writes, beside its marks, the counts of the rows it takes of each column the object counts,
+  out of line in its commit object, merged with an earlier delete's
+  ([deleting rows](13-dataset.md#what-a-question-of-counts-does-with-marks)). A question of counts,
+  sums, means or exact distinct values subtracts them from the object's counts; one of extremes,
+  sketches or registers, and the blocks' statistics, read the marked object's rows. The next compaction
+  rewrites the object without the rows.
 - An exclusion, every row but those of an identifier's value, finds those rows by the postings and
   subtracts their contribution. A distinct count is corrected by the counts of the counted column, a
   value leaving a group only when its last row there is excluded.
@@ -416,8 +420,9 @@ object holds constant; its aggregates counts, sums, extremes, means, quantiles a
 measures the counts carry, and the column's distinct values; its filter values of the column by
 equality or a set, and conjuncts an object's summaries prove true over its every row) is worked out
 once. Nothing in it knows a time: a window on an instant is a conjunct like any, and a truncation of an
-instant a function like any. Then each object a job wrote and no delete marked, whose summaries prove
-the other conjuncts and keys, reads its column's counts, with their sketches for a quantile, in one
+instant a function like any. Then each object a job wrote and no delete marked, or whose marked rows a
+delete counted under a question that subtracts them (§6), whose summaries prove the other conjuncts and
+keys, reads its column's counts, with their sketches for a quantile, in one
 request: no sheet of it, the counts saying which values it holds; read ahead as many objects as the
 session reads at once; kept parsed by the handle, so that the question asked again reads nothing. A
 rollup whose objects would all answer is read in their place, the highest rank first, or bucket by

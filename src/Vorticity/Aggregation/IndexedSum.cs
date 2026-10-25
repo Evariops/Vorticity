@@ -363,6 +363,45 @@ internal struct IndexedSum : IFloatSumState<IndexedSum>
     /// <summary>Takes back <paramref name="count"/> values counted that were not values: the zeros standing for rows left out.</summary>
     internal void Uncount(long count) => Meta -= count;
 
+    /// <summary>
+    /// Takes out <paramref name="taken"/>, the sum of some of this sum's values: its bins lined up under this top and
+    /// subtracted, which leaves the other values' parts as their own sum holds them when a value that calls for this top
+    /// stays, which every value taken out calling for a lower one proves, or the caller. False, nothing changed, when that
+    /// is not proven, or an infinity was taken out, or more values than this sum holds.
+    /// </summary>
+    /// <param name="taken">The sum of the values taken out.</param>
+    /// <param name="topStays">
+    /// Whether the caller knows a value of the largest magnitude stays: the least and the greatest of the sum's values
+    /// both remain, as <see cref="WideIndexedSum.TryRemove"/> takes it.
+    /// </param>
+    internal bool TryTakeOut(in IndexedSum taken, bool topStays = false)
+    {
+        int top = Top;
+        int theirs = taken.Top;
+        if (taken.Count == 0)
+        {
+            return true;
+        }
+
+        if ((taken.Meta & (PositiveInfinity | NegativeInfinity)) != 0 || taken.Count > Count || top == 0 || top >= SplitScaledTop
+            || theirs > top || (theirs == top && !topStays))
+        {
+            return false;
+        }
+
+        if (theirs != 0)
+        {
+            IndexedSum lined = taken;
+            lined.Shift(top);
+            M0 -= lined.M0;
+            M1 -= lined.M1;
+            M2 -= lined.M2;
+        }
+
+        Meta -= taken.Count;
+        return true;
+    }
+
     /// <summary>Folds another sum: the higher top for both, the bins added.</summary>
     public void Merge(in IndexedSum other)
     {

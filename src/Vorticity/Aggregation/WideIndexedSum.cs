@@ -120,6 +120,12 @@ internal struct WideIndexedSum : IFloatSumState<WideIndexedSum>
         return true;
     }
 
+    /// <summary>
+    /// Takes out <paramref name="taken"/>, the sum of some of this sum's values, as <see cref="IndexedSum.TryTakeOut"/> does,
+    /// for two sums neither of which settled an epoch: false, nothing changed, otherwise.
+    /// </summary>
+    internal bool TryTakeOut(in WideIndexedSum taken, bool topStays = false) => High == 0 && taken.High == 0 && Sum.TryTakeOut(in taken.Sum, topStays);
+
     public void Merge(in WideIndexedSum other)
     {
         if (Count + other.Count > Capacity)

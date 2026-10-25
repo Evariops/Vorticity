@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Vorticity;
 using Vorticity.File;
 using Vorticity.IO;
+using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
 
@@ -418,6 +419,50 @@ internal static class DatasetVerifier
             await CheckFileAsync(entry, fragments).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Checks the counts of an entry's deleted rows (<see cref="DeletedCounts"/>) against the rows its vector names, read
+        /// from the file and counted again: a question subtracts them from the object's own counts, and counts of other
+        /// rows would answer it wrongly where its rows answer it rightly.
+        /// </summary>
+        private async ValueTask CheckNegativesAsync(ObjectEntry entry, VortexFile file)
+        {
+            _commits.Add(entry.NegativesAt.Version);
+            DeletedCounts stored;
+            DeletionVector deletions;
+            try
+            {
+                stored = (await entry.NegativesAsync(_pages, cancellationToken).ConfigureAwait(false))!;
+                deletions = entry.Deletions;
+            }
+            catch (CommitFormatException malformed)
+            {
+                Problems.Add($"'{entry.Key}': its counts of deleted rows are not counts of them: {malformed.Message}");
+                return;
+            }
+            catch (InvalidOperationException)
+            {
+                // The vector did not resolve, which is reported already.
+                return;
+            }
+            catch (Exception unreadable) when (unreadable is TornCommitException or ObjectNotFoundException or ArgumentOutOfRangeException)
+            {
+                Problems.Add(Invariant($"'{entry.Key}': its counts of deleted rows in version {entry.NegativesAt.Version} at {entry.NegativesAt.Offset}+{entry.NegativesAt.Length}: {(unreadable is TornCommitException { InnerException: { } cause } ? cause : unreadable).Message}"));
+                return;
+            }
+
+            DeletedCounts.Builder counted = new DeletedCounts.Builder(file.DType, stored.Columns);
+            await foreach (RecordBatch batch in file.ScanBuilder().WithCompaction(false).WithEncodings(false).Take(deletions.Rows()).ExecuteAsync()
+                .WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                counted.Add(batch);
+            }
+
+            if (stored.Differs(counted.Finish()) is { } difference)
+            {
+                Problems.Add($"'{entry.Key}': its counts of deleted rows are not those of the rows it deletes: {difference}");
+            }
+        }
+
         private async ValueTask CheckFileAsync(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments)
         {
             VortexOpenOptions options = ObjectCache.OpenOptionsOf(entry, fragments);
@@ -476,6 +521,11 @@ internal static class DatasetVerifier
                         catch (Exception unreadable) when (unreadable is TornCommitException or ObjectNotFoundException or ArgumentOutOfRangeException)
                         {
                             Problems.Add(Invariant($"'{entry.Key}': its vector in version {entry.VectorAt.Version} at {entry.VectorAt.Offset}+{entry.VectorAt.Length}: {(unreadable is TornCommitException { InnerException: { } cause } ? cause : unreadable).Message}"));
+                        }
+
+                        if (entry.HasNegatives)
+                        {
+                            await CheckNegativesAsync(entry, file).ConfigureAwait(false);
                         }
                     }
 

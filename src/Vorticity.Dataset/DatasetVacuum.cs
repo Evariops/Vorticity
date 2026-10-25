@@ -296,6 +296,16 @@ internal static class DatasetVacuum
                             live[vector.Version] = live.GetValueOrDefault(vector.Version) + vector.Length;
                         }
                     }
+
+                    // So do the counts of its deleted rows.
+                    if (entry.NegativesAt is { Exists: true } negatives)
+                    {
+                        markedCommits.Add(negatives.Version);
+                        if (fragmentsSeen.Add(negatives))
+                        {
+                            live[negatives.Version] = live.GetValueOrDefault(negatives.Version) + negatives.Length;
+                        }
+                    }
                 }
 
                 return;

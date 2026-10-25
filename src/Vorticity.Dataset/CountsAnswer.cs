@@ -23,7 +23,8 @@ namespace Vorticity.Dataset;
 /// count the column's distinct values; its filter asks the column for values by equality or a set. Worked out once a
 /// question, with the columns of its batches of states; object by object, it names the column whose counts answer
 /// (<see cref="FieldOf(in PositionedObject)"/>): an object whose summaries prove the filter's other conjuncts true over its every row and the
-/// other keys constant, with no row a delete marked, which its counts still hold. Any other object is read as rows. The
+/// other keys constant, with no row a delete marked, which its counts still hold, or with the marked rows counted by the
+/// delete under a question that subtracts them (<see cref="Subtracts"/>). Any other object is read as rows. The
 /// summaries bound the key's first column by the object's keys where its file does not, a text's; and values of that
 /// column, under a question keyed by another, are proven so rather than counted, each object holding the values asked
 /// alone when the application clusters by them.
@@ -75,6 +76,19 @@ internal sealed class CountsAnswer
 
         AsksSketches = sketches > 0;
 
+        // A count, a sum, a mean or an exact distinct count reads what the counts of the rows deletes took subtract;
+        // extremes, sketches and the registers of approximate distinct counts are of every row.
+        Subtracts = !AsksSketches;
+        foreach (AggregateKind kind in request.Kinds)
+        {
+            Subtracts &= kind is AggregateKind.Count or AggregateKind.Sum or AggregateKind.Average or AggregateKind.CountDistinct;
+        }
+
+        for (int key = request.Grouped; key < request.Keys.Count; key++)
+        {
+            Subtracts &= request.DistinctColumn(key) is null;
+        }
+
         // A key's column a node, its validity's and its extension's at most; a word a node; a sketch's two; the struct.
         Nodes = (3 * KeyFields.Length) + (Type.FieldCount - KeyFields.Length - sketches) + (2 * sketches) + 1;
     }
@@ -90,6 +104,12 @@ internal sealed class CountsAnswer
 
     /// <summary>Whether the request asks a quantile or a distribution, which the counts' sketches answer: they are read beside them.</summary>
     internal bool AsksSketches { get; }
+
+    /// <summary>
+    /// Whether the counts of an object a delete marked answer, less those of its deleted rows (<see cref="DeletedCounts"/>):
+    /// the request reads counts, sums, means and exact distinct counts alone.
+    /// </summary>
+    internal bool Subtracts { get; }
 
     /// <summary>The top-level column of each key's column of the batches, each once, in their order.</summary>
     internal int[] KeyFields { get; }
@@ -229,13 +249,14 @@ internal sealed class CountsAnswer
     /// <summary>
     /// The column whose counts answer for the object <paramref name="held"/>: the column asked, or for a question of no
     /// column the one whose counts' region is least; null when its rows are read: rows a delete marked, which its counts
-    /// still hold, a conjunct or a key its summaries do not prove true over every row or constant, no counts of the
-    /// column, or columns of an earlier schema, which its counts name by their places.
+    /// still hold, unless the delete counted them and the question subtracts them; a conjunct or a key its summaries do
+    /// not prove true over every row or constant; no counts of the column; or columns of an earlier schema, which its
+    /// counts name by their places.
     /// </summary>
     internal int? FieldOf(in PositionedObject held)
     {
         ObjectEntry entry = held.Entry;
-        if (entry.HasDeletions || entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry))
+        if ((entry.HasDeletions && !(entry.HasNegatives && Subtracts)) || entry.Contents is not { Counts.Count: > 0 } contents || !_schema.Holds(entry))
         {
             return null;
         }

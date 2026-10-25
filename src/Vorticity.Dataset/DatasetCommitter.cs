@@ -791,7 +791,7 @@ internal static class DatasetCommitter
                 case DatasetOperation.ReplaceObjects replace:
                     foreach ((int _, ReadOnlyMemory<byte> _, ObjectEntry entry) in replace.Outputs)
                     {
-                        if (entry.HasFields)
+                        if (entry.HasFields || entry.HasNegatives)
                         {
                             features |= DatasetFeatures.EntryFields;
                             break;
@@ -1076,6 +1076,14 @@ internal static class DatasetCommitter
                             {
                                 await entry.ResolveAsync(pages, cancellationToken).ConfigureAwait(false);
                                 entry = entry.WithVectorAt(builder.AddFragment(entry.EncodedDeletions.Span));
+                                repack.Moved++;
+                            }
+
+                            // So do the counts of its deleted rows.
+                            if (entry.NegativesAt.Exists && repack.Versions.Contains(entry.NegativesAt.Version))
+                            {
+                                await entry.ResolveNegativesAsync(pages, cancellationToken).ConfigureAwait(false);
+                                entry = entry.WithNegativesAt(builder.AddFragment(entry.EncodedNegatives.Span));
                                 repack.Moved++;
                             }
 
@@ -1369,6 +1377,14 @@ internal static class DatasetCommitter
                 ReadOnlyMemory<byte> vector = entry.EncodedDeletions;
                 entry = entry.WithVectorAt(builder.AddFragment(vector.Span));
                 pages.Keep(entry.VectorAt, vector);
+            }
+
+            // The counts of the rows a delete took go there always, as a fragment does, and are kept as the vector is.
+            if (entry.NegativesPending)
+            {
+                ReadOnlyMemory<byte> negatives = entry.EncodedNegatives;
+                entry = entry.WithNegativesAt(builder.AddFragment(negatives.Span));
+                pages.Keep(entry.NegativesAt, negatives);
             }
 
             byte[] stored = Stored(level, key.Span);

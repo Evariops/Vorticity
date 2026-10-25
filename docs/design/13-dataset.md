@@ -890,6 +890,40 @@ step:
 | rows in key order, a key cursor | the key source steps over the marked rows' entries as it walks, and a rank subtracts the entries marked below it. That is arithmetic when the ranks are rows (a sorted column's, or the clustering run of a level above 0), and otherwise uses the marked rows' keys, read by one take when the cursor opens |
 | a minimum, a maximum | on a column the object's statistics say is sorted and that holds no null, its first or last live row: the statistic while that row is the column's end, and one row read once a delete took it. Otherwise the object's extreme when a count finds a live row holding it, and its live rows read when none does |
 | the summaries | an entry with marks keeps its bounds, which its live rows still lie inside, and drops what they no longer prove: exactness, a null count other than zero, a column left with no bound. They prune, but no longer answer |
+| counts, sums, means, distinct values | the object's counts less those of its marked rows, below |
+
+### What a question of counts does with marks
+
+A delete that marks rows in an object whose counts answer for the version's columns counts those rows
+too (`DeletedCounts`): for each column the object counts, an entry for each value of the rows it took,
+with their rows and, for each measure the object's counts carry, the count of values and the exact sum,
+in the counts' own format ([10-indexes.md](10-indexes.md)). The pass that finds the rows' positions
+reads the counted columns and their measures for it, and the object's counts are read from its table of
+contents for their measures. A delete after another adds its rows to the earlier ones', entry by entry.
+The counts always lie out of line, written into the commit object that made them as a vector past 256
+bytes is, and the entry names them by reference, field 5 of format 4, 36 bytes. Vacuum keeps the commit
+object they lie in, a repack moves them, and verify reads them and counts the rows the vector names
+again from the object, which must give the same values, rows and sums. An update counts the rows it
+takes as a delete does. An object marked before its marks were counted, or whose counts changed columns
+or measures between two deletes, keeps none, and is read as rows.
+
+A question of counts, sums, means or exact distinct values then answers a marked object from its counts
+less those of its marked rows: each entry's rows and measures less the marked rows' of the same value,
+or of the values the object's counts leave out when they leave that value out; an entry left with no
+row goes, and its value with it. An integer sum subtracts exactly. A float sum is an indexed sum, exact
+under its top bin: it subtracts exactly when a value that calls for that bin stays, which the least and
+the greatest of the value's rows lying past the marked rows' own prove (`WideIndexedSum.TryTakeOut`);
+otherwise the object is read as rows. Extremes do not subtract, nor sketches, nor the registers of
+approximate distinct counts: a question asking one of them reads the object's rows, as does a question
+whose marked rows' counts leave values out.
+
+What it costs follows from the counts' format. The marked rows' counts take, for each counted column,
+an entry for each distinct value of the rows taken: a few hundred bytes for an erasure of a handful of
+rows of an object, against the object's columns for its rows. A question reads them in the commit
+object's open read when they lie in the latest commits, and one ranged read of the commit object
+otherwise, a request beside the counts'. `DatasetNegativesTests` holds measures by service over two
+marked objects of 80 000 rows to 332 bytes, where their rows take 540 KB, and every question to its
+rows' answer.
 
 ### Compaction folds the marks
 

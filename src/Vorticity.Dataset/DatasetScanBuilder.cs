@@ -699,6 +699,8 @@ internal sealed class DatasetScanBuilder
                     reads[ahead] ??= objects[ahead].Field is not { } next ? NoCounts
                         : ahead < rolled?.Count
                             ? _dataset.ReadRollupCountsAsync(rolled[ahead].Rollup, next, answer.AsksSketches, answer.Values, rolled[ahead].Buckets is not null, stopped.Token).AsTask()
+                        : objects[ahead].Held.Entry.HasDeletions
+                            ? LiveCountsAsync(objects[ahead].Held.Entry, next, stopped.Token)
                         : _dataset.ReadCountsAsync(objects[ahead].Held.Entry, next, answer.AsksSketches, stopped.Token).AsTask();
                     if (objects[ahead].Field is null && ahead >= (rolled?.Count ?? 0) && (blockReads is null || !blockReads.ContainsKey(objects[ahead].Held.Entry.Uid))
                         && BlocksAnswer(objects[ahead].Held))
@@ -925,6 +927,18 @@ internal sealed class DatasetScanBuilder
         }
 
         return spread;
+    }
+
+    /// <summary>
+    /// The counts of column <paramref name="field"/> of an object a delete marked, less those of its deleted rows
+    /// (<see cref="DeletedCounts.Less"/>), read beside them from the commit object they lie in; none, and the object read as
+    /// rows, when they do not give the live rows' counts exactly.
+    /// </summary>
+    private async Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)> LiveCountsAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
+    {
+        ValueTask<DeletedCounts?> negatives = entry.NegativesAsync(_version.Pages, cancellationToken);
+        (Indexes.ColumnCounts? counts, _) = await _dataset.ReadCountsAsync(entry, field, sketches: false, cancellationToken).ConfigureAwait(false);
+        return (await negatives.ConfigureAwait(false))?.CountsOf(field) is { } taken && counts is not null ? (DeletedCounts.Less(counts, taken), null) : (null, null);
     }
 
     /// <summary>The read of an object's counts <see cref="StatesAsync"/> does not begin, or has taken: none.</summary>
@@ -1720,14 +1734,19 @@ internal sealed class DatasetScanBuilder
 
             if (answer is not null && AnsweredBy(answer, held) is int field)
             {
+                // An object a delete marked reads the counts of its deleted rows too, from the commit object they lie in.
                 Indexes.ObjectContents contents = held.Entry.Contents!;
                 Indexes.IndexSegment? sketched = answer.AsksSketches ? contents.SketchesOf(field) : null;
                 string column = _version.Schema.Columns[field].Name;
+                int less = held.Entry.HasDeletions ? 1 : 0;
                 states.Add(new StatesStep(
-                    held.Entry.Key, "states", sketched is null ? $"the counts of {column}" : $"the counts of {column} and their sketches", sketched is null ? 1 : 2));
+                    held.Entry.Key,
+                    "states",
+                    (sketched is null ? $"the counts of {column}" : $"the counts of {column} and their sketches") + (less > 0 ? ", less those of its deleted rows" : string.Empty),
+                    (sketched is null ? 1 : 2) + less));
                 keptRows += covered;
-                segments += sketched is null ? 1 : 2;
-                bytes += contents.CountsOf(field)!.Value.Length + (sketched?.Length ?? 0);
+                segments += (sketched is null ? 1 : 2) + less;
+                bytes += contents.CountsOf(field)!.Value.Length + (sketched?.Length ?? 0) + (less > 0 ? held.Entry.NegativesAt.Length : 0);
                 mayMatch = true;
                 continue;
             }

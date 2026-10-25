@@ -2537,6 +2537,41 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The counts of every column the object <paramref name="entry"/> names keeps them of, by the column's place, read as
+    /// <see cref="ReadCountsAsync"/> reads one's, side by side in one round trip; null when it keeps none, or one of them
+    /// does not read.
+    /// </summary>
+    internal async ValueTask<IReadOnlyList<(int Field, Indexes.ColumnCounts Counts)>?> ReadEveryCountsAsync(
+        ObjectEntry entry, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { Counts.Count: > 0 } contents)
+        {
+            return null;
+        }
+
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[contents.Counts.Count];
+        for (int i = 0; i < regions.Length; i++)
+        {
+            regions[i] = contents.Counts[i].Region;
+        }
+
+        object?[] read = new object?[regions.Length];
+        await ReadSynopsesAsync(entry, contents, regions, read, static (_, bytes) => CountsOrSketches(0, bytes), cancellationToken).ConfigureAwait(false);
+        (int Field, Indexes.ColumnCounts Counts)[] counted = new (int Field, Indexes.ColumnCounts Counts)[regions.Length];
+        for (int i = 0; i < regions.Length; i++)
+        {
+            if (read[i] is not Indexes.ColumnCounts counts)
+            {
+                return null;
+            }
+
+            counted[i] = (contents.Counts[i].Field, counts);
+        }
+
+        return counted;
+    }
+
+    /// <summary>
     /// The blocks of the object <paramref name="entry"/> names (<see cref="Indexes.BlockTable"/>), on its key's first
     /// column <paramref name="field"/>, read with no open of the object: the region its entry's table of contents names, none
     /// once this handle read it. An object that keeps none, or whose table of contents this library does not read, has none.

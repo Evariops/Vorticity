@@ -12,6 +12,7 @@ using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.IO;
+using Vorticity.Indexes;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 
@@ -298,13 +299,19 @@ internal static class DatasetRowChanges
                 // Marked at once when the rows fit the vector's bound even as a run each; otherwise
                 // their positions are found first, since rows a range takes lie in a few runs, and
                 // only then handed to the sink, which a rewrite would hand them to instead.
+                // The rows marked are counted too, by the columns the object counts, for an object whose counts answer for
+                // the version's columns and whose rows deleted before are counted already: a question subtracts them.
                 bool fits = FitsAtWorst(dataset.Options, held.Entry, matched);
-                DeletionVector deletions = await MarkAsync(file, held, columns, filter, fits ? changed : null, cancellationToken).ConfigureAwait(false);
+                IReadOnlyList<(int Field, ColumnCounts Counts)>? counted = columns is null && (!held.Entry.HasDeletions || held.Entry.HasNegatives)
+                    ? await dataset.ReadEveryCountsAsync(held.Entry, cancellationToken).ConfigureAwait(false)
+                    : null;
+                (DeletionVector deletions, DeletedCounts? negatives) = await MarkAsync(
+                    file, held, columns, filter, fits ? changed : null, fits || changed is null ? counted : null, cancellationToken).ConfigureAwait(false);
                 if (fits || deletions.EncodedBytes <= dataset.Options.MarkedVectorBytesOf(held.Entry.Bytes))
                 {
                     if (!fits && changed is not null)
                     {
-                        deletions = await MarkAsync(file, held, columns, filter, changed, cancellationToken).ConfigureAwait(false);
+                        (deletions, negatives) = await MarkAsync(file, held, columns, filter, changed, counted, cancellationToken).ConfigureAwait(false);
                     }
 
                     if (deletions.Count - held.Entry.Deletions.Count != matched)
@@ -317,6 +324,18 @@ internal static class DatasetRowChanges
                     // Under an erasure delay the entry says when its oldest mark was made, which the
                     // planner purges it by.
                     ObjectEntry marked = held.Entry.WithDeletions(deletions);
+                    if (negatives is not null && held.Entry.HasNegatives)
+                    {
+                        negatives = await held.Entry.NegativesAsync(version.Pages, cancellationToken).ConfigureAwait(false) is { } earlier
+                            ? DeletedCounts.Merge(earlier, negatives)
+                            : null;
+                    }
+
+                    if (negatives is not null)
+                    {
+                        marked = marked.WithNegatives(negatives);
+                    }
+
                     return new Change(
                         matched,
                         null,
@@ -402,16 +421,26 @@ internal static class DatasetRowChanges
     /// a time, and are added as the runs they form, which carry on from one batch to the next: the
     /// cost is the batches' words and the runs, not the rows.
     /// </remarks>
-    private static async ValueTask<DeletionVector> MarkAsync(
-        VortexFile file, PositionedObject held, ObjectColumns? columns, VortexExpr? filter, ChangedRows? changed, CancellationToken cancellationToken)
+    private static async ValueTask<(DeletionVector Deletions, DeletedCounts? Negatives)> MarkAsync(
+        VortexFile file,
+        PositionedObject held,
+        ObjectColumns? columns,
+        VortexExpr? filter,
+        ChangedRows? changed,
+        IReadOnlyList<(int Field, ColumnCounts Counts)>? counted,
+        CancellationToken cancellationToken)
     {
         DeletionVector deletions = held.Entry.Deletions;
         List<long> starts = [];
         List<long> ends = [];
         ulong[] live = [];
+
+        // Read whole for a sink, else the columns the counts of the rows marked count by and sum.
+        int[]? read = changed is null && counted is not null ? DeletedCounts.Builder.ColumnsRead(counted) : null;
+        DeletedCounts.Builder? negatives = counted is null ? null : new DeletedCounts.Builder(file.DType, counted, read);
         try
         {
-            await foreach (RecordBatch batch in MatchingAsync(file, columns, filter, whole: changed is not null, cancellationToken)
+            await foreach (RecordBatch batch in MatchingAsync(file, columns, filter, whole: changed is not null, read, cancellationToken)
                 .WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 int count = batch.RowCount;
@@ -443,6 +472,7 @@ internal static class DatasetRowChanges
                 }
 
                 Runs(taken, count, batch.StartRow, starts, ends);
+                negatives?.Add(batch, taken);
                 if (changed is not null)
                 {
                     VortexBuffer buffer = batch.Arena.AllocateUninitialized(words * sizeof(ulong), 64, out Span<byte> raw);
@@ -457,7 +487,7 @@ internal static class DatasetRowChanges
             Pooled.Return(live);
         }
 
-        return deletions.WithRuns(CollectionsMarshal.AsSpan(starts), CollectionsMarshal.AsSpan(ends));
+        return (deletions.WithRuns(CollectionsMarshal.AsSpan(starts), CollectionsMarshal.AsSpan(ends)), negatives?.Finish());
     }
 
     /// <summary>
@@ -510,10 +540,11 @@ internal static class DatasetRowChanges
     /// An object's rows under the filter, at their positions: its own scan without compaction, each
     /// batch selecting what the filter keeps, reshaped when it was written under another schema.
     /// With <paramref name="whole"/> every column is read, for a sink that writes the rows again;
-    /// otherwise only what the filter needs.
+    /// otherwise only what the filter needs, and of an object of the version's columns those
+    /// <paramref name="fields"/> names.
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> MatchingAsync(
-        VortexFile file, ObjectColumns? columns, VortexExpr? filter, bool whole, CancellationToken cancellationToken)
+        VortexFile file, ObjectColumns? columns, VortexExpr? filter, bool whole, int[]? fields, CancellationToken cancellationToken)
     {
         if (columns is null)
         {
@@ -525,7 +556,7 @@ internal static class DatasetRowChanges
 
             if (!whole && file.DType.Kind == Types.DTypeKind.Struct && file.DType.FieldCount > 0)
             {
-                scan.ProjectFields([0]);
+                scan.ProjectFields(fields ?? [0]);
             }
 
             return scan.ExecuteAsync();

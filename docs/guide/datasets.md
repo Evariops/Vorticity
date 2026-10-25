@@ -456,7 +456,10 @@ for a caller without a record type.
 A delete usually marks rows instead of rewriting objects. Each object's entry in the dataset records
 the positions of its deleted rows and every read steps over them, so deleting ten rows from a 4 MiB
 object writes a few kilobytes of metadata and no data. Counts stay exact, and a scan of a marked
-object reads the same bytes it would read from a rewritten one. A walk in key order pays a little
+object reads the same bytes it would read from a rewritten one. The delete also counts the rows it
+marks by the columns the object keeps counts of, so that a question of counts, sums, means or
+distinct values still answers the object from its counts, less the marked rows'; a question of
+minimums, maximums or quantiles reads its rows. A walk in key order pays a little
 for the marks: a cursor over a level 0 object reads the keys of its deleted rows once to rank around
 them, and a step that lands in a run of them skips past it.
 
