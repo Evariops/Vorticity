@@ -284,7 +284,11 @@ A dataset answers so the objects its counts do not (`BlockAnswer`): a block whos
 filter true over its rows and whose keys each hold one group gives its rows and its measures' states; a
 block where one column of the question varies, under a question of counts alone, gives the rows of each
 of its values, the filter judged value by value on the summary each value makes; any other block is
-read as rows, each run of them a part of the scan. A key that is a function of a column, a truncation,
+read as rows, each run of them a part of the scan. Between two such runs, the blocks answered are read as
+rows too when their rows of the question's columns cost less than a part more, a request and the chunks
+the two parts would share and both read: a window whose edges cut most of a service's rows' blocks reads
+what its rows take, the statistics aside, where the parts apart read a fifth more *(measured,
+`DatasetBlockAnswerTests`, 3.45 MB against 4.1 MB)*. A key that is a function of a column, a truncation,
 holds one group over a block whose extremes it sends to one: an instant, an integer under an extension,
 keeps its extremes over each block for it. Before it reads an object's statistics, the dataset counts
 the columns of the question that may vary in its blocks, those of the keys and of a filter the object's
@@ -307,8 +311,7 @@ a block value of the hour makes each block a run of one emitter's hour, some 14 
 4.9 × 10⁵ blocks a day where they were 3.5 × 10⁵, and 180 MB of statistics a day where they were
 129 *(computed)*.
 
-A block no delete touches settles as a file's does; a block a delete touches is decoded, or settled
-from the negative statistics the delete wrote (section 6). For the reference table clustered by
+A block no delete touches settles as a file's does; a block a delete touches is read as rows (section 6). For the reference table clustered by
 emitter: 3.5 × 10⁵ blocks a day, about 370 bytes each on the design's requests, where this design first
 reckoned 200: a service's block lists its endpoints and hosts, 129 and 83 bytes, and the instant keeps
 its extremes, 32. That is 129 MB a day kept in each object, 51 GB in 13 months *(369 bytes a block
@@ -378,9 +381,13 @@ object), which a later question with the same filter reads alone.
   subtracts their contribution. A distinct count is corrected by the counts of the counted column, a
   value leaving a group only when its last row there is excluded.
 - Late rows add their own entries, which merges add up.
-- A window edge that cuts a block or a bucket is exact by default: that block's rows are read. With
-  `ScanOptions.AlignWindow` the edge moves out to the bounds, on the key's first column, of the objects
-  it falls in, and the scan reports the window applied.
+- A window edge that cuts a block or a bucket is exact by default: that block's rows are read, and the
+  blocks the window holds whole are answered by their statistics. Windows drawn to the second over keys
+  and measures drawn too give the rows' answer, whether the blocks end at a declared value or not
+  (`DatasetBlockAnswerTests`). With `ScanOptions.AlignWindow` the edge moves out to the bounds, on the
+  key's first column, of the objects it falls in, and the scan reports the window applied. An edge on a
+  later column of the key does not move: each value of the first column has blocks of its own bounds on
+  it, so that no one window would be the one applied.
 
 ## 7. Estimates, then the exact answer
 

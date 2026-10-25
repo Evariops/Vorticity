@@ -368,22 +368,32 @@ internal sealed class BlockAnswer
             described[i] = new BlockColumn(_schema.Columns[Fields[i]].Name, _schema.DType.GetField(Fields[i]), columns[i].Where, columns[i].Blocks);
         }
 
+        // Which blocks their statistics answer, then those answered between two read as rows that cost less read as rows
+        // too than a part of the scan more, which would read again the chunks the two parts share.
         BlockStateRows states = new BlockStateRows(this);
+        List<ColumnSummary> judged = [];
+        bool[] answers = new bool[any.Count];
+        for (int b = 0; b < any.Count; b++)
+        {
+            long first = any.FirstRow(b);
+            answers[b] = deletions.DeletedIn(first, first + any.Rows[b]) == 0 && SettleBlock(b, any.Rows[b], described, summaries, judged, states);
+            states.Truncate(0);
+        }
+
+        Bridge(held.Entry, any, answers);
         List<RowRange> unsettled = [];
         int settled = 0;
-        List<ColumnSummary> judged = [];
         for (int b = 0; b < any.Count; b++)
         {
             long first = any.FirstRow(b);
             long rows = any.Rows[b];
-            int before = states.Count;
-            if (deletions.DeletedIn(first, first + rows) == 0 && SettleBlock(b, rows, described, summaries, judged, states))
+            if (answers[b])
             {
+                SettleBlock(b, rows, described, summaries, judged, states);
                 settled++;
                 continue;
             }
 
-            states.Truncate(before);
             if (unsettled.Count > 0 && unsettled[^1].End == first)
             {
                 unsettled[^1] = new RowRange(unsettled[^1].Start, first + rows);
@@ -395,6 +405,41 @@ internal sealed class BlockAnswer
         }
 
         return (states.Count > 0 ? states : null, unsettled, settled);
+    }
+
+    /// <summary>
+    /// Reads as rows each run of blocks <paramref name="answers"/> answers between two it does not, when reading its rows of
+    /// the question's columns costs less than a part of the scan more (<see cref="PathCosts.Bridges"/>).
+    /// </summary>
+    private void Bridge(ObjectEntry entry, ColumnBlocks blocks, bool[] answers)
+    {
+        int b = 0;
+        while (b < answers.Length && answers[b])
+        {
+            b++;
+        }
+
+        while (b < answers.Length)
+        {
+            // From an unanswered block, the run of answered ones after it, and whether an unanswered one ends it.
+            while (b < answers.Length && !answers[b])
+            {
+                b++;
+            }
+
+            int start = b;
+            long rows = 0;
+            while (b < answers.Length && answers[b])
+            {
+                rows += blocks.Rows[b];
+                b++;
+            }
+
+            if (b < answers.Length && PathCosts.Bridges(entry, Fields, rows))
+            {
+                Array.Fill(answers, false, start, b - start);
+            }
+        }
     }
 
     /// <summary>

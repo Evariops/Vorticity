@@ -58,6 +58,35 @@ internal static class PathCosts
         return new Cost(requests, bytes);
     }
 
+    /// <summary>
+    /// Whether reading <paramref name="rows"/> rows of <paramref name="fields"/> of the object <paramref name="entry"/> names,
+    /// between two ranges a scan reads, costs less than reading the two ranges apart: a request more, and each column's
+    /// chunk the gap ends inside, which both ranges would read. A column's chunks are its bytes over its chunks, each over an
+    /// even share of the rows; with no contents, never.
+    /// </summary>
+    internal static bool Bridges(ObjectEntry entry, ReadOnlySpan<int> fields, long rows)
+    {
+        IReadOnlyList<long>? columns = entry.Contents?.ColumnBytes;
+        long objectRows = entry.PhysicalRows;
+        if (columns is not { Count: > 0 } || objectRows <= 0)
+        {
+            return false;
+        }
+
+        IReadOnlyList<long>? chunks = entry.Contents?.ColumnChunks;
+        long read = 0;
+        long apart = RequestBytes;
+        foreach (int field in fields)
+        {
+            long column = field < columns.Count ? columns[field] : 0;
+            long count = Math.Max(1, chunks is { } known && field < known.Count ? known[field] : (column + ChunkBytes - 1) / ChunkBytes);
+            read += (long)((double)column * rows / objectRows);
+            apart += rows < objectRows / count ? column / count : 0;
+        }
+
+        return read <= apart;
+    }
+
     /// <summary>Reading <paramref name="regions"/> of an object with no open of it: their bytes, those within a gap of each other in one request.</summary>
     internal static Cost Regions(IEnumerable<IndexSegment?> regions)
     {
