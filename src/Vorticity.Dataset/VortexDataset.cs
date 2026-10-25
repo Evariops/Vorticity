@@ -2765,6 +2765,15 @@ public sealed class VortexDataset : IAsyncDisposable
     private ValueTask ReadSynopsesAsync(
         ObjectEntry entry, Indexes.ObjectContents contents, Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader,
         CancellationToken cancellationToken) =>
+        Recalled(entry.Uid, regions, synopses) == 0 ? default : ReadUnheldAsync(entry, contents, regions, synopses, reader, cancellationToken);
+
+    /// <summary>
+    /// <see cref="ReadSynopsesAsync"/>'s regions its memo does not hold, apart so that a call that reads none builds no
+    /// opener: a closure over its parameters would be built as the call starts.
+    /// </summary>
+    private ValueTask ReadUnheldAsync(
+        ObjectEntry entry, Indexes.ObjectContents contents, Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader,
+        CancellationToken cancellationToken) =>
         ReadRegionsAsync(
             entry.Uid, ct => OpenFooterlessAsync(entry, contents, ct), source => Footerless(source, entry, contents), regions, synopses, reader, cancellationToken);
 
@@ -2783,26 +2792,31 @@ public sealed class VortexDataset : IAsyncDisposable
 
         object?[] read = new object?[2];
         Indexes.IndexSegment?[] regions = [column.Counts, sketches ? column.Sketches : null];
-        await ReadRegionsAsync(
+        if (Recalled(rollup.Uid, regions, read) > 0)
+        {
+            await ReadRollupRegionsAsync(rollup, regions, read, cancellationToken).ConfigureAwait(false);
+        }
+
+        return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
+    }
+
+    /// <summary>The regions of the rollup <paramref name="rollup"/> its memo does not hold, apart as <see cref="ReadUnheldAsync"/> is.</summary>
+    private ValueTask ReadRollupRegionsAsync(RollupEntry rollup, Indexes.IndexSegment?[] regions, object?[] read, CancellationToken cancellationToken) =>
+        ReadRegionsAsync(
             rollup.Uid,
             ct => SealedObjectStore.OpenDataAsync(_store, rollup.Key, rollup.Uid, rollup.Bytes, ct, null),
             source => SessionReader.Wrap(source, Session),
             regions,
             read,
             CountsOrSketches,
-            cancellationToken).ConfigureAwait(false);
-        return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
-    }
+            cancellationToken);
 
     /// <summary>
-    /// Reads into <paramref name="synopses"/>, by their position, the regions <paramref name="regions"/> of the object of
-    /// <paramref name="uid"/>, each as <paramref name="reader"/> reads its bytes: those this handle read before from its memo,
-    /// the others side by side in one round trip through the reader <paramref name="open"/> gives and
-    /// <paramref name="wrap"/> wraps, and kept. A region null, or whose bytes fail their checksum, reads none.
+    /// Takes into <paramref name="synopses"/>, by their position, the regions <paramref name="regions"/> of the object of
+    /// <paramref name="uid"/> this handle read before, from its memo, and leaves them null among the regions: the number of
+    /// regions left to read.
     /// </summary>
-    private async ValueTask ReadRegionsAsync(
-        UInt128 uid, Func<CancellationToken, ValueTask<ISegmentReader>> open, Func<ISegmentReader, ISegmentReader> wrap,
-        Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader, CancellationToken cancellationToken)
+    private int Recalled(UInt128 uid, Indexes.IndexSegment?[] regions, object?[] synopses)
     {
         int asked = 0;
         for (int i = 0; i < regions.Length; i++)
@@ -2816,9 +2830,23 @@ public sealed class VortexDataset : IAsyncDisposable
             asked += regions[i] is null ? 0 : 1;
         }
 
-        if (asked == 0)
+        return asked;
+    }
+
+    /// <summary>
+    /// Reads into <paramref name="synopses"/>, by their position, the regions <paramref name="regions"/> of the object of
+    /// <paramref name="uid"/> not null, those its memo does not hold (<see cref="Recalled"/>), each as
+    /// <paramref name="reader"/> reads its bytes: side by side in one round trip through the reader <paramref name="open"/>
+    /// gives and <paramref name="wrap"/> wraps, and kept. A region whose bytes fail their checksum reads none.
+    /// </summary>
+    private async ValueTask ReadRegionsAsync(
+        UInt128 uid, Func<CancellationToken, ValueTask<ISegmentReader>> open, Func<ISegmentReader, ISegmentReader> wrap,
+        Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader, CancellationToken cancellationToken)
+    {
+        int asked = 0;
+        foreach (Indexes.IndexSegment? region in regions)
         {
-            return;
+            asked += region is null ? 0 : 1;
         }
 
         ISegmentReader source = await open(cancellationToken).ConfigureAwait(false);
