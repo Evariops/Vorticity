@@ -407,6 +407,17 @@ On the local disk, shared between processes: the data pages; the synopses; the p
 filter evaluated on rows, the pages that held at least one row it kept (at most 66 KB for a day's
 object), which a later question with the same filter reads alone.
 
+The filter's pages are built (`PredicatePages`): a scan whose batches stay whole, an aggregation's,
+notes of each object it covers whole and reads by its own scan the batches where the filter kept a row,
+as ranges of the object's rows, under the object's identity, the filter's canonical text and the
+version's columns; the handle keeps them, and the session's synopsis cache, their bytes checked by their
+hash. Pages that hold more than half the object's rows, or more than 4 096 ranges (64 KB), are not kept:
+they would spare little. The filter asked again reads each range alone. On 100 000 events, bodies of
+300 bytes in chunks of 512 rows, thirty rows of a rare code asked as a range, which no sheet estimates
+and no index answers: 23.2 MB the first time, 5.3 MB after, 5.4 MB from a handle opened later on the
+same cache *(measured, `DatasetPredicatePagesTests`)*. A scan that compacts its batches, whose rows no
+longer lie where they were, notes none.
+
 ## 6. Deletes, exclusions, late rows, window edges
 
 - A delete writes, beside its marks, the counts of the rows it takes of each column the object counts,

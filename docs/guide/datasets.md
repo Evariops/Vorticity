@@ -262,6 +262,10 @@ asked in the last hour: each object it appends learns their partials as it is wr
 append some 1.5 ms an object and family, so that a monitor asking the same question after each append
 reads none of the objects appended since it first asked.
 
+An aggregation whose filter is evaluated on an object's rows, a range no sheet or index answers, also
+notes where in the object the filter kept rows; asked again, from the handle or one opened later on the
+same `SynopsisCache`, it reads those parts of the object alone.
+
 Over a long range, an object's counts still cost a request an object. `RollUpAsync` sums the counts of
 runs of about `DatasetOptions.RollupFanout` consecutive objects (64 by default) into rollups, then as
 many rollups into one of the rank above, with no row read, and `RunCompactionAsync` calls it once no

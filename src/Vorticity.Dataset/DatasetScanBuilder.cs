@@ -367,6 +367,13 @@ internal sealed class DatasetScanBuilder
 
     private FamilyProof? _proof;
 
+    /// <summary>What keys the scan filter's pages (<see cref="PredicatePages"/>): its canonical text and the version's columns.</summary>
+    private UInt128 PredicateKey => _predicateKey ??=
+        System.IO.Hashing.XxHash128.HashToUInt128(System.Runtime.InteropServices.MemoryMarshal.AsBytes(ExprText.Format(_filter!).AsSpan()))
+        ^ System.IO.Hashing.XxHash128.HashToUInt128(_version.Schema.Bytes.Span);
+
+    private UInt128? _predicateKey;
+
     /// <summary>The top-level columns <paramref name="family"/> reads, by their places: its keys', its aggregates' and its filter's.</summary>
     private int[] FieldsOf(LearnedFamily family)
     {
@@ -1583,15 +1590,54 @@ internal sealed class DatasetScanBuilder
 
             if (columns is null && !held.Entry.HasDeletions)
             {
+                // A filter evaluated on the object's rows before reads the batches where it kept a row alone, each its own
+                // scan; one evaluated for the first time notes them, from batches whole, whose rows are where they lie.
+                SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
+                UInt128 predicate = _filter is not null && !_options.Compact && Covered(held) == held.Entry.Rows ? PredicateKey : default;
+                if (predicate != default && _dataset.Predicates.Of(held.Entry.Uid, predicate, cache) is { } pages)
+                {
+                    RecordBatch? found = null;
+                    foreach (RowRange range in pages)
+                    {
+                        ScanBuilder part = Of(lease.File, held, _filter, _mask, canonical: false, within: range);
+                        using QueryMemory? reads = ReadsAhead(part, lease.File);
+                        await foreach (RecordBatch batch in part.ExecuteAsync()
+                            .WithCancellation(cancellationToken).ConfigureAwait(false))
+                        {
+                            yield return InDataset(batch, held.FirstRow, ref found);
+                        }
+                    }
+
+                    yield break;
+                }
+
                 // The object's own scan, which every object of the version's schema with no row
                 // marked is read by, rebased into one view for the whole object.
+                List<RowRange>? kept = predicate != default && !_dataset.Predicates.Wide(held.Entry.Uid, predicate) ? [] : null;
                 RecordBatch? view = null;
                 ScanBuilder scan = Of(lease.File, held);
                 using QueryMemory? ahead = ReadsAhead(scan, lease.File);
                 await foreach (RecordBatch batch in scan.ExecuteAsync()
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
+                    if (kept is not null && batch.SelectedRows > 0)
+                    {
+                        if (kept.Count > 0 && kept[^1].End == batch.StartRow)
+                        {
+                            kept[^1] = new RowRange(kept[^1].Start, batch.StartRow + batch.RowCount);
+                        }
+                        else
+                        {
+                            kept.Add(new RowRange(batch.StartRow, batch.StartRow + batch.RowCount));
+                        }
+                    }
+
                     yield return InDataset(batch, held.FirstRow, ref view);
+                }
+
+                if (kept is not null)
+                {
+                    _dataset.Predicates.Keep(held.Entry.Uid, predicate, kept, held.Entry.Rows, cache);
                 }
 
                 yield break;

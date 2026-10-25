@@ -34,7 +34,9 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
     /// read as rows; warm, the handle keeps the counts parsed and nothing is read but the rows of the objects the unaligned
     /// window cuts, which no cache keeps. The dataset cut by the hour of its instant, where it took periods of an hour:
     /// 32 bytes more cold, its header naming the value, and the unaligned window's edges read in a request less but 42 KB
-    /// more, an object gathering each column in one chunk where a period cut it at each of its slices.
+    /// more, an object gathering each column in one chunk where a period cut it at each of its slices. The allocations of
+    /// the questions whose filter is evaluated on rows raised on 2026-10-25 by some 0.5 KB, each in a process of its own:
+    /// the filter's key, its canonical text hashed, and the lookup of its pages (PredicatePages).
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
@@ -42,7 +44,7 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
         ["count by service and hour"] = new(6, 41647, 0, 0, 51825),
         ["measures by service"] = new(6, 41647, 0, 0, 68030),
         ["count by day"] = new(6, 41647, 0, 0, 59062),
-        ["count by hour, one service"] = new(6, 41647, 0, 0, 62897),
+        ["count by hour, one service"] = new(6, 41647, 0, 0, 64554),
         ["count by service, an aligned window"] = new(2, 762, 0, 0, 37248),
         ["measures by service, an unaligned window"] = new(5, 402495, 2, 270920, 76704),
         ["quantiles by service"] = new(6, 74337, 0, 0, 1036385),

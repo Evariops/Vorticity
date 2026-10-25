@@ -51,17 +51,18 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// classes, the pools they left move a path by up to 3 %. Measured on 2026-10-24, every question read from the rows
     /// of objects that keep them in the order they came, with no synopsis part nor tables; the ceilings the cost formulas
     /// give come with the per-column synopses and the planner. The bytes cold measured again on 2026-10-25, the dataset
-    /// cut by the hour of its instant where it took periods of an hour.
+    /// cut by the hour of its instant where it took periods of an hour. The allocations of the questions whose filter is evaluated on rows raised on 2026-10-25 by some 0.5 KB, each
+    /// in a process of its own: the filter's key, its canonical text hashed, and the lookup of its pages (PredicatePages).
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["count by service"] = new(4, 168519, 0, 0, 36144),
         ["count by service, at eight lanes"] = new(4, 168519, 0, 0, 58240),
         ["count by service and hour"] = new(4, 168519, 0, 0, 41648),
-        ["by minute, the last hour, under a predicate"] = new(1, 41890, 0, 0, 39488),
-        ["an unaligned window"] = new(3, 126629, 0, 0, 43520),
-        ["an unaligned window, at eight lanes"] = new(3, 126629, 0, 0, 63808),
-        ["every row but one id"] = new(4, 168519, 0, 0, 46272),
+        ["by minute, the last hour, under a predicate"] = new(1, 41890, 0, 0, 40964),
+        ["an unaligned window"] = new(3, 126629, 0, 0, 45076),
+        ["an unaligned window, at eight lanes"] = new(3, 126629, 0, 0, 65117),
+        ["every row but one id"] = new(4, 168519, 0, 0, 47998),
         ["measures by region and hour"] = new(4, 168519, 0, 0, 49328),
         ["count by route, a shredded path"] = new(4, 168519, 0, 0, 55888),
         ["the rows of one id"] = new(4, 168519, 0, 0, 81328),

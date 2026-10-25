@@ -38,12 +38,13 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// they leave took 112 bytes off each. Measured on 2026-10-24, every pattern read from the rows of objects that keep
     /// them in the order they came, with no synopsis part nor tables. QP-10 allocated 159,400 bytes on CI's Linux runner
     /// where Windows allocated 154,352; Windows now allocates 148,144, and its ceiling stays 2 % above the runner's last
-    /// figure until the runner gives its new one.
+    /// figure until the runner gives its new one. The allocations of the questions whose filter is evaluated on rows raised on 2026-10-25 by some 0.5 KB, each
+    /// in a process of its own: the filter's key, its canonical text hashed, and the lookup of its pages (PredicatePages).
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361216, 4, 98960, 79824),
-        ["QP-2 the pods of a route"] = new(4, 262256, 0, 0, 68784),
+        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361216, 4, 98960, 82237),
+        ["QP-2 the pods of a route"] = new(4, 262256, 0, 0, 70837),
         ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262256, 0, 0, 168752),
         ["QP-4 the spans of a trace"] = new(5, 286996, 1, 24740, 73760),
         ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90304, 1, 24740, 294560),
