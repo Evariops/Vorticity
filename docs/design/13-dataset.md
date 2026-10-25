@@ -917,6 +917,14 @@ otherwise the object is read as rows. Extremes do not subtract, nor sketches, no
 approximate distinct counts: a question asking one of them reads the object's rows, as does a question
 whose marked rows' counts leave values out.
 
+The blocks' statistics ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md)) are not
+negated: a question the blocks answer settles the blocks of a marked object that hold no marked row,
+and reads the others as rows, numbered as the object's live rows. An erasure of a few rows touches a
+block each at most, whose rows of the question's columns are read, against negated statistics that
+would take some bytes; it stays bounded by the object's rows, and lasts until compaction folds the
+marks. `DatasetNegativesTests` holds counts by service and status over a marked object to its rows'
+answer, in 83 KB where the rows take 215 KB.
+
 What it costs follows from the counts' format. The marked rows' counts take, for each counted column,
 an entry for each distinct value of the rows taken: a few hundred bytes for an erasure of a handful of
 rows of an object, against the object's columns for its rows. A question reads them in the commit

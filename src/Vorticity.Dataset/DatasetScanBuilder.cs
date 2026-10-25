@@ -751,7 +751,10 @@ internal sealed class DatasetScanBuilder
                 {
                     // An object whose blocks answer where its counts do not: the states of the blocks its statistics answer,
                     // then the rows of the others, each run of them a part of the scan.
-                    (BlockStateRows? settled, List<RowRange> unsettled, int answered) = BlockAnswer()!.Settle(held, await blockRead.ConfigureAwait(false));
+                    // The blocks that hold a row a delete marked are read as rows too.
+                    (Indexes.ColumnWhere? Where, Indexes.ColumnBlocks? Blocks)[] blockColumns = await blockRead.ConfigureAwait(false);
+                    await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
+                    (BlockStateRows? settled, List<RowRange> unsettled, int answered) = BlockAnswer()!.Settle(held, blockColumns, held.Entry.Deletions);
                     if (_metrics is { } counted)
                     {
                         counted.BlocksAnswered += answered;

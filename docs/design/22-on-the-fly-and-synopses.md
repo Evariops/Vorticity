@@ -371,8 +371,9 @@ object), which a later question with the same filter reads alone.
   out of line in its commit object, merged with an earlier delete's
   ([deleting rows](13-dataset.md#what-a-question-of-counts-does-with-marks)). A question of counts,
   sums, means or exact distinct values subtracts them from the object's counts; one of extremes,
-  sketches or registers, and the blocks' statistics, read the marked object's rows. The next compaction
-  rewrites the object without the rows.
+  sketches or registers reads the marked object's rows. The blocks' statistics are not negated: the
+  blocks that hold a marked row are read as rows, the others answered by their statistics. The next
+  compaction rewrites the object without the rows.
 - An exclusion, every row but those of an identifier's value, finds those rows by the postings and
   subtracts their contribution. A distinct count is corrected by the counts of the counted column, a
   value leaving a group only when its last row there is excluded.

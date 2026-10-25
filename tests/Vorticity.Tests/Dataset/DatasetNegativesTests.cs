@@ -90,6 +90,42 @@ public sealed partial class DatasetNegativesTests
         Assert.True(bytes[1] * 4 < bytes[0], $"{bytes[1]} bytes through the counts, {bytes[0]} through the rows");
     }
 
+    /// <summary>
+    /// Counts by service and status, which no column's counts answer, settle the blocks of a marked object that hold no
+    /// marked row from their statistics, and read the others as rows: the rows' answer, in fewer bytes than the rows take.
+    /// </summary>
+    [Fact]
+    public async Task AMarkedObjectsBlocksAnswerWhereNoDeleteTouchedThem()
+    {
+        string[] keys = ["Service", "Status"];
+        string[] results = ["Service", "Status", "count()"];
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using (VortexDataset dataset = await CreateAsync(memory, Options()))
+        {
+            Assert.True((await dataset.DeleteAsync<Hit>(h => h.Service == "svc-1" & h.Size < 5_000, Ct)).ObjectsMarked >= 1);
+            List<string> rows = await DatasetPlannerTests.AskAsync(dataset, keys, results, null, synopses: false);
+            Assert.Equal(rows, await DatasetPlannerTests.AskAsync(dataset, keys, results, null, synopses: true));
+
+            HashSet<string> marked = [.. (await EntriesAsync(dataset)).Where(e => e.HasDeletions).Select(e => e.Key)];
+            ScanPlan plan = await Scan(dataset).GroupBy(h => (h.Service, h.Status)).Select(g => (g.Key.Service, g.Key.Status, g.Count())).ExplainAsync(Ct);
+            Assert.Contains(plan.States, step => step.Read == "blocks" && marked.Contains(step.Object));
+        }
+
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        long[] bytes = new long[2];
+        foreach (bool synopses in (bool[])[false, true])
+        {
+            await using VortexSession session = VortexSession.Create(_ => { });
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options() with { Session = session }, Ct);
+            store.Reset();
+            await DatasetPlannerTests.AskAsync(dataset, keys, results, null, synopses);
+            bytes[synopses ? 1 : 0] = store.BytesRead;
+        }
+
+        Console.WriteLine($"NEGATIVES counts by service and status over marked objects: {bytes[1]:N0} bytes through their blocks, {bytes[0]:N0} through their rows");
+        Assert.True(bytes[1] * 2 < bytes[0], $"{bytes[1]} bytes through the blocks, {bytes[0]} through the rows");
+    }
+
     [Fact]
     public async Task AQuestionOfExtremesReadsAMarkedObjectsRows()
     {

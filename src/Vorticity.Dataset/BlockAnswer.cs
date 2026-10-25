@@ -217,8 +217,9 @@ internal sealed class BlockAnswer
             : null;
 
     /// <summary>
-    /// Whether the blocks of the object <paramref name="held"/> may answer: no row a delete marked, which its statistics
-    /// still count, the version's columns in their places, and statistics of every column a key or a measure reads. And
+    /// Whether the blocks of the object <paramref name="held"/> may answer: the version's columns in their places, and
+    /// statistics of every column a key or a measure reads; a block that holds a row a delete marked, which its statistics
+    /// still count, is read as rows (<see cref="Settle"/>). And
     /// whether a block of it may hold one group, as the blocks follow the key's first column: of the columns of the keys,
     /// themselves and not a function of them, and of a filter the object's summaries do not prove true, those other than
     /// the first, and than a key's column they prove constant, may vary in a block: at most one under a question of
@@ -228,7 +229,7 @@ internal sealed class BlockAnswer
     internal bool MayAnswer(in PositionedObject held)
     {
         ObjectEntry entry = held.Entry;
-        if (entry.HasDeletions || entry.Contents is not { BlockStats.Count: > 0 } contents || !_schema.Holds(entry))
+        if (entry.Contents is not { BlockStats.Count: > 0 } contents || !_schema.Holds(entry))
         {
             return false;
         }
@@ -312,10 +313,31 @@ internal sealed class BlockAnswer
 
     /// <summary>
     /// The states the blocks of the object <paramref name="held"/> give, from the statistics and the indexes of
-    /// <see cref="Fields"/>, by their places in it, and the ranges of its rows, from its first, that its blocks do not
-    /// answer, which are read as rows; every row when the statistics do not describe the object's blocks alike.
+    /// <see cref="Fields"/>, by their places in it, and the ranges of its live rows, from its first, that its blocks do not
+    /// answer, which are read as rows; every row when the statistics do not describe the object's blocks alike. A block
+    /// that holds a row of <paramref name="deletions"/> is not answered: its statistics count that row.
     /// </summary>
-    internal (BlockStateRows? States, List<RowRange> Unsettled, int Settled) Settle(in PositionedObject held, (ColumnWhere? Where, ColumnBlocks? Blocks)[] columns)
+    internal (BlockStateRows? States, List<RowRange> Unsettled, int Settled) Settle(
+        in PositionedObject held, (ColumnWhere? Where, ColumnBlocks? Blocks)[] columns, DeletionVector deletions)
+    {
+        (BlockStateRows? states, List<RowRange> unsettled, int settled) = SettlePhysical(held, columns, deletions);
+        if (deletions.IsEmpty)
+        {
+            return (states, unsettled, settled);
+        }
+
+        // The ranges as the object's live rows number them, which a part of the scan reads.
+        for (int i = 0; i < unsettled.Count; i++)
+        {
+            unsettled[i] = new RowRange(deletions.Logical(unsettled[i].Start), deletions.Logical(unsettled[i].End));
+        }
+
+        return (states, unsettled, settled);
+    }
+
+    /// <summary><see cref="Settle"/>, its ranges the object's own row positions, deleted rows included.</summary>
+    private (BlockStateRows? States, List<RowRange> Unsettled, int Settled) SettlePhysical(
+        in PositionedObject held, (ColumnWhere? Where, ColumnBlocks? Blocks)[] columns, DeletionVector deletions)
     {
         long objectRows = held.Entry.PhysicalRows;
         ColumnBlocks? any = null;
@@ -355,7 +377,7 @@ internal sealed class BlockAnswer
             long first = any.FirstRow(b);
             long rows = any.Rows[b];
             int before = states.Count;
-            if (SettleBlock(b, rows, described, summaries, judged, states))
+            if (deletions.DeletedIn(first, first + rows) == 0 && SettleBlock(b, rows, described, summaries, judged, states))
             {
                 settled++;
                 continue;
