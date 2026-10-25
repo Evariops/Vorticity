@@ -70,6 +70,9 @@ cold, on one node *(computed)*:
 | the largest service, 7.4 % | ~40 ms | ~0.3 s | ~9 s | ~2 min |
 | a median service, 0.077 % | ~30 ms | ~35 ms | ~0.13 s | ~1.4 s |
 
+Measured since (section 3.4), `Status` and `Endpoint` take 1.9 bytes a row clustered, not 1.2: the times
+the bytes bound are some 1.6 times longer, and the frontiers below shorter by as much.
+
 A second on the fly covers about five hours of the whole table, three days of the largest service and
 a year of a median one. The synopses exist for the two cases past that frontier: the whole table over
 more than a few hours, and the largest values of the key's first column over more than a few days.
@@ -127,12 +130,21 @@ decoded for its other rows only.
 | what | in the order of arrival | clustered by emitter |
 |---|---|---|
 | rows a question naming a median service reads | all | 0.077 % |
-| bytes a row of `Service`, `Version` and `Host` together | 4.5 | ~0, constant in a block |
-| bytes a row of `Endpoint` | 2 | ~0.75: at most 50 values in a service, 6 bits |
-| bytes a row of `Status` | 0.5 | ~0.4: one value holds 86 % of the rows |
-| bytes a row of the instant | 1 | ~2: the gaps between two rows of an emitter are wider |
+| bytes a row of `Service`, `Version` and `Host` together | 4.36 | 0.03, constant in a run |
+| bytes a row of `Endpoint` | 1.85 | 1.22: at most 50 values in a service |
+| bytes a row of `Status` | 0.65 | 0.65: one value holds 86 % of the rows |
+| bytes a row of the instant | 3.68 | 3.88: the gaps between two rows of an emitter are wider |
+| bytes a row of the request's id | 0.60 | 4.24: the ids counted up lose their order |
+| bytes a row, every column | 23.9 | 20.4 |
 
-The clustered figures are estimates, which a size test checks before any synopsis relies on them.
+Measured with `vortex-queries --micro layout`: the reference generator's requests, 20 minutes at 5 000 a
+second (6 × 10⁶ rows, some 300 rows an emitter in an object), written as they arrive and clustered by
+`service/version/host` then the instant, each compacted to its last level. The estimates this table held
+before were within a factor of two of these, but for the instant in the order of arrival, estimated at
+1 byte a row: the 2 % of rows that arrive a few seconds late, and the few an hour late, widen every
+block's deltas. Clustering takes 15 % off a row on this table, more on the columns that depend on the
+emitter, and costs the id its order. At the design's rate an emitter's runs are thirty times longer, which
+should lower the clustered figures further.
 
 ### 3.5 Each column in segments of its own
 
