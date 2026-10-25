@@ -20,7 +20,7 @@ public partial record struct LogRow(DateTimeOffset At, string Service, Variant A
 public partial record struct RouteCount(string? Route, long Count);
 
 /// <summary>
-/// Variant columns: a value walked by key, read as stored or converted, and, in a dataset of periods, the keys
+/// Variant columns: a value walked by key, read as stored or converted, and, in a dataset clustered by day, the keys
 /// its objects shred asked as columns are, from their typed columns.
 /// </summary>
 internal static class Variants
@@ -42,7 +42,7 @@ internal static class Variants
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, LogRow.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(LogRow.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
         });
 
         // Three days of a line every five seconds from three routes, one in ten an error, appended ten minutes at a time.

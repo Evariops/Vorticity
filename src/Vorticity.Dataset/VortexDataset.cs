@@ -54,10 +54,6 @@ public sealed class VortexDataset : IAsyncDisposable
     // The store the handle made for a local directory it was given by location, which it disposes.
     private IObjectStore? _ownedStore;
 
-    // The newest instant this handle appended to a dataset of periods, in its column's unit; the
-    // least long before the first: what the lateness of the next append is measured against.
-    private long _newestInstant = long.MinValue;
-
     // The location the handle was opened at, as its caller named it, which tags the activities of its
     // commits, compactions and vacuums; null for a handle given a store.
     private string? _location;
@@ -350,51 +346,6 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// Records how late the oldest row of an object this handle appends to a dataset of periods came,
-    /// behind the newest instant the handle appended before: zero for rows in order. Read from the
-    /// object's summary of its instant, so it costs no read.
-    /// </summary>
-    private void ObserveLateness(WrittenObject? written)
-    {
-        if (written is not { } produced || _options.Periods is null || Key is not { } key
-            || !produced.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
-            || !summary.HasMin || !summary.HasMax
-            || summary.Min.Kind != FilterLiteralKind.Signed || summary.Max.Kind != FilterLiteralKind.Signed)
-        {
-            return;
-        }
-
-        long oldest = summary.Min.SignedValue;
-        long newest = Volatile.Read(ref _newestInstant);
-        if (newest != long.MinValue)
-        {
-            DatasetTelemetry.Late(Math.Max(0, (double)newest - oldest) / UnitsPerSecond(PeriodOptions.InstantOf(key)));
-        }
-
-        long latest = summary.Max.SignedValue;
-        while (latest > newest)
-        {
-            long seen = Interlocked.CompareExchange(ref _newestInstant, latest, newest);
-            if (seen == newest)
-            {
-                break;
-            }
-
-            newest = seen;
-        }
-    }
-
-    /// <summary>How many of <paramref name="unit"/> a second holds.</summary>
-    private static double UnitsPerSecond(TimeUnit unit) => unit switch
-    {
-        TimeUnit.Nanoseconds => 1e9,
-        TimeUnit.Microseconds => 1e6,
-        TimeUnit.Milliseconds => 1e3,
-        TimeUnit.Seconds => 1,
-        _ => 1.0 / 86_400,
-    };
-
-    /// <summary>
     /// The identifiers as a commit keeps them: a top-level column of <paramref name="schema"/>, or a key
     /// of one of its variant columns read as a string or an integer, <c>Attributes['user'].AsString()</c>,
     /// written as a plan writes it. Refuses any other, and one named twice.
@@ -659,51 +610,6 @@ public sealed class VortexDataset : IAsyncDisposable
     public Scan Scan(params ReadOnlySpan<string> columns) => new Scan(new DatasetScanSource(this, Snapshot), columns);
 
     /// <summary>
-    /// Asks <paramref name="question"/> over the window from <paramref name="from"/> to <paramref name="to"/>
-    /// part by part, newest first: the window cut at the starts of the periods it crosses, each part's
-    /// answer delivered once it and every newer part are in.
-    /// </summary>
-    /// <typeparam name="TAnswer">What the question answers.</typeparam>
-    /// <param name="from">The window's first instant.</param>
-    /// <param name="to">The instant past its last.</param>
-    /// <param name="question">
-    /// The question, asked with each part's bounds, the first in the part and the second past it, which it
-    /// applies to its own filter: <c>(from, to, ct) =&gt; dataset.Scan&lt;Request&gt;().Where(r =&gt; r.At &gt;= from &amp;&amp; r.At &lt; to)…</c>.
-    /// </param>
-    /// <param name="cancellationToken">Cancels the questions in flight.</param>
-    /// <returns>The parts, newest first, each with its bounds and its answer.</returns>
-    /// <exception cref="InvalidOperationException">The dataset declares no periods (<see cref="DatasetOptions.Periods"/>).</exception>
-    /// <exception cref="ArgumentException">The window is empty.</exception>
-    /// <remarks>
-    /// A page that shows a month can show its newest day while the rest is read: a part's answer is final
-    /// for its range of time, so once a part is delivered the window from its start to the window's end is
-    /// answered. A question over one period reads the synopses of its sealed objects, a round trip for
-    /// them all, and the parts are asked several at once, sixteen at most and no more than the session lets
-    /// reads be in flight, so a month asked part by part costs about the round trips of one question over it. Answers over
-    /// parts add up for counts and sums, and their extremes are the window's, but a mean over the window
-    /// is its sum over its count.
-    /// </remarks>
-    public IAsyncEnumerable<WindowPart<TAnswer>> AskNewestFirstAsync<TAnswer>(
-        DateTimeOffset from, DateTimeOffset to, Func<DateTimeOffset, DateTimeOffset, CancellationToken, ValueTask<TAnswer>> question,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(question);
-        if (to <= from)
-        {
-            throw new ArgumentException($"The window from {from:O} to {to:O} is empty.", nameof(to));
-        }
-
-        if (!Snapshot.Header.ByPeriods || Key is not { } key)
-        {
-            throw new InvalidOperationException(
-                "A window is asked part by part on the periods of a dataset, and this dataset declares none (DatasetOptions.Periods): ask its question over the whole window.");
-        }
-
-        PeriodCalendar calendar = PeriodCalendar.Of(Snapshot.Header, PeriodOptions.InstantOf(key));
-        return WindowParts.AskAsync(WindowParts.Of(calendar, from, to), Math.Min(Session.Options.MaxConcurrentReads, WindowParts.Width), question, cancellationToken);
-    }
-
-    /// <summary>
     /// Asks <paramref name="question"/> over the values of the clustering key's first column from <paramref name="from"/>
     /// up to <paramref name="to"/> part by part, a part a clustering value (<see cref="ClusteringOptions.Value"/>), the last
     /// part first unless <paramref name="descending"/> is false: each part's answer delivered once it and every part before
@@ -963,8 +869,6 @@ public sealed class VortexDataset : IAsyncDisposable
         ObjectSegmentSink sink = new ObjectSegmentSink(
             _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes, byteBound);
 
-        // A dataset of periods slices its objects by time; any other, by its keys.
-        bool byTime = sliced && _options.Periods is not null;
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with
         {
             RowBound = rowBound,
@@ -1033,11 +937,8 @@ public sealed class VortexDataset : IAsyncDisposable
 
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
 
-        // An object in time slices on a key of its instant alone is walked through its slice table,
-        // which finds a key's slice, and the slice's instants ranked: a run on the key would repeat
-        // them, with a row for each. One in key slices keeps its run, or its sorted column.
-        bool bySlices = byTime && schema.Key is { IsComposite: false };
-        if (schema.Key is { } clustering && !bySortedColumn && !bySlices)
+        // An object in key slices keeps its run, or its sorted column.
+        if (schema.Key is { } clustering && !bySortedColumn)
         {
             // The mandatory sorted run on the clustering key, added to the caller's own policy.
             write = clustering.Applied(write);
@@ -1047,7 +948,6 @@ public sealed class VortexDataset : IAsyncDisposable
         return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session))
         {
             BySortedColumn = bySortedColumn,
-            BySlices = bySlices,
         };
     }
 
@@ -1083,89 +983,8 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
-        return await ObservedAsync(written is { } produced ? [produced] : [], cancellationToken).ConfigureAwait(false);
+        return written is { } produced ? [produced] : [];
     }
-
-    /// <summary>
-    /// Notes how late the rows of an append's objects came, refuses them when they come later than the horizon and the
-    /// handle says so, and hands them on.
-    /// </summary>
-    private async ValueTask<List<WrittenObject>> ObservedAsync(List<WrittenObject> written, CancellationToken cancellationToken)
-    {
-        foreach (WrittenObject produced in written)
-        {
-            ObserveLateness(produced);
-        }
-
-        await RefuseLateAsync(written, cancellationToken).ConfigureAwait(false);
-        return written;
-    }
-
-    /// <summary>
-    /// Refuses an append whose objects hold a row later than the lateness horizon, when the handle says so
-    /// (<see cref="PeriodOptions.RefuseLateRows"/>): a row of a period the newest instant the dataset holds past
-    /// level 0 and the late level has closed. Nothing is committed, and the objects are left for vacuum.
-    /// </summary>
-    /// <exception cref="ArgumentException">An object holds such a row.</exception>
-    private async ValueTask RefuseLateAsync(List<WrittenObject> written, CancellationToken cancellationToken)
-    {
-        if (_options.Periods is not { RefuseLateRows: true } || Key is not { } key || written.Count == 0)
-        {
-            return;
-        }
-
-        DatasetSnapshot version = Snapshot;
-        TimeUnit unit = PeriodOptions.InstantOf(key);
-        PeriodCalendar calendar = PeriodCalendar.Of(version.Header, unit);
-        long horizon = TimeSlicer.Units(version.Header.Lateness ?? TimeSpan.Zero, unit);
-
-        // Only the objects whose instants may reach the earliest end of a period an appended row lies in, past the
-        // horizon, found by their summaries and their pages': an object short of it closes none of their periods, and a
-        // walk of every object read every page of the dataset at each append.
-        long earliest = long.MaxValue;
-        foreach (WrittenObject produced in written)
-        {
-            if (Instants(produced.Entry.Summaries, key) is { } appended)
-            {
-                earliest = Math.Min(earliest, calendar.Next(calendar.Floor(appended.Least)));
-            }
-        }
-
-        if (earliest == long.MaxValue)
-        {
-            return;
-        }
-
-        long reach = horizon > 0 && earliest > long.MaxValue - horizon ? long.MaxValue : earliest + horizon;
-        SummaryPruner closing = new SummaryPruner(Expr.Ge(Expr.Field(key.InstantPath), Expr.Literal(FilterLiteral.From(reach))));
-        long? newest = null;
-        await foreach (PositionedObject held in version.WalkAsync(closing, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
-        {
-            if (held.Level is not (0 or PeriodLevels.Late) && Instants(held.Entry.Summaries, key) is { } instants)
-            {
-                newest = Math.Max(newest ?? long.MinValue, instants.Greatest);
-            }
-        }
-
-        foreach (WrittenObject produced in written)
-        {
-            if (Instants(produced.Entry.Summaries, key) is { } instants
-                && newest is { } held
-                && calendar.Next(calendar.Floor(instants.Least)) <= held - horizon)
-            {
-                throw new ArgumentException(
-                    $"The append holds rows from {TimeSlicer.TimeOf(instants.Least, unit):O}, of a period the dataset has closed: " +
-                    $"they come later than its lateness horizon of {version.Header.Lateness}, and this handle refuses such rows (PeriodOptions.RefuseLateRows).");
-            }
-        }
-    }
-
-    /// <summary>The least and the greatest instant an object's summaries state, or null.</summary>
-    private static (long Least, long Greatest)? Instants(ObjectSummaries summaries, ClusteringKey key) =>
-        summaries.TryGet(key.InstantPath, out ColumnSummary instant)
-            && instant is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
-            ? (instant.Min.SignedValue, instant.Max.SignedValue)
-            : null;
 
     /// <summary>The batches of an append, as one object.</summary>
     private async ValueTask<List<WrittenObject>> WrittenAsync(IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken)
@@ -1666,22 +1485,6 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// Drops, in one commit and reading none of them, every object of a dataset of periods whose rows
-    /// all lie before <paramref name="before"/>, aligned down to the start of the period holding it.
-    /// </summary>
-    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
-    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
-    /// <returns>The cutoff applied: the start of the period holding <paramref name="before"/>.</returns>
-    /// <exception cref="InvalidOperationException">The dataset declares no periods (<see cref="DatasetOptions.Periods"/>).</exception>
-    /// <remarks>
-    /// A row may outlive the cutoff by up to a period, the one that holds it, and an object of level 0
-    /// that straddles it stays until compaction cuts it by period. What drops a row exactly is
-    /// <see cref="DeleteAsync(VortexExpr, CancellationToken)"/>, which opens the objects it touches.
-    /// </remarks>
-    public ValueTask<DateTimeOffset> ExpireAsync(DateTimeOffset before, CancellationToken cancellationToken = default) =>
-        DatasetExpiry.RunAsync(this, before, cancellationToken);
-
-    /// <summary>
     /// Changes the rows <paramref name="filter"/> is true for, in one commit: each is read as a
     /// record, passed through <paramref name="update"/>, and written again, while the objects it
     /// came from are rewritten without it.
@@ -1894,8 +1697,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The version created, which this handle now reads; the one it held when the dataset has every identifier already.</returns>
     /// <remarks>
     /// A lookup of an added identifier reads an object written since by its postings, and one written before as a scan
-    /// reads any object, its rows found all the same, until a compaction rewrites it: a period already sealed, which no
-    /// job takes again, is read so until the retention lets it go. Two writers that add one identifier each keep both.
+    /// reads any object, its rows found all the same, until a compaction rewrites it: an object no job takes again, one of the
+    /// last level, is read so until an expiry drops it. Two writers that add one identifier each keep both.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="identifiers"/> is null.</exception>
     /// <exception cref="ArgumentException">An identifier names neither a column of the schema nor such a key, or is named twice.</exception>
@@ -2201,20 +2004,8 @@ public sealed class VortexDataset : IAsyncDisposable
 
         ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
         DatasetFeatures features = options.ErasureDelay is null ? DatasetFeatures.None : DatasetFeatures.ErasureDelay;
-        if (options.Periods is not null)
-        {
-            _ = PeriodOptions.InstantOf(key);
-            features |= DatasetFeatures.Periods;
-        }
-
         if (options.Clustering is { } clustering)
         {
-            if (options.Periods is not null)
-            {
-                throw new ArgumentException(
-                    "A dataset compacted by periods cuts its objects by them: it declares no clustering besides.", nameof(options));
-            }
-
             // Resolved once here, so that a value the key's first column does not take is refused before anything is written.
             _ = ValueCut.Of(clustering, key);
             features |= DatasetFeatures.Clustering;
@@ -2246,8 +2037,6 @@ public sealed class VortexDataset : IAsyncDisposable
                 : options.Compaction,
             LockedStore = options.LockedStore,
             ErasureDelay = options.ErasureDelay,
-            Lateness = options.Periods?.Lateness,
-            PeriodLength = options.Periods?.Length,
             Identifiers = declared,
             ShreddedPaths = shredded,
             Clustering = options.Clustering,
@@ -3431,10 +3220,6 @@ public sealed class VortexDataset : IAsyncDisposable
             {
                 await CheckSortedAsync(file, cancellationToken).ConfigureAwait(false);
             }
-            else if (draft.BySlices)
-            {
-                await CheckSlicedAsync(file, cancellationToken).ConfigureAwait(false);
-            }
 
             ObjectSummaries summaries = Summaries(file);
             (byte[] prefix, byte[] last) = await BoundsAsync(file, summaries, firstRow, cancellationToken).ConfigureAwait(false);
@@ -3459,24 +3244,6 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         await cursor.DisposeAsync().ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Refuses an object written in time slices without a run whose slice table does not walk its
-    /// key: none, one on another column, or one that does not cover its rows. A key cursor would find
-    /// no source in it, and take it for an object without the key.
-    /// </summary>
-    private async ValueTask CheckSlicedAsync(VortexFile file, CancellationToken cancellationToken)
-    {
-        string instant = Key!.Paths[0];
-        (Keys.SlicedKeySource? source, string? reason) = await Keys.SlicedKeySource.OpenAsync(file, instant, cancellationToken).ConfigureAwait(false);
-        if (source is null)
-        {
-            throw new DatasetIntegrityException(
-                $"An object written in time slices carries no run on '{instant}' and no slice table that walks it: {reason}.");
-        }
-
-        await source.DisposeAsync().ConfigureAwait(false);
     }
 
     /// <summary>

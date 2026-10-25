@@ -7,7 +7,7 @@ namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// The time-window design's worst case of many facets (<c>--micro facets</c>): spans with a dozen repeating
-/// facets and a route under them (<see cref="SpanGenerator"/>), over hours of periods, in memory behind a store that
+/// facets and a route under them (<see cref="SpanGenerator"/>), over hours clustered by hour, in memory behind a store that
 /// counts and waits. It compacts such a table, then asks questions on the shallow facets and on the route, cold and
 /// warm, by the synopses where they answer and by the rows, as <c>--micro questions</c> does.
 /// </summary>
@@ -22,7 +22,7 @@ internal static class FacetsBench
         await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedSpan.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(GeneratedSpan.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget) },
         }))
         {

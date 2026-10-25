@@ -326,7 +326,7 @@ internal static class DatasetRowChanges
 
             // Written in the version's schema, which an object of an earlier one is read as. The rows
             // kept are the object's own in its own order, and an object above level 0 is a
-            // compaction's, whose rows come in key order, or in time slices for a dataset of periods.
+            // compaction's, whose rows come in key order, or in time slices for a dataset an earlier library wrote by periods.
             // They are some of its rows, which bound what the store sizes the parts of the object from.
             ObjectDraft? draft = matched < held.Entry.Rows
                 ? dataset.StartObjectUnder(

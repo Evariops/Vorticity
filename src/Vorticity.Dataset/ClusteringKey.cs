@@ -51,7 +51,7 @@ internal sealed class ClusteringKey
         return new ClusteringKey(kept, dtypes, mayHoldNull);
     }
 
-    /// <summary>The key's first column: a dataset by periods' instant, and the column a level's ranges are judged on.</summary>
+    /// <summary>The key's first column: the one a clustering value is a function of, and the one a level's ranges are judged on.</summary>
     public string InstantPath => _paths[0];
 
     /// <summary>The dtype of <see cref="InstantPath"/>.</summary>

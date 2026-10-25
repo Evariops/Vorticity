@@ -9,7 +9,7 @@ namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// The questions of the time-window and variant designs, asked of generated datasets (<c>--micro questions</c>):
-/// requests (<see cref="RequestGenerator"/>) and log records (<see cref="LogGenerator"/>) over hours of periods,
+/// requests (<see cref="RequestGenerator"/>) and log records (<see cref="LogGenerator"/>) over hours clustered by hour,
 /// in memory behind a store that counts and waits a round trip per request. Each question is asked cold, by a
 /// handle and a session opened for it with an empty synopsis cache on disk, then warm, by the same handle
 /// again, its cache filled, from its synopses and then from its rows. Each line says what the store saw
@@ -17,8 +17,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// with its time and the process's CPU time.
 /// </summary>
 /// <remarks>
-/// The examples of the designs are thirty periods of a day at 5 × 10⁴ requests a second. The bench keeps their
-/// shape at the scale of the Mac: periods of an hour (<c>--hours</c>, 24 by default), 20 requests a second
+/// The examples of the designs are thirty days at 5 × 10⁴ requests a second, an object a day. The bench keeps their
+/// shape at the scale of the Mac: an object an hour (<c>--hours</c>, 24 by default), 20 requests a second
 /// (<c>--rate</c>) and half as many log records, 30 ms a round trip (<c>--latency</c>). At that scale an hour's
 /// tables weigh far more against its rows than a day's do at the design's rate, so the default budget of the
 /// tables (<c>--budget</c>, in thousandths of the data, 100) keeps the shallow ones only. The counts are the
@@ -43,7 +43,7 @@ internal static class QuestionBench
         (long requestRows, string needle) = await FillRequestsAsync(requests, hours, rate, write, keyring);
         long logRows = await FillLogsAsync(logs, hours, rate / 2, write, keyring);
         Console.WriteLine(
-            $"{requestRows} requests and {logRows} log records over {hours} periods of an hour{(encrypted ? ", sealed" : string.Empty)}, written and compacted in " +
+            $"{requestRows} requests and {logRows} log records over {hours} hours clustered by hour{(encrypted ? ", sealed" : string.Empty)}, written and compacted in " +
             $"{Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s; tables up to {budget} ‰ of the data; {latency} ms a round trip; warm is the best of {rounds}");
         requestBytes.Latency = TimeSpan.FromMilliseconds(latency);
         logBytes.Latency = TimeSpan.FromMilliseconds(latency);
@@ -116,7 +116,7 @@ internal static class QuestionBench
             Session = session ?? VortexSession.Default,
             Encrypted = keyring is not null,
             ClusteringKey = [nameof(GeneratedRequest.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
             Write = write,
         });
@@ -154,7 +154,7 @@ internal static class QuestionBench
             Session = session ?? VortexSession.Default,
             Encrypted = keyring is not null,
             ClusteringKey = [nameof(LogRow.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
             Write = write,
         });
 

@@ -20,7 +20,7 @@ namespace Vorticity.Indexes;
 /// </summary>
 /// <remarks>
 /// <para>
-/// An open reads the footer, a node per chunk and column, which for an object of a period runs to
+/// An open reads the footer, a node per chunk and column, which for an object of a day's rows runs to
 /// megabytes. A question that needs the rows of a slice or two (the edges of a window, an exact
 /// lookup, the rows to show) needs none of it. Opening this reader costs three small dependent
 /// requests (the EOF marker, the postscript, the index directory). The first read of a column adds

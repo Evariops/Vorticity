@@ -116,8 +116,8 @@ internal enum DatasetFeatures : ulong
     ErasureDelay = 2,
 
     /// <summary>
-    /// Compaction by periods, under a lateness horizon: a library that does not know it would compact
-    /// the levels as it compacts any dataset, against the order its tiers keep.
+    /// A dataset an earlier library compacted by periods: a library that does not know it would compact its levels as it
+    /// compacts any dataset's, against the order they keep. This one reads such a dataset and compacts it no further.
     /// </summary>
     Periods = 4,
 

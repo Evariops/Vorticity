@@ -474,7 +474,7 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>
     /// The rows strictly inside <paramref name="physical"/> where a chunk of every top-level column of
     /// <paramref name="mask"/> starts, ascending: where an object whose columns are chunked apart is cut between lanes
-    /// without a chunk two of them read. Its columns' chunks end together at its time slices and its groups of rows.
+    /// without a chunk two of them read. Its columns' chunks end together at its slices and its groups of rows.
     /// </summary>
     private static long[] CommonStarts(LayoutTree tree, RowRange physical, in FieldMask mask)
     {

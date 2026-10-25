@@ -183,7 +183,7 @@ public sealed record DatasetOptions
 
     /// <summary>
     /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default, besides the
-    /// end of each time slice. A lane's range of the object is cut where they do, so that no chunk is read by two lanes.
+    /// end of each slice. A lane's range of the object is cut where they do, so that no chunk is read by two lanes.
     /// </summary>
     internal long GroupRows { get; init; } = 1L << 22;
 
@@ -202,10 +202,16 @@ public sealed record DatasetOptions
     internal long ContentsObjectBytes { get; init; } = 1L << 20;
 
     /// <summary>
-    /// The rows a slice bounded by keys aims at: <see cref="TimeSlicer.DefaultTargetRows"/>, past which the next key starts
+    /// The rows a slice bounded by keys aims at: <see cref="DefaultSliceTargetRows"/>, past which the next key starts
     /// another. Each writer's own, since an object's slices are its own; a test sets a few rows.
     /// </summary>
-    internal long SliceTargetRows { get; init; } = TimeSlicer.DefaultTargetRows;
+    internal long SliceTargetRows { get; init; } = DefaultSliceTargetRows;
+
+    /// <summary>
+    /// The rows a slice aims at by default: three million, a few megabytes a column, so that a read of one slice is one
+    /// request whose bytes the latency of a store does not dwarf.
+    /// </summary>
+    internal const long DefaultSliceTargetRows = 3_000_000;
 
     /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
@@ -263,21 +269,11 @@ public sealed record DatasetOptions
     private readonly TimeSpan? _erasureDelay;
 
     /// <summary>
-    /// Compacts the dataset by periods of its instant, the first column of its clustering key, a timestamp
-    /// in UTC: the open period's rows in fresh levels, rows later than the lateness horizon
-    /// beside them, and each period, once closed, sealed into one object. Null, the default, compacts
-    /// by levels. Fixed when the dataset is created and carried by every commit, which a library that
-    /// does not know periods refuses.
-    /// </summary>
-    public PeriodOptions? Periods { get; init; }
-
-    /// <summary>
     /// How jobs group the rows into objects: cut where a value of the clustering key's first column changes, at the bytes
     /// an object aims at, or both; the application chooses the value and the size, and the dataset knows nothing of what
     /// the values mean. Null, the default, leaves objects at the compaction's sizes. Fixed when the dataset is created and
     /// carried by every commit; a handle opened on an existing dataset follows the dataset's, whatever this says.
     /// </summary>
-    /// <remarks>A dataset compacted by periods (<see cref="Periods"/>) cuts its objects by them, and declares no clustering.</remarks>
     public ClusteringOptions? Clustering { get; init; }
 
     private readonly int _rollupFanout = 64;
@@ -382,19 +378,6 @@ public sealed record DatasetOptions
     /// </summary>
     internal bool AcceptsNullableKey { get; init; }
 
-    /// <summary>The periods a header records, or null for a dataset compacted by levels.</summary>
-    /// <remarks>The slice target is the handle's own, from <paramref name="asked"/>, as no header records it.</remarks>
-    private static PeriodOptions? PeriodsOf(CommitHeader header, PeriodOptions? asked) =>
-        header.Lateness is { } lateness
-            ? new PeriodOptions
-            {
-                Lateness = lateness,
-                Length = header.PeriodLength ?? throw new InvalidOperationException("A header of a dataset of periods names no period length."),
-                SliceTargetRows = asked?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows,
-                RefuseLateRows = asked?.RefuseLateRows ?? false,
-            }
-            : null;
-
     /// <summary>What vacuum keeps, as a header records it.</summary>
     internal RetentionSettings Retention => new RetentionSettings(RetainedVersions, (long)RetentionWindow.TotalSeconds);
 
@@ -412,7 +395,6 @@ public sealed record DatasetOptions
             Seed = header.Seed,
             LockedStore = false,
             ErasureDelay = header.ErasureDelay,
-            Periods = PeriodsOf(header, Periods),
             Clustering = header.Clustering,
         }
         : this with
@@ -420,7 +402,6 @@ public sealed record DatasetOptions
             Seed = header.Seed,
             LockedStore = true,
             ErasureDelay = null,
-            Periods = PeriodsOf(header, Periods),
             Clustering = header.Clustering,
             MarkedObjectBytes = 0,
             MarkedShare = 1,

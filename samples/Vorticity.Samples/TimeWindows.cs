@@ -8,7 +8,7 @@ using Vorticity.IO;
 
 namespace Vorticity.Samples;
 
-/// <summary>A request as a dataset of periods holds it.</summary>
+/// <summary>A request as a dataset clustered by day holds it.</summary>
 [VortexRecord]
 public partial record struct Request(DateTimeOffset At, string Service, string Method, short Status, string RequestId, long Bytes);
 
@@ -21,9 +21,9 @@ public partial record struct ServiceTotals(string Service, long Count, long Byte
 public partial record struct Logged(string Retention, DateTimeOffset At, string Message);
 
 /// <summary>
-/// The time-window part of the datasets page: a dataset compacted by periods, questions that read the rows their window
-/// reaches, a request found through its identifier, a window asked newest first, the objects' directories kept on the
-/// local disk, and rows of two retentions kept in a dataset each and expired on their own.
+/// The time-window part of the datasets page: a dataset whose objects each hold a day, questions that read the rows their
+/// window reaches, a request found through its identifier, a window asked day by day newest first, the objects'
+/// directories kept on the local disk, and rows of two retentions kept in a dataset each and expired on their own.
 /// </summary>
 internal static class TimeWindows
 {
@@ -38,7 +38,7 @@ internal static class TimeWindows
         await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(Request.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
             Identifiers = [nameof(Request.RequestId)],
         }))
         {
@@ -87,8 +87,8 @@ internal static class TimeWindows
             List<Request> found = await lookup.ToRecordsAsync().ToListAsync();
             Console.WriteLine($"{needle}: {found.Count} row, at {found[0].At:MM-dd HH:mm:ss}, {lookup.Metrics.BlocksPruned} blocks pruned");
 
-            // The newest day first, then the one before: each part's answer is final for its range of time.
-            await foreach (WindowPart<List<ServiceTotals>> part in dataset.AskNewestFirstAsync(from, to, async (start, end, ct) =>
+            // The newest day first, then the one before: each part's answer is final for its day.
+            await foreach (ValuePart<DateTimeOffset, List<ServiceTotals>> part in dataset.AskByValuesAsync(from, to, async (start, end, ct) =>
                 await dataset.Scan<Request>().Where(r => r.At >= start && r.At < end)
                     .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)))
                     .As<ServiceTotals>().ToRecordsAsync(ct).ToListAsync(ct)))
@@ -116,7 +116,10 @@ internal static class TimeWindows
         await dataset.Scan<Request>().Where(r => r.At >= Start && r.At < Start.AddDays(2))
             .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))).As<ServiceTotals>().ToRecordsAsync().ToListAsync();
 
-    /// <summary>Rows kept for different lengths of time: a dataset per retention, each expired on its own.</summary>
+    /// <summary>
+    /// Rows kept for different lengths of time: a dataset per retention, each expired on its own, its objects an hour's,
+    /// dropped unread once the expiry's bound passes them.
+    /// </summary>
     private static async Task RetentionAsync()
     {
         await using IObjectStore debugStore = new FileObjectStore(Demo.Path("retention-debug"));
@@ -124,7 +127,7 @@ internal static class TimeWindows
         DatasetOptions options = new DatasetOptions
         {
             ClusteringKey = [nameof(Logged.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
         };
         await using VortexDataset debug = await VortexDataset.CreateAsync(debugStore, Logged.Schema, options);
         await using VortexDataset info = await VortexDataset.CreateAsync(infoStore, Logged.Schema, options);
@@ -140,22 +143,11 @@ internal static class TimeWindows
         }
 
         long before = await debug.Scan<Logged>().CountAsync();
-        DateTimeOffset cutoff = await debug.ExpireAsync(Start.AddDays(2));
+        DateTimeOffset cutoff = Start.AddDays(2);
+        RowChangeResult expired = await debug.ExpireAsync<Logged>(r => r.At < cutoff);
         long kept = await debug.Scan<Logged>().CountAsync();
         long untouched = await info.Scan<Logged>().CountAsync();
-        Console.WriteLine($"debug lines expired before {cutoff:MM-dd}: {before} then {kept}; info lines untouched: {untouched}");
-
-        await using VortexDataset refusing = await VortexDataset.OpenAsync(infoStore, new DatasetOptions { Periods = new PeriodOptions { RefuseLateRows = true } });
-        try
-        {
-            await using ObjectDraft late = refusing.StartObject();
-            await late.Writer.WriteAsync<Logged>([new Logged("info", Start.AddHours(1), "a line two days late")]);
-            await refusing.AppendAsync(late);
-        }
-        catch (ArgumentException refused)
-        {
-            Console.WriteLine($"a late row refused: {refused.Message}");
-        }
+        Console.WriteLine($"debug lines expired before {cutoff:MM-dd}: {before} then {kept}, {expired.Rows} dropped; info lines untouched: {untouched}");
     }
 
     /// <summary>Appends <paramref name="rows"/> to <paramref name="dataset"/> as one object.</summary>

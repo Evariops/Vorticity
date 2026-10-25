@@ -280,8 +280,6 @@ internal static class DatasetCommitter
             SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired)
             {
                 WritePolicy = template.WritePolicy,
-                PeriodLength = template.PeriodLength,
-                PeriodChanges = template.PeriodChanges,
                 Identifiers = template.Identifiers,
                 ShreddedPaths = template.ShreddedPaths,
             };
@@ -381,7 +379,6 @@ internal static class DatasetCommitter
                 Schema = schema.Schema,
                 Retired = schema.Retired,
                 WritePolicy = schema.WritePolicy,
-                PeriodChanges = schema.PeriodChanges,
                 Identifiers = schema.Identifiers,
                 ShreddedPaths = schema.ShreddedPaths,
                 LastDataChange = ChangesRows(options.Kind, outcomes) ? version : LastDataChangeOf(template, parent),
@@ -390,12 +387,6 @@ internal static class DatasetCommitter
                 Features = template.Features | FeaturesOf(operations) | schema.Declared,
             };
             header = Fitted(WithoutHeld(header));
-            if (header.ByPeriods != header.Lateness.HasValue)
-            {
-                throw new InvalidOperationException(
-                    "A commit would write a header whose flag of periods and lateness horizon disagree, which every reader refuses.");
-            }
-
             // 3. One conditional creation. Once it is in, nothing after it can exist yet.
             string key = CommitKey.For(version);
             byte[] bytes = builder.Build(header);
@@ -1148,27 +1139,6 @@ internal static class DatasetCommitter
                     break;
                 }
 
-                case DatasetOperation.ChangePeriodLength change:
-                {
-                    // Dropped on a dataset with no periods, when worked out on a calendar another writer changed first, when it
-                    // asks for the length the calendar ends on already, or when it does not follow the calendar's last change:
-                    // the changes stay few, and in the order of their boundaries, which a calendar reads them in.
-                    IReadOnlyList<PeriodChange> held = schema.PeriodChanges;
-                    if (schema.PeriodLength is not { } first || held.Count != change.After
-                        || change.Change.Length == (held.Count > 0 ? held[^1].Length : first)
-                        || (held.Count > 0 && change.Change.From <= held[^1].From))
-                    {
-                        outcomes.Add(OperationOutcome.Dropped);
-                    }
-                    else
-                    {
-                        schema.PeriodChanges = [.. schema.PeriodChanges, change.Change];
-                        outcomes.Add(OperationOutcome.Applied);
-                    }
-
-                    break;
-                }
-
                 case DatasetOperation.AddIdentifiers add:
                 {
                     // Joined to those of the version it lands on, as two policies are, so that two writers adding one each
@@ -1628,12 +1598,6 @@ internal static class DatasetCommitter
 
         /// <summary>The indexes every writer builds, as the header records them.</summary>
         internal ReadOnlyMemory<byte> WritePolicy { get; set; }
-
-        /// <summary>The first period length, as the header records it; null for the default.</summary>
-        internal SliceWidth? PeriodLength { get; init; }
-
-        /// <summary>The changes of the period length, as the header records them.</summary>
-        internal IReadOnlyList<PeriodChange> PeriodChanges { get; set; } = [];
 
         /// <summary>The identifiers, as the header records them.</summary>
         internal IReadOnlyList<string> Identifiers { get; set; } = [];

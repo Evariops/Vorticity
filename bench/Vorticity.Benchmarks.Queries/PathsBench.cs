@@ -12,7 +12,7 @@ using Vorticity.IO;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// Every query path of a dataset of periods, at scale, over a store that waits a round trip per request
+/// Every query path of datasets clustered by hour or by day, at scale, over a store that waits a round trip per request
 /// (<c>--micro paths</c>): generated requests and log records written once into a directory that stands for the
 /// object store, then asked the questions of the time-window and variant designs, each from its synopses and from
 /// its rows, cold and warm, at each degree asked. The synopsis cache lives on the same disk, without the wait.
@@ -24,8 +24,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// tenth of a millisecond (<see cref="PreciseDelay"/>), the reads' bytes crossing one link of <c>--gbps</c> (10 by
 /// default, 0 for none) and each read's at most <c>--mbps</c> when set; the synopsis cache reads its own disk, with
 /// neither. A dataset is written the first time its parameters are asked for (<c>--hours</c>, <c>--rate</c> requests a
-/// second, <c>--log-rate</c> log records, <c>--design</c> at the design's own scale, its days loaded as sealed periods or,
-/// with <c>--incremental</c>, its hours appended and compacted as they come, <see cref="DesignBuild"/>) and kept beside a
+/// second, <c>--log-rate</c> log records, <c>--design</c> at the design's own scale, its hours appended and compacted as they come,
+/// <see cref="DesignBuild"/>) and kept beside a
 /// note of what it holds; <c>--rebuild</c> writes it again.
 /// </para>
 /// <para>
@@ -113,12 +113,6 @@ internal static partial class PathsBench
 
         internal bool Design { get; init; }
 
-        /// <summary>Whether <c>--design</c> appends its hours and compacts them as they come (<see cref="DesignBuild.FillAsync"/>) rather than load its days as sealed periods (<see cref="DesignBuild.LoadAsync"/>).</summary>
-        internal bool Incremental { get; init; }
-
-        /// <summary>The days a load of <c>--design</c> writes at once.</summary>
-        internal int ParallelPeriods { get; init; } = 4;
-
         internal int ParallelHours { get; init; } = 4;
 
         internal int PartMinutes { get; init; } = 10;
@@ -201,12 +195,10 @@ internal static partial class PathsBench
 
         Built requests = await EnsureAsync(
             settings,
-            $"requests-{(!settings.Design ? string.Empty : settings.Incremental ? "design-" : "design-load-")}h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}{(settings.RandomIds ? "-rid" : string.Empty)}",
+            $"requests-{(settings.Design ? "design-" : string.Empty)}clustered-h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}{(settings.RandomIds ? "-rid" : string.Empty)}",
             store => !settings.Design ? FillRequestsAsync(store, settings)
-                : settings.Incremental
-                ? DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"), settings.RandomIds)
-                : DesignBuild.LoadAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelPeriods, settings.WriteDegree, Path.Combine(settings.Store, "scratch"), settings.RandomIds));
-        Built logs = await EnsureAsync(settings, $"logs-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
+                : DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"), settings.RandomIds));
+        Built logs = await EnsureAsync(settings, $"logs-clustered-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
         Built? spans = !settings.Qp ? null : await EnsureAsync(settings, SpansName(settings), store => FillSpansAsync(store, settings));
         Built? logs2 = !settings.Qp ? null : await EnsureAsync(settings, LogsV2Name(settings), store => FillLogsV2Async(store, settings));
         if (settings.BuildOnly)
@@ -626,7 +618,8 @@ internal static partial class PathsBench
 
     /// <summary>
     /// The first result of an aggregation, as the client's review defines it: cold, by a session and a handle opened for it with
-    /// an empty synopsis cache, the window asked part by part newest first (<see cref="VortexDataset.AskNewestFirstAsync"/>), and
+    /// an empty synopsis cache, the window asked a clustering value at a time, newest first
+    /// (<see cref="VortexDataset.AskByValuesAsync{TValue, TAnswer}"/>), and
     /// the time its first part took to arrive. The other figures are the whole asking's, its groups the parts, its rows the
     /// answers' rows.
     /// </summary>
@@ -662,7 +655,7 @@ internal static partial class PathsBench
             double first = 0;
             long parts = 0;
             long rows = 0;
-            await foreach (WindowPart<long> part in dataset.AskNewestFirstAsync(window.From, window.To, async (from, to, ct) =>
+            await foreach (ValuePart<DateTimeOffset, long> part in dataset.AskByValuesAsync(window.From, window.To, async (from, to, ct) =>
             {
                 Asking asking = window.Ask(dataset, options, from, to);
                 long answered = 0;
@@ -770,16 +763,16 @@ internal static partial class PathsBench
 
     /// <summary>
     /// The client's spans (<see cref="SpanGeneratorV2"/>) of <c>--qp-hours</c> at <c>--qp-rate</c>, appended and compacted
-    /// as a client's ingestion does, in periods of a day, their trace and span ids declared identifiers; and the trace id of
+    /// as a client's ingestion does, clustered by day, their trace and span ids declared identifiers; and the trace id of
     /// a span in the middle, a needle.
     /// </summary>
     /// <summary>The name of the client's spans' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
     private static string SpansName(Settings settings) =>
-        $"spans-v2-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
+        $"spans-v2-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
 
     /// <summary>The name of the client's log records' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
     private static string LogsV2Name(Settings settings) =>
-        $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
+        $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
 
     /// <summary>
     /// <c>--qp-write spans|logs</c>: that one of the client's stores alone, built as <c>--qp</c> builds it, in a process of
@@ -828,7 +821,7 @@ internal static partial class PathsBench
         {
             Session = session,
             ClusteringKey = [nameof(GeneratedSpanV2.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
             Identifiers = [nameof(GeneratedSpanV2.TraceId), nameof(GeneratedSpanV2.SpanId)],
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
         };
@@ -866,7 +859,7 @@ internal static partial class PathsBench
         {
             Session = session,
             ClusteringKey = [nameof(LogRow.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
 
             // --declared: the keys of the attributes QP-3, QP-9 and QP-10 filter by, shredded by every job and every append.

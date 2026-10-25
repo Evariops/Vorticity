@@ -148,8 +148,9 @@ internal sealed record CommitHeader
         | DatasetFeatures.ShreddedPaths | DatasetFeatures.Clustering | DatasetFeatures.Rollups;
 
     /// <summary>
-    /// Whether the dataset is compacted by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which the lateness
-    /// horizon goes with, a header that names one and not the other being refused.
+    /// Whether an earlier library wrote the dataset by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which
+    /// every header after keeps. Its late level's objects overlap, as level 0's do, and its other levels' rows are in no
+    /// key order; it is read as it is, and compacted no further (<see cref="CompactionPolicy"/>).
     /// </summary>
     internal bool ByPeriods => (Features & DatasetFeatures.Periods) != 0;
 
@@ -159,25 +160,6 @@ internal sealed record CommitHeader
     /// for none. A header that carries one names <see cref="DatasetFeatures.ErasureDelay"/>.
     /// </summary>
     public TimeSpan? ErasureDelay { get; init; }
-
-    /// <summary>
-    /// The lateness horizon of a dataset compacted by periods (<see cref="DatasetOptions.Periods"/>),
-    /// fixed at creation and kept by every header; null for a dataset that is not. A header that
-    /// carries one names <see cref="DatasetFeatures.Periods"/>.
-    /// </summary>
-    public TimeSpan? Lateness { get; init; }
-
-    /// <summary>
-    /// The calendar unit a period of a dataset compacted by periods spans (<see cref="PeriodOptions.Length"/>),
-    /// which its every header names; null for a dataset that is not.
-    /// </summary>
-    internal SliceWidth? PeriodLength { get; init; }
-
-    /// <summary>
-    /// The changes of the period length the dataset made since its creation, in order
-    /// (<see cref="PeriodCalendar"/>); empty for none.
-    /// </summary>
-    internal IReadOnlyList<PeriodChange> PeriodChanges { get; init; } = [];
 
     /// <summary>
     /// The columns whose values questions look up (<see cref="DatasetOptions.Identifiers"/>), kept by
@@ -226,21 +208,15 @@ internal sealed record CommitHeader
         internal const int LastDataChange = 16;
         internal const int Features = 17;
         internal const int ErasureDelay = 18;
-        internal const int Lateness = 19;
+
+        // 19, 21 and 22 held the periods' lateness horizon, length and changes, retired with them: never reused, and
+        // skipped when an earlier library's header holds them.
         internal const int Identifiers = 20;
-        internal const int PeriodLength = 21;
-        internal const int PeriodChanges = 22;
 
         // 23 held the partition columns, retired with them: never reused.
         internal const int ShreddedPaths = 24;
         internal const int Clustering = 25;
         internal const int Rollups = 26;
-    }
-
-    internal static class PeriodChangeField
-    {
-        internal const int From = 1;
-        internal const int Length = 2;
     }
 
     internal static class SourceField
@@ -357,12 +333,6 @@ internal sealed record CommitHeader
             writer.WriteUInt64(Field.ErasureDelay, (ulong)delay.TotalSeconds);
         }
 
-        // Written even when zero: the field's presence is what says the dataset is compacted by periods.
-        if (Lateness is { } lateness)
-        {
-            writer.WriteUInt64Always(Field.Lateness, (ulong)lateness.TotalSeconds);
-        }
-
         foreach (string column in Identifiers)
         {
             writer.WriteString(Field.Identifiers, column);
@@ -371,26 +341,6 @@ internal sealed record CommitHeader
         foreach (string path in ShreddedPaths)
         {
             writer.WriteString(Field.ShreddedPaths, path);
-        }
-
-        if (PeriodLength is { } length)
-        {
-            writer.WriteUInt64Always(Field.PeriodLength, (ulong)length);
-        }
-
-        foreach (PeriodChange change in PeriodChanges)
-        {
-            ProtoWriter inner = new ProtoWriter();
-            try
-            {
-                inner.WriteSInt64Always(PeriodChangeField.From, change.From);
-                inner.WriteUInt64Always(PeriodChangeField.Length, (ulong)change.Length);
-                writer.WriteBytes(Field.PeriodChanges, inner.WrittenSpan);
-            }
-            finally
-            {
-                inner.Dispose();
-            }
         }
 
         if (Clustering is { } clustering)
@@ -599,11 +549,8 @@ internal sealed record CommitHeader
         ulong lastDataChange = 0;
         DatasetFeatures features = DatasetFeatures.None;
         TimeSpan? erasureDelay = null;
-        TimeSpan? lateness = null;
         List<string> identifiers = [];
         List<string> shreddedPaths = [];
-        SliceWidth? periodLength = null;
-        List<PeriodChange> periodChanges = [];
         ClusteringOptions? grouping = null;
         CommitLevel? rollups = null;
 
@@ -668,20 +615,11 @@ internal sealed record CommitHeader
                     case (Field.ErasureDelay, ProtoWireType.Varint):
                         erasureDelay = TimeSpan.FromSeconds((long)Math.Min(reader.ReadVarint(), MaxDelaySeconds));
                         break;
-                    case (Field.Lateness, ProtoWireType.Varint):
-                        lateness = TimeSpan.FromSeconds((long)Math.Min(reader.ReadVarint(), MaxDelaySeconds));
-                        break;
                     case (Field.Identifiers, ProtoWireType.LengthDelimited):
                         identifiers.Add(System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                         break;
                     case (Field.ShreddedPaths, ProtoWireType.LengthDelimited):
                         shreddedPaths.Add(System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
-                        break;
-                    case (Field.PeriodLength, ProtoWireType.Varint):
-                        periodLength = PeriodUnit(reader.ReadVarint());
-                        break;
-                    case (Field.PeriodChanges, ProtoWireType.LengthDelimited):
-                        periodChanges.Add(ReadPeriodChange(reader.ReadLengthDelimited()));
                         break;
                     case (Field.Clustering, ProtoWireType.LengthDelimited):
                         grouping = ReadClustering(reader.ReadLengthDelimited());
@@ -714,12 +652,6 @@ internal sealed record CommitHeader
                 $"A commit header names features 0x{(ulong)(features & ~KnownFeatures):x} this library does not know: a later library wrote the dataset.");
         }
 
-        if (((features & DatasetFeatures.Periods) != 0) != lateness.HasValue || lateness.HasValue != periodLength.HasValue)
-        {
-            throw new CommitFormatException(
-                "A commit header's flag of periods, its lateness horizon and its period length disagree: each goes with the others.");
-        }
-
         if (((features & DatasetFeatures.Clustering) != 0) != grouping is not null)
         {
             throw new CommitFormatException("A commit header's flag of clustering and its clustering disagree: each goes with the other.");
@@ -750,11 +682,8 @@ internal sealed record CommitHeader
             LastDataChange = lastDataChange,
             Features = features,
             ErasureDelay = erasureDelay,
-            Lateness = lateness,
             Identifiers = identifiers,
             ShreddedPaths = shreddedPaths,
-            PeriodLength = periodLength,
-            PeriodChanges = periodChanges,
             Clustering = grouping,
             Rollups = rollups,
         };
@@ -803,37 +732,6 @@ internal sealed record CommitHeader
             Value = function is { } named ? ClusteringValue.Of(named, unit, width, floatWidth) : null,
             ObjectBytes = (long)objectBytes,
         };
-    }
-
-    /// <summary>A period unit as a header writes it.</summary>
-    /// <exception cref="CommitFormatException">The code names no unit a period may span.</exception>
-    private static SliceWidth PeriodUnit(ulong unit) =>
-        unit is >= (ulong)SliceWidth.Minute and <= (ulong)SliceWidth.Month
-            ? (SliceWidth)unit
-            : throw new CommitFormatException($"A commit header names period unit {unit}, which is none of a minute, an hour, a day or a month.");
-
-    private static PeriodChange ReadPeriodChange(ReadOnlySpan<byte> bytes)
-    {
-        long from = 0;
-        ulong unit = 0;
-        ProtoReader reader = new ProtoReader(bytes);
-        while (reader.TryReadTag(out int field, out ProtoWireType wire))
-        {
-            switch (field, wire)
-            {
-                case (PeriodChangeField.From, ProtoWireType.Varint):
-                    from = reader.ReadSInt64();
-                    break;
-                case (PeriodChangeField.Length, ProtoWireType.Varint):
-                    unit = reader.ReadVarint();
-                    break;
-                default:
-                    reader.SkipField(wire);
-                    break;
-            }
-        }
-
-        return new PeriodChange(from, PeriodUnit(unit));
     }
 
     private static SourceOffset ReadSource(ReadOnlySpan<byte> bytes)

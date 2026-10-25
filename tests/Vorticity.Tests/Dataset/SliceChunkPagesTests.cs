@@ -8,7 +8,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Dataset;
 
-public sealed partial class TimeSliceTests
+public sealed class SliceChunkPagesTests
 {
     /// <summary>
     /// Ten chunks of a column laid in pages of four: the table says three pages and their checksums; each page reads back

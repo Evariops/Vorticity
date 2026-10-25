@@ -1,6 +1,4 @@
-// Expiry of a dataset of periods drops whole periods from what the leaves say, reading no data
-// object; and a delete whose filter the summaries prove true for every row of an object removes it
-// without reading it.
+// A delete whose filter the summaries prove true for every row of an object removes it without reading it.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,7 +11,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Dataset;
 
-public sealed partial class DatasetExpiryTests
+public sealed partial class DatasetUnreadDeleteTests
 {
     private static readonly DateTimeOffset Noon = new(2026, 10, 18, 12, 0, 0, TimeSpan.Zero);
 
@@ -22,46 +20,12 @@ public sealed partial class DatasetExpiryTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         ClusteringKey = [nameof(Reading.At)],
-        Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(10), Length = SliceWidth.Hour },
+        Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
     };
 
     /// <summary>
-    /// Three hours of rows, the first two sealed: an expiry before half past two drops the two sealed
-    /// hours and keeps the third, at the hour's start, reading no data object.
-    /// </summary>
-    [Fact]
-    public async Task AnExpiryDropsWholePeriodsAndReadsNoObject()
-    {
-        await using MemoryObjectStore memory = new MemoryObjectStore();
-        await using (VortexDataset writer = await VortexDataset.CreateAsync(memory, Reading.Schema, Options(), Ct))
-        {
-            await FillAsync(writer, hours: 3);
-        }
-
-        DataReads store = new DataReads(memory);
-        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(), Ct);
-        Assert.Equal(180, await CountAsync(dataset));
-
-        // Before the first hour's end: nothing lies wholly before noon.
-        Assert.Equal(Noon, await dataset.ExpireAsync(Noon.AddMinutes(30), Ct));
-        Assert.Equal(180, dataset.Levels.Rows);
-
-        store.Reads = 0;
-        Assert.Equal(Noon.AddHours(2), await dataset.ExpireAsync(Noon.AddMinutes(150), Ct));
-        Assert.Equal(0, store.Reads);
-        Assert.Equal(60, dataset.Levels.Rows);
-        List<DateTimeOffset> kept = await dataset.Scan<Reading>().Select(r => r.At).ToListAsync(Ct);
-        Assert.All(kept, at => Assert.True(at >= Noon.AddHours(2)));
-
-        // A dataset without periods has nothing to expire whole.
-        await using MemoryObjectStore plain = new MemoryObjectStore();
-        await using VortexDataset leveled = await VortexDataset.CreateAsync(plain, Reading.Schema, new DatasetOptions { ClusteringKey = [nameof(Reading.At)] }, Ct);
-        await Assert.ThrowsAsync<InvalidOperationException>(async () => await leveled.ExpireAsync(Noon, Ct));
-    }
-
-    /// <summary>
     /// A delete of every row before an hour's start removes the objects that lie wholly before it
-    /// unread, and opens only the one that straddles it.
+    /// unread, each an hour's.
     /// </summary>
     [Fact]
     public async Task ADeleteTrueForEveryRowOfAnObjectDoesNotReadIt()

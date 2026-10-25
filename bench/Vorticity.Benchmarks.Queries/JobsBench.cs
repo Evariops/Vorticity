@@ -13,21 +13,20 @@ using Vorticity.IO;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// What the compaction of a period costs at the time-window design's scale (<c>--micro seal</c>): the first
-/// <c>--minutes</c> minutes of each of <c>--hours</c> hours of requests at <c>--rate</c> a second, appended in parts of
-/// <c>--part-minutes</c>, the jobs due between two hours run as a dataset fed by its appends runs them; then a few rows
-/// past the last hour's period and its lateness, which close it. The jobs then due run until none is, each timed with its
-/// passes (the spans <c>vortex.dataset.compaction.plan</c> and <c>.write</c>) and the most private bytes the process held
-/// while it ran, and the cores the process kept busy meanwhile. The periods are hours, or days with <c>--day</c>. The
-/// store and the scratch lie in a directory of their own under <c>--store</c>, on the disk the design simulates its object
-/// store on, removed after.
+/// What a dataset's jobs cost at the time-window design's scale (<c>--micro jobs</c>): the first <c>--minutes</c> minutes
+/// of each of <c>--hours</c> hours of requests at <c>--rate</c> a second, appended in parts of <c>--part-minutes</c>, the
+/// jobs due between two hours run as a dataset fed by its appends runs them. The jobs then due run until none is, each
+/// timed with its passes (the spans <c>vortex.dataset.compaction.plan</c> and <c>.write</c>) and the most private bytes
+/// the process held while it ran, and the cores the process kept busy meanwhile. The objects are cut at every hour, or at
+/// every midnight with <c>--day</c>. The store and the scratch lie in a directory of their own under <c>--store</c>, on
+/// the disk the design simulates its object store on, removed after.
 /// </summary>
-internal static class SealBench
+internal static class JobsBench
 {
     internal static async Task<int> Run(
         string root, int minutes, double rate, int partMinutes, int ceiling, int writeDegree, int budget, bool lateRows = true, int hours = 1, bool days = false)
     {
-        string directory = Path.Combine(root, $"seal-{Guid.NewGuid():N}");
+        string directory = Path.Combine(root, $"jobs-{Guid.NewGuid():N}");
         string scratch = Path.Combine(directory, "scratch");
         Directory.CreateDirectory(scratch);
         ConcurrentQueue<(string Name, string Detail, double Milliseconds)> spans = new ConcurrentQueue<(string, string, double)>();
@@ -51,13 +50,12 @@ internal static class SealBench
             {
                 Session = session,
                 ClusteringKey = [nameof(GeneratedRequest.At)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = days ? SliceWidth.Day : SliceWidth.Hour },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(days ? CalendarUnit.Day : CalendarUnit.Hour) },
                 Identifiers = [nameof(GeneratedRequest.RequestId)],
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
             });
 
-            // Each hour's parts, appended in order, the jobs due run before the next hour's; then a few rows past the
-            // last hour's period and its lateness, which close it.
+            // Each hour's parts, appended in order, the jobs due run before the next hour's.
             long perHour = (long)(rate * 3_600);
             long begin = Stopwatch.GetTimestamp();
             int between = 0;
@@ -88,20 +86,6 @@ internal static class SealBench
                     between++;
                     betweenPeak = Math.Max(betweenPeak, memory.Peak);
                 }
-            }
-
-            RequestGenerator generator = new RequestGenerator(9_999, perHour);
-            GeneratedRequest[] tail = new GeneratedRequest[1_000];
-            DateTimeOffset closing = (days ? QuestionBench.Start.AddDays(Math.Ceiling(hours / 24.0)) : QuestionBench.Start.AddHours(hours)).AddMinutes(6);
-            for (int i = 0; i < tail.Length; i++)
-            {
-                tail[i] = generator.Next(closing.AddMilliseconds(i));
-            }
-
-            await using (ObjectDraft draft = dataset.StartObject())
-            {
-                await draft.Writer.WriteAsync<GeneratedRequest>(tail);
-                await dataset.AppendAsync(draft);
             }
 
             double written = Stopwatch.GetElapsedTime(begin).TotalSeconds;

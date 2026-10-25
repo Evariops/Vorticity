@@ -47,13 +47,6 @@ public sealed class ObjectDraft : IAsyncDisposable
     /// </summary>
     internal bool BySortedColumn { get; init; }
 
-    /// <summary>
-    /// Whether the object is written in time slices with no run on the clustering key, the instant
-    /// its slice table is on: its seal checks that a key cursor opens on that table, since nothing
-    /// else walks it by key.
-    /// </summary>
-    internal bool BySlices { get; init; }
-
     /// <summary>Abandons the object unless a commit took it.</summary>
     /// <returns>A task that completes when the writer's buffers are released.</returns>
     public async ValueTask DisposeAsync()

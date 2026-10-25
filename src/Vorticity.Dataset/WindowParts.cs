@@ -7,8 +7,8 @@ using System.Threading.Tasks;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// A window cut on a dataset's periods and asked part by part, newest first: what lets a page show the
-/// newest hours of a month while the rest is read.
+/// A range cut in parts and asked part by part, several at once, each answer delivered in the parts' order: what lets a
+/// page show the newest values of a range while the rest is read (<see cref="VortexDataset.AskByValuesAsync"/>).
 /// </summary>
 internal static class WindowParts
 {
@@ -19,45 +19,9 @@ internal static class WindowParts
     internal const int Width = 16;
 
     /// <summary>
-    /// The parts of the window from <paramref name="from"/> to <paramref name="to"/>, newest first: the
-    /// window cut at the starts of the periods it crosses, by the calendar the dataset's commits keep.
-    /// </summary>
-    internal static List<(DateTimeOffset From, DateTimeOffset To)> Of(PeriodCalendar calendar, DateTimeOffset from, DateTimeOffset to)
-    {
-        TimeUnit unit = calendar.Unit;
-        List<(DateTimeOffset, DateTimeOffset)> parts = [];
-        DateTimeOffset end = to;
-        while (end > from)
-        {
-            // The last instant before the part's end, which an instant counted down to its unit may be.
-            long last = TimeSlicer.InstantOf(end, unit);
-            if (TimeSlicer.TimeOf(last, unit) >= end)
-            {
-                last--;
-            }
-
-            DateTimeOffset start = TimeSlicer.TimeOf(calendar.Floor(last), unit);
-            start = start > from ? start : from;
-            parts.Add((start, end));
-            end = start;
-        }
-
-        return parts;
-    }
-
-    /// <summary>
-    /// Asks <paramref name="question"/> over each part, as many at once as <paramref name="width"/> says, and
-    /// delivers the answers in the parts' order, each once it and every part before it are in.
-    /// </summary>
-    internal static IAsyncEnumerable<WindowPart<TAnswer>> AskAsync<TAnswer>(
-        List<(DateTimeOffset From, DateTimeOffset To)> parts, int width,
-        Func<DateTimeOffset, DateTimeOffset, CancellationToken, ValueTask<TAnswer>> question,
-        CancellationToken cancellationToken) =>
-        AskAsync(parts, width, question, static (from, to, answer) => new WindowPart<TAnswer>(from, to, answer), cancellationToken);
-
-    /// <summary>
-    /// <see cref="AskAsync{TAnswer}"/> over parts of any bounds, taken from <paramref name="parts"/> as they are asked, each
-    /// answer delivered as the part <paramref name="part"/> makes of it.
+    /// Asks <paramref name="question"/> over each of <paramref name="parts"/>, taken as they are asked, as many at once as
+    /// <paramref name="width"/> says, and delivers the answers in the parts' order, each once it and every part before it
+    /// are in, as the part <paramref name="part"/> makes of it.
     /// </summary>
     internal static async IAsyncEnumerable<TPart> AskAsync<TBound, TAnswer, TPart>(
         IEnumerable<(TBound From, TBound To)> parts, int width,

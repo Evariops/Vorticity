@@ -61,28 +61,13 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         SheetMicro.RunAsync((int)Option(args, "--rows", 3_000_000), rounds)),
     ["counts"] = ("what each column's counts cost the writer and weigh, a counted column a row, one thread (CountsMicro.cs)", () =>
         CountsMicro.RunAsync((int)Option(args, "--rows", 3_000_000), Option(args, "--hours", 4), rounds)),
-    ["load"] = ("the write path of a load of sealed periods at the design's density, a few seconds a round (LoadMicro.cs)", () =>
-    {
-        int periods = Option(args, "--periods", 4);
-        return LoadMicro.Run(
-            Text(args, "--store") ?? BenchStores.Of("load-micro"),
-            periods,
-            Option(args, "--parallel", periods),
-            Option(args, "--minutes", 3),
-            Option(args, "--rate", 50_000),
-            Option(args, "--rounds", 3),
-            Option(args, "--budget", 100),
-            Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
-            args.Contains("--disk"),
-            Option(args, "--period-hours", 1));
-    }),
     ["entries"] = ("each object's entry in the tree of the dataset at --store, and what its table of contents holds", async () =>
     {
         await PathsBench.EntriesAsync(Text(args, "--store") ?? throw new ArgumentException("--micro entries reads the dataset at --store."));
         return 0;
     }),
-    ["seal"] = ("what the compaction of a period costs at the design's scale, job by job and pass by pass (SealBench.cs)", () => SealBench.Run(
-        Text(args, "--store") ?? BenchStores.Of("seal"),
+    ["jobs"] = ("what a dataset's jobs cost at the design's scale, job by job and pass by pass (JobsBench.cs)", () => JobsBench.Run(
+        Text(args, "--store") ?? BenchStores.Of("jobs"),
         Option(args, "--minutes", 10),
         Option(args, "--rate", 50_000),
         Option(args, "--part-minutes", 10),
@@ -109,7 +94,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["lifecycle"] = ("what a row costs from its append to its last rewrite, and the objects a window finds (LifecycleBench.cs)", () =>
         LifecycleBench.Run(
             (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
-            Text(args, "--style") == "leveled", (int)Option(args, "--period-hours", 1), Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
+            Text(args, "--clustering") ?? "hour", Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
             Text(args, "--late") != "off", Text(args, "--neighbours") != "off", (long)Option(args, "--max-object-mib", 0) << 20,
             Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0))),
     ["qp-dashboard"] = ("the client's questions of a --qp run's TSV against the review's targets, a Markdown table (QpDashboard.cs)", () =>
@@ -144,12 +129,10 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Option(args, "--budget", 100))),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
-    ["paths"] = ("every query path of a dataset of periods at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
+    ["paths"] = ("every query path of datasets clustered by hour or by day at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
     {
         Store = Text(args, "--store") ?? new PathsBench.Settings().Store,
         Design = args.Contains("--design"),
-        Incremental = args.Contains("--incremental"),
-        ParallelPeriods = Option(args, "--parallel-periods", 4),
         Hours = Option(args, "--hours", args.Contains("--design") ? 240 : 24),
         Rate = Option(args, "--rate", args.Contains("--design") ? 50_000 : 1_000),
         ParallelHours = Option(args, "--parallel-hours", 4),

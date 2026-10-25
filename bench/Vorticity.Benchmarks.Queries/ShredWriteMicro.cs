@@ -61,7 +61,7 @@ internal static class ShredWriteMicro
                 // As a job counts: text bounds cut as a text column's zones cut theirs, and the path
                 // directory built beside the choice.
                 long begin = Stopwatch.GetTimestamp();
-                PathCensus counted = new PathCensus(VortexWriteOptions.Default.StringBoundBytes, Vorticity.Dataset.TimeSlicer.DefaultTargetRows);
+                PathCensus counted = new PathCensus(VortexWriteOptions.Default.StringBoundBytes, Vorticity.Dataset.DatasetOptions.DefaultSliceTargetRows);
                 for (int b = 0; b < batches.Count; b++)
                 {
                     counted.Add(batches[b], field, instants[b]);

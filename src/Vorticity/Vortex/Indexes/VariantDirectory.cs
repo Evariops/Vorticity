@@ -61,8 +61,8 @@ internal sealed record PathEntry(
 /// holding the directory, behind a version byte and the body's length, the body one zstd frame.
 /// </summary>
 /// <remarks>
-/// It is counted from the rows a job of a dataset of periods parses anyway, in the first pass that
-/// cuts its slices, so an append, which parses nothing, writes none and drops the one it extends.
+/// It is counted from the rows a job parses anyway as it writes an object in key slices, so an append,
+/// which parses nothing, writes none and drops the one it extends.
 /// Each path names the slices it may hold a value in, which a question on it prunes the others by.
 /// Under the index budget, the paths of the residual held least are left out first, and a directory
 /// that left one out refutes nothing by a path's absence. Like every index it is a hint: a region that

@@ -255,7 +255,7 @@ public sealed partial class SlicedKeySourceTests
         Random random = new Random(7);
         Hit[] inTime = [.. Enumerable.Range(0, Rows).Select(i => new Hit(DateTimeOffset.FromUnixTimeMilliseconds((Noon / 1000) + (i / 3 * 90L)), random.Next(5)))];
         long[] instants = [.. inTime.Select(hit => Micros(hit.At))];
-        List<TimeSlice> slices = TimeSlicer.Cut(instants, TimeUnit.Microseconds, targetRows: 2_500);
+        List<TimeSlice> slices = Dataset.TimeSliceTests.Slices(instants, 2_500);
         List<Hit> sorted = [];
         foreach (TimeSlice slice in slices)
         {

@@ -7,8 +7,8 @@ namespace Vorticity.Dataset;
 /// The trees of one version of a dataset, one per level. Levels hold the lookup bound: at most
 /// eight objects in level 0 and key-disjoint objects in every level above, so a lookup by key
 /// touches at most eight plus the level count. Empty levels keep their place, since a level's
-/// number is its meaning. A dataset compacted by periods keeps one level above 0 whose objects
-/// overlap, its late level (<see cref="PeriodLevels"/>), under a ceiling as level 0 is.
+/// number is its meaning. A dataset an earlier library wrote by periods keeps one level above 0 whose
+/// objects overlap, its late level (<see cref="LateLevel"/>), which it is still read by.
 /// </summary>
 internal sealed class DatasetLevels
 {
@@ -31,7 +31,7 @@ internal sealed class DatasetLevels
     /// <summary>A dataset with nothing in it.</summary>
     public static DatasetLevels Empty => None;
 
-    /// <summary>Whether the dataset is compacted by periods, and so keeps a late level.</summary>
+    /// <summary>Whether an earlier library wrote the dataset by periods, and so it keeps a late level.</summary>
     public bool ByPeriods { get; }
 
     /// <summary>
@@ -44,7 +44,7 @@ internal sealed class DatasetLevels
     /// Whether a level of a dataset with a clustering key holds objects each written in the key's
     /// order, null keys last: every level above 0, which only a merge on the key writes into, since a
     /// plan refuses tiered levels for such a dataset. Level 0 holds what appends wrote, in any order,
-    /// and a dataset of periods writes its objects in time slices, whose rows it may order by another
+    /// and an earlier library wrote a dataset of periods in time slices, whose rows it may order by another
     /// column inside each slice: in the key's order slice by slice only. Off the key, a level's objects are in no order of it.
     /// </summary>
     public bool RowsInKeyOrder(int level) => level > 0 && !ByPeriods;
@@ -55,7 +55,10 @@ internal sealed class DatasetLevels
     /// level, whose sorted objects overlap as level 0's do. A read by key opens at most one object of
     /// such a level at a time.
     /// </summary>
-    public bool IsDisjoint(int level) => level > 0 && !(ByPeriods && level == PeriodLevels.Late);
+    public bool IsDisjoint(int level) => level > 0 && !(ByPeriods && level == LateLevel);
+
+    /// <summary>The late level of a dataset written by periods, whose objects overlap: what such a dataset is still read by.</summary>
+    internal const int LateLevel = 1;
 
     /// <summary>How many levels the version names; level numbers run from 0 to this minus one.</summary>
     public int Count => _levels.Length;

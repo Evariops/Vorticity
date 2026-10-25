@@ -39,8 +39,6 @@ public sealed partial class DatasetClusteringValueTests
             store, Event.Schema, Options([nameof(Event.Name)], ClusteringValue.Truncate(CalendarUnit.Day)), Ct));
         await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(
             store, Event.Schema, Options([nameof(Event.At)], ClusteringValue.Bucket(10)), Ct));
-        await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(
-            store, Event.Schema, Options([nameof(Event.At)], ClusteringValue.Column) with { Periods = new PeriodOptions() }, Ct));
 
         await using MemoryObjectStore sized = new MemoryObjectStore();
         await using VortexDataset unkeyed = await VortexDataset.CreateAsync(
