@@ -2778,50 +2778,157 @@ public sealed class VortexDataset : IAsyncDisposable
             entry.Uid, ct => OpenFooterlessAsync(entry, contents, ct), source => Footerless(source, entry, contents), regions, synopses, reader, cancellationToken);
 
     /// <summary>
+    /// A region of a rollup's counts that a reader of some values reads by its header, then their chunks, holds more than
+    /// this many chunks past its header: a smaller one is read whole, in the one request the header alone would take.
+    /// </summary>
+    internal const int PartialChunks = 4;
+
+    /// <summary>The bit that keys a region's header in the memo apart from the region read whole, which starts where it does.</summary>
+    private const ulong HeadKey = 1UL << 63;
+
+    /// <summary>
     /// The counts of column <paramref name="field"/> a rollup (<see cref="RollupEntry"/>) keeps over its objects, and when
     /// <paramref name="sketches"/> asks their sketches, side by side in one round trip with no open, none once this handle
-    /// read them: (null, null) for a column it keeps none of.
+    /// read them: (null, null) for a column it keeps none of, or whose bytes fail a checksum. Under
+    /// <paramref name="values"/>, the values a question reads alone, a large region (<see cref="ReadsInPart"/>) gives the
+    /// groups of the chunks that hold them alone, read after its header (<see cref="ReadRollupValuesAsync"/>).
     /// </summary>
     internal async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadRollupCountsAsync(
-        RollupEntry rollup, int field, bool sketches, CancellationToken cancellationToken)
+        RollupEntry rollup, int field, bool sketches, IReadOnlyList<byte[]>? values, CancellationToken cancellationToken)
     {
         if (rollup.ColumnOf(field) is not { } column)
         {
             return (null, null);
         }
 
+        if (ReadsInPart(column, sketches, values) && !_synopses.TryGet(rollup.Uid, column.Counts.Offset, out Indexes.ColumnCounts? _))
+        {
+            return await ReadRollupValuesAsync(rollup, column, sketches, values!, cancellationToken).ConfigureAwait(false);
+        }
+
         object?[] read = new object?[2];
         Indexes.IndexSegment?[] regions = [column.Counts, sketches ? column.Sketches : null];
-        if (Recalled(rollup.Uid, regions, read) > 0)
+        if (Recalled(rollup.Uid, regions, read, 0) > 0)
         {
-            await ReadRollupRegionsAsync(rollup, regions, read, cancellationToken).ConfigureAwait(false);
+            await ReadRollupRegionsAsync(rollup, regions, read, CountsOrSketches, 0, cancellationToken).ConfigureAwait(false);
         }
 
         return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
     }
 
-    /// <summary>The regions of the rollup <paramref name="rollup"/> its memo does not hold, apart as <see cref="ReadUnheldAsync"/> is.</summary>
-    private ValueTask ReadRollupRegionsAsync(RollupEntry rollup, Indexes.IndexSegment?[] regions, object?[] read, CancellationToken cancellationToken) =>
+    /// <summary>
+    /// Whether a reader of <paramref name="values"/> alone reads the totals <paramref name="column"/> by their header, then
+    /// the chunks that hold them: totals of more than <see cref="PartialChunks"/> chunks, each chunk and the header
+    /// checksummed, and their sketches too when <paramref name="sketches"/> asks them.
+    /// </summary>
+    internal static bool ReadsInPart(RollupColumn column, bool sketches, IReadOnlyList<byte[]>? values) =>
+        values is not null && column.CountsHead > 0
+        && column.Counts.Length - column.CountsHead > PartialChunks * Indexes.ColumnCounts.ChunkBytes
+        && (!sketches || column.Sketches is null || column.SketchesHead > 0);
+
+    /// <summary>
+    /// The groups of <paramref name="values"/> in a rollup's totals <paramref name="column"/>, and when
+    /// <paramref name="sketches"/> asks their sketches: the headers side by side in a round trip, then the chunks that hold
+    /// the values and their entries' sketches in another, each checked against its checksum, none once this handle read
+    /// them. The counts hold those chunks' groups alone, their entries from 0, and the sketches as many entries; (null,
+    /// null) when a header or a chunk fails its checksum.
+    /// </summary>
+    private async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadRollupValuesAsync(
+        RollupEntry rollup, RollupColumn column, bool sketches, IReadOnlyList<byte[]> values, CancellationToken cancellationToken)
+    {
+        Indexes.IndexSegment? sketched = sketches ? column.Sketches : null;
+        try
+        {
+            object?[] heads = new object?[2];
+            Indexes.IndexSegment?[] headRegions =
+            [
+                new Indexes.IndexSegment(column.Counts.Offset, (uint)column.CountsHead, 0),
+                sketched is { } region ? new Indexes.IndexSegment(region.Offset, (uint)column.SketchesHead, 0) : null,
+            ];
+            if (Recalled(rollup.Uid, headRegions, heads, HeadKey) > 0)
+            {
+                await ReadRollupRegionsAsync(rollup, headRegions, heads, Directories, HeadKey, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (heads[0] is not Indexes.CountsDirectory directory || (sketched is not null && heads[1] is not Indexes.SketchesDirectory)
+                || (directory.Groups > 0 && directory.Chunks.Count == 0))
+            {
+                return (null, null);
+            }
+
+            // The chunks of the values asked, then those of the sketches of every entry they hold.
+            Indexes.SketchesDirectory? sketchDirectory = heads[1] as Indexes.SketchesDirectory;
+            List<int> chunks = Indexes.ColumnCounts.ChunksOf(directory, values, leading: false);
+            List<int> sketchChunks = sketchDirectory is null ? [] : Indexes.ColumnSketches.ChunksOf(sketchDirectory, Indexes.ColumnCounts.EntriesOf(directory, chunks));
+            Indexes.IndexSegment?[] pieces = new Indexes.IndexSegment?[chunks.Count + sketchChunks.Count];
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                Indexes.CountsChunk chunk = directory.Chunks[chunks[i]];
+                pieces[i] = new Indexes.IndexSegment(column.Counts.Offset + (ulong)(directory.HeaderBytes + chunk.Offset), (uint)chunk.Length, 0);
+            }
+
+            for (int i = 0; i < sketchChunks.Count; i++)
+            {
+                (int offset, int length, _, _) = sketchDirectory!.Chunks[sketchChunks[i]];
+                pieces[chunks.Count + i] = new Indexes.IndexSegment(sketched!.Value.Offset + (ulong)(sketchDirectory.HeaderBytes + offset), (uint)length, 0);
+            }
+
+            object?[] read = new object?[pieces.Length];
+            if (Recalled(rollup.Uid, pieces, read, 0) > 0)
+            {
+                await ReadRollupRegionsAsync(rollup, pieces, read, Raw, 0, cancellationToken).ConfigureAwait(false);
+            }
+
+            ReadOnlyMemory<byte>[] bytes = new ReadOnlyMemory<byte>[read.Length];
+            for (int i = 0; i < read.Length; i++)
+            {
+                bytes[i] = read[i] as byte[] ?? throw new VortexFormatException("A chunk of a rollup's counts read no bytes.");
+            }
+
+            Indexes.ColumnCounts counts = Indexes.ColumnCounts.FromChunks(directory, chunks, bytes.AsSpan(0, chunks.Count).ToArray(), out int[] entries);
+            return (counts, sketchDirectory is null ? null : Indexes.ColumnSketches.FromEntries(sketchDirectory, sketchChunks, bytes[chunks.Count..], entries));
+        }
+        catch (VortexFormatException)
+        {
+            // A header or a chunk that fails its checksum reads none, as a region read whole does.
+            return (null, null);
+        }
+    }
+
+    /// <summary>The directory of a rollup's totals, at the first position, or of their sketches, at the second.</summary>
+    private static (object Synopsis, long Bytes) Directories(int position, ReadOnlySpan<byte> bytes) =>
+        position == 0 ? (Indexes.ColumnCounts.ReadDirectory(bytes), bytes.Length) : (Indexes.ColumnSketches.ReadDirectory(bytes), bytes.Length);
+
+    /// <summary>A chunk's bytes, which its directory checks once read.</summary>
+    private static (object Synopsis, long Bytes) Raw(int position, ReadOnlySpan<byte> bytes) => (bytes.ToArray(), bytes.Length);
+
+    /// <summary>
+    /// The regions of the rollup <paramref name="rollup"/> its memo does not hold, apart as <see cref="ReadUnheldAsync"/> is,
+    /// each as <paramref name="reader"/> reads it and kept under its offset with <paramref name="keyed"/>.
+    /// </summary>
+    private ValueTask ReadRollupRegionsAsync(
+        RollupEntry rollup, Indexes.IndexSegment?[] regions, object?[] read, SynopsisReader reader, ulong keyed, CancellationToken cancellationToken) =>
         ReadRegionsAsync(
             rollup.Uid,
             ct => SealedObjectStore.OpenDataAsync(_store, rollup.Key, rollup.Uid, rollup.Bytes, ct, null),
             source => SessionReader.Wrap(source, Session),
             regions,
             read,
-            CountsOrSketches,
-            cancellationToken);
+            reader,
+            cancellationToken,
+            keyed);
 
     /// <summary>
     /// Takes into <paramref name="synopses"/>, by their position, the regions <paramref name="regions"/> of the object of
-    /// <paramref name="uid"/> this handle read before, from its memo, and leaves them null among the regions: the number of
-    /// regions left to read.
+    /// <paramref name="uid"/> this handle read before, from its memo under their offsets with <paramref name="keyed"/>, and
+    /// leaves them null among the regions: the number of regions left to read.
     /// </summary>
-    private int Recalled(UInt128 uid, Indexes.IndexSegment?[] regions, object?[] synopses)
+    private int Recalled(UInt128 uid, Indexes.IndexSegment?[] regions, object?[] synopses, ulong keyed = 0)
     {
         int asked = 0;
         for (int i = 0; i < regions.Length; i++)
         {
-            if (regions[i] is { } region && _synopses.TryGet(uid, region.Offset, out object? held))
+            if (regions[i] is { } region && _synopses.TryGet(uid, region.Offset | keyed, out object? held))
             {
                 synopses[i] = held;
                 regions[i] = null;
@@ -2837,11 +2944,12 @@ public sealed class VortexDataset : IAsyncDisposable
     /// Reads into <paramref name="synopses"/>, by their position, the regions <paramref name="regions"/> of the object of
     /// <paramref name="uid"/> not null, those its memo does not hold (<see cref="Recalled"/>), each as
     /// <paramref name="reader"/> reads its bytes: side by side in one round trip through the reader <paramref name="open"/>
-    /// gives and <paramref name="wrap"/> wraps, and kept. A region whose bytes fail their checksum reads none.
+    /// gives and <paramref name="wrap"/> wraps, and kept under their offsets with <paramref name="keyed"/>. A region whose
+    /// bytes fail their checksum reads none.
     /// </summary>
     private async ValueTask ReadRegionsAsync(
         UInt128 uid, Func<CancellationToken, ValueTask<ISegmentReader>> open, Func<ISegmentReader, ISegmentReader> wrap,
-        Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader, CancellationToken cancellationToken)
+        Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader, CancellationToken cancellationToken, ulong keyed = 0)
     {
         int asked = 0;
         foreach (Indexes.IndexSegment? region in regions)
@@ -2868,7 +2976,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 {
                     (object synopsis, long bytes) = reader(i, requests.GetBuffer(slots[i]).Span);
                     synopses[i] = synopsis;
-                    _synopses.Keep(uid, regions[i]!.Value.Offset, synopsis, bytes);
+                    _synopses.Keep(uid, regions[i]!.Value.Offset | keyed, synopsis, bytes);
                 }
             }
         }

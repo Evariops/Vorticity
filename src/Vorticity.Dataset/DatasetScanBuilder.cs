@@ -597,7 +597,7 @@ internal sealed class DatasetScanBuilder
                 for (int ahead = o; ahead < objects.Count && ahead < o + width; ahead++)
                 {
                     reads[ahead] ??= objects[ahead].Field is not { } next ? NoCounts
-                        : ahead < rolled?.Count ? _dataset.ReadRollupCountsAsync(rolled[ahead], next, answer.AsksSketches, stopped.Token).AsTask()
+                        : ahead < rolled?.Count ? _dataset.ReadRollupCountsAsync(rolled[ahead], next, answer.AsksSketches, answer.Values, stopped.Token).AsTask()
                         : _dataset.ReadCountsAsync(objects[ahead].Held.Entry, next, answer.AsksSketches, stopped.Token).AsTask();
                 }
 
@@ -687,6 +687,13 @@ internal sealed class DatasetScanBuilder
             arena.Reset();
         }
     }
+
+    /// <summary>
+    /// The bytes a reader of <paramref name="values"/> values reads of <paramref name="region"/>, about: its header of
+    /// <paramref name="head"/> bytes, then a chunk a value at most.
+    /// </summary>
+    private static long InPart(Indexes.IndexSegment region, int head, int values) =>
+        head + Math.Min(region.Length - (long)head, (long)values * Indexes.ColumnCounts.ChunkBytes);
 
     /// <summary>The rollups <paramref name="rollups"/> takes, in their order.</summary>
     private static List<RollupEntry> Rolled(RollupChoice rollups)
@@ -1294,17 +1301,23 @@ internal sealed class DatasetScanBuilder
         RollupChoice? rollups = answer is null ? null : await RollupsAsync(answer, cancellationToken).ConfigureAwait(false);
         foreach ((RollupEntry rollup, int field) in rollups?.Chosen ?? [])
         {
+            // Under values asked, large totals read their header, then the chunks of the values, a chunk each at most.
             RollupColumn totals = rollup.ColumnOf(field)!.Value;
             Indexes.IndexSegment? sketched = answer!.AsksSketches ? totals.Sketches : null;
             string column = _version.Schema.Columns[field].Name;
+            bool inPart = VortexDataset.ReadsInPart(totals, answer.AsksSketches, answer.Values);
+            int regions = (sketched is null ? 1 : 2) * (inPart ? 2 : 1);
+            string read = inPart ? $"the header of the totals of {column} and the chunks of {answer.Values!.Length} values" : $"the totals of {column}";
             states.Add(new StatesStep(
                 rollup.Key,
                 "rollup",
-                $"the totals of {column}{(sketched is null ? string.Empty : " and their sketches")} over {rollup.Objects} objects, rank {rollup.Rank}",
-                sketched is null ? 1 : 2));
+                $"{read}{(sketched is null ? string.Empty : " and their sketches")} over {rollup.Objects} objects, rank {rollup.Rank}",
+                regions));
             keptRows += rollup.Rows;
-            segments += sketched is null ? 1 : 2;
-            bytes += totals.Counts.Length + (sketched?.Length ?? 0);
+            segments += regions;
+            bytes += inPart
+                ? InPart(totals.Counts, totals.CountsHead, answer.Values!.Length) + (sketched is { } some ? InPart(some, totals.SketchesHead, answer.Values.Length) : 0)
+                : totals.Counts.Length + (sketched?.Length ?? 0);
             mayMatch = true;
         }
 

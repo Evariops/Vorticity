@@ -139,12 +139,7 @@ internal sealed class CountsAnswer
             GroupPredicates.Conjuncts(filter, conjuncts);
             foreach (VortexExpr conjunct in conjuncts)
             {
-                (FieldExpr? asked, FilterLiteral[]? literals) = conjunct switch
-                {
-                    ComparisonExpr { Op: ComparisonOp.Equal } equal => (equal.Field, [equal.Value]),
-                    InExpr set => (set.Field, set.Literals),
-                    _ => (null, null),
-                };
+                (FieldExpr? asked, FilterLiteral[]? literals) = Asked(conjunct);
                 if (asked is not null && Top(asked, schema) is int field && (column is null || column == field)
                     && !(keyedElsewhere && field == leading)
                     && ValuesOf(literals!, schema.GetField(field)) is { } wanted)
@@ -521,6 +516,20 @@ internal sealed class CountsAnswer
 
         return ([.. keyFields], [.. measures], VortexTypes.ToDType(VortexSchema.Create([.. fields]), types));
     }
+
+    /// <summary>
+    /// The column and the values <paramref name="conjunct"/> asks by equality, by a set, or by a disjunction of them over
+    /// one column; (null, null) for any other.
+    /// </summary>
+    private static (FieldExpr? Field, FilterLiteral[]? Literals) Asked(VortexExpr conjunct) => conjunct switch
+    {
+        ComparisonExpr { Op: ComparisonOp.Equal } equal => (equal.Field, [equal.Value]),
+        InExpr set => (set.Field, set.Literals),
+        LogicalExpr { IsAnd: false } either
+            when Asked(either.Left) is (ColumnFieldExpr left, { } some) && Asked(either.Right) is (ColumnFieldExpr right, { } others)
+            && left.Path == right.Path => (left, [.. some, .. others]),
+        _ => (null, null),
+    };
 
     /// <summary>The top-level column <paramref name="field"/> reads as it is, or null for a path, a function or a column the schema lacks.</summary>
     private static int? Top(FieldExpr field, DType schema) =>

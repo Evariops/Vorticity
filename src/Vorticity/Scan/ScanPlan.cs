@@ -20,9 +20,12 @@ public sealed record PruningStep(string Structure, int BlocksPruned, int Segment
 /// its rows.
 /// </summary>
 /// <param name="Object">The object, by its key in the dataset.</param>
-/// <param name="Read">What it reads: <c>states</c>.</param>
+/// <param name="Read">What it reads: <c>states</c>, or <c>rollup</c> for a rollup's totals, which stand for its objects'.</param>
 /// <param name="Detail">The column whose counts it reads, and their sketches when a quantile asks them.</param>
-/// <param name="Count">The regions the states read: the counts, and their sketches.</param>
+/// <param name="Count">
+/// The regions the states read: the counts, and their sketches; a rollup's totals read in part, under the values a
+/// question asks, count their header and their chunks.
+/// </param>
 public sealed record StatesStep(string Object, string Read, string Detail, long Count);
 
 /// <summary>
