@@ -438,6 +438,19 @@ request a mebibyte of chunk. The explanation of each object names the path taken
 and those of the rows it was weighed against: errors by service read 114 bytes in a request from an
 object of 4 MiB, where its rows would take 33 KB in three *(measured, `DatasetBlockAnswerTests`)*.
 
+An object read as rows is read in two passes when its sheets say its filter keeps so few rows that most
+chunks of the widest column read would hold none: the columns of the filter first, the rows they keep
+marked, then the other columns for those rows alone, which read only the chunks that hold them. With `k`
+rows kept among `c` chunks of the widest column, about `min(k, c)` are read where every one was, at the
+price of a round trip more; the dataset takes the two passes when `2k ≤ c`. `k` is the sheets' count of
+the values an equality or a set asks: a frequent value's rows, none where the presence filter refutes
+it, else the rows the sheet leaves to its other values shared out evenly; a conjunction the least of its
+sides, a disjunction their sum. `c` is the chunks the object's contents count for each column. A rare
+code scattered among thirty rows of 100 000, whose bodies of 400 bytes lie in chunks of 512 rows, read
+4.8 MB in 36 requests in two passes, where the same filter as a range, which no sheet estimates, read
+30.3 MB in 198 *(measured, `DatasetTwoPhaseTests`)*. Where the rows lie together, in a value's blocks, the
+index of where each value lives (section 5.4) has already narrowed the read, and one pass reads them.
+
 ### 8.1 What each shape costs
 
 At the design rate, S3 profile, cold, one node, on the reference table clustered by emitter

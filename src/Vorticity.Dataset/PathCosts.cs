@@ -34,7 +34,8 @@ internal static class PathCosts
 
     /// <summary>
     /// Reading the rows of <paramref name="fields"/> of the object <paramref name="entry"/> names: its open, then each
-    /// column's chunks, a request each; every column's bytes, the object's, when its contents say none.
+    /// column's chunks, a request each, as its contents count them or a mebibyte each; every column's bytes, the object's,
+    /// when its contents say none.
     /// </summary>
     internal static Cost Rows(ObjectEntry entry, ReadOnlySpan<int> fields)
     {
@@ -44,13 +45,14 @@ internal static class PathCosts
             return new Cost(1 + (int)Math.Min(int.MaxValue - 1, (entry.Bytes + ChunkBytes - 1) / ChunkBytes), entry.Bytes);
         }
 
+        IReadOnlyList<long>? chunks = entry.Contents?.ColumnChunks;
         int requests = 1;
         long bytes = 0;
         foreach (int field in fields)
         {
             long column = field < columns.Count ? columns[field] : 0;
             bytes += column;
-            requests += (int)Math.Min(int.MaxValue / 2, (column + ChunkBytes - 1) / ChunkBytes);
+            requests += (int)Math.Min(int.MaxValue / 2, chunks is { } known && field < known.Count ? known[field] : (column + ChunkBytes - 1) / ChunkBytes);
         }
 
         return new Cost(requests, bytes);

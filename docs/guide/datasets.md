@@ -153,6 +153,11 @@ map leaves rows out, a filter on one endpoint read 1.3 MB in 8 requests, where t
 as a prefix, which no index answers, read 14.4 MB in 131. A value that lives in more than half an
 object's blocks is read with the whole object.
 
+A value that is rare but scattered, which no index places, is read in two passes when the sheets say
+so: the filter's columns first, then the other columns only for the rows it kept, from the chunks that
+hold them. A code held by thirty rows of 100 000 scattered over the objects, under bodies of 400 bytes,
+read 4.8 MB in 36 requests that way, where one pass over every body read 30.3 MB in 198.
+
 Row positions are the dataset's. A batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows object after object, in the order a scan delivers them. A key cursor over the
 clustering key merges the cursors of the objects, and its `CountAtKeyAsync` is the number of entries

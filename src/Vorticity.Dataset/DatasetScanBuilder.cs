@@ -1313,6 +1313,27 @@ internal sealed class DatasetScanBuilder
                 yield break;
             }
 
+            if (columns is null && !held.Entry.HasDeletions && _take is null && _filter is { } asked
+                && await TwoPhaseAsync(held, asked, cancellationToken).ConfigureAwait(false) is { } filtered)
+            {
+                // A filter its sheets say keeps so few rows that most chunks of the widest column read hold none: its own
+                // columns first, then the rest for the rows it keeps alone, which read only the chunks that hold them.
+                long[] kept = await KeptAsync(lease.File, held, asked, filtered, cancellationToken).ConfigureAwait(false);
+                if (kept.Length > 0)
+                {
+                    RecordBatch? view = null;
+                    ScanBuilder scan = Configure(lease.File.ScanBuilder(), null, _mask, canonical: false).Take(kept);
+                    using QueryMemory? ahead = ReadsAhead(scan, lease.File);
+                    await foreach (RecordBatch batch in scan.ExecuteAsync()
+                        .WithCancellation(cancellationToken).ConfigureAwait(false))
+                    {
+                        yield return InDataset(batch, held.FirstRow, ref view);
+                    }
+                }
+
+                yield break;
+            }
+
             if (columns is null && !held.Entry.HasDeletions)
             {
                 // The object's own scan, which every object of the version's schema with no row
@@ -2109,6 +2130,90 @@ internal sealed class DatasetScanBuilder
         }
     }
 
+
+    /// <summary>
+    /// The columns of <paramref name="filter"/> when the object <paramref name="held"/> is read in two passes
+    /// (<see cref="TwoPhaseReads"/>): a filter on top-level columns alone, whose sheets say it keeps rows fewer than half the
+    /// chunks of the widest other column read, as the object's contents count them; null to read it in
+    /// one. Its sheets are those the walk read, which the handle keeps.
+    /// </summary>
+    private async ValueTask<FieldMask?> TwoPhaseAsync(PositionedObject held, VortexExpr filter, CancellationToken cancellationToken)
+    {
+        DType schema = _version.Schema.DType;
+        if (!_summaries || held.Entry.Contents is not { ColumnChunks.Count: > 0, Sheets.Count: > 0 } contents || schema.IsDefault
+            || !SheetPruning.Asks(filter, schema) || WidestChunks(contents, null) < TwoPhaseReads.LeastChunks)
+        {
+            // Too few chunks in any column read to spare one, decided before the filter is looked into.
+            return null;
+        }
+
+        List<int> fields = [];
+        foreach (string path in new SummaryPruner(filter).Paths)
+        {
+            if (path.Contains('.', StringComparison.Ordinal) || schema.IndexOfField(path) is not (int field and >= 0))
+            {
+                return null;
+            }
+
+            fields.Add(field);
+        }
+
+        // The widest column the rows read besides the filter's, in chunks.
+        long chunks = WidestChunks(contents, fields);
+        if (chunks < TwoPhaseReads.LeastChunks)
+        {
+            return null;
+        }
+
+        List<int> asked = SheetPruning.Columns(filter, schema);
+        Indexes.ColumnSheet?[] sheets = await _dataset.ReadSheetsAsync(held.Entry, asked, cancellationToken).ConfigureAwait(false);
+        long? kept = TwoPhaseReads.ExpectedRows(filter, schema, field => asked.IndexOf(field) is int at and >= 0 ? sheets[at] : null);
+        return kept is long rows && TwoPhaseReads.Pays(rows, chunks) ? FieldMasks.Of(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(fields)) : null;
+    }
+
+    /// <summary>The chunks of the widest column the scan reads in an object of <paramref name="contents"/>, those of <paramref name="besides"/> aside.</summary>
+    private long WidestChunks(Indexes.ObjectContents contents, List<int>? besides)
+    {
+        DType schema = _version.Schema.DType;
+        long chunks = 0;
+        int read = _mask is { } mask ? mask.SelectedCount(schema.FieldCount) : schema.FieldCount;
+        for (int i = 0; i < read; i++)
+        {
+            int field = _mask is { } selected ? selected.SelectedField(i) : i;
+            if (besides?.Contains(field) != true && field < contents.ColumnChunks.Count)
+            {
+                chunks = Math.Max(chunks, contents.ColumnChunks[field]);
+            }
+        }
+
+        return chunks;
+    }
+
+    /// <summary>
+    /// The rows of the object <paramref name="held"/> <paramref name="filter"/> keeps, by their place in its file, read from
+    /// its columns <paramref name="filtered"/> alone, its batches whole with the rows kept marked.
+    /// </summary>
+    private async ValueTask<long[]> KeptAsync(VortexFile file, PositionedObject held, VortexExpr filter, FieldMask filtered, CancellationToken cancellationToken)
+    {
+        List<long> kept = [];
+        ScanBuilder scan = Of(file, held, filter, filtered, canonical: false).WithCompaction(false);
+        await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            using (batch)
+            {
+                ReadOnlySpan<ulong> words = batch.SelectionWords;
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    if (words.IsEmpty || ((words[row >> 6] >> (row & 63)) & 1) != 0)
+                    {
+                        kept.Add(batch.StartRow + row);
+                    }
+                }
+            }
+        }
+
+        return [.. kept];
+    }
 
     /// <summary>Keeps the ranges of the object <paramref name="held"/>'s rows a selected row may lie in, which its read takes alone.</summary>
     private void Narrow(PositionedObject held, RowRange[] ranges)

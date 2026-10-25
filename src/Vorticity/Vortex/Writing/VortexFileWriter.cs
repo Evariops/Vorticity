@@ -175,6 +175,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // The table of contents of a sliced file, built once its regions are written, before the directory's.
     private ObjectContents? _contents;
 
+    /// <summary>The chunks of each top-level column's data, by its place: one a segment it wrote.</summary>
+    private long[] ColumnChunks()
+    {
+        long[] chunks = new long[_isTabular ? _fieldCount : 0];
+        for (int field = 0; field < chunks.Length; field++)
+        {
+            chunks[field] = _columnSegments[field].Count;
+        }
+
+        return chunks;
+    }
+
     /// <summary>
     /// The table of contents of a sliced file: its slices' table and chunk directories, its variant columns' path
     /// directories.
@@ -183,7 +195,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
         List<(int Field, IndexSegment Region)> blocks, List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres,
-        long[] columnBytes) =>
+        long[] columnBytes, long[] columnChunks) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
@@ -194,6 +206,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             BlockStats = blockStats,
             Wheres = wheres,
             ColumnBytes = columnBytes,
+            ColumnChunks = columnChunks,
         };
 
     /// <summary>
@@ -2556,7 +2569,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_slices is { } sliced)
             {
                 _contents = Contents(
-                    sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, blocks, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0));
+                    sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, blocks, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks());
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

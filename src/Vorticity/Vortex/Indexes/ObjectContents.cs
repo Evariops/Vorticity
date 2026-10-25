@@ -128,6 +128,12 @@ internal sealed class ObjectContents(
     /// </summary>
     internal IReadOnlyList<long> ColumnBytes { get; init; } = [];
 
+    /// <summary>
+    /// The chunks of each top-level column's data in the object, by the column's place: the requests reading its rows
+    /// takes, one a chunk, and the chunks a read of a few rows spares. Empty when the object does not say.
+    /// </summary>
+    internal IReadOnlyList<long> ColumnChunks { get; init; } = [];
+
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
         foreach ((int column, IndexSegment region) in regions)
@@ -166,6 +172,7 @@ internal sealed class ObjectContents(
             BlockStats = BlockStats,
             Wheres = Wheres,
             ColumnBytes = ColumnBytes,
+            ColumnChunks = ColumnChunks,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -234,6 +241,9 @@ internal sealed class ObjectContents(
 
     // The bytes of each top-level column's data, packed, by the column's place.
     private const int TagColumnBytes = 20;
+
+    // The chunks of each top-level column's data, packed, by the column's place.
+    private const int TagColumnChunks = 21;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -454,6 +464,15 @@ internal sealed class ObjectContents(
                 }
             }
 
+            if (ColumnChunks.Count > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnChunks);
+                foreach (long chunks in ColumnChunks)
+                {
+                    writer.WriteVarint((ulong)chunks);
+                }
+            }
+
             if (DirectoryRegion is { } directoryRegion)
             {
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
@@ -505,6 +524,7 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> blockStats = [];
             List<(int, IndexSegment)> wheres = [];
             List<long> columnBytes = [];
+            List<long> columnChunks = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -592,6 +612,14 @@ internal sealed class ObjectContents(
                         }
 
                         break;
+                    case (TagColumnChunks, ProtoWireType.LengthDelimited):
+                        ProtoReader chunked = reader.ReadMessage();
+                        while (!chunked.End)
+                        {
+                            columnChunks.Add(checked((long)chunked.ReadVarint()));
+                        }
+
+                        break;
                     case (TagWhere, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } placed)
                         {
@@ -640,6 +668,7 @@ internal sealed class ObjectContents(
                     BlockStats = blockStats,
                     Wheres = wheres,
                     ColumnBytes = columnBytes,
+                    ColumnChunks = columnChunks,
                 }
                 : null;
         }
