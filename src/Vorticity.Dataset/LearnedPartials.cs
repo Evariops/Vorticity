@@ -66,6 +66,68 @@ internal sealed class LearnedPartials
         return true;
     }
 
+    // The objects a compaction merged whole into one, by the one's identity: their partials sum to its own.
+    private readonly ConcurrentDictionary<UInt128, UInt128[]> _merged = new();
+
+    /// <summary>
+    /// Records that the object <paramref name="output"/> holds the rows of <paramref name="inputs"/>, all of them and no
+    /// other, as a compaction that wrote it alone from them, none with a row marked, says once it committed: the partials of
+    /// the inputs, summed, are its own, in the handle and in the session's cache.
+    /// </summary>
+    internal void Inherit(UInt128 output, UInt128[] inputs, SynopsisCache? cache)
+    {
+        _merged[output] = inputs;
+        if (cache is not null)
+        {
+            byte[] kept = new byte[(inputs.Length * 16) + 16];
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                WriteHash(kept.AsSpan(i * 16), inputs[i]);
+            }
+
+            WriteHash(kept.AsSpan(inputs.Length * 16), XxHash128.HashToUInt128(kept.AsSpan(0, inputs.Length * 16)));
+            cache.AdmitSealed(output, LineageName(output), kept);
+        }
+    }
+
+    /// <summary>The objects whose rows the object <paramref name="uid"/> holds, which a compaction merged into it alone; null when none is known.</summary>
+    internal UInt128[]? MergedInto(UInt128 uid, SynopsisCache? cache)
+    {
+        if (_merged.TryGetValue(uid, out UInt128[]? inputs))
+        {
+            return inputs;
+        }
+
+        if (cache is null || !cache.TryReadSealed(LineageName(uid), MaxInputs * 16 + 16, out SegmentOwner owner))
+        {
+            return null;
+        }
+
+        using (owner)
+        {
+            ReadOnlySpan<byte> bytes = owner.Buffer.Span;
+            if (bytes.Length < 32 || bytes.Length % 16 != 0 || XxHash128.HashToUInt128(bytes[..^16]) != ReadHash(bytes[^16..]))
+            {
+                cache.DropSealed(LineageName(uid));
+                return null;
+            }
+
+            inputs = new UInt128[(bytes.Length / 16) - 1];
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                inputs[i] = ReadHash(bytes[(i * 16)..]);
+            }
+        }
+
+        _merged[uid] = inputs;
+        return inputs;
+    }
+
+    /// <summary>The objects a compaction merges whose lineage is kept at most.</summary>
+    internal const int MaxInputs = 4_096;
+
+    private static string LineageName(UInt128 uid) => string.Create(CultureInfo.InvariantCulture, $"{uid:x32}-lineage");
+
     /// <summary>Whether the handle or the cache holds the partial of family <paramref name="family"/> of the object <paramref name="uid"/>, with no read of it.</summary>
     internal bool Holds(UInt128 uid, UInt128 family, SynopsisCache? cache) =>
         _held.ContainsKey((uid, family)) || cache?.HoldsSealed(NameOf(uid, family)) == true;

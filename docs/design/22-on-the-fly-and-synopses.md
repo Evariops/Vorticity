@@ -376,8 +376,17 @@ learns that family no more. The plan says `partial`, learned or to learn. Learni
 rows of the family's columns, which a question with a scattered column's value reads anyway: on four
 services of 20 000 calls, counts and sums by route under one status read 542 KB the first time, as the
 rows do, and nothing under another status, nor from a handle opened later on the same cache
-*(measured, `DatasetLearnedPartialsTests`)*. Not built yet: the sum of partials through a compaction
-(F2), the families kept up as objects are written (F3), the store beside the rollups.
+*(measured, `DatasetLearnedPartialsTests`)*. Only the objects a job wrote learn, on a version that keeps
+counts: letting appended objects learn too, and versions without counts, raised what a dozen ratchets of
+the rows' path allocate warm two to five times, and made the test of 5.7 million groups learn partials
+past its budget. Through a compaction, a job notes which outputs each input's rows went to, the merge's
+runs each coming from one input; an output whose every input sent it all its rows, none of them marked,
+holds theirs, all and no other, and the handle and the session's cache keep its inputs' identities. A
+question that finds no partial of the output sums its inputs' (`LearnedFamily.MergeAsync`, the
+family's plan over their states, to the bits their rows would give), found so in turn up to eight merges
+deep, and keeps the sum as the output's: an object rewritten into the next level is answered with no row
+read *(measured)*. Not built yet: the families kept up as objects are written (F3), the store beside
+the rollups.
 
 ### 5.7 The caches
 

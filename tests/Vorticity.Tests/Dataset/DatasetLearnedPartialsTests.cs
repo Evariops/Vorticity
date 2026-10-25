@@ -64,6 +64,64 @@ public sealed partial class DatasetLearnedPartialsTests
         Assert.All(plan.States, step => Assert.Equal(("partial", "the partial of the question's family it learned"), (step.Read, step.Detail)));
     }
 
+    /// <summary>
+    /// The objects a job wrote of an hour learn the family; their level, past its size, is rewritten into the next, each
+    /// object into one of the same rows under another identity, whose partial is its input's. Asked after, with another
+    /// value, the family reads no row, and answers as the rows do.
+    /// </summary>
+    [Fact]
+    public async Task APartialOutlivesARewriteOfItsObject()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Call.At)],
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            ContentsObjectBytes = 1,
+            SheetObjectBytes = 0,
+        }, Ct);
+        Random random = new Random(0xF2);
+        for (int part = 0; part < 4; part++)
+        {
+            Call[] rows = [.. Enumerable.Range(0, 2_000).Select(i => new Call(
+                $"svc-{random.Next(4)}",
+                Noon.AddMinutes(part * 15).AddTicks(random.NextInt64(TimeSpan.FromMinutes(15).Ticks)),
+                $"h-{random.Next(12)}",
+                $"/r{random.Next(6)}",
+                (short)(random.Next(20) switch { < 14 => 200, < 17 => 404, < 19 => 500, _ => 503 }),
+                random.Next(4_000) / 4.0,
+                random.Next(1_000_000)))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Call>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
+            {
+            }
+        }
+
+        string[] keys = ["Route"];
+        string[] results = ["Route", "count()", "sum(Size)", "avg(Latency)"];
+        Assert.Equal(
+            await DatasetPlannerTests.AskAsync(dataset, keys, results, "Status = 404", synopses: false),
+            await DatasetPlannerTests.AskAsync(dataset, keys, results, "Status = 404", synopses: true));
+        HashSet<string> learned = [.. (await dataset.ScanBuilder().ObjectsAsync(Ct).ToListAsync(Ct)).Select(held => held.Entry.Key)];
+
+        int rewrites = 0;
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1 }, Ct) is { } compacted)
+        {
+            rewrites += compacted.FromLevel > 0 && compacted.Outcome == OperationOutcome.Applied ? 1 : 0;
+        }
+
+        Assert.True(rewrites > 0, "the objects are rewritten into the next level");
+        Assert.Contains(await dataset.ScanBuilder().ObjectsAsync(Ct).ToListAsync(Ct), held => !learned.Contains(held.Entry.Key));
+        List<string> rows500 = await DatasetPlannerTests.AskAsync(dataset, keys, results, "Status = 500", synopses: false);
+        store.Reset();
+        List<string> inherited = await DatasetPlannerTests.AskAsync(dataset, keys, results, "Status = 500", synopses: true);
+        Assert.Equal(rows500, inherited);
+        Assert.True(store.BytesRead == 0, $"{store.BytesRead} bytes in {store.Requests} requests after the rewrites, where the inputs' partials hold the answer");
+    }
+
     /// <summary>Quantiles and approximate distinct counts, whose states are sketches, are learned and answered as the rows give them.</summary>
     [Fact]
     public async Task SketchesAreLearnedToo()

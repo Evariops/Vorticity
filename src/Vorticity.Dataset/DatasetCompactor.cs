@@ -148,6 +148,7 @@ internal static class DatasetCompactor
         // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
         ObjectStream outputs;
         long rows;
+        Provenance? provenance = null;
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
         {
@@ -166,9 +167,10 @@ internal static class DatasetCompactor
                 };
                 try
                 {
+                    provenance = new Provenance();
                     rows = merge
-                        ? await MergeAsync(dataset, schema, job, key!, outputs, cancellationToken).ConfigureAwait(false)
-                        : await ConcatenateAsync(dataset, schema, job, outputs, cancellationToken).ConfigureAwait(false);
+                        ? await MergeAsync(dataset, schema, job, key!, outputs, provenance, cancellationToken).ConfigureAwait(false)
+                        : await ConcatenateAsync(dataset, schema, job, outputs, provenance, cancellationToken).ConfigureAwait(false);
                     await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                     break;
                 }
@@ -225,6 +227,20 @@ internal static class DatasetCompactor
 
         CommitResult commit = await dataset
             .CommitAsync([replacement], CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
+
+        // An object written from inputs none of which a delete marked, each of which sent it every row, holds their rows,
+        // all and no other: the partials the questions learned of them, summed, are its own (LearnedPartials).
+        OperationOutcome outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied;
+        if (outcome == OperationOutcome.Applied && !job.Inputs.Any(static input => input.Entry.HasDeletions))
+        {
+            for (int o = 0; o < outputs.Written.Count; o++)
+            {
+                if (provenance!.SoleInputsOf(o, job.Inputs) is { Length: > 0 and <= LearnedPartials.MaxInputs } inputs)
+                {
+                    dataset.Partials.Inherit(outputs.Written[o].Entry.Uid, inputs, dataset.Session.Options.SynopsisCache);
+                }
+            }
+        }
 
         return new CompactionResult
         {
@@ -431,9 +447,49 @@ internal static class DatasetCompactor
         return LiveRows.OrderedAsync(ordered, nulls, entry.Deletions, descending: false, cancellationToken);
     }
 
+    /// <summary>
+    /// Which outputs each input's rows went to, as a job writes them, an input by its key: an output whose every input sent it
+    /// all its rows holds theirs, all and no other, and inherits the partials learned of them.
+    /// </summary>
+    private sealed class Provenance
+    {
+        private readonly Dictionary<string, HashSet<int>> _outputs = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+
+        /// <summary>Notes that rows of input <paramref name="input"/> go to output <paramref name="output"/>, by its place among the outputs.</summary>
+        internal void Wrote(string input, int output)
+        {
+            if (!_outputs.TryGetValue(input, out HashSet<int>? outputs))
+            {
+                _outputs[input] = outputs = [];
+            }
+
+            outputs.Add(output);
+        }
+
+        /// <summary>The identities of the inputs whose rows output <paramref name="output"/> holds, when each sent it every row; null when one sent rows elsewhere too.</summary>
+        internal UInt128[]? SoleInputsOf(int output, IReadOnlyList<CompactionInput> inputs)
+        {
+            List<UInt128> sole = [];
+            foreach (CompactionInput input in inputs)
+            {
+                if (_outputs.TryGetValue(input.Entry.Key, out HashSet<int>? outputs) && outputs.Contains(output))
+                {
+                    if (outputs.Count > 1)
+                    {
+                        return null;
+                    }
+
+                    sole.Add(input.Entry.Uid);
+                }
+            }
+
+            return [.. sole];
+        }
+    }
+
     /// <summary>Each input's rows, in its own order, one after another.</summary>
     private static async ValueTask<long> ConcatenateAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ObjectStream outputs, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ObjectStream outputs, Provenance provenance, CancellationToken cancellationToken)
     {
         long rows = 0;
         foreach (CompactionInput input in job.Inputs)
@@ -445,6 +501,7 @@ internal static class DatasetCompactor
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     await outputs.RollIfFullAsync(cancellationToken).ConfigureAwait(false);
+                    provenance.Wrote(input.Entry.Key, outputs.Written.Count);
                     await outputs.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
                     rows += batch.RowCount;
                 }
@@ -461,6 +518,7 @@ internal static class DatasetCompactor
         CompactionJob job,
         ClusteringKey key,
         ObjectStream outputs,
+        Provenance provenance,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<string> paths = key.Paths;
@@ -503,6 +561,7 @@ internal static class DatasetCompactor
                     outputs.Starts(merge.KeyAt(at));
                     outputs.Block(merge, at, end);
                     outputs.Note(merge.KeyAt(end - 1));
+                    provenance.Wrote(merge.CurrentObject, outputs.Written.Count);
                     await outputs.WriteAsync(at == 0 && end == run.RowCount ? run : run.Window(at, end - at), cancellationToken).ConfigureAwait(false);
                 }
 

@@ -105,6 +105,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     /// <summary>The most inputs held open at once.</summary>
     internal int MostOpen { get; private set; }
 
+    /// <summary>The key in the store of the object the run comes from.</summary>
+    internal string CurrentObject => Emitting().Object;
+
     /// <summary>Where the rows of the object the run comes from start among the dataset's.</summary>
     internal long CurrentFirstRow => Emitting().FirstRow;
 

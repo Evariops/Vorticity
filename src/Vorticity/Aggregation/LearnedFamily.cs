@@ -163,6 +163,19 @@ internal sealed class LearnedFamily
     }
 
     /// <summary>
+    /// The family's partial of the rows of <paramref name="partials"/> together, partials of it over rows apart: their
+    /// groups merged by the family's plan, as a merge of parts folds them, to the bits the rows together would give, with
+    /// no row read. <paramref name="source"/> is the source they were learned over.
+    /// </summary>
+    internal ValueTask<AggregationPartial> MergeAsync(AggregationPartial[] partials, ScanSource source, ScanOptions options, CancellationToken cancellationToken)
+    {
+        VortexSchema expected = AggregationQuery.StatesOf(new FamilyHost(source, new ScanSpec()), Plan, Keys).Schema;
+        PartialsSource merged = new PartialsSource(source, partials, expected);
+        ScanSpec spec = new ScanSpec { Options = options with { UseSynopses = true, AlignWindow = false } };
+        return AggregationPartials.ExportAsync(AggregationQuery.StatesOf(new FamilyHost(merged, spec), Plan, Keys), cancellationToken);
+    }
+
+    /// <summary>
     /// The states of <paramref name="partial"/>, a partial of this family, as a question of it reads them: each batch of its
     /// file a batch of a partial's states (<see cref="RecordBatch.OfPartial"/>), its rows numbered from
     /// <paramref name="firstRow"/>, the groups of the values the question asks selected.
