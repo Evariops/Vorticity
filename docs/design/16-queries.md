@@ -618,6 +618,74 @@ with the other two, gives the same answers, and so does a file cut at its chunks
 memory the whole question holds granted everything (`DatasetPartsBudgetTests`), each part and the merge
 of 441 430 groups go through the core and spill its 256 parts, with the same answers.
 
+### 5.9 Estimates, then the exact answer
+
+`EstimateAsync` answers a question tier after tier, each from a larger share of its rows, then exactly.
+It is a stratified cluster sample whose clusters are ranges of rows, built on the parts of
+[5.8](#58-parts-of-a-question-merged).
+
+**The ranges.** The source cuts the rows a pass reads (`ScanSource.StrataAsync`): a file's, and each
+object of a dataset that the filter keeps by its summaries and its slices. The cuts fall where the
+chunks of every column the pass reads end together (`SplitPlan.CommonStarts`, the cuts a lane's piece
+takes). Consecutive cuts are gathered until a range holds `RangeBytes` of the narrowest column at its
+mean bytes a row, 1 MiB by default. A range then reads whole chunks of each column. Drawn one block at a
+time, 1 % of a month would cost as many requests as blocks, some 10⁵.
+
+**The strata.** Objects that follow one another are gathered until a stratum holds the ranges the first
+tier draws two of: `⌈2 / s₁⌉` ranges, `s₁` the first share. Objects follow the order of the
+clustering, so a stratum holds neighbouring values. Each stratum draws its ranges in an order shuffled
+once, with the seed given or one of the process's choosing. A tier of share `s` reads the first
+`clamp(⌈s · M_h⌉, min(2, M_h), M_h)` of a stratum's `M_h` ranges, so the tiers are nested.
+
+**A tier.** Each range drawn runs as a part of the question giving its states
+(`AggregationQuery.Ranged`, through a plan of its own), as many at once as the session's lanes, or 16
+over an object store whose reads are round trips. A partition folds the states, exactly, and gives
+each row its group (`AggregationPartition.StateGroups`). Beside it, for each stratum and group, the
+estimate sums what a total needs over the draws: the rows, the count of values and the sum of each
+measure a sum or a mean reads, their squares, and the product of values and sum.
+
+The ranges are not all the same size, and the rows of each stratum are known, so a total is a ratio
+estimate. For a total `Y` of a group, with `n_h` ranges drawn of `M_h`, `L_h` rows in the stratum,
+`ℓ_hi` rows in range `i` and `y_hi` the group's total there (0 where the range holds none of its rows):
+
+- the estimate is `Ŷ = Σ_h L_h Σ_i y_hi / Σ_i ℓ_hi`;
+- its variance is `V̂ = Σ_h M_h² (1 − n_h / M_h) s_h² / n_h · (L̄_h / ℓ̄_h)²`, where `s_h²` is the spread of
+  the residuals `y_hi − r̂_h ℓ_hi` over the stratum's draws, `r̂_h` the ratio of the draws' totals to their
+  rows, and `L̄_h / ℓ̄_h` the stratum's mean rows per range over the draws'. With ranges of one size,
+  this is the plain expansion `(M_h / n_h) Σ_i y_hi`;
+- a mean is the ratio `R̂ = Ŝ / X̂` of the sum's estimate over the count of values'. Its variance is that
+  of the residuals `s_hi − R̂ x_hi`, estimated the same way, over `X̂²`;
+- a margin is `t · √V̂`, where `t` is Student's 97.5 % quantile with `Σ_h (n_h − 1)` degrees of freedom
+  over the strata not read whole. The quantile comes from a table up to ten degrees and from Fisher's
+  expansion past them, within 10⁻³.
+
+The answers of a tier are the question's own columns over states written for it. The sample's states
+are written as rows of states, through `AggregationPartials.Columns` with an overlay that replaces the
+rows, the counts of values and the sums by their estimates. Integer sums are rounded to an `Int128`,
+and float sums are a wide indexed sum of the estimate over its count. The extremes and sketches stay
+the sample's. A fresh partition folds those rows, and the question's columns read it, so each element
+comes out typed as the question types it. The margins follow as `double` columns. The exact tier is
+the sample partition itself, every range folded: its states merge exactly, so its answers are the
+question's to the bits.
+
+Not in it: a filter on groups, an order or a window, which an estimate cannot apply to groups it has
+not all met; the aggregates the parts refuse; and margins for extremes, distributions and distinct
+counts. A stratum draws two ranges at least, so over few ranges the first tier reads more than its
+share. The planner (lot D) decides when a question is answered by estimates and announces the cost of
+the exact answer.
+
+Tests (`DatasetEstimateTests`): 140 groups of a region and a status, spread over 400 000 rows in eight
+objects of a dozen ranges each, in two strata. Over 200 draws, the margins of the counts, sums and means
+held the exact answer 94.80 % of the time at 5 %, with three ranges drawn per stratum and four degrees of
+freedom, and 95.09 % at 20 %, each within a standard error of 0.09 %. The shortfall at the smallest
+draws comes from the t interval over a finite population and shrinks as the draws grow. The test holds
+the mean coverage of twenty draws to 95 % less three standard errors, which come from the spread between
+draws: the groups of one draw share its ranges, so they are not independent trials. The plain
+expansion estimator measured 94.76 % at 5 %. The exact tier gave the question's answers, every margin 0.
+Over a store that counts its requests, the first tier made 32 requests for 6 ranges, the objects' 8
+opens included, and the second 53 for 14 ranges of four columns: one request per range and column read
+at most, where drawing the same rows block by block would cost one per block and column.
+
 ## 6. After the group by
 
 ### 6.1 Results: `Select`

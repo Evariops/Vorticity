@@ -70,6 +70,22 @@ internal sealed class AggregationQuery : ResultQuery
         return new AggregationQuery(Host, Plan, Nodes, Keys, null, 0, long.MaxValue, RowFilter, [], exports: true);
     }
 
+    /// <summary>
+    /// The same query giving its groups' states over <paramref name="host"/>, a range an estimate draws, through a plan of its
+    /// own: the ranges an estimate reads at once each run theirs, and a plan keeps what its last run did.
+    /// </summary>
+    internal AggregationQuery Ranged(AggregationHost host)
+    {
+        SymNode[] results = Array.ConvertAll(Nodes, static node => (SymNode)node);
+        AggregationPlan plan = new AggregationPlan(results, Keys);
+        if (plan.Aggregates.Length != Plan.Aggregates.Length)
+        {
+            throw new InvalidOperationException("A query whose operators read aggregates of their own runs no range of an estimate.");
+        }
+
+        return new AggregationQuery(host, plan, Nodes, Keys, null, 0, long.MaxValue, RowFilter, [], exports: true);
+    }
+
     /// <summary>The same query over <paramref name="host"/>, a merge of its parts' partials, which applied its filter on the rows.</summary>
     internal AggregationQuery Merged(PartialsHost host) => new AggregationQuery(host, Plan, Nodes, Keys, _typed, Skip, Take, null, Operators);
 

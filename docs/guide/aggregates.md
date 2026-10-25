@@ -454,6 +454,56 @@ sum or an aggregator of your own. A partial whose keys or measures are not the q
 be told apart, so the question on each node is yours to keep the same. To keep the version the same,
 open the dataset at the version the coordinator cut (`VortexDataset.OpenAsync(store, version)`).
 
+## Estimates first, then the exact answer
+
+A question over a long window can be answered first from a share of its rows, each count and sum with
+its margin, then from more rows, until the exact answer:
+
+```csharp
+Aggregation question = dataset.Scan<Hit>().Where(r => r.At >= from)
+    .GroupBy(r => (r.Region, r.Status))
+    .Select(g => (g.Key.Region, g.Key.Status, g.Count(), g.Sum(r => r.Bytes), g.Average(r => r.Latency)));
+
+await foreach (AggregationEstimate tier in question.EstimateAsync())
+{
+    List<HitEstimate> groups = await tier.As<HitEstimate>().ToRecordsAsync().ToListAsync();
+    Console.WriteLine($"{tier.Share:P1} of the rows, {tier.Groups} groups{(tier.IsExact ? ", exact" : "")}");
+}
+
+[VortexRecord]
+public partial record struct HitEstimate(
+    string Region, int Status, long Rows, long Bytes, double? Latency,
+    double RowsMargin, double BytesMargin, double LatencyMargin);
+```
+
+By default the tiers read 0.1 %, 1 % and 10 % of the question's rows, then all of them. Each tier
+reads the rows of the one before and adds more. The rows are read in ranges, never block by block. A
+range runs between two places where the chunks of every column the question reads end together, and it
+holds at least 1 MiB of the narrowest of those columns, so it costs a few requests. The ranges are drawn
+at random within strata, runs of neighbouring objects, at least two ranges in each stratum.
+
+A tier scales the counts and sums of the ranges it read up to every row. Each comes with a margin, the
+half-width of a 95 % interval computed from how much the ranges of each stratum differ. A mean is the
+ratio of the scaled sum to the scaled count of its values, with a margin of its own. A least, a
+greatest, a distribution, a quantile or an approximate distinct count is the value over the rows read,
+without a margin: the least of those rows is never below the least of all rows. A group that no range
+read is missing from the tier. The last tier reads every range and is the exact answer, the same bits
+as the question itself gives, every margin 0.
+
+The record of a tier takes the selection's elements in order, then one `double` for each count of rows,
+sum and mean among them, in the same order. `EstimateOptions` sets the shares, whether the exact tier
+comes at the end, the bytes of a range and the seed of the draw.
+
+In the tests, with 140 groups spread over 400 000 rows and 200 draws, the margins held the exact counts,
+sums and means 94.8 % of the time at 5 % of the rows, with three ranges drawn per stratum, and 95.1 % of
+the time at 20 %. A tier made about one request per range and per column read: 53 requests for 14
+ranges of four columns.
+
+An estimate answers every group it meets, so a question with `Where` on its groups, an order or a
+window throws `NotSupportedException`; it takes the aggregates a question in parts takes. A stratum
+draws two ranges at least, so the first tier of a source with few ranges reads more than its share.
+Read each tier before asking for the next.
+
 ## Decimals at any precision
 
 A decimal column sums exactly, whatever its precision and its row count. The total is kept in 320

@@ -503,6 +503,22 @@ public sealed class Aggregation<TResult>
     public Aggregation<TResult> Merge(IEnumerable<AggregationPartial> partials) =>
         new Aggregation<TResult>(AggregationPartials.Merged(AggregationPartials.Of(_query), partials));
 
+    /// <summary>
+    /// Estimates of the aggregation, tier after tier, then its exact answer: each tier reads a share of the question's
+    /// ranges more, drawn at random in each stratum of its files or objects, and answers every group it met, its counts of
+    /// rows, sums and means scaled to every row with a margin each (<see cref="AggregationEstimate"/>).
+    /// </summary>
+    /// <param name="options">The shares of the tiers, the exact answer or not, the bytes a range holds, the seed; the defaults when null.</param>
+    /// <param name="cancellationToken">Cancels the reads at a range's batch.</param>
+    /// <returns>The tiers, in order, each read before the next is asked for.</returns>
+    /// <exception cref="NotSupportedException">
+    /// A state does not answer one of the aggregates whole, the question filters, orders or windows its groups, or its
+    /// source has no ranges of its own.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The shares are not ascending in (0, 1], or a range holds no byte.</exception>
+    public IAsyncEnumerable<AggregationEstimate> EstimateAsync(EstimateOptions? options = null, CancellationToken cancellationToken = default) =>
+        new EstimateRun(AggregationPartials.Of(_query), options ?? new EstimateOptions()).TiersAsync(cancellationToken);
+
     /// <summary>The result as a scan of a record of one member, which takes the value: <c>Select(g =&gt; g.Count()).As&lt;Total&gt;()</c>.</summary>
     /// <typeparam name="TRecord">The record, whose one member is of the result's type or its nullable form.</typeparam>
     /// <returns>A scan of the result, which runs the query when its sink runs.</returns>
@@ -612,6 +628,22 @@ public sealed class Aggregation
     /// <remarks>A partial of another question, whose keys or measures differ, throws <see cref="System.IO.InvalidDataException"/> when the merge reads it.</remarks>
     public Aggregation Merge(IEnumerable<AggregationPartial> partials) =>
         new Aggregation(AggregationPartials.Merged(AggregationPartials.Of(_query), partials));
+
+    /// <summary>
+    /// Estimates of the aggregation, tier after tier, then its exact answer: each tier reads a share of the question's
+    /// ranges more, drawn at random in each stratum of its files or objects, and answers every group it met, its counts of
+    /// rows, sums and means scaled to every row with a margin each (<see cref="AggregationEstimate"/>).
+    /// </summary>
+    /// <param name="options">The shares of the tiers, the exact answer or not, the bytes a range holds, the seed; the defaults when null.</param>
+    /// <param name="cancellationToken">Cancels the reads at a range's batch.</param>
+    /// <returns>The tiers, in order, each read before the next is asked for.</returns>
+    /// <exception cref="NotSupportedException">
+    /// A state does not answer one of the aggregates whole, the question filters, orders or windows its groups, or its
+    /// source has no ranges of its own.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The shares are not ascending in (0, 1], or a range holds no byte.</exception>
+    public IAsyncEnumerable<AggregationEstimate> EstimateAsync(EstimateOptions? options = null, CancellationToken cancellationToken = default) =>
+        new EstimateRun(AggregationPartials.Of(_query), options ?? new EstimateOptions()).TiersAsync(cancellationToken);
 
     /// <summary>
     /// The result as a scan of <typeparamref name="TRecord"/>, whose members take the elements of the

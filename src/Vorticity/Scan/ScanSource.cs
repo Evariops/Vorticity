@@ -199,6 +199,14 @@ internal abstract class ScanSource
     internal virtual ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken) => default;
 
     /// <summary>
+    /// The rows of <paramref name="pass"/> as the ranges an estimate draws from, a list for each file or object, in the
+    /// order of their rows: each cut where the chunks of every column the pass reads end together, a range holding
+    /// <paramref name="rangeBytes"/> of the narrowest of them at least (<see cref="Aggregating.EstimateStrata"/>). Null for
+    /// a source with no cut of its own, which takes no estimate.
+    /// </summary>
+    internal virtual ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken) => default;
+
+    /// <summary>
     /// How many of <paramref name="ranges"/>, the pieces <see cref="PiecesAsync"/> cut, read rows from the store, and so
     /// read their splits ahead: every one by default; a dataset's pieces its synopses answer read a few tables instead,
     /// whose lanes leave the splits they were granted to the lanes that read rows.
@@ -248,6 +256,20 @@ internal sealed class FileScanSource : ScanSource
         spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>()
         : Refuted(spec) ? RefusedAsync(spec, metrics)
         : Builder(spec, metrics).ExecuteAsync();
+
+    /// <summary>The file's rows the pass reads as the ranges of one list; none when its statistics refute the filter.</summary>
+    internal override ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken)
+    {
+        RowRange whole = new RowRange(0, _file.RowCount);
+        RowRange rows = pass.Rows is { } asked ? asked.Intersect(whole) : whole;
+        if (pass.MatchesNothing || rows.IsEmpty || Refuted(pass))
+        {
+            return ValueTask.FromResult<RowRange[][]?>([]);
+        }
+
+        FieldMask mask = pass.Projection ?? FieldMask.All;
+        return ValueTask.FromResult<RowRange[][]?>([[.. Aggregating.EstimateStrata.Clusters(_file.LayoutTree, _file.SegmentSpecs, rows, in mask, rangeBytes)]]);
+    }
 
     internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {

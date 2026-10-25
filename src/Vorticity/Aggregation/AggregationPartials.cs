@@ -144,9 +144,10 @@ internal static class AggregationPartials
 
     /// <summary>
     /// The columns of a part's rows of states: its keys under the names of their places, the rows each group counts, each
-    /// measure's words, then each sketch.
+    /// measure's words, then each sketch; the counts and the words changed by <paramref name="overlay"/> before they are
+    /// written, an estimate's totals in place of its sample's.
     /// </summary>
-    internal static ResultColumn[] Columns(AggregationPlan plan, ColumnShape[] keys)
+    internal static ResultColumn[] Columns(AggregationPlan plan, ColumnShape[] keys, IStateOverlay? overlay = null)
     {
         List<ResultColumn> columns = [];
         for (int k = 0; k < keys.Length; k++)
@@ -156,7 +157,7 @@ internal static class AggregationPartials
 
         IAggregateNode[] aggregates = plan.Aggregates;
         int rows = Array.FindIndex(aggregates, static a => a.Kind == AggregateKind.Count && a.Input is null);
-        columns.Add(new RowsColumn(plan, rows));
+        columns.Add(new RowsColumn(plan, rows, overlay));
 
         // Each measure, in the order its first aggregate comes: the slots of its sums and extremes, which write its words.
         List<(string Name, bool Floats, List<int> Writers)> measures = [];
@@ -195,7 +196,7 @@ internal static class AggregationPartials
 
         foreach ((string name, bool floats, List<int> writers) in measures)
         {
-            MeasureWords words = new MeasureWords(plan, [.. writers], floats);
+            MeasureWords words = new MeasureWords(plan, name, [.. writers], floats, overlay);
             string[] names = MeasureLayout.Names(name, floats);
             for (int w = 0; w < names.Length; w++)
             {
@@ -240,7 +241,7 @@ internal static class AggregationPartials
     }
 
     /// <summary>The rows each group counts: its count of rows's, or none where no aggregate counts them, which no other reads.</summary>
-    private sealed class RowsColumn(AggregationPlan plan, int count) : ResultColumn(StateRequest.RowsColumn, VortexType.Int64)
+    private sealed class RowsColumn(AggregationPlan plan, int count, IStateOverlay? overlay) : ResultColumn(StateRequest.RowsColumn, VortexType.Int64)
     {
         private long[] _rows = [];
 
@@ -252,6 +253,7 @@ internal static class AggregationPartials
                 outcome.SlotOf(plan.Aggregates[count]).ExportStates(groups, new StateExport { Rows = rows });
             }
 
+            overlay?.Rows(groups, rows);
             ((FixedStore)store).Append<long>(rows);
         }
     }
@@ -260,7 +262,7 @@ internal static class AggregationPartials
     /// The words of a measure's states for a batch of groups, written by the slots of its sums and extremes when its first
     /// word's column is appended, and read by every one of its columns, which a batch appends in their order.
     /// </summary>
-    private sealed class MeasureWords(AggregationPlan plan, int[] writers, bool floats)
+    private sealed class MeasureWords(AggregationPlan plan, string name, int[] writers, bool floats, IStateOverlay? overlay)
     {
         private static readonly long NoFloat = BitConverter.DoubleToInt64Bits(double.NaN);
         private long[] _words = [];
@@ -285,6 +287,8 @@ internal static class AggregationPartials
             {
                 outcome.SlotOf(plan.Aggregates[writer]).ExportStates(groups, new StateExport { Words = words, Floats = floats });
             }
+
+            overlay?.Words(name, floats, groups, words);
         }
 
         internal long Word(int group, int word) => _words[(group * Stride) + word];
@@ -324,6 +328,19 @@ internal static class AggregationPartials
             }
         }
     }
+}
+
+/// <summary>
+/// What changes the states a part's columns write (<see cref="AggregationPartials.Columns"/>), before they are written: an
+/// estimate's totals over every row in place of its sample's.
+/// </summary>
+internal interface IStateOverlay
+{
+    /// <summary>Changes the rows each of <paramref name="groups"/> counts.</summary>
+    void Rows(ReadOnlySpan<int> groups, Span<long> rows);
+
+    /// <summary>Changes the words of measure <paramref name="measure"/> of each of <paramref name="groups"/>, <see cref="MeasureLayout.Words"/> a group.</summary>
+    void Words(string measure, bool floats, ReadOnlySpan<int> groups, Span<long> words);
 }
 
 /// <summary>

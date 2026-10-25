@@ -2665,6 +2665,12 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>
+    /// The group of each of the first <paramref name="rows"/> rows of the last batch of states the partition folded: what an
+    /// estimate sums by stratum beside the states the partition merges.
+    /// </summary>
+    internal ReadOnlySpan<int> StateGroups(int rows) => _rowGroups.AsSpan(0, rows);
+
+    /// <summary>
     /// The states of <paramref name="column"/>'s aggregate in a batch of states, and with <paramref name="sketched"/>, a
     /// distribution's, its sketches; the rows alone for a count of rows.
     /// </summary>

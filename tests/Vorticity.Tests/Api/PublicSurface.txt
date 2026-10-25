@@ -46,6 +46,7 @@ Vorticity: sealed class Vorticity.Aggregation
 Vorticity:     method Aggregation Merge(IEnumerable<AggregationPartial>)
 Vorticity:     method Aggregation Skip(int)
 Vorticity:     method Aggregation Take(int)
+Vorticity:     method IAsyncEnumerable<AggregationEstimate> EstimateAsync(EstimateOptions = default, CancellationToken = default)
 Vorticity:     method Scan<TRecord> As<TRecord>()
 Vorticity:     method ValueTask<AggregationPartial> PartialAsync(CancellationToken = default)
 Vorticity:     method ValueTask<RowRange[]> PartsAsync(int, CancellationToken = default)
@@ -56,6 +57,7 @@ Vorticity:     method Aggregation<TResult> Merge(IEnumerable<AggregationPartial>
 Vorticity:     method Aggregation<TResult> Skip(int)
 Vorticity:     method Aggregation<TResult> Take(int)
 Vorticity:     method Aggregation<TResult> WithCancellation(CancellationToken)
+Vorticity:     method IAsyncEnumerable<AggregationEstimate> EstimateAsync(EstimateOptions = default, CancellationToken = default)
 Vorticity:     method IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken = default)
 Vorticity:     method IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken = default)
 Vorticity:     method Scan<TRecord> As<TRecord>()
@@ -65,6 +67,13 @@ Vorticity:     method ValueTask<RowRange[]> PartsAsync(int, CancellationToken = 
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     method ValueTask<TResult[]> ToArrayAsync(CancellationToken = default)
 Vorticity:     property ScanMetrics Metrics { get; }
+Vorticity: sealed class Vorticity.AggregationEstimate
+Vorticity:     method Scan<TRecord> As<TRecord>()
+Vorticity:     property ScanMetrics Metrics { get; }
+Vorticity:     property bool IsExact { get; }
+Vorticity:     property double Share { get; }
+Vorticity:     property int Ranges { get; }
+Vorticity:     property long Groups { get; }
 Vorticity: sealed class Vorticity.AggregationPartial
 Vorticity:     method AggregationPartial FromBytes(ReadOnlyMemory<byte>)
 Vorticity:     property ReadOnlyMemory<byte> Bytes { get; }
@@ -915,6 +924,19 @@ Vorticity: enum Vorticity.EncodingObjective
 Vorticity:     const EncodingObjective ReadTime = 0
 Vorticity:     const EncodingObjective Size = 1
 Vorticity:     field byte value__
+Vorticity: sealed class Vorticity.EstimateOptions : IEquatable<EstimateOptions>
+Vorticity:     ctor EstimateOptions()
+Vorticity:     method EstimateOptions <Clone>$()
+Vorticity:     method bool Equals(EstimateOptions)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(EstimateOptions, EstimateOptions)
+Vorticity:     method bool op_Inequality(EstimateOptions, EstimateOptions)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     property IReadOnlyList<double> Shares { get; init; }
+Vorticity:     property Nullable<int> Seed { get; init; }
+Vorticity:     property bool Exact { get; init; }
+Vorticity:     property long RangeBytes { get; init; }
 Vorticity: static class Vorticity.ExtensionColumnBuilderExtensions
 Vorticity:     method void Append<T>(ColumnBuilder<T>, T)
 Vorticity:     method void AppendNull<T>(ColumnBuilder<T>)

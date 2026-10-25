@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Collections.Generic;
 
 using Vorticity.Arrays;
 using Vorticity.Compute;
@@ -92,6 +93,75 @@ internal sealed class SplitPlan
     {
         long zoneLength = tree.FirstZoneLength;
         return zoneLength > 0 ? zoneLength : DefaultBatchRows;
+    }
+
+    /// <summary>
+    /// The rows strictly inside <paramref name="physical"/> where a chunk of every top-level column of
+    /// <paramref name="mask"/> starts, ascending: where a file or an object whose columns are chunked apart is cut, between lanes or into the ranges an estimate
+    /// draws, without a chunk two of them read. A dataset object's columns' chunks end together at its slices and its groups of rows.
+    /// </summary>
+    internal static long[] CommonStarts(LayoutTree tree, RowRange physical, in FieldMask mask)
+    {
+        long natural = SplitPlan.NaturalBatchRows(tree);
+        int fields = tree.Root.Encoding == LayoutEncodingId.Struct ? tree.Root.ChildCount : 0;
+        int count = fields == 0 ? 0 : mask.IsAll ? fields : mask.NamedFieldCount;
+        if (count == 0)
+        {
+            SplitPlan whole = SplitPlan.Compute(tree, physical, in mask, natural);
+            return Interior(whole, physical);
+        }
+
+        long[]? common = null;
+        for (int i = 0; i < count && common is not { Length: 0 }; i++)
+        {
+            int field = mask.IsAll ? i : mask.GetNamedField(i);
+            FieldMask column = FieldMask.Single(field);
+            long[] starts = Interior(SplitPlan.Compute(tree, physical, in column, natural), physical);
+            common = common is null ? starts : Intersect(common, starts);
+        }
+
+        return common ?? [];
+
+        static long[] Interior(SplitPlan plan, RowRange rows)
+        {
+            List<long> inside = new List<long>(plan.BoundaryCount);
+            for (int b = 0; b < plan.BoundaryCount; b++)
+            {
+                long at = plan.BoundaryAt(b);
+                if (at > rows.Start && at < rows.End)
+                {
+                    inside.Add(at);
+                }
+            }
+
+            return [.. inside];
+        }
+
+        static long[] Intersect(long[] left, long[] right)
+        {
+            List<long> both = new List<long>(Math.Min(left.Length, right.Length));
+            int l = 0;
+            int r = 0;
+            while (l < left.Length && r < right.Length)
+            {
+                if (left[l] == right[r])
+                {
+                    both.Add(left[l]);
+                    l++;
+                    r++;
+                }
+                else if (left[l] < right[r])
+                {
+                    l++;
+                }
+                else
+                {
+                    r++;
+                }
+            }
+
+            return [.. both];
+        }
     }
 
     /// <summary>Walks the selected subtrees and collects their split boundaries.</summary>

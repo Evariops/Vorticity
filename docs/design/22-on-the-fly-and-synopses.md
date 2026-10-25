@@ -328,6 +328,11 @@ ranges, in about 1.6 s cold *(computed)*. A scan option says whether the caller 
 only, accepts estimates, or sets a cost threshold, one second by default; the cost of the exact answer
 is announced before it is read.
 
+The estimates exist as `EstimateAsync` ([16-queries.md](16-queries.md#59-estimates-then-the-exact-answer)).
+Each drawn range runs as a part of the question and gives its states, and the strata are runs of
+neighbouring objects, which follow the clustering's values, with two ranges drawn in each at least. The
+option and the threshold that choose estimates for a question belong to the planner.
+
 ## 8. The planner
 
 1. Time and the column sheets drop objects.
