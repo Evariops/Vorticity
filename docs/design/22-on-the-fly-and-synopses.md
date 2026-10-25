@@ -279,13 +279,35 @@ question, block by block, with nothing computed for a pair of columns:
 | one column of the question varies | exact counts, from that column's values |
 | two columns vary | exact bounds, max(0, n(x) + n(y) − n) ≤ n(x, y) ≤ min(n(x), n(y)); the exact answer reads those two columns in that block |
 
+A dataset answers so the objects its counts do not (`BlockAnswer`): a block whose statistics prove the
+filter true over its rows and whose keys each hold one group gives its rows and its measures' states; a
+block where one column of the question varies, under a question of counts alone, gives the rows of each
+of its values, the filter judged value by value on the summary each value makes; any other block is
+read as rows, each run of them a part of the scan. A key that is a function of a column, a truncation,
+holds one group over a block whose extremes it sends to one: an instant, an integer under an extension,
+keeps its extremes over each block for it. Before it reads an object's statistics, the dataset counts
+the columns of the question that may vary in its blocks, those of the keys and of a filter the object's
+summaries do not prove, other than the key's first column and than a key's column the summaries prove
+constant: past one under a question of counts, or past none under one of measures, every block would be
+read as rows after its statistics, and the object is read as rows at once. Under a key led by the
+service, errors by service read 86.8 KB through the blocks where the rows took 480.7 KB *(measured,
+`DatasetBlockAnswerTests`, four services of 150 000 rows)*. The exact bounds of two varying columns are
+not given yet; they belong with the estimates the planner chooses (section 8).
+
+The truncation of an instant holds one group over a block only when the block is short in time: blocks
+end where the key's first column changes and at 65 536 rows, never where an hour does, as nothing here
+knows a time. Errors by service and hour settle the blocks that fall in one hour; with blocks of some
+fifty minutes, the measured question read 2.7 MB through them where the rows took 3.4 MB. For the
+reference table led by its emitter, whose blocks span hours, they mostly would not.
+
 A block no delete touches settles as a file's does; a block a delete touches is decoded, or settled
 from the negative statistics the delete wrote (section 6). For the reference table clustered by
-emitter: 3.5 × 10⁵ blocks a day, about 340 bytes each on the design's requests, where this design first
-reckoned 200: a service's block lists its endpoints and hosts, 129 and 83 bytes. That is 118 MB a day
-kept in each object, 47 GB in 13 months *(337 bytes a block measured, `--micro blocks`; extrapolated)*.
+emitter: 3.5 × 10⁵ blocks a day, about 370 bytes each on the design's requests, where this design first
+reckoned 200: a service's block lists its endpoints and hosts, 129 and 83 bytes, and the instant keeps
+its extremes, 32. That is 129 MB a day kept in each object, 51 GB in 13 months *(369 bytes a block
+measured, `--micro blocks`; extrapolated)*.
 The rollups sum none of them: their buckets are the clustering values, not the key's first column.
-Writing costs 11.4 ns a row, every column's statistics and their indexes together *(measured, one
+Writing costs 12.2 ns a row, every column's statistics and their indexes together *(measured, one
 thread)*. Aggregates per value for the columns of at most 16 values a block are left out of the first
 version, and weighed again against the size test.
 
@@ -305,7 +327,7 @@ structure would answer ranges and prefixes, which the planner takes up (section 
 column's values once an object, 6.2 bytes a value for the design's endpoints and hosts, their names
 sharing their prefixes *(measured)*: some 270 KB an object of an hour of the reference table, whose
 30 000 endpoints and 10 200 hosts it holds all, 6.6 MB a day, 2.6 GB in 13 months *(computed)*, where
-this design first reckoned 0.5 MB a day. Its writing is in the 11.4 ns of section 5.3.
+this design first reckoned 0.5 MB a day. Its writing is in the 12.2 ns of section 5.3.
 
 ### 5.5 Identifiers' postings
 
@@ -480,7 +502,7 @@ them.
 |---|---|---|
 | appends | the data, once | 3 to 5 PUT each: the object, the commit, the pages of the tree; how often is the application's choice |
 | compaction: level 0's exit and the leveled merges | each row rewritten 2 to 4 times: 4 to 8 MB/s written, a little less read | under one PUT and one GET a second, in parts of 16 to 64 MB |
-| synopses in the objects | about 176 MB a day, 0.1 % of the data | within the objects' parts |
+| synopses in the objects | about 187 MB a day, 0.1 % of the data | within the objects' parts |
 | rollups | a few MB a column and a run of 64 objects | a PUT a rollup, once the objects of its run stand |
 | listings | none: the commit tree is the catalog | none |
 
@@ -493,11 +515,11 @@ The composite tables this design replaces wrote 7.7 GB a day, 4.4 % of the data.
 | work | ns a row |
 |---|---|
 | clustering at level 0's exit, sorted merges | ~40 |
-| block statistics, and where each value lives | 11.4 *(measured)* |
+| block statistics, and where each value lives | 12.2 *(measured)* |
 | counts, seven columns | ~56 |
 | quantile and distinct sketches | ~67 |
 | column sheets, seven columns | ~42 |
-| **total** | **~216**, plus ~30 for each learned family kept up |
+| **total** | **~217**, plus ~30 for each learned family kept up |
 
 At the design rate that is 0.011 of a core *(computed)*.
 
@@ -507,10 +529,10 @@ At the design rate that is 0.011 of a core *(computed)*.
 |---|---|---|---|
 | column sheets | 0.08 MB | — | 0.03 GB |
 | counts, sketches | 51 MB | 2.7 MB | 21 GB |
-| block statistics | 118 MB | — | 47 GB |
+| block statistics | 129 MB | — | 51 GB |
 | where each value lives | 6.6 MB | — | 2.6 GB |
 | learned partials | what is asked | what is asked | 2 GiB budget |
-| **total** | **~176 MB** | **~3 MB** | **~71 GB** |
+| **total** | **~187 MB** | **~3 MB** | **~75 GB** |
 
 The synopses weigh 0.1 % of the data. The design this one replaces kept 7.7 GB a day of synopsis
 tables for this table, 4.4 % of the data and about 3 TB in 13 months *(measured)*. For a petabyte of

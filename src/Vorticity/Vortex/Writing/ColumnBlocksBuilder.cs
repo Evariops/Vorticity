@@ -6,6 +6,7 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Indexes;
 using Vorticity.Serialization.Protobuf;
+using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
@@ -61,7 +62,9 @@ internal sealed class BlockCuts
 /// </para>
 /// <para>
 /// The values' part holds while the sheet numbers every row and keeps every value's bytes; the measure's while the plan
-/// carries the column as a measure, read from every batch. A column that keeps neither keeps no statistics.
+/// carries the column as a measure, read from every batch. An integer under an extension, an instant or a date, which
+/// the plan does not carry, is a measure of its own blocks: its extremes say which group of a function of it, a
+/// truncation, a block falls in whole. A column that keeps neither part keeps no statistics.
 /// </para>
 /// </remarks>
 internal sealed class ColumnBlocksBuilder : IndexBuilder
@@ -74,6 +77,11 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
     private readonly ColumnSheetBuilder _sheet;
     private readonly CountsPlan _plan;
     private readonly int _measure;
+
+    // An integer under an extension, which the plan does not carry, read here: how it is summed and its width; null for none.
+    private readonly (MeasureKind Kind, int Width)? _own;
+    private long[] _ownValues = [];
+    private byte[] _ownValid = [];
     private readonly BlockCuts _cuts;
 
     // The rows taken; the open block's first row and nulls; the blocks closed; the next cut and its place.
@@ -120,13 +128,15 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
     /// <param name="plan">What the file's counts share, which reads the measures.</param>
     /// <param name="field">The column.</param>
     /// <param name="cuts">Where the blocks end.</param>
-    internal ColumnBlocksBuilder(ColumnSheetBuilder sheet, CountsPlan plan, int field, BlockCuts cuts)
+    /// <param name="dtype">The column's type.</param>
+    internal ColumnBlocksBuilder(ColumnSheetBuilder sheet, CountsPlan plan, int field, BlockCuts cuts, DType dtype)
     {
         _sheet = sheet;
         _plan = plan;
         _cuts = cuts;
         _measure = plan.MeasureOf(field);
-        _measured = _measure >= 0;
+        _own = _measure < 0 ? OwnOf(dtype) : null;
+        _measured = _measure >= 0 || _own is not null;
         _state = new long[_measured ? MeasureLayout.Words(Kind == MeasureKind.Float) : 0];
         if (_measured)
         {
@@ -136,7 +146,29 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
         sheet.NumberRows();
     }
 
-    private MeasureKind Kind => _plan.Measures[_measure].Kind;
+    private MeasureKind Kind => _own?.Kind ?? _plan.Measures[_measure].Kind;
+
+    /// <summary>How an integer under an extension is summed, and its width; null for any other type.</summary>
+    private static (MeasureKind Kind, int Width)? OwnOf(DType dtype)
+    {
+        if (dtype.Kind != DTypeKind.Extension)
+        {
+            return null;
+        }
+
+        DType storage = dtype;
+        while (storage.Kind == DTypeKind.Extension)
+        {
+            storage = storage.StorageType;
+        }
+
+        return storage.Kind != DTypeKind.Primitive ? null : storage.PType switch
+        {
+            PType.I8 or PType.I16 or PType.I32 or PType.I64 => (MeasureKind.Signed, storage.PType.ByteWidth()),
+            PType.U8 or PType.U16 or PType.U32 or PType.U64 => (MeasureKind.Unsigned, storage.PType.ByteWidth()),
+            _ => null,
+        };
+    }
 
     /// <inheritdoc/>
     protected override long OpenBytes =>
@@ -153,7 +185,7 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
 
         ReadOnlySpan<int> ids = _sheet.RowIds;
         _values &= !ids.IsEmpty;
-        _measured = _measured && _plan.Measures[_measure].Live;
+        _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
         for (int at = 0; at < count;)
         {
             if (_nextEnd <= _row || _nextEnd == long.MaxValue)
@@ -168,7 +200,11 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
                 Count(ids.Slice(at, take));
             }
 
-            if (_measured)
+            if (_measured && _own is { } own)
+            {
+                FoldOwn(arena, nodeIndex, start + at, take, own);
+            }
+            else if (_measured)
             {
                 Fold(start + at, take);
             }
@@ -301,6 +337,88 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
         }
     }
 
+    /// <summary>
+    /// Folds the values of an integer under an extension of the batch's rows <c>[start, start + count)</c> into the open
+    /// block's record, read from its storage; a form other than a flat or a constant one, or nulls the extension holds
+    /// over it, give the measure up.
+    /// </summary>
+    private void FoldOwn(CanonicalArena arena, int nodeIndex, int start, int count, (MeasureKind Kind, int Width) own)
+    {
+        CanonicalNode outer = arena.GetNode(nodeIndex);
+        CanonicalNode node = outer;
+        while (node.Kind == CanonicalKind.Extension)
+        {
+            node = arena.GetNode(node.StorageIndex);
+        }
+
+        ValidityMask wrapper = ValidityMask.From(arena, outer.Validity);
+        ValidityMask valid = ValidityMask.From(arena, node.Validity);
+        if (node.Kind is not (CanonicalKind.Primitive or CanonicalKind.Constant) || (outer.Kind == CanonicalKind.Extension && !wrapper.AllValid))
+        {
+            _measured = false;
+            return;
+        }
+
+        if (_ownValues.Length < count)
+        {
+            _ownValues = new long[Math.Max(count, _ownValues.Length * 2)];
+            _ownValid = new byte[_ownValues.Length];
+        }
+
+        bool constant = node.Kind == CanonicalKind.Constant;
+        ReadOnlySpan<byte> values = constant ? node.ConstantElement : node.Values.Span;
+        bool signed = own.Kind == MeasureKind.Signed;
+        if (!constant && signed && own.Width == sizeof(long) && valid.AllValid)
+        {
+            // An instant's usual form, every row valid: its sum and extremes in one pass over its values, with no copy.
+            FoldLongs(MemoryMarshal.Cast<byte, long>(values).Slice(start, count));
+            return;
+        }
+
+        Span<long> into = _ownValues.AsSpan(0, count);
+        Span<byte> flags = _ownValid.AsSpan(0, count);
+        for (int i = 0; i < count; i++)
+        {
+            int row = start + i;
+            into[i] = CountsPlan.Integer(values, own.Width, constant ? 0 : row, signed);
+            flags[i] = valid.AllInvalid ? (byte)0 : valid.AllValid || valid.IsValid(row) ? (byte)1 : (byte)0;
+        }
+
+        if (_zeros.Length < count)
+        {
+            _zeros = new int[Math.Max(count, _zeros.Length * 2)];
+        }
+
+        ref long state = ref MemoryMarshal.GetArrayDataReference(_state);
+        if (signed)
+        {
+            ColumnCountsBuilder.FoldSigned(ref state, _zeros.AsSpan(0, count), into, flags);
+        }
+        else
+        {
+            ColumnCountsBuilder.FoldUnsigned(ref state, _zeros.AsSpan(0, count), into, flags);
+        }
+    }
+
+    /// <summary>Folds <paramref name="values"/>, every one valid, into the open block's record of a signed measure: their count, exact sum and extremes.</summary>
+    private void FoldLongs(ReadOnlySpan<long> values)
+    {
+        Int128 sum = 0;
+        long least = _state[MeasureLayout.IntegerLeast];
+        long greatest = _state[MeasureLayout.IntegerGreatest];
+        foreach (long value in values)
+        {
+            sum += value;
+            least = Math.Min(least, value);
+            greatest = Math.Max(greatest, value);
+        }
+
+        _state[MeasureLayout.Values] += values.Length;
+        StateWords.Write(StateWords.IntegerOf(_state, MeasureLayout.Sum) + sum, _state, MeasureLayout.Sum);
+        _state[MeasureLayout.IntegerLeast] = least;
+        _state[MeasureLayout.IntegerGreatest] = greatest;
+    }
+
     /// <summary>Ends the open block: its rows and nulls, its values and their ranges, its measure.</summary>
     private void End()
     {
@@ -402,7 +520,7 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
     internal (byte[] Blocks, byte[]? Where)? Finish(BlockTable table)
     {
         End();
-        _measured = _measured && _plan.Measures[_measure].Live;
+        _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
         byte[]?[]? values = _values && _sheet.Counting ? _sheet.ValuesByNumber() : null;
         if (values is not null && Array.Exists(values, value => value is null))
         {

@@ -981,7 +981,8 @@ gives each row its group through the same keys and functions as rows, and each a
 state into it, an exact sum merged, an extreme compared and a sketch merged, to the bits the rows would
 give. A path's states carry the path's text as their name. A dataset gives states where its objects'
 counts or its rollups answer the pass, a question on one column and the measures whose other keys an
-object holds constant, and rows everywhere else
+object holds constant, where its columns' statistics over an object's blocks answer a block, and rows
+everywhere else
 ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#8-the-planner)).
 `ScanOptions.UseSynopses` chooses them, true by default; `ScanOptions.AlignWindow` moves a range on the
 key's first column out to the bounds of the objects its ends fall in, so that they answer whole, and

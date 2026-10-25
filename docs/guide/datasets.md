@@ -210,8 +210,19 @@ var hourly = dataset.Scan<Request>()
 ```
 
 It answers what the rows would, to the bit. The objects still in their appends keep no counts and are
-read as rows, and so is every other question. `ScanOptions.UseSynopses = false` reads every object's
-rows, and `ExplainAsync` says object by object which it reads (`ScanPlan.States`).
+read as rows. `ScanOptions.UseSynopses = false` reads every object's rows, and `ExplainAsync` says
+object by object which it reads (`ScanPlan.States`).
+
+An object whose counts do not answer may still be answered block by block. Such an object keeps, for
+each column, its statistics over the object's blocks, the runs of rows of one value of the key's first
+column: each block's values and their rows, and each number's count, sum and extremes. A block whose
+columns of the question hold one value each, its filter proven over its rows, gives its counts and
+measures; a block where one column varies gives the count of each of its values, under a question of
+counts alone. The other blocks are read as rows. Under a key that leads with the service, errors by
+service read the statistics of the service and the status, `r.Status >= 500` judged value by value:
+on four services of 150 000 rows, 86.8 KB where the rows took 480.7 KB. By the hour as well, a block
+answers when its instants fall in one hour, which takes blocks short in time: here each held some fifty
+minutes, and the question read 2.7 MB where the rows took 3.4 MB.
 `ScanOptions.AlignWindow` widens the window to the bounds of the objects its ends fall in, so that
 they are answered from their counts too: the answer is then the exact answer of the window applied,
 which `ScanMetrics.Window` gives. The other synopses are designed in

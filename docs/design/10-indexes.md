@@ -464,13 +464,15 @@ part given up midway is dropped whole:
   keeps every value's bytes;
 - **a measure:** for a number column the counts carry as a measure, of more than 64 values, each block's
   count of values, the words of its exact sum, an `Int128` or a float's wide sum, its least and its
-  greatest, as the counts keep a measure's states.
+  greatest, as the counts keep a measure's states. An integer under an extension, an instant or a date,
+  which the counts do not carry, is a measure of its own blocks too: its extremes say which group of a
+  function of it, a truncation, a block falls in whole.
 
 A column that keeps neither part keeps no region: an identifier, an instant. On three million requests of
 the design over four hours, in the order of a key by emitter and cut as a job cuts them, 335 blocks of
-8 955 rows, every column's statistics cost 11.4 ns a row on one thread, and took 337 bytes a block, of
-which the endpoints took 129 and the hosts 83: the values of a service's block, each a number and its
-rows *(measured, `--micro blocks`)*.
+8 955 rows, every column's statistics cost 12.2 ns a row on one thread, and took 369 bytes a block, of
+which the endpoints took 129 and the hosts 83, the values of a service's block, each a number and its
+rows, and the instant 32, its extremes *(measured, `--micro blocks`)*.
 
 ### 4.13 `vorticity.column.where.v1`: where each value lives
 

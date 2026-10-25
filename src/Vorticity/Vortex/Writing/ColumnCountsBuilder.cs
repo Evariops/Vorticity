@@ -290,7 +290,8 @@ internal sealed class CountsPlan
         }
     }
 
-    private static long Integer(ReadOnlySpan<byte> value, int width, int at, bool signed) => (width, signed) switch
+    /// <summary>The integer at <paramref name="at"/> of <paramref name="value"/>'s values of <paramref name="width"/> bytes, unsigned ones as their bits.</summary>
+    internal static long Integer(ReadOnlySpan<byte> value, int width, int at, bool signed) => (width, signed) switch
     {
         (8, _) => MemoryMarshal.Read<long>(value[(at * 8)..]),
         (4, true) => MemoryMarshal.Read<int>(value[(at * 4)..]),

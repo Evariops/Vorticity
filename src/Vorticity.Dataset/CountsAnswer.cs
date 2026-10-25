@@ -374,7 +374,7 @@ internal sealed class CountsAnswer
     /// null when they prove no such thing. Bounds that are not exact lie outwards, which keeps the proof: a non-decreasing
     /// function sends every value between them between their images.
     /// </summary>
-    private static FilterLiteral? ConstantOf(ObjectSummaries summaries, string path, FieldExpr key)
+    internal static FilterLiteral? ConstantOf(ObjectSummaries summaries, string path, FieldExpr key)
     {
         if (!summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax || !column.HasNullCount || column.NullCount != 0
             || Image(key, column.Min) is not { } low || Image(key, column.Max) is not { } high || KeyCursor.Compare(low, high) != 0)
@@ -386,7 +386,7 @@ internal sealed class CountsAnswer
     }
 
     /// <summary>The image of <paramref name="value"/> through the functions of <paramref name="key"/>, the innermost first; null when one does not read it.</summary>
-    private static FilterLiteral? Image(FieldExpr key, FilterLiteral value)
+    internal static FilterLiteral? Image(FieldExpr key, FilterLiteral value)
     {
         if (key is not FunctionFieldExpr function)
         {
@@ -397,7 +397,7 @@ internal sealed class CountsAnswer
     }
 
     /// <summary>The column <paramref name="key"/> reads, under its functions.</summary>
-    private static FieldExpr Inner(FieldExpr key)
+    internal static FieldExpr Inner(FieldExpr key)
     {
         while (key is FunctionFieldExpr function)
         {
@@ -519,7 +519,7 @@ internal sealed class CountsAnswer
     /// name a batch of states gives it, the rows, each measure's states, then the sketches a quantile asks, typed in
     /// <paramref name="types"/>.
     /// </summary>
-    private static (int[] KeyFields, (string Name, int Field, bool Floats, bool Sketch)[] Measures, DType Type) Layout(
+    internal static (int[] KeyFields, (string Name, int Field, bool Floats, bool Sketch)[] Measures, DType Type) Layout(
         StateRequest request, VortexSchema columns, DType schema, DTypeArena types)
     {
         List<int> keyFields = [];
@@ -658,17 +658,15 @@ internal sealed class CountsAnswer
 /// entry, its keys' columns, the column's value and the values the object holds constant, its rows, and each measure's
 /// states and sketch under the names <see cref="StateRequest"/> gives them, in the columns the answer lays out.
 /// </summary>
-internal sealed class StateRows
+internal sealed class StateRows : StateTable
 {
-    /// <summary>The rows of states a batch holds at most.</summary>
-    internal const int BatchRows = 1 << 14;
-
-    private readonly CountsAnswer _answer;
     private readonly ColumnCounts _counts;
     private readonly ColumnSketches? _sketches;
     private readonly int[] _entries;
+    private readonly int _count;
 
-    // Each measure's place among the counts', and its first word among an entry's.
+    // Each measure, its place among the counts', and its first word among an entry's.
+    private readonly (string Name, int Field, bool Floats, bool Sketch)[] _measures;
     private readonly int[] _places;
     private readonly int[] _wordAt;
 
@@ -677,12 +675,13 @@ internal sealed class StateRows
     private readonly byte[]?[] _constants;
 
     internal StateRows(CountsAnswer answer, ColumnCounts counts, ColumnSketches? sketches, int[] entries, int count, int[] places, byte[]?[] constants)
+        : base(answer.KeyFields.Length, answer.Measures, answer.Type, answer.Bool)
     {
-        _answer = answer;
         _counts = counts;
         _sketches = sketches;
         _entries = entries;
-        Count = count;
+        _count = count;
+        _measures = answer.Measures;
         _places = places;
         _constants = constants;
         int[] offsets = new int[counts.MeasureFields.Length];
@@ -700,126 +699,36 @@ internal sealed class StateRows
     }
 
     /// <summary>The rows of states: an entry each.</summary>
-    internal int Count { get; }
+    internal override int Count => _count;
 
-    /// <summary>The batch of states of entries <c>[start, start + count)</c> of the answer, built in <paramref name="arena"/>, its rows counted from <paramref name="firstRow"/>.</summary>
-    internal RecordBatch Batch(CanonicalArena arena, int start, int count, long firstRow)
+    /// <inheritdoc/>
+    protected override void FillWords(Span<long> into, int start, int word)
     {
-        ReadOnlySpan<int> entries = _entries.AsSpan(start, count);
-        DType type = _answer.Type;
-        Span<int> nodes = stackalloc int[type.FieldCount];
-        int at = 0;
-        for (int k = 0; k < _answer.KeyFields.Length; k++)
+        // The word among an entry's: its rows, or a measure's word where the measure's place among the counts' puts it.
+        int at = word;
+        for (int i = 0, rest = word - 1; rest >= 0 && i < _places.Length; i++)
         {
-            nodes[at] = Bytes(arena, type.GetField(at), entries, -1, _constants[k]);
-            at++;
-        }
-
-        nodes[at] = Words(arena, type.GetField(at), entries, 0);
-        at++;
-        for (int i = 0; i < _places.Length; i++)
-        {
-            for (int word = 0; word < MeasureLayout.Words(_answer.Measures[i].Floats); word++)
+            int length = MeasureLayout.Words(_measures[i].Floats);
+            if (rest < length)
             {
-                nodes[at] = Words(arena, type.GetField(at), entries, _wordAt[i] + word);
-                at++;
+                at = _wordAt[i] + rest;
+                break;
             }
+
+            rest -= length;
         }
 
-        for (int i = 0; i < _places.Length; i++)
+        for (int i = 0; i < into.Length; i++)
         {
-            if (_answer.Measures[i].Sketch)
-            {
-                nodes[at] = Bytes(arena, type.GetField(at), entries, _places[i], null);
-                at++;
-            }
+            into[i] = _counts.WordsOf(_entries[start + i])[at];
         }
-
-        int root = arena.AddStruct(type, count, Validity.NonNullable, nodes);
-        return RecordBatch.OfStates(arena, root, firstRow);
     }
 
-    /// <summary>A column of one word of each entry's states, the word <paramref name="word"/> of its words.</summary>
-    private int Words(CanonicalArena arena, DType dtype, ReadOnlySpan<int> entries, int word)
-    {
-        VortexBuffer buffer = arena.AllocateUninitialized(entries.Length * sizeof(long), sizeof(long), out Span<byte> bytes);
-        Span<long> values = MemoryMarshal.Cast<byte, long>(bytes);
-        for (int i = 0; i < entries.Length; i++)
-        {
-            values[i] = _counts.WordsOf(entries[i])[word];
-        }
+    /// <inheritdoc/>
+    protected override byte[]? KeyOf(int row, int key) => _constants[key] ?? ValueOf(_entries[row]);
 
-        return arena.AddPrimitive(dtype, entries.Length, Validity.NonNullable, PType.I64, buffer);
-    }
-
-    /// <summary>
-    /// A column of each entry's bytes, null for none: <paramref name="constant"/> for every entry when there is one, else
-    /// the counted column's value as it stores it for <paramref name="place"/> -1, the sketch of the measure at
-    /// <paramref name="place"/> among the counts' otherwise; fixed-width values in a buffer, texts and binaries as views,
-    /// the long ones in one data buffer.
-    /// </summary>
-    private int Bytes(CanonicalArena arena, DType dtype, ReadOnlySpan<int> entries, int place, byte[]? constant)
-    {
-        DType storage = Storage(dtype);
-        bool nulls = false;
-        int data = 0;
-        foreach (int entry in entries)
-        {
-            byte[]? value = constant ?? BytesOf(entry, place);
-            nulls |= value is null;
-            data += value is { Length: > CanonicalSupport.MaxInlineViewLength } ? value.Length : 0;
-        }
-
-        Validity validity = Valid(storage);
-        if (nulls)
-        {
-            VortexBuffer bits = arena.Allocate((entries.Length + 7) / 8, 1, out Span<byte> set);
-            for (int i = 0; i < entries.Length; i++)
-            {
-                set[i >> 3] |= (constant ?? BytesOf(entries[i], place)) is null ? (byte)0 : (byte)(1 << (i & 7));
-            }
-
-            validity = Validity.Bitmap(arena.AddBool(_answer.Bool, entries.Length, Validity.NonNullable, bits, 0));
-        }
-
-        int node;
-        if (storage.Kind == DTypeKind.Primitive)
-        {
-            int width = storage.PType.ByteWidth();
-            VortexBuffer buffer = arena.Allocate(entries.Length * width, Math.Max(width, 1), out Span<byte> bytes);
-            for (int i = 0; i < entries.Length; i++)
-            {
-                if ((constant ?? BytesOf(entries[i], place)) is { } value)
-                {
-                    value.AsSpan(0, Math.Min(width, value.Length)).CopyTo(bytes[(i * width)..]);
-                }
-            }
-
-            node = arena.AddPrimitive(storage, entries.Length, validity, storage.PType, buffer);
-        }
-        else
-        {
-            VortexBuffer views = arena.Allocate(entries.Length * 16, 16, out Span<byte> view);
-            VortexBuffer heap = arena.Allocate(Math.Max(data, 1), 1, out Span<byte> into);
-            int offset = 0;
-            for (int i = 0; i < entries.Length; i++)
-            {
-                byte[] value = constant ?? BytesOf(entries[i], place) ?? [];
-                if (CanonicalSupport.WriteView(view.Slice(i * 16, 16), value, value.Length, 0, offset))
-                {
-                    value.CopyTo(into[offset..]);
-                    offset += value.Length;
-                }
-            }
-
-            node = arena.AddVarBinView(storage, entries.Length, validity, views, [heap]);
-        }
-
-        return Wrap(arena, dtype, node, entries.Length);
-    }
-
-    /// <summary>The bytes <see cref="Bytes"/> reads of entry <paramref name="entry"/>: its value for <paramref name="place"/> -1, else its sketch.</summary>
-    private byte[]? BytesOf(int entry, int place) => place < 0 ? ValueOf(entry) : _sketches!.SketchOf(entry, place);
+    /// <inheritdoc/>
+    protected override byte[]? SketchOf(int row, int measure) => _sketches!.SketchOf(_entries[row], _places[measure]);
 
     /// <summary>The value of the group entry <paramref name="entry"/> belongs to; null for the nulls'.</summary>
     private byte[]? ValueOf(int entry)
@@ -841,30 +750,5 @@ internal sealed class StateRows
         }
 
         return groups[low].Value;
-    }
-
-    /// <summary>The validity of a column of <paramref name="dtype"/> with no null: every row valid, which a nullable type says so.</summary>
-    private static Validity Valid(DType dtype) => dtype.Nullability == Nullability.Nullable ? Validity.AllValid : Validity.NonNullable;
-
-    /// <summary>The type <paramref name="dtype"/> stores its values as, under every extension.</summary>
-    private static DType Storage(DType dtype)
-    {
-        while (dtype.Kind == DTypeKind.Extension)
-        {
-            dtype = dtype.StorageType;
-        }
-
-        return dtype;
-    }
-
-    /// <summary>The node <paramref name="storage"/> under every extension <paramref name="dtype"/> wraps it in.</summary>
-    private static int Wrap(CanonicalArena arena, DType dtype, int storage, int rows)
-    {
-        if (dtype.Kind != DTypeKind.Extension)
-        {
-            return storage;
-        }
-
-        return arena.AddExtension(dtype, rows, Wrap(arena, dtype.StorageType, storage, rows));
     }
 }

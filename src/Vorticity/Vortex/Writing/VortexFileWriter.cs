@@ -884,7 +884,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 if (options.Blocked && writer._indexes is { } blocked)
                 {
                     writer._cuts = new BlockCuts();
-                    blocked.AddBlockStats(writer._cuts);
+                    blocked.AddBlockStats(schema, writer._cuts);
                 }
             }
         }

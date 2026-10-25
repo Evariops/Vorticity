@@ -88,7 +88,7 @@ internal static class BlocksMicro
             {
                 sheets[column] = new ColumnSheetBuilder();
                 counters[column] = new ColumnCountsBuilder(sheets[column], counts, column);
-                builders[column] = new ColumnBlocksBuilder(sheets[column], counts, column, cuts);
+                builders[column] = new ColumnBlocksBuilder(sheets[column], counts, column, cuts, schema.GetField(column));
             }
 
             long[] ticks = new long[columns];

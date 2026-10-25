@@ -1855,13 +1855,13 @@ internal sealed class IndexWriter : IDisposable
     /// its counts, from the values its sheet numbers and the measures the counts' plan reads; nothing for a file that keeps
     /// no counts.
     /// </summary>
-    internal void AddBlockStats(BlockCuts cuts)
+    internal void AddBlockStats(DType schema, BlockCuts cuts)
     {
         for (int field = 0; _counts is { } plan && _isTabular && field < _fieldCount; field++)
         {
             if (SheetOf(field) is { } sheet)
             {
-                _builders[field].Add(new ColumnBlocksBuilder(sheet, plan, field, cuts));
+                _builders[field].Add(new ColumnBlocksBuilder(sheet, plan, field, cuts, schema.GetField(field)));
             }
         }
     }

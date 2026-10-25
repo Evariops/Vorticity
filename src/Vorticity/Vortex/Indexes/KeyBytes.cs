@@ -218,6 +218,27 @@ internal readonly record struct KeyLayout(KeyShape Shape, int Width, PType PType
         }
     }
 
+    /// <summary>
+    /// The literal a key of this layout stands for, the inverse of <see cref="TryEncode"/>: a text's or a binary's bytes,
+    /// an integer of its width, a float widened to a double.
+    /// </summary>
+    /// <param name="key">The key, as the column stores the value.</param>
+    internal FilterLiteral ToLiteral(ReadOnlySpan<byte> key) => (Shape, Width) switch
+    {
+        (KeyShape.Bytes, _) => FilterLiteral.From(key),
+        (KeyShape.Float, 8) => FilterLiteral.From(BinaryPrimitives.ReadDoubleLittleEndian(key)),
+        (KeyShape.Float, 4) => FilterLiteral.From(BinaryPrimitives.ReadSingleLittleEndian(key)),
+        (KeyShape.Float, _) => FilterLiteral.From((double)BinaryPrimitives.ReadHalfLittleEndian(key)),
+        (KeyShape.Signed, 8) => FilterLiteral.From(BinaryPrimitives.ReadInt64LittleEndian(key)),
+        (KeyShape.Signed, 4) => FilterLiteral.From((long)BinaryPrimitives.ReadInt32LittleEndian(key)),
+        (KeyShape.Signed, 2) => FilterLiteral.From((long)BinaryPrimitives.ReadInt16LittleEndian(key)),
+        (KeyShape.Signed, _) => FilterLiteral.From((long)(sbyte)key[0]),
+        (_, 8) => FilterLiteral.From(BinaryPrimitives.ReadUInt64LittleEndian(key)),
+        (_, 4) => FilterLiteral.From((ulong)BinaryPrimitives.ReadUInt32LittleEndian(key)),
+        (_, 2) => FilterLiteral.From((ulong)BinaryPrimitives.ReadUInt16LittleEndian(key)),
+        _ => FilterLiteral.From((ulong)key[0]),
+    };
+
     private static bool TryDouble(FilterLiteral value, out double d)
     {
         switch (value.Kind)
