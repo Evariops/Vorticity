@@ -734,7 +734,13 @@ before it asks the store, by its file's name and length: a region read whole and
 checksum, a sealed object's frames and trailer and a tree's pages handed to their readers, which check
 them as they check the local cache's. What it reads there it does not keep again, so a region the
 processes read lies once on the disk, unless two of them read it from the store before either kept it;
-a sealed frame another directory holds counts as held, and is not kept again either. The root's own
+a sealed frame another directory holds counts as held, and is not kept again either. A file of another
+directory read once stays open, up to 1 024 of them, the least recently read closed first, and checked
+against its checksum once: an entry never changes once renamed, so the next read of it needs neither an
+open nor a hash, and a file its cache deletes meanwhile reads as it was. A question warm from another's
+directory then takes what it takes from its own: 10.05 ms against 10.04 over 16 objects of 200 000 rows,
+38.5 against 36.5 over 64, where an open and a hash at every read made them 7 % and 36 % slower
+(`vortex-queries --micro peercache`). The root's own
 lock is held shared by every cache of the root, which a cache of its own, holding it alone, refuses and
 is refused by: a root is shared or owned, never both.
 

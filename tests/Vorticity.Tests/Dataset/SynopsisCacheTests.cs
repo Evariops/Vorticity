@@ -366,10 +366,12 @@ public sealed class SynopsisCacheTests
             Assert.False(first.TryRead(uid, neither, out _));
             Assert.Equal((1L, 1L), (first.Misses, second.Misses));
 
-            // Torn in the first's directory: not served to the second, and still the first's.
+            // Torn in the first's directory: not served to the second, and still the first's. The second keeps open the
+            // files of the first it read, checked once, which no one writes then: it lets them go first.
             string file = Directory.GetFiles(first.Directory, SynopsisCache.NameOf(uid, kept), SearchOption.AllDirectories).Single();
             byte[] flipped = [.. keptBytes];
             flipped[7] ^= 1;
+            second.CloseFiles();
             System.IO.File.WriteAllBytes(file, flipped);
             Assert.False(second.TryRead(uid, kept, out _));
             Assert.True(System.IO.File.Exists(file));

@@ -88,6 +88,9 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>The files the cache keeps open at most, the least recently opened closed first.</summary>
     private const int MaxOpenHandles = 4096;
 
+    /// <summary>The files of the other caches of the root the cache keeps open at most, the least recently read closed first.</summary>
+    private const int MaxPeerHandles = 1024;
+
     /// <summary>The bytes of regions waiting for their write at most, past which a region is written before its reader goes on.</summary>
     private const long MaxPendingBytes = 256L << 20;
 
@@ -116,6 +119,12 @@ public sealed class SynopsisCache : IDisposable
     private readonly object _gate = new object();
     private readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
     private readonly LinkedList<Entry> _open = new LinkedList<Entry>();
+
+    // The files of the other caches of the root read, kept open, the most recently read first, each with whether its bytes
+    // held their checksum once: a file never changes once renamed, so a read of it again needs neither an open, which costs
+    // about 85 µs on Windows, nor a hash.
+    private readonly Dictionary<string, PeerFile> _peerFiles = new Dictionary<string, PeerFile>(StringComparer.Ordinal);
+    private readonly LinkedList<PeerFile> _peerOrder = new LinkedList<PeerFile>();
 
     // The regions of indexes and the pages of trees, and the data segments, each within its own capacity.
     private readonly Tier _regions;
@@ -1075,25 +1084,26 @@ public sealed class SynopsisCache : IDisposable
     {
         owner = null!;
         int length = checked((int)region.Length);
-        using (SafeFileHandle? file = OpenPeer(name, length, out _))
+        if (LeasePeer(name, length) is { } file)
         {
-            if (file is not null)
+            NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+            try
             {
-                NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
-                try
+                Span<byte> bytes = block.WritableSpan[..length];
+                if (ReadPeer(file, bytes) && (file.Verified || region.Holds(bytes)))
                 {
-                    Span<byte> bytes = block.WritableSpan[..length];
-                    if (ReadAll(file, bytes) && region.Holds(bytes))
-                    {
-                        owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes, region.AlignmentExponent));
-                        ServedByPeer(length);
-                        return true;
-                    }
+                    file.Verified = true;
+                    owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes, region.AlignmentExponent));
+                    ServedByPeer(length);
+                    return true;
                 }
-                finally
-                {
-                    block.Release();
-                }
+
+                ForgetPeer(file);
+            }
+            finally
+            {
+                block.Release();
+                file.Handle.DangerousRelease();
             }
         }
 
@@ -1109,30 +1119,133 @@ public sealed class SynopsisCache : IDisposable
     {
         owner = null!;
         int length = checked((int)segment.Length);
-        using (SafeFileHandle? file = OpenPeer(name, length + DataTrailerBytes, out _))
+        if (LeasePeer(name, length + DataTrailerBytes) is { } file)
         {
-            if (file is not null)
+            NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
+            try
             {
-                NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
-                try
+                // Once its bytes held their checksum, a file's read leaves the checksum unread.
+                bool verified = file.Verified;
+                Span<byte> bytes = block.WritableSpan[..(verified ? length : length + DataTrailerBytes)];
+                if (ReadPeer(file, bytes) && (verified || HoldsTrailer(bytes[..length], bytes[length..])))
                 {
-                    Span<byte> bytes = block.WritableSpan[..(length + DataTrailerBytes)];
-                    if (ReadAll(file, bytes) && HoldsTrailer(bytes[..length], bytes[length..]))
-                    {
-                        owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes[..length], segment.AlignmentExponent));
-                        ServedByPeer(length);
-                        return true;
-                    }
+                    file.Verified = true;
+                    owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes[..length], segment.AlignmentExponent));
+                    ServedByPeer(length);
+                    return true;
                 }
-                finally
-                {
-                    block.Release();
-                }
+
+                ForgetPeer(file);
+            }
+            finally
+            {
+                block.Release();
+                file.Handle.DangerousRelease();
             }
         }
 
         Missed();
         return false;
+    }
+
+    /// <summary>
+    /// The file named <paramref name="name"/> of another cache of the root, of <paramref name="length"/> bytes, a reference
+    /// to its handle taken for the caller to release: the one this cache kept open from an earlier read, or one it opens
+    /// now and keeps, the least recently read let go past <see cref="MaxPeerHandles"/>; null when no directory holds such a
+    /// file. A file its cache deletes meanwhile is read as it was, which is what it holds: an entry never changes.
+    /// </summary>
+    private PeerFile? LeasePeer(ReadOnlySpan<char> name, int length)
+    {
+        bool added = false;
+        lock (_gate)
+        {
+            if (_peerFiles.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out PeerFile? kept) && kept.Length == length)
+            {
+                kept.Handle.DangerousAddRef(ref added);
+                _peerOrder.Remove(kept.Node!);
+                kept.Node = _peerOrder.AddFirst(kept);
+                return kept;
+            }
+        }
+
+        if (OpenPeer(name, length, out _) is not { } opened)
+        {
+            return null;
+        }
+
+        PeerFile made = new PeerFile(new string(name), opened, length);
+        PeerFile? closed = null;
+        try
+        {
+            lock (_gate)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    closed = made;
+                    return null;
+                }
+
+                if (_peerFiles.TryGetValue(made.Name, out PeerFile? raced))
+                {
+                    closed = made;
+                    raced.Handle.DangerousAddRef(ref added);
+                    return raced.Length == length ? raced : Released(raced);
+                }
+
+                _peerFiles[made.Name] = made;
+                made.Node = _peerOrder.AddFirst(made);
+                if (_peerOrder.Count > MaxPeerHandles)
+                {
+                    closed = _peerOrder.Last!.Value;
+                    _peerOrder.RemoveLast();
+                    _peerFiles.Remove(closed.Name);
+                }
+
+                made.Handle.DangerousAddRef(ref added);
+                return made;
+            }
+        }
+        finally
+        {
+            // A handle let go closes once the reads that hold a reference to it release them.
+            closed?.Handle.Dispose();
+        }
+
+        static PeerFile? Released(PeerFile file)
+        {
+            file.Handle.DangerousRelease();
+            return null;
+        }
+    }
+
+    /// <summary>Whether <paramref name="bytes"/> were read whole from the start of a file of another cache of the root.</summary>
+    private static bool ReadPeer(PeerFile file, Span<byte> bytes)
+    {
+        try
+        {
+            return ReadAll(file.Handle, bytes);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Lets go of a file of another cache of the root that a read found torn: the next read opens it again.</summary>
+    private void ForgetPeer(PeerFile file)
+    {
+        lock (_gate)
+        {
+            if (!_peerFiles.TryGetValue(file.Name, out PeerFile? kept) || !ReferenceEquals(kept, file))
+            {
+                return;
+            }
+
+            _peerFiles.Remove(file.Name);
+            _peerOrder.Remove(file.Node!);
+        }
+
+        file.Handle.Dispose();
     }
 
     /// <summary>
@@ -1480,12 +1593,26 @@ public sealed class SynopsisCache : IDisposable
                     closed.Add(handle);
                 }
             }
+
+            ClosePeers(closed);
         }
 
         foreach (SafeFileHandle handle in closed)
         {
             handle.Dispose();
         }
+    }
+
+    /// <summary>Takes every file of another cache of the root the cache keeps open out of it, for the caller to dispose. Under the gate.</summary>
+    private void ClosePeers(List<SafeFileHandle> closed)
+    {
+        foreach (PeerFile peer in _peerOrder)
+        {
+            closed.Add(peer.Handle);
+        }
+
+        _peerOrder.Clear();
+        _peerFiles.Clear();
     }
 
     /// <summary>Releases the directory's lock; the entries stay on the disk for the next cache that opens it.</summary>
@@ -1495,12 +1622,20 @@ public sealed class SynopsisCache : IDisposable
         {
             // What waits for its write is written: the next cache to open the directory finds it.
             Flush();
+            List<SafeFileHandle> peers = [];
             lock (_gate)
             {
                 while (_open.First is { } open)
                 {
                     Close(open.Value)?.Dispose();
                 }
+
+                ClosePeers(peers);
+            }
+
+            foreach (SafeFileHandle peer in peers)
+            {
+                peer.Dispose();
             }
 
             _lock.Dispose();
@@ -1879,6 +2014,30 @@ public sealed class SynopsisCache : IDisposable
 
         /// <summary>The mapping whose bytes a read found to hold their region's checksum; null before one did.</summary>
         internal IO.MappedFileOwner? Verified { get; set; }
+    }
+
+    /// <summary>
+    /// A file of another cache of the root, kept open: its name, its handle, its length, whether a read found its bytes to
+    /// hold their checksum, and its place among those kept.
+    /// </summary>
+    private sealed class PeerFile(string name, SafeFileHandle handle, long length)
+    {
+        internal string Name { get; } = name;
+
+        internal SafeFileHandle Handle { get; } = handle;
+
+        internal long Length { get; } = length;
+
+        private int _verified;
+
+        /// <summary>Whether a read found the file's bytes to hold their checksum; set by any reader, read by every one.</summary>
+        internal bool Verified
+        {
+            get => Volatile.Read(ref _verified) != 0;
+            set => Volatile.Write(ref _verified, value ? 1 : 0);
+        }
+
+        internal LinkedListNode<PeerFile>? Node { get; set; }
     }
 
     /// <summary>
