@@ -147,6 +147,29 @@ hands batches to your loop gains little: it still delivers them one at a time an
 (which the sample checks at degree 4), and most of its cost here is walking 123 blocks. Measure on
 your own files. Timings vary from run to run on a busy machine, so read the ratios.
 
+## Many questions at once
+
+A process answers as many questions at once as it has cores. Past its physical cores, extra clients
+add little: what hyperthreading gives two threads that share a core. One process is as good as two:
+the questions share its caches, which a second process would fill again.
+
+Measured with the paths bench's throughput run (`--qps`), on a 16-core processor with 32 logical
+cores. Each question ran at one lane over two hours of spans and logs, its segments in a 4 GiB cache:
+
+| clients | short questions, q/s | cores busy | mixed questions, q/s | cores busy |
+|---|---|---|---|---|
+| 8 | 337 | 8.4 | 8.9 | 6.3 |
+| 16 | 531 | 16.5 | 16.7 | 13.8 |
+| 24 | 561 | 24.3 | 21.2 | 21.9 |
+| 32 | 561 | 30.0 | 22.9 | 27.0 |
+
+The short questions take 0.2 to 60 ms each, answered from the cache with no request to the store.
+The mixed ones add full scans of 3 to 4 seconds. Two processes of 16 clients each answered 537 short
+questions a second together, on the same 30 cores as one process of 32 clients, which answered 548.
+The limit is the cores, not the process. Over a 10 Gb/s link, the mixed questions stop at 14.7 a
+second from 16 clients on, the link full at about 1 GB/s. Size the clients of a process to its
+physical cores, or to its link when its questions read the store.
+
 ## Prefetch
 
 `ScanOptions.Prefetch` is the number of batches decoded ahead of the loop, 1 by default, so that
