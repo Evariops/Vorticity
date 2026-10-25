@@ -178,9 +178,16 @@ internal static class DatasetVacuum
                 ? head
                 : await CommitObject.OpenAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false);
             pages.Open(version, commit);
-            foreach ((int _, DatasetTree tree) in DatasetLevels.Of(commit.Header).Occupied())
+            DatasetLevels trees = DatasetLevels.Of(commit.Header);
+            foreach ((int _, DatasetTree tree) in trees.Occupied())
             {
                 await MarkAsync(tree.Root, tree.Depth).ConfigureAwait(false);
+            }
+
+            // The tree of rollups, whose leaves name the rollups' objects.
+            if (!trees.Rollups.IsEmpty)
+            {
+                await MarkAsync(trees.Rollups.Root, trees.Rollups.Depth, rollups: true).ConfigureAwait(false);
             }
         }
 
@@ -200,11 +207,14 @@ internal static class DatasetVacuum
         }
 
         await DeleteAsync().ConfigureAwait(false);
-        foreach (ObjectListing listed in await store.ListEntriesAsync(CommitKey.DataPrefix, cancellationToken).ConfigureAwait(false))
+        foreach (string prefix in (string[])[CommitKey.DataPrefix, CommitKey.RollupPrefix])
         {
-            if (!markedData.Contains(listed.Key) && await HeadToSweepAsync(listed).ConfigureAwait(false) is { } found)
+            foreach (ObjectListing listed in await store.ListEntriesAsync(prefix, cancellationToken).ConfigureAwait(false))
             {
-                Sweep(listed.Key, found);
+                if (!markedData.Contains(listed.Key) && await HeadToSweepAsync(listed).ConfigureAwait(false) is { } found)
+                {
+                    Sweep(listed.Key, found);
+                }
             }
         }
 
@@ -242,7 +252,7 @@ internal static class DatasetVacuum
             Sparse = sparse,
         };
 
-        async ValueTask MarkAsync(PageReference reference, int depth)
+        async ValueTask MarkAsync(PageReference reference, int depth, bool rollups = false)
         {
             if (!reference.Exists || !seen.Add(reference))
             {
@@ -252,6 +262,16 @@ internal static class DatasetVacuum
             markedCommits.Add(reference.Version);
             live[reference.Version] = live.GetValueOrDefault(reference.Version) + reference.Length;
             ReadOnlyMemory<byte> page = await pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
+            if (depth == 1 && rollups)
+            {
+                foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
+                {
+                    markedData.Add(RollupEntry.FromBytes(leaf.Key.Span, leaf.Value.Span).Key);
+                }
+
+                return;
+            }
+
             if (depth == 1)
             {
                 foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
@@ -283,7 +303,7 @@ internal static class DatasetVacuum
 
             foreach (InternalEntry child in TreePage.ReadInternal(page))
             {
-                await MarkAsync(child.Child, depth - 1).ConfigureAwait(false);
+                await MarkAsync(child.Child, depth - 1, rollups).ConfigureAwait(false);
             }
         }
 

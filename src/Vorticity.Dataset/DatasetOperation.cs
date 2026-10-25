@@ -135,6 +135,14 @@ internal abstract record DatasetOperation
     /// <param name="Change">The change.</param>
     /// <param name="After">How many changes the calendar held when the change was worked out.</param>
     public sealed record ChangePeriodLength(PeriodChange Change, int After) : DatasetOperation;
+
+    /// <summary>
+    /// Puts a rollup (<see cref="RollupEntry"/>) into the tree of rollups: applied when what it sums is in the version as
+    /// it summed it, by the fingerprint of the level's entries it covers, or of the rollups of the rank below; dropped when
+    /// one of them changed since, which a later rollup sums again.
+    /// </summary>
+    /// <param name="Entry">The rollup, its object written.</param>
+    public sealed record PutRollup(RollupEntry Entry) : DatasetOperation;
 }
 
 /// <summary>What a commit made of one change, once re-applied to the version it landed on.</summary>

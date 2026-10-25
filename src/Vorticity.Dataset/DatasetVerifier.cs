@@ -115,6 +115,7 @@ internal static class DatasetVerifier
         }
 
         await run.CheckEntriesAsync().ConfigureAwait(false);
+        await run.CheckRollupsAsync(targetLevels.Rollups).ConfigureAwait(false);
         await run.CheckCommitsAsync(version).ConfigureAwait(false);
         return new DatasetVerification
         {
@@ -302,6 +303,54 @@ internal static class DatasetVerifier
             {
                 Problems.Add(Invariant($"the page of version {reference.Version} at {reference.Offset}+{reference.Length}: {(unreadable is TornCommitException { InnerException: { } cause } ? cause : unreadable).Message}"));
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// The tree of rollups, every page of it, and each rollup's object: in the store, of the length its entry says. A
+        /// rollup's regions are checksummed, which its readers check as they read them.
+        /// </summary>
+        internal async ValueTask CheckRollupsAsync(DatasetTree rollups)
+        {
+            if (rollups.IsEmpty)
+            {
+                return;
+            }
+
+            List<(PageReference Reference, int Height)> pages = [(rollups.Root, rollups.Depth)];
+            while (pages.Count > 0)
+            {
+                (PageReference reference, int height) = pages[^1];
+                pages.RemoveAt(pages.Count - 1);
+                if (!_checked.Add(reference) || await ReadAsync(reference, height).ConfigureAwait(false) is not { } page)
+                {
+                    continue;
+                }
+
+                if (height > 1)
+                {
+                    foreach (InternalEntry child in TreePage.ReadInternal(page))
+                    {
+                        pages.Add((child.Child, height - 1));
+                    }
+
+                    continue;
+                }
+
+                foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
+                {
+                    RollupEntry rollup = RollupEntry.FromBytes(leaf.Key.Span, leaf.Value.Span);
+                    Objects++;
+                    ObjectHead? head = await store.HeadAsync(rollup.Key, cancellationToken).ConfigureAwait(false);
+                    if (head is not { } found)
+                    {
+                        Problems.Add($"the rollup '{rollup.Key}' is not in the store");
+                    }
+                    else if (found.Length != rollup.Bytes)
+                    {
+                        Problems.Add(Invariant($"the rollup '{rollup.Key}' holds {found.Length} bytes, and its entry says {rollup.Bytes}"));
+                    }
+                }
             }
         }
 

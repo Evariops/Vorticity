@@ -46,6 +46,9 @@ internal enum CommitKind
 
     /// <summary>The keys of variant columns every job shreds changed.</summary>
     Layout = 12,
+
+    /// <summary>Rollups put over runs of objects, which only read what the objects keep.</summary>
+    Rollup = 13,
 }
 
 /// <summary>How a commit ended, as the dataset's telemetry names it.</summary>
@@ -341,6 +344,7 @@ internal static class DatasetTelemetry
         CommitKind.Rekey => "rekey",
         CommitKind.Sources => "sources",
         CommitKind.Layout => "layout",
+        CommitKind.Rollup => "rollup",
         _ => "other",
     };
 

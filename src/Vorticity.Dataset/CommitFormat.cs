@@ -140,6 +140,12 @@ internal enum DatasetFeatures : ulong
     /// not know it would write objects across values and past the size, against the cut every writer keeps.
     /// </summary>
     Clustering = 128,
+
+    /// <summary>
+    /// A tree of rollups (<see cref="RollupEntry"/>), whose pages and objects a library that does not know it would leave
+    /// unmarked in a vacuum, and whose rollups its commits would leave stale over the objects they change.
+    /// </summary>
+    Rollups = 256,
 }
 
 /// <summary>

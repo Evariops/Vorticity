@@ -1992,6 +1992,17 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Sums the counts of the deepest level's objects into rollups, rank by rank, where the latest version holds none yet:
+    /// runs of about <see cref="DatasetOptions.RollupFanout"/> consecutive objects, then of as many rollups, each summed
+    /// from what its children keep, with no row read. A question over a long range of the key then reads a rollup where it
+    /// would read the counts of its objects. A commit that puts or takes away an object takes away the rollups over it,
+    /// which a later call sums again; <see cref="RunCompactionAsync"/> calls this when no job is due.
+    /// </summary>
+    /// <param name="cancellationToken">Stops the work between rollups or inside one; a rollup written and not put is swept by a vacuum.</param>
+    /// <returns>The rollups put.</returns>
+    public ValueTask<int> RollUpAsync(CancellationToken cancellationToken = default) => DatasetRollups.RollUpAsync(this, cancellationToken);
+
+    /// <summary>
     /// Runs compaction in the background until <paramref name="cancellationToken"/> is cancelled:
     /// refreshes, plans, runs the job due for this loop, paces what it wrote, and sleeps when nothing
     /// is due. Any host runs it, a hosted service, a worker, a console; the library starts no thread
@@ -2445,6 +2456,12 @@ public sealed class VortexDataset : IAsyncDisposable
     internal LevelZeroMemo LevelZero { get; } = new LevelZeroMemo();
 
     /// <summary>
+    /// The deepest level's root and the tree of rollups' root as this handle's last <see cref="RollUpAsync"/> left them: a
+    /// call that finds both where they were has nothing to sum, and walks nothing.
+    /// </summary>
+    internal (PageReference Bottom, PageReference Rollups)? RolledUp { get; set; }
+
+    /// <summary>
     /// The store's reader of an object read with no open of it, which the caller disposes: a sealed object's
     /// keeps its trailer and the frames of the regions its table of contents declares in the session's synopsis
     /// cache, the bytes the store holds.
@@ -2745,14 +2762,52 @@ public sealed class VortexDataset : IAsyncDisposable
     /// from its memo, the others with no open of the object, side by side in one round trip, none once the session's cache
     /// holds them, and kept. A region null, or whose bytes fail their checksum, reads none.
     /// </summary>
-    private async ValueTask ReadSynopsesAsync(
+    private ValueTask ReadSynopsesAsync(
         ObjectEntry entry, Indexes.ObjectContents contents, Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        ReadRegionsAsync(
+            entry.Uid, ct => OpenFooterlessAsync(entry, contents, ct), source => Footerless(source, entry, contents), regions, synopses, reader, cancellationToken);
+
+    /// <summary>
+    /// The counts of column <paramref name="field"/> a rollup (<see cref="RollupEntry"/>) keeps over its objects, and when
+    /// <paramref name="sketches"/> asks their sketches, side by side in one round trip with no open, none once this handle
+    /// read them: (null, null) for a column it keeps none of.
+    /// </summary>
+    internal async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadRollupCountsAsync(
+        RollupEntry rollup, int field, bool sketches, CancellationToken cancellationToken)
+    {
+        if (rollup.ColumnOf(field) is not { } column)
+        {
+            return (null, null);
+        }
+
+        object?[] read = new object?[2];
+        Indexes.IndexSegment?[] regions = [column.Counts, sketches ? column.Sketches : null];
+        await ReadRegionsAsync(
+            rollup.Uid,
+            ct => SealedObjectStore.OpenDataAsync(_store, rollup.Key, rollup.Uid, rollup.Bytes, ct, null),
+            source => SessionReader.Wrap(source, Session),
+            regions,
+            read,
+            CountsOrSketches,
+            cancellationToken).ConfigureAwait(false);
+        return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
+    }
+
+    /// <summary>
+    /// Reads into <paramref name="synopses"/>, by their position, the regions <paramref name="regions"/> of the object of
+    /// <paramref name="uid"/>, each as <paramref name="reader"/> reads its bytes: those this handle read before from its memo,
+    /// the others side by side in one round trip through the reader <paramref name="open"/> gives and
+    /// <paramref name="wrap"/> wraps, and kept. A region null, or whose bytes fail their checksum, reads none.
+    /// </summary>
+    private async ValueTask ReadRegionsAsync(
+        UInt128 uid, Func<CancellationToken, ValueTask<ISegmentReader>> open, Func<ISegmentReader, ISegmentReader> wrap,
+        Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader, CancellationToken cancellationToken)
     {
         int asked = 0;
         for (int i = 0; i < regions.Length; i++)
         {
-            if (regions[i] is { } region && _synopses.TryGet(entry.Uid, region.Offset, out object? held))
+            if (regions[i] is { } region && _synopses.TryGet(uid, region.Offset, out object? held))
             {
                 synopses[i] = held;
                 regions[i] = null;
@@ -2766,7 +2821,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return;
         }
 
-        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        ISegmentReader source = await open(cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
             using SegmentRequestSet requests = new SegmentRequestSet(asked);
@@ -2778,14 +2833,14 @@ public sealed class VortexDataset : IAsyncDisposable
                     : -1;
             }
 
-            await Footerless(source, entry, contents).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            await wrap(source).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             for (int i = 0; i < regions.Length; i++)
             {
                 if (slots[i] >= 0 && regions[i]!.Value.Holds(requests.GetBuffer(slots[i]).Span))
                 {
                     (object synopsis, long bytes) = reader(i, requests.GetBuffer(slots[i]).Span);
                     synopses[i] = synopsis;
-                    _synopses.Keep(entry.Uid, regions[i]!.Value.Offset, synopsis, bytes);
+                    _synopses.Keep(uid, regions[i]!.Value.Offset, synopsis, bytes);
                 }
             }
         }

@@ -145,7 +145,7 @@ internal sealed record CommitHeader
     /// <summary>The features this library knows: a header that names another is refused, a later library's.</summary>
     internal const DatasetFeatures KnownFeatures =
         DatasetFeatures.EntryFields | DatasetFeatures.ErasureDelay | DatasetFeatures.Periods | DatasetFeatures.Identifiers
-        | DatasetFeatures.ShreddedPaths | DatasetFeatures.Clustering;
+        | DatasetFeatures.ShreddedPaths | DatasetFeatures.Clustering | DatasetFeatures.Rollups;
 
     /// <summary>
     /// Whether the dataset is compacted by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which the lateness
@@ -197,6 +197,12 @@ internal sealed record CommitHeader
     /// </summary>
     public ClusteringOptions? Clustering { get; init; }
 
+    /// <summary>
+    /// The tree of rollups (<see cref="RollupEntry"/>), as a level is recorded, without inlined pages; null for none. A header
+    /// that carries it names <see cref="DatasetFeatures.Rollups"/>.
+    /// </summary>
+    public CommitLevel? Rollups { get; init; }
+
     /// <summary>The longest delay a header reads, in seconds: what a <see cref="TimeSpan"/> holds.</summary>
     private const ulong MaxDelaySeconds = (ulong)(long.MaxValue / TimeSpan.TicksPerSecond);
 
@@ -228,6 +234,7 @@ internal sealed record CommitHeader
         // 23 held the partition columns, retired with them: never reused.
         internal const int ShreddedPaths = 24;
         internal const int Clustering = 25;
+        internal const int Rollups = 26;
     }
 
     internal static class PeriodChangeField
@@ -311,7 +318,12 @@ internal sealed record CommitHeader
         writer.WriteInt64(Field.CreatedAt, CreatedAtUnixMilliseconds);
         foreach (CommitLevel level in Levels)
         {
-            WriteLevel(ref writer, level);
+            WriteLevel(ref writer, level, Field.Levels);
+        }
+
+        if (Rollups is { } rollups)
+        {
+            WriteLevel(ref writer, rollups, Field.Rollups);
         }
 
         foreach (RetiredColumn column in Retired)
@@ -526,7 +538,7 @@ internal sealed record CommitHeader
         }
     }
 
-    private static void WriteLevel(ref ProtoWriter writer, CommitLevel level)
+    private static void WriteLevel(ref ProtoWriter writer, CommitLevel level, int field)
     {
         ProtoWriter inner = new ProtoWriter();
         try
@@ -559,7 +571,7 @@ internal sealed record CommitHeader
                 inner.WriteBytes(LevelField.Pointer, level.Pointer.Span);
             }
 
-            writer.WriteBytes(Field.Levels, inner.WrittenSpan);
+            writer.WriteBytes(field, inner.WrittenSpan);
         }
         finally
         {
@@ -593,6 +605,7 @@ internal sealed record CommitHeader
         SliceWidth? periodLength = null;
         List<PeriodChange> periodChanges = [];
         ClusteringOptions? grouping = null;
+        CommitLevel? rollups = null;
 
         try
         {
@@ -673,6 +686,9 @@ internal sealed record CommitHeader
                     case (Field.Clustering, ProtoWireType.LengthDelimited):
                         grouping = ReadClustering(reader.ReadLengthDelimited());
                         break;
+                    case (Field.Rollups, ProtoWireType.LengthDelimited):
+                        rollups = ReadLevel(reader.ReadLengthDelimited());
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -709,6 +725,11 @@ internal sealed record CommitHeader
             throw new CommitFormatException("A commit header's flag of clustering and its clustering disagree: each goes with the other.");
         }
 
+        if (rollups is not null && (features & DatasetFeatures.Rollups) == 0)
+        {
+            throw new CommitFormatException("A commit header carries a tree of rollups and does not name them.");
+        }
+
         return new CommitHeader
         {
             Version = version,
@@ -735,6 +756,7 @@ internal sealed record CommitHeader
             PeriodLength = periodLength,
             PeriodChanges = periodChanges,
             Clustering = grouping,
+            Rollups = rollups,
         };
     }
 

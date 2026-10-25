@@ -280,6 +280,24 @@ public sealed record DatasetOptions
     /// <remarks>A dataset compacted by periods (<see cref="Periods"/>) cuts its objects by them, and declares no clustering.</remarks>
     public ClusteringOptions? Clustering { get; init; }
 
+    private readonly int _rollupFanout = 64;
+
+    /// <summary>
+    /// The runs a rollup sums (<see cref="VortexDataset.RollUpAsync"/>): about this many consecutive objects of the deepest
+    /// level a rollup of rank 1, cut where the clustering value changes, and about this many rollups of the rank below one
+    /// of a higher rank, so that a question over a long range of the key reads a rollup where it would read this many
+    /// objects' counts, and this many again a rank up. 64 by default; 0 writes none. A setting of the handle that writes
+    /// them; a reader takes the rollups whatever their fanout.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The fanout is negative, or 1.</exception>
+    public int RollupFanout
+    {
+        get => _rollupFanout;
+        init => _rollupFanout = value is 0 or >= 2
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(value), value, "A rollup sums two children or more: a fanout of 0 writes none.");
+    }
+
     /// <summary>
     /// The columns whose values questions look up one at a time, such as a request's id: those an
     /// object indexes by value so that a lookup reads the objects that hold the value and no other.
