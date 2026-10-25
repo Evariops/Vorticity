@@ -394,7 +394,8 @@ is announced before it is read.
 The estimates exist as `EstimateAsync` ([16-queries.md](16-queries.md#59-estimates-then-the-exact-answer)).
 Each drawn range runs as a part of the question and gives its states, and the strata are runs of
 neighbouring objects, which follow the clustering's values, with two ranges drawn in each at least. The
-option and the threshold that choose estimates for a question belong to the planner.
+cost of the exact answer is announced by every tier, priced by the planner object by object (section 8)
+with no read; under `EstimateOptions.ExactUnder`, a second by default, the exact answer comes at once.
 
 ## 8. The planner
 

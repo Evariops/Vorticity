@@ -34,7 +34,8 @@ public sealed partial class DatasetEstimateTests
     /// <summary>The draws the coverage is measured over: twenty, or as many as <c>VX_ESTIMATE_DRAWS</c> says for a longer measure.</summary>
     private static readonly int Draws = int.TryParse(Environment.GetEnvironmentVariable("VX_ESTIMATE_DRAWS"), out int draws) ? draws : 20;
 
-    private static readonly EstimateOptions Tiers = new EstimateOptions { Shares = [0.05, 0.2], RangeBytes = 1 << 10 };
+    // Tiers of 5 % and 20 %, drawn whatever the exact answer costs, which is little on these rows.
+    private static readonly EstimateOptions Tiers = new EstimateOptions { Shares = [0.05, 0.2], RangeBytes = 1 << 10, ExactUnder = TimeSpan.Zero };
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
@@ -127,6 +128,38 @@ public sealed partial class DatasetEstimateTests
         }
     }
 
+    /// <summary>
+    /// A question whose exact answer costs less than the threshold, a second by default at the cost model's link, comes
+    /// exact at once: one tier, with no estimate before it, the question's answer. Every tier announces what the exact
+    /// answer costs, the same whatever the tiers drawn before it.
+    /// </summary>
+    [Fact]
+    public async Task UnderItsCostTheExactAnswerComesAtOnce()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store);
+        List<string> whole = [.. (await Question(dataset).As<Total>().ToRecordsAsync(Ct).ToListAsync(Ct)).Select(Text).Order(StringComparer.Ordinal)];
+
+        List<AggregationEstimate> tiers = await Question(dataset).EstimateAsync(cancellationToken: Ct).ToListAsync(Ct);
+        AggregationEstimate only = Assert.Single(tiers);
+        Assert.True(only.IsExact);
+        TimeSpan cost = Assert.IsType<TimeSpan>(only.ExactCost);
+        Console.WriteLine($"EXACT AT ONCE: the exact answer costs {cost.TotalMilliseconds:F1} ms at the model's link");
+        Assert.InRange(cost, TimeSpan.FromTicks(1), TimeSpan.FromSeconds(1));
+        List<Estimated> groups = await only.As<Estimated>().ToRecordsAsync(Ct).ToListAsync(Ct);
+        Assert.Equal(whole, [.. groups.Select(g => Text(new Total(g.Region, g.Status, g.Rows, g.Bytes, g.Mean))).Order(StringComparer.Ordinal)]);
+
+        // Under no threshold, the tiers come first, each announcing the same cost.
+        List<TimeSpan?> announced = [];
+        await foreach (AggregationEstimate tier in Question(dataset).EstimateAsync(Tiers with { Seed = 3 }, Ct))
+        {
+            announced.Add(tier.ExactCost);
+        }
+
+        Assert.Equal(Tiers.Shares.Count + 1, announced.Count);
+        Assert.All(announced, each => Assert.Equal(cost, each));
+    }
+
     /// <summary>An estimate refuses what no state answers whole, and a question that filters, orders or windows its groups.</summary>
     [Fact]
     public async Task AnEstimateRefusesWhatItCannotScale()
@@ -136,6 +169,7 @@ public sealed partial class DatasetEstimateTests
         Assert.Throws<NotSupportedException>(() => dataset.Scan<Hit>().GroupBy(r => r.Region).Select(g => (g.Key, g.CountDistinct(r => r.Status))).EstimateAsync(cancellationToken: Ct));
         Assert.Throws<NotSupportedException>(() => dataset.Scan<Hit>().GroupBy(r => r.Region).OrderByDescending(g => g.Count()).Take(3).Select(g => (g.Key, g.Count())).EstimateAsync(cancellationToken: Ct));
         Assert.Throws<ArgumentOutOfRangeException>(() => Question(dataset).EstimateAsync(new EstimateOptions { Shares = [0.2, 0.1] }, Ct));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Question(dataset).EstimateAsync(new EstimateOptions { ExactUnder = TimeSpan.FromSeconds(-1) }, Ct));
     }
 
     /// <summary>The count, the bytes and the mean latency of each region and status.</summary>

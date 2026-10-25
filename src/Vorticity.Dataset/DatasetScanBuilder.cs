@@ -610,6 +610,48 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
+    /// What the scan would cost, by the formula, before reading anything: each object it covers through the path its read
+    /// takes, its column's counts, its blocks' statistics, or the rows of the columns it reads (<see cref="PathCosts"/>). An
+    /// object a sheet or an index would pass over counts whole: the cost is a bound.
+    /// </summary>
+    internal async ValueTask<PathCosts.Cost> CostAsync(CancellationToken cancellationToken)
+    {
+        CountsAnswer? answer = Answer() is { } asked && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false) ? asked : null;
+        int fieldCount = _version.Schema.DType.IsDefault ? 0 : _version.Schema.DType.FieldCount;
+        int[] fields;
+        if (_mask is { } mask)
+        {
+            fields = new int[mask.SelectedCount(fieldCount)];
+            for (int i = 0; i < fields.Length; i++)
+            {
+                fields[i] = mask.SelectedField(i);
+            }
+        }
+        else
+        {
+            fields = [.. System.Linq.Enumerable.Range(0, fieldCount)];
+        }
+
+        long requests = 0;
+        long bytes = 0;
+        await foreach (PositionedObject held in _version.WalkAsync(Pruner(), _from, _to, null, cancellationToken).ConfigureAwait(false))
+        {
+            if (Covered(held) == 0)
+            {
+                continue;
+            }
+
+            PathCosts.Cost cost = answer is not null && AnsweredBy(answer, held) is int field
+                ? PathCosts.Regions([held.Entry.Contents!.CountsOf(field), answer.AsksSketches ? held.Entry.Contents.SketchesOf(field) : null])
+                : BlocksAnswer(held) ? BlockAnswer()!.Costs(held).Blocks : PathCosts.Rows(held.Entry, fields);
+            requests += cost.Requests;
+            bytes += cost.Bytes;
+        }
+
+        return new PathCosts.Cost((int)Math.Min(requests, int.MaxValue), bytes);
+    }
+
+    /// <summary>
     /// The scan as states where the objects' counts answer: each such object's entries as batches of states; the objects
     /// between them read as rows, those side by side a part of the scan, which
     /// reads them as it would (<see cref="Part"/>). The counts of the objects that answer are read side by side, as many at

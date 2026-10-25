@@ -24,11 +24,19 @@ public sealed record EstimateOptions
     /// <summary>The seed of the draw, for estimates drawn the same way twice; null for one the process chooses.</summary>
     public int? Seed { get; init; }
 
+    /// <summary>
+    /// The cost of the exact answer under which it comes at once, with no estimate before it: a second by default, read cold
+    /// at the cost model's link, 1.25 GB a second, each request worth its round trip (<see cref="AggregationEstimate.ExactCost"/>).
+    /// <see cref="TimeSpan.Zero"/> draws the estimates whatever the cost; a source that cannot say a cost draws them too.
+    /// </summary>
+    public TimeSpan ExactUnder { get; init; } = TimeSpan.FromSeconds(1);
+
     /// <summary>Throws unless the shares are ascending, each above 0 and at most 1, and the range holds bytes.</summary>
     internal void Validate()
     {
         ArgumentNullException.ThrowIfNull(Shares);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(RangeBytes);
+        ArgumentOutOfRangeException.ThrowIfLessThan(ExactUnder, TimeSpan.Zero);
         double last = 0;
         foreach (double share in Shares)
         {
@@ -62,14 +70,22 @@ public sealed class AggregationEstimate
 {
     private readonly ResultQuery _result;
 
-    internal AggregationEstimate(ResultQuery result, double share, int ranges, long groups, bool exact)
+    internal AggregationEstimate(ResultQuery result, double share, int ranges, long groups, bool exact, TimeSpan? exactCost)
     {
         _result = result;
         Share = share;
         Ranges = ranges;
         Groups = groups;
         IsExact = exact;
+        ExactCost = exactCost;
     }
+
+    /// <summary>
+    /// What the exact answer costs, announced before it is read: its requests and bytes as the source's planner prices them,
+    /// read cold at the cost model's link, 1.25 GB a second, each request worth its round trip; null when the source cannot
+    /// say. The same for every tier.
+    /// </summary>
+    public TimeSpan? ExactCost { get; }
 
     /// <summary>The share of the question's rows read so far.</summary>
     public double Share { get; }

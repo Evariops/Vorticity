@@ -65,6 +65,9 @@ internal sealed class EstimateRun
     private long _read;
     private int _ranges;
 
+    // What the exact answer costs, as the source prices it before reading anything; null when it cannot say.
+    private TimeSpan? _exactCost;
+
     internal EstimateRun(AggregationQuery question, EstimateOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -103,6 +106,23 @@ internal sealed class EstimateRun
     {
         AggregationHost host = _question.Host;
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_question.RowFilter), _columns, _question.Plan, host.Source.Schema);
+
+        // The exact answer's cost, announced by every tier; under the threshold, the exact answer at once, the question read
+        // whole as one part, through whatever its source's planner answers it by.
+        StateRequest? states = host.Source.KeepsStates && pass.Options.UseSynopses
+            ? StateRequest.Of(_question.Plan, new AggregateSlot?[_question.Plan.Aggregates.Length], null)
+            : null;
+        if (await host.Source.CostAsync(pass with { States = states }, cancellationToken).ConfigureAwait(false) is (long requests, long bytes))
+        {
+            _exactCost = ReadCost.Time(requests, bytes);
+            if (_exactCost <= _options.ExactUnder && _options.Exact && host.Source.RowBound >= 0)
+            {
+                await ReadWholeAsync(host.Source.RowBound, cancellationToken).ConfigureAwait(false);
+                yield return Estimate(exact: true);
+                yield break;
+            }
+        }
+
         RowRange[][] pieces = await host.Source.StrataAsync(pass, _options.RangeBytes, cancellationToken).ConfigureAwait(false)
             ?? throw new NotSupportedException("A source with no ranges of its own, such as a query's result, takes no estimate.");
         Random random = _options.Seed is int seed ? new Random(seed) : new Random();
@@ -205,6 +225,26 @@ internal sealed class EstimateRun
         }
 
         return drawn;
+    }
+
+    /// <summary>Reads every one of the source's <paramref name="rows"/> as one part, its states folded into the sample's: the exact answer at once.</summary>
+    private async Task ReadWholeAsync(long rows, CancellationToken cancellationToken)
+    {
+        AggregationQuery part = _question.Ranged(new RangeHost(_question.Host, new RowRange(0, rows), _counters));
+        IAsyncEnumerator<RecordBatch> groups = part.Groups(cancellationToken);
+        await using (groups.ConfigureAwait(false))
+        {
+            while (await groups.MoveNextAsync().ConfigureAwait(false))
+            {
+                if (groups.Current.RowCount > 0)
+                {
+                    _sample.Process(RecordBatch.OfPartial(groups.Current.Arena, groups.Current.RootIndex, 0));
+                }
+            }
+        }
+
+        _read = _total = rows;
+        _ranges = 1;
     }
 
     /// <summary>Reads <paramref name="drawn"/>, as many at once as the session's lanes, or <see cref="RoundTripRanges"/> over an object store, each range's states folded as they come.</summary>
@@ -344,13 +384,13 @@ internal sealed class EstimateRun
         {
             AggregationOutcome whole = new AggregationOutcome(plan, _sample.Slots, _sample.Keys, Order(groups));
             EstimateQuery answers = new EstimateQuery(_question, whole, groups, Margins(null, null, groups), _counters);
-            return new AggregationEstimate(answers, 1, _ranges, groups, exact: true);
+            return new AggregationEstimate(answers, 1, _ranges, groups, exact: true, _exactCost);
         }
 
         Totals totals = TotalsOf(groups);
         (AggregationOutcome scaled, int[] place) = Scaled(totals, groups);
         EstimateQuery estimate = new EstimateQuery(_question, scaled, groups, Margins(totals, place, groups), _counters);
-        return new AggregationEstimate(estimate, _total == 0 ? 1 : (double)_read / _total, _ranges, groups, exact: false);
+        return new AggregationEstimate(estimate, _total == 0 ? 1 : (double)_read / _total, _ranges, groups, exact: false, _exactCost);
     }
 
     /// <summary>The estimates of every group's totals over every row, and their variances.</summary>

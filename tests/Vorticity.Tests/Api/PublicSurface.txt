@@ -69,6 +69,7 @@ Vorticity:     method ValueTask<TResult[]> ToArrayAsync(CancellationToken = defa
 Vorticity:     property ScanMetrics Metrics { get; }
 Vorticity: sealed class Vorticity.AggregationEstimate
 Vorticity:     method Scan<TRecord> As<TRecord>()
+Vorticity:     property Nullable<TimeSpan> ExactCost { get; }
 Vorticity:     property ScanMetrics Metrics { get; }
 Vorticity:     property bool IsExact { get; }
 Vorticity:     property double Share { get; }
@@ -935,6 +936,7 @@ Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
 Vorticity:     property IReadOnlyList<double> Shares { get; init; }
 Vorticity:     property Nullable<int> Seed { get; init; }
+Vorticity:     property TimeSpan ExactUnder { get; init; }
 Vorticity:     property bool Exact { get; init; }
 Vorticity:     property long RangeBytes { get; init; }
 Vorticity: static class Vorticity.ExtensionColumnBuilderExtensions

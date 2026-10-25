@@ -624,6 +624,15 @@ of 441 430 groups go through the core and spill its 256 parts, with the same ans
 It is a stratified cluster sample whose clusters are ranges of rows, built on the parts of
 [5.8](#58-parts-of-a-question-merged).
 
+**The threshold.** Before any tier, the source prices the exact answer (`ScanSource.CostAsync`): a
+dataset walks its entries and prices each object by the path its planner would take, its column's
+counts, its blocks' statistics or its rows, in requests and bytes
+([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#8-the-planner)), the time of which, cold
+over a link of 1.25 GB/s with each request worth 293 KB, every tier announces (`ExactCost`). Under
+`EstimateOptions.ExactUnder`, a second by default, the exact answer comes at once: the question runs as
+one part over every row, through whatever its planner answers it by, and its states are the one tier. A
+source that cannot price its reads, a single file's, draws the tiers.
+
 **The ranges.** The source cuts the rows a pass reads (`ScanSource.StrataAsync`): a file's, and each
 object of a dataset that the filter keeps by its summaries and its slices. The cuts fall where the
 chunks of every column the pass reads end together (`SplitPlan.CommonStarts`, the cuts a lane's piece

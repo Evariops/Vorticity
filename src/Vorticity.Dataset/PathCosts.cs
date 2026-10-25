@@ -10,14 +10,14 @@ namespace Vorticity.Dataset;
 /// bytes, and the regions of its synopses.
 /// </summary>
 /// <remarks>
-/// A request costs what 293 KB of transfer cost under the cost model of an object store, a round trip of 30 ms among 128
-/// requests in flight over a link of 1.25 GB/s: the rule that joins two ranges across a gap of 256 KiB at most
-/// (<see cref="IO.SegmentReadOptions.Remote"/>), which joins the regions of one read here too.
+/// A request costs what 293 KB of transfer cost under the cost model of an object store (<see cref="Scanning.ReadCost"/>):
+/// the rule that joins two ranges across a gap of 256 KiB at most (<see cref="IO.SegmentReadOptions.Remote"/>), which joins
+/// the regions of one read here too.
 /// </remarks>
 internal static class PathCosts
 {
     /// <summary>The bytes a request's round trip is worth.</summary>
-    internal const long RequestBytes = 293_000;
+    internal const long RequestBytes = Scanning.ReadCost.RequestBytes;
 
     /// <summary>The gap two regions are read across as one, as an object store's source joins them.</summary>
     private const long JoinedGap = 256 << 10;

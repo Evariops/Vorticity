@@ -424,6 +424,12 @@ internal sealed class DatasetScanSource : ScanSource
         return pieces.Count > 1 ? [.. pieces] : null;
     }
 
+    internal override async ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken)
+    {
+        PathCosts.Cost cost = await Builder(spec, null).CostAsync(cancellationToken).ConfigureAwait(false);
+        return (cost.Requests, cost.Bytes);
+    }
+
     /// <summary>
     /// The rows of the pass as each object's ranges an estimate draws from, the objects its filter keeps by their summaries and
     /// their slices, in the order of their rows: each object cut where the chunks of the columns read end together, as a

@@ -207,6 +207,12 @@ internal abstract class ScanSource
     internal virtual ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken) => default;
 
     /// <summary>
+    /// What reading <paramref name="spec"/> would cost, its requests and bytes as the source's planner prices its paths
+    /// before reading anything (<see cref="ReadCost"/>); null for a source that cannot say.
+    /// </summary>
+    internal virtual ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken) => default;
+
+    /// <summary>
     /// How many of <paramref name="ranges"/>, the pieces <see cref="PiecesAsync"/> cut, read rows from the store, and so
     /// read their splits ahead: every one by default; a dataset's pieces its synopses answer read a few tables instead,
     /// whose lanes leave the splits they were granted to the lanes that read rows.
