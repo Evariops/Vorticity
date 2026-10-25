@@ -226,6 +226,12 @@ It answers what the rows would, to the bit. The objects still in their appends k
 read as rows. `ScanOptions.UseSynopses = false` reads every object's rows, and `ExplainAsync` says
 object by object which it reads (`ScanPlan.States`).
 
+A filter that leaves one value of a declared identifier out, `r.RequestId != id`, keeps the counts: an
+object's counts answer, less those of the rows that hold the value, which the identifier's postings find
+without reading the object's other rows. An object that does not hold the value reads its counts and
+the postings alone. That holds for counts, sums, means and distinct values, when the identifier column
+holds no null; a minimum, a maximum or a quantile reads the rows.
+
 An object whose counts do not answer may still be answered block by block. Such an object keeps, for
 each column, its statistics over the object's blocks, the runs of rows of one value of the key's first
 column: each block's values and their rows, and each number's count, sum and extremes. A block whose

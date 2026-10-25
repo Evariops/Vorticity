@@ -146,6 +146,7 @@ internal sealed class CountsAnswer
         int? column = null;
         List<byte[]>? values = null;
         List<VortexExpr> rest = [];
+        (int Field, string Path, VortexExpr Found)? exclusion = null;
         if (filter is not null)
         {
             int? leading = version.Schema.Key is { } clustering ? Top(Expr.Field(clustering.InstantPath), schema) : null;
@@ -166,6 +167,15 @@ internal sealed class CountsAnswer
                 {
                     column = field;
                     values = values is null ? wanted : values.FindAll(value => wanted.Exists(other => value.AsSpan().SequenceEqual(other)));
+                    continue;
+                }
+
+                // One value of a declared identifier left out, whose rows the identifier's postings find in each object.
+                if (exclusion is null && conjunct is ComparisonExpr { Op: ComparisonOp.NotEqual, Field: ColumnFieldExpr excluded } other
+                    && other.Value.Kind != FilterLiteralKind.Null && Top(excluded, schema) is int identifier
+                    && Identifies(version.Schema, identifier))
+                {
+                    exclusion = (identifier, excluded.Path, new ComparisonExpr(excluded, ComparisonOp.Equal, other.Value));
                     continue;
                 }
 
@@ -237,8 +247,40 @@ internal sealed class CountsAnswer
         }
 
         return new CountsAnswer(
-            request, version.Schema, column, keyed, values?.ToArray(), GroupPredicates.And(null, rest), [.. constants]);
+            request, version.Schema, column, keyed, values?.ToArray(), GroupPredicates.And(null, rest), [.. constants])
+        {
+            Exclusion = exclusion,
+        };
     }
+
+    /// <summary>Whether a column of <paramref name="dtype"/> named <paramref name="path"/> holds no null: its type says so, or the summaries.</summary>
+    private static bool NoNull(ObjectSummaries summaries, string path, DType dtype) =>
+        !dtype.IsNullable || (summaries.TryGet(path, out ColumnSummary column) && column.HasNullCount && column.NullCount == 0);
+
+    /// <summary>Whether column <paramref name="field"/> of <paramref name="version"/> is a declared identifier, which every job indexes.</summary>
+    private static bool Identifies(DatasetSchema version, int field)
+    {
+        string name = version.Columns[field].Name;
+        foreach (string identifier in version.Identifiers)
+        {
+            if (string.Equals(identifier, name, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The value of a declared identifier the filter leaves out, <c>id != v</c>, a conjunct of it: the identifier's column,
+    /// its name, and <c>id == v</c>, which the identifier's postings find the rows of in each object
+    /// (<see cref="VortexDataset.LookupAsync"/>), whose counts a question that subtracts takes from the object's
+    /// (<see cref="DeletedCounts.Less"/>). A row whose identifier is null is left out too, which a count cannot tell: an
+    /// object whose summaries do not prove the column holds none is read as rows. Null for none; a second is a conjunct
+    /// like any, which summaries prove or not.
+    /// </summary>
+    internal (int Field, string Path, VortexExpr Found)? Exclusion { get; private init; }
 
     /// <summary>
     /// The summaries an object <paramref name="held"/> is judged by: its entry's, the key's first column bounded by its keys
@@ -267,6 +309,14 @@ internal sealed class CountsAnswer
             return null;
         }
 
+        // A value left out: its rows found by the identifier's postings, the object's counts less theirs, for an object no
+        // delete marked whose identifier holds no null.
+        if (Exclusion is (int excluded, string excludedPath, _)
+            && (!Subtracts || entry.HasDeletions || contents.DirectoryRegion is null || !NoNull(summaries, excludedPath, _schema.DType.GetField(excluded))))
+        {
+            return null;
+        }
+
         foreach ((_, string path, FieldExpr key) in _constants)
         {
             if (ConstantOf(summaries, path, key) is null)
@@ -287,7 +337,7 @@ internal sealed class CountsAnswer
     /// </summary>
     internal int? FieldOf(RollupEntry rollup)
     {
-        if ((_rest is { } rest && !rest.MustMatch(rollup.Summaries.Columns, rollup.Rows)) || rollup.Columns.Count == 0)
+        if ((_rest is { } rest && !rest.MustMatch(rollup.Summaries.Columns, rollup.Rows)) || rollup.Columns.Count == 0 || Exclusion is not null)
         {
             return null;
         }
@@ -320,7 +370,7 @@ internal sealed class CountsAnswer
     /// </summary>
     internal (int Field, ObjectSummaries?[] Buckets)? BucketsOf(RollupEntry rollup, ClusteringKey key, SummaryPruner? pruner)
     {
-        if (rollup.Buckets.Count < 2)
+        if (rollup.Buckets.Count < 2 || Exclusion is not null)
         {
             return null;
         }

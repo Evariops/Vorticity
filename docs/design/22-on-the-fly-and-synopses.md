@@ -379,7 +379,17 @@ object), which a later question with the same filter reads alone.
   compaction rewrites the object without the rows.
 - An exclusion, every row but those of an identifier's value, finds those rows by the postings and
   subtracts their contribution. A distinct count is corrected by the counts of the counted column, a
-  value leaving a group only when its last row there is excluded.
+  value leaving a group only when its last row there is excluded. Done for one value of a declared
+  identifier left out, `id != v` (`CountsAnswer.Exclusion`), under a question of counts, sums, means or
+  exact distinct values, on an object no delete marked whose identifier the summaries or the type prove
+  holds no null (a null id is left out too, which no count tells): the object's counts less the counts
+  of the rows the postings find for `id == v` (`VortexDataset.LookupAsync`), of the counted column and
+  the measures the question reads. Per object it costs its counts and the identifier's index entries
+  and postings; an object that holds the value reads besides the chunks of the identifier, the counted
+  column and those measures that hold its rows. On two objects of 80 000 calls, counts by service but
+  one request's read 127 KB when no object holds it, and 611 KB when one does, one chunk a column
+  there, where the rows take 791 KB *(measured, `DatasetExclusionTests`)*. A rollup's totals hold the
+  value's rows, and are not read under an exclusion.
 - Late rows add their own entries, which merges add up.
 - A window edge that cuts a block or a bucket is exact by default: that block's rows are read, and the
   blocks the window holds whole are answered by their statistics. Windows drawn to the second over keys

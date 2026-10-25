@@ -125,11 +125,12 @@ internal sealed class DeletedCounts
     /// left out for a value the object's counts leave out; an entry left with no row dropped, its value gone from the
     /// object. Null when that does not give the live rows' exactly: other measures, a deleted value the counts do not
     /// hold, values the deleted rows' counts leave out, or a sum of floats whose top a deleted value may have set
-    /// (<see cref="WideIndexedSum.TryTakeOut"/>). The extremes stay those of every row, which no question reads of these.
+    /// (<see cref="WideIndexedSum.TryTakeOut"/>). The extremes stay those of every row, which no question reads of these;
+    /// so do the measures <paramref name="taken"/> does not carry, for a question that reads none of them.
     /// </summary>
     internal static ColumnCounts? Less(ColumnCounts counts, ColumnCounts taken)
     {
-        if (counts.Buckets != 0 || !counts.MeasureFields.AsSpan().SequenceEqual(taken.MeasureFields) || !counts.Kinds.AsSpan().SequenceEqual(taken.Kinds))
+        if (counts.Buckets != 0 || Offsets(counts, taken) is not { } offsets)
         {
             return null;
         }
@@ -146,7 +147,7 @@ internal sealed class DeletedCounts
                     : EntryOf(counts.Groups, CountedValue.Others, null),
                 _ => -1,
             };
-            if (entry < 0 || !TakeOut(words.AsSpan(entry * width, width), taken.WordsOf(group.FirstEntry), counts.Kinds))
+            if (entry < 0 || !TakeOut(words.AsSpan(entry * width, width), taken.WordsOf(group.FirstEntry), taken.Kinds, offsets))
             {
                 return null;
             }
@@ -207,8 +208,37 @@ internal sealed class DeletedCounts
         return -1;
     }
 
-    /// <summary>Takes the words <paramref name="taken"/> out of an entry's <paramref name="words"/>; false when the result would not be the live rows' exactly.</summary>
-    private static bool TakeOut(Span<long> words, ReadOnlySpan<long> taken, MeasureKind[] kinds)
+    /// <summary>
+    /// Where each measure of <paramref name="taken"/> starts among an entry's words of <paramref name="counts"/>, the same
+    /// measure summed alike; null when <paramref name="counts"/> carries one of them not, or not so.
+    /// </summary>
+    private static int[]? Offsets(ColumnCounts counts, ColumnCounts taken)
+    {
+        int[] offsets = new int[taken.MeasureFields.Length];
+        for (int m = 0; m < offsets.Length; m++)
+        {
+            int place = Array.IndexOf(counts.MeasureFields, taken.MeasureFields[m]);
+            if (place < 0 || counts.Kinds[place] != taken.Kinds[m])
+            {
+                return null;
+            }
+
+            offsets[m] = 1;
+            for (int p = 0; p < place; p++)
+            {
+                offsets[m] += MeasureLayout.Words(counts.Kinds[p] == MeasureKind.Float);
+            }
+        }
+
+        return offsets;
+    }
+
+    /// <summary>
+    /// Takes the words <paramref name="taken"/>, its measures of <paramref name="kinds"/>, out of an entry's
+    /// <paramref name="words"/>, each measure at its offset among them; false when the result would not be the rows kept's
+    /// exactly.
+    /// </summary>
+    private static bool TakeOut(Span<long> words, ReadOnlySpan<long> taken, MeasureKind[] kinds, int[] offsets)
     {
         if (taken[0] > words[0])
         {
@@ -216,35 +246,36 @@ internal sealed class DeletedCounts
         }
 
         words[0] -= taken[0];
-        int at = 1;
-        foreach (MeasureKind kind in kinds)
+        int from = 1;
+        for (int m = 0; m < kinds.Length; m++)
         {
-            bool floats = kind == MeasureKind.Float;
-            if (taken[at + MeasureLayout.Values] > words[at + MeasureLayout.Values])
+            bool floats = kinds[m] == MeasureKind.Float;
+            Span<long> into = words[offsets[m]..];
+            ReadOnlySpan<long> own = taken[from..];
+            from += MeasureLayout.Words(floats);
+            if (own[MeasureLayout.Values] > into[MeasureLayout.Values])
             {
                 return false;
             }
 
-            words[at + MeasureLayout.Values] -= taken[at + MeasureLayout.Values];
+            into[MeasureLayout.Values] -= own[MeasureLayout.Values];
             if (floats)
             {
-                // The top stays when the least and the greatest of every row lie past the deleted rows' own: both live.
-                bool stays = BitConverter.Int64BitsToDouble(taken[at + MeasureLayout.FloatLeast]) > BitConverter.Int64BitsToDouble(words[at + MeasureLayout.FloatLeast])
-                    && BitConverter.Int64BitsToDouble(taken[at + MeasureLayout.FloatGreatest]) < BitConverter.Int64BitsToDouble(words[at + MeasureLayout.FloatGreatest]);
-                WideIndexedSum sum = StateWords.SumOf(words, at + MeasureLayout.Sum);
-                if (!sum.TryTakeOut(StateWords.SumOf(taken, at + MeasureLayout.Sum), stays))
+                // The top stays when the least and the greatest of every row lie past the taken rows' own: both kept.
+                bool stays = BitConverter.Int64BitsToDouble(own[MeasureLayout.FloatLeast]) > BitConverter.Int64BitsToDouble(into[MeasureLayout.FloatLeast])
+                    && BitConverter.Int64BitsToDouble(own[MeasureLayout.FloatGreatest]) < BitConverter.Int64BitsToDouble(into[MeasureLayout.FloatGreatest]);
+                WideIndexedSum sum = StateWords.SumOf(into, MeasureLayout.Sum);
+                if (!sum.TryTakeOut(StateWords.SumOf(own, MeasureLayout.Sum), stays))
                 {
                     return false;
                 }
 
-                StateWords.Write(sum, words, at + MeasureLayout.Sum);
+                StateWords.Write(sum, into, MeasureLayout.Sum);
             }
             else
             {
-                StateWords.Write(StateWords.IntegerOf(words, at + MeasureLayout.Sum) - StateWords.IntegerOf(taken, at + MeasureLayout.Sum), words, at + MeasureLayout.Sum);
+                StateWords.Write(StateWords.IntegerOf(into, MeasureLayout.Sum) - StateWords.IntegerOf(own, MeasureLayout.Sum), into, MeasureLayout.Sum);
             }
-
-            at += MeasureLayout.Words(floats);
         }
 
         return true;

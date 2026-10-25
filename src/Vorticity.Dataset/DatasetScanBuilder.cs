@@ -701,6 +701,8 @@ internal sealed class DatasetScanBuilder
                             ? _dataset.ReadRollupCountsAsync(rolled[ahead].Rollup, next, answer.AsksSketches, answer.Values, rolled[ahead].Buckets is not null, stopped.Token).AsTask()
                         : objects[ahead].Held.Entry.HasDeletions
                             ? LiveCountsAsync(objects[ahead].Held.Entry, next, stopped.Token)
+                        : answer.Exclusion is { } exclusion
+                            ? KeptCountsAsync(answer, objects[ahead].Held.Entry, next, exclusion.Field, exclusion.Found, stopped.Token)
                         : _dataset.ReadCountsAsync(objects[ahead].Held.Entry, next, answer.AsksSketches, stopped.Token).AsTask();
                     if (objects[ahead].Field is null && ahead >= (rolled?.Count ?? 0) && (blockReads is null || !blockReads.ContainsKey(objects[ahead].Held.Entry.Uid))
                         && BlocksAnswer(objects[ahead].Held))
@@ -942,6 +944,69 @@ internal sealed class DatasetScanBuilder
         ValueTask<DeletedCounts?> negatives = entry.NegativesAsync(_version.Pages, cancellationToken);
         (Indexes.ColumnCounts? counts, _) = await _dataset.ReadCountsAsync(entry, field, sketches: false, cancellationToken).ConfigureAwait(false);
         return (await negatives.ConfigureAwait(false))?.CountsOf(field) is { } taken && counts is not null ? (DeletedCounts.Less(counts, taken), null) : (null, null);
+    }
+
+    /// <summary>
+    /// The counts of column <paramref name="field"/> of an object under a value of identifier <paramref name="identifier"/>
+    /// left out, less those of the rows that hold it (<see cref="CountsAnswer.Exclusion"/>): the rows its postings find for
+    /// <paramref name="found"/>, read beside the counts, counted and taken out (<see cref="DeletedCounts.Less"/>); none, and the
+    /// object read as rows, when the postings cannot say or the counts do not give the rows kept exactly.
+    /// </summary>
+    private async Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)> KeptCountsAsync(
+        CountsAnswer answer, ObjectEntry entry, int field, int identifier, VortexExpr found, CancellationToken cancellationToken)
+    {
+        (Indexes.ColumnCounts? counts, _) = await _dataset.ReadCountsAsync(entry, field, sketches: false, cancellationToken).ConfigureAwait(false);
+        if (counts is null)
+        {
+            return (null, null);
+        }
+
+        // The columns the rows' counts read: the counted one, the measures the question reads, and the identifier the rows
+        // are kept by; the counts' other measures, which the question does not read, stay every row's.
+        List<int> measures = [];
+        List<MeasureKind> kinds = [];
+        foreach ((_, int measured, _, _) in answer.Measures)
+        {
+            int place = Array.IndexOf(counts.MeasureFields, measured);
+            if (place >= 0 && !measures.Contains(measured))
+            {
+                measures.Add(measured);
+                kinds.Add(counts.Kinds[place]);
+            }
+        }
+
+        Indexes.ColumnCounts shape = new Indexes.ColumnCounts([.. measures], [.. kinds], [], []);
+        SortedSet<int> columns = [field, identifier, .. measures];
+        int[] read = [.. columns];
+        List<RecordBatch>? rows = await _dataset.LookupAsync(entry, found, read, cancellationToken).ConfigureAwait(false);
+        if (rows is null)
+        {
+            return (null, null);
+        }
+
+        try
+        {
+            DeletedCounts.Builder taken = new DeletedCounts.Builder(_version.Schema.DType, [(field, shape)], read);
+            long held = 0;
+            foreach (RecordBatch batch in rows)
+            {
+                SelectBy(batch, found);
+                if (batch.SelectedRows > 0)
+                {
+                    taken.Add(batch);
+                    held += batch.SelectedRows;
+                }
+            }
+
+            return held == 0 ? (counts, null) : (DeletedCounts.Less(counts, taken.Finish().CountsOf(field)!), null);
+        }
+        finally
+        {
+            foreach (RecordBatch batch in rows)
+            {
+                batch.Dispose();
+            }
+        }
     }
 
     /// <summary>The read of an object's counts <see cref="StatesAsync"/> does not begin, or has taken: none.</summary>
@@ -1741,11 +1806,15 @@ internal sealed class DatasetScanBuilder
                 Indexes.ObjectContents contents = held.Entry.Contents!;
                 Indexes.IndexSegment? sketched = answer.AsksSketches ? contents.SketchesOf(field) : null;
                 string column = _version.Schema.Columns[field].Name;
-                int less = held.Entry.HasDeletions ? 1 : 0;
+                // Under a value of an identifier left out, the rows its postings find, in three round trips cold: the index
+                // entries and the chunk directories, the runs, the chunks.
+                int less = (held.Entry.HasDeletions ? 1 : 0) + (answer.Exclusion is null ? 0 : 3);
                 states.Add(new StatesStep(
                     held.Entry.Key,
                     "states",
-                    (sketched is null ? $"the counts of {column}" : $"the counts of {column} and their sketches") + (less > 0 ? ", less those of its deleted rows" : string.Empty),
+                    (sketched is null ? $"the counts of {column}" : $"the counts of {column} and their sketches")
+                        + (held.Entry.HasDeletions ? ", less those of its deleted rows" : string.Empty)
+                        + (answer.Exclusion is { } exclusion ? $", less those of the rows of {exclusion.Path} its postings find" : string.Empty),
                     (sketched is null ? 1 : 2) + less));
                 keptRows += covered;
                 segments += (sketched is null ? 1 : 2) + less;
