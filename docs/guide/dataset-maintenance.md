@@ -255,17 +255,21 @@ is refused, since its encoder lives in a handle's options.
 
 ## Expiry
 
-A dataset that declares periods drops old data a period at a time, without reading it:
+An expiry drops old data without reading it: every object a filter covers whole goes in one commit.
 
 ```csharp
-DateTimeOffset applied = await dataset.ExpireAsync(DateTimeOffset.UtcNow - TimeSpan.FromDays(30), ct);
+DateTimeOffset cutoff = DateTimeOffset.UtcNow - TimeSpan.FromDays(30);
+RowChangeResult expired = await dataset.ExpireAsync<Request>(r => r.At < cutoff, ct);
 ```
 
-The cutoff is aligned down to the start of the period holding the instant you give, and returned. Every
-object whose rows all lie before it goes in one commit, decided from the dataset's tree, with no data
-object read. A row may therefore outlive the instant you gave by up to a period. To drop rows exactly,
-delete them (`DeleteAsync`), which opens the objects that straddle the cutoff and marks their rows.
-Expiry, like a delete, leaves the bytes to vacuum.
+It is decided from the objects' summaries in the dataset's tree, with no data object read, and
+`expired.Rows` says how many rows went. An object that holds rows on both sides of the bound stays
+whole, so a row may outlive the bound. Under a clustering value every object above level 0 holds rows
+of one value, so a bound on the key's first column covers whole objects up to the value it falls in:
+under a clustering by day, a row outlives the bound by a day at most. To drop rows exactly, delete them
+(`DeleteAsync`), which opens the objects that straddle the bound and marks their rows. A filter on a
+text covers no object, since an object's summaries bound numbers and times, not texts. Expiry, like a
+delete, leaves the bytes to vacuum.
 
 ## What each costs
 
@@ -302,8 +306,9 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
 * A compaction that dies leaves what it wrote, which no version names, and vacuum deletes it like any
   other object. An upload in parts it had started is aborted when the job fails, and one the abort
   could not reach, because the process died, stays in the bucket as parts no object shows. Give the
-  bucket a lifecycle rule that aborts incomplete uploads after a day. The seal of a dataset of periods
-  writes a period's object, gigabytes, in one upload, which makes the rule worth its line.
+  bucket a lifecycle rule that aborts incomplete uploads after a day. A job of a dataset clustered by
+  day writes a day's object, gigabytes at a few thousand rows a second, in one upload, which makes the
+  rule worth its line.
 * None of this changes the data. After all three operations, the same rows read back.
 
 ## Run it

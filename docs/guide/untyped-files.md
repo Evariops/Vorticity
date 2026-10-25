@@ -180,8 +180,8 @@ Scan totals = file.Scan().Aggregate("count()", "max(Bytes)");
 A result is a column of the key, or one of `count()`, `count_distinct(c)`, `sum(c)`, `min(c)`,
 `max(c)` and `avg(c)`. A sum of integers is a 64-bit integer, signed or not, a sum of floats and a
 mean are doubles, and a minimum, a maximum and a key keep their column's type. Each result column is
-named by the text that asked for it. The engine and the plan are the typed path's: on a dataset by
-periods, the same question reads the same rows.
+named by the text that asked for it. The engine and the plan are the typed path's: on a dataset, the
+same question reads the same rows.
 
 ## Watch out
 

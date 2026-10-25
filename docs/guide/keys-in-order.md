@@ -80,8 +80,7 @@ day: source SortedColumn, 1 run, 1000000 entries, rows reachable: True
 ```
 
 Two sources can serve a cursor that returns rows in a file you write yourself, and a third serves the
-objects a dataset of periods sorts slice by slice (`Slices`, see [a dataset of
-periods](../design/15-compaction.md#a-dataset-of-periods)):
+objects an earlier release's datasets of periods sorted slice by slice (`Slices`):
 
 * A sorted column: when the file statistics say a column is sorted, the column is its own index, and
   it costs nothing to write: just order the rows by that column. A seek is a binary search over the

@@ -52,6 +52,28 @@ row whose key is unknown takes a value of its own instead, the smallest or the l
 `SummaryColumns` picks which other columns each object summarises for the same purpose, the first 32
 by default.
 
+`Clustering` decides how compaction groups the rows into objects. Its `Value` is the key's first
+column, `ClusteringValue.Column`, or a function of it that never decreases: `Truncate(CalendarUnit.Day)`
+for the start of an instant's day, `Bucket(width)` for an instant's or a number's bucket. Above level 0
+no object holds rows of two values, so the rows of a day, or of whatever the value is, lie in objects
+of their own. Its `ObjectBytes` is the size an object aims at, past which a job starts another without
+splitting a key. Either works alone. The library knows nothing of what a value means: to keep each
+tenant's rows apart, lead the key with the tenant's column and cluster by `Column`.
+
+```csharp
+await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
+{
+    ClusteringKey = [nameof(Request.At)],
+    Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
+    Identifiers = [nameof(Request.RequestId)],
+});
+```
+
+The clustering is fixed when the dataset is created, every commit carries it, and every writer
+follows it. A question bounded on the key's first column then reads whole objects but at its ends, an
+expiry by such a bound drops whole objects, and a long range can be asked a value at a time, as
+[Reading](#reading) shows.
+
 ## Adding rows
 
 `StartObject()` returns an `ObjectDraft`, which is a key in the store plus a `VortexFileWriter` with
@@ -106,12 +128,12 @@ opened, and their 13 blocks are pruned without a read. `MayMatch` answers from t
 handle already holds (the version's header and the pages it kept from earlier versions), so it reads
 nothing, and `false` is a proof.
 
-A dataset compacted by periods also keeps a sheet of each column of the objects of a megabyte or more
-it seals: its distinct values, its most frequent ones, and, when its values repeat, a filter of them. A
-question that asks a column for a value, `r.Route == "/checkout"` or a set of them, reads the sheets
-of such an object before the object, and passes over an object whose filter lacks every value asked:
-one request a few kilobytes long instead of the object's reads. A smaller object is read in the
-request its sheets would take, and keeps none.
+An object a job writes, of a mebibyte or more, also keeps a sheet of each column: its distinct
+values, its most frequent ones, and, when its values repeat, a filter of them. A question that asks a
+column for a value, `r.Route == "/checkout"` or a set of them, reads the sheets of such an object
+before the object, and passes over an object whose filter lacks every value asked: one request a few
+kilobytes long instead of the object's reads. A smaller object is read in the request its sheets
+would take, and keeps none.
 
 Row positions are the dataset's. A batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows object after object, in the order a scan delivers them. A key cursor over the
@@ -130,14 +152,16 @@ only when the scan reaches it.
 
 A group by at a degree above one reads the objects side by side, each one a range in the lanes'
 queue, with large objects cut where the chunks of the columns it reads start together. On the first
-column of the clustering key, or a function of it, a group by streams, because the dataset delivers its
-rows in key order. See [aggregates.md](aggregates.md).
+column of the clustering key, or a function of it, a group by under a take streams: the dataset then
+delivers its rows in key order, one object after the other, and the take stops the read early. Without
+a take, the objects are read side by side. See [aggregates.md](aggregates.md).
 
-A dataset compacted by periods cuts the objects it seals into time slices, and a question under a
-window on the instant reads only what the window reaches: the objects whose instants it may hold, and
-in each the blocks whose instants it holds, which the object's slice table and zone maps find. Every
-aggregation reads its rows, as above. Three days of a request every five seconds, by service over the
-first two, then over the last quarter of an hour of the second (the `time-windows` sample):
+An object a job writes, of a mebibyte or more, is cut into slices of the key that its table of
+contents lists, and a question under a range of the key's first column reads only what the range
+reaches: the objects whose keys it may hold, and in each the slices and blocks whose keys it holds.
+Every aggregation reads its rows, as above. Three days of a request every five seconds, clustered by
+day, by service over the first two, then over the last quarter of an hour of the second (the
+`time-windows` sample):
 
 ```
 51840 requests over three days in 3 objects
@@ -159,13 +183,14 @@ var routes = dataset.Scan<LogRow>()
 `AsDouble()` reads floats as well as doubles, the floats from the field's value of the rows that hold
 one, and `ToInt64()` converts every kind of value.
 
-A dataset in periods answers some questions from counts rather than rows. An object its jobs write, of a
-mebibyte or more, keeps for each column whose values repeat its counts by hour: the rows of each value in
-each hour, each number column's exact sum, least and greatest there, and for a column of at most 1 000
-values a quantile sketch of each number column. A question on one column, the time and the numbers,
-keyed by that column and by the instant truncated to the hour or coarser, under a window of the instant
-and values of that column, reads an object's counts in one request instead of its rows, and the rows of
-the hours its window cuts:
+Some questions are answered from counts rather than rows. An object a job writes, of a mebibyte or
+more, keeps for each column whose values repeat its counts: the rows of each value, each number
+column's exact sum, least and greatest, and for a column of at most 1 000 values a quantile sketch of
+each number column. A question on one column and the numbers reads an object's counts in one request
+instead of its rows when its other keys are values the object holds constant and its filter asks that
+column for values or is true for every row of the object, as its summaries prove. Under a clustering by
+hour each object holds one hour, so a question by service and hour is such a question, and only the
+objects at the window's ends, which hold rows outside it, are read as rows:
 
 ```csharp
 var hourly = dataset.Scan<Request>()
@@ -176,16 +201,28 @@ var hourly = dataset.Scan<Request>()
 
 It answers what the rows would, to the bit. The objects still in their appends keep no counts and are
 read as rows, and so is every other question. `ScanOptions.UseSynopses = false` reads every object's
-rows, `ExplainAsync` says object by object which it reads (`ScanPlan.States`), and
-`ScanOptions.AlignWindow` changes nothing yet. The other synopses are designed in
+rows, and `ExplainAsync` says object by object which it reads (`ScanPlan.States`).
+`ScanOptions.AlignWindow` widens the window to the bounds of the objects its ends fall in, so that
+they are answered from their counts too: the answer is then the exact answer of the window applied,
+which `ScanMetrics.Window` gives. The other synopses are designed in
 [22-on-the-fly-and-synopses.md](../design/22-on-the-fly-and-synopses.md).
 
-A page that shows a long window can show its newest part first. `AskNewestFirstAsync` cuts the window
-at the starts of the periods it crosses, asks your question over each part, several parts at once,
-and delivers each part's answer newest first, once it and every newer part are in:
+Over a long range, an object's counts still cost a request an object. `RollUpAsync` sums the counts of
+runs of about `DatasetOptions.RollupFanout` consecutive objects (64 by default) into rollups, then as
+many rollups into one of the rank above, with no row read, and `RunCompactionAsync` calls it once no
+job is due. A question whose every object under a rollup would answer from its counts reads the
+rollup instead. On thirty days of 2 000 routes, an object a day and rollups of four, a count of every
+route reads 4 requests and 261 698 bytes, where the objects' counts take 30 requests and 1 930 456
+bytes. A commit that adds or takes away an object takes away the rollups over it, which the next call
+sums again.
+
+A page that shows a long window can show its newest part first. `AskByValuesAsync` cuts a range of the
+key's first column where the clustering value changes, asks your question over each part, several
+parts at once, and delivers each part's answer, the last part first by default, once it and every part
+before it are in:
 
 ```csharp
-await foreach (WindowPart<List<ServiceTotals>> part in dataset.AskNewestFirstAsync(from, to, async (start, end, ct) =>
+await foreach (ValuePart<DateTimeOffset, List<ServiceTotals>> part in dataset.AskByValuesAsync(from, to, async (start, end, ct) =>
     await dataset.Scan<Request>().Where(r => r.At >= start && r.At < end)
         .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)))
         .As<ServiceTotals>().ToRecordsAsync(ct).ToListAsync(ct)))
@@ -194,38 +231,43 @@ await foreach (WindowPart<List<ServiceTotals>> part in dataset.AskNewestFirstAsy
 }
 ```
 
-Each part's answer is final for its range of time, so once a part arrives, the window from its start
-to the window's end is answered. Counts and sums over the parts add up, and so do minimums and
-maximums. A mean over the whole window is the sum of the parts' sums over the sum of their counts.
-
-Rows kept for different lengths of time, or rows of different tenants or sources kept apart, go in a
-dataset each: the library knows no tenant, and an application lays out its rows as it chooses. Each
-dataset then expires on its own schedule, reading no data:
-
-```csharp
-await debug.ExpireAsync(DateTimeOffset.UtcNow.AddDays(-7));
-await info.ExpireAsync(DateTimeOffset.UtcNow.AddDays(-90));
+```
+part 10-02 to 10-03: 17280 requests
+part 10-01 to 10-02: 17280 requests
 ```
 
-An expiry drops whole periods. A filter on a column is a delete, and `DeleteAsync` is the call for it.
+Each part's answer is final for its values, so once a part arrives, the range from its start to the
+range's end is answered. Counts and sums over the parts add up, and so do minimums and maximums. A mean
+over the whole range is the sum of the parts' sums over the sum of their counts. A value whose next
+value no function tells, a text's or a float's, has no part to cut, and the call refuses it.
 
-A row that arrives after its period has closed, later than the lateness horizon, is kept beside its
-period in a small object of its own, and every question reads it with the period. Its period is not
-rewritten for it, and it expires with its period. The dataset counts such rows on its meter, as
-`vortex.dataset.rows_past_horizon`. A handle created with `PeriodOptions.RefuseLateRows = true`
-refuses an append that holds one instead.
+Rows kept for different lengths of time go in a dataset each, and so may rows of different tenants or
+sources an application keeps apart: the library knows no tenant, and an application lays out its rows
+as it chooses. Each dataset then expires on its own schedule, reading no data:
 
-A period closes on the data's own time, never the clock's: once the dataset holds a row past the
-period's end and the lateness horizon. A dataset that stops receiving rows keeps its last period open,
-in the small objects its last appends left. Questions over it are just as exact and cost a few more
-requests than over a sealed period, and it expires all the same.
+```csharp
+DateTimeOffset week = DateTimeOffset.UtcNow.AddDays(-7);
+DateTimeOffset quarter = DateTimeOffset.UtcNow.AddDays(-90);
+await debug.ExpireAsync<Logged>(r => r.At < week);
+await info.ExpireAsync<Logged>(r => r.At < quarter);
+```
 
-Declare a horizon that covers how late your rows come, or periods longer than that. Rows that keep
-coming later than the horizon fill the small objects beside their period, and the period is sealed
-again with them: on periods of an hour, under a few rows up to an hour late among four writers, a row
-is rewritten about five times instead of under three, each hour sealed three times over
-(`vortex-queries --micro lifecycle`). The `vortex.dataset.lateness` histogram records how late the
-oldest row of each append came, to set the horizon against.
+An expiry drops, in one commit, the objects its filter covers whole, by their summaries, and opens
+none. Under a clustering by day, a bound on the instant covers every day before the one it falls in,
+so a row outlives the bound by a day at most. To drop rows exactly, delete them: `DeleteAsync` opens
+the objects that straddle the bound. The sample keeps three days of debug lines, an hour an object,
+and drops the first two:
+
+```
+debug lines expired before 10-03: 2880 then 960, 1920 dropped; info lines untouched: 1440
+```
+
+A row that comes late, after rows of later keys, is appended as any other, into level 0, and the job
+that takes it down rewrites the objects of the level below that its key reaches. On 48 hours of
+requests at 20 a second from four writers, clustered by hour, one row in fifty a few seconds late and
+one in ten thousand up to an hour late, a row is rewritten 6.5 times on its way down, against 2.8 when
+none comes late (`vortex-queries --micro lifecycle`). A writer that can hold its rows until the late
+ones are in, and append them in key order, pays the second figure.
 
 The directories a question reads to find an object's rows can stay on the local disk, so that the next
 question over the same objects asks the store nothing for them. Give the session a `SynopsisCache`, a
@@ -429,9 +471,14 @@ never lend its values to an unrelated column.
 * The dataset format is experimental and specific to this project. Pin the package version, and do
   not expect another Vortex implementation to read the commit tree.
 * A dataset written in commit format 4 is refused by earlier releases, which would otherwise misread
-  it. A dataset takes format 4 once it declares periods, identifiers, shredded paths
-  or an erasure delay, or once one of its objects has a footer past the first 64 KiB an open reads.
+  it. A dataset takes format 4 once it declares a clustering, identifiers, shredded paths
+  or an erasure delay, once it holds rollups, or once one of its objects has a footer past the first
+  64 KiB an open reads.
   Upgrade every process that writes or reads such a dataset before any of them uses one of those.
+* A dataset an earlier release wrote by periods opens and reads as before, but compaction plans
+  nothing for it: its late level's objects overlap, and the rows of its other levels are in no key
+  order, which a merge on the key would take them to be. Append its rows to a clustered dataset to
+  compact them.
 * Marked rows keep their bytes until compaction. A delete that marks rows frees no space, since the
   object holds them (up to an eighth of its rows) until compaction rewrites it or a later delete
   passes that share. An object under a mebibyte is rewritten by every delete that touches it, so
@@ -454,8 +501,8 @@ never lend its values to an unrelated column.
   reaches without that fails at its end: 168 GB on Cloudflare R2 and 106 GB on Scaleway (about a
   terabyte on Amazon S3). Append in smaller pieces, or give the store a spool directory
   (`StoreTransportOptions.SpoolDirectory`) there. The parts of a large object are in flight four at a
-  time: a period of a day at a few thousand rows a second sends parts of about 180 MB on Scaleway,
-  where periods of an hour keep the default parts of 16 MiB.
+  time: an object of a day at a few thousand rows a second sends parts of about 180 MB on Scaleway,
+  where objects of an hour keep the default parts of 16 MiB.
 * `DatasetOptions.Session` is the session whose pool, cache and parallelism the dataset's scans use,
   and `DatasetOptions.TimeProvider` is the clock a commit reads its creation time from.
 
@@ -465,7 +512,7 @@ never lend its values to an unrelated column.
 dotnet run -c Release --project samples/Vorticity.Samples -- datasets
 ```
 
-The dataset of periods, the window asked newest first, the cache and the retentions are
+The dataset clustered by day, the window asked a day at a time, the cache and the retentions are
 the `time-windows` sample, and the variant columns the `variants` sample:
 
 ```

@@ -305,8 +305,8 @@ await dataset.SetShreddedPathsAsync(["Attributes['http.response.status_code'].As
 from then on follows the new lists, the appends of every handle and the compactions of every loop,
 handles opened before the change included. The objects already written stay as they are: a lookup of
 an added identifier reads the rows of an object written before as a scan does, and finds them all the
-same, only slower, until a compaction rewrites that object. A period already sealed is not rewritten
-again, so its objects keep being read that way until the retention lets them go.
+same, only slower, until a compaction rewrites that object. An object no job takes again, such as a
+past day's under a clustering by day, keeps being read that way until an expiry drops it.
 
 Each call is checked against the dataset's schema and refused, before anything is committed, with the
 messages a creation gives. It throws `InvalidOperationException` when another writer changed the schema
