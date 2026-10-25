@@ -6,7 +6,7 @@
 // of each column, read for every column in one request, and the counts of each column whose values repeat, a column a
 // request, with no open of the object; a sheet's rows, nulls, distinct values, frequent values and filter hold to the
 // object's rows, and a column's counts to the rows of each of its values. Questions drawn at random answer as their rows
-// do, on one lane as on four, and the counts answer some of them.
+// do, on one lane as on four, once the deepest level is rolled up, and the counts or the rollups answer some of them.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -97,8 +97,10 @@ public sealed class DatasetClusteredSynopsesTests
         Console.WriteLine($"CLUSTERED {clustering}: {objects} objects with their counts");
         Assert.True(objects >= 2, $"{clustering}: {objects} objects with their counts");
 
-        // Questions drawn at random, as rows, then on one lane and on four as the counts answer them.
+        // Questions drawn at random, as rows, then on one lane and on four as the counts and the rollups answer them.
+        int rolled = await dataset.RollUpAsync(Ct);
         const int Questions = 12;
+        int rollups = 0;
         int answered = 0;
         for (int question = 0; question < Questions; question++)
         {
@@ -113,10 +115,11 @@ public sealed class DatasetClusteredSynopsesTests
             }
 
             ScanPlan plan = await DatasetPlannerTests.Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
-            answered += plan.States.Any(step => step.Read == "states") ? 1 : 0;
+            answered += plan.States.Any(step => step.Read is "states" or "rollup") ? 1 : 0;
+            rollups += plan.States.Any(step => step.Read == "rollup") ? 1 : 0;
         }
 
-        Console.WriteLine($"CLUSTERED {clustering}: the counts answered {answered} questions of {Questions}");
+        Console.WriteLine($"CLUSTERED {clustering}: {rolled} rollups; the counts answered {answered} questions of {Questions}, the rollups {rollups} of them");
         Assert.True(answered > 0, $"{clustering}: the counts answered no question");
     }
 
@@ -151,6 +154,7 @@ public sealed class DatasetClusteredSynopsesTests
             Write = write,
             SheetObjectBytes = 0,
             ContentsObjectBytes = 0,
+            RollupFanout = 2,
         });
     }
 

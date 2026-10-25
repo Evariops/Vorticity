@@ -22,7 +22,7 @@ namespace Vorticity.Dataset;
 /// take the extremes or the mean of a measure the counts carry, take a quantile or a distribution of one they sketch, or
 /// count the column's distinct values; its filter asks the column for values by equality or a set. Worked out once a
 /// question, with the columns of its batches of states; object by object, it names the column whose counts answer
-/// (<see cref="FieldOf"/>): an object whose summaries prove the filter's other conjuncts true over its every row and the
+/// (<see cref="FieldOf(in PositionedObject)"/>): an object whose summaries prove the filter's other conjuncts true over its every row and the
 /// other keys constant, with no row a delete marked, which its counts still hold. Any other object is read as rows. The
 /// summaries bound the key's first column by the object's keys where its file does not, a text's; and values of that
 /// column, under a question keyed by another, are proven so rather than counted, each object holding the values asked
@@ -261,6 +261,54 @@ internal sealed class CountsAnswer
 
         int counted = Column ?? Least(contents.Counts);
         return contents.CountsOf(counted) is null ? null : counted;
+    }
+
+    /// <summary>
+    /// The column whose totals answer for the rollup <paramref name="rollup"/> (<see cref="RollupEntry"/>), as an object's
+    /// counts answer for it: the union of its objects' summaries proves every conjunct the counts do not hold true over
+    /// their rows and every other key constant, and it keeps the column's totals; the column asked, or for a question of
+    /// no column the one whose totals' region is least. Null when its objects are taken one by one.
+    /// </summary>
+    internal int? FieldOf(RollupEntry rollup)
+    {
+        if ((_rest is { } rest && !rest.MustMatch(rollup.Summaries.Columns, rollup.Rows)) || rollup.Columns.Count == 0)
+        {
+            return null;
+        }
+
+        foreach ((_, string path, FieldExpr key) in _constants)
+        {
+            if (ConstantOf(rollup.Summaries, path, key) is null)
+            {
+                return null;
+            }
+        }
+
+        // The column asked, or the least whose totals answer; its totals carry every measure the request reads, sketched
+        // when a quantile asks, and keep every value when a key or the values asked read them.
+        RollupColumn? counted = null;
+        foreach (RollupColumn column in rollup.Columns)
+        {
+            if ((Column is null || column.Field == Column) && Answers(column) && (counted is not { } least || column.Counts.Length < least.Counts.Length))
+            {
+                counted = column;
+            }
+        }
+
+        return counted?.Field;
+
+        bool Answers(RollupColumn column)
+        {
+            foreach ((_, int field, _, bool sketch) in Measures)
+            {
+                if (Array.IndexOf(column.MeasureFields, field) < 0 || (sketch && (!column.Sketched || _request.SketchBits > ColumnCountsBuilder.SketchBits)))
+                {
+                    return false;
+                }
+            }
+
+            return !column.LeavesOut || (!Keyed && Values is null);
+        }
     }
 
     /// <summary>

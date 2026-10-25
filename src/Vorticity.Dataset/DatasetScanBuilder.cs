@@ -56,6 +56,9 @@ internal sealed class DatasetScanCounters
     /// <summary>The rows of states the answered objects gave, an entry of their counts each.</summary>
     public long StateRows { get; internal set; }
 
+    /// <summary>Rollups whose totals answered an aggregation as states, each for the objects it covers, which <see cref="ObjectsAnswered"/> counts.</summary>
+    public long RollupsAnswered { get; internal set; }
+
     /// <summary>
     /// The most data objects the scan read at once: one in the tree's order, two once a prefetch
     /// opens the next object ahead, and under <see cref="DatasetScanBuilder.InKeyOrder(string, bool)"/>
@@ -560,10 +563,22 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> StatesAsync(CountsAnswer answer, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        // The rollups a scan of the whole version takes, each standing for the objects it covers, which the walk passes
+        // over; then the objects the walk meets that no rollup covers. The rollups come first, as many as rolled holds.
+        RollupChoice? rollups = await RollupsAsync(answer, cancellationToken).ConfigureAwait(false);
+        List<RollupEntry>? rolled = rollups is null ? null : Rolled(rollups);
         List<(PositionedObject Held, int? Field)> objects = [];
-        await foreach (PositionedObject held in WalkAsync(cancellationToken, answer).ConfigureAwait(false))
+        if (rollups is not null)
         {
-            if (Covered(held) > 0)
+            foreach ((RollupEntry _, int field) in rollups.Chosen)
+            {
+                objects.Add((default, field));
+            }
+        }
+
+        await foreach (PositionedObject held in WalkAsync(cancellationToken, answer, rollups).ConfigureAwait(false))
+        {
+            if (Covered(held) > 0 && rollups?.CoverOf(held) is not >= 0)
             {
                 objects.Add((held, AnsweredBy(answer, held)));
             }
@@ -572,38 +587,56 @@ internal sealed class DatasetScanBuilder
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)>?[] reads = new Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)>?[objects.Count];
         int width = Math.Max(1, _dataset.Session.Options.MaxConcurrentReads);
-        int started = 0;
         CanonicalArena arena = new CanonicalArena(answer.Nodes);
         try
         {
             for (int o = 0; o < objects.Count; o++)
             {
-                // The counts of the next objects read ahead, as many objects ahead as the session reads at once.
-                for (; started < objects.Count && started < o + width; started++)
+                // The counts of the next objects and rollups read ahead, as many ahead as the session reads at once; a read
+                // begun, or none to begin, is no longer null.
+                for (int ahead = o; ahead < objects.Count && ahead < o + width; ahead++)
                 {
-                    if (objects[started].Field is { } next)
-                    {
-                        reads[started] = _dataset.ReadCountsAsync(objects[started].Held.Entry, next, answer.AsksSketches, stopped.Token).AsTask();
-                    }
+                    reads[ahead] ??= objects[ahead].Field is not { } next ? NoCounts
+                        : ahead < rolled?.Count ? _dataset.ReadRollupCountsAsync(rolled[ahead], next, answer.AsksSketches, stopped.Token).AsTask()
+                        : _dataset.ReadCountsAsync(objects[ahead].Held.Entry, next, answer.AsksSketches, stopped.Token).AsTask();
                 }
 
                 PositionedObject held = objects[o].Held;
+                RollupEntry? taken = o < rolled?.Count ? rolled[o] : null;
                 StateRows? rows = null;
-                if (reads[o] is { } read)
+                if (reads[o] is { } read && read != NoCounts)
                 {
-                    reads[o] = null;
+                    reads[o] = NoCounts;
                     if (await read.ConfigureAwait(false) is ({ } counts, var sketched))
                     {
-                        rows = answer.Rows(counts, sketched, answer.SummariesOf(held));
+                        rows = answer.Rows(counts, sketched, taken is not null ? taken.Summaries : answer.SummariesOf(held));
                     }
+                }
+
+                if (rows is null && taken is not null)
+                {
+                    // A rollup whose totals did not answer after all: its objects, one by one, after the others, the rollups
+                    // left first; their reads begin as the loop meets them, the reads begun before them kept.
+                    List<(PositionedObject Held, int? Field)> spread = await SpreadAsync(taken, answer, cancellationToken).ConfigureAwait(false);
+                    objects.RemoveAt(o);
+                    rolled!.RemoveAt(o);
+                    objects.AddRange(spread);
+                    Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)>?[] grown = new Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)>?[objects.Count];
+                    Array.Copy(reads, grown, o);
+                    Array.Copy(reads, o + 1, grown, o, reads.Length - o - 1);
+                    reads = grown;
+                    o--;
+                    continue;
                 }
 
                 if (rows is null)
                 {
                     // This object's rows and those of the objects after it the counts do not answer, up to the next they may:
-                    // a part of the scan, which reads them as it would, ahead and past their sheets.
+                    // a part of the scan, which reads them as it would, ahead and past their sheets. Under rollups, a part
+                    // stops where the rows the walk passed over begin, which a rollup answers.
                     int last = o;
-                    while (last + 1 < objects.Count && objects[last + 1].Field is null)
+                    while (last + 1 < objects.Count && objects[last + 1].Field is null
+                        && (rollups is null || objects[last + 1].Held.FirstRow == objects[last].Held.FirstRow + objects[last].Held.Entry.Rows))
                     {
                         last++;
                     }
@@ -621,7 +654,8 @@ internal sealed class DatasetScanBuilder
 
                 if (_metrics is { } metrics)
                 {
-                    metrics.ObjectsAnswered++;
+                    metrics.ObjectsAnswered += taken?.Objects ?? 1;
+                    metrics.RollupsAnswered += taken is null ? 0 : 1;
                     metrics.StateRows += rows.Count;
                 }
 
@@ -638,7 +672,7 @@ internal sealed class DatasetScanBuilder
             await stopped.CancelAsync().ConfigureAwait(false);
             foreach (Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)>? left in reads)
             {
-                if (left is not null)
+                if (left is not null && left != NoCounts)
                 {
                     try
                     {
@@ -653,6 +687,36 @@ internal sealed class DatasetScanBuilder
             arena.Reset();
         }
     }
+
+    /// <summary>The rollups <paramref name="rollups"/> takes, in their order.</summary>
+    private static List<RollupEntry> Rolled(RollupChoice rollups)
+    {
+        List<RollupEntry> rolled = new List<RollupEntry>(rollups.Chosen.Count);
+        foreach ((RollupEntry rollup, int _) in rollups.Chosen)
+        {
+            rolled.Add(rollup);
+        }
+
+        return rolled;
+    }
+
+    /// <summary>The objects <paramref name="rollup"/> covers, each with the column whose counts answer for it, in key order.</summary>
+    private async Task<List<(PositionedObject Held, int? Field)>> SpreadAsync(RollupEntry rollup, CountsAnswer answer, CancellationToken cancellationToken)
+    {
+        List<(PositionedObject Held, int? Field)> spread = [];
+        await foreach (PositionedObject under in _version.WalkAsync(Pruner(), 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        {
+            if (under.Level == rollup.Level && rollup.Covers(under.TreeKey.Span))
+            {
+                spread.Add((under, AnsweredBy(answer, under)));
+            }
+        }
+
+        return spread;
+    }
+
+    /// <summary>The read of an object's counts <see cref="StatesAsync"/> does not begin, or has taken: none.</summary>
+    private static readonly Task<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)> NoCounts = Task.FromResult<(Indexes.ColumnCounts?, Indexes.ColumnSketches?)>((null, null));
 
     /// <summary>
     /// The scan of rows <c>[from, to)</c> <paramref name="filter"/> keeps, as this scan reads rows, with no states asked and
@@ -1224,10 +1288,30 @@ internal sealed class DatasetScanBuilder
         List<StatesStep> states = [];
         KeyRange? range = CountRange();
         CountsAnswer? answer = Answer() is { } asked && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false) ? asked : null;
-        await foreach (PositionedObject held in WalkAsync(cancellationToken, answer).ConfigureAwait(false))
+
+        // A rollup the scan takes reads its column's totals, and their sketches beside them for a quantile, in a request,
+        // for the objects it covers, which the walk passes over.
+        RollupChoice? rollups = answer is null ? null : await RollupsAsync(answer, cancellationToken).ConfigureAwait(false);
+        foreach ((RollupEntry rollup, int field) in rollups?.Chosen ?? [])
+        {
+            RollupColumn totals = rollup.ColumnOf(field)!.Value;
+            Indexes.IndexSegment? sketched = answer!.AsksSketches ? totals.Sketches : null;
+            string column = _version.Schema.Columns[field].Name;
+            states.Add(new StatesStep(
+                rollup.Key,
+                "rollup",
+                $"the totals of {column}{(sketched is null ? string.Empty : " and their sketches")} over {rollup.Objects} objects, rank {rollup.Rank}",
+                sketched is null ? 1 : 2));
+            keptRows += rollup.Rows;
+            segments += sketched is null ? 1 : 2;
+            bytes += totals.Counts.Length + (sketched?.Length ?? 0);
+            mayMatch = true;
+        }
+
+        await foreach (PositionedObject held in WalkAsync(cancellationToken, answer, rollups).ConfigureAwait(false))
         {
             long covered = Covered(held);
-            if (covered == 0)
+            if (covered == 0 || rollups?.CoverOf(held) >= 0)
             {
                 continue;
             }
@@ -1578,13 +1662,21 @@ internal sealed class DatasetScanBuilder
     /// The objects the scan walks: those the summaries keep, and of them those the sheets do not refute, but the objects
     /// whose counts <paramref name="answered"/> answers, which read no sheet.
     /// </summary>
-    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken, CountsAnswer? answered = null)
+    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken, CountsAnswer? answered = null, RollupChoice? rollups = null)
     {
-        IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken);
+        IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(
+            Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers);
         return _summaries && _filter is { } filter && SheetPruning.Asks(filter, _version.Schema.DType)
-            ? SheetPrunedAsync(walk, filter, answered, cancellationToken)
+            ? SheetPrunedAsync(walk, filter, answered, rollups, cancellationToken)
             : walk;
     }
+
+    /// <summary>
+    /// The rollups the scan takes in place of the objects they cover (<see cref="RollupChoice"/>): a scan of the whole
+    /// version's, for which the counts answer; null for another, which reads no rollup.
+    /// </summary>
+    private ValueTask<RollupChoice?> RollupsAsync(CountsAnswer answer, CancellationToken cancellationToken) =>
+        _from == 0 && _to == long.MaxValue ? RollupChoice.OfAsync(_version, answer, Pruner(), cancellationToken) : default;
 
     /// <summary>The objects a sheet read at once may pass over, in the walk's order.</summary>
     private const int SheetBatch = 16;
@@ -1597,12 +1689,13 @@ internal sealed class DatasetScanBuilder
     /// does an object whose counts <paramref name="answered"/> answers, whose counts say which values it holds.
     /// </summary>
     private async IAsyncEnumerable<PositionedObject> SheetPrunedAsync(
-        IAsyncEnumerable<PositionedObject> walk, VortexExpr filter, CountsAnswer? answered, [EnumeratorCancellation] CancellationToken cancellationToken)
+        IAsyncEnumerable<PositionedObject> walk, VortexExpr filter, CountsAnswer? answered, RollupChoice? rollups,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         DType schema = _version.Schema.DType;
         List<int>? columns = null;
         List<PositionedObject>? batch = null;
-        Func<PositionedObject, bool>? unread = answered is null ? null : held => AnsweredBy(answered, held) is not null;
+        Func<PositionedObject, bool>? unread = answered is null ? null : held => AnsweredBy(answered, held) is not null || rollups?.CoverOf(held) >= 0;
         DatasetScanCounters? metrics = _considers ? _metrics : null;
         await foreach (PositionedObject held in walk.ConfigureAwait(false))
         {

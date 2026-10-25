@@ -188,7 +188,12 @@ internal sealed class RollupBuilder
                 }
             }
 
-            columns.Add(new RollupColumn(field, counts, totalSketches, bucketCounts, bucketSketches));
+            columns.Add(new RollupColumn(field, counts, totalSketches, bucketCounts, bucketSketches)
+            {
+                MeasureFields = totals.MeasureFields,
+                Sketched = totals.Sketched && sketches?.Sketches is not null,
+                LeavesOut = Array.Exists(totals.Groups, static group => group.Kind == CountedValue.Others),
+            });
         }
 
         RollupEntry entry = new RollupEntry

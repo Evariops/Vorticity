@@ -133,6 +133,99 @@ public sealed partial class DatasetRollupsTests
         await HoldsAsync(dataset, summed);
     }
 
+    public static TheoryData<string> Questions() =>
+    [
+        "count by service", "count by service and hour", "measures by service, hours two to eight", "count by status, one service",
+        "median bytes by service", "count by service, half an hour cut",
+    ];
+
+    [Theory]
+    [MemberData(nameof(Questions))]
+    public async Task AQuestionTheRollupsAnswerAnswersAsTheRowsDo(string question)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await WriteAsync(store);
+        await dataset.RollUpAsync(Ct);
+        List<string> rows = await AskAsync(dataset, question, synopses: false);
+        List<string> states = await AskAsync(dataset, question, synopses: true);
+        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
+        int rollups = plan.States.Count(step => step.Read == "rollup");
+        int objects = plan.States.Count(step => step.Read == "states");
+        Console.WriteLine($"ROLLUPS {question}: {rollups} rollups and {objects} objects' counts answer, {plan.States.Length - rollups - objects} other steps");
+        Assert.NotEmpty(rows);
+        Assert.Equal(rows, states);
+        if (question is "count by service" or "measures by service, hours two to eight" or "median bytes by service" or "count by service and hour")
+        {
+            Assert.True(rollups > 0, $"{question}: no rollup answered");
+        }
+    }
+
+    [Fact]
+    public async Task TheRollupsReadFewerObjectsThanTheCounts()
+    {
+        // The same question asked of a fresh handle before the rollups are written and after: the counts of every object,
+        // then the totals of a few rollups.
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using (VortexDataset written = await WriteAsync(memory))
+        {
+        }
+
+        (long requests, long bytes) before = await CostAsync(memory, "count by service");
+        await using (VortexDataset dataset = await VortexDataset.OpenAsync(memory, Options(), Ct))
+        {
+            Assert.True(await dataset.RollUpAsync(Ct) > 0);
+        }
+
+        (long requests, long bytes) after = await CostAsync(memory, "count by service");
+        Console.WriteLine($"ROLLUPS count by service: {before.requests} requests and {before.bytes} bytes with the objects' counts, {after.requests} and {after.bytes} with the rollups");
+        Assert.True(after.requests < before.requests, $"{after.requests} requests with the rollups, {before.requests} without");
+    }
+
+    /// <summary>The requests and bytes a fresh handle's answer to <paramref name="question"/> costs, its opening apart.</summary>
+    private static async Task<(long Requests, long Bytes)> CostAsync(MemoryObjectStore memory, string question)
+    {
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(), Ct);
+        store.Reset();
+        await AskAsync(dataset, question, synopses: true);
+        return (store.Requests, store.BytesRead);
+    }
+
+    /// <summary>The groups <paramref name="question"/> answers, each a line of its values, sorted.</summary>
+    private static async Task<List<string>> AskAsync(VortexDataset dataset, string question, bool synopses)
+    {
+        List<string> rows = [];
+        await using (IAsyncEnumerator<RecordBatch> batches = Ask(dataset, question, synopses).Query.Batches(Ct))
+        {
+            while (await batches.MoveNextAsync())
+            {
+                Vorticity.Tests.Writing.Values.DescribeRows(batches.Current, rows);
+            }
+        }
+
+        rows.Sort(StringComparer.Ordinal);
+        return rows;
+    }
+
+    private static Vorticity.Aggregation Ask(VortexDataset dataset, string question, bool synopses)
+    {
+        Scan<Hit> scan = dataset.Scan<Hit>().With(new ScanOptions { UseSynopses = synopses });
+        DateTimeOffset from = Noon.AddHours(2);
+        DateTimeOffset to = Noon.AddHours(9);
+        DateTimeOffset cut = Noon.AddMinutes(150);
+        return question switch
+        {
+            "count by service" => scan.GroupBy(h => h.Service).Select(g => (g.Key, g.Count())),
+            "count by service and hour" => scan.GroupBy(h => (h.Service, h.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count())),
+            "measures by service, hours two to eight" => scan.Where(h => h.At >= from && h.At < to).GroupBy(h => h.Service)
+                .Select(g => (g.Key, g.Count(), g.Sum(h => h.Bytes), g.Min(h => h.Bytes), g.Max(h => h.Bytes))),
+            "count by status, one service" => scan.Where(h => h.Service == "api").GroupBy(h => h.Status).Select(g => (g.Key, g.Count())),
+            "median bytes by service" => scan.GroupBy(h => h.Service).Select(g => (g.Key, g.Quantile(h => h.Bytes, 0.5))),
+            "count by service, half an hour cut" => scan.Where(h => h.At >= cut).GroupBy(h => h.Service).Select(g => (g.Key, g.Count())),
+            _ => throw new ArgumentException($"No question named '{question}'.", nameof(question)),
+        };
+    }
+
     [Fact]
     public async Task ASchemaChangeTakesEveryRollupAway()
     {

@@ -80,14 +80,16 @@ internal sealed class DatasetSnapshot
 
     /// <summary>
     /// The objects inside <c>[from, to)</c> whose summaries, and their ancestors', do not refute
-    /// the pruner, in key order. A null pruner keeps every object.
+    /// the pruner, in key order. A null pruner keeps every object. A subtree of a level that
+    /// <paramref name="covered"/> says another answer takes whole, rollups', is passed over as a refuted one is.
     /// </summary>
     internal async IAsyncEnumerable<PositionedObject> WalkAsync(
         SummaryPruner? pruner,
         long from,
         long to,
         DatasetScanCounters? metrics,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        Func<int, InternalEntry, bool>? covered = null)
     {
         // Each node and each entry is asked about the pruner's columns alone, decoded out of its
         // summaries in place; an entry is parsed whole only once it is kept.
@@ -97,7 +99,7 @@ internal sealed class DatasetSnapshot
             || ObjectSummaries.Of(ObjectSummaryFold.SummariesOf(node.Summary.Span, out _), wanted!).MayMatch(pruner, node.Rows);
 
         await foreach ((TreeEntry held, long firstRow, int level) in
-            EntriesAsync(from, to, mayMatch, metrics, cancellationToken).ConfigureAwait(false))
+            EntriesAsync(from, to, mayMatch, metrics, cancellationToken, covered).ConfigureAwait(false))
         {
             if (metrics is { } counters)
             {
@@ -424,7 +426,8 @@ internal sealed class DatasetSnapshot
         long to,
         Func<InternalEntry, bool>? mayMatch,
         DatasetScanCounters? metrics,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        Func<int, InternalEntry, bool>? covered = null)
     {
         List<DatasetTree> trees = [];
         List<int> levels = [];
@@ -438,9 +441,10 @@ internal sealed class DatasetSnapshot
         {
             DatasetTree only = trees.Count == 1 ? trees[0] : DatasetTree.Empty;
             int level = trees.Count == 1 ? levels[0] : 0;
-            Func<InternalEntry, bool>? descend = mayMatch is null ? null : node =>
+            Func<InternalEntry, bool>? kept = Kept(mayMatch, covered, level);
+            Func<InternalEntry, bool>? descend = kept is null ? null : node =>
             {
-                if (mayMatch(node))
+                if (kept(node))
                 {
                     return true;
                 }
@@ -468,7 +472,7 @@ internal sealed class DatasetSnapshot
         {
             for (int i = 0; i < trees.Count; i++)
             {
-                walks[i] = new TreeWalk(trees[i], Pages, mayMatch, cancellationToken);
+                walks[i] = new TreeWalk(trees[i], Pages, Kept(mayMatch, covered, levels[i]), cancellationToken);
                 live[i] = await walks[i].MoveNextAsync().ConfigureAwait(false);
             }
 
@@ -525,6 +529,20 @@ internal sealed class DatasetSnapshot
             }
         }
     }
+
+    /// <summary>
+    /// The subtrees of <paramref name="level"/> a walk enters: those <paramref name="mayMatch"/> keeps, past those
+    /// <paramref name="covered"/> takes; null for all of them.
+    /// </summary>
+    private static Func<InternalEntry, bool>? Kept(Func<InternalEntry, bool>? mayMatch, Func<int, InternalEntry, bool>? covered, int level) =>
+        covered is null ? mayMatch : Uncovered(mayMatch, covered, level);
+
+    /// <summary>
+    /// <see cref="Kept"/> under <paramref name="covered"/>, apart so that a walk with nothing covered builds no closure: one
+    /// over a method's parameters is built as the method starts.
+    /// </summary>
+    private static Func<InternalEntry, bool> Uncovered(Func<InternalEntry, bool>? mayMatch, Func<int, InternalEntry, bool> covered, int level) =>
+        mayMatch is null ? node => !covered(level, node) : node => mayMatch(node) && !covered(level, node);
 
     /// <summary>
     /// Whether a step of another level falls inside the key span of the subtree level

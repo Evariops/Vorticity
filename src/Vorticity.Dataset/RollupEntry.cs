@@ -26,7 +26,26 @@ internal readonly record struct RollupBucket(FilterLiteral Image, FilterLiteral 
 /// <param name="Sketches">Their sketches, null for none.</param>
 /// <param name="BucketCounts">The counts kept by bucket (<see cref="CountsBuckets"/>), null when the rollup keeps no buckets.</param>
 /// <param name="BucketSketches">Their sketches, null for none.</param>
-internal readonly record struct RollupColumn(int Field, IndexSegment Counts, IndexSegment? Sketches, IndexSegment? BucketCounts, IndexSegment? BucketSketches);
+internal readonly record struct RollupColumn(int Field, IndexSegment Counts, IndexSegment? Sketches, IndexSegment? BucketCounts, IndexSegment? BucketSketches)
+{
+    /// <summary>The measures the totals carry, by their places in the schema: what a question may sum or take the extremes of.</summary>
+    public int[] MeasureFields { get; init; } = [];
+
+    /// <summary>Whether the totals' sketches keep a quantile sketch of each measure.</summary>
+    public bool Sketched { get; init; }
+
+    /// <summary>Whether the totals hold an entry of the values a budget left out, which gives no value of its own.</summary>
+    public bool LeavesOut { get; init; }
+
+    /// <inheritdoc/>
+    public bool Equals(RollupColumn other) =>
+        Field == other.Field && Counts == other.Counts && Sketches == other.Sketches && BucketCounts == other.BucketCounts
+        && BucketSketches == other.BucketSketches && MeasureFields.AsSpan().SequenceEqual(other.MeasureFields) && Sketched == other.Sketched
+        && LeavesOut == other.LeavesOut;
+
+    /// <inheritdoc/>
+    public override int GetHashCode() => HashCode.Combine(Field, Counts, BucketCounts, Sketched, LeavesOut);
+}
 
 /// <summary>
 /// A rollup, as the tree of rollups carries it: the counts of a run of consecutive objects of one level, in the order of
@@ -154,6 +173,13 @@ internal sealed record RollupEntry
                     WriteRegion(ref inner, ColumnField.Sketches, column.Sketches);
                     WriteRegion(ref inner, ColumnField.BucketCounts, column.BucketCounts);
                     WriteRegion(ref inner, ColumnField.BucketSketches, column.BucketSketches);
+                    foreach (int measure in column.MeasureFields)
+                    {
+                        inner.WriteUInt64Always(ColumnField.Measure, (ulong)measure);
+                    }
+
+                    inner.WriteBool(ColumnField.Sketched, column.Sketched);
+                    inner.WriteBool(ColumnField.LeavesOut, column.LeavesOut);
                     writer.WriteBytes(Field.Column, inner.WrittenSpan);
                 }
                 finally
@@ -317,6 +343,9 @@ internal sealed record RollupEntry
         IndexSegment? sketches = null;
         IndexSegment? bucketCounts = null;
         IndexSegment? bucketSketches = null;
+        List<int> measures = [];
+        bool sketched = false;
+        bool leavesOut = false;
         ProtoReader reader = new ProtoReader(bytes);
         while (reader.TryReadTag(out int tag, out ProtoWireType wire))
         {
@@ -337,6 +366,15 @@ internal sealed record RollupEntry
                 case (ColumnField.BucketSketches, ProtoWireType.LengthDelimited):
                     bucketSketches = ReadRegion(reader.ReadLengthDelimited());
                     break;
+                case (ColumnField.Measure, ProtoWireType.Varint):
+                    measures.Add(checked((int)reader.ReadVarint()));
+                    break;
+                case (ColumnField.Sketched, ProtoWireType.Varint):
+                    sketched = reader.ReadBool();
+                    break;
+                case (ColumnField.LeavesOut, ProtoWireType.Varint):
+                    leavesOut = reader.ReadBool();
+                    break;
                 default:
                     reader.SkipField(wire);
                     break;
@@ -344,7 +382,7 @@ internal sealed record RollupEntry
         }
 
         return field >= 0 && counts is { } totals
-            ? new RollupColumn(field, totals, sketches, bucketCounts, bucketSketches)
+            ? new RollupColumn(field, totals, sketches, bucketCounts, bucketSketches) { MeasureFields = [.. measures], Sketched = sketched, LeavesOut = leavesOut }
             : throw new CommitFormatException("A rollup's column names no field or no counts.");
     }
 
@@ -402,6 +440,9 @@ internal sealed record RollupEntry
         internal const int Sketches = 3;
         internal const int BucketCounts = 4;
         internal const int BucketSketches = 5;
+        internal const int Measure = 6;
+        internal const int Sketched = 7;
+        internal const int LeavesOut = 8;
     }
 
     private static class RegionField

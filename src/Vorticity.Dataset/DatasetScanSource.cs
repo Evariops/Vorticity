@@ -316,6 +316,13 @@ internal sealed class DatasetScanSource : ScanSource
             && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
             ? CountsAnswer.Of(request, spec.Filter, _version)
             : null;
+        // A scan that rollups answer reads on one lane: the rows of their objects lie in no piece, and a piece of a scan
+        // takes no rollup (RollupChoice).
+        if (answer is not null && spec.Rows is null && await RollupChoice.OfAsync(_version, answer, pruner, cancellationToken).ConfigureAwait(false) is not null)
+        {
+            return null;
+        }
+
         HashSet<long> answered = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
