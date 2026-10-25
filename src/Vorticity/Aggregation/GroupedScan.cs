@@ -519,6 +519,17 @@ public sealed class Aggregation<TResult>
     public IAsyncEnumerable<AggregationEstimate> EstimateAsync(EstimateOptions? options = null, CancellationToken cancellationToken = default) =>
         new EstimateRun(AggregationPartials.Of(_query), options ?? new EstimateOptions()).TiersAsync(cancellationToken);
 
+    /// <summary>
+    /// What the exact answer costs, announced before anything is read: the requests and the bytes its source's planner
+    /// would read, object by object through the path it takes, at the price an object store asks of a request and a byte,
+    /// as each tier of <see cref="EstimateAsync"/> announces it (<see cref="AggregationEstimate.ExactCost"/>). Null for a source
+    /// that cannot say, a file's.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the walk of the source's entries.</param>
+    /// <returns>The time the exact answer would take on an object store, by the formula.</returns>
+    public ValueTask<TimeSpan?> CostAsync(CancellationToken cancellationToken = default) =>
+        EstimateRun.CostOfAsync(AggregationPartials.Of(_query), cancellationToken);
+
     /// <summary>The result as a scan of a record of one member, which takes the value: <c>Select(g =&gt; g.Count()).As&lt;Total&gt;()</c>.</summary>
     /// <typeparam name="TRecord">The record, whose one member is of the result's type or its nullable form.</typeparam>
     /// <returns>A scan of the result, which runs the query when its sink runs.</returns>
@@ -644,6 +655,17 @@ public sealed class Aggregation
     /// <exception cref="ArgumentOutOfRangeException">The shares are not ascending in (0, 1], or a range holds no byte.</exception>
     public IAsyncEnumerable<AggregationEstimate> EstimateAsync(EstimateOptions? options = null, CancellationToken cancellationToken = default) =>
         new EstimateRun(AggregationPartials.Of(_query), options ?? new EstimateOptions()).TiersAsync(cancellationToken);
+
+    /// <summary>
+    /// What the exact answer costs, announced before anything is read: the requests and the bytes its source's planner
+    /// would read, object by object through the path it takes, at the price an object store asks of a request and a byte,
+    /// as each tier of <see cref="EstimateAsync"/> announces it (<see cref="AggregationEstimate.ExactCost"/>). Null for a source
+    /// that cannot say, a file's.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the walk of the source's entries.</param>
+    /// <returns>The time the exact answer would take on an object store, by the formula.</returns>
+    public ValueTask<TimeSpan?> CostAsync(CancellationToken cancellationToken = default) =>
+        EstimateRun.CostOfAsync(AggregationPartials.Of(_query), cancellationToken);
 
     /// <summary>
     /// The result as a scan of <typeparamref name="TRecord"/>, whose members take the elements of the

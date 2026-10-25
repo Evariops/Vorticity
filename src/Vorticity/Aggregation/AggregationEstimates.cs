@@ -101,6 +101,24 @@ internal sealed class EstimateRun
         _measures = [.. measures];
     }
 
+    /// <summary>
+    /// What the exact answer to <paramref name="question"/> costs, its requests and bytes as its source's planner prices its
+    /// paths before reading anything, at the price of a request and a byte (<see cref="ReadCost"/>); null for a source that
+    /// cannot say.
+    /// </summary>
+    internal static async ValueTask<TimeSpan?> CostOfAsync(AggregationQuery question, CancellationToken cancellationToken)
+    {
+        AggregationHost host = question.Host;
+        AggregationPlan plan = question.Plan;
+        AggregateSlot?[] settled = new AggregateSlot?[plan.Aggregates.Length];
+        (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, settled);
+        ScanSpec pass = AggregationEngine.PassSpec(host.Spec(question.RowFilter), columns, plan, host.Source.Schema);
+        StateRequest? states = host.Source.KeepsStates && pass.Options.UseSynopses ? StateRequest.Of(plan, settled, null) : null;
+        return await host.Source.CostAsync(pass with { States = states }, cancellationToken).ConfigureAwait(false) is (long requests, long bytes)
+            ? ReadCost.Time(requests, bytes)
+            : null;
+    }
+
     /// <summary>The tiers: one a share of the ranges, each reading those the share adds, then the exact answer.</summary>
     internal async IAsyncEnumerable<AggregationEstimate> TiersAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -109,13 +127,10 @@ internal sealed class EstimateRun
 
         // The exact answer's cost, announced by every tier; under the threshold, the exact answer at once, the question read
         // whole as one part, through whatever its source's planner answers it by.
-        StateRequest? states = host.Source.KeepsStates && pass.Options.UseSynopses
-            ? StateRequest.Of(_question.Plan, new AggregateSlot?[_question.Plan.Aggregates.Length], null)
-            : null;
-        if (await host.Source.CostAsync(pass with { States = states }, cancellationToken).ConfigureAwait(false) is (long requests, long bytes))
+        _exactCost = await CostOfAsync(_question, cancellationToken).ConfigureAwait(false);
+        if (_exactCost is { } exactCost)
         {
-            _exactCost = ReadCost.Time(requests, bytes);
-            if (_exactCost <= _options.ExactUnder && _options.Exact && host.Source.RowBound >= 0)
+            if (exactCost <= _options.ExactUnder && _options.Exact && host.Source.RowBound >= 0)
             {
                 await ReadWholeAsync(host.Source.RowBound, cancellationToken).ConfigureAwait(false);
                 yield return Estimate(exact: true);

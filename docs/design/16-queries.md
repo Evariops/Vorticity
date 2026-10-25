@@ -631,7 +631,9 @@ counts, its blocks' statistics or its rows, in requests and bytes
 over a link of 1.25 GB/s with each request worth 293 KB, every tier announces (`ExactCost`). Under
 `EstimateOptions.ExactUnder`, a second by default, the exact answer comes at once: the question runs as
 one part over every row, through whatever its planner answers it by, and its states are the one tier. A
-source that cannot price its reads, a single file's, draws the tiers.
+source that cannot price its reads, a single file's, draws the tiers. The same price is announced before
+any tier or any read, `Aggregation.CostAsync`, so that an application chooses between the exact answer,
+the estimates, or a threshold of its own before it asks.
 
 **The ranges.** The source cuts the rows a pass reads (`ScanSource.StrataAsync`): a file's, and each
 object of a dataset that the filter keeps by its summaries and its slices. The cuts fall where the

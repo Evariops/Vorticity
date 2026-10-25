@@ -160,6 +160,24 @@ public sealed partial class DatasetEstimateTests
         Assert.All(announced, each => Assert.Equal(cost, each));
     }
 
+    /// <summary>
+    /// The exact answer's cost is announced before anything is read: the formula's, from the entries alone, no data object
+    /// opened, the same each tier announces.
+    /// </summary>
+    [Fact]
+    public async Task TheExactAnswersCostIsAnnouncedBeforeAnyRead()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await (await FilledAsync(memory)).DisposeAsync();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
+        store.Reset();
+        TimeSpan cost = Assert.IsType<TimeSpan>(await Question(dataset).CostAsync(Ct));
+        Assert.Equal(0, store.CountOf(ObjectOperation.Read));
+        List<AggregationEstimate> tiers = await Question(dataset).EstimateAsync(cancellationToken: Ct).ToListAsync(Ct);
+        Assert.Equal(cost, Assert.Single(tiers).ExactCost);
+    }
+
     /// <summary>An estimate refuses what no state answers whole, and a question that filters, orders or windows its groups.</summary>
     [Fact]
     public async Task AnEstimateRefusesWhatItCannotScale()

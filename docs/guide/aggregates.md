@@ -499,7 +499,15 @@ cold over a link of 1.25 GB/s, each request worth its round trip, as the dataset
 object by object (counts, blocks or rows) from what its entries say, with no read. Under
 `EstimateOptions.ExactUnder`, a second by default, the exact answer comes at once, one tier and no
 estimate: on the tests' 400 000 rows it costs 7.6 ms. `TimeSpan.Zero` draws the tiers whatever the cost,
-and so does a source that cannot price its reads, a single file's.
+and so does a source that cannot price its reads, a single file's. `CostAsync()` gives the same price
+before anything is asked, from the entries alone, null for a source that cannot say: the exact answer,
+the estimates or a threshold of the application's own can be chosen from it.
+
+```csharp
+TimeSpan? cost = await question.CostAsync();
+IAsyncEnumerable<AggregationEstimate> tiers = question.EstimateAsync(
+    new EstimateOptions { ExactUnder = cost < TimeSpan.FromSeconds(5) ? TimeSpan.FromSeconds(5) : TimeSpan.Zero });
+```
 
 In the tests, with 140 groups spread over 400 000 rows and 200 draws, the margins held the exact counts,
 sums and means 94.8 % of the time at 5 % of the rows, with three ranges drawn per stratum, and 95.1 % of
