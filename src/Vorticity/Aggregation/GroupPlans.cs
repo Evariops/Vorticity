@@ -62,9 +62,19 @@ internal static class GroupPlans
 
         for (int k = 0; k < facts.Sorted.Length; k++)
         {
-            if (facts.Sorted[k] || query.Host.Source.OrdersOnAsking(query.Plan.Keys[k].Column.Field))
+            if (facts.Sorted[k])
             {
                 return "the order asked for is not the one the groups would close in";
+            }
+
+            if (query.Host.Source.OrdersOnAsking(query.Plan.Keys[k].Column.Field, StreamingGroupBatches.StopsEarly(query)))
+            {
+                return "the order asked for is not the one the groups would close in";
+            }
+
+            if (query.Host.Source.OrdersOnAsking(query.Plan.Keys[k].Column.Field, stopsEarly: true))
+            {
+                return "the source brings the key in its order when asked, on one lane, which no take stops early";
             }
         }
 

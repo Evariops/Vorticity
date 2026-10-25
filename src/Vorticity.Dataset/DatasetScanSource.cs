@@ -272,10 +272,16 @@ internal sealed class DatasetScanSource : ScanSource
     /// Not in a dataset of periods, whose objects may order each slice by another column: read in key
     /// order, such a slice is sorted again, its instants read to order it and its columns read again in
     /// that order, which made a group by of time over a store 5 ms away 5.6 times slower than the pass
-    /// that holds its groups at one lane, reading 14 times its bytes, and 35 times slower at sixteen.
+    /// that holds its groups at one lane, reading 14 times its bytes, and 35 times slower at sixteen. And only when
+    /// <paramref name="stopsEarly"/>, a take or a window stopping the read, which reading in order is for: the read opens
+    /// the objects one after the other, each through its own key-ordered scan, on one lane, where the pass that holds the
+    /// groups reads them on every lane and spills what does not fit. A group by of the hour over objects of an hour each
+    /// read on one lane of eight, where the pass read them on four, and at one lane allocated three times what the pass
+    /// did, in 1.5 times its time.
     /// </summary>
-    internal override bool OrdersOnAsking(FieldExpr column) =>
-        !_version.Levels.ByPeriods && _version.Schema.Key is { } key && key.Paths.Count > 0 && string.Equals(key.Paths[0], column.Path, System.StringComparison.Ordinal);
+    internal override bool OrdersOnAsking(FieldExpr column, bool stopsEarly) =>
+        stopsEarly && !_version.Levels.ByPeriods && _version.Schema.Key is { } key && key.Paths.Count > 0
+        && string.Equals(key.Paths[0], column.Path, System.StringComparison.Ordinal);
 
     /// <summary>
     /// The loosest bounds the summaries of the version's root pages in hand give the column, over

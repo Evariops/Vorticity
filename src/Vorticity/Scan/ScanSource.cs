@@ -194,11 +194,11 @@ internal abstract class ScanSource
 
     /// <summary>
     /// Whether a scan that asks for the order of <paramref name="column"/> (<see cref="ScanSpec.OrderPath"/>)
-    /// brings its rows in it at a cost a stream can bear: a dataset on the first column of its
-    /// clustering key, whose objects a key-ordered read opens as the order reaches them. A file
-    /// whose statistics say a column is sorted needs no asking.
+    /// brings its rows in it at a cost a stream can bear: a Parquet file on a column it lies in; a dataset on the first
+    /// column of its clustering key when <paramref name="stopsEarly"/>, a take or a window stopping the read, whose objects
+    /// a key-ordered read opens as the order reaches them. A file whose statistics say a column is sorted needs no asking.
     /// </summary>
-    internal virtual bool OrdersOnAsking(FieldExpr column) => false;
+    internal virtual bool OrdersOnAsking(FieldExpr column, bool stopsEarly) => false;
 
     /// <summary>
     /// The smallest and the largest value of an integer column of a key, as the source's statistics
