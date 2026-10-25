@@ -296,7 +296,12 @@ sorted by their bytes, each with its number and the ranges of rows of the blocks
 `everywhere`. The threshold is on the blocks a value actually touches, measured when the object is
 written, never on a count of rows assumed spread at random: more than half the blocks, or more ranges
 than a sixteenth of them. A filter on a value of the key's first column, or of a column that depends on
-it, reads that value's blocks only; the same structure answers ranges and prefixes. The index holds the
+it, reads that value's blocks only: the equalities and sets a filter asks of such columns, through `AND`
+and `OR`, read the indexes of an object in place of its sheets, in one request, and give the ranges of
+rows its scan reads, each on its own. On thirty sources whose endpoints' names interleave, so that no
+zone map leaves rows out, a filter on one endpoint read 1.3 MB in 8 requests, against 14.4 MB in 131 for
+the same filter as a prefix, which no index answers *(measured, `DatasetWhereTests`)*. The same
+structure would answer ranges and prefixes, which the planner takes up (section 8). The index holds the
 column's values once an object, 6.2 bytes a value for the design's endpoints and hosts, their names
 sharing their prefixes *(measured)*: some 270 KB an object of an hour of the reference table, whose
 30 000 endpoints and 10 200 hosts it holds all, 6.6 MB a day, 2.6 GB in 13 months *(computed)*, where

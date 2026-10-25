@@ -183,11 +183,16 @@ A leaf entry describes one data object:
   each variant column's path directory, each column's sheet ([the column
   sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)), its columns' counts ([the
   counts](10-indexes.md#49-vorticitycolumncountsv1-a-columns-counts)) and their sketches ([the
-  sketches](10-indexes.md#410-vorticitycolumnsketchesv1-the-sketches-of-a-columns-counts)), the
+  sketches](10-indexes.md#410-vorticitycolumnsketchesv1-the-sketches-of-a-columns-counts)), its
+  blocks ([the block table](10-indexes.md#411-vorticityblocktablev1-an-objects-blocks)), each column's
+  statistics over them ([the block statistics](10-indexes.md#412-vorticityblockstatsv1-a-column-over-the-blocks))
+  and where each of its values lives ([the
+  index](10-indexes.md#413-vorticitycolumnwherev1-where-each-value-lives)), the
   region of the object's index directory, and where in it the entry of each locating index lies ([the
   directory](10-indexes.md#3-the-directory-and-the-runs)). With no open of the object, a reader of a slice
   reads its columns' directories, then its chunks; a question on a value reads the sheets of its columns
-  in one request, and passes the object over when they prove the value absent; a question on one column
+  in one request, or where their values live when the object keeps it for each, and passes the object
+  over when they prove the value absent, or reads only the ranges of rows the values live in; a question on one column
   reads that column's counts in one request instead of its rows; and a lookup by a value
   reads its index entries with its columns' page tables, then its postings, the pages of its rows and its
   chunks, four round trips. A table of contents of the first version, which also

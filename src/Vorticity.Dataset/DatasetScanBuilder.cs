@@ -116,6 +116,12 @@ internal sealed class DatasetScanBuilder
     private CountsAnswer? _answer;
     private bool _answerKnown;
 
+    // The ranges of each object's rows a selected row may lie in, by where its columns' values live, for the objects whose
+    // indexes leave rows out (SheetPruning.KeptAsync); read by the lanes that read the objects. Made at the first such
+    // object: a scan that meets none allocates nothing for them.
+    private System.Collections.Concurrent.ConcurrentDictionary<UInt128, RowRange[]>? _narrowed;
+    private Action<PositionedObject, RowRange[]>? _narrowing;
+
     // Whether the walk counts the objects it considers: not in a part of a scan whose own walk counted them (Part).
     private bool _considers = true;
 
@@ -1170,6 +1176,25 @@ internal sealed class DatasetScanBuilder
                 yield break;
             }
 
+            if (columns is null && !held.Entry.HasDeletions && Volatile.Read(ref _narrowed) is { } narrowed && narrowed.TryGetValue(held.Entry.Uid, out RowRange[]? ranges))
+            {
+                // The ranges of the object's rows where the values its filter asks live, each its own scan, the rows
+                // between them never read.
+                RecordBatch? view = null;
+                foreach (RowRange range in ranges)
+                {
+                    ScanBuilder scan = Of(lease.File, held, _filter, _mask, canonical: false, within: range);
+                    using QueryMemory? ahead = ReadsAhead(scan, lease.File);
+                    await foreach (RecordBatch batch in scan.ExecuteAsync()
+                        .WithCancellation(cancellationToken).ConfigureAwait(false))
+                    {
+                        yield return InDataset(batch, held.FirstRow, ref view);
+                    }
+                }
+
+                yield break;
+            }
+
             if (columns is null && !held.Entry.HasDeletions)
             {
                 // The object's own scan, which every object of the version's schema with no row
@@ -1928,7 +1953,7 @@ internal sealed class DatasetScanBuilder
             {
                 columns ??= SheetPruning.Columns(filter, schema);
                 foreach (PositionedObject kept in await SheetPruning.KeptAsync(
-                    _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken).ConfigureAwait(false))
+                    _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
                 {
                     yield return kept;
                 }
@@ -1941,13 +1966,22 @@ internal sealed class DatasetScanBuilder
         {
             columns ??= SheetPruning.Columns(filter, schema);
             foreach (PositionedObject kept in await SheetPruning.KeptAsync(
-                _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken).ConfigureAwait(false))
+                _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
             {
                 yield return kept;
             }
         }
     }
 
+
+    /// <summary>Keeps the ranges of the object <paramref name="held"/>'s rows a selected row may lie in, which its read takes alone.</summary>
+    private void Narrow(PositionedObject held, RowRange[] ranges)
+    {
+        System.Collections.Concurrent.ConcurrentDictionary<UInt128, RowRange[]> narrowed = Volatile.Read(ref _narrowed)
+            ?? Interlocked.CompareExchange(ref _narrowed, new System.Collections.Concurrent.ConcurrentDictionary<UInt128, RowRange[]>(), null)
+            ?? _narrowed!;
+        narrowed[held.Entry.Uid] = ranges;
+    }
 
     private void RecordOpen(ObjectLease lease, int open = 1)
     {

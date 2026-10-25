@@ -135,6 +135,16 @@ before the object, and passes over an object whose filter lacks every value aske
 kilobytes long instead of the object's reads. A smaller object is read in the request its sheets
 would take, and keeps none.
 
+Such an object also keeps, for each column whose values repeat, where each value lives: the column's
+values, each with the ranges of rows of the blocks it appears in. A question that asks those columns for
+values reads these indexes in place of the sheets, passes over an object that lacks the values, and
+reads only the ranges of the others where the values live. That holds on any column, not only the key's:
+a filter on an endpoint, which only its service's rows hold, reads that service's rows. On thirty
+sources of 30 000 rows, each with endpoints whose names interleave with every other's, so that no zone
+map leaves rows out, a filter on one endpoint read 1.3 MB in 8 requests, where the same filter written
+as a prefix, which no index answers, read 14.4 MB in 131. A value that lives in more than half an
+object's blocks is read with the whole object.
+
 Row positions are the dataset's. A batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows object after object, in the order a scan delivers them. A key cursor over the
 clustering key merges the cursors of the objects, and its `CountAtKeyAsync` is the number of entries

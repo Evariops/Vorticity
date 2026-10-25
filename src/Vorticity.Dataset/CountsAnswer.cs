@@ -612,7 +612,7 @@ internal sealed class CountsAnswer
     }
 
     /// <summary>The bytes of each of <paramref name="literals"/> as a column of <paramref name="dtype"/> stores them, each once; null for one it cannot hold so.</summary>
-    private static List<byte[]>? ValuesOf(FilterLiteral[] literals, DType dtype)
+    internal static List<byte[]>? ValuesOf(FilterLiteral[] literals, DType dtype)
     {
         if (!KeyLayout.TryOf(dtype, out KeyLayout layout))
         {
