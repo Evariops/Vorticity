@@ -523,7 +523,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         _ => 0,
     };
 
-    private static int LiteralBytes(FilterLiteral literal) => literal.Kind switch
+    internal static int LiteralBytes(FilterLiteral literal) => literal.Kind switch
     {
         FilterLiteralKind.Bytes => 1 + TreePage.VarintBytes((ulong)literal.BytesValue.Length)
             + literal.BytesValue.Length,
@@ -532,7 +532,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         _ => 1 + sizeof(ulong),
     };
 
-    private static Span<byte> WriteLiteral(Span<byte> destination, FilterLiteral literal)
+    internal static Span<byte> WriteLiteral(Span<byte> destination, FilterLiteral literal)
     {
         destination[0] = (byte)literal.Kind;
         destination = destination[1..];
@@ -561,7 +561,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         _ => 0,
     };
 
-    private static FilterLiteral ReadLiteral(ReadOnlySpan<byte> value, ref int at)
+    internal static FilterLiteral ReadLiteral(ReadOnlySpan<byte> value, ref int at)
     {
         if (at >= value.Length)
         {

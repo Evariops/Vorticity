@@ -19,11 +19,14 @@ internal enum CountedValue : byte
     Others = 2,
 }
 
-/// <summary>A group of a column's counts: what it stands for, and its entries from the entry <paramref name="FirstEntry"/>, one over the whole object.</summary>
+/// <summary>
+/// A group of a column's counts: what it stands for, and its entries from the entry <paramref name="FirstEntry"/>, one over
+/// the whole object, or one a bucket its rows lie in for counts kept by bucket.
+/// </summary>
 /// <param name="Kind">A value, the nulls, or the values left out.</param>
 /// <param name="Value">The value's bytes as the column stores them, when <paramref name="Kind"/> is <see cref="CountedValue.Value"/>.</param>
 /// <param name="FirstEntry">Its first entry.</param>
-/// <param name="Entries">Its entries: one.</param>
+/// <param name="Entries">Its entries: one, or one a bucket (<see cref="ColumnCounts.Buckets"/>).</param>
 internal readonly record struct CountGroup(CountedValue Kind, byte[]? Value, int FirstEntry, int Entries);
 
 /// <summary>
@@ -46,6 +49,11 @@ internal readonly record struct CountGroup(CountedValue Kind, byte[]? Value, int
 /// its sum and its extremes as varints, a float's extremes as their eight bytes. A reader of one value can read the
 /// header and the chunk that holds it alone.
 /// </para>
+/// <para>
+/// Counts kept by bucket, a rollup's by clustering value, give each group an entry for each bucket its value has rows in,
+/// the buckets ascending, each entry its bucket's number before its words: a reader of one value finds all its buckets'
+/// entries in the chunk that holds it.
+/// </para>
 /// </remarks>
 internal sealed class ColumnCounts
 {
@@ -63,6 +71,9 @@ internal sealed class ColumnCounts
 
     /// <summary>The header's flag of counts whose sketches keep the registers of the distinct values of wide columns.</summary>
     private const byte DistinctFlag = 2;
+
+    /// <summary>The header's flag of counts kept by bucket (<see cref="Buckets"/>).</summary>
+    private const byte BucketsFlag = 4;
 
     /// <param name="measureFields">The top-level columns whose states each entry holds, in their order.</param>
     /// <param name="kinds">How each is summed.</param>
@@ -89,8 +100,17 @@ internal sealed class ColumnCounts
     /// </summary>
     internal int[] AttachedFields { get; init; } = [];
 
+    /// <summary>
+    /// The buckets the counts keep apart, a rollup's clustering values: 0 for an entry a group; past 0, a group holds an
+    /// entry for each bucket its value has rows in, <see cref="EntryBuckets"/> numbering each entry's.
+    /// </summary>
+    internal int Buckets { get; init; }
+
+    /// <summary>The bucket of each entry, ascending within a group, when <see cref="Buckets"/> is past 0; null otherwise.</summary>
+    internal int[]? EntryBuckets { get; init; }
+
     /// <summary>The bytes the counts hold in memory, about: their words and their groups.</summary>
-    internal long Bytes => (Words.Length * (long)sizeof(long)) + (Groups.Length * 64L);
+    internal long Bytes => (Words.Length * (long)sizeof(long)) + (Groups.Length * 64L) + ((EntryBuckets?.Length ?? 0) * (long)sizeof(int));
 
     /// <summary>The top-level columns whose states each entry holds.</summary>
     internal int[] MeasureFields { get; }
@@ -107,8 +127,8 @@ internal sealed class ColumnCounts
     /// <summary>The words of an entry: its rows, then each measure's states.</summary>
     internal int WordsPerEntry { get; }
 
-    /// <summary>The entries: a group's each.</summary>
-    internal int Entries => Groups.Length;
+    /// <summary>The entries: a group's each, or one a bucket of each group.</summary>
+    internal int Entries => Words.Length / WordsPerEntry;
 
     /// <summary>The words of entry <paramref name="entry"/>.</summary>
     internal ReadOnlySpan<long> WordsOf(int entry) => Words.AsSpan(entry * WordsPerEntry, WordsPerEntry);
@@ -133,7 +153,7 @@ internal sealed class ColumnCounts
 
         Output head = new Output(256);
         head.Byte(Version);
-        head.Byte((byte)((Sketched ? SketchesFlag : 0) | (AttachedFields.Length == 0 ? 0 : DistinctFlag)));
+        head.Byte((byte)((Sketched ? SketchesFlag : 0) | (AttachedFields.Length == 0 ? 0 : DistinctFlag) | (Buckets == 0 ? 0 : BucketsFlag)));
         head.Varint((ulong)MeasureFields.Length);
         for (int i = 0; i < MeasureFields.Length; i++)
         {
@@ -148,6 +168,12 @@ internal sealed class ColumnCounts
             {
                 head.Varint((ulong)field);
             }
+        }
+
+        if (Buckets > 0)
+        {
+            head.Varint((ulong)Buckets);
+            head.Varint((ulong)Entries);
         }
 
         head.Varint((ulong)Groups.Length);
@@ -197,6 +223,14 @@ internal sealed class ColumnCounts
             }
         }
 
+        int buckets = 0;
+        int entries = -1;
+        if ((bytes[1] & BucketsFlag) != 0)
+        {
+            buckets = Count(bytes, ref at);
+            entries = Count(bytes, ref at);
+        }
+
         int groups = Count(bytes, ref at);
         int chunks = Count(bytes, ref at);
         for (int chunk = 0; chunk < chunks; chunk++)
@@ -208,22 +242,39 @@ internal sealed class ColumnCounts
             SkipKey(bytes, ref at);
         }
 
-        ColumnCounts counts = new ColumnCounts(fields, kinds, new CountGroup[groups], new long[groups * StateWords.Count(kinds)])
+        int words = StateWords.Count(kinds);
+        entries = buckets == 0 ? groups : entries;
+        if (entries < groups || entries > bytes.Length)
+        {
+            throw new VortexFormatException($"A column's counts claim {entries} entries for {groups} groups in {bytes.Length} bytes.");
+        }
+
+        ColumnCounts counts = new ColumnCounts(fields, kinds, new CountGroup[groups], new long[entries * words])
         {
             Sketched = (bytes[1] & SketchesFlag) != 0,
             AttachedFields = attached,
+            Buckets = buckets,
+            EntryBuckets = buckets == 0 ? null : new int[entries],
         };
+
         // The groups in their order, which a reader of a value searches: the nulls, the values left out, then the values by
         // their bytes, each once.
+        int entry = 0;
         for (int group = 0; group < groups; group++)
         {
-            CountGroup read = counts.ReadGroup(bytes, ref at, group);
+            CountGroup read = counts.ReadGroup(bytes, ref at, entry);
             if (group > 0 && !Precedes(counts.Groups[group - 1], read))
             {
                 throw new VortexFormatException($"A column's counts hold their group {group} out of its order, at {at}.");
             }
 
             counts.Groups[group] = read;
+            entry += read.Entries;
+        }
+
+        if (entry != entries)
+        {
+            throw new VortexFormatException($"A column's counts hold {entry} entries where their header says {entries}.");
         }
 
         if (at != bytes.Length)
@@ -245,8 +296,24 @@ internal sealed class ColumnCounts
     private void WriteGroup(ref Output into, CountGroup group)
     {
         Key(ref into, group);
+        if (Buckets == 0)
+        {
+            WriteEntry(ref into, group.FirstEntry);
+            return;
+        }
+
+        into.Varint((ulong)group.Entries);
+        for (int entry = group.FirstEntry; entry < group.FirstEntry + group.Entries; entry++)
+        {
+            into.Varint((ulong)EntryBuckets![entry]);
+            WriteEntry(ref into, entry);
+        }
+    }
+
+    private void WriteEntry(ref Output into, int entry)
+    {
         int words = WordsPerEntry;
-        ReadOnlySpan<long> state = Words.AsSpan(group.FirstEntry * words, words);
+        ReadOnlySpan<long> state = Words.AsSpan(entry * words, words);
         long rows = state[0];
         into.Varint((ulong)rows);
         int at = 1;
@@ -290,9 +357,39 @@ internal sealed class ColumnCounts
         }
     }
 
-    private CountGroup ReadGroup(ReadOnlySpan<byte> bytes, ref int at, int entry)
+    private CountGroup ReadGroup(ReadOnlySpan<byte> bytes, ref int at, int first)
     {
         (CountedValue counted, byte[]? value) = ReadKey(bytes, ref at);
+        if (Buckets == 0)
+        {
+            ReadEntry(bytes, ref at, first);
+            return new CountGroup(counted, value, first, 1);
+        }
+
+        // An entry a bucket the value has rows in, the buckets ascending.
+        int entries = Count(bytes, ref at);
+        if (entries == 0 || entries > Entries - first)
+        {
+            throw new VortexFormatException($"A column's counts give a group {entries} entries where {Entries - first} are left, at {at}.");
+        }
+
+        for (int entry = first; entry < first + entries; entry++)
+        {
+            int bucket = Count(bytes, ref at);
+            if (bucket >= Buckets || (entry > first && bucket <= EntryBuckets![entry - 1]))
+            {
+                throw new VortexFormatException($"A column's counts hold an entry of bucket {bucket} out of its order, at {at}.");
+            }
+
+            EntryBuckets![entry] = bucket;
+            ReadEntry(bytes, ref at, entry);
+        }
+
+        return new CountGroup(counted, value, first, entries);
+    }
+
+    private void ReadEntry(ReadOnlySpan<byte> bytes, ref int at, int entry)
+    {
         int words = WordsPerEntry;
         Span<long> state = Words.AsSpan(entry * words, words);
         StateWords.Clear(state, Kinds);
@@ -342,8 +439,6 @@ internal sealed class ColumnCounts
 
             m += MeasureLayout.Words(floats);
         }
-
-        return new CountGroup(counted, value, entry, 1);
     }
 
     private static void Key(ref Output into, CountGroup group)
