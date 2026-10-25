@@ -259,6 +259,11 @@ column whose values questions look up one at a time, and no other: a column they
 is read, its blocks pruned by their zone maps, and a key of a variant column they filter on is declared
 shredded, below.
 
+The postings serve aggregations too. A filter that leaves one value out, `r.RequestId != id`, keeps an
+object's counts: the object answers from them, less the rows the postings find holding the value, and
+an object that holds none reads its counts and the postings alone (see
+[How an aggregation is answered](datasets.md#how-an-aggregation-is-answered)).
+
 An identifier may also be a key of a variant column, read as a string or an integer, written as a filter
 writes it:
 

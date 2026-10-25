@@ -42,6 +42,8 @@ version, so nothing is ever overwritten. A commit is a conditional create in the
 two writers need no lock. The one that loses the race applies its change again on top of the
 winner's version, up to `DatasetOptions.MaxAttempts` times (8 by default).
 
+### The key and the clustering
+
 `ClusteringKey` is the decision that matters most. Objects are ordered by the smallest key each
 holds, every object this handle writes carries a sorted-runs index on the key, and compaction keeps
 the levels above 0 free of overlap on it. That lets a scan skip whole objects, the same way ordered
@@ -81,6 +83,18 @@ The clustering is fixed when the dataset is created, every commit carries it, an
 follows it. A question bounded on the key's first column then reads whole objects but at its ends, an
 expiry by such a bound drops whole objects, and a long range can be asked a value at a time, as
 [Reading](#reading) shows.
+
+How to choose them, from the questions the application asks:
+
+| the questions mostly | lead the key with | cluster by |
+|---|---|---|
+| select one value of a column, a tenant, a service, a source | that column | `Column`, an object per value or several |
+| ask windows of time, last hour, last day | the instant | `Truncate` of the unit the windows and the expiry fall on |
+| ask a column's values within windows of time | the column, then the instant | `Column`, and a `BlockValue` of the time unit the questions group by |
+
+A filter on the key's first column reads the objects of its values alone; a group by a function of the
+key's second column answers from the blocks when the blocks follow that function. Any other column is
+still answered by its counts, its sheets and where its values live, at a cost the plan states.
 
 Which column to lead the key with is the application's choice, and the questions it asks tell. A handle
 keeps count: `RecommendClustering()` ranks the columns its questions' filters read by the bytes a
@@ -143,32 +157,7 @@ key cursor: seek 75 found True, key 75 at row 75000; 1000 entries
 walking down: last key 119 at row 119999; the key before it 118, its last entry at row 118999
 ```
 
-Pruning starts with the object summaries. The two objects whose days all fall before 100 are never
-opened, and their 13 blocks are pruned without a read. `MayMatch` answers from the summaries the
-handle already holds (the version's header and the pages it kept from earlier versions), so it reads
-nothing, and `false` is a proof.
-
-An object a job writes, of a mebibyte or more, also keeps a sheet of each column: its distinct
-values, its most frequent ones, and, when its values repeat, a filter of them. A question that asks a
-column for a value, `r.Route == "/checkout"` or a set of them, reads the sheets of such an object
-before the object, and passes over an object whose filter lacks every value asked: one request a few
-kilobytes long instead of the object's reads. A smaller object is read in the request its sheets
-would take, and keeps none.
-
-Such an object also keeps, for each column whose values repeat, where each value lives: the column's
-values, each with the ranges of rows of the blocks it appears in. A question that asks those columns for
-values reads these indexes in place of the sheets, passes over an object that lacks the values, and
-reads only the ranges of the others where the values live. That holds on any column, not only the key's:
-a filter on an endpoint, which only its service's rows hold, reads that service's rows. On thirty
-sources of 30 000 rows, each with endpoints whose names interleave with every other's, so that no zone
-map leaves rows out, a filter on one endpoint read 1.3 MB in 8 requests, where the same filter written
-as a prefix, which no index answers, read 14.4 MB in 131. A value that lives in more than half an
-object's blocks is read with the whole object.
-
-A value that is rare but scattered, which no index places, is read in two passes when the sheets say
-so: the filter's columns first, then the other columns only for the rows it kept, from the chunks that
-hold them. A code held by thirty rows of 100 000 scattered over the objects, under bodies of 400 bytes,
-read 4.8 MB in 36 requests that way, where one pass over every body read 30.3 MB in 198.
+### Positions, cursors and lanes
 
 Row positions are the dataset's. A batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows object after object, in the order a scan delivers them. A key cursor over the
@@ -191,12 +180,44 @@ column of the clustering key, or a function of it, a group by under a take strea
 delivers its rows in key order, one object after the other, and the take stops the read early. Without
 a take, the objects are read side by side. See [aggregates.md](aggregates.md).
 
-An object a job writes, of a mebibyte or more, is cut into slices of the key that its table of
-contents lists, and a question under a range of the key's first column reads only what the range
-reaches: the objects whose keys it may hold, and in each the slices and blocks whose keys it holds.
-Every aggregation reads its rows, as above. Three days of a request every five seconds, clustered by
-day, by service over the first two, then over the last quarter of an hour of the second (the
-`time-windows` sample):
+### How a question finds its rows
+
+Before it reads an object, a question asks what the object says of itself, cheapest first:
+
+| what the object keeps | what it spares | measured |
+|---|---|---|
+| summaries in its entry: each column's least, greatest and nulls | objects whose bounds refute the filter, never opened; `MayMatch` reads nothing | days 100 and on: two objects of three never opened, 13 blocks of 16 |
+| key slices, for an object a job writes of a mebibyte or more | a range of the key's first column reads the slices and blocks its keys hold | the last quarter of an hour of a day: one block decoded of three |
+| a sheet of each column: distinct values, frequent ones, a filter of them | an object that lacks every value a filter asks, for a few kilobytes | |
+| where each value lives: the ranges of rows of the blocks it appears in | of the others, the ranges of the values asked alone, on any column | one endpoint of thirty sources: 1.3 MB in 8 requests, against 14.4 MB in 131 |
+| nothing for a rare, scattered value | read in two passes: the filter's columns, then the other columns for the rows kept | thirty rows of 100 000: 4.8 MB in 36 requests, against 30.3 MB in 198 |
+
+Pruning starts with the object summaries. The two objects whose days all fall before 100 are never
+opened, and their 13 blocks are pruned without a read. `MayMatch` answers from the summaries the
+handle already holds (the version's header and the pages it kept from earlier versions), so it reads
+nothing, and `false` is a proof.
+
+An object a job writes, of a mebibyte or more, also keeps a sheet of each column: its distinct
+values, its most frequent ones, and, when its values repeat, a filter of them. A question that asks a
+column for a value, `r.Route == "/checkout"` or a set of them, reads the sheets of such an object
+before the object, and passes over an object whose filter lacks every value asked: one request a few
+kilobytes long instead of the object's reads. A smaller object is read in the request its sheets
+would take, and keeps none.
+
+Such an object also keeps, for each column whose values repeat, where each value lives. A question
+that asks those columns for values reads these indexes in place of the sheets, passes over an object
+that lacks the values, and reads only the ranges of the others where the values live. That holds on
+any column, not only the key's: a filter on an endpoint, which only its service's rows hold, reads that
+service's rows, where the same filter written as a prefix, which no index answers, reads every row. A
+value that lives in more than half an object's blocks is read with the whole object. A value that is
+rare but scattered, which no index places, is read in two passes when the sheets say so: the filter's
+columns first, then the other columns only for the rows it kept, from the chunks that hold them.
+
+An object a job writes is also cut into slices of the key that its table of contents lists, and a
+question under a range of the key's first column reads only what the range reaches: the objects whose
+keys it may hold, and in each the slices and blocks whose keys it holds. Three days of a request every
+five seconds, clustered by day, by service over the first two, then over the last quarter of an hour of
+the second (the `time-windows` sample):
 
 ```
 51840 requests over three days in 3 objects
@@ -218,14 +239,31 @@ var routes = dataset.Scan<LogRow>()
 `AsDouble()` reads floats as well as doubles, the floats from the field's value of the rows that hold
 one, and `ToInt64()` converts every kind of value.
 
-Some questions are answered from counts rather than rows. An object a job writes, of a mebibyte or
-more, keeps for each column whose values repeat its counts: the rows of each value, each number
-column's exact sum, least and greatest, and for a column of at most 1 000 values a quantile sketch of
-each number column. A question on one column and the numbers reads an object's counts in one request
-instead of its rows when its other keys are values the object holds constant and its filter asks that
-column for values or is true for every row of the object, as its summaries prove. Under a clustering by
-hour each object holds one hour, so a question by service and hour is such a question, and only the
-objects at the window's ends, which hold rows outside it, are read as rows:
+### How an aggregation is answered
+
+An aggregation answers each object by the cheapest path it can prove gives the rows' answer, to the
+bit, and reads the rows of the others. `ExplainAsync` says object by object which path it takes and
+what it costs (`ScanPlan.States`), and `ScanOptions.UseSynopses = false` reads every object's rows.
+
+| path | which objects | measured |
+|---|---|---|
+| the column's counts | a question on one column and the numbers, its other keys constant over the object, its filter asking that column for values or proven over every row | a count by service: a request an object, a few kilobytes |
+| the counts less one value | a filter that leaves one value of a declared identifier out, `r.RequestId != id` | no object holding it: 127 KB where the rows take 791 KB |
+| the counts less the deleted rows | an object a delete marked, under counts, sums, means or distinct values | 332 bytes where the rows take 540 KB |
+| the blocks' statistics | a question the counts do not answer, block by block, the blocks that hold one group | errors by service: 86.8 KB where the rows take 480.7 KB |
+| a learned partial | the question, or its family, asked before over the object | nothing read |
+| a rollup's totals | every object under a rollup, over a long range | 4 requests where the objects' counts take 30 |
+| the filter's pages | a filter evaluated on rows, asked before | 5.3 MB where the first ask read 23.2 MB |
+| the rows | any other object | |
+
+**Counts.** An object a job writes, of a mebibyte or more, keeps for each column whose values repeat
+its counts: the rows of each value, each number column's exact sum, least and greatest, and for a
+column of at most 1 000 values a quantile sketch of each number column. A question on one column and
+the numbers reads an object's counts in one request instead of its rows when its other keys are values
+the object holds constant and its filter asks that column for values or is true for every row of the
+object, as its summaries prove. Under a clustering by hour each object holds one hour, so a question by
+service and hour is such a question, and only the objects at the window's ends, which hold rows outside
+it, are read as rows. The objects still in their appends keep no counts and are read as rows.
 
 ```csharp
 var hourly = dataset.Scan<Request>()
@@ -234,58 +272,58 @@ var hourly = dataset.Scan<Request>()
     .Select(g => (g.Key.Service, g.Key.Item2, g.Count(), g.Sum(r => r.Bytes), g.Quantile(r => r.Bytes, 0.99)));
 ```
 
-It answers what the rows would, to the bit. The objects still in their appends keep no counts and are
-read as rows. `ScanOptions.UseSynopses = false` reads every object's rows, and `ExplainAsync` says
-object by object which it reads (`ScanPlan.States`).
-
 A filter that leaves one value of a declared identifier out, `r.RequestId != id`, keeps the counts: an
 object's counts answer, less those of the rows that hold the value, which the identifier's postings find
 without reading the object's other rows. An object that does not hold the value reads its counts and
 the postings alone. That holds for counts, sums, means and distinct values, when the identifier column
-holds no null; a minimum, a maximum or a quantile reads the rows.
+holds no null; a minimum, a maximum or a quantile reads the rows. Rows a delete marked are taken out the
+same way (see [Deleting and updating rows](#deleting-and-updating-rows)).
 
-An object whose counts do not answer may still be answered block by block. Such an object keeps, for
-each column, its statistics over the object's blocks, the runs of rows of one value of the key's first
-column: each block's values and their rows, and each number's count, sum and extremes. A block whose
-columns of the question hold one value each, its filter proven over its rows, gives its counts and
-measures; a block where one column varies gives the count of each of its values, under a question of
-counts alone. The other blocks are read as rows. Under a key that leads with the service, errors by
-service read the statistics of the service and the status, `r.Status >= 500` judged value by value:
-on four services of 150 000 rows, 86.8 KB where the rows took 480.7 KB. By the hour as well, a block
-answers when its instants fall in one hour, which takes blocks short in time: here each held some fifty
-minutes, and the question read 2.7 MB where the rows took 3.4 MB. With a `BlockValue` of the hour, its
-blocks end at each hour, and it read 438 KB where the rows took 3.4 MB.
-`ScanOptions.AlignWindow` widens the window to the bounds of the objects its ends fall in, so that
-they are answered from their counts too: the answer is then the exact answer of the window applied,
-which `ScanMetrics.Window` gives. The other synopses are designed in
-[22-on-the-fly-and-synopses.md](../design/22-on-the-fly-and-synopses.md).
+**Blocks.** An object whose counts do not answer may still be answered block by block. Such an object
+keeps, for each column, its statistics over the object's blocks, the runs of rows of one value of the
+key's first column: each block's values and their rows, and each number's count, sum and extremes. A
+block whose columns of the question hold one value each, its filter proven over its rows, gives its
+counts and measures; a block where one column varies gives the count of each of its values, under a
+question of counts alone. The other blocks are read as rows, those a delete marked a row of among them.
+Under a key that leads with the service, errors by service read the statistics of the service and the
+status, `r.Status >= 500` judged value by value. By the hour as well, a block answers when its instants
+fall in one hour, which takes blocks short in time: here each held some fifty minutes, and the question
+read 2.7 MB where the rows took 3.4 MB. With a `BlockValue` of the hour, its blocks end at each hour,
+and it read 438 KB where the rows took 3.4 MB. A window whose edges cut blocks reads those blocks as
+rows, and never more than the rows take. `ScanOptions.AlignWindow` widens the window to the bounds of
+the objects its ends fall in, so that they are answered from their counts too: the answer is then the
+exact answer of the window applied, which `ScanMetrics.Window` gives.
 
-An object read as rows leaves what it gave the question, so that the question asked again reads
-nothing of it. What it keeps is the question's family: the same keys and aggregates, each filter that
-asks a column for a value or a few made a key of its own. Counts by route where `r.Status == 404`
-learn the counts by route and status, and the same question under `r.Status == 500` answers from
-them. The handle keeps these partials, and so does the session's `SynopsisCache` when it has one, for
-the handles and processes after. A question whose aggregates a state answers whole learns them: counts,
-sums, means, extremes, quantiles and approximate distinct counts. A value of the key's first column is
-not made a key where an object holds it with others, since learning would read every value's rows.
-A window on the key's first column that moves, `r.At >= now - 15 minutes`, keeps the partials of the
-objects it holds whole, and reads the one its edge cuts. The handle keeps up the families its questions
-asked in the last hour: each object it appends learns their partials as it is written, which costs the
-append some 1.5 ms an object and family, so that a monitor asking the same question after each append
-reads none of the objects appended since it first asked.
+**Learned partials.** An object read as rows leaves what it gave the question, so that the question
+asked again reads nothing of it. What it keeps is the question's family: the same keys and aggregates,
+each filter that asks a column for a value or a few made a key of its own. Counts by route where
+`r.Status == 404` learn the counts by route and status, and the same question under `r.Status == 500`
+answers from them. The handle keeps these partials, and so does the session's `SynopsisCache` when it
+has one, for the handles and processes after; an object a compaction rewrites without removing rows
+sums the partials of the objects it replaces. A question whose aggregates a state answers whole learns
+them: counts, sums, means, extremes, quantiles and approximate distinct counts. A value of the key's
+first column is not made a key where an object holds it with others, since learning would read every
+value's rows. A window on the key's first column that moves, `r.At >= now - 15 minutes`, keeps the
+partials of the objects it holds whole, and reads the one its edge cuts. The handle keeps up the
+families its questions asked in the last hour: each object it appends learns their partials as it is
+written, which costs the append some 1.5 ms an object and family, so that a monitor asking the same
+question after each append reads none of the objects appended since it first asked.
 
-An aggregation whose filter is evaluated on an object's rows, a range no sheet or index answers, also
-notes where in the object the filter kept rows; asked again, from the handle or one opened later on the
-same `SynopsisCache`, it reads those parts of the object alone.
+**Rollups.** Over a long range, an object's counts still cost a request an object. `RollUpAsync` sums
+the counts of runs of about `DatasetOptions.RollupFanout` consecutive objects (64 by default) into
+rollups, then as many rollups into one of the rank above, with no row read, and `RunCompactionAsync`
+calls it once no job is due. A question whose every object under a rollup would answer from its counts
+reads the rollup instead. On thirty days of 2 000 routes, an object a day and rollups of four, a count
+of every route reads 4 requests and 261 698 bytes, where the objects' counts take 30 requests and
+1 930 456 bytes. A commit that adds or takes away an object takes away the rollups over it, which the
+next call sums again.
 
-Over a long range, an object's counts still cost a request an object. `RollUpAsync` sums the counts of
-runs of about `DatasetOptions.RollupFanout` consecutive objects (64 by default) into rollups, then as
-many rollups into one of the rank above, with no row read, and `RunCompactionAsync` calls it once no
-job is due. A question whose every object under a rollup would answer from its counts reads the
-rollup instead. On thirty days of 2 000 routes, an object a day and rollups of four, a count of every
-route reads 4 requests and 261 698 bytes, where the objects' counts take 30 requests and 1 930 456
-bytes. A commit that adds or takes away an object takes away the rollups over it, which the next call
-sums again.
+**Pages.** An aggregation whose filter is evaluated on an object's rows, a range no sheet or index
+answers, also notes where in the object the filter kept rows; asked again, from the handle or one
+opened later on the same `SynopsisCache`, it reads those parts of the object alone. The synopses are
+designed in [22-on-the-fly-and-synopses.md](../design/22-on-the-fly-and-synopses.md).
+
+### Long ranges, expiry and late rows
 
 A page that shows a long window can show its newest part first. `AskByValuesAsync` cuts a range of the
 key's first column where the clustering value changes, asks your question over each part, several
@@ -343,6 +381,8 @@ one in ten thousand up to an hour late, a row is rewritten 6.5 times on its way 
 none comes late (`vortex-queries --micro lifecycle`). A writer that can hold its rows until the late
 ones are in, and append them in key order, pays the second figure.
 
+### The local cache
+
 The directories a question reads to find an object's rows can stay on the local disk, so that the next
 question over the same objects asks the store nothing for them. Give the session a `SynopsisCache`, a
 directory and the bytes it may hold:
@@ -357,10 +397,11 @@ long warmed = await dataset.WarmAsync<Request>(r => r.At >= DateTimeOffset.UtcNo
 ```
 
 By default only what an object's table of contents declares enters the cache: the directories that
-find its rows, of its chunks, its pages, its indexes and its variants' paths, never its data. A read
-with no open of an object, such as a lookup of an identifier in a large one, needs nothing else before
-its data; a read that opens the object reads its last 64 KiB from the store first. An object never
-changes, so an entry never goes stale.
+find its rows, of its chunks, its pages, its indexes and its variants' paths, never its data, along with
+the partials and the filters' pages questions learned. A read with no open of an object, such as a
+lookup of an identifier in a large one, needs nothing else before its data; a read that opens the
+object reads its last 64 KiB from the store first. An object never changes, so an entry never goes
+stale.
 
 Given a quota of its own, the cache keeps the data a question reads of a plain dataset's objects too,
 their footers included, so that the same question asked again, by this process or the next, reads no

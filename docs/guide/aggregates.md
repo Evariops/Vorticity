@@ -454,6 +454,23 @@ sum or an aggregator of your own. A partial whose keys or measures are not the q
 be told apart, so the question on each node is yours to keep the same. To keep the version the same,
 open the dataset at the version the coordinator cut (`VortexDataset.OpenAsync(store, version)`).
 
+## Exact, estimated or progressive, and at what cost
+
+Every way of asking gives the exact answer in the end, or says it does not. Which one to take depends on
+what the exact answer costs, which `CostAsync()` says before anything is read:
+
+| you want | ask | what comes back |
+|---|---|---|
+| the exact answer | the question itself, `ToListAsync()`, `ToRecordsAsync()` | the rows' answer, to the bit; on a dataset each object answered by the cheapest path its plan proves (counts, blocks, partials, rows) |
+| the exact answer when it is cheap, estimates when it is not | `EstimateAsync(new EstimateOptions { ExactUnder = … })` | under the threshold, the exact answer at once; over it, the tiers below |
+| something soon, then better, then exact | `EstimateAsync()` | tiers from 0.1 %, 1 % and 10 % of the rows, each count, sum and mean with a 95 % margin, then the exact answer |
+| a long range of a dataset, newest first | `AskByValuesAsync` ([datasets.md](datasets.md)) | each part's exact answer, the newest first |
+| the answer from several nodes | `PartsAsync`, `PartialAsync`, `Merge` | the exact answer, the same bits as one node gives |
+
+The price is the time the exact answer's reads take cold on an object store, at the planner's paths:
+1.25 GB/s, a request worth 293 KB of transfer. It says nothing of a warm cache, which answers faster,
+and a single file's source cannot say.
+
 ## Estimates first, then the exact answer
 
 A question over a long window can be answered first from a share of its rows, each count and sum with

@@ -98,6 +98,16 @@ rows, or half of its vector's bound, a thousandth of its bytes and at least a ki
 rewritten alone in its level by a job whose `Trigger` is `Marks`. Those jobs come after the level
 limits and before the fragments, the most marked object first.
 
+An object a job writes, of a mebibyte or more, also keeps what aggregations answer from without its
+rows: the counts of each column whose values repeat and the statistics of its blocks, computed as the
+rows go out, with no pass of its own (see
+[How an aggregation is answered](datasets.md#how-an-aggregation-is-answered)). An output that holds
+all the rows of each of its inputs and nothing else, none of them marked, inherits the partials the
+questions learned of them, in the handle that compacts and in the session's `SynopsisCache`, so a
+question asked before the compaction reads nothing of it after. A moved object keeps its partials
+with its entry, and an output that holds part of an input, or rows of a marked one, learns again the
+first time a question reads its rows.
+
 When the application owes the erasure of deleted rows within a delay, it declares the delay when it
 creates the dataset:
 
@@ -133,8 +143,10 @@ verify since 12: holds True, 1 objects, 1 pages; cost: 11 requests (9 read, 2 he
 references promise, and reports every problem instead of throwing. `Problems` is a list of
 sentences, empty when `Holds` is true. Each object is hashed and compared with the hash its entry
 records. `Unhashed` counts the imported objects whose entry records no hash, and for those only the
-length is checked. `since` skips what an earlier, trusted version shares with this one: after one
-more append it read 28 187 bytes, where a full verification read 145 615.
+length is checked. An object a delete marked has its counts of the deleted rows recounted from the
+rows its vector names, and every rollup's object is checked to be in the store at its length. `since`
+skips what an earlier, trusted version shares with this one: after one more append it read 28 187
+bytes, where a full verification read 145 615.
 
 ## Vacuum
 
@@ -160,7 +172,9 @@ Today nothing goes, because every version is younger than the window. The window
 unless `DatasetOptions.RetentionWindow` set another when the dataset was created, and
 `RetainedVersions` keeps a number of versions whatever their age. Eight days later only the latest
 version is kept and 21 objects go: the ten data objects compaction replaced, and eleven of the
-twelve superseded commit objects. The twelfth still holds pages the latest version reads.
+twelve superseded commit objects. The twelfth still holds pages the latest version reads. A commit
+object that holds a delete's vector of positions, or its counts of the rows it marked, is kept the
+same way while a retained version names them, and the rollups a retained version names stay with it.
 
 `VacuumOptions.TimeProvider` is the clock vacuum measures ages against. That is how the sample
 jumps past the window, and how you can test your own retention. It must agree with the store's
@@ -192,7 +206,9 @@ stopped: 1 compactions, 2 objects, lag 0
 ```
 
 Each turn refreshes the handle (one round trip), plans, and runs the job that is due. When nothing
-is due it sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces the loop:
+is due, the first loop (`Loop` 0) sums the counts of the deepest level's new runs of objects into
+rollups (`RollUpAsync`, see [Rollups](datasets.md#how-an-aggregation-is-answered)), reading no row,
+then sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces the loop:
 after a job it waits until what the job wrote fits the rate, which leaves the store's bandwidth to
 the writers. The task ends with `OperationCanceledException` once the token is cancelled, or with
 the exception a job raised, which the host catches before starting the loop again.
