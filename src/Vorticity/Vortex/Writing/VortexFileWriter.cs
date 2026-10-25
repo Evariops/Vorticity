@@ -182,7 +182,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private ObjectContents Contents(
         SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
-        List<(int Field, IndexSegment Region)> blocks, List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres) =>
+        List<(int Field, IndexSegment Region)> blocks, List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres,
+        long[] columnBytes) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
@@ -192,6 +193,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Blocks = blocks,
             BlockStats = blockStats,
             Wheres = wheres,
+            ColumnBytes = columnBytes,
         };
 
     /// <summary>
@@ -2553,7 +2555,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // A sliced file's table of contents, now that every region it names is written.
             if (_slices is { } sliced)
             {
-                _contents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, blocks, stated, wheres);
+                _contents = Contents(
+                    sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, blocks, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0));
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

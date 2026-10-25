@@ -238,7 +238,26 @@ internal sealed class BlockAnswer
             }
         }
 
-        return true;
+        // And the statistics cost less than the rows they would spare, both by the formula.
+        (PathCosts.Cost blocks, PathCosts.Cost rows) = Costs(held);
+        return blocks.Weight < rows.Weight;
+    }
+
+    /// <summary>
+    /// What the object <paramref name="held"/> costs through its blocks' statistics and their indexes, its blocks all
+    /// answered, and through the rows of the question's columns (<see cref="PathCosts"/>).
+    /// </summary>
+    internal (PathCosts.Cost Blocks, PathCosts.Cost Rows) Costs(in PositionedObject held)
+    {
+        ObjectContents contents = held.Entry.Contents!;
+        int[] fields = Fields;
+        IndexSegment?[] regions = new IndexSegment?[2 * fields.Length];
+        for (int i = 0; i < fields.Length; i++)
+        {
+            (regions[2 * i], regions[(2 * i) + 1]) = (contents.WhereOf(fields[i]), contents.BlockStatsOf(fields[i]));
+        }
+
+        return (PathCosts.Regions(regions), PathCosts.Rows(held.Entry, fields));
     }
 
     private bool Keyed(int field)

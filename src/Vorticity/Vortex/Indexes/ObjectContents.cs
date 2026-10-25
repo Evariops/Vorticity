@@ -122,6 +122,12 @@ internal sealed class ObjectContents(
     /// <summary>The region of where column <paramref name="field"/>'s values live, or null when the object keeps none of it.</summary>
     internal IndexSegment? WhereOf(int field) => RegionOf(Wheres, field);
 
+    /// <summary>
+    /// The bytes of each top-level column's data in the object, by the column's place: what reading its rows costs, which a
+    /// planner weighs against the synopses that would answer instead. Empty when the object does not say.
+    /// </summary>
+    internal IReadOnlyList<long> ColumnBytes { get; init; } = [];
+
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
         foreach ((int column, IndexSegment region) in regions)
@@ -159,6 +165,7 @@ internal sealed class ObjectContents(
             Blocks = Blocks,
             BlockStats = BlockStats,
             Wheres = Wheres,
+            ColumnBytes = ColumnBytes,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -224,6 +231,9 @@ internal sealed class ObjectContents(
 
     // Where a column's values live: its field and its region, as a path directory's.
     private const int TagWhere = 19;
+
+    // The bytes of each top-level column's data, packed, by the column's place.
+    private const int TagColumnBytes = 20;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -435,6 +445,15 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
+            if (ColumnBytes.Count > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnBytes);
+                foreach (long bytes in ColumnBytes)
+                {
+                    writer.WriteVarint((ulong)bytes);
+                }
+            }
+
             if (DirectoryRegion is { } directoryRegion)
             {
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
@@ -485,6 +504,7 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> blocks = [];
             List<(int, IndexSegment)> blockStats = [];
             List<(int, IndexSegment)> wheres = [];
+            List<long> columnBytes = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -564,6 +584,14 @@ internal sealed class ObjectContents(
 
                         blockStats.Add(stated);
                         break;
+                    case (TagColumnBytes, ProtoWireType.LengthDelimited):
+                        ProtoReader packed = reader.ReadMessage();
+                        while (!packed.End)
+                        {
+                            columnBytes.Add(checked((long)packed.ReadVarint()));
+                        }
+
+                        break;
                     case (TagWhere, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } placed)
                         {
@@ -611,6 +639,7 @@ internal sealed class ObjectContents(
                     Blocks = blocks,
                     BlockStats = blockStats,
                     Wheres = wheres,
+                    ColumnBytes = columnBytes,
                 }
                 : null;
         }

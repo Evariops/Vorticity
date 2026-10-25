@@ -1064,6 +1064,9 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>Counts a chunk's data bytes toward its column, for `Auto`'s shares.</summary>
     internal void AddColumnBytes(int field, long bytes) => _columnBytes[field] += bytes;
 
+    /// <summary>The bytes of the data of each of the first <paramref name="fields"/> columns, the top-level ones, by their place.</summary>
+    internal long[] ColumnBytes(int fields) => _columnBytes[..fields];
+
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
     {

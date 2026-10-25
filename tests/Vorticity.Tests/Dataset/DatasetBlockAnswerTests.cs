@@ -93,6 +93,42 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
 
         Console.WriteLine($"BLOCK ANSWER {question}{(hourly ? ", blocks ending at each hour" : string.Empty)}: {blockBytes:N0} bytes through the blocks, {rowBytes:N0} through the rows");
         Assert.True(blockBytes * fewer < rowBytes, $"{question}: {blockBytes} bytes through the blocks, {rowBytes} through the rows");
+
+        // The plan says so object by object: the blocks' path, its requests and bytes, and the rows' it was weighed against.
+        await using VortexDataset explained = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
+        ScanPlan plan = await Ask(explained, question, synopses: true).ExplainAsync(Ct);
+        StatesStep[] blocks = [.. plan.States.Where(step => step.Read == "blocks")];
+        Console.WriteLine($"BLOCK PLAN {question}: {blocks.Length} objects, {blocks.FirstOrDefault()?.Detail}");
+        Assert.NotEmpty(blocks);
+        Assert.All(blocks, step => Assert.True(step.Count >= 1, step.Detail));
+    }
+
+    /// <summary>
+    /// Each object a job writes says the bytes of each of its columns in its table of contents, what reading its rows costs:
+    /// together no more than the object, and the wide columns more than the narrow.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectSaysEachColumnsBytes()
+    {
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.Store, new DatasetOptions(), Ct);
+        int objects = 0;
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            if (held.Entry.Contents is not { ColumnBytes.Count: > 0 } contents)
+            {
+                continue;
+            }
+
+            objects++;
+            Assert.Equal(Call.Schema.Count, contents.ColumnBytes.Count);
+            Assert.All(contents.ColumnBytes, bytes => Assert.True(bytes > 0));
+            Assert.True(contents.ColumnBytes.Sum() < held.Entry.Bytes, $"{contents.ColumnBytes.Sum()} bytes of columns in an object of {held.Entry.Bytes}");
+
+            // The instant and the size, of many values each, weigh more than the status, of four.
+            Assert.True(contents.ColumnBytes[1] > contents.ColumnBytes[4] && contents.ColumnBytes[6] > contents.ColumnBytes[4]);
+        }
+
+        Assert.True(objects >= 2, $"{objects} objects say their columns' bytes");
     }
 
     /// <summary>

@@ -187,7 +187,8 @@ A leaf entry describes one data object:
   blocks ([the block table](10-indexes.md#411-vorticityblocktablev1-an-objects-blocks)), each column's
   statistics over them ([the block statistics](10-indexes.md#412-vorticityblockstatsv1-a-column-over-the-blocks))
   and where each of its values lives ([the
-  index](10-indexes.md#413-vorticitycolumnwherev1-where-each-value-lives)), the
+  index](10-indexes.md#413-vorticitycolumnwherev1-where-each-value-lives)), the bytes of each of its columns,
+  which a planner weighs a path against, the
   region of the object's index directory, and where in it the entry of each locating index lies ([the
   directory](10-indexes.md#3-the-directory-and-the-runs)). With no open of the object, a reader of a slice
   reads its columns' directories, then its chunks; a question on a value reads the sheets of its columns

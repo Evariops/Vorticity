@@ -427,6 +427,16 @@ warm, where its rows take
 323 KB; a quantile by service reads 74.4 KB; questions drawn at random on tables drawn at random answer as
 their rows do *(measured)*.
 
+Past the counts, an object's blocks answer where its counts do not (section 5.3), when the formula says
+they cost less than its rows. Each object a job writes says in its table of contents the bytes of each
+of its columns, a few bytes an entry, which the writer counts as it writes them. The cost of a path is
+its bytes and its requests, each worth the 293 KB of transfer its round trip would have carried: through
+the blocks, the regions of the statistics and the indexes of the question's columns, those within
+256 KiB of each other in one request; through the rows, the bytes of the question's columns, an open and a
+request a mebibyte of chunk. The explanation of each object names the path taken, its requests and bytes,
+and those of the rows it was weighed against: errors by service read 114 bytes in a request from an
+object of 4 MiB, where its rows would take 33 KB in three *(measured, `DatasetBlockAnswerTests`)*.
+
 ### 8.1 What each shape costs
 
 At the design rate, S3 profile, cold, one node, on the reference table clustered by emitter

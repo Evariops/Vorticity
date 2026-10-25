@@ -1640,23 +1640,17 @@ internal sealed class DatasetScanBuilder
             if (answer is not null && AnsweredBy(answer, held) is null && BlocksAnswer(held))
             {
                 // An object whose blocks may answer reads its columns' statistics over them and their indexes, in as many
-                // requests as runs of them lie apart; the blocks they do not answer are read as rows.
-                Indexes.ObjectContents contents = held.Entry.Contents!;
-                long read = 0;
-                int regions = 0;
-                foreach (int column in BlockAnswer()!.Fields)
-                {
-                    foreach (Indexes.IndexSegment? region in (Indexes.IndexSegment?[])[contents.WhereOf(column), contents.BlockStatsOf(column)])
-                    {
-                        read += region?.Length ?? 0;
-                        regions += region is null ? 0 : 1;
-                    }
-                }
-
-                states.Add(new StatesStep(held.Entry.Key, "blocks", $"the statistics over the blocks of {BlockAnswer()!.Fields.Length} columns, and the rows of the blocks they do not answer", regions));
+                // requests as runs of them lie apart; the blocks they do not answer are read as rows. The formula's costs of
+                // both paths say why.
+                (PathCosts.Cost statistics, PathCosts.Cost read) = BlockAnswer()!.Costs(held);
+                states.Add(new StatesStep(
+                    held.Entry.Key,
+                    "blocks",
+                    $"the statistics over the blocks of {BlockAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests where the rows would take {read.Bytes} in {read.Requests}, and the rows of the blocks they do not answer",
+                    statistics.Requests));
                 keptRows += covered;
-                segments += regions;
-                bytes += read;
+                segments += statistics.Requests;
+                bytes += statistics.Bytes;
                 mayMatch = true;
                 continue;
             }

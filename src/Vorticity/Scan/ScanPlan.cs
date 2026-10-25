@@ -16,15 +16,21 @@ namespace Vorticity;
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
 
 /// <summary>
-/// What an aggregation reads of one object of a dataset whose counts answer it: the states of the counts, which stand for
-/// its rows.
+/// What an aggregation reads of one object of a dataset whose synopses answer it: the states of its counts, or of its blocks'
+/// statistics, which stand for its rows.
 /// </summary>
 /// <param name="Object">The object, by its key in the dataset.</param>
-/// <param name="Read">What it reads: <c>states</c>, or <c>rollup</c> for a rollup's totals, which stand for its objects'.</param>
-/// <param name="Detail">The column whose counts it reads, and their sketches when a quantile asks them.</param>
+/// <param name="Read">
+/// What it reads: <c>states</c>, <c>rollup</c> for a rollup's totals, which stand for its objects', or <c>blocks</c> for the
+/// statistics of its columns over its blocks, the rows of the blocks they do not answer read besides.
+/// </param>
+/// <param name="Detail">
+/// The column whose counts it reads, and their sketches when a quantile asks them; for blocks, the bytes and requests of
+/// their statistics and those of the rows they were weighed against.
+/// </param>
 /// <param name="Count">
 /// The regions the states read: the counts, and their sketches; a rollup's totals read in part, under the values a
-/// question asks, count their header and their chunks.
+/// question asks, count their header and their chunks; the requests of the blocks' statistics.
 /// </param>
 public sealed record StatesStep(string Object, string Read, string Detail, long Count);
 
