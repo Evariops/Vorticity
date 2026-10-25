@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,11 +14,12 @@ namespace Vorticity;
 /// <summary>
 /// An object's reader through a <see cref="SynopsisCache"/>: a region its table of contents declares, with a
 /// checksum, or a page or a segment of an index's run whose reader names it with its checksum, comes from the
-/// disk when the cache holds it, and goes into the cache when the store sends it; every other read, its data and
-/// its footer, goes to the store untouched.
+/// disk when the cache holds it, and goes into the cache when the store sends it. Every other read, its data and
+/// its footer, does so too when the cache keeps data segments (<see cref="SynopsisCache.DataCapacityBytes"/>), and
+/// goes to the store untouched otherwise.
 /// </summary>
 /// <remarks>
-/// Readers that miss the same region at once wait for one read of it. A request set whose regions another
+/// Readers that miss the same region or segment at once wait for one read of it. A request set whose regions another
 /// reader is fetching reads the rest beside that read, so the wait costs no round trip of its own.
 /// </remarks>
 internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
@@ -37,18 +39,25 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
 
     /// <summary>
     /// <paramref name="inner"/> through <paramref name="cache"/> for the regions <paramref name="contents"/>
-    /// declares; <paramref name="inner"/> itself without a cache, an object's uid, or a region with a checksum.
+    /// declares, and for the object's other segments when the cache keeps data; <paramref name="inner"/> itself
+    /// without a cache, an object's uid, or anything the cache would keep of it.
     /// </summary>
-    internal static ISegmentReader Over(ISegmentReader inner, SynopsisCache? cache, UInt128 uid, ObjectContents contents)
+    /// <param name="inner">The store's reader of a plain object: a sealed one's data never reaches the cache.</param>
+    /// <param name="cache">The session's cache, or null.</param>
+    /// <param name="uid">The object's uid.</param>
+    /// <param name="contents">The object's table of contents, or null when it has none.</param>
+    internal static ISegmentReader Over(ISegmentReader inner, SynopsisCache? cache, UInt128 uid, ObjectContents? contents)
     {
         if (cache is null || uid == UInt128.Zero)
         {
             return inner;
         }
 
-        IReadOnlyDictionary<(ulong, uint), IndexSegment> regions = contents.DeclaredRegions;
-        return regions.Count == 0 ? inner : new SynopsisCacheReader(inner, cache, uid, regions);
+        IReadOnlyDictionary<(ulong, uint), IndexSegment> regions = contents?.DeclaredRegions ?? NoRegions;
+        return regions.Count == 0 && !cache.KeepsData ? inner : new SynopsisCacheReader(inner, cache, uid, regions);
     }
+
+    private static readonly IReadOnlyDictionary<(ulong, uint), IndexSegment> NoRegions = new Dictionary<(ulong, uint), IndexSegment>();
 
     /// <summary>The store's reader under the cache's.</summary>
     internal ISegmentReader Inner => _inner;
@@ -59,14 +68,19 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
     public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) => _inner.GetLengthAsync(cancellationToken);
 
     public ValueTask<SegmentOwner> ReadRangeAsync(long offset, int length, int alignment, CancellationToken cancellationToken) =>
-        _inner.ReadRangeAsync(offset, length, alignment, cancellationToken);
+        _cache.KeepsData && length > 0 && offset >= 0 && alignment > 0
+            ? ReadDataAsync(
+                new IndexSegment((ulong)offset, (uint)length, (byte)BitOperations.Log2((uint)alignment)), default, alignment, cancellationToken)
+            : _inner.ReadRangeAsync(offset, length, alignment, cancellationToken);
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
     {
         if (!_regions.TryGetValue((spec.Offset, spec.Length), out IndexSegment region))
         {
-            return await _inner.ReadAsync(spec, cancellationToken).ConfigureAwait(false);
+            return _cache.KeepsData && spec.Length > 0
+                ? await ReadDataAsync(DataOf(spec), spec, alignment: 0, cancellationToken).ConfigureAwait(false)
+                : await _inner.ReadAsync(spec, cancellationToken).ConfigureAwait(false);
         }
 
         _cache.Asked?.Invoke(_uid, region);
@@ -101,6 +115,50 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
         }
     }
 
+    /// <summary>
+    /// A data segment from the disk when the cache holds it; otherwise read from the store, as the segment
+    /// <paramref name="spec"/> names, or as a range of <paramref name="alignment"/> when that is positive, once for the
+    /// readers that miss it at once, and handed to the cache.
+    /// </summary>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<SegmentOwner> ReadDataAsync(IndexSegment segment, SegmentSpec spec, int alignment, CancellationToken cancellationToken)
+    {
+        for (bool waited = false; ; waited = true)
+        {
+            if (_cache.TryReadData(_uid, segment, out SegmentOwner cached))
+            {
+                return cached;
+            }
+
+            if (!_cache.TryBeginReadData(_uid, segment, out TaskCompletionSource? mine, out Task? theirs) && !waited)
+            {
+#pragma warning disable VSTHRD003
+                await theirs!.WaitAsync(cancellationToken).ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+                continue;
+            }
+
+            try
+            {
+                SegmentOwner owner = alignment > 0
+                    ? await _inner.ReadRangeAsync((long)segment.Offset, (int)segment.Length, alignment, cancellationToken).ConfigureAwait(false)
+                    : await _inner.ReadAsync(spec, cancellationToken).ConfigureAwait(false);
+                _cache.AdmitData(_uid, segment, owner, owner.Buffer);
+                return owner;
+            }
+            finally
+            {
+                if (mine is not null)
+                {
+                    _cache.EndReadData(_uid, segment, mine);
+                }
+            }
+        }
+    }
+
+    /// <summary>A segment of the object's other than its regions, as the cache keeps it: its place, its length, its alignment, no checksum.</summary>
+    private static IndexSegment DataOf(SegmentSpec spec) => new IndexSegment(spec.Offset, spec.Length, spec.AlignmentExponent);
+
     public ValueTask ReadManyAsync(SegmentRequestSet requests, CancellationToken cancellationToken) =>
         ReadSetAsync(requests, default, cancellationToken);
 
@@ -114,17 +172,44 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
 
     /// <summary>
     /// The region slot <paramref name="slot"/> of a set reads, which the cache keeps: one the contents declare, or the
-    /// index region <paramref name="named"/> gives the slot, at its place, with a checksum.
+    /// index region <paramref name="named"/> gives the slot, at its place, with a checksum; or, when the cache keeps data,
+    /// the slot's segment as a data segment, which <paramref name="data"/> then says.
     /// </summary>
-    private bool TryKept(SegmentSpec spec, int slot, ReadOnlyMemory<IndexSegment> named, out IndexSegment region)
+    private bool TryKept(SegmentSpec spec, int slot, ReadOnlyMemory<IndexSegment> named, out IndexSegment region, out bool data)
     {
+        data = false;
         if (_regions.TryGetValue((spec.Offset, spec.Length), out region))
         {
             return true;
         }
 
         region = slot < named.Length ? named.Span[slot] : default;
-        return region.Checksum is not null && region.Offset == spec.Offset && region.Length == spec.Length;
+        if (region.Checksum is not null && region.Offset == spec.Offset && region.Length == spec.Length)
+        {
+            return true;
+        }
+
+        data = _cache.KeepsData && spec.Length > 0;
+        region = data ? DataOf(spec) : default;
+        return data;
+    }
+
+    private bool TryRead(IndexSegment region, bool data, out SegmentOwner owner) =>
+        data ? _cache.TryReadData(_uid, region, out owner) : _cache.TryRead(_uid, region, out owner);
+
+    private bool TryBeginRead(IndexSegment region, bool data, out TaskCompletionSource? mine, out Task? theirs) =>
+        data ? _cache.TryBeginReadData(_uid, region, out mine, out theirs) : _cache.TryBeginRead(_uid, region, out mine, out theirs);
+
+    private void EndRead(IndexSegment region, bool data, TaskCompletionSource mine)
+    {
+        if (data)
+        {
+            _cache.EndReadData(_uid, region, mine);
+        }
+        else
+        {
+            _cache.EndRead(_uid, region, mine);
+        }
     }
 
     /// <summary>Reads <paramref name="requests"/>, its slot <c>i</c> the index region <paramref name="named"/>[i] where there is one.</summary>
@@ -140,31 +225,35 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
 
         // The regions kept: those the disk holds fill their slots, those another reader is fetching are waited
         // for, and this reader fetches the rest.
-        List<(int Slot, IndexSegment Region, TaskCompletionSource Mine)> mine = [];
-        List<(int Slot, IndexSegment Region, Task Theirs)>? waited = null;
+        List<(int Slot, IndexSegment Region, bool Data, TaskCompletionSource Mine)> mine = [];
+        List<(int Slot, IndexSegment Region, bool Data, Task Theirs)>? waited = null;
         try
         {
             for (int slot = 0; slot < requests.Count; slot++)
             {
                 SegmentSpec spec = requests.GetSpec(slot);
-                if (requests.IsFilled(slot) || !TryKept(spec, slot, named, out IndexSegment region))
+                if (requests.IsFilled(slot) || !TryKept(spec, slot, named, out IndexSegment region, out bool data))
                 {
                     continue;
                 }
 
-                _cache.Asked?.Invoke(_uid, region);
-                if (_cache.TryRead(_uid, region, out SegmentOwner cached))
+                if (!data)
+                {
+                    _cache.Asked?.Invoke(_uid, region);
+                }
+
+                if (TryRead(region, data, out SegmentOwner cached))
                 {
                     requests.SetResult(slot, cached);
                     requests.NoteCacheHit();
                 }
-                else if (_cache.TryBeginRead(_uid, region, out TaskCompletionSource? reading, out Task? theirs))
+                else if (TryBeginRead(region, data, out TaskCompletionSource? reading, out Task? theirs))
                 {
-                    mine.Add((slot, region, reading!));
+                    mine.Add((slot, region, data, reading!));
                 }
                 else
                 {
-                    (waited ??= []).Add((slot, region, theirs!));
+                    (waited ??= []).Add((slot, region, data, theirs!));
                 }
             }
 
@@ -177,9 +266,16 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
                 await ReadBesideAsync(requests, waited, cancellationToken).ConfigureAwait(false);
             }
 
-            foreach ((int slot, IndexSegment region, _) in mine)
+            foreach ((int slot, IndexSegment region, bool data, _) in mine)
             {
-                _cache.Admit(_uid, region, requests.GetOwner(slot), requests.GetBuffer(slot));
+                if (data)
+                {
+                    _cache.AdmitData(_uid, region, requests.GetOwner(slot), requests.GetBuffer(slot));
+                }
+                else
+                {
+                    _cache.Admit(_uid, region, requests.GetOwner(slot), requests.GetBuffer(slot));
+                }
             }
         }
         catch
@@ -189,9 +285,9 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
         }
         finally
         {
-            foreach ((_, IndexSegment region, TaskCompletionSource reading) in mine)
+            foreach ((_, IndexSegment region, bool data, TaskCompletionSource reading) in mine)
             {
-                _cache.EndRead(_uid, region, reading);
+                EndRead(region, data, reading);
             }
         }
     }
@@ -202,7 +298,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
     /// the other read did not leave them there.
     /// </summary>
     private async ValueTask ReadBesideAsync(
-        SegmentRequestSet requests, List<(int Slot, IndexSegment Region, Task Theirs)> waited, CancellationToken cancellationToken)
+        SegmentRequestSet requests, List<(int Slot, IndexSegment Region, bool Data, Task Theirs)> waited, CancellationToken cancellationToken)
     {
         HashSet<int> theirs = [];
         Task[] others = new Task[waited.Count];
@@ -242,9 +338,9 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
 
         using SegmentRequestSet late = new SegmentRequestSet();
         List<(int Slot, int Late)> missed = [];
-        foreach ((int slot, IndexSegment region, _) in waited)
+        foreach ((int slot, IndexSegment region, bool data, _) in waited)
         {
-            if (_cache.TryRead(_uid, region, out SegmentOwner cached))
+            if (TryRead(region, data, out SegmentOwner cached))
             {
                 requests.SetResult(slot, cached);
                 requests.NoteCacheHit();

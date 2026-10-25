@@ -2126,9 +2126,13 @@ Vorticity: static class Vorticity.SymExtensions.<G>$EAA1A4811C4615E6168DDA7467CF
 Vorticity:     method void <Extension>$(Sym<Nullable<long>>)
 Vorticity: sealed class Vorticity.SynopsisCache : IDisposable
 Vorticity:     ctor SynopsisCache(string, long)
+Vorticity:     ctor SynopsisCache(string, long, long)
 Vorticity:     method SynopsisCache OpenShared(string, long)
+Vorticity:     method SynopsisCache OpenShared(string, long, long)
 Vorticity:     method void Dispose()
 Vorticity:     property long CapacityBytes { get; }
+Vorticity:     property long DataCapacityBytes { get; }
+Vorticity:     property long DataHeldBytes { get; }
 Vorticity:     property long HeldBytes { get; }
 Vorticity:     property string Directory { get; }
 Vorticity: static class Vorticity.TextColumnBuilderExtensions

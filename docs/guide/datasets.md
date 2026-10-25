@@ -285,11 +285,24 @@ await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new Dat
 long warmed = await dataset.WarmAsync<Request>(r => r.At >= DateTimeOffset.UtcNow.AddDays(-30));
 ```
 
-Only what an object's table of contents declares enters the cache: the directories that find its
-rows, of its chunks, its pages, its indexes and its variants' paths, never its data. A read with no
-open of an object, such as a lookup of an identifier in a large one, needs nothing else before its
-data; a read that opens the object reads its last 64 KiB from the store first. An object never
+By default only what an object's table of contents declares enters the cache: the directories that
+find its rows, of its chunks, its pages, its indexes and its variants' paths, never its data. A read
+with no open of an object, such as a lookup of an identifier in a large one, needs nothing else before
+its data; a read that opens the object reads its last 64 KiB from the store first. An object never
 changes, so an entry never goes stale.
+
+Given a quota of its own, the cache keeps the data a question reads of a plain dataset's objects too,
+their footers included, so that the same question asked again, by this process or the next, reads no
+data object from the store:
+
+```csharp
+options.SynopsisCache = new SynopsisCache("/var/cache/vorticity", capacityBytes: 20L << 30, dataCapacityBytes: 200L << 30);
+```
+
+The data keeps within its quota, the directories within theirs, so a sweep of a long window through
+the data never pushes the directories out. Each data segment's file holds an XXH3-64 of its bytes,
+which every read from the disk checks. An encrypted dataset's data never enters the cache, and a data
+segment whose write would hold up the question, past the bytes waiting for their writes, is not kept.
 Each region is checked against its checksum whenever it is read from the disk, and one that fails is
 read again from the store. One process owns a directory at a time, and the entries outlive it: the
 next session that opens the directory finds them. A second cache on the same directory, in the same
