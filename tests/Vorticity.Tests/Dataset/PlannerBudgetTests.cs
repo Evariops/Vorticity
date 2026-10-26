@@ -38,7 +38,9 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
     /// the questions whose filter is evaluated on rows raised on 2026-10-25 by some 0.5 KB, each in a process of its own:
     /// the filter's key, its canonical text hashed, and the lookup of its pages (PredicatePages). Those of the two
     /// questions of measures set again on 2026-10-26 at 2 % above their measure, 72 bytes more an ask: the opens and the
-    /// partials a scan begins ahead of the objects it reads next.
+    /// partials a scan begins ahead of the objects it reads next. The quantiles by service lowered the same day to 2 % above
+    /// 338,928 bytes, the larger of this machine's figure and CI's Linux runner's, from 1,036,385: a quantile read in place
+    /// from its sketch.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
@@ -49,7 +51,7 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
         ["count by hour, one service"] = new(6, 41647, 0, 0, 64554),
         ["count by service, an aligned window"] = new(2, 762, 0, 0, 37248),
         ["measures by service, an unaligned window"] = new(5, 402495, 2, 270920, 78360),
-        ["quantiles by service"] = new(6, 74337, 0, 0, 1036385),
+        ["quantiles by service"] = new(6, 74337, 0, 0, 345707),
         ["distinct services by hour"] = new(6, 41647, 0, 0, 53513),
         ["count by route and day"] = new(6, 93472, 0, 0, 56475),
     };
