@@ -49,6 +49,29 @@ internal static class SheetPruning
         entry.Bytes >= options.SheetObjectBytes && entry.Contents is { Sheets.Count: > 0 } && schema.Holds(entry);
 
     /// <summary>
+    /// What a scan reads of the object <paramref name="entry"/> names before it, under a filter that asks
+    /// <paramref name="columns"/> for values: where their values live when each keeps that index, else their sheets; nothing
+    /// for an object whose sheets it does not read (<see cref="Reads"/>).
+    /// </summary>
+    internal static PathCosts.Cost Cost(ObjectEntry entry, DatasetOptions options, DatasetSchema schema, List<int> columns)
+    {
+        if (!Reads(entry, options, schema) || columns.Count == 0)
+        {
+            return default;
+        }
+
+        ObjectContents contents = entry.Contents!;
+        bool places = Places(entry, columns);
+        IndexSegment?[] regions = new IndexSegment?[columns.Count];
+        for (int i = 0; i < regions.Length; i++)
+        {
+            regions[i] = places ? contents.WhereOf(columns[i]) : contents.SheetOf(columns[i]);
+        }
+
+        return PathCosts.Regions(regions);
+    }
+
+    /// <summary>
     /// Whether a row <paramref name="filter"/> selects may lie in an object whose sheets <paramref name="sheetOf"/> gives
     /// by column: false only when they prove none can.
     /// </summary>
@@ -135,7 +158,7 @@ internal static class SheetPruning
     }
 
     /// <summary>Whether the object <paramref name="entry"/> names keeps where the values of every column of <paramref name="columns"/> live.</summary>
-    private static bool Places(ObjectEntry entry, List<int> columns)
+    internal static bool Places(ObjectEntry entry, List<int> columns)
     {
         if (entry.Contents is not { Wheres.Count: > 0 } contents || columns.Count == 0)
         {

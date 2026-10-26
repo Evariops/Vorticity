@@ -874,6 +874,9 @@ internal sealed class DatasetScanBuilder
         CountsAnswer? answer = Answer() is { } asked && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false) ? asked : null;
         int[] fields = FieldsRead();
         SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
+        List<int>? sheetColumns = _summaries && _filter is { } filter && SheetPruning.Asks(filter, _version.Schema.DType)
+            ? SheetPruning.Columns(filter, _version.Schema.DType)
+            : null;
         long requests = 0;
         long bytes = 0;
         await foreach (PositionedObject held in _version.WalkAsync(Pruner(), _from, _to, null, cancellationToken).ConfigureAwait(false))
@@ -903,6 +906,14 @@ internal sealed class DatasetScanBuilder
             else
             {
                 cost = PathCosts.Rows(held.Entry, fields);
+            }
+
+            // An object its counts do not answer is passed through its sheets first, or where the asked values live, when
+            // the filter asks a column for values.
+            if (answer is null || AnsweredBy(answer, held) is null)
+            {
+                PathCosts.Cost sheets = sheetColumns is { } columns ? SheetPruning.Cost(held.Entry, _dataset.Options, _version.Schema, columns) : default;
+                cost = new PathCosts.Cost(cost.Requests + sheets.Requests, cost.Bytes + sheets.Bytes);
             }
 
             requests += cost.Requests;
