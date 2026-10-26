@@ -20,7 +20,7 @@ lives](#2-where-an-index-lives), and the rest follows.
 |---|---|
 | skipping index | a conservative summary per region, "no row here can match", which clears bits of a block mask |
 | locating index | a value-keyed structure, "the rows or blocks where this value occurs", which may answer a predicate outright |
-| exactness | `Exact` means the rows it names are exactly the matching ones. `Superset` means what it clears is proven and what it keeps is "maybe" |
+| exactness | *Exact* means the rows it names are exactly the matching ones. *Superset* means what it clears is proven and what it keeps is "maybe" |
 | granularity | a row, a block (the zone length, 8 192 rows by default, counted from row 0), a node of 16 blocks, or the file |
 | run | an immutable payload over a contiguous range of blocks. An index is a sequence of runs |
 
@@ -196,7 +196,7 @@ This is the same structure over every byte trigram of every value of a text or b
 `StartsWith`, `Contains` and `LIKE` require the trigrams of each literal run of three bytes or more
 between their wildcards, and one absent trigram prunes the block. An option folds ASCII case on both
 sides. A folded index still answers a case-sensitive predicate, since a value containing `Foo`
-contains `foo` once folded. It is a `Superset` index, so the predicate is always evaluated on the
+contains `foo` once folded. It is a superset index, so the predicate is always evaluated on the
 survivors.
 
 ### 4.3 `vorticity.dict.probe.v1`: the dictionary is already an index

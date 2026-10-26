@@ -187,7 +187,7 @@ The interface is the seam every store implements, the ones this package ships an
 caller writes. It changes in five places, each for a request saved, a copy avoided or a correctness
 gap closed:
 
-| change | today | revised | what it buys |
+| change | before | revised | what it buys |
 |---|---|---|---|
 | a read fills the caller's buffer | `GetRangeAsync` returns bytes the store owns, and the dataset's object source copies each segment out of them into an aligned block (`ObjectSegmentSource.cs`, `Aligned`) | `ReadAsync(key, offset, destination, ifToken)` reads into memory the caller gives and returns the bytes read, the object's length and its token | the body lands in the block the scan decodes from, and the per-segment copy disappears |
 | the end of an object, without its length | the open asks the length first (`GetLengthAsync`, a head), then reads the tail (`VortexFile.cs`, the open path) | `ReadTailAsync(key, destination)` reads the last bytes and returns the object's length with them | one request instead of two on a store that reads suffixes. Another store answers with a head and a read, as today |
@@ -298,11 +298,11 @@ adapter, would be lost. And each fix the runtime ships for its client would have
 again here. The platform's client also makes the store testable without a network: a test gives it a
 message handler that answers with delays, resets, throttling and refusals.
 
-The allocations that matter are this library's own. The dataset's object source allocates on every
-batch today: a list of slots, an array of tasks and a task per read, an array of ranges and a sorting
-delegate (`ObjectSegmentSource.cs`, `ReadManyAsync`). They go, replaced by pooled arrays and value
-tasks, so that what a scan over a store allocates per batch is the platform's constant per request and
-nothing else.
+The allocations that matter are this library's own. The dataset's object source allocated on every
+batch: a list of slots, an array of tasks and a task per read, an array of ranges and a sorting
+delegate (`ObjectSegmentSource.cs`, `ReadManyAsync`, before the revision). They went, replaced by
+pooled arrays and value tasks (`ObjectStoreSource.cs`), so that what a scan over a store allocates per
+batch is the platform's constant per request and nothing else.
 
 ### 6.2 How it is configured
 
