@@ -128,7 +128,7 @@ public class ColumnsBuilder
     internal static ColumnBuilder<T> Checked<T>(ColumnStore column, string what)
     {
         ClrShape shape = ClrShape.For<T>.Value;
-        ClrFit.Require<T>(column.Type, what, column.Extensions);
+        ClrFit.Require<T>(column.Type, what, column.Extensions, written: true);
         RequireNullability(shape, column.Type, what);
         RequireLeaf(shape, column.Leaf, what);
         column.Checked = typeof(T);

@@ -143,10 +143,13 @@ internal sealed class ClrShape
 /// <summary>Whether a .NET type fits a column, by the mapping table of the public surface.</summary>
 internal static class ClrFit
 {
-    /// <summary>Throws <see cref="VortexSchemaException"/> when <typeparamref name="T"/> cannot read or write <paramref name="column"/>.</summary>
-    internal static void Require<T>(VortexType column, string what, VortexExtensionRegistry? extensions)
+    /// <summary>
+    /// Throws <see cref="VortexSchemaException"/> when <typeparamref name="T"/> cannot read <paramref name="column"/>, or,
+    /// <paramref name="written"/>, write it.
+    /// </summary>
+    internal static void Require<T>(VortexType column, string what, VortexExtensionRegistry? extensions, bool written = false)
     {
-        if (!Fits(ClrShape.For<T>.Value, column, extensions, out string? reason))
+        if (!Fits(ClrShape.For<T>.Value, column, extensions, out string? reason, written))
         {
             throw new VortexSchemaException($"{what} is a column of {column}, which {Name(typeof(T))} does not map to: {reason}");
         }
@@ -217,7 +220,11 @@ internal static class ClrFit
         return (tick < 0 ? name : name[..tick]) + "<" + string.Join(", ", names) + ">";
     }
 
-    internal static bool Fits(ClrShape shape, VortexType column, VortexExtensionRegistry? extensions, out string? reason)
+    /// <summary>
+    /// Whether <paramref name="shape"/> reads <paramref name="column"/>, or, <paramref name="written"/>, writes it: the same
+    /// but for a zoned timestamp, whose instant a write stores whatever its zone, where a read needs the zone for its offset.
+    /// </summary>
+    internal static bool Fits(ClrShape shape, VortexType column, VortexExtensionRegistry? extensions, out string? reason, bool written = false)
     {
         reason = null;
         if (extensions is not null && column.Kind == VortexTypeKind.Extension && extensions.TryGet(column.ExtensionId!, out ExtensionRegistration registration)
@@ -278,8 +285,11 @@ internal static class ClrFit
                 return Expect(target.ExtensionId == ExtensionIds.Timestamp && (target.TimeZone is null || TimeZones.IsUtc(target.TimeZone)),
                     "a DateTime reads a naive or UTC vortex.timestamp column; read a zoned one as DateTimeOffset.", out reason);
             case ClrKind.DateTimeOffset:
-                return Expect(target.ExtensionId == ExtensionIds.Timestamp && target.TimeZone is { } zone && TimeZones.TryResolve(zone, out _),
-                    "a DateTimeOffset reads a vortex.timestamp column whose zone this host resolves; read another as long.", out reason);
+                return written
+                    ? Expect(target.ExtensionId == ExtensionIds.Timestamp && target.TimeZone is not null,
+                        "a DateTimeOffset writes a zoned vortex.timestamp column; write a naive or UTC one as DateTime.", out reason)
+                    : Expect(target.ExtensionId == ExtensionIds.Timestamp && target.TimeZone is { } zone && TimeZones.TryResolve(zone, out _),
+                        "a DateTimeOffset reads a vortex.timestamp column whose zone this host resolves; read another as long.", out reason);
             case ClrKind.Guid:
                 return Expect(target.ExtensionId == ExtensionIds.Uuid, "a Guid reads a vortex.uuid column.", out reason);
             case ClrKind.TimeSpan:
@@ -302,7 +312,7 @@ internal static class ClrFit
                     return false;
                 }
 
-                return Fits(shape.Element!, target.ElementType!, extensions, out reason);
+                return Fits(shape.Element!, target.ElementType!, extensions, out reason, written);
             default:
                 reason = "the type has no mapping to a dtype.";
                 return false;
