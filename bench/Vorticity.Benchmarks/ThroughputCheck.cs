@@ -2070,8 +2070,6 @@ internal static class ThroughputCheck
         _ => RustReader.Require(RustReader.ScanCanonical(path), "scan"),
     };
 
-    private static Task<long> ScanAll(string path) => Scenarios.ScanAll(path);
-
     /// <summary>
     /// Batches the scan emits, reported beside the timing because it is what explains it.
     /// </summary>

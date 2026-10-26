@@ -22,7 +22,6 @@ namespace Vorticity.Tests.Dataset;
 
 public sealed partial class TimeSliceTests
 {
-    private const long Second = 1_000_000;
 
     private static readonly long Noon = new DateTimeOffset(2026, 10, 18, 12, 0, 0, TimeSpan.Zero).ToUnixTimeMilliseconds() * 1000;
 

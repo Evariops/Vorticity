@@ -14,16 +14,6 @@ internal static class DecimalDigits
         return Int256.CompareMagnitudes(m0, m1, m2, m3, Powers[at], Powers[at + 1], Powers[at + 2], Powers[at + 3]) < 0;
     }
 
-    /// <summary>10^<paramref name="exponent"/>'s limbs, least significant first.</summary>
-    internal static void Power(int exponent, out ulong l0, out ulong l1, out ulong l2, out ulong l3)
-    {
-        int at = exponent * 4;
-        l0 = Powers[at];
-        l1 = Powers[at + 1];
-        l2 = Powers[at + 2];
-        l3 = Powers[at + 3];
-    }
-
     private static ulong[] Build()
     {
         ulong[] powers = new ulong[77 * 4];

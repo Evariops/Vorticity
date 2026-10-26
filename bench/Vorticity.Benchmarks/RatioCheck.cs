@@ -2091,13 +2091,6 @@ internal static class RatioCheck
     private static Task<long> FilteredScan(string path, long low, long width) =>
         Scenarios.FilteredScan(path, low, width);
 
-    /// <summary>Takes the same strided rows the Rust side is given.</summary>
-    /// <param name="path">The file.</param>
-    /// <param name="count">How many rows.</param>
-    /// <param name="stride">The gap between them.</param>
-    private static Task<long> ScatteredTake(string path, long count, long stride) =>
-        Scenarios.ScatteredTake(path, count, stride);
-
     private static async Task<long> FirstBatch(string path)
     {
         await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
@@ -2109,18 +2102,6 @@ internal static class RatioCheck
 
         return 0;
     }
-
-    /// <summary>
-    /// Reads a file and writes it back out, which is the write axis -- the one the benchmark design
-    /// never gave a timing reference.
-    /// </summary>
-    /// <remarks>
-    /// The read is on both sides of the ratio and is therefore common-mode, but it is not small:
-    /// subtract the `full scan` axis from both before reading the quotient as a statement about
-    /// writers. The sink discards, on both sides, because a write benchmark that measures the
-    /// filesystem measures the filesystem.
-    /// </remarks>
-    private static Task<long> ReadAndWrite(string path) => Scenarios.ReadAndWrite(path);
 
     private static async Task<long> FooterOnly(string path)
     {

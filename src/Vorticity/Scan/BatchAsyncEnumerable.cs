@@ -586,11 +586,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <exception cref="InvalidOperationException">There is no current batch.</exception>
     public RecordBatch Current => _held ? _current! : ScanThrow.NoCurrentBatch<RecordBatch>();
 
-    /// <summary>The request the current batch was produced for.</summary>
-    /// <remarks>Exposed for diagnostics and for the scan's own tests; it changes with every batch.</remarks>
-    public ScanRequest CurrentRequest =>
-        new ScanRequest(_currentLane?.Rows ?? RowRange.Empty, _mask, (int)Math.Min(_cursor.Plan.MaxRows, int.MaxValue));
-
     /// <summary>Produces the next batch.</summary>
     /// <returns><see langword="true"/> when <see cref="Current"/> holds a new batch.</returns>
     /// <exception cref="ObjectDisposedException">The enumerator has been disposed.</exception>

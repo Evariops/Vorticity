@@ -86,18 +86,6 @@ internal sealed class LearnedFamily
     /// <summary>The keys the family adds to the question's.</summary>
     internal int Added { get; }
 
-    /// <summary>The top-level columns the family adds as keys, by their places in <paramref name="schema"/>.</summary>
-    internal int[] AddedFields(VortexSchema schema)
-    {
-        int[] fields = new int[Added];
-        for (int i = 0; i < fields.Length; i++)
-        {
-            fields[i] = schema.IndexOfName(Keys[Keys.Length - Added + i].Path);
-        }
-
-        return fields;
-    }
-
     /// <summary>
     /// The family of <paramref name="plan"/> under <paramref name="filter"/> over <paramref name="source"/>'s columns; null for a
     /// plan that takes no parts.

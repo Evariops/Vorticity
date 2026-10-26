@@ -309,33 +309,6 @@ internal abstract class AggregateSlot
     }
 }
 
-/// <summary>The bytes of the runtime's collections at their capacity: a bucket and an entry an item, the entry laid out field for field as the runtime's.</summary>
-internal static class Footprints
-{
-    /// <summary>A <see cref="System.Collections.Generic.HashSet{T}"/> of <paramref name="capacity"/>.</summary>
-    internal static long Set<T>(int capacity) => (long)capacity * (sizeof(int) + Unsafe.SizeOf<SetEntry<T>>());
-
-    /// <summary>A <see cref="System.Collections.Generic.Dictionary{TKey, TValue}"/> of <paramref name="capacity"/>.</summary>
-    internal static long Map<TKey, TValue>(int capacity) => (long)capacity * (sizeof(int) + Unsafe.SizeOf<MapEntry<TKey, TValue>>());
-
-#pragma warning disable CS0169, IDE0051 // Laid out to be measured, never read.
-    private struct SetEntry<T>
-    {
-        private int _hashCode;
-        private int _next;
-        private T _value;
-    }
-
-    private struct MapEntry<TKey, TValue>
-    {
-        private uint _hashCode;
-        private int _next;
-        private TKey _key;
-        private TValue _value;
-    }
-#pragma warning restore CS0169, IDE0051
-}
-
 /// <summary>An aggregate whose answer per group is a <typeparamref name="TResult"/>.</summary>
 internal abstract class AggregateSlot<TResult> : AggregateSlot
 {

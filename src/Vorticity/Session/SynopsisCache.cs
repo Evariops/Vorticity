@@ -141,7 +141,6 @@ public sealed class SynopsisCache : IDisposable
     private long _peerHits;
     private long _misses;
     private long _corrupt;
-    private long _evictions;
     private long _refused;
     private long _failedWrites;
     private int _disposed;
@@ -310,9 +309,6 @@ public sealed class SynopsisCache : IDisposable
 
     /// <summary>Regions whose file did not hold their checksum, dropped.</summary>
     internal long Corrupt => Count(ref _corrupt);
-
-    /// <summary>Entries dropped past the capacity.</summary>
-    internal long Evictions => Count(ref _evictions);
 
     /// <summary>Regions larger than the capacity, never kept.</summary>
     internal long Refused => Count(ref _refused);
@@ -1852,7 +1848,6 @@ public sealed class SynopsisCache : IDisposable
         entry.Tier.Held -= entry.Bytes;
         VortexTelemetry.SynopsisHolds(-entry.Bytes);
         evicted.Add(entry);
-        Interlocked.Increment(ref _evictions);
         VortexTelemetry.SynopsisEvicted();
     }
 

@@ -19,8 +19,6 @@ internal static class Churn
 {
     private const int KindCount = 3;
 
-    private static readonly string[] Kinds = ["append", "update", "delete"];
-
     /// <summary>A label per residue, so that writing a row allocates no string.</summary>
     private static readonly string[] Labels = [.. Enumerable.Range(0, 64).Select(i => "label-" + i.ToString(CultureInfo.InvariantCulture))];
 

@@ -386,22 +386,6 @@ internal sealed class SliceReader : IDisposable
     /// </summary>
     internal ValueTask LoadDirectoryAsync(int field, CancellationToken cancellationToken) => LoadAsync([field], [], cancellationToken);
 
-    /// <summary>
-    /// What column <paramref name="field"/> weighs in the file: the bytes of its chunks, as its chunk directory lists them, read
-    /// whole the first time it is asked for, every page of a paged one.
-    /// </summary>
-    internal async ValueTask<long> ColumnBytesAsync(int field, CancellationToken cancellationToken)
-    {
-        await LoadAsync([field], [new TimeSlice(0, 1, 0, _rows)], cancellationToken).ConfigureAwait(false);
-        long bytes = 0;
-        foreach (ChunkSpan chunk in Overlapping(field, 0, _rows))
-        {
-            bytes += chunk.Length;
-        }
-
-        return bytes;
-    }
-
     private int[] AllColumns()
     {
         int[] all = new int[_regions.Count];

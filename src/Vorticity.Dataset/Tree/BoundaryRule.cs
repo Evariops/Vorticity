@@ -133,9 +133,6 @@ internal sealed class FillBoundaryRule : IBoundaryRule
         _fill = fillBytes;
     }
 
-    /// <summary>The size a page is filled to.</summary>
-    public int FillBytes => _fill;
-
     /// <inheritdoc/>
     public void Reset() => _bytes = 0;
 

@@ -54,9 +54,6 @@ internal sealed class ClusteringKey
     /// <summary>The key's first column: the one a clustering value is a function of, and the one a level's ranges are judged on.</summary>
     public string InstantPath => _paths[0];
 
-    /// <summary>The dtype of <see cref="InstantPath"/>.</summary>
-    internal DType InstantType => _dtypes[0];
-
     /// <summary>
     /// The key a new dataset declares, which may not be over a column that may hold a null. A
     /// composite key's run holds no tuple with a null, so no merge could keep such a row. And a null

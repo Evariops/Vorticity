@@ -786,10 +786,6 @@ internal sealed class ArrayDecodeContext
     public int NewCanonical(CanonicalKind kind, DType dtype, int length, Validity validity) =>
         Canonical.AddBare(kind, dtype, length, validity);
 
-    /// <summary>The id text of encoding spec <paramref name="specIndex"/>, for an exception message.</summary>
-    /// <param name="specIndex">The wire <c>u16</c> from <c>ArrayNode.encoding</c>.</param>
-    public string GetEncodingIdText(int specIndex) => _scan.GetArrayEncodingIdText(specIndex);
-
     // ---------------------------------------------------------------- shared validation helpers
 
     /// <summary>Requires an exact child count.</summary>

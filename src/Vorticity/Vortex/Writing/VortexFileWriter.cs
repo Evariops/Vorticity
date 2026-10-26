@@ -502,27 +502,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         (_directories ??= new VariantDirectory?[_fieldCount])[field] = directory;
     }
 
-    /// <summary>
-    /// Declares the most rows the file will hold (<see cref="VortexWriteOptions.RowBound"/>) before its first row: a caller
-    /// that learns it from its first rows, as a load in one pass does from the pace of its first slice, sizes the file's
-    /// chunks and its hashed postings' buckets by it.
-    /// </summary>
-    /// <exception cref="InvalidOperationException">The writer took a row already.</exception>
-    internal void DeclareRowBound(long rowBound)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegative(rowBound);
-        if (_acceptedRows > 0)
-        {
-            throw new InvalidOperationException("A file's row bound sizes its chunks from its first row on: it is declared before it.");
-        }
-
-        _leastChunkBlocks = LeastChunkBlocks(rowBound, _schema, _rowBlock);
-        if (_indexes is { } built)
-        {
-            built.ExpectedRows = rowBound;
-        }
-    }
-
     /// <summary>Where every column's chunks lie and the encodings their trees name, as the layout will say.</summary>
     private SliceChunks ChunkDirectory()
     {

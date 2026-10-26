@@ -220,8 +220,5 @@ internal static class Program
         return findings.Count == 0 ? 0 : 1;
     }
 
-    private static void Line(StringBuilder output, FormattableString line) =>
-        output.Append(line.ToString(CultureInfo.InvariantCulture)).Append('\n');
-
     private static void Line(StringBuilder output, string line) => output.Append(line).Append('\n');
 }
