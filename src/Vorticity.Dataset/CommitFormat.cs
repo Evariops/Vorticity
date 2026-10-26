@@ -18,44 +18,28 @@ internal static class CommitFormat
     public static ReadOnlySpan<byte> TrailerMagic => "VXCT"u8;
 
     /// <summary>
-    /// The format this library writes for a header without source offsets. Format 2 headers may
-    /// retire column names, lock the store and say where earlier versions' pages start, and its pages
-    /// carry tallies and deletion vectors: a reader of format 1 would read such a dataset wrongly
-    /// where it did not fail, a renamed column as missing and a locked store as one it may rewrite,
-    /// and refuses it by this number instead.
+    /// The one format this library writes and reads. Formats 1 to 4 were the dataset before its layout was rebuilt
+    /// around partitions, sort keys and objects addressable to the granule; a commit of any of them, or of a later
+    /// format, is refused with a message that says which, and is never read in part.
     /// </summary>
-    public const uint Version = 2;
+    public const uint Version = 5;
 
     /// <summary>
-    /// The format of a header that counts source offsets, and the newest this library reads. A writer
-    /// of format 2 would rebuild such a header without the field it does not know, and so forget
-    /// every offset at its first commit: the entries it counted would be counted again. It refuses the
-    /// dataset by this number instead.
+    /// Refuses a commit object of format <paramref name="format"/> unless it is <see cref="Version"/>: an earlier
+    /// release's dataset is rebuilt rather than read, and a later release's would be misread.
     /// </summary>
-    public const uint WithSources = 3;
+    /// <exception cref="CommitFormatException">The format is not <see cref="Version"/>.</exception>
+    public static void Check(uint format)
+    {
+        if (format == Version)
+        {
+            return;
+        }
 
-    /// <summary>
-    /// The format of a header that names features (<see cref="DatasetFeatures"/>): its tree holds
-    /// entries with fields past their summaries, which a reader of format 3 parses as deleted rows and
-    /// refuses, or as nothing at all. Once a dataset uses one, every later commit names it, since the
-    /// pages that hold such entries stay in its trees. It refuses the dataset by this number instead.
-    /// </summary>
-    public const uint WithFeatures = 4;
-
-    /// <summary>The newest format this library reads.</summary>
-    public const uint Newest = WithFeatures;
-
-    /// <summary>The format a commit object of <paramref name="header"/> is written in.</summary>
-    public static uint For(CommitHeader header) =>
-        header.Features != DatasetFeatures.None || header.ErasureDelay is not null ? WithFeatures
-        : header.Sources.Count > 0 ? WithSources
-        : Version;
-
-    /// <summary>
-    /// The oldest format this library reads: format 1 holds nothing format 2 does not read the same,
-    /// so a dataset written by a reader of it opens here as it is.
-    /// </summary>
-    public const uint OldestRead = 1;
+        throw new CommitFormatException(format < Version
+            ? $"The dataset was written in commit format {format} by an earlier release; this library reads format {Version} alone, and such a dataset is rebuilt from its rows."
+            : $"The dataset was written in commit format {format} by a later release; this library reads format {Version} alone.");
+    }
 
     /// <summary>Bytes before the header: the magic, the format and the header's length.</summary>
     public const int PreambleBytes = 16;
@@ -93,59 +77,6 @@ internal static class CommitFormat
         BinaryPrimitives.WriteUInt64LittleEndian(destination[20..], checksum);
         TrailerMagic.CopyTo(destination[28..]);
     }
-}
-
-/// <summary>
-/// What a dataset uses of commit format 4, as its header names it: a library that reads format 3
-/// would misread each, so a header that names one is written in format 4, and every header after it
-/// names it too.
-/// </summary>
-[Flags]
-internal enum DatasetFeatures : ulong
-{
-    /// <summary>Nothing past format 3.</summary>
-    None = 0,
-
-    /// <summary>Leaf entries that carry fields of format 4, such as their object's footer length.</summary>
-    EntryFields = 1,
-
-    /// <summary>
-    /// A delay within which deleted rows are erased from the store's bytes: a library that does not know
-    /// it would keep marks past it, against what the application owes.
-    /// </summary>
-    ErasureDelay = 2,
-
-    /// <summary>
-    /// A dataset an earlier library compacted by periods: a library that does not know it would compact its levels as it
-    /// compacts any dataset's, against the order they keep. This one reads such a dataset and compacts it no further.
-    /// </summary>
-    Periods = 4,
-
-    /// <summary>Columns whose values questions look up, which a library that does not know them would drop from the headers it writes.</summary>
-    Identifiers = 8,
-
-    // 16 named partition columns, retired with them: a header that still names it is refused, never reused.
-
-    /// <summary>
-    /// Keys of variant columns every job shreds into columns of their own, which a library that does not know them
-    /// would drop from the headers it writes.
-    /// </summary>
-    ShreddedPaths = 32,
-
-    // 64 named objects that joined several sealed periods, retired with the joins: a header that still names it is
-    // refused, never reused.
-
-    /// <summary>
-    /// Objects cut by a clustering value or aimed at a size (<see cref="DatasetOptions.Clustering"/>): a library that does
-    /// not know it would write objects across values and past the size, against the cut every writer keeps.
-    /// </summary>
-    Clustering = 128,
-
-    /// <summary>
-    /// A tree of rollups (<see cref="RollupEntry"/>), whose pages and objects a library that does not know it would leave
-    /// unmarked in a vacuum, and whose rollups its commits would leave stale over the objects they change.
-    /// </summary>
-    Rollups = 256,
 }
 
 /// <summary>

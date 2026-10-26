@@ -35,13 +35,13 @@ internal static class DatasetRollups
 
     /// <summary>
     /// Writes the rollups the latest version lacks, rank by rank, a commit a rank; the rollups put. None for a dataset with
-    /// no key, by periods, on a sealed store, with a fanout of 0, or with no level past 0. With <paramref name="refreshed"/>,
+    /// no key, on a sealed store, with a fanout of 0, or with no level past 0. With <paramref name="refreshed"/>,
     /// the handle stands on the latest version already, which the first rank reads as it is: a compaction loop's turn.
     /// </summary>
     internal static async ValueTask<int> RollUpAsync(VortexDataset dataset, CancellationToken cancellationToken, bool refreshed = false)
     {
         int fanout = dataset.Options.RollupFanout;
-        if (fanout < 2 || dataset.Snapshot.Schema.Key is null || dataset.Snapshot.Levels.ByPeriods || dataset.Store is SealedObjectStore { Seals: true })
+        if (fanout < 2 || dataset.Snapshot.Schema.Key is null || dataset.Store is SealedObjectStore { Seals: true })
         {
             return 0;
         }
@@ -55,7 +55,7 @@ internal static class DatasetRollups
             }
 
             DatasetSnapshot version = dataset.Snapshot;
-            if (fanout < 2 || version.Schema.Key is not { } key || version.Levels.ByPeriods || dataset.Store is SealedObjectStore { Seals: true }
+            if (fanout < 2 || version.Schema.Key is not { } key || dataset.Store is SealedObjectStore { Seals: true }
                 || Bottom(version.Levels) is not int bottom)
             {
                 return put;

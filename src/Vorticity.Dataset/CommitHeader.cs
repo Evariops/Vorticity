@@ -124,65 +124,42 @@ internal sealed record CommitHeader
     /// <summary>
     /// Per source of the application's entries, how far its entries are counted in the dataset, in
     /// the ordinal order of the names: what the commits that declared the ranges they consumed
-    /// advanced. A header that carries one is written in commit format 3.
+    /// advanced.
     /// </summary>
     public IReadOnlyList<SourceOffset> Sources { get; init; } = [];
 
     /// <summary>
     /// The last version whose commit changed rows, which a commit that only moves them copies from
-    /// its parent; 0 when a writer that does not know the field wrote the header, and nothing is
-    /// known then but that it is at most this version.
+    /// its parent.
     /// </summary>
     public ulong LastDataChange { get; init; }
 
     /// <summary>
-    /// The features of commit format 4 the dataset uses, kept by every header after the first that
-    /// names one: the trees still hold what they describe. A header that names any is written in
-    /// format 4.
-    /// </summary>
-    public DatasetFeatures Features { get; init; }
-
-    /// <summary>The features this library knows: a header that names another is refused, a later library's.</summary>
-    internal const DatasetFeatures KnownFeatures =
-        DatasetFeatures.EntryFields | DatasetFeatures.ErasureDelay | DatasetFeatures.Periods | DatasetFeatures.Identifiers
-        | DatasetFeatures.ShreddedPaths | DatasetFeatures.Clustering | DatasetFeatures.Rollups;
-
-    /// <summary>
-    /// Whether an earlier library wrote the dataset by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which
-    /// every header after keeps. Its late level's objects overlap, as level 0's do, and its other levels' rows are in no
-    /// key order; it is read as it is, and compacted no further (<see cref="CompactionPolicy"/>).
-    /// </summary>
-    internal bool ByPeriods => (Features & DatasetFeatures.Periods) != 0;
-
-    /// <summary>
     /// The most time a deleted row stays in the store's bytes after its delete
     /// (<see cref="DatasetOptions.ErasureDelay"/>), fixed at creation and kept by every header; null
-    /// for none. A header that carries one names <see cref="DatasetFeatures.ErasureDelay"/>.
+    /// for none.
     /// </summary>
     public TimeSpan? ErasureDelay { get; init; }
 
     /// <summary>
     /// The columns whose values questions look up (<see cref="DatasetOptions.Identifiers"/>), kept by
-    /// every header; empty for none. A header that carries any names <see cref="DatasetFeatures.Identifiers"/>.
+    /// every header; empty for none.
     /// </summary>
     public IReadOnlyList<string> Identifiers { get; init; } = [];
 
     /// <summary>
     /// The keys of variant columns every job shreds into columns of their own (<see cref="DatasetOptions.ShreddedPaths"/>),
-    /// kept by every header; empty for none. A header that carries any names <see cref="DatasetFeatures.ShreddedPaths"/>.
+    /// kept by every header; empty for none.
     /// </summary>
     public IReadOnlyList<string> ShreddedPaths { get; init; } = [];
 
     /// <summary>
     /// How the dataset's jobs cut their objects (<see cref="DatasetOptions.Clustering"/>), fixed at creation and kept by
-    /// every header; null for none. A header that carries it names <see cref="DatasetFeatures.Clustering"/>.
+    /// every header; null for none.
     /// </summary>
     public ClusteringOptions? Clustering { get; init; }
 
-    /// <summary>
-    /// The tree of rollups (<see cref="RollupEntry"/>), as a level is recorded, without inlined pages; null for none. A header
-    /// that carries it names <see cref="DatasetFeatures.Rollups"/>.
-    /// </summary>
+    /// <summary>The tree of rollups (<see cref="RollupEntry"/>), as a level is recorded, without inlined pages; null for none.</summary>
     public CommitLevel? Rollups { get; init; }
 
     /// <summary>The longest delay a header reads, in seconds: what a <see cref="TimeSpan"/> holds.</summary>
@@ -206,14 +183,11 @@ internal sealed record CommitHeader
         internal const int LockedStore = 14;
         internal const int Sources = 15;
         internal const int LastDataChange = 16;
-        internal const int Features = 17;
+
+        // 17 held the features of format 4, 19, 21 and 22 the periods' lateness horizon, length and changes, and 23 the
+        // partition columns of a design that preceded the partitions of the layout: all retired, never reused.
         internal const int ErasureDelay = 18;
-
-        // 19, 21 and 22 held the periods' lateness horizon, length and changes, retired with them: never reused, and
-        // skipped when an earlier library's header holds them.
         internal const int Identifiers = 20;
-
-        // 23 held the partition columns, retired with them: never reused.
         internal const int ShreddedPaths = 24;
         internal const int Clustering = 25;
         internal const int Rollups = 26;
@@ -324,11 +298,6 @@ internal sealed record CommitHeader
         }
 
         writer.WriteUInt64(Field.LastDataChange, LastDataChange);
-        if (Features != DatasetFeatures.None)
-        {
-            writer.WriteUInt64(Field.Features, (ulong)Features);
-        }
-
         if (ErasureDelay is { } delay)
         {
             writer.WriteUInt64(Field.ErasureDelay, (ulong)delay.TotalSeconds);
@@ -560,7 +529,6 @@ internal sealed record CommitHeader
         bool locked = false;
         List<SourceOffset> sources = [];
         ulong lastDataChange = 0;
-        DatasetFeatures features = DatasetFeatures.None;
         TimeSpan? erasureDelay = null;
         List<string> identifiers = [];
         List<string> shreddedPaths = [];
@@ -622,9 +590,6 @@ internal sealed record CommitHeader
                     case (Field.LastDataChange, ProtoWireType.Varint):
                         lastDataChange = reader.ReadVarint();
                         break;
-                    case (Field.Features, ProtoWireType.Varint):
-                        features = (DatasetFeatures)reader.ReadVarint();
-                        break;
                     case (Field.ErasureDelay, ProtoWireType.Varint):
                         erasureDelay = TimeSpan.FromSeconds((long)Math.Min(reader.ReadVarint(), MaxDelaySeconds));
                         break;
@@ -658,23 +623,6 @@ internal sealed record CommitHeader
             throw new CommitFormatException("A commit header names no version.");
         }
 
-        // A feature this library does not know is one of a later format, which it would misread.
-        if ((features & ~KnownFeatures) != 0)
-        {
-            throw new CommitFormatException(
-                $"A commit header names features 0x{(ulong)(features & ~KnownFeatures):x} this library does not know: a later library wrote the dataset.");
-        }
-
-        if (((features & DatasetFeatures.Clustering) != 0) != grouping is not null)
-        {
-            throw new CommitFormatException("A commit header's flag of clustering and its clustering disagree: each goes with the other.");
-        }
-
-        if (rollups is not null && (features & DatasetFeatures.Rollups) == 0)
-        {
-            throw new CommitFormatException("A commit header carries a tree of rollups and does not name them.");
-        }
-
         return new CommitHeader
         {
             Version = version,
@@ -693,7 +641,6 @@ internal sealed record CommitHeader
             LockedStore = locked,
             Sources = sources,
             LastDataChange = lastDataChange,
-            Features = features,
             ErasureDelay = erasureDelay,
             Identifiers = identifiers,
             ShreddedPaths = shreddedPaths,

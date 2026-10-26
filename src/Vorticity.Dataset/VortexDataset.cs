@@ -2060,27 +2060,23 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
-        DatasetFeatures features = options.ErasureDelay is null ? DatasetFeatures.None : DatasetFeatures.ErasureDelay;
         if (options.Clustering is { } clustering)
         {
             // Resolved once here, so that a value the key's first column does not take is refused before anything is written.
             _ = ValueCut.Of(clustering, key);
             _ = ValueCut.OfBlocks(clustering, key);
-            features |= DatasetFeatures.Clustering;
         }
 
         string[] declared = [];
         if (options.Identifiers is { Count: > 0 } identifiers)
         {
             declared = RequireIdentifiers(identifiers, schema, nameof(DatasetOptions.Identifiers));
-            features |= DatasetFeatures.Identifiers;
         }
 
         string[] shredded = [];
         if (options.ShreddedPaths is { Count: > 0 } paths)
         {
             shredded = RequireShreddedPaths(paths, schema, nameof(DatasetOptions.ShreddedPaths));
-            features |= DatasetFeatures.ShreddedPaths;
         }
 
         CommitHeader template = new CommitHeader
@@ -2098,7 +2094,6 @@ public sealed class VortexDataset : IAsyncDisposable
             Identifiers = declared,
             ShreddedPaths = shredded,
             Clustering = options.Clustering,
-            Features = features,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,

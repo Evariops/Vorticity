@@ -1204,8 +1204,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         }
 
         // An object above level 0 is a merge's, its rows in the clustering key's order with null keys
-        // last, so on that key an entry's rank is its row and a deleted row's rank needs no read; not
-        // for a dataset of periods, whose objects may order each slice by another column.
+        // last, so on that key an entry's rank is its row and a deleted row's rank needs no read.
         slot.Cursor = await _key.TryOpenAsync(
                 slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded && _version.Levels.RowsInKeyOrder(slot.Level), cancellationToken)
             .ConfigureAwait(false)

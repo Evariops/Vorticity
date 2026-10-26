@@ -384,7 +384,6 @@ internal static class DatasetCommitter
                 LastDataChange = ChangesRows(options.Kind, outcomes) ? version : LastDataChangeOf(template, parent),
                 Sources = sources,
                 Starts = starts,
-                Features = template.Features | FeaturesOf(operations) | schema.Declared,
             };
             header = Fitted(WithoutHeld(header));
             // 3. One conditional creation. Once it is in, nothing after it can exist yet.
@@ -769,40 +768,6 @@ internal static class DatasetCommitter
         }
 
         return header;
-    }
-
-    /// <summary>
-    /// The features of format 4 the operations bring into the trees: an entry they add with fields of
-    /// format 4. An entry rebuilt from one in the trees keeps its fields, and its feature is named already.
-    /// </summary>
-    private static DatasetFeatures FeaturesOf(IReadOnlyList<DatasetOperation> operations)
-    {
-        DatasetFeatures features = DatasetFeatures.None;
-        foreach (DatasetOperation operation in operations)
-        {
-            switch (operation)
-            {
-                case DatasetOperation.AddObject { Entry.HasFields: true }:
-                    features |= DatasetFeatures.EntryFields;
-                    break;
-                case DatasetOperation.PutRollup:
-                    features |= DatasetFeatures.Rollups;
-                    break;
-                case DatasetOperation.ReplaceObjects replace:
-                    foreach ((int _, ReadOnlyMemory<byte> _, ObjectEntry entry) in replace.Outputs)
-                    {
-                        if (entry.HasFields || entry.HasNegatives)
-                        {
-                            features |= DatasetFeatures.EntryFields;
-                            break;
-                        }
-                    }
-
-                    break;
-            }
-        }
-
-        return features;
     }
 
     /// <summary>The header with the inlined pages of <paramref name="omitted"/> left out.</summary>
@@ -1620,11 +1585,6 @@ internal static class DatasetCommitter
 
         /// <summary>The shredded paths, as the header records them.</summary>
         internal IReadOnlyList<string> ShreddedPaths { get; set; } = [];
-
-        /// <summary>The features of format 4 the identifiers and the shredded paths name, once there are any.</summary>
-        internal DatasetFeatures Declared =>
-            (Identifiers.Count > 0 ? DatasetFeatures.Identifiers : DatasetFeatures.None)
-            | (ShreddedPaths.Count > 0 ? DatasetFeatures.ShreddedPaths : DatasetFeatures.None);
     }
 
     /// <summary>Where <paramref name="name"/> stands in <paramref name="names"/>; -1 when it does not.</summary>

@@ -42,8 +42,7 @@ internal sealed partial class DatasetKeyCursor
         internal int Number { get; }
 
         /// <summary>
-        /// Whether the level's objects are key-disjoint, in the order of their keys: every level above
-        /// 0 but the late level of a dataset of periods, whose objects overlap.
+        /// Whether the level's objects are key-disjoint, in the order of their keys: every level above 0.
         /// </summary>
         internal bool Disjoint { get; }
 

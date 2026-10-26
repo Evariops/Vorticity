@@ -216,13 +216,6 @@ internal static partial class CompactionPolicy
         CompactionStyle style,
         HashSet<int> taken)
     {
-        // A dataset an earlier library wrote by periods is read as it is: its late level's objects overlap, and its other
-        // levels' rows are in no key order, which a merge on the key takes them to be.
-        if (dataset.Levels.ByPeriods)
-        {
-            return null;
-        }
-
         if (levels.Count > 0 && objects[0] > settings.LevelZeroCeiling && !taken.Contains(0))
         {
             // Leveled under a key, the objects of level 0 that came late wait apart, within half the ceiling (LateRows).
