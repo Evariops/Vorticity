@@ -170,7 +170,7 @@ bridge them. A file written alone keeps its columns chunked together, the defaul
 
 ## 4. The dataset's read path
 
-The engine is fed by the dataset's scan, which holds to six rules.
+The engine is fed by the dataset's scan, which holds to seven rules.
 
 1. **One read a segment**, whatever the number of lanes: every lane of a question shares the reads of
    every object's segments, those of objects cut into parts included, under one read-ahead reservation
@@ -194,6 +194,14 @@ The engine is fed by the dataset's scan, which holds to six rules.
    blocks each, whose partial results merge to the same bits: an application with several nodes spreads
    a heavy question over them. A part's partial is its groups' states, those a synopsis keeps, which the
    merge folds as a synopsis's ([16-queries.md](16-queries.md#58-parts-of-a-question-merged)).
+7. **Objects opened ahead, even on one lane.** An object read as rows costs an open, a request for its
+   end, then its chunks: two round trips after one another. The objects that read their rows next are
+   opened ahead, eight at most, and left open in the handle's cache for the read that comes to them; an
+   object that learns its family's partial learns it while the one before it is served, as a scan
+   decodes its next batch ahead of its consumer (`ScanOptions.Prefetch`). On one lane at the S3 profile,
+   five of the client's questions, which learn from their objects, waited 2 to 14 round trips one after
+   another where they waited 12 to 88, and answered in 0.26 to 2.1 s where they took 0.56 to 4.9 s; on 32 lanes,
+   as before *(measured, `vortex-queries --micro paths --qp`)*.
 
 ## 5. The synopses, all per column
 

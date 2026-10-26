@@ -310,6 +310,21 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// An object's bytes are immutable but its fragments are not, so a new set of fragments is a new
     /// view of the same bytes -- a second open, never a stale handle.
     /// </summary>
+    /// <summary>Whether the object <paramref name="entry"/> names is open on the view its fragments make, or being opened: a rent of it reads nothing more.</summary>
+    internal bool Holds(ObjectEntry entry)
+    {
+        string handle = HandleOf(entry);
+        _gate.Wait();
+        try
+        {
+            return _open.ContainsKey(handle) || _opening.ContainsKey(handle);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     private static string HandleOf(ObjectEntry entry)
     {
         if (entry.Fragments.Count == 0)

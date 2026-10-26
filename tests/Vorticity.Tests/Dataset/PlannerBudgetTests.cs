@@ -36,17 +36,19 @@ public sealed class PlannerBudgetTests : IClassFixture<DatasetPlannerTests.Fixtu
     /// 32 bytes more cold, its header naming the value, and the unaligned window's edges read in a request less but 42 KB
     /// more, an object gathering each column in one chunk where a period cut it at each of its slices. The allocations of
     /// the questions whose filter is evaluated on rows raised on 2026-10-25 by some 0.5 KB, each in a process of its own:
-    /// the filter's key, its canonical text hashed, and the lookup of its pages (PredicatePages).
+    /// the filter's key, its canonical text hashed, and the lookup of its pages (PredicatePages). Those of the two
+    /// questions of measures set again on 2026-10-26 at 2 % above their measure, 72 bytes more an ask: the opens and the
+    /// partials a scan begins ahead of the objects it reads next.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
         ["count by service"] = new(6, 41647, 0, 0, 45378),
         ["count by service and hour"] = new(6, 41647, 0, 0, 51825),
-        ["measures by service"] = new(6, 41647, 0, 0, 68030),
+        ["measures by service"] = new(6, 41647, 0, 0, 69491),
         ["count by day"] = new(6, 41647, 0, 0, 59062),
         ["count by hour, one service"] = new(6, 41647, 0, 0, 64554),
         ["count by service, an aligned window"] = new(2, 762, 0, 0, 37248),
-        ["measures by service, an unaligned window"] = new(5, 402495, 2, 270920, 76704),
+        ["measures by service, an unaligned window"] = new(5, 402495, 2, 270920, 78360),
         ["quantiles by service"] = new(6, 74337, 0, 0, 1036385),
         ["distinct services by hour"] = new(6, 41647, 0, 0, 53513),
         ["count by route and day"] = new(6, 93472, 0, 0, 56475),

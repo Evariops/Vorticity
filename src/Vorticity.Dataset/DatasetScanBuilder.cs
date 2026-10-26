@@ -500,7 +500,18 @@ internal sealed class DatasetScanBuilder
     /// The states of the object <paramref name="held"/> under the scan's family: its partial, from the handle or the
     /// session's cache, or learned now from its rows and kept; the groups of the values the question asks.
     /// </summary>
-    private async IAsyncEnumerable<RecordBatch> LearnedAsync(PositionedObject held, [EnumeratorCancellation] CancellationToken cancellationToken)
+    private async IAsyncEnumerable<RecordBatch> LearnedAsync(
+        PositionedObject held, Task<AggregationPartial>? learning, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        AggregationPartial partial = await (learning ?? PartialAsync(held, cancellationToken)).ConfigureAwait(false);
+        await foreach (RecordBatch batch in FamilyOf(held)!.Value.Family.ServeAsync(partial, _dataset.Session, held.FirstRow, cancellationToken).ConfigureAwait(false))
+        {
+            yield return batch;
+        }
+    }
+
+    /// <summary>The partial of the object <paramref name="held"/> under the scan's family: from the handle or the session's cache, else learned now from its rows and kept.</summary>
+    private async Task<AggregationPartial> PartialAsync(PositionedObject held, CancellationToken cancellationToken)
     {
         (LearnedFamily family, UInt128 key) = FamilyOf(held)!.Value;
         SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
@@ -512,10 +523,7 @@ internal sealed class DatasetScanBuilder
             _dataset.Partials.Keep(held.Entry.Uid, key, partial, cache);
         }
 
-        await foreach (RecordBatch batch in family.ServeAsync(partial, _dataset.Session, held.FirstRow, cancellationToken).ConfigureAwait(false))
-        {
-            yield return batch;
-        }
+        return partial;
     }
 
     /// <summary>
@@ -947,6 +955,17 @@ internal sealed class DatasetScanBuilder
         // The statistics over the blocks of the objects the counts do not answer and whose blocks may, by the place of the
         // object, read ahead as the counts are; made at the first such object.
         Dictionary<UInt128, Task<(Indexes.ColumnWhere? Where, Indexes.ColumnBlocks? Blocks)[]>>? blockReads = null;
+
+        // The objects that read their rows next, opened ahead, a few at a time, so that each one's open is not a round trip
+        // after the reads of the one before; left open in the handle's cache for the read that comes to them.
+        Dictionary<UInt128, Task>? opened = null;
+        int opensAhead = Math.Clamp(_dataset.Options.MaxOpenObjects / 4, 1, 8);
+        int openSeen = 0;
+
+        // The partials of the objects that learn theirs next, learned ahead of the one served as the scan's batches are
+        // decoded ahead of its consumer (ScanOptions.Prefetch): each one's reads then wait on no decode before them.
+        Dictionary<UInt128, Task<AggregationPartial>>? learning = null;
+        int learnSeen = 0;
         try
         {
             for (int o = 0; o < objects.Count; o++)
@@ -967,6 +986,16 @@ internal sealed class DatasetScanBuilder
                         && BlocksAnswer(objects[ahead].Held))
                     {
                         (blockReads ??= [])[objects[ahead].Held.Entry.Uid] = _dataset.ReadBlockColumnsAsync(objects[ahead].Held.Entry, BlockAnswer()!.Fields, stats: true, stopped.Token).AsTask();
+                    }
+                }
+
+                // Each object looked at once, as the window of those ahead reaches it.
+                for (; openSeen < objects.Count && openSeen < o + opensAhead; openSeen++)
+                {
+                    if (openSeen >= (rolled?.Count ?? 0) && objects[openSeen].Field is null && !_version.HoldsOpen(objects[openSeen].Held.Entry)
+                        && ReadsRows(objects[openSeen].Held))
+                    {
+                        (opened ??= [])[objects[openSeen].Held.Entry.Uid] = OpenAheadAsync(objects[openSeen].Held, stopped.Token);
                     }
                 }
 
@@ -1045,7 +1074,20 @@ internal sealed class DatasetScanBuilder
                     // An object of the question's family answers from the partial it learned, or learns it from its rows.
                     if (Learns(held))
                     {
-                        await foreach (RecordBatch batch in LearnedAsync(held, cancellationToken).ConfigureAwait(false))
+                        Task<AggregationPartial>? learned = null;
+                        learning?.Remove(held.Entry.Uid, out learned);
+                        int started = learning?.Count ?? 0;
+                        for (learnSeen = Math.Max(learnSeen, o + 1); learnSeen < objects.Count && started < _options.Prefetch; learnSeen++)
+                        {
+                            PositionedObject next = objects[learnSeen].Held;
+                            if (learnSeen >= (rolled?.Count ?? 0) && objects[learnSeen].Field is null && !BlocksAnswer(next) && Learns(next) && ReadsRows(next))
+                            {
+                                started++;
+                                (learning ??= [])[next.Entry.Uid] = PartialAsync(next, stopped.Token);
+                            }
+                        }
+
+                        await foreach (RecordBatch batch in LearnedAsync(held, learned, cancellationToken).ConfigureAwait(false))
                         {
                             yield return batch;
                         }
@@ -1108,8 +1150,24 @@ internal sealed class DatasetScanBuilder
         }
         finally
         {
-            // The counts and statistics read ahead of a consumer that stopped, or of a failure, are nobody's.
+            // The counts, statistics and opens begun ahead of a consumer that stopped, or of a failure, are nobody's.
             await stopped.CancelAsync().ConfigureAwait(false);
+            foreach (Task open in (IEnumerable<Task>?)opened?.Values ?? [])
+            {
+                await open.ConfigureAwait(false);
+            }
+
+            foreach (Task<AggregationPartial> left in (IEnumerable<Task<AggregationPartial>>?)learning?.Values ?? [])
+            {
+                try
+                {
+                    await left.ConfigureAwait(false);
+                }
+                catch (Exception) when (left.IsFaulted || left.IsCanceled)
+                {
+                }
+            }
+
             foreach (Task<(Indexes.ColumnWhere? Where, Indexes.ColumnBlocks? Blocks)[]> left in (IEnumerable<Task<(Indexes.ColumnWhere? Where, Indexes.ColumnBlocks? Blocks)[]>>?)blockReads?.Values ?? [])
             {
                 try
@@ -1136,6 +1194,44 @@ internal sealed class DatasetScanBuilder
             }
 
             arena.Reset();
+        }
+    }
+
+    /// <summary>
+    /// Whether the object <paramref name="held"/>, which its counts do not answer, reads its rows: not one whose blocks may
+    /// answer, which reads their statistics first, nor one whose family's partial the handle holds or sums.
+    /// </summary>
+    private bool ReadsRows(in PositionedObject held)
+    {
+        if (BlocksAnswer(held))
+        {
+            return false;
+        }
+
+        if (!Learns(held))
+        {
+            return true;
+        }
+
+        SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
+        return !_dataset.Partials.Holds(held.Entry.Uid, FamilyOf(held)!.Value.Key, cache) && _dataset.Partials.MergedInto(held.Entry.Uid, cache) is null;
+    }
+
+    /// <summary>
+    /// Opens the object <paramref name="held"/> ahead of its read and gives the lease back, the object left open and idle in
+    /// the handle's cache, its copy shredded in memory, if any, left to the read; what the open meets is the read's to
+    /// meet again.
+    /// </summary>
+    private async Task OpenAheadAsync(PositionedObject held, CancellationToken cancellationToken)
+    {
+        try
+        {
+            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            await lease.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // The read that comes to the object opens it again, and reports what fails then.
         }
     }
 

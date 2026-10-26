@@ -163,6 +163,9 @@ internal sealed class DatasetSnapshot
     /// <exception cref="ObjectNotFoundException">
     /// The object is gone: this version fell out of the retention window and vacuum took it.
     /// </exception>
+    /// <summary>Whether the handle holds the object <paramref name="entry"/> names open, so that a rent of it reads nothing.</summary>
+    internal bool HoldsOpen(ObjectEntry entry) => _objects.Holds(entry);
+
     internal async ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken)
     {
         try
