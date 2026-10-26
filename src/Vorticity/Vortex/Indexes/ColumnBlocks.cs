@@ -6,22 +6,36 @@ using Vorticity.Serialization.Protobuf;
 namespace Vorticity.Indexes;
 
 /// <summary>
-/// One column's statistics over the blocks of a file whose rows follow a key (<see cref="IndexKinds.BlockStats"/>,
-/// <see cref="BlockTable"/>): each block's rows and nulls; the values it holds by their numbers in the column's
+/// One column's statistics over the blocks of a file whose rows follow a key (<see cref="IndexKinds.BlockStats"/>): each
+/// block's rows and nulls; the values it holds by their numbers in the column's
 /// <see cref="ColumnWhere"/>, with each one's rows, while it holds at most <see cref="ListedValues"/> of them, and their
 /// count past that; and for a measure, its count of values, exact sum, least and greatest, in
 /// <see cref="MeasureLayout"/>'s words. A block whose columns of a question hold one value each is that question's
 /// answer for its rows, read from these alone.
 /// </summary>
 /// <remarks>
+/// <para>
+/// A block is a run of rows of one value of the key's first column: it ends where that column changes once it holds
+/// <see cref="LeastRows"/> rows, and at <see cref="MostRows"/> rows whatever its rows hold, so that a first column whose
+/// runs are shorter, an identifier, gives blocks of several values rather than a block a row. A block is a range of rows,
+/// independent of the file's chunks and zones.
+/// </para>
+/// <para>
 /// Encoded as its version, its count of blocks and the parts it holds, then a section a part: each block's rows and nulls;
 /// each block's values, their count then, for a block of at most <see cref="ListedValues"/>, their numbers ascending as
 /// the gaps between them and, past one value, each one's rows; each block's measure, its count of values then, for a
 /// block of one or more, its sum's words and its extremes. Sections rather than blocks, so that a writer that gives a
 /// part up midway drops its section whole.
+/// </para>
 /// </remarks>
 internal sealed class ColumnBlocks
 {
+    /// <summary>The rows a block holds at most.</summary>
+    internal const int MostRows = 65_536;
+
+    /// <summary>The rows a block holds before a change of the key's first column ends it: a sixteenth of <see cref="MostRows"/>.</summary>
+    internal const int LeastRows = MostRows / 16;
+
     /// <summary>The values a block lists at most, each with its rows; past them it gives their count alone.</summary>
     internal const int ListedValues = 256;
 

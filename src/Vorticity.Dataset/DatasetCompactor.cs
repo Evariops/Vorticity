@@ -977,7 +977,7 @@ internal static class DatasetCompactor
 
         /// <summary>
         /// The type of the key's first column, whose runs of one value cut the blocks of an object in slices bounded by keys
-        /// (<see cref="BlockTable"/>); null for objects written without them.
+        /// (<see cref="ColumnBlocks"/>); null for objects written without them.
         /// </summary>
         internal DType? Blocked { get; init; }
 
@@ -987,13 +987,13 @@ internal static class DatasetCompactor
         /// </summary>
         internal ValueCut? BlockValues { get; init; }
 
-        // The blocks of the object being written: each closed block's rows and first and last keys, then the rows of the one
-        // being written, its first key and the key of its last row.
+        // The blocks of the object being written: each closed block's rows, and the rows of those of one value; then the rows
+        // of the one being written, its first key and the key of its last row, in buffers that grow and are kept.
         private readonly List<long> _blockRows = [];
-        private readonly List<byte[]> _blockLows = [];
-        private readonly List<byte[]> _blockHighs = [];
+        private long _pureRows;
         private long _blockFilled;
         private byte[] _blockLow = [];
+        private int _blockLowLength;
         private byte[] _blockHigh = [];
         private int _blockHighLength;
 
@@ -1004,8 +1004,8 @@ internal static class DatasetCompactor
         /// <summary>
         /// Notes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
         /// key's order: a block ends at the first change of the key's first column, or of the declared block value of its
-        /// second (<see cref="BlockValues"/>), once it holds <see cref="BlockTable.LeastRows"/> rows, and at
-        /// <see cref="BlockTable.MostRows"/> rows. The keys of a run follow one another, and so the pairs of values, so a
+        /// second (<see cref="BlockValues"/>), once it holds <see cref="ColumnBlocks.LeastRows"/> rows, and at
+        /// <see cref="ColumnBlocks.MostRows"/> rows. The keys of a run follow one another, and so the pairs of values, so a
         /// bisection finds each change.
         /// </summary>
         internal void Block(KeyOrderedMerge merge, int from, int to)
@@ -1019,13 +1019,13 @@ internal static class DatasetCompactor
             {
                 if (_blockFilled == 0)
                 {
-                    _blockLow = merge.KeyAt(at).ToArray();
+                    _blockLowLength = Keep(ref _blockLow, merge.KeyAt(at));
                 }
 
                 // The rows up to the least a block holds join it whatever their values; past them, those up to the first
                 // change of the first column, up to the most a block holds.
-                int limit = (int)Math.Min(to, at + (BlockTable.MostRows - _blockFilled));
-                int open = (int)Math.Clamp(BlockTable.LeastRows - _blockFilled, 0, limit - at);
+                int limit = (int)Math.Min(to, at + (ColumnBlocks.MostRows - _blockFilled));
+                int open = (int)Math.Clamp(ColumnBlocks.LeastRows - _blockFilled, 0, limit - at);
                 int end = limit;
                 int checkFrom = at + open;
                 if (checkFrom < limit)
@@ -1036,23 +1036,28 @@ internal static class DatasetCompactor
 
                 if (end > at)
                 {
-                    ReadOnlySpan<byte> last = merge.KeyAt(end - 1);
-                    if (_blockHigh.Length < last.Length)
-                    {
-                        _blockHigh = new byte[Math.Max(last.Length, _blockHigh.Length * 2)];
-                    }
-
-                    last.CopyTo(_blockHigh);
-                    _blockHighLength = last.Length;
+                    _blockHighLength = Keep(ref _blockHigh, merge.KeyAt(end - 1));
                     _blockFilled += end - at;
                     at = end;
                 }
 
-                if (end < limit || _blockFilled == BlockTable.MostRows)
+                if (end < limit || _blockFilled == ColumnBlocks.MostRows)
                 {
                     CloseBlock();
                 }
             }
+        }
+
+        /// <summary>Copies <paramref name="key"/> into <paramref name="buffer"/>, grown when short; its length.</summary>
+        private static int Keep(ref byte[] buffer, ReadOnlySpan<byte> key)
+        {
+            if (buffer.Length < key.Length)
+            {
+                buffer = new byte[Math.Max(key.Length, buffer.Length * 2)];
+            }
+
+            key.CopyTo(buffer);
+            return key.Length;
         }
 
         /// <summary>
@@ -1102,7 +1107,11 @@ internal static class DatasetCompactor
             return right.Length >= length && left[..length].SequenceEqual(right[..length]);
         }
 
-        /// <summary>Closes the block being written at its last row.</summary>
+        /// <summary>
+        /// Closes the block being written at its last row; its rows are of one value when its first and last keys hold one
+        /// value of the first column and one block value, since the keys follow one another and every row between holds them
+        /// too.
+        /// </summary>
         private void CloseBlock()
         {
             if (_blockFilled == 0)
@@ -1110,17 +1119,20 @@ internal static class DatasetCompactor
                 return;
             }
 
+            if (Blocked is { } column && SameRun(_blockLow.AsSpan(0, _blockLowLength), _blockHigh.AsSpan(0, _blockHighLength), column, BlockValues))
+            {
+                _pureRows += _blockFilled;
+            }
+
             _blockRows.Add(_blockFilled);
-            _blockLows.Add(_blockLow);
-            _blockHighs.Add(_blockHigh.AsSpan(0, _blockHighLength).ToArray());
             _blockFilled = 0;
         }
 
         /// <summary>
-        /// The blocks of the object being written, its last one closed; null when it was written without them, or when they
-        /// do not cover its rows. The lists start over for the next object.
+        /// The count of the blocks of the object being written, its last one closed, and the rows of those of one value; null
+        /// when it was written without them, or when they do not cover its rows. The counts start over for the next object.
         /// </summary>
-        private BlockTable? Blocks()
+        private (int Count, long PureRows)? Blocks()
         {
             CloseBlock();
             long covered = 0;
@@ -1129,26 +1141,12 @@ internal static class DatasetCompactor
                 covered += rows;
             }
 
-            BlockTable? table = null;
-            if (Blocked is { } column && _blockRows.Count > 0 && covered == _rows)
-            {
-                // The rows of the blocks whose first and last keys hold one value of the first column and one block value: the
-                // keys follow one another, so every row between holds them too.
-                long pure = 0;
-                for (int b = 0; b < _blockRows.Count; b++)
-                {
-                    pure += SameRun(_blockLows[b], _blockHighs[b], column, BlockValues) ? _blockRows[b] : 0;
-                }
-
-                table = BlockTable.Of(_blockRows, _blockLows, _blockHighs, pure);
-            }
-
+            (int, long)? blocks = Blocked is not null && _blockRows.Count > 0 && covered == _rows ? (_blockRows.Count, _pureRows) : null;
             _declaredBlocks = 0;
             _declaredEnd = 0;
             _blockRows.Clear();
-            _blockLows.Clear();
-            _blockHighs.Clear();
-            return table;
+            _pureRows = 0;
+            return blocks;
         }
 
         // The slices of the object being written, bounded by keys: each closed slice's rows, each slice's first key, and the
@@ -1244,7 +1242,7 @@ internal static class DatasetCompactor
             // The object is this method's from here: whatever fails gives it up, its upload included when it streams, since
             // nothing else holds the draft any more. Its slices bounded by keys close at its last key.
             SliceTable? keySlices = KeySlices();
-            BlockTable? blocks = Blocks();
+            (int Count, long PureRows)? blocks = Blocks();
             _draft = null;
             _lastKeyLength = -1;
             WrittenObject? written;
@@ -1255,9 +1253,9 @@ internal static class DatasetCompactor
                     if (keySlices is not null)
                     {
                         draft.Writer.DeclareSlices(KeySliced!, keySlices);
-                        if (blocks is not null)
+                        if (blocks is { } cut)
                         {
-                            draft.Writer.DeclareBlocks(KeySliced!, blocks);
+                            draft.Writer.DeclareBlocks(cut.Count, cut.PureRows);
                         }
                     }
 

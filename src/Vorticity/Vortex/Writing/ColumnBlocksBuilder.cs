@@ -11,7 +11,7 @@ using Vorticity.Types;
 namespace Vorticity.Writing;
 
 /// <summary>
-/// Where a file's blocks end (<see cref="BlockTable"/>), each as the rows before it: declared by the caller, which writes
+/// Where a file's blocks end (<see cref="ColumnBlocks"/>), each as the rows before it: declared by the caller, which writes
 /// its rows in the key's order, before it writes the rows a block ends in, and read by every column's
 /// <see cref="ColumnBlocksBuilder"/>, which may take its rows on another thread.
 /// </summary>
@@ -525,11 +525,11 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
     }
 
     /// <summary>
-    /// The statistics and the index, once every row of the file's <paramref name="table"/> is in: null for a column that
-    /// keeps neither part, and for blocks other than the table's, which the cuts declared wrong. The statistics' measure
-    /// is the plan's verdict, asked once every column's counts settled it.
+    /// The statistics and the index, once every one of the file's <paramref name="rows"/> is in: null for a column that
+    /// keeps neither part, and for blocks other than the <paramref name="blocks"/> the caller cut, which the cuts declared
+    /// wrong. The statistics' measure is the plan's verdict, asked once every column's counts settled it.
     /// </summary>
-    internal (byte[] Blocks, byte[]? Where)? Finish(BlockTable table)
+    internal (byte[] Blocks, byte[]? Where)? Finish(int blocks, long rows)
     {
         End();
         _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
@@ -539,7 +539,7 @@ internal sealed class ColumnBlocksBuilder : IndexBuilder
             values = null;
         }
 
-        if ((values is null && !_measured) || _blocks != table.Count || _row != table.TotalRows)
+        if ((values is null && !_measured) || _blocks != blocks || _row != rows)
         {
             return null;
         }

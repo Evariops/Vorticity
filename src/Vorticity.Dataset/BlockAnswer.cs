@@ -343,7 +343,7 @@ internal sealed class BlockAnswer
         // every block at most.
         foreach (int field in edges && !proven ? _ranged : [])
         {
-            share += field == _leading ? Math.Min(1, 2.0 * BlockTable.MostRows / entry.PhysicalRows) : 1;
+            share += field == _leading ? Math.Min(1, 2.0 * ColumnBlocks.MostRows / entry.PhysicalRows) : 1;
         }
 
         return Math.Min(1, share);

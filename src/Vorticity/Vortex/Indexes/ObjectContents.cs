@@ -96,15 +96,6 @@ internal sealed class ObjectContents(
     internal IndexSegment? SketchesOf(int field) => RegionOf(Sketches, field);
 
     /// <summary>
-    /// The object's blocks (<see cref="BlockTable"/>), on its key's first column, and their region: what a question reads to
-    /// learn the runs of rows of each value of that column. Empty when the object keeps none.
-    /// </summary>
-    internal IReadOnlyList<(int Field, IndexSegment Region)> Blocks { get; init; } = [];
-
-    /// <summary>The region of the blocks on column <paramref name="field"/>, or null when the object keeps none on it.</summary>
-    internal IndexSegment? BlocksOf(int field) => RegionOf(Blocks, field);
-
-    /// <summary>
     /// The statistics of each column over the object's blocks (<see cref="ColumnBlocks"/>) and their regions: what a
     /// question reads to answer a block from its columns' values without its rows. Empty when the object keeps none.
     /// </summary>
@@ -135,7 +126,7 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<long> ColumnChunks { get; init; } = [];
 
     /// <summary>
-    /// The rows of the object's blocks (<see cref="Blocks"/>) that hold one value of the key's first column, and of the block
+    /// The rows of the object's blocks (<see cref="BlockStats"/>) that hold one value of the key's first column, and of the block
     /// value its writer declared: those a question grouped by both may answer from their statistics, where a block that holds
     /// several reads its rows. -1 when the object does not say.
     /// </summary>
@@ -175,7 +166,6 @@ internal sealed class ObjectContents(
             Sheets = Sheets,
             Counts = Counts,
             Sketches = Sketches,
-            Blocks = Blocks,
             BlockStats = BlockStats,
             Wheres = Wheres,
             ColumnBytes = ColumnBytes,
@@ -238,8 +228,7 @@ internal sealed class ObjectContents(
     // The sketches of a column's counts: its field and its region, as a path directory's.
     private const int TagSketches = 16;
 
-    // The object's blocks: the field of its key's first column and their region, as a path directory's.
-    private const int TagBlocks = 17;
+    // 17 held the region of the blocks' keys, retired: never reused.
 
     // A column's statistics over the blocks: its field and its region, as a path directory's.
     private const int TagBlockStats = 18;
@@ -347,11 +336,6 @@ internal sealed class ObjectContents(
             Declare(region);
         }
 
-        foreach ((int _, IndexSegment region) in Blocks)
-        {
-            Declare(region);
-        }
-
         foreach ((int _, IndexSegment region) in BlockStats)
         {
             Declare(region);
@@ -445,13 +429,6 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
-            foreach ((int field, IndexSegment region) in Blocks)
-            {
-                using ProtoWriter.MessageScope message = writer.BeginMessage(TagBlocks);
-                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
-                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
-            }
-
             foreach ((int field, IndexSegment region) in BlockStats)
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagBlockStats);
@@ -536,7 +513,6 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> sheets = [];
             List<(int, IndexSegment)> counts = [];
             List<(int, IndexSegment)> sketches = [];
-            List<(int, IndexSegment)> blocks = [];
             List<(int, IndexSegment)> blockStats = [];
             List<(int, IndexSegment)> wheres = [];
             List<long> columnBytes = [];
@@ -604,14 +580,6 @@ internal sealed class ObjectContents(
                         }
 
                         sketches.Add(sketched);
-                        break;
-                    case (TagBlocks, ProtoWireType.LengthDelimited):
-                        if (Directory(reader.ReadMessage()) is not { } blocked)
-                        {
-                            return null;
-                        }
-
-                        blocks.Add(blocked);
                         break;
                     case (TagBlockStats, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } stated)
@@ -684,7 +652,6 @@ internal sealed class ObjectContents(
                     Sheets = sheets,
                     Counts = counts,
                     Sketches = sketches,
-                    Blocks = blocks,
                     BlockStats = blockStats,
                     Wheres = wheres,
                     ColumnBytes = columnBytes,

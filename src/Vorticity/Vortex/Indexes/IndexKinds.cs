@@ -93,17 +93,13 @@ internal static class IndexKinds
     /// </summary>
     public const string ColumnSketches = "vorticity.column.sketches.v1";
 
-    /// <summary>
-    /// The blocks of a file whose rows follow a key, on its first column: runs of rows of one value of it, each its rows and
-    /// the first and the last key it holds, in one payload region that a table of contents names, which the statistics of
-    /// each column of each block extend (<see cref="Indexes.BlockTable"/>).
-    /// </summary>
-    public const string BlockTable = "vorticity.block.table.v1";
+    // vorticity.block.table.v1 held each block's rows and its first and last keys, written and never read: retired, its
+    // name never reused.
 
     /// <summary>
-    /// One column's statistics over the blocks of <see cref="BlockTable"/>: each block's rows, nulls, values and their
-    /// rows, and a measure's count, exact sum and extremes, in one payload region that a table of contents names
-    /// (<see cref="ColumnBlocks"/>).
+    /// One column's statistics over the blocks of a file whose rows follow a key, runs of rows of one value of its first
+    /// column: each block's rows, nulls, values and their rows, and a measure's count, exact sum and extremes, in one
+    /// payload region that a table of contents names (<see cref="ColumnBlocks"/>).
     /// </summary>
     public const string BlockStats = "vorticity.block.stats.v1";
 
@@ -125,7 +121,7 @@ internal static class IndexKinds
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
                 or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks
-                or ColumnSheet or ColumnCounts or ColumnSketches or BlockTable or BlockStats or ColumnWhere => true,
+                or ColumnSheet or ColumnCounts or ColumnSketches or BlockStats or ColumnWhere => true,
             _ => false,
         };
 
