@@ -178,6 +178,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         LoopSeconds = Option(args, "--loop", 0),
         LoopColdSeconds = Option(args, "--loop-cold", 0),
         NoDigest = args.Contains("--no-digest"),
+        AllocTypes = args.Contains("--alloc-types"),
         MaxReads = Option(args, "--max-reads", 0),
         SegmentCacheBytes = Option(args, "--segment-cache-mb", 0) * (1L << 20),
         KeepHandles = args.Contains("--keep-handles"),

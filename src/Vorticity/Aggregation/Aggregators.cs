@@ -120,7 +120,7 @@ internal static class Aggregators
     {
         int bits = QuantileSketch.BitsFor(relativeError);
         return new Sym<Distribution?>(new AggregateNode<Distribution?>(
-            AggregateKind.Distribution, shape, Distributed<Distribution?>(shape, bits, static d => d), null,
+            AggregateKind.Distribution, shape, Distributed<Distribution?>(shape, bits, static s => s is null ? null : new Distribution(s)), null,
             parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{BitsParameter}{bits}")));
     }
 
@@ -158,11 +158,11 @@ internal static class Aggregators
 
         int bits = QuantileSketch.BitsFor(relativeError);
         return new Sym<double?>(new AggregateNode<double?>(
-            AggregateKind.Quantile, shape, Distributed<double?>(shape, bits, d => d?.Quantile(q)), null,
+            AggregateKind.Quantile, shape, Distributed<double?>(shape, bits, s => s?.Quantile(q)), null,
             parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"q={q:R};{BitsParameter}{bits}")));
     }
 
-    private static Func<ScanSource?, AggregateSlot<T>> Distributed<T>(ColumnShape shape, int bits, Func<Distribution?, T> final) =>
+    private static Func<ScanSource?, AggregateSlot<T>> Distributed<T>(ColumnShape shape, int bits, Func<QuantileSketch?, T> final) =>
         shape.Kind != StorageKind.Primitive
             ? throw shape.Unsupported("a distribution")
             : shape.PType switch

@@ -128,6 +128,9 @@ internal static partial class PathsBench
         /// </summary>
         internal bool NoDigest { get; init; }
 
+        /// <summary>Whether each question's warm asks are sampled for what they allocate, by type (<c>--alloc-types</c>).</summary>
+        internal bool AllocTypes { get; init; }
+
         /// <summary>The reads each session keeps in flight at most (<see cref="VortexSessionOptions.MaxConcurrentReads"/>); zero for the session's default.</summary>
         internal int MaxReads { get; init; }
 
@@ -548,6 +551,21 @@ internal static partial class PathsBench
             }
 
             warm.Sort((a, b) => a.Milliseconds.CompareTo(b.Milliseconds));
+
+            // --alloc-types: what a warm ask allocates, by type, over twenty more.
+            if (settings.AllocTypes)
+            {
+                using AllocationSampler sampler = new AllocationSampler();
+                for (int ask = 0; ask < 20; ask++)
+                {
+                    await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
+                }
+
+                foreach (string line in sampler.Lines(20, 15))
+                {
+                    Console.WriteLine(line);
+                }
+            }
 
             // --explain: what each object reads, once warm.
             if (settings.Explain && question.Ask(dataset, options) is { Explain: { } explain } asked)
