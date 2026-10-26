@@ -683,7 +683,7 @@ them.
 |---|---|---|
 | appends | the data, once | 3 to 5 PUT each: the object, the commit, the pages of the tree; how often is the application's choice |
 | compaction: level 0's exit and the leveled merges | each row rewritten 2 to 4 times: 4 to 8 MB/s written, a little less read | under one PUT and one GET a second, in parts of 16 to 64 MB |
-| synopses in the objects | about 187 MB a day, 0.1 % of the data | within the objects' parts |
+| synopses in the objects | about 240 MB a day under objects of an hour, 0.14 % of the data; about 1.1 GB under objects of 64 MiB (section 10.2) | within the objects' parts |
 | rollups | a few MB a column and a run of 64 objects | a PUT a rollup, once the objects of its run stand |
 | listings | none: the commit tree is the catalog | none |
 
@@ -706,21 +706,38 @@ At the design rate that is 0.011 of a core *(computed)*.
 
 ### 10.2 Sizes
 
-| structure | in an object, a day | coarser grains, a day | 13 months |
-|---|---|---|---|
-| column sheets | 0.08 MB | — | 0.03 GB |
-| counts, sketches | 51 MB | 2.7 MB | 21 GB |
-| block statistics | 129 MB | — | 51 GB |
-| where each value lives | 6.6 MB | — | 2.6 GB |
-| learned partials | what is asked | what is asked | 2 GiB budget |
-| **total** | **~187 MB** | **~3 MB** | **~75 GB** |
+The synopses grow two ways. The sheets, and the sketches the counts keep of the columns of few values,
+cost each object about the same whatever its rows: they follow the objects a day. The counts, the
+block statistics and the index of where values live follow the values and the blocks, which the rows
+set. A day of the reference table clustered by emitter *(computed from the units measured below)*:
 
-The synopses weigh 0.1 % of the data. The design this one replaces kept 7.7 GB a day of synopsis
-tables for this table, 4.4 % of the data and about 3 TB in 13 months *(measured)*. For a petabyte of
-data, fifteen such tables kept 13 months, the synopses weigh about 1.1 TB on the store, of which the
-local cache's working set is about 60 GB, the last 30 days and the coarser grains; the sheets and
-directories take under 1 GB of memory *(computed)*. The coarser grains were computed for monthly files of
-days and months, which rollups replaced.
+| structure | objects of an hour, 24 a day | objects of 64 MiB, ~2 600 a day | a unit, measured | the unit first reckoned |
+|---|---|---|---|---|
+| column sheets | 1.8 MB | 98 MB | a sheet 3.4 to 6.7 KB, 0.72 to 0.92 of its formula | 4.5 KB and 1.125 bytes a distinct value |
+| counts | 68 MB | 70 MB | an entry 67 to 69 bytes | 52 to 61 bytes |
+| counts' sketches | ~36 MB | ~770 MB | a sketch 0.3 to 0.45 KB at the bench's scale | 0.5 to 2 KB a quantile sketch, 1.5 KB a distinct one |
+| block statistics | 129 MB, 180 MB under a block value of the hour | the same | a block 565 to 833 bytes at the bench's scale, 369 at the design's | 200 bytes |
+| where each value lives | 6.6 MB | the same | a value 7.0 bytes | 6.2 bytes |
+| learned partials | what is asked | what is asked | | |
+| **total** | **~240 MB, 0.14 % of the data** | **~1.1 GB, 0.6 %** | | |
+
+The units are those of `vortex-queries --micro columns`, 4 hours of the reference requests at 50 and at
+200 rows a second clustered by service, each sheet weighed against its formula over the object's own
+distinct values *(measured)*. There a block gathers the runs of the small services, whose endpoints and
+hosts it lists, 833 bytes at 50 rows a second and 565 at 200; at the design's rate a block holds one
+emitter's hour, and the 369 bytes measured on the design's requests hold. The sketches are smaller at
+the bench's scale, where an entry holds fewer rows. Under objects of 64 MiB, the compaction's bound when
+the application declares no object size, each object keeps the sheets of its eleven columns, about
+38 KB, and the sketches of its 49 entries of few values with the distinct sketches of three wide columns
+attached to 43 of them, about 300 KB: the synopses then weigh four to five times what objects of an hour
+make them weigh. A dataset at the design's rate declares objects of the size its clustering value cuts,
+an hour's (`ClusteringOptions.ObjectBytes`).
+
+Under objects of an hour the synopses weigh 0.14 % of the data, about 95 GB in 13 months. The design
+this one replaces kept 7.7 GB a day of synopsis tables for this table, 4.4 % of the data and about 3 TB
+in 13 months *(measured)*. For a petabyte of data, fifteen such tables kept 13 months, the synopses
+weigh about 1.4 TB on the store, of which the local cache's working set is about 60 GB, the last 30
+days and the rollups; the sheets and directories take under 1 GB of memory *(computed)*.
 
 ### 10.3 Index kinds
 

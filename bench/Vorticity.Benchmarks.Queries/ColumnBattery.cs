@@ -135,6 +135,7 @@ internal static class ColumnBattery
         long rows = 0;
         int fields = EmitterRequest.Schema.Count;
         double[] columnBytes = new double[fields];
+        SortedDictionary<string, long> synopses = new SortedDictionary<string, long>(StringComparer.Ordinal);
         await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, default))
         {
             objects++;
@@ -148,6 +149,24 @@ internal static class ColumnBattery
                     columnBytes[field] += perColumn[field];
                 }
             }
+
+            if (held.Entry.Contents is { } contents)
+            {
+                Add("1 column sheets", contents.Sheets);
+                Add("2 counts", contents.Counts);
+                Add("3 counts' sketches", contents.Sketches);
+                Add("4 block table", contents.Blocks);
+                Add("5 block statistics", contents.BlockStats);
+                Add("6 where values live", contents.Wheres);
+            }
+        }
+
+        void Add(string kind, IReadOnlyList<(int Field, Vorticity.Indexes.IndexSegment Region)> regions)
+        {
+            foreach ((_, Vorticity.Indexes.IndexSegment region) in regions)
+            {
+                synopses[kind] = synopses.GetValueOrDefault(kind) + region.Length;
+            }
         }
 
         Dictionary<string, double> perRow = [];
@@ -159,7 +178,76 @@ internal static class ColumnBattery
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"{name}: {objects} objects, {keeping} with a table of contents, {bytes / 1e6:F2} MB, {bytes / (double)Math.Max(1, rows):F2} bytes a row"));
+
+        // What each synopsis weighs, by the regions the tables of contents name: an object's, and a million rows'.
+        foreach ((string kind, long held) in synopses)
+        {
+            Console.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"  {kind[2..],-20} {held / 1e3,10:F1} KB, {held / 1e3 / Math.Max(1, objects),9:F1} KB an object, {held * 1e6 / Math.Max(1, rows) / 1e3,9:F1} KB a million rows"));
+        }
+
+        await UnitsAsync(dataset, synopses);
         return new Layout(objects, bytes, perRow);
+    }
+
+    /// <summary>
+    /// What a unit of each synopsis weighs, against the design's figures (22 §5): a sheet, against its formula over the
+    /// object's distinct values; an entry of the counts, and a sketch; a block's statistics over every column; a value of
+    /// the index of where values live.
+    /// </summary>
+    private static async Task UnitsAsync(VortexDataset dataset, SortedDictionary<string, long> synopses)
+    {
+        int fields = EmitterRequest.Schema.Count;
+        int[] all = [.. Enumerable.Range(0, fields)];
+        double sheetFormula = 0;
+        long sheets = 0;
+        long entries = 0;
+        long sketched = 0;
+        long blocks = 0;
+        long values = 0;
+        await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, default))
+        {
+            if (held.Entry.Contents is not { } contents)
+            {
+                continue;
+            }
+
+            // A sheet: 4.5 KB and 1.125 bytes a distinct value where the values repeat, the distinct-count sketch of 1.5 KB alone otherwise.
+            foreach (Vorticity.Indexes.ColumnSheet? sheet in await dataset.ReadSheetsAsync(held.Entry, all, default))
+            {
+                if (sheet is not null)
+                {
+                    sheets++;
+                    sheetFormula += sheet.Filter is null ? 1_536 : 4_608 + (1.125 * sheet.Distinct);
+                }
+            }
+
+            foreach ((int field, _) in contents.Counts)
+            {
+                (Vorticity.Indexes.ColumnCounts? counts, Vorticity.Indexes.ColumnSketches? sketches) = await dataset.ReadCountsAsync(held.Entry, field, sketches: true, default);
+                entries += counts?.Entries ?? 0;
+                sketched += sketches is null ? 0 : (long)sketches.Entries * (sketches.Measures + sketches.Attached);
+            }
+
+            // Every column's statistics describe the object's blocks alike: their count is any one's.
+            int objectBlocks = 0;
+            foreach ((Vorticity.Indexes.ColumnWhere? where, Vorticity.Indexes.ColumnBlocks? columnBlocks) in await dataset.ReadBlockColumnsAsync(held.Entry, all, stats: true, default))
+            {
+                values += where?.Values.Length ?? 0;
+                objectBlocks = Math.Max(objectBlocks, columnBlocks?.Count ?? 0);
+            }
+
+            blocks += objectBlocks;
+        }
+
+        Console.WriteLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"  a sheet {synopses.GetValueOrDefault("1 column sheets") / (double)Math.Max(1, sheets):F0} bytes, by its formula {sheetFormula / Math.Max(1, sheets):F0}; " +
+            $"a counts entry {synopses.GetValueOrDefault("2 counts") / (double)Math.Max(1, entries):F1} bytes over {entries:N0}; " +
+            $"a sketch {synopses.GetValueOrDefault("3 counts' sketches") / (double)Math.Max(1, sketched):F0} bytes over {sketched:N0}; " +
+            $"a block {(synopses.GetValueOrDefault("5 block statistics") + synopses.GetValueOrDefault("4 block table")) / (double)Math.Max(1, blocks):F0} bytes over {blocks:N0}; " +
+            $"a value where it lives {synopses.GetValueOrDefault("6 where values live") / (double)Math.Max(1, values):F1} bytes over {values:N0}"));
     }
 
     /// <summary>

@@ -59,8 +59,14 @@ column, `ClusteringValue.Column`, or a function of it that never decreases: `Tru
 for the start of an instant's day, `Bucket(width)` for an instant's or a number's bucket. Above level 0
 no object holds rows of two values, so the rows of a day, or of whatever the value is, lie in objects
 of their own. Its `ObjectBytes` is the size an object aims at, past which a job starts another without
-splitting a key. Either works alone. The library knows nothing of what a value means: to keep each
-tenant's rows apart, lead the key with the tenant's column and cluster by `Column`.
+splitting a key; with none, compaction caps an object at 64 MiB. Either works alone. The library knows
+nothing of what a value means: to keep each tenant's rows apart, lead the key with the tenant's column
+and cluster by `Column`.
+
+The size counts at high rates. An object keeps a few hundred kilobytes of synopses whatever its rows,
+its columns' sheets and the sketches of its counts: at 50 000 rows a second, objects of 64 MiB make some
+2 600 objects a day and about 1.1 GB of synopses, where objects of an hour make 24 and about 240 MB. Set
+`ObjectBytes` to what a clustering value holds when its objects would otherwise be cut far smaller.
 
 ```csharp
 await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
