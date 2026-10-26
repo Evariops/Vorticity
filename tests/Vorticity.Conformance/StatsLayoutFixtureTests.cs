@@ -36,7 +36,6 @@ using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.Conformance.Corpus;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;

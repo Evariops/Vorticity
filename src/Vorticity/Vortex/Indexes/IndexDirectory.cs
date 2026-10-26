@@ -243,7 +243,7 @@ internal sealed record IndexDirectory(
     /// <see cref="ToBytes()"/>, noting in <paramref name="located"/>, when it is given, where the message of each entry of a
     /// locating index lies in the bytes (<see cref="IndexKinds.Locates"/>): what a table of contents names, so that a lookup
     /// reads the entries on its columns alone (<see cref="TryParseEntry"/>), where the whole directory of a day's object held
-    /// every chunk of its synopsis tables.
+    /// every chunk of the synopsis tables it carried then.
     /// </summary>
     /// <param name="located">Where each such entry's message lies: its start in the bytes, and its length.</param>
     /// <returns>The segment's bytes, the same with or without <paramref name="located"/>.</returns>

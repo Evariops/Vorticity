@@ -14,7 +14,6 @@ using System.Threading.Tasks;
 using Vorticity.Conformance.Comparison;
 using Vorticity.Conformance.Corpus;
 using Vorticity.Conformance.Sidecar;
-using Vorticity.File;
 using Xunit;
 
 namespace Vorticity.Conformance;

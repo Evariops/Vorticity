@@ -2,7 +2,6 @@
 // usable oracle and a useless one. Every mismatch carries (file, column path, row) and both
 // renderings, and the log stops collecting after a cap so one broken decoder does not print a
 // million lines and hide the second broken decoder underneath.
-using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;

@@ -20,8 +20,8 @@ public partial record struct LogRow(DateTimeOffset At, string Service, Variant A
 public partial record struct RouteCount(string? Route, long Count);
 
 /// <summary>
-/// Variant columns: a value walked by key, read as stored or converted, and, in a dataset of periods, the keys
-/// its objects shred asked as columns are, from the synopses.
+/// Variant columns: a value walked by key, read as stored or converted, and, in a dataset clustered by day, the keys
+/// its objects shred asked as columns are, from their typed columns.
 /// </summary>
 internal static class Variants
 {
@@ -42,7 +42,7 @@ internal static class Variants
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, LogRow.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(LogRow.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
         });
 
         // Three days of a line every five seconds from three routes, one in ten an error, appended ten minutes at a time.
@@ -66,18 +66,15 @@ internal static class Variants
         }
 
         DateTimeOffset to = Start.AddDays(2);
-        foreach (bool synopses in new[] { true, false })
-        {
-            var routes = dataset.Scan<LogRow>().With(new ScanOptions { UseSynopses = synopses })
-                .Where(r => r.At < to && r.Attributes["http.response.status_code"].AsInt64() >= 500)
-                .GroupBy(r => r.Attributes["http.route"].AsString())
-                .Select(g => (g.Key, g.Count()));
-            List<RouteCount> counts = await routes.As<RouteCount>().ToRecordsAsync().ToListAsync();
-            Console.WriteLine(
-                $"errors by route over two days, synopses {(synopses ? "on" : "off")}: " +
-                $"{string.Join(", ", counts.OrderBy(c => c.Route, StringComparer.Ordinal).Select(c => $"{c.Route} {c.Count}"))}; " +
-                $"{routes.Metrics.SynopsisRows} table rows, {routes.Metrics.Rows} rows read");
-        }
+        var routes = dataset.Scan<LogRow>()
+            .Where(r => r.At < to && r.Attributes["http.response.status_code"].AsInt64() >= 500)
+            .GroupBy(r => r.Attributes["http.route"].AsString())
+            .Select(g => (g.Key, g.Count()));
+        List<RouteCount> counts = await routes.As<RouteCount>().ToRecordsAsync().ToListAsync();
+        Console.WriteLine(
+            $"errors by route over two days: " +
+            $"{string.Join(", ", counts.OrderBy(c => c.Route, StringComparer.Ordinal).Select(c => $"{c.Route} {c.Count}"))}; " +
+            $"{routes.Metrics.Rows} rows read");
 
         // The same kind of question as text, as a tool that learns its columns at run time asks it.
         Scan perService = dataset.Scan()

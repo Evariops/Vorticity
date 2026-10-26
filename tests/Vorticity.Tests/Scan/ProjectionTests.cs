@@ -9,9 +9,6 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;

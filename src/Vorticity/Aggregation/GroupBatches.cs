@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -34,13 +33,14 @@ internal sealed class AggregationQuery : ResultQuery
 
     private AggregationQuery(
         AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, (VortexSchema Record, Type Type)? typed, long skip, long take, VortexExpr? rows,
-        GroupOperator[] operators)
+        GroupOperator[] operators, bool exports = false)
     {
         Host = host;
         Plan = plan;
         Nodes = nodes;
         Keys = keys;
         _typed = typed;
+        Exports = exports;
         Columns = NewColumns();
         Skip = skip;
         Take = take;
@@ -51,6 +51,46 @@ internal sealed class AggregationQuery : ResultQuery
 
     /// <summary>The conjuncts of the filters on groups that name only the key: they filter the rows.</summary>
     internal VortexExpr? RowFilter { get; }
+
+    /// <summary>
+    /// Whether the query gives its groups' states rather than their answers: a part's (<see cref="Partial"/>), whose columns
+    /// are those of rows of states (<see cref="AggregationPartials.Columns"/>), and which the file statistics settle nothing of.
+    /// </summary>
+    internal bool Exports { get; }
+
+    /// <summary>
+    /// The same query giving its groups' states, a part's: no operator on its groups nor window, which the merge applies,
+    /// its columns those of rows of states.
+    /// </summary>
+    /// <exception cref="NotSupportedException">A state does not answer one of its aggregates whole.</exception>
+    /// <summary>A query of <paramref name="plan"/>'s groups' states by <paramref name="keys"/> over <paramref name="host"/>: a learned family's (<see cref="LearnedFamily"/>).</summary>
+    internal static AggregationQuery StatesOf(AggregationHost host, AggregationPlan plan, ColumnShape[] keys) =>
+        new AggregationQuery(host, plan, [], keys, null, 0, long.MaxValue, null, [], exports: true);
+
+    internal AggregationQuery Partial()
+    {
+        AggregationPartials.Check(Plan);
+        return new AggregationQuery(Host, Plan, Nodes, Keys, null, 0, long.MaxValue, RowFilter, [], exports: true);
+    }
+
+    /// <summary>
+    /// The same query giving its groups' states over <paramref name="host"/>, a range an estimate draws, through a plan of its
+    /// own: the ranges an estimate reads at once each run theirs, and a plan keeps what its last run did.
+    /// </summary>
+    internal AggregationQuery Ranged(AggregationHost host)
+    {
+        SymNode[] results = Array.ConvertAll(Nodes, static node => (SymNode)node);
+        AggregationPlan plan = new AggregationPlan(results, Keys);
+        if (plan.Aggregates.Length != Plan.Aggregates.Length)
+        {
+            throw new InvalidOperationException("A query whose operators read aggregates of their own runs no range of an estimate.");
+        }
+
+        return new AggregationQuery(host, plan, Nodes, Keys, null, 0, long.MaxValue, RowFilter, [], exports: true);
+    }
+
+    /// <summary>The same query over <paramref name="host"/>, a merge of its parts' partials, which applied its filter on the rows.</summary>
+    internal AggregationQuery Merged(PartialsHost host) => new AggregationQuery(host, Plan, Nodes, Keys, _typed, Skip, Take, null, Operators);
 
     /// <summary>
     /// The first operator on groups that reads a column of a chosen row, before which those columns
@@ -143,6 +183,11 @@ internal sealed class AggregationQuery : ResultQuery
     /// </summary>
     internal ResultColumn[] NewColumns()
     {
+        if (Exports)
+        {
+            return AggregationPartials.Columns(Plan, Keys);
+        }
+
         if (_typed is not { } typed)
         {
             return Natural(Nodes, Keys);
@@ -659,7 +704,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>
     /// The nodes an arena of a result's batches starts with room for: its struct and twice its columns, a column's and
     /// its validity's or its views'. A record is a hundred bytes or so, and sixty-four of them were a sixth of what a
-    /// warm group by answered from the tables allocated; a result of more columns grows its arena once.
+    /// warm group by answered from the synopsis tables of the time allocated; a result of more columns grows its arena once.
     /// </summary>
     internal static int ResultNodes(int columns) => Math.Max(4, 1 + (2 * columns));
 

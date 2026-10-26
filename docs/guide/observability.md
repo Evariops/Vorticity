@@ -86,8 +86,8 @@ The connections themselves are the platform's: `System.Net.Http` reports the con
 their durations, and the requests and their durations, which OpenTelemetry collects as it does for
 any other client.
 
-The package Vorticity.Dataset adds ten instruments to the same meter, the first time a dataset
-commits, compacts or vacuums:
+The package Vorticity.Dataset adds seven instruments to the same meter, the first time a dataset
+commits, compacts, vacuums or reads:
 
 ```
 instrument vortex.dataset.commits ({commit}): Commits of datasets, by operation and outcome.
@@ -96,16 +96,8 @@ instrument vortex.dataset.compactions ({compaction}): Compactions of datasets, b
 instrument vortex.dataset.compaction.bytes_read (By): Bytes the compactions that ran to their commit read, by trigger.
 instrument vortex.dataset.compaction.bytes_written (By): Bytes the compactions that ran to their commit wrote, by trigger.
 instrument vortex.dataset.vacuum.objects_deleted ({object}): Objects vacuums deleted.
-instrument vortex.dataset.lateness (s): How far behind the newest instant a handle appended the oldest row of each append to a dataset of periods came.
-instrument vortex.dataset.rows_past_horizon ({row}): Rows a dataset by periods took later than its lateness horizon, kept in the late level beside their period.
-instrument vortex.dataset.partitions ({partition}): The values of its partition columns a dataset holds rows of, at each plan of its compaction.
-instrument vortex.dataset.period.load (By/s): The bytes per second of data time of each period a seal wrote, with the period length that load calls for.
+instrument vortex.dataset.clustering.avoidable_bytes (By): Bytes the objects read as rows under a filter would have been spared by a clustering of the filter's column, by column (ClusteringAdvice).
 ```
-
-The last four concern datasets of periods
-([datasets.md](datasets.md)): how late rows come against the declared horizon, the rows past it, the
-partitions a dataset holds, which no bound limits over its life, and the load each sealed period
-weighed.
 
 A commit is tagged with `vortex.operation` (`create`, `append`, `import`, `replace`, `delete`, `update`,
 `schema`, `index`, `compaction`, `repack`, `rekey`) and `vortex.outcome` (`applied`, `nothing_to_do`,
@@ -125,9 +117,14 @@ total vortex.dataset.compactions = 1
 
 A dry run deletes nothing and counts nothing. No tag of these counters names a dataset: a process can
 hold a hundred thousand of them, and a tag per location would make a series per dataset. The
-location is on the activities instead. A dataset's compaction lag has no counter, since the library
-keeps no list of the handles a process holds, so export `VortexDataset.Lag` for the datasets you care
-about.
+location is on the activities instead. The clustering counter is tagged with `vortex.column`, a
+column a filter read, a set as small as a schema. It adds the bytes each object read as rows whole
+under that filter would have been spared had the dataset been clustered by the column, the figure
+`VortexDataset.RecommendClustering` ranks for one handle (see
+[the key and the clustering](datasets.md#the-key-and-the-clustering)). Summed over the processes, it
+says which column the questions keep paying for. A dataset's compaction lag has no counter, since
+the library keeps no list of the handles a process holds, so export `VortexDataset.Lag` for the
+datasets you care about.
 
 ## The activities
 
@@ -148,16 +145,20 @@ whatever activity is current when the scan or the writer starts, so a request's 
 scans it ran. `ExplainAsync` reads statistics and zone maps without starting one.
 
 A dataset's commit, compaction and vacuum get one activity each, `vortex.dataset.commit` over all of
-a commit's attempts, `vortex.dataset.compaction`, whose commit is its child, and
-`vortex.dataset.vacuum`. A handle opened at a location tags them with it:
+a commit's attempts, `vortex.dataset.compaction`, whose passes and commit are its children, and
+`vortex.dataset.vacuum`. A compaction's passes are `vortex.dataset.compaction.write`, which reads the
+inputs' rows and writes the outputs, and before it, for a job that writes key slices over a variant
+column, `vortex.dataset.compaction.plan`, which counts each clustering value's paths. A handle opened
+at a location tags the others with it:
 
 ```
 activity vortex.dataset.commit [Unset]: vortex.operation=create, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=1
 activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=2
 activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=3
 activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=4
+activity vortex.dataset.compaction.write [Unset]: 
 activity vortex.dataset.commit [Unset]: vortex.operation=compaction, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=5
-activity vortex.dataset.compaction [Unset]: vortex.trigger=level_zero_ceiling, vortex.level.from=0, vortex.level.to=1, vortex.objects_in=3, vortex.bytes_in=10725, vortex.location=observed-dataset, vortex.outcome=applied, vortex.objects_out=1, vortex.bytes_out=2956, vortex.rows=6, vortex.version=5
+activity vortex.dataset.compaction [Unset]: vortex.trigger=level_zero_ceiling, vortex.level.from=0, vortex.level.to=1, vortex.objects_in=3, vortex.bytes_in=10725, vortex.location=observed-dataset, vortex.outcome=applied, vortex.objects_out=1, vortex.objects_moved=0, vortex.bytes_out=2956, vortex.rows=6, vortex.version=5
 activity vortex.dataset.vacuum [Unset]: vortex.dry_run=True, vortex.location=observed-dataset, vortex.deleted=0, vortex.young=0, vortex.locked=0, vortex.retained=5
 ```
 

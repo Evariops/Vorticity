@@ -11,8 +11,8 @@ namespace Vorticity.Dataset;
 /// An object the sink streams goes to the store before its length is known. Without a bound, a service
 /// sizes its parts for an unknown length, and its parts then reach so far: about a terabyte on Amazon
 /// S3, whose parts may grow, 168 GB on Cloudflare R2, whose parts are all of one size, and 106 GB on
-/// Scaleway, which takes a thousand parts. A period of a day at a few thousand rows a second is one
-/// object past that, which would fail at its end, after its upload, every time. With a bound, the store
+/// Scaleway, which takes a thousand parts. A day of rows at a few thousand a second, in one object, is
+/// past that, which would fail at its end, after its upload, every time. With a bound, the store
 /// sizes its parts from it at the first, or holds the object on disk first, or refuses at once.
 /// </para>
 /// <para>
@@ -24,8 +24,8 @@ namespace Vorticity.Dataset;
 internal static class ObjectBound
 {
     /// <summary>
-    /// The most bytes a rewrite writes for each byte it reads. On the lifecycle bench's five scenes
-    /// (periods of a day and of an hour, with and without late rows, leveled in order and under late
+    /// The most bytes a rewrite writes for each byte it reads. On the lifecycle bench's five scenes, measured when the
+    /// library compacted by periods too (periods of a day and of an hour, with and without late rows, leveled in order and under late
     /// rows), a job wrote 1.024 bytes a byte at worst, a merge of neighbours 1.016 and a seal 1.000.
     /// </summary>
     internal const double OutPerIn = 1.03;

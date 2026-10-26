@@ -6,7 +6,6 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;

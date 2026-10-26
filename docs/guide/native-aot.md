@@ -85,7 +85,7 @@ of ten thousand. A native binary pays neither cost.
   want, as long as every call site names a concrete record type the compiler can see.
 * A timestamp column with a named time zone resolves it once, at open, with
   `TimeZoneInfo.FindSystemTimeZoneById`. A host without time zone data, such as a minimal container
-  image, cannot resolve it, and the column then binds only as its `long` storage, not as
-  `DateTimeOffset`.
+  image, cannot resolve it, and the column then reads only as its `long` storage, not as
+  `DateTimeOffset`. Writing a `DateTimeOffset` to it needs no zone: the instant is stored as it is.
 * Trimming and AOT are separate switches. `PublishTrimmed` alone already removes what nothing
   reaches, and is worth having where AOT is not an option.

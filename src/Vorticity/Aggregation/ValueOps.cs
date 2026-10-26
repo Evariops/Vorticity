@@ -54,6 +54,13 @@ internal interface IValueOp<TValue, TState>
     /// time, to the same bits; false for an op no persisted state feeds, which no batch of states asks.
     /// </summary>
     bool FoldState(ref TState state, in StateInput input, int row);
+
+    /// <summary>
+    /// Writes <paramref name="state"/> into a group's words of its measure (<see cref="MeasureLayout"/>), as a row of
+    /// states holds it, which <see cref="FoldState"/> folds back to the same state; false for an op whose states no row
+    /// of states holds, which no batch of states asks either.
+    /// </summary>
+    bool ExportState(in TState state, Span<long> words, bool floats) => false;
 }
 
 /// <summary>A running sum at the widened type, and how many values it holds.</summary>
@@ -125,6 +132,8 @@ internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
         state.Count += input.Values[row];
         return true;
     }
+
+    public bool ExportState(in SumState<Int128> state, Span<long> words, bool floats) => StateExports.Sum(words, state.Sum, state.Count);
 }
 
 /// <summary>
@@ -185,6 +194,8 @@ internal readonly struct NarrowSignedSum<TValue> : IValueOp<TValue, SumState<lon
         state.Count += input.Values[row];
         return true;
     }
+
+    public bool ExportState(in SumState<long> state, Span<long> words, bool floats) => StateExports.Sum(words, state.Sum, state.Count);
 }
 
 /// <summary>A sum of unsigned integers in 64 bits, for a column whose statistics prove its rows times its largest value stay below 2^64.</summary>
@@ -238,6 +249,8 @@ internal readonly struct NarrowUnsignedSum<TValue> : IValueOp<TValue, SumState<u
         state.Count += input.Values[row];
         return true;
     }
+
+    public bool ExportState(in SumState<ulong> state, Span<long> words, bool floats) => StateExports.Sum(words, (UInt128)state.Sum, state.Count);
 }
 
 /// <summary>A sum of unsigned integers in 128 bits, exact whatever the order, as <see cref="SignedSum{TValue}"/> is.</summary>
@@ -291,6 +304,8 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
         state.Count += input.Values[row];
         return true;
     }
+
+    public bool ExportState(in SumState<UInt128> state, Span<long> words, bool floats) => StateExports.Sum(words, state.Sum, state.Count);
 }
 
 /// <summary>
@@ -327,6 +342,8 @@ internal readonly struct NarrowSignedTotal<TValue> : IValueOp<TValue, long>
         state += long.CreateChecked(input.IntegerSum(row));
         return true;
     }
+
+    public bool ExportState(in long state, Span<long> words, bool floats) => StateExports.Total(words, state);
 }
 
 /// <summary>A sum of signed integers in 128 bits that no mean reads: the total alone, as <see cref="SignedSum{TValue}"/> without its count.</summary>
@@ -359,6 +376,8 @@ internal readonly struct SignedTotal<TValue> : IValueOp<TValue, Int128>
         state += input.IntegerSum(row);
         return true;
     }
+
+    public bool ExportState(in Int128 state, Span<long> words, bool floats) => StateExports.Total(words, state);
 }
 
 /// <summary>A sum of unsigned integers in 64 bits that no mean reads, as <see cref="NarrowUnsignedSum{TValue}"/> without its count.</summary>
@@ -391,6 +410,8 @@ internal readonly struct NarrowUnsignedTotal<TValue> : IValueOp<TValue, ulong>
         state += ulong.CreateChecked(input.UnsignedSum(row));
         return true;
     }
+
+    public bool ExportState(in ulong state, Span<long> words, bool floats) => StateExports.Total(words, (UInt128)state);
 }
 
 /// <summary>A sum of unsigned integers in 128 bits that no mean reads, as <see cref="UnsignedSum{TValue}"/> without its count.</summary>
@@ -423,6 +444,8 @@ internal readonly struct UnsignedTotal<TValue> : IValueOp<TValue, UInt128>
         state += input.UnsignedSum(row);
         return true;
     }
+
+    public bool ExportState(in UInt128 state, Span<long> words, bool floats) => StateExports.Total(words, state);
 }
 
 /// <summary>A sum of unscaled decimals in 128 bits, checked.</summary>
@@ -694,6 +717,9 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
 
         return true;
     }
+
+    public bool ExportState(in ExtremeState<TValue> state, Span<long> words, bool floats) =>
+        !state.Has || StateExports.Extreme(words, floats, greatest: false, state.Value);
 }
 
 /// <summary>The largest value, NaN skipped.</summary>
@@ -767,6 +793,9 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
 
         return true;
     }
+
+    public bool ExportState(in ExtremeState<TValue> state, Span<long> words, bool floats) =>
+        !state.Has || StateExports.Extreme(words, floats, greatest: true, state.Value);
 }
 
 /// <summary>
@@ -824,6 +853,9 @@ internal readonly struct SeededMinOp<TValue> : IValueOp<TValue, TValue>
 
         return true;
     }
+
+    /// <remarks>A state still at its seed is no value, which its slot leaves out; a float's NaN reads as none either way.</remarks>
+    public bool ExportState(in TValue state, Span<long> words, bool floats) => StateExports.Extreme(words, floats, greatest: false, state);
 
     /// <remarks>A state that saw nothing holds the seed, which moves no other.</remarks>
     public void Merge(ref TValue into, in TValue other) => Add(ref into, other);
@@ -886,6 +918,9 @@ internal readonly struct SeededMaxOp<TValue> : IValueOp<TValue, TValue>
 
         return true;
     }
+
+    /// <remarks>A state still at its seed is no value, which its slot leaves out; a float's NaN reads as none either way.</remarks>
+    public bool ExportState(in TValue state, Span<long> words, bool floats) => StateExports.Extreme(words, floats, greatest: true, state);
 
     /// <remarks>A state that saw nothing holds the seed, which moves no other.</remarks>
     public void Merge(ref TValue into, in TValue other) => Add(ref into, other);

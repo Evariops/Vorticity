@@ -32,7 +32,7 @@ public sealed partial class IdentifierPostingsTests
         {
             ClusteringKey = [nameof(Request.At)],
             Identifiers = [nameof(Request.RequestId)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
         }, Ct);
         Random random = new Random(19);
         List<Request> appended = [];
@@ -68,7 +68,7 @@ public sealed partial class IdentifierPostingsTests
 
         // What the postings of a sealed hour weigh a row, the id 32 hexadecimal digits: a gap of about 12
         // bits and a block number, here always the hour's one block. A sorted run took 19.3 bytes.
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
         {
             ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
             await using ObjectLease lease = await dataset.RentAsync(entry, Ct);
@@ -100,7 +100,7 @@ public sealed partial class IdentifierPostingsTests
             Session = session,
             ClusteringKey = [nameof(Request.At)],
             Identifiers = [nameof(Request.RequestId)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
         }, Ct);
         Random random = new Random(23);
         List<Request> appended = [];
@@ -119,12 +119,12 @@ public sealed partial class IdentifierPostingsTests
         }
 
         List<ObjectEntry> hours = [];
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
         {
             hours.Add(ObjectEntry.FromBytes(leaf.Value.Span));
         }
 
-        Assert.Equal(2, hours.Count);
+        Assert.Equal(3, hours.Count);
         Request needle = appended[1_234];
         VortexExpr filter = VortexExpr.Parse($"RequestId = '{needle.RequestId}'");
         inner.Latency = TimeSpan.FromMilliseconds(20);
@@ -178,7 +178,7 @@ public sealed partial class IdentifierPostingsTests
                 Session = session,
                 ClusteringKey = [nameof(Request.At)],
                 Identifiers = [nameof(Request.RequestId)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
                 Write = paged ? new VortexWriteOptions { Fences = new global::Vorticity.Writing.FenceShape(InlineFences: 1, PageBytes: 512) } : VortexWriteOptions.Default,
             }, Ct);
             // The same two hours and a quarter; in pages, enough rows that a run of an hour's postings takes more
@@ -202,12 +202,12 @@ public sealed partial class IdentifierPostingsTests
             }
 
             List<ObjectEntry> hours = [];
-            await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+            await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
             {
                 hours.Add(ObjectEntry.FromBytes(leaf.Value.Span));
             }
 
-            Assert.Equal(2, hours.Count);
+            Assert.Equal(3, hours.Count);
             Request needle = appended[2_345];
             VortexExpr filter = VortexExpr.Parse($"RequestId = '{needle.RequestId}'");
             inner.Latency = TimeSpan.FromMilliseconds(20);
@@ -242,7 +242,7 @@ public sealed partial class IdentifierPostingsTests
             HashSet<string> data = new HashSet<string>(StringComparer.Ordinal);
             foreach (ObjectEntry hour in hours)
             {
-                foreach (IndexSegment region in SynopsisContents.From(hour.Synopsis.Span)!.Declared())
+                foreach (IndexSegment region in ObjectContents.From(hour.TableOfContents.Span)!.Declared())
                 {
                     declared.Add(SynopsisCache.NameOf(hour.Uid, region));
                 }
@@ -255,7 +255,8 @@ public sealed partial class IdentifierPostingsTests
 
                 IndexDirectory index = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
                 IndexEntry postings = index.Entries.Single(e => e.Kind == IndexKinds.PostingsHashed);
-                Assert.Equal(paged, postings.Runs.Any(run => KeyRunOptions.IsPaged(run.OptionBytes)));
+                // A run in pages holds more segments of 16 384 entries than its one fence inline: a full hour's, not the quarter past.
+                Assert.Equal(paged && hour.Rows > 16_384, postings.Runs.Any(run => KeyRunOptions.IsPaged(run.OptionBytes)));
             }
 
             session.Options.SynopsisCache!.Flush();
@@ -288,7 +289,7 @@ public sealed partial class IdentifierPostingsTests
             Session = session,
             ClusteringKey = [nameof(Visit.At)],
             Identifiers = ["Attributes['user'].AsString()"],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
         }, Ct);
         Random random = new Random(31);
         List<string> users = [];
@@ -312,7 +313,7 @@ public sealed partial class IdentifierPostingsTests
         }
 
         List<ObjectEntry> hours = [];
-        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        await foreach (TreeEntry leaf in dataset.AboveLevelZeroAsync(Ct))
         {
             ObjectEntry hour = ObjectEntry.FromBytes(leaf.Value.Span);
             hours.Add(hour);
@@ -321,7 +322,7 @@ public sealed partial class IdentifierPostingsTests
             Assert.Contains(directory.Entries, e => e.Kind == IndexKinds.PostingsHashed && e.VariantPath is ["user"] && e.VariantClass == Vorticity.Types.Variants.PathClass.String);
         }
 
-        Assert.Equal(2, hours.Count);
+        Assert.Equal(3, hours.Count);
         string needle = users[1_234];
         VortexExpr filter = VortexExpr.Parse($"Attributes['user'].AsString() = '{needle}'");
         inner.Latency = TimeSpan.FromMilliseconds(20);
@@ -398,7 +399,7 @@ public sealed partial class IdentifierPostingsTests
         {
             ClusteringKey = [nameof(Logged.At)],
             Identifiers = [nameof(Logged.TraceId)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
         }, Ct);
         List<Logged> appended = [];
         for (int part = 0; part < 6; part++)

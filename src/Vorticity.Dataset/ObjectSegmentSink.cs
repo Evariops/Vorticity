@@ -124,9 +124,6 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// <summary>Whether <see cref="CommitAsync"/> has run.</summary>
     public bool IsCommitted => _committed;
 
-    /// <summary>Whether the sink is closed to further writes: its writer disposed it.</summary>
-    public bool IsClosed => _closed;
-
     /// <summary>The XXH3-128 of everything written so far, as the leaf entry records it.</summary>
     public UInt128 ContentHash => _hash.GetCurrentHashAsUInt128();
 

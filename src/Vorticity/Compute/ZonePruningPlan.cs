@@ -5,7 +5,6 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Types;
 

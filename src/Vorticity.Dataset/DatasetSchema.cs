@@ -36,8 +36,8 @@ internal sealed class DatasetSchema
     private readonly ConditionalWeakTable<DTypeArena, Mapped> _mapped = new ConditionalWeakTable<DTypeArena, Mapped>();
 
     private DatasetSchema(
-        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy, int partitionColumns,
-        IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths)
+        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy,
+        IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths, ClusteringOptions? declared)
     {
         Bytes = bytes;
         Retired = retired;
@@ -48,7 +48,9 @@ internal sealed class DatasetSchema
         IndexedColumns = new HashSet<string>(IndexPolicy.Columns.Keys, StringComparer.Ordinal);
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
-        Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType, partitionColumns);
+        Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType);
+        Cut = ValueCut.Of(declared, Key);
+        BlockCut = ValueCut.OfBlocks(declared, Key);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);
@@ -73,6 +75,12 @@ internal sealed class DatasetSchema
 
     /// <summary>The clustering key, or null when the dataset is ordered by arrival.</summary>
     internal ClusteringKey? Key { get; }
+
+    /// <summary>The clustering value the dataset's jobs cut their objects by, over <see cref="Key"/>; null when it declares none.</summary>
+    internal ValueCut? Cut { get; }
+
+    /// <summary>Where a job also ends a block, by the declared block value of the key's second column; null for none.</summary>
+    internal ValueCut? BlockCut { get; }
 
     /// <summary>Every name a column of the dataset gave up, in the order they were given up.</summary>
     internal IReadOnlyList<RetiredColumn> Retired { get; }
@@ -111,7 +119,8 @@ internal sealed class DatasetSchema
             && Same(previous.Identifiers, header.Identifiers) && Same(previous.ShreddedPaths, header.ShreddedPaths)
             ? previous
             : new DatasetSchema(
-                header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.PartitionColumns, header.Identifiers, header.ShreddedPaths);
+                header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.Identifiers, header.ShreddedPaths,
+                header.Clustering);
 
     /// <summary>
     /// How an object of this dtype answers for these columns: null when it holds exactly them, the
@@ -135,6 +144,13 @@ internal sealed class DatasetSchema
         _mapped.AddOrUpdate(arena, new Mapped(file.NodeIndex, arena.Generation, objectKey, columns));
         return columns;
     }
+
+    /// <summary>
+    /// Whether the object <paramref name="entry"/> names holds exactly these columns, each in its place and of its type:
+    /// what its synopses take to answer for them, which name its columns by their places and hold its values as it stores
+    /// them. An object written before the schema last changed answers through its rows until a job rewrites it.
+    /// </summary>
+    internal bool Holds(ObjectEntry entry) => entry.Contents is { } contents && ColumnsOf(contents.SchemaType, entry.Key) is null;
 
     /// <summary>What <see cref="ColumnsOf"/> found for one file's dtype, at its place in its arena.</summary>
     private sealed record Mapped(int Index, int Generation, string Key, ObjectColumns? Columns);

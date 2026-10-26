@@ -1,7 +1,9 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.IO.Hashing;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
@@ -12,8 +14,8 @@ namespace Vorticity;
 
 /// <summary>
 /// A cache on the local disk of what a question reads of a dataset's objects without the rest of their
-/// data: the tables of their synopses, their slices' chunk directories, their index directories, their
-/// variant columns' path directories, and the pages and segments of their indexes' runs a lookup reads;
+/// data: their slices' chunk directories, their index directories, their variant columns' path
+/// directories, and the pages and segments of their indexes' runs a lookup reads;
 /// and the pages of the dataset's tree, which say what objects it holds. A question over a month answers
 /// from the disk once those regions have been read, and makes no request to the store for them.
 /// </summary>
@@ -25,6 +27,14 @@ namespace Vorticity;
 /// page or a segment of a run its reader names with the checksum its directory or its parent page gave.
 /// Every read from the disk checks the checksum, and a region that fails it is dropped and read again from
 /// the store.
+/// </para>
+/// <para>
+/// Given a quota of its own (<see cref="DataCapacityBytes"/>), the cache keeps besides the other segments its readers
+/// read of a plain object, its data and its footer, under the object's uid and the segment's place alone: no directory
+/// gives their checksum, so their file holds their XXH3-64 after them, which every read from the disk checks. They leave
+/// as the regions do, within their quota, and never push a region out. A sealed object's are never kept, nor are those
+/// whose writes would hold up the read past the bytes waiting: no plaintext reaches the disk, and no question waits on
+/// the cache's writes for its data.
 /// </para>
 /// <para>
 /// A page of a dataset's tree is kept by the XXH3-128 hash of its bytes, which the page or the header naming
@@ -55,7 +65,7 @@ namespace Vorticity;
 /// for one read. Those that miss the same frames of a sealed object at once read them each.
 /// </para>
 /// <para>
-/// The caches of several processes share a root through <see cref="OpenShared"/>: each owns a directory under
+/// The caches of several processes share a root through <see cref="OpenShared(string, long)"/>: each owns a directory under
 /// it, and reads from the others' what they keep before it asks the store, keeping none of it again.
 /// </para>
 /// <para>
@@ -67,7 +77,7 @@ namespace Vorticity;
 /// (<c>vortex-queries --micro cachetrace</c>).
 /// </para>
 /// </remarks>
-public sealed class SynopsisCache : IDisposable, IHeldRegions
+public sealed class SynopsisCache : IDisposable
 {
     private const string LockName = ".lock";
     private const string TemporaryExtension = ".tmp";
@@ -77,6 +87,9 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
 
     /// <summary>The files the cache keeps open at most, the least recently opened closed first.</summary>
     private const int MaxOpenHandles = 4096;
+
+    /// <summary>The files of the other caches of the root the cache keeps open at most, the least recently read closed first.</summary>
+    private const int MaxPeerHandles = 1024;
 
     /// <summary>The bytes of regions waiting for their write at most, past which a region is written before its reader goes on.</summary>
     private const long MaxPendingBytes = 256L << 20;
@@ -105,11 +118,17 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
 
     private readonly object _gate = new object();
     private readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
-    private readonly LinkedList<Entry> _small = new LinkedList<Entry>();
-    private readonly LinkedList<Entry> _main = new LinkedList<Entry>();
     private readonly LinkedList<Entry> _open = new LinkedList<Entry>();
-    private readonly LinkedList<(string Name, long Bytes)> _ghost = new LinkedList<(string, long)>();
-    private readonly Dictionary<string, LinkedListNode<(string Name, long Bytes)>> _ghosts = new Dictionary<string, LinkedListNode<(string Name, long Bytes)>>(StringComparer.Ordinal);
+
+    // The files of the other caches of the root read, kept open, the most recently read first, each with whether its bytes
+    // held their checksum once: a file never changes once renamed, so a read of it again needs neither an open, which costs
+    // about 85 µs on Windows, nor a hash.
+    private readonly Dictionary<string, PeerFile> _peerFiles = new Dictionary<string, PeerFile>(StringComparer.Ordinal);
+    private readonly LinkedList<PeerFile> _peerOrder = new LinkedList<PeerFile>();
+
+    // The regions of indexes and the pages of trees, and the data segments, each within its own capacity.
+    private readonly Tier _regions;
+    private readonly Tier _data;
     private readonly Dictionary<string, TaskCompletionSource> _reading = new Dictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
     private readonly Dictionary<string, Pending> _pending = new Dictionary<string, Pending>(StringComparer.Ordinal);
 
@@ -118,14 +137,10 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     private readonly Queue<Pending> _queue = new Queue<Pending>();
     private long _pendingHeld;
     private int _writers;
-    private long _held;
-    private long _smallHeld;
-    private long _ghostHeld;
     private long _hits;
     private long _peerHits;
     private long _misses;
     private long _corrupt;
-    private long _evictions;
     private long _refused;
     private long _failedWrites;
     private int _disposed;
@@ -140,16 +155,33 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacityBytes"/> is not positive.</exception>
     /// <exception cref="InvalidOperationException">Another cache, in this process or another, owns the directory.</exception>
     public SynopsisCache(string directory, long capacityBytes)
-        : this(directory, capacityBytes, root: null, rootLock: null)
+        : this(directory, capacityBytes, dataCapacityBytes: 0)
     {
     }
 
-    private SynopsisCache(string directory, long capacityBytes, string? root, FileStream? rootLock)
+    /// <summary>
+    /// Opens the cache in <paramref name="directory"/>, as <see cref="SynopsisCache(string, long)"/> does, keeping besides up
+    /// to <paramref name="dataCapacityBytes"/> of the data segments its readers read of plain objects.
+    /// </summary>
+    /// <param name="directory">The directory, which this cache owns while it is open.</param>
+    /// <param name="capacityBytes">The bytes of regions it keeps at most.</param>
+    /// <param name="dataCapacityBytes">The bytes of data segments it keeps at most, beside the regions; 0 keeps none.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacityBytes"/> is not positive, or <paramref name="dataCapacityBytes"/> is negative.</exception>
+    /// <exception cref="InvalidOperationException">Another cache, in this process or another, owns the directory.</exception>
+    public SynopsisCache(string directory, long capacityBytes, long dataCapacityBytes)
+        : this(directory, capacityBytes, dataCapacityBytes, root: null, rootLock: null)
+    {
+    }
+
+    private SynopsisCache(string directory, long capacityBytes, long dataCapacityBytes, string? root, FileStream? rootLock)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacityBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(dataCapacityBytes);
         Directory = Path.GetFullPath(directory);
         CapacityBytes = capacityBytes;
+        _regions = new Tier(capacityBytes);
+        _data = new Tier(dataCapacityBytes);
         System.IO.Directory.CreateDirectory(Directory);
         try
         {
@@ -185,10 +217,24 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacityBytes"/> is not positive.</exception>
     /// <exception cref="InvalidOperationException">A cache of its own owns the root, or 64 caches share it already.</exception>
-    public static SynopsisCache OpenShared(string root, long capacityBytes)
+    public static SynopsisCache OpenShared(string root, long capacityBytes) => OpenShared(root, capacityBytes, dataCapacityBytes: 0);
+
+    /// <summary>
+    /// Opens a cache that shares <paramref name="root"/>, as <see cref="OpenShared(string, long)"/> does, keeping besides up to
+    /// <paramref name="dataCapacityBytes"/> of the data segments its readers read of plain objects, which it too reads from
+    /// the other caches' directories before the store sends them.
+    /// </summary>
+    /// <param name="root">The directory the caches share, created if it does not exist.</param>
+    /// <param name="capacityBytes">The bytes of regions this cache keeps at most in the directory it takes.</param>
+    /// <param name="dataCapacityBytes">The bytes of data segments it keeps at most there, beside the regions; 0 keeps none.</param>
+    /// <returns>The cache; its <see cref="Directory"/> is the directory it took, which it owns while it is open.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacityBytes"/> is not positive, or <paramref name="dataCapacityBytes"/> is negative.</exception>
+    /// <exception cref="InvalidOperationException">A cache of its own owns the root, or 64 caches share it already.</exception>
+    public static SynopsisCache OpenShared(string root, long capacityBytes, long dataCapacityBytes)
     {
         ArgumentException.ThrowIfNullOrEmpty(root);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacityBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(dataCapacityBytes);
         string full = Path.GetFullPath(root);
         System.IO.Directory.CreateDirectory(full);
 
@@ -207,7 +253,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         {
             try
             {
-                return new SynopsisCache(Path.Combine(full, SlotPrefix + slot.ToString(CultureInfo.InvariantCulture)), capacityBytes, full, rootLock);
+                return new SynopsisCache(Path.Combine(full, SlotPrefix + slot.ToString(CultureInfo.InvariantCulture)), capacityBytes, dataCapacityBytes, full, rootLock);
             }
             catch (InvalidOperationException)
             {
@@ -225,14 +271,29 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     /// <summary>The bytes of regions the cache keeps at most.</summary>
     public long CapacityBytes { get; }
 
-    /// <summary>The bytes of regions the cache holds now, on the disk or waiting for their write.</summary>
+    /// <summary>The bytes of data segments the cache keeps at most, beside its regions; 0 when it keeps none.</summary>
+    public long DataCapacityBytes => _data.Capacity;
+
+    /// <summary>The bytes the cache holds now, its regions' and its data segments', on the disk or waiting for their write.</summary>
     public long HeldBytes
     {
         get
         {
             lock (_gate)
             {
-                return _held + _pendingHeld;
+                return _regions.Held + _data.Held + _pendingHeld;
+            }
+        }
+    }
+
+    /// <summary>The bytes of data segments the cache holds now, on the disk or waiting for their write.</summary>
+    public long DataHeldBytes
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _data.Held + _data.Pending;
             }
         }
     }
@@ -248,9 +309,6 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
 
     /// <summary>Regions whose file did not hold their checksum, dropped.</summary>
     internal long Corrupt => Count(ref _corrupt);
-
-    /// <summary>Entries dropped past the capacity.</summary>
-    internal long Evictions => Count(ref _evictions);
 
     /// <summary>Regions larger than the capacity, never kept.</summary>
     internal long Refused => Count(ref _refused);
@@ -388,6 +446,103 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         return true;
     }
 
+    /// <summary>Whether the cache keeps the data segments of plain objects: whether it has a quota for them.</summary>
+    internal bool KeepsData => _data.Capacity > 0;
+
+    /// <summary>
+    /// The data segment <paramref name="segment"/> of object <paramref name="uid"/> from the disk, checked against the
+    /// checksum its file holds after it; false when the cache does not hold it, or, when it shares a root, another cache of
+    /// the root, or held it torn, which it then drops.
+    /// </summary>
+    internal bool TryReadData(UInt128 uid, IndexSegment segment, out SegmentOwner owner)
+    {
+        owner = null!;
+        ReadOnlySpan<char> name = DataNameOf(uid, segment, stackalloc char[MaxDataNameLength]);
+        if (TryPending(name, out owner))
+        {
+            return true;
+        }
+
+        if (Find(name) is not { } entry)
+        {
+            return _root is not null && TryPeerData(segment, name, out owner);
+        }
+
+        // Mapped and verified once a mapping, as a region is.
+        int length = checked((int)segment.Length);
+        if (entry.Bytes == length + DataTrailerBytes && LeaseMap(entry) is { } map)
+        {
+            bool held;
+            try
+            {
+                VortexBuffer view = map.View(0, length, segment.AlignmentExponent);
+                held = ReferenceEquals(entry.Verified, map) || HoldsTrailer(view.Span, map.View(length, DataTrailerBytes, 0).Span);
+                if (held)
+                {
+                    entry.Verified = map;
+                    owner = new IO.SliceSegmentOwner(map, view);
+                }
+            }
+            finally
+            {
+                map.Release();
+            }
+
+            if (!held)
+            {
+                Drop(entry, corrupt: true);
+                return false;
+            }
+
+            Served(length);
+            return true;
+        }
+
+        NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
+        try
+        {
+            Span<byte> bytes = block.WritableSpan[..(length + DataTrailerBytes)];
+            if (!ReadWhole(entry, bytes) || !HoldsTrailer(bytes[..length], bytes[length..]))
+            {
+                Drop(entry, corrupt: true);
+                return false;
+            }
+
+            owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes[..length], segment.AlignmentExponent));
+            Served(length);
+            return true;
+        }
+        finally
+        {
+            block.Release();
+        }
+    }
+
+    /// <summary>
+    /// Keeps the data segment <paramref name="segment"/> of object <paramref name="uid"/> read from the store, behind its
+    /// caller as a region is (<see cref="Admit(UInt128, IndexSegment, SegmentOwner, VortexBuffer)"/>), its checksum
+    /// written after it by the cache's writer; never on the caller's own time: past the bytes waiting for their write, or
+    /// with no quota for data, it is not kept.
+    /// </summary>
+    internal void AdmitData(UInt128 uid, IndexSegment segment, SegmentOwner owner, VortexBuffer bytes)
+    {
+        if (KeepsData && bytes.Length == segment.Length && bytes.Length > 0)
+        {
+            _ = TryQueue(uid, DataNameOf(uid, segment), owner, bytes, page: null, data: true);
+        }
+    }
+
+    /// <summary>As <see cref="TryBeginRead"/>, for a data segment.</summary>
+    internal bool TryBeginReadData(UInt128 uid, IndexSegment segment, out TaskCompletionSource? mine, out Task? theirs) =>
+        BeginReadOf(DataNameOf(uid, segment), out mine, out theirs);
+
+    /// <summary>As <see cref="EndRead"/>, for a data segment.</summary>
+    internal void EndReadData(UInt128 uid, IndexSegment segment, TaskCompletionSource mine) => EndReadOf(DataNameOf(uid, segment), mine);
+
+    /// <summary>Whether <paramref name="trailer"/> holds the XXH3-64 of <paramref name="bytes"/>, as a data segment's file keeps it.</summary>
+    private static bool HoldsTrailer(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> trailer) =>
+        trailer.Length == DataTrailerBytes && XxHash3.HashToUInt64(bytes) == BinaryPrimitives.ReadUInt64LittleEndian(trailer);
+
     /// <summary>
     /// Keeps the region of object <paramref name="uid"/> read from the store, when it holds its checksum and
     /// fits the capacity, and drops what the capacity no longer holds: on the disk before it returns.
@@ -442,15 +597,16 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     /// run; false when the caller writes it, past the bytes waiting or the capacity. A page of a tree comes as
     /// <paramref name="page"/>, with no owner nor buffer.
     /// </summary>
-    private bool TryQueue(UInt128 uid, string name, SegmentOwner? owner, VortexBuffer bytes, byte[]? page)
+    private bool TryQueue(UInt128 uid, string name, SegmentOwner? owner, VortexBuffer bytes, byte[]? page, bool data = false)
     {
         if (Volatile.Read(ref _disposed) != 0)
         {
             return true;
         }
 
-        int length = page?.Length ?? bytes.Length;
-        if (length > CapacityBytes)
+        Tier tier = data ? _data : _regions;
+        int length = (page?.Length ?? bytes.Length) + (data ? DataTrailerBytes : 0);
+        if (length > tier.Capacity)
         {
             return false;
         }
@@ -463,16 +619,17 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
                 return true;
             }
 
-            if (_pendingHeld + length > Math.Min(MaxPendingBytes, CapacityBytes))
+            if (_pendingHeld + length > Math.Min(MaxPendingBytes, tier.Capacity))
             {
                 return false;
             }
 
-            Pending pending = new Pending(new Entry(name, ShardOf(uid), length), owner?.Retain(), bytes, page);
+            Pending pending = new Pending(new Entry(name, ShardOf(uid), length, tier), owner?.Retain(), bytes, page) { Data = data };
             _pending[name] = pending;
             Volatile.Write(ref _pendingCount, _pending.Count);
             _queue.Enqueue(pending);
             _pendingHeld += length;
+            tier.Pending += length;
             start = _writers < MaxWriters;
             _writers += start ? 1 : 0;
         }
@@ -531,7 +688,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         try
         {
             WriteFault?.Invoke(PathOf(pending.Entry));
-            written = Write(pending.Entry, pending.Span);
+            written = Write(pending.Entry, pending.Span, pending.Data);
         }
         finally
         {
@@ -541,6 +698,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
                 _pending.Remove(pending.Entry.Name);
                 Volatile.Write(ref _pendingCount, _pending.Count);
                 _pendingHeld -= pending.Entry.Bytes;
+                pending.Entry.Tier.Pending -= pending.Entry.Bytes;
                 if (written)
                 {
                     Enter(pending.Entry, pending.Hits, evicted);
@@ -922,30 +1080,168 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     {
         owner = null!;
         int length = checked((int)region.Length);
-        using (SafeFileHandle? file = OpenPeer(name, length, out _))
+        if (LeasePeer(name, length) is { } file)
         {
-            if (file is not null)
+            NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+            try
             {
-                NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
-                try
+                Span<byte> bytes = block.WritableSpan[..length];
+                if (ReadPeer(file, bytes) && (file.Verified || region.Holds(bytes)))
                 {
-                    Span<byte> bytes = block.WritableSpan[..length];
-                    if (ReadAll(file, bytes) && region.Holds(bytes))
-                    {
-                        owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes, region.AlignmentExponent));
-                        ServedByPeer(length);
-                        return true;
-                    }
+                    file.Verified = true;
+                    owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes, region.AlignmentExponent));
+                    ServedByPeer(length);
+                    return true;
                 }
-                finally
-                {
-                    block.Release();
-                }
+
+                ForgetPeer(file);
+            }
+            finally
+            {
+                block.Release();
+                file.Handle.DangerousRelease();
             }
         }
 
         Missed();
         return false;
+    }
+
+    /// <summary>
+    /// As <see cref="TryPeerRegion"/>, for a data segment, checked against the checksum its file holds after it. It stays in
+    /// that directory, so that a segment the caches read lies once on the disk.
+    /// </summary>
+    private bool TryPeerData(IndexSegment segment, ReadOnlySpan<char> name, out SegmentOwner owner)
+    {
+        owner = null!;
+        int length = checked((int)segment.Length);
+        if (LeasePeer(name, length + DataTrailerBytes) is { } file)
+        {
+            NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
+            try
+            {
+                // Once its bytes held their checksum, a file's read leaves the checksum unread.
+                bool verified = file.Verified;
+                Span<byte> bytes = block.WritableSpan[..(verified ? length : length + DataTrailerBytes)];
+                if (ReadPeer(file, bytes) && (verified || HoldsTrailer(bytes[..length], bytes[length..])))
+                {
+                    file.Verified = true;
+                    owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes[..length], segment.AlignmentExponent));
+                    ServedByPeer(length);
+                    return true;
+                }
+
+                ForgetPeer(file);
+            }
+            finally
+            {
+                block.Release();
+                file.Handle.DangerousRelease();
+            }
+        }
+
+        Missed();
+        return false;
+    }
+
+    /// <summary>
+    /// The file named <paramref name="name"/> of another cache of the root, of <paramref name="length"/> bytes, a reference
+    /// to its handle taken for the caller to release: the one this cache kept open from an earlier read, or one it opens
+    /// now and keeps, the least recently read let go past <see cref="MaxPeerHandles"/>; null when no directory holds such a
+    /// file. A file its cache deletes meanwhile is read as it was, which is what it holds: an entry never changes.
+    /// </summary>
+    private PeerFile? LeasePeer(ReadOnlySpan<char> name, int length)
+    {
+        bool added = false;
+        lock (_gate)
+        {
+            if (_peerFiles.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out PeerFile? kept) && kept.Length == length)
+            {
+                kept.Handle.DangerousAddRef(ref added);
+                _peerOrder.Remove(kept.Node!);
+                kept.Node = _peerOrder.AddFirst(kept);
+                return kept;
+            }
+        }
+
+        if (OpenPeer(name, length, out _) is not { } opened)
+        {
+            return null;
+        }
+
+        PeerFile made = new PeerFile(new string(name), opened, length);
+        PeerFile? closed = null;
+        try
+        {
+            lock (_gate)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    closed = made;
+                    return null;
+                }
+
+                if (_peerFiles.TryGetValue(made.Name, out PeerFile? raced))
+                {
+                    closed = made;
+                    raced.Handle.DangerousAddRef(ref added);
+                    return raced.Length == length ? raced : Released(raced);
+                }
+
+                _peerFiles[made.Name] = made;
+                made.Node = _peerOrder.AddFirst(made);
+                if (_peerOrder.Count > MaxPeerHandles)
+                {
+                    closed = _peerOrder.Last!.Value;
+                    _peerOrder.RemoveLast();
+                    _peerFiles.Remove(closed.Name);
+                }
+
+                made.Handle.DangerousAddRef(ref added);
+                return made;
+            }
+        }
+        finally
+        {
+            // A handle let go closes once the reads that hold a reference to it release them.
+            closed?.Handle.Dispose();
+        }
+
+        static PeerFile? Released(PeerFile file)
+        {
+            file.Handle.DangerousRelease();
+            return null;
+        }
+    }
+
+    /// <summary>Whether <paramref name="bytes"/> were read whole from the start of a file of another cache of the root.</summary>
+    private static bool ReadPeer(PeerFile file, Span<byte> bytes)
+    {
+        try
+        {
+            return ReadAll(file.Handle, bytes);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Lets go of a file of another cache of the root that a read found torn: the next read opens it again.</summary>
+    private void ForgetPeer(PeerFile file)
+    {
+        lock (_gate)
+        {
+            if (!_peerFiles.TryGetValue(file.Name, out PeerFile? kept) || !ReferenceEquals(kept, file))
+            {
+                return;
+            }
+
+            _peerFiles.Remove(file.Name);
+            _peerOrder.Remove(file.Node!);
+        }
+
+        file.Handle.Dispose();
     }
 
     /// <summary>
@@ -1140,7 +1436,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         }
 
         VortexTelemetry.SynopsisFetched(bytes.Length);
-        if (bytes.Length > CapacityBytes)
+        if (bytes.Length > _regions.Capacity)
         {
             lock (_gate)
             {
@@ -1151,7 +1447,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
             return;
         }
 
-        Entry entry = new Entry(name, ShardOf(uid), bytes.Length);
+        Entry entry = new Entry(name, ShardOf(uid), bytes.Length, _regions);
         lock (_gate)
         {
             if (_entries.ContainsKey(name) || _pending.ContainsKey(name))
@@ -1160,7 +1456,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
             }
         }
 
-        if (!Write(entry, bytes))
+        if (!Write(entry, bytes, trailer: false))
         {
             return;
         }
@@ -1174,8 +1470,12 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         Delete(evicted);
     }
 
-    /// <summary>Writes the file of <paramref name="entry"/>, under a temporary name then renamed, so a reader never sees half of it; false when the disk refused it.</summary>
-    private bool Write(Entry entry, ReadOnlySpan<byte> bytes)
+    /// <summary>
+    /// Writes the file of <paramref name="entry"/>, under a temporary name then renamed, so a reader never sees half of it,
+    /// with the XXH3-64 of <paramref name="bytes"/> after them when <paramref name="trailer"/> says so; false when the disk
+    /// refused it.
+    /// </summary>
+    private bool Write(Entry entry, ReadOnlySpan<byte> bytes, bool trailer)
     {
         string path = PathOf(entry);
         string temporary = path + "." + Guid.NewGuid().ToString("N") + TemporaryExtension;
@@ -1185,6 +1485,12 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
             using (SafeFileHandle file = System.IO.File.OpenHandle(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 RandomAccess.Write(file, bytes, 0);
+                if (trailer)
+                {
+                    Span<byte> sum = stackalloc byte[DataTrailerBytes];
+                    BinaryPrimitives.WriteUInt64LittleEndian(sum, XxHash3.HashToUInt64(bytes));
+                    RandomAccess.Write(file, sum, bytes.Length);
+                }
             }
 
             System.IO.File.Move(temporary, path, overwrite: true);
@@ -1214,25 +1520,28 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         }
 
         // A region dropped not long ago and asked again goes to the main queue at once.
-        bool returning = _ghosts.Remove(entry.Name, out LinkedListNode<(string Name, long Bytes)>? ghost);
+        Tier tier = entry.Tier;
+        bool returning = tier.Ghosts.Remove(entry.Name, out LinkedListNode<(string Name, long Bytes)>? ghost);
         if (returning)
         {
-            _ghost.Remove(ghost!);
-            _ghostHeld -= ghost!.Value.Bytes;
+            tier.Ghost.Remove(ghost!);
+            tier.GhostHeld -= ghost!.Value.Bytes;
         }
 
         entry.Hits = hits;
         Add(entry, main: returning);
-        Evict(evicted);
+        Evict(tier, evicted);
     }
 
     /// <summary>
     /// Whether the caller reads the region, holding <paramref name="mine"/> until <see cref="EndRead"/>; false
     /// when another read of it is in flight, which <paramref name="theirs"/> completes.
     /// </summary>
-    internal bool TryBeginRead(UInt128 uid, IndexSegment region, out TaskCompletionSource? mine, out Task? theirs)
+    internal bool TryBeginRead(UInt128 uid, IndexSegment region, out TaskCompletionSource? mine, out Task? theirs) =>
+        BeginReadOf(NameOf(uid, region), out mine, out theirs);
+
+    private bool BeginReadOf(string name, out TaskCompletionSource? mine, out Task? theirs)
     {
-        string name = NameOf(uid, region);
         lock (_gate)
         {
             if (_reading.TryGetValue(name, out TaskCompletionSource? other))
@@ -1250,11 +1559,13 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     }
 
     /// <summary>Ends a read <see cref="TryBeginRead"/> handed to the caller: those who wait on it look again.</summary>
-    internal void EndRead(UInt128 uid, IndexSegment region, TaskCompletionSource mine)
+    internal void EndRead(UInt128 uid, IndexSegment region, TaskCompletionSource mine) => EndReadOf(NameOf(uid, region), mine);
+
+    private void EndReadOf(string name, TaskCompletionSource mine)
     {
         lock (_gate)
         {
-            _reading.Remove(NameOf(uid, region));
+            _reading.Remove(name);
         }
 
         mine.TrySetResult();
@@ -1278,12 +1589,26 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
                     closed.Add(handle);
                 }
             }
+
+            ClosePeers(closed);
         }
 
         foreach (SafeFileHandle handle in closed)
         {
             handle.Dispose();
         }
+    }
+
+    /// <summary>Takes every file of another cache of the root the cache keeps open out of it, for the caller to dispose. Under the gate.</summary>
+    private void ClosePeers(List<SafeFileHandle> closed)
+    {
+        foreach (PeerFile peer in _peerOrder)
+        {
+            closed.Add(peer.Handle);
+        }
+
+        _peerOrder.Clear();
+        _peerFiles.Clear();
     }
 
     /// <summary>Releases the directory's lock; the entries stay on the disk for the next cache that opens it.</summary>
@@ -1293,12 +1618,20 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         {
             // What waits for its write is written: the next cache to open the directory finds it.
             Flush();
+            List<SafeFileHandle> peers = [];
             lock (_gate)
             {
                 while (_open.First is { } open)
                 {
                     Close(open.Value)?.Dispose();
                 }
+
+                ClosePeers(peers);
+            }
+
+            foreach (SafeFileHandle peer in peers)
+            {
+                peer.Dispose();
             }
 
             _lock.Dispose();
@@ -1321,6 +1654,27 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
 
     /// <summary>The characters of a region's name at most (<see cref="NameOf(UInt128, IndexSegment)"/>): a uid's 32, two places' 16 each, a checksum's 16 and three dashes.</summary>
     private const int MaxNameLength = 32 + 16 + 16 + 16 + 3;
+
+    /// <summary>The file name of a data segment of an object: its uid, its place and its length.</summary>
+    internal static string DataNameOf(UInt128 uid, IndexSegment segment) => new string(DataNameOf(uid, segment, stackalloc char[MaxDataNameLength]));
+
+    /// <summary><see cref="DataNameOf(UInt128, IndexSegment)"/> written into <paramref name="room"/>, of <see cref="MaxDataNameLength"/> characters.</summary>
+    private static ReadOnlySpan<char> DataNameOf(UInt128 uid, IndexSegment segment, Span<char> room) =>
+        room.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{segment.Offset:x}-{segment.Length:x}{DataSuffix}", out int written)
+            ? room[..written]
+            : throw new InvalidOperationException($"A data segment's name takes more than the {MaxDataNameLength} characters made for it.");
+
+    /// <summary>The suffix of a data segment's file name, which tells its tier when the cache walks its directory.</summary>
+    private const string DataSuffix = "-data";
+
+    /// <summary>The characters of a data segment's name at most: a uid's 32, two places' 16 each, two dashes and the suffix.</summary>
+    private const int MaxDataNameLength = 32 + 16 + 16 + 2 + 5;
+
+    /// <summary>The bytes of a data segment's checksum, which its file holds after it.</summary>
+    private const int DataTrailerBytes = sizeof(ulong);
+
+    /// <summary>The tier an entry's name says it belongs to: a data segment's, or a region's and a page's.</summary>
+    private Tier TierOf(string name) => name.EndsWith(DataSuffix, StringComparison.Ordinal) ? _data : _regions;
 
     /// <summary>The file name of a frame of a sealed object: its uid, the frame's place in the object and its length.</summary>
     internal static string FrameNameOf(UInt128 uid, long cipherOffset, int length) => string.Create(
@@ -1377,7 +1731,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
                     continue;
                 }
 
-                found.Add((new Entry(file.Name, shardName, file.Length), file.LastWriteTimeUtc));
+                found.Add((new Entry(file.Name, shardName, file.Length, TierOf(file.Name)), file.LastWriteTimeUtc));
             }
         }
 
@@ -1391,7 +1745,8 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
                 Add(entry, main: true);
             }
 
-            Evict(evicted);
+            Evict(_regions, evicted);
+            Evict(_data, evicted);
         }
 
         Delete(evicted);
@@ -1402,27 +1757,27 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     {
         _entries[entry.Name] = entry;
         Enqueue(entry, main);
-        _held += entry.Bytes;
+        entry.Tier.Held += entry.Bytes;
         VortexTelemetry.SynopsisHolds(entry.Bytes);
     }
 
     private void Enqueue(Entry entry, bool main)
     {
         entry.Main = main;
-        entry.Node = main ? _main.AddFirst(entry) : _small.AddFirst(entry);
+        entry.Node = main ? entry.Tier.Main.AddFirst(entry) : entry.Tier.Small.AddFirst(entry);
         if (!main)
         {
-            _smallHeld += entry.Bytes;
+            entry.Tier.SmallHeld += entry.Bytes;
         }
     }
 
     private void Dequeue(Entry entry)
     {
-        (entry.Main ? _main : _small).Remove(entry.Node!);
+        (entry.Main ? entry.Tier.Main : entry.Tier.Small).Remove(entry.Node!);
         entry.Node = null;
         if (!entry.Main)
         {
-            _smallHeld -= entry.Bytes;
+            entry.Tier.SmallHeld -= entry.Bytes;
         }
     }
 
@@ -1437,27 +1792,20 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         }
     }
 
-    bool IHeldRegions.Holds(UInt128 uid, IndexSegment region) => Holds(uid, region);
-
-    bool IHeldRegions.TryRead(UInt128 uid, IndexSegment region, out SegmentOwner owner) => TryRead(uid, region, out owner);
-
-    /// <summary>Tells <see cref="Asked"/>.</summary>
-    void IHeldRegions.Ask(UInt128 uid, IndexSegment region) => Asked?.Invoke(uid, region);
-
     /// <summary>
     /// Drops entries past the capacity, S3-FIFO's way. While the small queue holds its tenth of the capacity or
     /// more, its oldest entry leaves it: to the main queue if it was read since it came in, dropped otherwise, its
     /// name kept among the ghosts. Then the main queue's oldest: back at its head with one read less while it has
     /// reads, dropped otherwise.
     /// </summary>
-    private void Evict(List<Entry> evicted)
+    private void Evict(Tier tier, List<Entry> evicted)
     {
-        long smallCapacity = Math.Max(1, CapacityBytes / 10);
-        while (_held > CapacityBytes && (_small.Count > 0 || _main.Count > 0))
+        long smallCapacity = Math.Max(1, tier.Capacity / 10);
+        while (tier.Held > tier.Capacity && (tier.Small.Count > 0 || tier.Main.Count > 0))
         {
-            if (_small.Count > 0 && (_smallHeld >= smallCapacity || _main.Count == 0))
+            if (tier.Small.Count > 0 && (tier.SmallHeld >= smallCapacity || tier.Main.Count == 0))
             {
-                Entry oldest = _small.Last!.Value;
+                Entry oldest = tier.Small.Last!.Value;
                 Dequeue(oldest);
                 if (oldest.Hits > 0)
                 {
@@ -1467,19 +1815,19 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
                 }
 
                 Evicted(oldest, evicted);
-                _ghosts[oldest.Name] = _ghost.AddFirst((oldest.Name, oldest.Bytes));
-                _ghostHeld += oldest.Bytes;
-                while (_ghostHeld > CapacityBytes - smallCapacity && _ghost.Last is { } forgotten)
+                tier.Ghosts[oldest.Name] = tier.Ghost.AddFirst((oldest.Name, oldest.Bytes));
+                tier.GhostHeld += oldest.Bytes;
+                while (tier.GhostHeld > tier.Capacity - smallCapacity && tier.Ghost.Last is { } forgotten)
                 {
-                    _ghost.RemoveLast();
-                    _ghosts.Remove(forgotten.Value.Name);
-                    _ghostHeld -= forgotten.Value.Bytes;
+                    tier.Ghost.RemoveLast();
+                    tier.Ghosts.Remove(forgotten.Value.Name);
+                    tier.GhostHeld -= forgotten.Value.Bytes;
                 }
 
                 continue;
             }
 
-            Entry last = _main.Last!.Value;
+            Entry last = tier.Main.Last!.Value;
             Dequeue(last);
             if (last.Hits > 0)
             {
@@ -1497,10 +1845,9 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     {
         Close(entry)?.Dispose();
         _entries.Remove(entry.Name);
-        _held -= entry.Bytes;
+        entry.Tier.Held -= entry.Bytes;
         VortexTelemetry.SynopsisHolds(-entry.Bytes);
         evicted.Add(entry);
-        Interlocked.Increment(ref _evictions);
         VortexTelemetry.SynopsisEvicted();
     }
 
@@ -1513,7 +1860,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
 
         Close(entry)?.Dispose();
         Dequeue(entry);
-        _held -= entry.Bytes;
+        entry.Tier.Held -= entry.Bytes;
         VortexTelemetry.SynopsisHolds(-entry.Bytes);
     }
 
@@ -1569,7 +1916,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
                 lock (_gate)
                 {
                     _doomed.Add(victim);
-                    _held += victim.Bytes;
+                    victim.Tier.Held += victim.Bytes;
                     VortexTelemetry.SynopsisHolds(victim.Bytes);
                 }
             }
@@ -1608,7 +1955,7 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     /// <summary>Takes the bytes of a file that went, or became an entry's again, out of those held. Under the gate.</summary>
     private void Uncount(Entry doomed)
     {
-        _held -= doomed.Bytes;
+        doomed.Tier.Held -= doomed.Bytes;
         VortexTelemetry.SynopsisHolds(-doomed.Bytes);
     }
 
@@ -1631,16 +1978,19 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     }
 
     /// <summary>
-    /// An entry: its file's name and shard, its bytes, its reads since it came in or last passed the main queue's
-    /// tail, up to <see cref="MaxHits"/>, and its queue.
+    /// An entry: its file's name and shard, its bytes, its tier, its reads since it came in or last passed the main
+    /// queue's tail, up to <see cref="MaxHits"/>, and its queue.
     /// </summary>
-    private sealed class Entry(string name, string shard, long bytes)
+    private sealed class Entry(string name, string shard, long bytes, Tier tier)
     {
         internal string Name { get; } = name;
 
         internal string Shard { get; } = shard;
 
         internal long Bytes { get; } = bytes;
+
+        /// <summary>The queues and the capacity it is kept within: the regions' or the data's.</summary>
+        internal Tier Tier { get; } = tier;
 
         internal int Hits { get; set; }
 
@@ -1662,6 +2012,30 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
     }
 
     /// <summary>
+    /// A file of another cache of the root, kept open: its name, its handle, its length, whether a read found its bytes to
+    /// hold their checksum, and its place among those kept.
+    /// </summary>
+    private sealed class PeerFile(string name, SafeFileHandle handle, long length)
+    {
+        internal string Name { get; } = name;
+
+        internal SafeFileHandle Handle { get; } = handle;
+
+        internal long Length { get; } = length;
+
+        private int _verified;
+
+        /// <summary>Whether a read found the file's bytes to hold their checksum; set by any reader, read by every one.</summary>
+        internal bool Verified
+        {
+            get => Volatile.Read(ref _verified) != 0;
+            set => Volatile.Write(ref _verified, value ? 1 : 0);
+        }
+
+        internal LinkedListNode<PeerFile>? Node { get; set; }
+    }
+
+    /// <summary>
     /// A region waiting for its write: its entry to be, the buffer its reader handed over, held, and its reads meanwhile;
     /// or a page of a tree, in an array of its own.
     /// </summary>
@@ -1680,6 +2054,38 @@ public sealed class SynopsisCache : IDisposable, IHeldRegions
         /// <summary>The bytes its write writes.</summary>
         internal ReadOnlySpan<byte> Span => Page is null ? Bytes.Span : new ReadOnlySpan<byte>(Page);
 
+        /// <summary>Whether it is a data segment, whose file holds its checksum after its bytes.</summary>
+        internal bool Data { get; init; }
+
         internal int Hits { get; set; }
+    }
+
+    /// <summary>
+    /// The entries kept within one capacity, S3-FIFO's way: the small queue, the main queue, and the names of those the
+    /// small queue let go not long ago, with the bytes each holds. Under the gate.
+    /// </summary>
+    private sealed class Tier(long capacity)
+    {
+        /// <summary>The bytes its entries hold at most.</summary>
+        internal long Capacity { get; } = capacity;
+
+        internal LinkedList<Entry> Small { get; } = new LinkedList<Entry>();
+
+        internal LinkedList<Entry> Main { get; } = new LinkedList<Entry>();
+
+        internal LinkedList<(string Name, long Bytes)> Ghost { get; } = new LinkedList<(string, long)>();
+
+        internal Dictionary<string, LinkedListNode<(string Name, long Bytes)>> Ghosts { get; } =
+            new Dictionary<string, LinkedListNode<(string Name, long Bytes)>>(StringComparer.Ordinal);
+
+        /// <summary>The bytes of its entries on the disk, and of the files let go that did not go yet.</summary>
+        internal long Held { get; set; }
+
+        /// <summary>The bytes of its entries waiting for their write.</summary>
+        internal long Pending { get; set; }
+
+        internal long SmallHeld { get; set; }
+
+        internal long GhostHeld { get; set; }
     }
 }

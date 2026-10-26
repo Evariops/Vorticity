@@ -15,7 +15,6 @@ using System.Threading.Tasks;
 
 using Vorticity.Arrays;
 using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Xunit;

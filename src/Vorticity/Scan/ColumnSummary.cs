@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;

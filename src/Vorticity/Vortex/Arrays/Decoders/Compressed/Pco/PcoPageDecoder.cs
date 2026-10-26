@@ -458,16 +458,7 @@ internal static class PcoPageDecoder
     }
 
     /// <summary>
-    /// The float an integer latent stands for, <c>int_float_from_latent</c>, as its bits: the
-    /// latent's distance from the midpoint as a float, exactly below 2^(mantissa + 1) and counted in
-    /// representable steps above it, negative below the midpoint.
-    /// </summary>
-    /// <param name="latent">The latent, no wider than the number.</param>
-    /// <param name="number">The float type.</param>
-    internal static ulong IntFloat(ulong latent, PcoNumber number) => new IntFloats(number).Bits(latent, number.LatentBits);
-
-    /// <summary>
-    /// What <see cref="IntFloat"/> works out of the float type alone, once for a batch rather than
+    /// What turning a latent into a float's bits works out of the float type alone, once for a batch rather than
     /// once a value: the midpoint, the magnitudes a float holds exactly, and the bits of the first
     /// one it does not.
     /// </summary>

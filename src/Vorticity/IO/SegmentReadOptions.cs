@@ -32,6 +32,20 @@ internal sealed class SegmentReadOptions
     public static SegmentReadOptions Default { get; } = new SegmentReadOptions();
 
     /// <summary>
+    /// The options of a source whose reads are requests to an object store: two ranges are read as one across a gap of
+    /// 256 KiB at most, and a read joined so holds 8 MiB at most.
+    /// </summary>
+    /// <remarks>
+    /// A request more costs what about 290 KB of transfer cost under the cost model of an object store: a round trip of 30
+    /// ms among 128 requests in flight, over a link of 1.25 GB/s, is a 4 266th of a second of the link, 293 KB. A gap past
+    /// it costs more to bridge than to ask apart: a dataset's object, whose columns are chunked apart in about a mebibyte
+    /// each, then reads the chunks of the columns a question asks, and not those of the columns between them, which a
+    /// bridge of a mebibyte read too (some 21 % more bytes on a question of four columns). A joined read of 8 MiB carries
+    /// some 28 times what its request costs.
+    /// </remarks>
+    public static SegmentReadOptions Remote { get; } = new SegmentReadOptions { CoalesceGapBytes = 256 << 10, MaxCoalescedReadBytes = 8 << 20 };
+
+    /// <summary>
     /// Two ranges separated by no more than this many bytes are read as one. Default
     /// <see cref="DefaultCoalesceGapBytes"/>. Zero disables coalescing of non-adjacent ranges.
     /// </summary>

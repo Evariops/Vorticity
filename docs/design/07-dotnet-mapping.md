@@ -119,9 +119,10 @@ machine-dependent.
 So the zone is resolved once, when a `DateTimeOffset` member or column binds to the file, by
 `TimeZoneInfo.FindSystemTimeZoneById`, and never per value. A naive or UTC timestamp binds as
 `DateTime`, with `Kind` `Unspecified` or `Utc`, and needs no database. A zone the host cannot resolve
-makes the `DateTimeOffset` binding fail with `VortexSchemaException`. The column still binds as
-`long`, its storage, and `AsStorage()`, `Unit` and `TimeZone` let a caller convert with a zone of its
-own choosing. The machine dependence is confined to one call, at one moment, with a refusal rather
+makes a read of the column as `DateTimeOffset` fail with `VortexSchemaException`. The column still
+binds as `long`, its storage, and `AsStorage()`, `Unit` and `TimeZone` let a caller convert with a zone
+of its own choosing. A write needs no zone: it stores a `DateTimeOffset`'s instant, `UtcTicks`, and the
+zone stays the column's metadata, so a host that cannot resolve it still writes the column. The machine dependence is confined to one call, at one moment, with a refusal rather
 than a guess.
 
 ## 4. Strings: spans first, `string` on request

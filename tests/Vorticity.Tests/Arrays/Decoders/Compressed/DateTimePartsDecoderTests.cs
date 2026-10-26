@@ -7,7 +7,6 @@
 // floor-division that does not round toward zero.
 using System;
 using System.Buffers.Binary;
-using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Types;
 using Xunit;

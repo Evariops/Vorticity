@@ -109,7 +109,7 @@ A program that learns its columns at run time groups the tool scan by names and 
 as text: `file.Scan().Where(text).GroupBy("Service").Select("Service", "count()", "sum(Bytes)")`,
 and `Aggregate(results)` for a whole scan. A result is a column of the key, or one of `count()`,
 `count_distinct(c)`, `sum(c)`, `min(c)`, `max(c)` and `avg(c)`. The engine builds the nodes the typed
-path's lambdas build, so the plan is the same, synopses and indexes included, and the result is a
+path's lambdas build, so the plan is the same, indexes included, and the result is a
 tool scan of the groups whose columns the texts name. A sum takes the widest type of its kind, a long,
 an unsigned long or a double, and a minimum, a maximum and a key keep their column's .NET type,
 chosen by a switch over the storage rather than by reflection, which Native AOT would refuse. The
@@ -199,13 +199,14 @@ On such a key:
 A group by does not stream on a key with no such component, under an order by an aggregate, or on a
 sorted column that holds a NaN, which is not sorted at all (see [key order per
 dtype](12-index-reads.md#34-key-order-per-dtype)). On a dataset it only streams on the first column of
-the clustering key, or a function of it, where the dataset reads its rows in key order, merging the
-objects and opening each one once it may hold the next row (see [order beyond the
-lookup](13-dataset.md#66-order-beyond-the-lookup)). An object a dataset of periods sorted slice by
-slice is read the same way, slice after slice in time order, each slice decoded once and its rows
-gathered in key order ([rows in key order](12-index-reads.md#5-rows-in-key-order)), so the groups are
-those a dataset in time order gives. The null group of the streaming component is final at the end,
-and comes last.
+the clustering key, or a function of it, under a take that stops the read early, where the dataset
+reads its rows in key order, merging the objects and opening each one once it may hold the next row;
+without a take, a read in key order would go one object at a time, and the objects are read side by
+side (see [order beyond the lookup](13-dataset.md#66-order-beyond-the-lookup)). An object an earlier
+release's dataset of periods sorted slice by slice is read the same way, slice after slice in time
+order, each slice decoded once and its rows gathered in key order ([rows in key
+order](12-index-reads.md#5-rows-in-key-order)), so the groups are those a dataset in time order gives.
+The null group of the streaming component is final at the end, and comes last.
 
 Under a descending order of the component, a group by streams backwards when a window follows the
 order, which stops the read: `orderby g.Key descending take 7` reads the last seven days of a year,
@@ -349,8 +350,6 @@ of the other keys, and a key left in the residual is parsed from the rows of the
 A key no chunk of the object shreds is parsed from each chunk's residual alone, the keys the chunk
 shreds neither decoded nor put back into its rows: a question over such a key of 36 000 log records
 took 6.6 ms of a core, two thirds of it putting the shredded keys back, against 2.2.
-A dataset's synopsis counts a shredded path as a column, so a question that groups or filters by it
-answers from the tables ([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
 The keys a window holds, with their counts, are the union of its objects' path directories.
 
 ## 4. Keys
@@ -564,13 +563,139 @@ writes it as its buckets. A quantile of a decimal column is not taken yet.
 
 ### 5.7 States kept past a scan
 
-A dataset of periods keeps aggregates past a scan, for its runs and its tables, and merges them later
+A dataset keeps aggregates past a scan, for its runs and its tables, and merges them later
 with the states of a query. What it keeps is the engine's own state, in its widest form: a count, an
 integer sum as an `Int128`, a decimal sum in its 320 bits, a float sum as the wide indexed sum, which
 takes some 35 trillion values, and an extreme with whether there is one. Each is a kind of the index
 directory ([the kinds of persisted states](10-indexes.md#56-the-kinds-of-persisted-states)) stored as
 the words the engine holds, so a state read back merges into a query's as if the query had folded the
 rows itself, and the answer is the same bits whatever the cut between what was kept and what was read.
+
+### 5.8 Parts of a question, merged
+
+A question can run in parts, on several nodes, and merge to the bits the whole question gives. A part
+is a range of the source's rows. `PartsAsync` takes the pieces a pass would hand its lanes: a dataset
+cuts at its objects and inside a large one at its chunks (`ScanSource.PiecesAsync`), and a file at
+its chunks (`AggregationEngine.Ranges`). It gathers them, in row order, into as many ranges as asked
+at most, each about the same number of rows. The ranges follow one another from the start of the
+question's rows to their end, so the rows no piece holds, which the question keeps none of, still lie
+in a part.
+
+A part runs as the same question over its range and gives its groups' states rather than their
+answers. These are the states the counts of a dataset keep ([5.7](#57-states-kept-past-a-scan)),
+written by the slot that holds them, the inverse of the fold of a batch of states (`ExportStates`
+beside `StepStates`). Each group is a row: its keys as their functions gave them, then the rows a
+count of rows folded, then each measure's words where `MeasureLayout` puts them, then a column of
+sketches for each distribution and each approximate distinct count. The words are a count of values,
+an exact sum as an `Int128` or a wide indexed sum, a least and a greatest. A part's rows of states are
+the result's batches with these columns in place of the answers, so a part goes through every delivery
+a question has, a core part by part and its spills included. They are written to a Vortex file in
+memory, which is the partial's bytes.
+
+Two things differ from a question that answers. The file statistics settle nothing in a part, because
+an answer they give, a mean or a least, is no state. The blocks a zone map settles still fold as
+states. And a part leaves out the operators on groups and the window, which apply only at the merge.
+
+The merge is the question over a source of the partials. That source keeps states, and answers the
+pass that asks for them with each partial's batches. The engine folds those batches as it folds a
+synopsis's states. A partial's keys are already computed, so the fold reads each one by its place
+(`RecordBatch.KeysApplied`) rather than through the key's functions again. A key of a column read
+through two functions is two keys, which a synopsis's states could not carry. A count of rows alone
+is the sum of the partials' rows. Since the merge is a question, it can give a partial too, so the
+merges can form a tree.
+
+Only a question whose every aggregate a state answers whole takes parts, the questions
+`StateRequest.Of` accepts, less the exact distinct count, whose states would be the values themselves.
+The others throw `NotSupportedException`. A partial whose columns are not those of the question's
+partials, other keys or measures, throws `InvalidDataException` when the merge opens it.
+
+Tests (`DatasetPartsTests`): six objects of four hours, by region and hour, with counts, sums of
+integers and of floats, a mean, extremes, a quantile and an approximate distinct count. Cut into four
+parts, run apart, read back from their bytes and merged in reverse order, they give each of the 119
+groups the whole question gives, every double the same bits. With a filter on groups, an order on a
+sum and a window of five, the merge gives the same five groups. A merge of two partials, merged again
+with the other two, gives the same answers, and so does a file cut at its chunks. Under a sixth of the
+memory the whole question holds granted everything (`DatasetPartsBudgetTests`), each part and the merge
+of 441 430 groups go through the core and spill its 256 parts, with the same answers.
+
+### 5.9 Estimates, then the exact answer
+
+`EstimateAsync` answers a question tier after tier, each from a larger share of its rows, then exactly.
+It is a stratified cluster sample whose clusters are ranges of rows, built on the parts of
+[5.8](#58-parts-of-a-question-merged).
+
+**The threshold.** Before any tier, the source prices the exact answer (`ScanSource.CostAsync`): a
+dataset walks its entries and prices each object by the path its planner would take, its column's
+counts, its blocks' statistics or its rows, in requests and bytes
+([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#8-the-planner)), the time of which, cold
+over a link of 1.25 GB/s with each request worth 293 KB, every tier announces (`ExactCost`). Under
+`EstimateOptions.ExactUnder`, a second by default, the exact answer comes at once: the question runs as
+one part over every row, through whatever its planner answers it by, and its states are the one tier. A
+source that cannot price its reads, a single file's, draws the tiers. The same price is announced before
+any tier or any read, `Aggregation.CostAsync`, so that an application chooses between the exact answer,
+the estimates, or a threshold of its own before it asks.
+
+**The ranges.** The source cuts the rows a pass reads (`ScanSource.StrataAsync`): a file's, and each
+object of a dataset that the filter keeps by its summaries and its slices. The cuts fall where the
+chunks of every column the pass reads end together (`SplitPlan.CommonStarts`, the cuts a lane's piece
+takes). Consecutive cuts are gathered until a range holds `RangeBytes` of the narrowest column at its
+mean bytes a row, 1 MiB by default. A range then reads whole chunks of each column. Drawn one block at a
+time, 1 % of a month would cost as many requests as blocks, some 10⁵.
+
+**The strata.** Objects that follow one another are gathered until a stratum holds the ranges the first
+tier draws two of: `⌈2 / s₁⌉` ranges, `s₁` the first share. Objects follow the order of the
+clustering, so a stratum holds neighbouring values. Each stratum draws its ranges in an order shuffled
+once, with the seed given or one of the process's choosing. A tier of share `s` reads the first
+`clamp(⌈s · M_h⌉, min(2, M_h), M_h)` of a stratum's `M_h` ranges, so the tiers are nested.
+
+**A tier.** Each range drawn runs as a part of the question giving its states
+(`AggregationQuery.Ranged`, through a plan of its own), as many at once as the session's lanes, or 16
+over an object store whose reads are round trips. A partition folds the states, exactly, and gives
+each row its group (`AggregationPartition.StateGroups`). Beside it, for each stratum and group, the
+estimate sums what a total needs over the draws: the rows, the count of values and the sum of each
+measure a sum or a mean reads, their squares, and the product of values and sum.
+
+The ranges are not all the same size, and the rows of each stratum are known, so a total is a ratio
+estimate. For a total `Y` of a group, with `n_h` ranges drawn of `M_h`, `L_h` rows in the stratum,
+`ℓ_hi` rows in range `i` and `y_hi` the group's total there (0 where the range holds none of its rows):
+
+- the estimate is `Ŷ = Σ_h L_h Σ_i y_hi / Σ_i ℓ_hi`;
+- its variance is `V̂ = Σ_h M_h² (1 − n_h / M_h) s_h² / n_h · (L̄_h / ℓ̄_h)²`, where `s_h²` is the spread of
+  the residuals `y_hi − r̂_h ℓ_hi` over the stratum's draws, `r̂_h` the ratio of the draws' totals to their
+  rows, and `L̄_h / ℓ̄_h` the stratum's mean rows per range over the draws'. With ranges of one size,
+  this is the plain expansion `(M_h / n_h) Σ_i y_hi`;
+- a mean is the ratio `R̂ = Ŝ / X̂` of the sum's estimate over the count of values'. Its variance is that
+  of the residuals `s_hi − R̂ x_hi`, estimated the same way, over `X̂²`;
+- a margin is `t · √V̂`, where `t` is Student's 97.5 % quantile with `Σ_h (n_h − 1)` degrees of freedom
+  over the strata not read whole. The quantile comes from a table up to ten degrees and from Fisher's
+  expansion past them, within 10⁻³.
+
+The answers of a tier are the question's own columns over states written for it. The sample's states
+are written as rows of states, through `AggregationPartials.Columns` with an overlay that replaces the
+rows, the counts of values and the sums by their estimates. Integer sums are rounded to an `Int128`,
+and float sums are a wide indexed sum of the estimate over its count. The extremes and sketches stay
+the sample's. A fresh partition folds those rows, and the question's columns read it, so each element
+comes out typed as the question types it. The margins follow as `double` columns. The exact tier is
+the sample partition itself, every range folded: its states merge exactly, so its answers are the
+question's to the bits.
+
+Not in it: a filter on groups, an order or a window, which an estimate cannot apply to groups it has
+not all met; the aggregates the parts refuse; and margins for extremes, distributions and distinct
+counts. A stratum draws two ranges at least, so over few ranges the first tier reads more than its
+share. The planner (lot D) decides when a question is answered by estimates and announces the cost of
+the exact answer.
+
+Tests (`DatasetEstimateTests`): 140 groups of a region and a status, spread over 400 000 rows in eight
+objects of a dozen ranges each, in two strata. Over 200 draws, the margins of the counts, sums and means
+held the exact answer 94.80 % of the time at 5 %, with three ranges drawn per stratum and four degrees of
+freedom, and 95.09 % at 20 %, each within a standard error of 0.09 %. The shortfall at the smallest
+draws comes from the t interval over a finite population and shrinks as the draws grow. The test holds
+the mean coverage of twenty draws to 95 % less three standard errors, which come from the spread between
+draws: the groups of one draw share its ranges, so they are not independent trials. The plain
+expansion estimator measured 94.76 % at 5 %. The exact tier gave the question's answers, every margin 0.
+Over a store that counts its requests, the first tier made 32 requests for 6 ranges, the objects' 8
+opens included, and the second 53 for 14 ranges of four columns: one request per range and column read
+at most, where drawing the same rows block by block would cost one per block and column.
 
 ## 6. After the group by
 
@@ -858,32 +983,21 @@ of as many rows holding each column's minimum and, on its last row, its maximum,
 streams and the groups come in the order they would have. A dataset's objects do not settle, because
 their files still count the rows a deletion removed.
 
-A dataset of periods answers part of a pass with states instead
-([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
-When every aggregate is a count of the rows, a sum, a minimum, a maximum or a mean of a number column
-or of a variant's integer or double path, none of them filtered, and every key is a column, a function
-of one or a variant's path read strictly, the pass asks its source for states. A path's states carry
-the path's text as their name. A path read with `AsDouble()` reads floats too, which the double class
-of the tables leaves out, so an object that holds a float there, as its slice table says, answers with
-its rows. An object whose
-synopsis answers then comes as a batch of states: a row per bucket of a table and per value of its
-keys. The key columns carry the names and types the rows' have, the instant holds the bucket's start,
-and beside them are the rows the row stands for and each measure's states. A lane gives each row its
-group through the same keys and functions as rows, and each aggregate folds the row's state into it,
-an exact sum merged and an extreme compared, to the bits the rows would give. A source that keeps
-states makes the pass block rather than stream when one of its objects would answer: states come
-with their objects, not in key order. `ScanOptions.UseSynopses` turns this off, and the metrics count
-the table rows folded (`SynopsisRows`) and the rows read at the edges (`EdgeRows`).
-
-`ScanOptions.AlignWindow` grows the window on the instant to what the tables answer whole. The pass
-carries the question's keys and measures beside its states (`ScanSpec.Aligning`), set from the plan
-whether the states or the rows answer, so the source grows the same window either way: each end that
-cuts an object moves, in the object of most rows it cuts, to the nearest bound at which that object
-answers its side of the window with no row, its slice's, its hour's or its own, and no further than
-the instants it holds. The source rewrites the filter's bounds on the instant once per scan, from the
-entries alone, and the metrics give the window applied (`WindowFrom`, `WindowTo`). Another object the
-moved end cuts, a late or fresh one whose slices fall elsewhere, reads its rows there, so the answer
-is the exact one of that window.
+A pass may also take states rather than rows from its source. When every aggregate is a count of the
+rows, a sum, a minimum, a maximum or a mean of a number column or of a variant's integer or double path,
+a quantile or a distribution of one, or a distinct count of a column, none of them filtered, and every
+key is a column, a function of one or a variant's path read strictly, the pass asks its source for
+states, a row per group of keys with the rows it stands for and each measure's states and sketch; a lane
+gives each row its group through the same keys and functions as rows, and each aggregate folds the row's
+state into it, an exact sum merged, an extreme compared and a sketch merged, to the bits the rows would
+give. A path's states carry the path's text as their name. A dataset gives states where its objects'
+counts or its rollups answer the pass, a question on one column and the measures whose other keys an
+object holds constant, where its columns' statistics over an object's blocks answer a block, and rows
+everywhere else
+([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#8-the-planner)).
+`ScanOptions.UseSynopses` chooses them, true by default; `ScanOptions.AlignWindow` moves a range on the
+key's first column out to the bounds of the objects its ends fall in, so that they answer whole, and
+the scan reports the range applied.
 
 ### 9.4 Parallelism and the merge
 
@@ -923,29 +1037,21 @@ homed by the top bits of its hash. A part is then a run of every lane's slots, w
 with nothing cut first, its own table homing them by the bits below the part's, which they share. A
 chosen row and a tie keep the earlier range's.
 
-On a dataset, a range is an object, and an object holding two shares of the rows or more is cut
-between its chunks, as a file's rows are, so no chunk is read by two ranges. An object whose synopsis
-answers the pass's states counts for none of the shares of rows, but for the rows its answer reads, the
-rows of its tables' chunks and of its edges' slices; whether it answers, its entry says, as its scan would
-find, so that one whose tables do not hold the question is cut as any other. Up to eight objects in a row
-that their tables alone answer, with no row read at an edge, of an identifier left out or of a delete, make
-one range while they read less than a share of tables' rows together, 2^16 at least: such an answer takes
-a tenth of a millisecond warm, where a range costs a walk of the tree to its rows and a lane's turn, so that
-a warm count over 48 hourly objects at 16 lanes took 3.8 ms and allocated 1.7 MB with a range an object,
-against 3.1 ms and 221 KB. An answer that reads two shares or more, and takes no row of an identifier left
-out or of a delete, is cut between the chunks of its tables into ranges of its slices, at a slice that no
-bucket a table folds whole straddles: a lane answers its range as the object is answered under a window
-that ends where the range does, and reads the slices of the edges it holds. A count per service and per
-12 hours over a window that cuts three hours of 540 M rows, 3.47 M rows of runs, one lane's whole when an
-answer was, took 32 ms at 16 lanes as at one; cut, 11 ms. Over several lanes, an edge of the answer of two
-edge shares of rows or more, 2^17 at least, is cut between its chunks into ranges of its rows alone, which
-read them under the window's filter as the edge was read, and the ranges answered around it end and begin
-with its neighbours' slices: a window whose edge cuts a minute of 3 M rows, one lane's to decode, took 38.7
-ms at 16 lanes as at one without latency, 83 ms over a store of 5 ms; cut, 3.3 and 39.8 ms. The objects
-that are cut are opened side by side to learn where their chunks end, and the ranges then find them
-already open.
-No object settles ([statistics and zone maps](#93-statistics-and-zone-maps), and see
-[13-dataset.md](13-dataset.md)). A group by that streams runs as [in parallel, in
+On a dataset, a range is an object, and an object holding two shares of the rows or more is cut where
+a chunk of every column the pass reads starts, so no chunk is read by two ranges: the columns of a
+dataset's object are chunked apart, and their chunks end together at its slices and its groups of rows
+([key slices](11-write-strategy.md#9-key-slices-and-shredded-variants)). Under a range of the key's
+first column, an object in slices counts for the rows of the slices the range reaches, which its entry
+names, and is cut between their chunks alone. The objects that are cut are opened side by side to learn
+where their chunks end, and the ranges then find them already open.
+An object's blocks settle as a file's do ([statistics and zone maps](#93-statistics-and-zone-maps)), but
+that the dataset settles each object as it reads it: a block that holds a row a delete marked, which its
+file's statistics still count, is read as rows, and so is every block under a filter that reads another
+column than the key's first, or that the object's summaries do not prove true over its every row; a
+settled block comes in the object's batches, at its place among the dataset's rows, as a block of its
+zones' bounds. A count by day, with its extremes, over an object of ten days and a million rows, five of
+them deleted far apart, decodes 14 blocks, the five a delete marked and the nine a midnight cuts, where a
+read without statistics decodes 123 (`DatasetSettlingTests`). A group by that streams runs as [in parallel, in
 order](#25-in-parallel-in-order) describes, its ranges grouped side by side and followed in row order,
 and a top-k on the key as [`Skip` and `Take`](#64-skip-and-take) describes. An integer key's groups are
 numbered by value as over a file. The summaries of the version's roots bound its values over every
@@ -1259,6 +1365,7 @@ early](#24-stopping-early) describes.
 | the same bits for a custom aggregator whose merge is not associative | every native aggregate gives the same bits whatever the caches' capacity, α and the order its states merge in ([how it is tested](#13-how-it-is-tested)), its consolidation made of merges alone. A merge that is not associative depends on that order, as it already depends on the order of the merges at more than one lane |
 | a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, and a third more at a million groups, whose 32 bytes per group leave the cache. It is more accurate, and a second semantics would be a second test matrix |
 | grouping sets | later, as operators of the same pipeline |
+| parts of an exact distinct count | its states are the values themselves, as many as the rows at worst; an approximate distinct count takes parts ([5.8](#58-parts-of-a-question-merged)) |
 
 ## 13. How it is tested
 

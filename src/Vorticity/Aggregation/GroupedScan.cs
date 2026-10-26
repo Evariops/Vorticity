@@ -469,6 +469,67 @@ public sealed class Aggregation<TResult>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
     public Aggregation<TResult> Take(int count) => new Aggregation<TResult>(_query.Limit(0, count));
 
+    /// <summary>
+    /// The rows the aggregation reads cut into <paramref name="count"/> parts at most, which read apart: a dataset's at its
+    /// objects and inside a large one at its chunks, a file's at its chunks, gathered into ranges of about as many rows. Each
+    /// part runs as the same question over its range (<c>Scan.Rows(range)</c>), on any node, and gives its states
+    /// (<see cref="PartialAsync"/>), which <see cref="Merge"/> folds to the answer of the whole question.
+    /// </summary>
+    /// <param name="count">The parts at most: one for a source with no cut of its own.</param>
+    /// <param name="cancellationToken">Cancels the reads of the structures that cut the rows.</param>
+    /// <returns>The parts' ranges, in the order of their rows, which cover the question's.</returns>
+    /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole, as an exact distinct count's.</exception>
+    public ValueTask<RowRange[]> PartsAsync(int count, CancellationToken cancellationToken = default) =>
+        AggregationPartials.PartsAsync(AggregationPartials.Of(_query), count, cancellationToken);
+
+    /// <summary>
+    /// Runs the aggregation and gives its groups' states rather than their answers: a part's, whose partial
+    /// <see cref="Merge"/> folds with the other parts'. Its filters on groups, its order and its window wait for the merge.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
+    /// <returns>The partial, whose bytes another node reads (<see cref="AggregationPartial.FromBytes"/>).</returns>
+    /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole.</exception>
+    public ValueTask<AggregationPartial> PartialAsync(CancellationToken cancellationToken = default) =>
+        AggregationPartials.ExportAsync(AggregationPartials.Of(_query).Partial(), cancellationToken);
+
+    /// <summary>
+    /// The aggregation answered from the partials of its parts, to the bits the whole question gives: the same question,
+    /// built over the same version of the same source, its filters on groups, its order and its window applied to the merge.
+    /// </summary>
+    /// <param name="partials">The partials of the parts, in any order.</param>
+    /// <returns>The merged aggregation, enumerated as any other, once.</returns>
+    /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole.</exception>
+    /// <remarks>A partial of another question, whose keys or measures differ, throws <see cref="System.IO.InvalidDataException"/> when the merge reads it.</remarks>
+    public Aggregation<TResult> Merge(IEnumerable<AggregationPartial> partials) =>
+        new Aggregation<TResult>(AggregationPartials.Merged(AggregationPartials.Of(_query), partials));
+
+    /// <summary>
+    /// Estimates of the aggregation, tier after tier, then its exact answer: each tier reads a share of the question's
+    /// ranges more, drawn at random in each stratum of its files or objects, and answers every group it met, its counts of
+    /// rows, sums and means scaled to every row with a margin each (<see cref="AggregationEstimate"/>).
+    /// </summary>
+    /// <param name="options">The shares of the tiers, the exact answer or not, the bytes a range holds, the seed; the defaults when null.</param>
+    /// <param name="cancellationToken">Cancels the reads at a range's batch.</param>
+    /// <returns>The tiers, in order, each read before the next is asked for.</returns>
+    /// <exception cref="NotSupportedException">
+    /// A state does not answer one of the aggregates whole, the question filters, orders or windows its groups, or its
+    /// source has no ranges of its own.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The shares are not ascending in (0, 1], or a range holds no byte.</exception>
+    public IAsyncEnumerable<AggregationEstimate> EstimateAsync(EstimateOptions? options = null, CancellationToken cancellationToken = default) =>
+        new EstimateRun(AggregationPartials.Of(_query), options ?? new EstimateOptions()).TiersAsync(cancellationToken);
+
+    /// <summary>
+    /// What the exact answer costs, announced before anything is read: the requests and the bytes its source's planner
+    /// would read, object by object through the path it takes, at the price an object store asks of a request and a byte,
+    /// as each tier of <see cref="EstimateAsync"/> announces it (<see cref="AggregationEstimate.ExactCost"/>). Null for a source
+    /// that cannot say, a file's.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the walk of the source's entries.</param>
+    /// <returns>The time the exact answer would take on an object store, by the formula.</returns>
+    public ValueTask<TimeSpan?> CostAsync(CancellationToken cancellationToken = default) =>
+        EstimateRun.CostOfAsync(AggregationPartials.Of(_query), cancellationToken);
+
     /// <summary>The result as a scan of a record of one member, which takes the value: <c>Select(g =&gt; g.Count()).As&lt;Total&gt;()</c>.</summary>
     /// <typeparam name="TRecord">The record, whose one member is of the result's type or its nullable form.</typeparam>
     /// <returns>A scan of the result, which runs the query when its sink runs.</returns>
@@ -544,6 +605,67 @@ public sealed class Aggregation
     /// <returns>The same query, which delivers fewer.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
     public Aggregation Take(int count) => new Aggregation(_query.Limit(0, count));
+
+    /// <summary>
+    /// The rows the aggregation reads cut into <paramref name="count"/> parts at most, which read apart: a dataset's at its
+    /// objects and inside a large one at its chunks, a file's at its chunks, gathered into ranges of about as many rows. Each
+    /// part runs as the same question over its range (<c>Scan.Rows(range)</c>), on any node, and gives its states
+    /// (<see cref="PartialAsync"/>), which <see cref="Merge"/> folds to the answer of the whole question.
+    /// </summary>
+    /// <param name="count">The parts at most: one for a source with no cut of its own.</param>
+    /// <param name="cancellationToken">Cancels the reads of the structures that cut the rows.</param>
+    /// <returns>The parts' ranges, in the order of their rows, which cover the question's.</returns>
+    /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole, as an exact distinct count's.</exception>
+    public ValueTask<RowRange[]> PartsAsync(int count, CancellationToken cancellationToken = default) =>
+        AggregationPartials.PartsAsync(AggregationPartials.Of(_query), count, cancellationToken);
+
+    /// <summary>
+    /// Runs the aggregation and gives its groups' states rather than their answers: a part's, whose partial
+    /// <see cref="Merge"/> folds with the other parts'. Its filters on groups, its order and its window wait for the merge.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
+    /// <returns>The partial, whose bytes another node reads (<see cref="AggregationPartial.FromBytes"/>).</returns>
+    /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole.</exception>
+    public ValueTask<AggregationPartial> PartialAsync(CancellationToken cancellationToken = default) =>
+        AggregationPartials.ExportAsync(AggregationPartials.Of(_query).Partial(), cancellationToken);
+
+    /// <summary>
+    /// The aggregation answered from the partials of its parts, to the bits the whole question gives: the same question,
+    /// built over the same version of the same source, its filters on groups, its order and its window applied to the merge.
+    /// </summary>
+    /// <param name="partials">The partials of the parts, in any order.</param>
+    /// <returns>The merged aggregation, read as any other through a record (<see cref="As{TRecord}"/>), once.</returns>
+    /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole.</exception>
+    /// <remarks>A partial of another question, whose keys or measures differ, throws <see cref="System.IO.InvalidDataException"/> when the merge reads it.</remarks>
+    public Aggregation Merge(IEnumerable<AggregationPartial> partials) =>
+        new Aggregation(AggregationPartials.Merged(AggregationPartials.Of(_query), partials));
+
+    /// <summary>
+    /// Estimates of the aggregation, tier after tier, then its exact answer: each tier reads a share of the question's
+    /// ranges more, drawn at random in each stratum of its files or objects, and answers every group it met, its counts of
+    /// rows, sums and means scaled to every row with a margin each (<see cref="AggregationEstimate"/>).
+    /// </summary>
+    /// <param name="options">The shares of the tiers, the exact answer or not, the bytes a range holds, the seed; the defaults when null.</param>
+    /// <param name="cancellationToken">Cancels the reads at a range's batch.</param>
+    /// <returns>The tiers, in order, each read before the next is asked for.</returns>
+    /// <exception cref="NotSupportedException">
+    /// A state does not answer one of the aggregates whole, the question filters, orders or windows its groups, or its
+    /// source has no ranges of its own.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The shares are not ascending in (0, 1], or a range holds no byte.</exception>
+    public IAsyncEnumerable<AggregationEstimate> EstimateAsync(EstimateOptions? options = null, CancellationToken cancellationToken = default) =>
+        new EstimateRun(AggregationPartials.Of(_query), options ?? new EstimateOptions()).TiersAsync(cancellationToken);
+
+    /// <summary>
+    /// What the exact answer costs, announced before anything is read: the requests and the bytes its source's planner
+    /// would read, object by object through the path it takes, at the price an object store asks of a request and a byte,
+    /// as each tier of <see cref="EstimateAsync"/> announces it (<see cref="AggregationEstimate.ExactCost"/>). Null for a source
+    /// that cannot say, a file's.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the walk of the source's entries.</param>
+    /// <returns>The time the exact answer would take on an object store, by the formula.</returns>
+    public ValueTask<TimeSpan?> CostAsync(CancellationToken cancellationToken = default) =>
+        EstimateRun.CostOfAsync(AggregationPartials.Of(_query), cancellationToken);
 
     /// <summary>
     /// The result as a scan of <typeparamref name="TRecord"/>, whose members take the elements of the

@@ -61,17 +61,20 @@ cursor opened without `Distinct()` only takes the first three sources, because a
 dictionary source cannot say where a key's rows are, and answering with a block's first row would
 make `Row` a lie.
 
-Time slices serve the objects a dataset of periods writes, whose rows are sorted inside each slice by
-other columns first, then by their instant ([sorted time
-slices](11-write-strategy.md#9-sorted-time-slices-and-shredded-variants)). The slices follow each other in time,
-so the slice table finds the one slice that may hold a key, and the rank of a key at or below a
-slice's start is the rows of the slices before it, without a read. Inside the slice, the instants are
-read, decoded and sorted by a radix over their distance from the slice's start, which keeps the rows
-of one instant in row order. Two slices are held at most: the position's, and the last one a rank
-read. A seek or a rank from a cursor just opened costs one slice's read and sort, 2.9 ms for a slice of
-half a million rows and 13 ms for two million (`vortex-queries --micro sliceorder`), where a sorted
-column answers in 0.02 ms. An instant outside its slice's bounds, or a null one, is a table that does
-not say what the file holds, and the read is refused with a `VortexFormatException`.
+Time slices serve the objects an earlier release's datasets of periods wrote, whose rows another
+column could order inside each slice before their instant ([key
+slices](11-write-strategy.md#9-key-slices-and-shredded-variants)). An object whose slices kept the
+order the rows came in has its instant ascending through the file, which a sorted column serves. A key
+table is no key source: a job writes its object in key order, so its sorted column or its run serves
+the key. The slices follow each other in time, so the slice table finds the one slice that may hold a
+key, and the rank of a key at or below a slice's start is the rows of the slices before it, without a
+read. Inside the slice, the instants are read, decoded and sorted by a radix over their distance from
+the slice's start, which keeps the rows of one instant in row order. Two slices are held at most: the
+position's, and the last one a rank read. A seek or a rank from a cursor just opened costs one slice's
+read and sort, 2.9 ms for a slice of half a million rows and 13 ms for two million (`vortex-queries
+--micro sliceorder`), where a sorted column answers in 0.02 ms. An instant outside its slice's bounds,
+or a null one, is a table that does not say what the file holds, and the read is refused with a
+`VortexFormatException`.
 
 The sorted-column source serves the files this writer produces, whose statistics carry the order
 flags in the reference's semantics. The reference writer drops those flags from its file statistics.
@@ -221,79 +224,25 @@ refused, naming `IndexPolicy.Postings`, the cheapest structure that would serve 
 filled into a hash set bounded by the column. Distinct is a property of the cursor, not a terminal
 returning a list, because it is an ordered walk with an early exit, and a list would buffer it.
 
-### 4.5 Aggregations from a dataset's synopsis
+### 4.5 Aggregations of a dataset
 
-An object a dataset of periods writes keeps, beside its data, a synopsis: tables of counts, exact
-sums and extremes for the combinations of its synopsis columns, by slice, by hour and over the whole
-object ([the synopsis tables](10-indexes.md#49-vorticitysynopsistablev1-the-synopsis-tables)). Its
-entry in the dataset's tree carries the table of contents, each table's keys, measures, bucket and
-rows, and its chunks, or the region of their list with its checksum for a table of many chunks, so
-deciding what an object answers reads nothing. A question then reads the lists of the tables it reads
-that keep theirs apart, for every object at once, from the synopsis cache or in one round trip, and
-the chunks that hold the buckets it folds.
+Every aggregation of a dataset runs through the engine of [16-queries.md](16-queries.md): each object a
+range in the lanes' queue, a large one cut between its chunks, and under a filter on the key's first
+column only the objects whose keys the filter may hold. An object's counts answer, in one request
+instead of its rows, a question on one column whose other keys the object holds constant and whose
+filter its summaries prove true, and rollups answer runs of such objects ([the
+synopses](22-on-the-fly-and-synopses.md#5-the-synopses-all-per-column),
+[rollups](15-compaction.md#rollups)); the composite tables of the first design, which answered from a
+table chosen per object, are gone.
 
-An aggregation that asks for states ([states](16-queries.md#93-statistics-and-zone-maps)) is answered
-object by object. The filter splits into bounds on the instant, which make the window, and predicates
-on other columns, which must be keys of a table. The table of fewest rows that holds the question's
-keys, the columns its filter reads and its measures folds every bucket the window keeps whole. A table
-by slice folds the whole slices of a bucket the window cuts, and the slices the window cuts themselves
-are read as rows, through the chunk directories, without the footer
-([the rows of a time slice](#51-the-rows-of-a-time-slice-without-the-footer)). An object that no table
-answers, or whose every row lies at an edge, is read as rows. The predicates on keys run once per table
-row, first, before anything else is made of a chunk's rows. Where they hold for fewer than an eighth of
-them, those rows alone go on, gathered, their instants made from them alone: a question of one value of
-a column, whose table of values lies in the order of the hour, then of the value, keeps a row in a few
-hundred, and one host per minute over ten days of the design's requests answers warm in 10.7 ms, where
-taking every row of each chunk through took 40.8 (`vortex-queries --micro paths --design --only "one
-host per minute"`). A table's chunk is decoded for the fields its batches are read by alone: the bucket, the count, the
-columns of the keys and of the filter, and the states of the measures the question folds, so that a count
-by service decodes 3 of a table's 16 columns. A table a delete or an identifier corrects is decoded whole,
-since a row comes out of it by every key and state. The keys among the fields decoded stay as they lie, a
-dictionary's codes or a run-end's runs, which the group by reads as they are: a table's rows are one struct,
-whose fields no layout grants their encoding, and its keys came out canonical, their values gathered at
-every row to be looked up again row by row. The rows are decoded where they lie, in the bytes read, which
-the set of tables keeps until it lets the rows go, and an answer's part holds the buckets it folds as runs
-of buckets folded one after another. A count by service per 12 hours over a window that cuts three hours
-of 540 M rows, 3.47 M rows of runs, went from 69 to 33 ms and from 127 to 53 KB allocated warm (`--hours 3
---rate 50000`). Over 48 hourly objects warm, from the synopsis cache, a
-count by service per 12 hours went from 8.3 to 5.5 ms; with the analysis of the question's filter, keys
-and measures done once for every object, and an object's kept buckets held in order rather than in a set,
-4.9 ms and 232 KB allocated, against 278 (`vortex-queries --micro paths --design --hours 48 --rate 200
---loop`). A key may be a column, a function of the instant, a partition column, whose one value the object
-holds, or a key of a variant column read strictly as an integer, a double, a text or a boolean, which
-the object's synopsis path of the same class stands for, a double only where the object holds no float
-there. A key the object leaves in its residual is counted over the rows that hold it alone, so it
-answers as a measure only. Under `ScanOptions.AlignWindow` the window grows first, each end to the
-nearest bound at which the object it cuts answers with no row, and no further than that object's rows
-([the window aligned](16-queries.md#93-statistics-and-zone-maps)).
-
-Two kinds of rows come out of a table's states rather than make the object read its rows. The rows a
-delete marked are found by their positions, charged to the table row of their bucket and keys, and
-their counts and exact sums subtracted. A filter that leaves out one value of a declared identifier,
-`id != v || id == null`, or `id != v` alone on a column without nulls, is the whole minus the part the
-identifier's index finds, taken out the same way. The pages and segments of the index that lookup
-reads are named with their checksums, which the session's synopsis cache keeps as it keeps the
-directory: warm, only the chunks of the blocks found go to the store. When a removed row holds an
-extreme the question reads, or the top of a float sum, the object is read as rows.
-
-The objects a synopsis answers are read newest first and many at once, as many as the session lets
-reads be in flight, so a day of hourly objects costs one round trip, and the objects read as rows open
-the next one ahead as a scan of rows does. Every region read is one the table of contents declares, so
-the session's synopsis cache keeps it on the local disk ([the synopsis
-cache](19-object-storage.md#105-the-synopsis-cache-on-the-local-disk)). On 24 hours of generated requests at 30 ms a round trip, a count by
-service over the day takes 24 requests in two dependent steps cold and none warm, against 120
-requests in 120 steps and 3.9 s through the rows (`vortex-queries --micro questions`). The question's
-`ExplainAsync()` lists in `States` what each object reads: a table and its buckets, the edges, the
-rows left out, or its rows and why. Every answer gives the bits of its rows, at every degree, over
-objects of one slice, of many and of minutes, before and after compaction, under marks and
-exclusions (`SynopsisAnswerTests`).
-
-A page that shows a long window can show its newest part first. `VortexDataset.AskNewestFirstAsync`
-cuts the window at the starts of the periods it crosses, asks the caller's question over each part,
-several at once, and delivers each part's answer newest first, once it and every newer part are in.
-The engine still folds every object of one question before it delivers a group, so the parts are
-what makes the delivery progressive, and merging them is the caller's: counts and sums add, extremes
-compare, a mean is a sum over a count.
+A page that shows a long range can show its last part first. `VortexDataset.AskByValuesAsync` cuts a
+range of the key's first column where the clustering value changes, asks the caller's question over
+each part, sixteen at once at most, and delivers each part's answer, the last first by default, once it
+and every part before it are in. The engine still folds every object of one question before it
+delivers a group, so the parts are what makes the delivery progressive, each with the share of the
+range the answers so far cover (`ValuePart.Covered`), and merging them is the caller's: counts and sums
+add, extremes compare, a mean is a sum over a count. A value whose next value
+no function tells, a text's or a float's, cuts no part, and the call refuses it.
 
 ## 5. Rows in key order
 
@@ -330,28 +279,28 @@ a top-k or a merge, not for a whole uncorrelated column, where sorting the scan'
 The plan's `OrderPlan` states the source, the runs the range reaches and the entries it admits
 before the read, and the scan's metrics count the windows and the splits they touched afterwards.
 
-Over time slices, rows are in key order slice by slice only, and a window touches about every split
-of its slice. The first window of a slice reads the splits its own rows lie in, which is all a page
-wants. From the second, the slice is decoded whole and once, in file order, the filter is evaluated
-on it once, and each window is gathered out of it. A window never spans two slices. On four million
-rows sorted inside each slice by three columns, a read of every row in key order took 137 ns a row
-with slices of half a million rows and 189 with slices of two million when every window read its
-splits, and takes 22 to 23 ns now. The same rows in time order take 64 ns a row through a sorted
-column's windows. A page of a hundred rows from an instant costs about the seek, 3.4 ms and 14 ms.
-Memory is one slice of the columns read, the size the windows held when they kept a slice's chunks
-decoded.
+Over the time slices of those objects of periods, rows are in key order slice by slice only, and a
+window touches about every split of its slice. The first window of a slice reads the splits its own
+rows lie in, which is all a page wants. From the second, the slice is decoded whole and once, in file
+order, the filter is evaluated on it once, and each window is gathered out of it. A window never spans
+two slices. On four million rows sorted inside each slice by three columns, a read of every row in key
+order took 137 ns a row with slices of half a million rows and 189 with slices of two million when
+every window read its splits, and takes 22 to 23 ns now. The same rows in time order take 64 ns a row
+through a sorted column's windows. A page of a hundred rows from an instant costs about the seek, 3.4
+ms and 14 ms. Memory is one slice of the columns read, the size the windows held when they kept a
+slice's chunks decoded.
 
 The dataset's key-ordered reads and its compaction merge are built on this, one call per object (see
 [what a compaction does](13-dataset.md#53-what-a-compaction-does) and [order beyond the
 lookup](13-dataset.md#66-order-beyond-the-lookup)).
 
-### 5.1 The rows of a time slice, without the footer
+### 5.1 The rows of a slice, without the footer
 
-An open reads the footer, which holds a node per chunk and column. For the object of a dataset's
-period that is megabytes, and a question that needs the rows of a slice or two (the edges of a time
-window, an exact lookup, the rows to show) needs none of it. A sliced file carries its slice table and
+An open reads the footer, which holds a node per chunk and column. For an object of a day's rows that
+is megabytes, and a question that needs the rows of a slice or two (the edges of a range, an exact
+lookup, the rows to show) needs none of it. A sliced file carries its slice table and
 where its chunks lie in its index directory ([the slice
-kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)), so a reader goes from the end
+kinds](10-indexes.md#44-vorticityslicesv1-the-slices-of-a-file)), so a reader goes from the end
 of the file to a slice's rows without the footer:
 
 ```
@@ -366,9 +315,9 @@ Each chunk decodes from its own bytes, the encoding table the directory carries,
 type, which the caller knows from the dataset's schema. The chunks that overlap a slice are cut to its
 rows and joined, so a slice that starts inside a chunk reads that chunk whole, as any read of a flat
 chunk does. A read may name the columns it wants, and then fetches only their regions and chunks: the
-edges of a window read the instant alone. Requests 1 to 4 are small, are paid once per file, and a
+edges of a range read the column it bounds alone. Requests 1 to 4 are small, are paid once per file, and a
 dataset's leaf entry that records the regions spares the first three. A column of many chunks lays
-its region out in pages ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)):
+its region out in pages ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-slices-of-a-file)):
 a reader of the file alone reads it whole, while a reader given the leaf entry, which holds the first
 row of each page, reads the column's page table and the pages that hold the slice's rows in request
 4, each checked against its checksum. The page table stays with the entry, and a later read asks for

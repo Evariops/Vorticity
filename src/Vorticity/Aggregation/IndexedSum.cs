@@ -82,6 +82,13 @@ internal struct IndexedSum : IFloatSumState<IndexedSum>
     /// <summary>The values summed: every one but the NaN.</summary>
     public readonly long Count => Meta & CountMask;
 
+    /// <summary>The parts of a meta word <paramref name="meta"/>: the values it counts, its top, and the infinities met as two bits.</summary>
+    internal static (long Count, int Top, int Infinities) PartsOf(long meta) =>
+        (meta & CountMask, (int)((meta & TopMask) >>> TopShift), (int)((meta >>> 56) & 3));
+
+    /// <summary>The meta word of the parts <see cref="PartsOf"/> gives.</summary>
+    internal static long MetaOf(long count, int top, int infinities) => count | ((long)top << TopShift) | ((long)infinities << 56);
+
     /// <summary>The bin the largest value called for, the highest of the three; 0 before the first finite value.</summary>
     internal readonly int Top => (int)((Meta & TopMask) >>> TopShift);
 
@@ -209,6 +216,78 @@ internal struct IndexedSum : IFloatSumState<IndexedSum>
         Deposit(value, top);
     }
 
+    /// <summary>
+    /// A value split once into its parts in the bins its own top calls for, which <see cref="Add(in Split)"/> adds to any sum
+    /// whose top lies at or above that top: a bin above a value takes nothing of it, so a sum of a higher top keeps the same
+    /// parts, moved down, as <see cref="Add(double)"/> would split them. Several sums that take the same value, the groups of
+    /// several columns a row falls in, split it once.
+    /// </summary>
+    /// <param name="Value">The value.</param>
+    /// <param name="Top">The bin it calls for; 0 for a value only <see cref="Add(double)"/> takes: a NaN, an infinity, or one past the extractors.</param>
+    /// <param name="P0">Its part in bin <paramref name="Top"/>.</param>
+    /// <param name="P1">Its part in the bin below.</param>
+    /// <param name="P2">Its part in the bin below that.</param>
+    internal readonly record struct Split(double Value, int Top, long P0, long P1, long P2);
+
+    /// <summary>Splits <paramref name="value"/> into its parts in the bins its own top calls for (<see cref="Split"/>).</summary>
+    internal static Split SplitOf(double value)
+    {
+        double magnitude = Math.Abs(value);
+        if (!(magnitude < Limit[HugeTop - 1]))
+        {
+            return new Split(value, 0, 0, 0, 0);
+        }
+
+        int top = Needed(magnitude);
+        ref double sigma = ref MemoryMarshal.GetArrayDataReference(Sigma);
+        ref long bits = ref MemoryMarshal.GetArrayDataReference(SigmaBits);
+        double s = Unsafe.Add(ref sigma, top);
+        double y = s + value;
+        long p0 = BitConverter.DoubleToInt64Bits(y) - Unsafe.Add(ref bits, top);
+        double r = value - (y - s);
+        s = Unsafe.Add(ref sigma, top - 1);
+        y = s + r;
+        long p1 = BitConverter.DoubleToInt64Bits(y) - Unsafe.Add(ref bits, top - 1);
+        r -= y - s;
+        long p2 = BitConverter.DoubleToInt64Bits(Unsafe.Add(ref sigma, top - 2) + r) - Unsafe.Add(ref bits, top - 2);
+        return new Split(value, top, p0, p1, p2);
+    }
+
+    /// <summary>Folds a value split by <see cref="SplitOf"/>: its parts, moved down to the sum's top, or the value itself when the top must rise.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void Add(in Split split)
+    {
+        int top = Top;
+        if (top < split.Top || split.Top == 0)
+        {
+            Add(split.Value);
+            return;
+        }
+
+        if ((++Meta & CountMask) > Endurance)
+        {
+            throw Outgrown();
+        }
+
+        switch (top - split.Top)
+        {
+            case 0:
+                M0 += split.P0;
+                M1 += split.P1;
+                M2 += split.P2;
+                break;
+            case 1:
+                M1 += split.P0;
+                M2 += split.P1;
+                break;
+            case 2:
+                M2 += split.P0;
+                break;
+            default:
+                break;
+        }
+    }
+
     /// <summary>Folds <paramref name="count"/> values equal to <paramref name="value"/>: a run, a constant, a dictionary entry.</summary>
     public void AddWeighted(double value, long count)
     {
@@ -283,6 +362,45 @@ internal struct IndexedSum : IFloatSumState<IndexedSum>
 
     /// <summary>Takes back <paramref name="count"/> values counted that were not values: the zeros standing for rows left out.</summary>
     internal void Uncount(long count) => Meta -= count;
+
+    /// <summary>
+    /// Takes out <paramref name="taken"/>, the sum of some of this sum's values: its bins lined up under this top and
+    /// subtracted, which leaves the other values' parts as their own sum holds them when a value that calls for this top
+    /// stays, which every value taken out calling for a lower one proves, or the caller. False, nothing changed, when that
+    /// is not proven, or an infinity was taken out, or more values than this sum holds.
+    /// </summary>
+    /// <param name="taken">The sum of the values taken out.</param>
+    /// <param name="topStays">
+    /// Whether the caller knows a value of the largest magnitude stays: the least and the greatest of the sum's values
+    /// both remain, as <see cref="WideIndexedSum.TryRemove"/> takes it.
+    /// </param>
+    internal bool TryTakeOut(in IndexedSum taken, bool topStays = false)
+    {
+        int top = Top;
+        int theirs = taken.Top;
+        if (taken.Count == 0)
+        {
+            return true;
+        }
+
+        if ((taken.Meta & (PositiveInfinity | NegativeInfinity)) != 0 || taken.Count > Count || top == 0 || top >= SplitScaledTop
+            || theirs > top || (theirs == top && !topStays))
+        {
+            return false;
+        }
+
+        if (theirs != 0)
+        {
+            IndexedSum lined = taken;
+            lined.Shift(top);
+            M0 -= lined.M0;
+            M1 -= lined.M1;
+            M2 -= lined.M2;
+        }
+
+        Meta -= taken.Count;
+        return true;
+    }
 
     /// <summary>Folds another sum: the higher top for both, the bins added.</summary>
     public void Merge(in IndexedSum other)
@@ -748,6 +866,9 @@ internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
         state.Merge(in persisted.Sum);
         return true;
     }
+
+    /// <remarks>A narrow sum is a <see cref="WideIndexedSum"/> of no epoch, as a table of states holds every float sum.</remarks>
+    public bool ExportState(in IndexedSum state, Span<long> words, bool floats) => StateExports.Sum(words, new WideIndexedSum { Sum = state });
 
     /// <remarks>The rows left out read as zero, which no bin takes anything of, and come off the count.</remarks>
     [SkipLocalsInit]

@@ -3,7 +3,6 @@ using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Types.Numerics;
 
 namespace Vorticity.Compute;
@@ -984,10 +983,8 @@ internal sealed class ZonePruner : IBlockPruner
             bool all = hasLow && low >= 0;
             if (_hasUpper)
             {
-                int minVsUpper = 0;
-                int maxVsUpper = 0;
-                bool lowAboveUpper = bounds.HasMin && TryCompare(bounds.Min, _upper, out minVsUpper) && minVsUpper >= 0;
-                bool highBelowUpper = bounds.HasMax && TryCompare(bounds.Max, _upper, out maxVsUpper) && maxVsUpper < 0;
+                bool lowAboveUpper = bounds.HasMin && TryCompare(bounds.Min, _upper, out int minVsUpper) && minVsUpper >= 0;
+                bool highBelowUpper = bounds.HasMax && TryCompare(bounds.Max, _upper, out int maxVsUpper) && maxVsUpper < 0;
                 none |= lowAboveUpper;
                 all &= highBelowUpper;
             }

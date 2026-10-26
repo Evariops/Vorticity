@@ -40,11 +40,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-
-using Vorticity.Arrays;
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Xunit;
@@ -116,7 +112,7 @@ internal static class ReleaseOnlyCeilings
     }
 }
 
-/// <summary>Whole-path allocation ceilings, on the <see cref="WrittenSizeTests"/> ratchet model.</summary>
+/// <summary>Whole-path allocation ceilings, on the <see cref="Writing.WrittenSizeTests"/> ratchet model.</summary>
 [Collection(nameof(AllocationCollection))]
 [Trait("Category", "RunsAlone")]
 public sealed class PathAllocationTests

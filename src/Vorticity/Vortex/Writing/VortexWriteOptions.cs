@@ -273,6 +273,42 @@ public sealed record VortexWriteOptions
     internal bool CarriesSlices { get; init; }
 
     /// <summary>
+    /// The encoded bytes the chunks of each top-level column without a target of its own
+    /// (<see cref="ColumnChunkTargetBytes"/>) aim at, or 0, the default, for every such column chunked with the file: the
+    /// column gathers its rows across the file's chunks until they would encode to that many bytes at the rate its last
+    /// chunk compressed, so that a read of a few columns fetches segments of about that size. A dataset's objects set it.
+    /// </summary>
+    internal int GatheredChunkBytes { get; init; }
+
+    /// <summary>
+    /// The rows after which every column that gathers writes what it holds, or 0 for no bound: the chunks of every column
+    /// end together at least that often, where a reader cuts the rows between lanes without a chunk two of them read.
+    /// A flush ends such a group too.
+    /// </summary>
+    internal long GatheredGroupRows { get; init; }
+
+    /// <summary>
+    /// The bytes from which the file keeps a sheet of each top-level column (<see cref="Indexes.ColumnSheet"/>), which a
+    /// sliced file's table of contents names, counted before its sheets; null, the default, for none. A dataset's sealed
+    /// objects keep them from the size at which its scans read an object's sheets before the object, under which a
+    /// question reads the object in the request its sheets would take.
+    /// </summary>
+    internal long? ColumnSheetBytes { get; init; }
+
+    /// <summary>
+    /// Whether a file that keeps sheets also counts each of its columns over its rows (<see cref="Indexes.ColumnCounts"/>);
+    /// false, the default, for none. A dataset's sliced objects keep them.
+    /// </summary>
+    internal bool Counted { get; init; }
+
+    /// <summary>
+    /// Whether a file that counts its columns also keeps each one's statistics over the blocks its writer declares as it
+    /// writes (<see cref="VortexFileWriter.EndBlock"/>, <see cref="Indexes.ColumnBlocks"/>) and where each value lives
+    /// (<see cref="Indexes.ColumnWhere"/>); false, the default, for none. A dataset's objects written in its key's order keep them.
+    /// </summary>
+    internal bool Blocked { get; init; }
+
+    /// <summary>
     /// What each top-level variant column shreds, by its name: its chunks are written as the reference
     /// stores a shredded variant, the values the shredding names in typed columns. A column not named
     /// is written whole.
@@ -286,32 +322,11 @@ public sealed record VortexWriteOptions
     internal IReadOnlyDictionary<string, Indexes.VariantDirectory>? VariantDirectories { get; init; }
 
     /// <summary>
-    /// The top-level columns whose chunks lie together after the rest of the data, the synopsis part,
-    /// each named in the index directory: the object's synopsis columns, which a question that needs
-    /// only them reads without the rest.
-    /// </summary>
-    internal IReadOnlyList<string>? SynopsisColumns { get; init; }
-
-    /// <summary>
     /// The chunks of a page of a sliced file's chunk directories, those that hold more than a page laid in pages
     /// (<see cref="global::Vorticity.Indexes.SliceChunks.PagedVersion"/>): <see cref="global::Vorticity.Indexes.SliceChunks.DefaultPageEntries"/>. Lowered by tests,
     /// so that objects of a few chunks lay their directories in pages as a day's do.
     /// </summary>
     internal int ChunkPageEntries { get; init; } = global::Vorticity.Indexes.SliceChunks.DefaultPageEntries;
-
-    /// <summary>
-    /// The bytes of a synopsis table's list of chunks at most for the entry to keep the chunks in its place:
-    /// <see cref="global::Vorticity.Indexes.SynopsisContents.InlineListBytes"/>. Zero by tests, so that small objects list every
-    /// table apart as a day lists its large ones.
-    /// </summary>
-    internal int InlineListBytes { get; init; } = global::Vorticity.Indexes.SynopsisContents.InlineListBytes;
-
-    /// <summary>
-    /// The data under which no synopsis table is given up before the end, every one weighed by the choice against the
-    /// whole data: <see cref="IndexWriter.DefaultEarlyChoiceBytes"/>. Lowered by tests, so that objects of a few rows
-    /// meet the early verdicts that only large ones do otherwise.
-    /// </summary>
-    internal long SynopsisEarlyChoiceBytes { get; init; } = IndexWriter.DefaultEarlyChoiceBytes;
 
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;

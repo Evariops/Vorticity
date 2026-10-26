@@ -423,113 +423,63 @@ outside CI against the twenty column shapes of `--tradeoffs`, it names the choic
 measured as best on every one. Taking the advice by default would change what a write produces and
 its determinism, so it is not done.
 
-## 9. Sorted time slices, and shredded variants
+## 9. Key slices, and shredded variants
 
-A dataset compacted by periods hands the writer rows it has already sorted. Its jobs cut each object
-into time slices, ranges of instants of up to a few million rows, and sort the
-rows of a slice by the object's synopsis columns, the columns whose values repeat, then by the
-instant ([13-dataset.md](13-dataset.md#5-levels-and-compaction)).
-The order is one per object: its columns are those whose values repeat twice on average, and the
-object's first slice settles their order greedily, by the runs each adds over a sample of 16 384 of its
-rows. The slice table records it, beside each slice's instants.
+A job hands the writer its rows in key order, and cuts an object that aims at a mebibyte or more into
+slices of the key: past `SliceTargetRows` rows, 3 × 10⁶ by default, a minute of the design's example,
+the next change of key starts a slice, so that a key's rows lie in one slice ([clustering by a
+value](15-compaction.md#clustering-by-a-value-and-a-size)). The slice table records each slice's rows
+and first key, and the last key of the last ([the slice
+table](10-indexes.md#44-vorticityslicesv1-the-slices-of-a-file)). An earlier release's datasets of periods
+cut their objects into time slices instead, a calendar unit chosen from the rows' pace, which a reader
+still walks.
 
-A slice aims at 3 × 10⁶ rows, a minute of the design's example. The slicer takes the coarsest calendar
-unit, a second, a minute, an hour, a day or a month, whose units hold no more than twice that at the
-median, and cuts a burst finer, a unit past twice the target. At the target itself, the minutes of an
-hour of the example that a few late rows of the next hour took past it went to seconds, every hour of
-a day but the last: tables by slice sixty times the rows, those of the hosts and the endpoints past the
-budget, and an hour 3.7 % larger and half again as long to write.
+A dataset's object chunks each column on its own. A column gathers its rows across the object's chunks
+until they would encode to about 1 MiB (`DatasetOptions.ChunkBytes`, internal) at the rate its last
+chunk compressed to, the first guessed at a quarter, and holds at most sixteen times that in canonical
+bytes, so that a question reading a few columns fetches segments of about a megabyte rather than every
+column's bytes between them. The chunks of every column end together at each slice's end, the writer
+flushed there, and at least every 2²² rows (`GroupRows`): where a lane's range of the object starts, so
+that no chunk is read by two lanes. A file written alone keeps its columns chunked together, which the
+decision of 2026-10-11 left as the default for a file read locally.
 
-A target of each object's own, from what a window that cuts one of its hours costs, was built and
-measured, then dropped. The cut hour reads at its edge every row of the slice the edge falls in, and
-folds, for the slices it keeps, the rows of a table of slices. A wider slice reads more rows there and
-folds fewer table rows. At each depth of the order, a cut hour of `H` rows and `D` combinations costs
-`N` rows read at the edge and `(H / N) × min(N, D)` table rows. A table row is worth 2.3 rows read at an
-edge: it weighs 39.4 bytes compressed against 16.5, at 10 ns a byte and 12 ns a row grouped
-(`vortex-queries --micro slicecost`). That model, never under a chunk's rows since an edge reads its
-chunks whole, asks for slices of about 9 × 10⁴ rows on an hour of 1.8 × 10⁸ rows and twenty services,
-and of a chunk, about 24 000 rows, on the questions bench, whose hours hold 72 000 rows. Two costs it
-leaves out decided against it:
+Measured on the client's spans, two hours at 500 rows a second over a store 5 ms away, at 16 lanes, cold
+(`vortex-queries --micro paths --qp`): an hour's object went from about 2 000 segments to 102, 555 KB
+each on average; QP-1 read 33.9 MB in 75 requests in 123 ms, against 177.7 MB in 232 in 280 ms; QP-5
+504 MB in 545 requests in 470 ms, against 1 061 MB in 2 688 in 1 291 ms. A needle takes a segment a
+column now, about a megabyte, where it took the small chunk of every column in one: QP-4 read 15.5 MB in
+13 requests in 39 ms, against 0.8 MB in 7 in 18 ms. A load of four hourly periods at 50 000 rows a
+second, in the load of periods an earlier release had, took 2.07 s against 1.75 (+19 %), its process
+peaking at 8.0 GB against 6.1, for 4 % fewer bytes.
 
-- The slicer cuts at calendar units, so a target between a minute and an hour gives minutes. The
-  bench's hours went from one slice to sixty slices of 1 200 rows.
-- A slice is also the rows the job sorts together. Sixty minutes sorted one by one hold up to sixty
-  times the runs of an hour sorted whole: the bench's objects took 16 % more bytes of data, 7.3 times
-  more for the service column. The questions read from rows took up to three times the requests and
-  3.8 times the bytes.
+Chunks of a column do not end at every slice when a column gathers no further: a slice's end closes
+the group, not a chunk of the object's own. Ending the object's chunks around each slice's first row
+was tried before columns gathered: on six hours of requests at twenty a second, a read of whole
+objects took five times the requests, a request a chunk, and the rows a cut hour reads took 2.4 times
+the bytes, each small chunk carrying its own dictionaries and encodings.
 
-Chunks do not end at slices. Ending them around each slice's first row, at the start and the end of
-its block, was tried and measured: on six hours of requests at twenty a second, a read of whole objects
-took five times the requests, a request a chunk, and the rows a cut hour reads took 2.4 times the
-bytes, each small chunk carrying its own dictionaries and encodings.
-
-A slice is sorted in memory before the writer sees it. Each synopsis column becomes codes, the ranks
-of the slice's distinct values, and stable counting sorts over the codes, the last column first, give
-one permutation, through which every column is gathered once. A million rows sorted on three columns
-take about 57 ns a row (`vortex-queries --micro slicesort`). The writer then finds long runs in the
-synopsis columns, which it encodes as runs, and the job counts the synopsis tables from the codes
-while the slice is still in memory. An object written so is 4 % smaller than the same rows in time
-order, and 10 % smaller than a leveled object with its sorted run.
-
-The count runs beside the slice's write, on a lane of the session's of its own when one is free, through
-records of an arena of its own over the slice's buffers, since the write cuts its chunks as nodes of the
-slice's arena. Its tables are weighed against the data written before the slice, held while the write
-goes out, and their chunks encoded against a dictionary of encodings of their own, which starts as the
-file's and is renumbered onto it when the synopsis part is written: the object's bytes are those of a
-count before the write. On a day of three hours of ten minutes (90 M rows), the chain that writes the
-slices went from 19.0 s, the counts then the writes, to 12.9 s, the writes and their waits for the
-counts beside them.
-
-Nothing of the tables outlives a slice in memory but a chunk of each and what a merge reads, whatever
-the object's rows: an hour of requests at 5 × 10⁴ a second holds 1.8 × 10⁸ rows, a day 4.3 × 10⁹. A
-slice's groups at every depth are in the order of their keys already, so its runs go out at once as rows
-of the tables of slices, and its groups at the deepest depth a coarser table still asks for, with each
-later column's values, go to the hour's scratch store as a run of compact records, in memory up to half
-the writer's scratch budget and on disk past it. At the end of the hour, a k-way merge of those runs
-gives every depth of the hour's coarse tables in one pass, a group of a depth ending where its prefix
-of the keys changes, and the value counts likewise; the hour's deepest groups go on to the object's
-store, whose merge at the end gives the object's tables. Each table goes to the writer a chunk at a
-time, which encodes it and holds it in the synopsis part's spool until the choice.
-
-A table that cannot be worth its bytes is given up as it grows, before it costs the merges and the
-spool anything more. The budget of the whole object is projected from the data written so far, scaled
-to the object's rows, which the job's first pass counted or a seal in one pass reads off its inputs; a
-table of slices is projected from its rows so far, scaled likewise; a coarse table of an hour, and a
-column's value counts, from the distinct groups of the hour, counted by a HyperLogLog sketch per depth
-and projected to the hour's rows by a power of its rows fitted through two points, as Heaps' law has
-it; a table of the object from its own sketch. A table whose rows so far take more than the budget, or
-whose projection takes twice as much, is given up, the margin against values that come in a burst and
-then repeat. Under 64 MiB of data, during the merges at the end, and in an object of one pass whose
-rows are unknown, nothing is given up, and the choice weighs every table against the whole data. On three hours of 60 000 rows whose third column is almost unique to each row, the four tables of
-that column were given up at the sixth of thirty slices, the projection 58 846 rows for about 57 000,
-and the choice kept the same tables, to the byte, as when every one was built to the end.
+A job writes its rows into the object as they come, and ends a slice by flushing the writer at the
+first change of key past the slice's rows. A job of a schema with a variant column reads its rows twice,
+once to count the paths of each clustering value's rows and choose what its variant columns shred, once
+to write them; another job reads them once.
 
 A variant column is written whole by an append, and shredded by the job that rewrites it, so that
 ingestion pays nothing for shredding. Until that job runs, a query node that reads the variants of an
-object of level 0 shreds a copy of them in memory, once per object and under the session's budget,
-and keeps it until the object leaves level 0, so every question after the first reads typed columns
-there too. The job's
-first pass counts each top-level key, its class and its bytes (`PathCensus`). From those counts a cost
-model chooses the keys the object shreds: a key earns a typed column when what its occurrences cost in
-the residual, at the measured price of each class, outweighs the column's overhead of about 200 bytes a
-chunk. The keys chosen are written in the reference's form, the `vortex.variant` encoding with a typed
-tree, integers of every width in one 64-bit column, each key encoded the same way in every chunk, and a
-chunk shreds only the keys its rows hold. The validity of a shredded field goes through the compressor
-as any column does, as runs where it has few of them, as a bitmap otherwise. A path map in each chunk's
-metadata (`vorticity.variant.paths.v1`) says which keys it holds and where. Counting and writing cost
-about 80 ns an attribute: 181 ns a row to count, and 310 ns a row more to write six to eight
-attributes shredded.
+object of level 0 shreds a copy of them in memory, once per object and under the session's budget, and
+keeps it until the object leaves level 0, so every question after the first reads typed columns there
+too. The job's first pass counts each top-level key, its class and its bytes, for each clustering value
+(`PathCensus`). From those counts a cost model chooses the keys the object shreds: a key earns a typed
+column when what its occurrences cost in the residual, at the measured price of each class, outweighs
+the column's overhead of about 200 bytes a chunk. The keys chosen are written in the reference's form,
+the `vortex.variant` encoding with a typed tree, integers of every width in one 64-bit column, each key
+encoded the same way in every chunk, and a chunk shreds only the keys its rows hold. The validity of a
+shredded field goes through the compressor as any column does, as runs where it has few of them, as a
+bitmap otherwise. A path map in each chunk's metadata (`vorticity.variant.paths.v1`) says which keys it
+holds and where. Counting and writing cost about 80 ns an attribute: 181 ns a row to count, and 310 ns
+a row more to write six to eight attributes shredded.
 
-Once an object has chosen its keys, each row has a shape: per key it shreds, two bits that say whether
-the row holds it, in the class its typed column holds or in another, and one bit for anything left in
-the residual, so that a source that puts identifiers in its keys touches only that bit. The shape is
-one more synopsis column. The object's first slice places it in the order, before the first column
-whose values in that slice outnumber its shapes, and nowhere when its shapes are more than half its
-rows. Every path's rows then lie together inside each run of the columns before it, so a question on
-a path reads only the ranges of the shapes that hold it, and `Has` on a shredded key is a set of
-shapes. Coding the shapes costs about 100 ns a row of six to eight attributes. A body is a variant too:
-a line of text keeps its text, which the trigram indexes search, and an object is shredded as
-attributes are, and shown again from its columns and residual, keys in order.
+A body is a variant too: a line of text keeps its text, which the trigram indexes search, and an object
+is shredded as attributes are, and shown again from its columns and residual, keys in order.
 
 ## 10. Deliberately not done
 

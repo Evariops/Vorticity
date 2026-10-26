@@ -174,37 +174,44 @@ public sealed record DatasetOptions
     internal long LeastPieceRows { get; init; } = 1L << 20;
 
     /// <summary>
-    /// The rows of an edge of a synopsis answer, a slice its window cuts, that a piece of a pass on several lanes reads at
-    /// least: 2^17 by default, four chunks of the design's requests. An edge of twice as many or more is cut between its
-    /// chunks into pieces of its rows alone, as many as the lanes but none smaller, where one lane read the whole edge
-    /// while the others waited. A test cuts its small edges with less.
+    /// The encoded bytes each column's chunks of an object aim at: 2^20 by default, about what a request to an object
+    /// store carries before its bytes cost more than its round trip, so that a question reading a few columns fetches
+    /// segments of that size rather than every column's bytes between them. 0 writes every column chunked with the
+    /// object.
     /// </summary>
-    internal long LeastEdgePieceRows { get; init; } = 1L << 17;
+    internal int ChunkBytes { get; init; } = 1 << 20;
 
     /// <summary>
-    /// The objects in a row their synopses answer that one lane's piece of a pass on several lanes takes at most: 8 by
-    /// default. An answer reads a few tables and folds their rows, a tenth of a millisecond warm, where a piece costs a
-    /// walk of the tree to its rows and a lane's turn: a piece an object made a warm question over 48 hourly objects at
-    /// 16 lanes spend more of its lanes' time waiting than answering.
+    /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default, besides the
+    /// end of each slice. A lane's range of the object is cut where they do, so that no chunk is read by two lanes.
     /// </summary>
-    internal int AnswersPerPiece { get; init; } = 8;
+    internal long GroupRows { get; init; } = 1L << 22;
 
     /// <summary>
-    /// The rows of synopsis tables, the states, a lane's piece of answers folds at least, when a pass on several lanes
-    /// cuts the objects their synopses answer: 2^16 by default, about a millisecond of folding, against the tenth a piece
-    /// costs. Answers in a row share a piece while they fold less together, and an answer that folds twice as many or more
-    /// is cut between the chunks of its tables into pieces of about a share each, a lane's part of the slices of its
-    /// window, where every answer was a lane's whole: a window that cuts three hours folds 3.47 M rows of runs. A test
-    /// cuts its small tables with less.
+    /// The bytes from which an object's column sheets are read before it, for a filter that asks a column for values
+    /// its sheet may prove absent: 2^20 by default, under which an open reads the object's footer, and often all of it,
+    /// in the request the sheets would take.
     /// </summary>
-    internal long LeastPieceStates { get; init; } = 1L << 16;
+    internal long SheetObjectBytes { get; init; } = 1L << 20;
 
     /// <summary>
-    /// The rows of a chunk of a synopsis table and the bytes past which an hour's rows are chunks of their own, as the
-    /// compaction writes them; null for the defaults (<see cref="SynopsisTables.ChunkRows"/>). A test cuts tables of a few
-    /// rows into chunks, which an answer is cut between.
+    /// The target from which the objects a job of a dataset with a key writes keep a table of contents and slices bounded
+    /// by their keys: 2^20 by default, the bytes under which an open reads an object's footer, and often all of it, in the
+    /// request a read without it would take. A test sets less to slice its small objects.
     /// </summary>
-    internal (int Rows, long HourBytes)? SynopsisChunking { get; init; }
+    internal long ContentsObjectBytes { get; init; } = 1L << 20;
+
+    /// <summary>
+    /// The rows a slice bounded by keys aims at: <see cref="DefaultSliceTargetRows"/>, past which the next key starts
+    /// another. Each writer's own, since an object's slices are its own; a test sets a few rows.
+    /// </summary>
+    internal long SliceTargetRows { get; init; } = DefaultSliceTargetRows;
+
+    /// <summary>
+    /// The rows a slice aims at by default: three million, a few megabytes a column, so that a read of one slice is one
+    /// request whose bytes the latency of a store does not dwarf.
+    /// </summary>
+    internal const long DefaultSliceTargetRows = 3_000_000;
 
     /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a
@@ -262,52 +269,30 @@ public sealed record DatasetOptions
     private readonly TimeSpan? _erasureDelay;
 
     /// <summary>
-    /// Compacts the dataset by periods of its instant, the first column of its clustering key past its
-    /// partition columns, a timestamp in UTC: the open period's rows in fresh levels, rows later than the lateness horizon
-    /// beside them, and each period, once closed, sealed into one object. Null, the default, compacts
-    /// by levels. Fixed when the dataset is created and carried by every commit, which a library that
-    /// does not know periods refuses.
+    /// How jobs group the rows into objects: cut where a value of the clustering key's first column changes, at the bytes
+    /// an object aims at, or both; the application chooses the value and the size, and the dataset knows nothing of what
+    /// the values mean. Null, the default, leaves objects at the compaction's sizes. Fixed when the dataset is created and
+    /// carried by every commit; a handle opened on an existing dataset follows the dataset's, whatever this says.
     /// </summary>
-    public PeriodOptions? Periods { get; init; }
+    public ClusteringOptions? Clustering { get; init; }
+
+    private readonly int _rollupFanout = 64;
 
     /// <summary>
-    /// How many leading columns of the clustering key are partition columns, such as a retention class
-    /// before the instant in a key <c>(Retention, At)</c>: 0, the default, for none. Every object holds one
-    /// partition value, an append split into an object per value, and each partition grows its own periods,
-    /// so that what dies together is written together and expires without a read. Partition columns have
-    /// few values by declaration: an append that holds more than <see cref="MaxPartitionValues"/> is refused.
-    /// The instant of a dataset by periods is the key's column after them. Fixed when the dataset is created
-    /// and carried by every commit, which a library that does not know partitions refuses.
+    /// The runs a rollup sums (<see cref="VortexDataset.RollUpAsync"/>): about this many consecutive objects of the deepest
+    /// level a rollup of rank 1, cut where the clustering value changes, and about this many rollups of the rank below one
+    /// of a higher rank, so that a question over a long range of the key reads a rollup where it would read this many
+    /// objects' counts, and this many again a rank up. 64 by default; 0 writes none. A setting of the handle that writes
+    /// them; a reader takes the rollups whatever their fanout.
     /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">The count is negative.</exception>
-    public int PartitionColumns
+    /// <exception cref="ArgumentOutOfRangeException">The fanout is negative, or 1.</exception>
+    public int RollupFanout
     {
-        get => _partitionColumns;
-        init
-        {
-            ArgumentOutOfRangeException.ThrowIfNegative(value);
-            _partitionColumns = value;
-        }
+        get => _rollupFanout;
+        init => _rollupFanout = value is 0 or >= 2
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(value), value, "A rollup sums two children or more: a fanout of 0 writes none.");
     }
-
-    private readonly int _partitionColumns;
-
-    /// <summary>
-    /// The partition values one append may hold, at most: past it the append is refused before anything is
-    /// committed, since each value is an object of its own. 64 by default.
-    /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">The bound is not positive.</exception>
-    public int MaxPartitionValues
-    {
-        get => _maxPartitionValues;
-        init
-        {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
-            _maxPartitionValues = value;
-        }
-    }
-
-    private readonly int _maxPartitionValues = 64;
 
     /// <summary>
     /// The columns whose values questions look up one at a time, such as a request's id: those an
@@ -323,8 +308,7 @@ public sealed record DatasetOptions
     /// <summary>
     /// Keys of variant columns that every object a job writes keeps in a column of its own, in one class, written as a
     /// filter reads them, <c>Attributes['http.status_code'].AsInt64()</c>: shredded whatever the rows a job counts, so
-    /// that a question on the key reads that column rather than parse the variant, and the object's synopsis counts its
-    /// values. A key read as a string, an integer, a double or a boolean (<c>AsString</c>, <c>AsInt64</c>,
+    /// that a question on the key reads that column rather than parse the variant. A key read as a string, an integer, a double or a boolean (<c>AsString</c>, <c>AsInt64</c>,
     /// <c>AsDouble</c>, <c>AsBool</c>). Null, the default, names none. Read when the dataset is created and carried by
     /// every commit; <see cref="VortexDataset.SetShreddedPathsAsync"/> changes them later, and a handle opened on an
     /// existing dataset follows its commits, whatever this says.
@@ -338,20 +322,6 @@ public sealed record DatasetOptions
     /// A setting of the handle, which each writer chooses.
     /// </summary>
     public bool ShredOnAppend { get; init; }
-
-    /// <summary>
-    /// Columns that questions filter and group by together, beyond the prefixes of an object's synopsis order: each
-    /// grouping one to four synopsis columns, or keys of variant columns written as a filter reads them, the first the
-    /// one questions pick values of, <c>["Service", "HttpStatus", "Route"]</c>. Every job writes a table of each grouping
-    /// of two columns or more by hour and by object beside the prefix tables, and tables of each grouping's measures'
-    /// sketches by slice, by hour and by object, weighed by the same choice under the same budget, their chunks bounded
-    /// by the first column's values, so that a question over those columns alone, whatever columns the order places
-    /// between them, reads those tables rather than the rows or the deepest prefix: a quantile per service over the last
-    /// minutes, declared <c>["Service"]</c>, reads the sketches of the slices its window keeps whole. A grouping that
-    /// names a column an object's order does not hold writes no table in it. Null, the default, declares none. A setting
-    /// of the handle that runs the jobs.
-    /// </summary>
-    public IReadOnlyList<IReadOnlyList<string>>? SynopsisGroupings { get; init; }
 
     /// <summary>
     /// The bytes an object's marks may take: <see cref="MarkedVectorBytes"/>, or a part of the
@@ -408,19 +378,6 @@ public sealed record DatasetOptions
     /// </summary>
     internal bool AcceptsNullableKey { get; init; }
 
-    /// <summary>The periods a header records, or null for a dataset compacted by levels.</summary>
-    /// <remarks>The slice target is the handle's own, from <paramref name="asked"/>, as no header records it.</remarks>
-    private static PeriodOptions? PeriodsOf(CommitHeader header, PeriodOptions? asked) =>
-        header.Lateness is { } lateness
-            ? new PeriodOptions
-            {
-                Lateness = lateness,
-                Length = header.PeriodLength ?? throw new InvalidOperationException("A header of a dataset of periods names no period length."),
-                SliceTargetRows = asked?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows,
-                RefuseLateRows = asked?.RefuseLateRows ?? false,
-            }
-            : null;
-
     /// <summary>What vacuum keeps, as a header records it.</summary>
     internal RetentionSettings Retention => new RetentionSettings(RetainedVersions, (long)RetentionWindow.TotalSeconds);
 
@@ -438,14 +395,14 @@ public sealed record DatasetOptions
             Seed = header.Seed,
             LockedStore = false,
             ErasureDelay = header.ErasureDelay,
-            Periods = PeriodsOf(header, Periods),
+            Clustering = header.Clustering,
         }
         : this with
         {
             Seed = header.Seed,
             LockedStore = true,
             ErasureDelay = null,
-            Periods = PeriodsOf(header, Periods),
+            Clustering = header.Clustering,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,

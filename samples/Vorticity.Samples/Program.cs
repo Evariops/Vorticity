@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 
 namespace Vorticity.Samples;
@@ -12,6 +13,13 @@ internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
+        // The figures print alike on every host, while the host still knows its time zones by their IANA names, which
+        // Windows finds through ICU and invariant globalization would leave out.
+        CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+        CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.InvariantCulture;
+        CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+        CultureInfo.CurrentUICulture = CultureInfo.InvariantCulture;
+
         Dictionary<string, Func<Task>> samples = new(StringComparer.Ordinal);
         ReadCases.Register(samples);
         AccessCases.Register(samples);

@@ -5,10 +5,8 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
-using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
@@ -314,7 +312,7 @@ internal sealed class OnPairPlan
             try
             {
                 int selected = SampleOrder(order.AsSpan(0, rows), lengths, budget);
-                Discover(heap, starts, lengths, order.AsSpan(0, selected), budget, total);
+                Discover(heap, starts, lengths, order.AsSpan(0, selected), budget);
                 Sort();
 
                 // The sample again, under the sorted dictionary: what the column's codes are scaled from.
@@ -422,7 +420,7 @@ internal sealed class OnPairPlan
         /// tokens counted, and a pair counted as often as the bar becomes a token of its own, which
         /// the scan then carries on from as one token.
         /// </summary>
-        private void Discover(byte[] heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, ReadOnlySpan<int> order, long budget, int total)
+        private void Discover(byte[] heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, ReadOnlySpan<int> order, long budget)
         {
             Threshold bar = new Threshold(Capacity - 256, budget);
             for (int i = 0; i < order.Length; i++)

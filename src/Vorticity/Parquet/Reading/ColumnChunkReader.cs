@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
 using System.Threading;
@@ -2011,7 +2010,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         try
         {
             IntegerNarrowing.Truncate(ints, _slot == sizeof(byte) ? PType.I8 : PType.I16, dense);
-            Spread(page, dense, valid, spread);
+            Spread(page, dense, spread);
         }
         finally
         {
@@ -2037,11 +2036,11 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>The values <see cref="Dense"/> gave a block for spread over the page's rows; nothing where they are its slots.</summary>
-    private void Spread(Page page, ReadOnlySpan<byte> dense, int valid, NativeSegmentOwner? spread)
+    private void Spread(Page page, ReadOnlySpan<byte> dense, NativeSegmentOwner? spread)
     {
         if (spread is not null)
         {
-            Place(page, dense, valid);
+            Place(page, dense);
         }
     }
 
@@ -2098,7 +2097,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 }
             }
 
-            Spread(page, wide, valid, spread);
+            Spread(page, wide, spread);
         }
         finally
         {
@@ -2130,7 +2129,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 position += length;
             }
 
-            Spread(page, wide, valid, spread);
+            Spread(page, wide, spread);
         }
         finally
         {
@@ -2149,7 +2148,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>Dense values of the slot's width copied into the page's slots, spread over its rows when it has a null.</summary>
-    private void Place(Page page, ReadOnlySpan<byte> dense, int valid)
+    private void Place(Page page, ReadOnlySpan<byte> dense)
     {
         int rows = page.Rows;
         NativeSegmentOwner slots = Slots(page, rows * _slot);
@@ -2343,7 +2342,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
             else
             {
-                Place(page, values, valid);
+                Place(page, values);
             }
         }
         finally
@@ -2418,7 +2417,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 ParquetThrow.Format($"A DELTA_BYTE_ARRAY page of '{Name}' rebuilds {total} bytes for {valid} values of {_width}.");
             }
 
-            Place(page, heap.WritableSpan[..(int)total], valid);
+            Place(page, heap.WritableSpan[..(int)total]);
         }
         finally
         {
@@ -2462,7 +2461,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
             else
             {
-                Place(page, values, valid);
+                Place(page, values);
             }
         }
         finally
@@ -2498,7 +2497,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
             if (dense is not null)
             {
-                Place(page, into, valid);
+                Place(page, into);
             }
         }
         finally

@@ -127,16 +127,12 @@ so a listener that enables one only pays for that one:
 | `vortex.synopsis_cache.evictions`, `vortex.synopsis_cache.refused` | the regions dropped past their capacity, and those larger than it |
 | `vortex.synopsis_cache.corrupt` | regions whose file failed its checksum, dropped and read again |
 | `vortex.synopsis_cache.held` | the bytes they hold on the disk |
-| `vortex.synopsis_tables.corrupt` | chunks of synopsis tables that failed their checksum or did not decode, the question answered from the rows instead |
-| `vortex.synopsis_tables.unknown` | synopsis tables of a kind or a version a later writer made, skipped, the object's other tables answering |
 | `vortex.write.bytes` | bytes the writers handed to their sinks |
 | `vortex.dataset.commits`, by `vortex.operation` and `vortex.outcome` | how the commits of datasets end: applied, nothing to do, lost, cancelled or failed |
 | `vortex.dataset.commit_attempts`, by `vortex.operation` | the conditional creations commits sent, whose excess over the applied commits is the rebases, the measure of contention |
 | `vortex.dataset.compactions`, by `vortex.trigger` and `vortex.outcome` | how often compaction runs, and how often a job is abandoned, the measure of competing compactions |
 | `vortex.dataset.compaction.bytes_read`, `vortex.dataset.compaction.bytes_written`, by `vortex.trigger` | what compaction reads and rewrites, abandoned jobs included, which is the write amplification of the datasets |
 | `vortex.dataset.vacuum.objects_deleted` | what vacuums deleted, a dry run's nothing |
-| `vortex.dataset.rows_past_horizon` | rows a dataset by periods took later than its lateness horizon, kept in the late level beside their period: a horizon too short shows here |
-| `vortex.dataset.partitions` | the values of its partition columns a dataset holds rows of, at each plan of its compaction: what one append's bound does not see pile up over a dataset's life |
 
 A scan is one activity, `vortex.scan.typed` or `vortex.scan.tool`, tagged when it ends with its rows,
 batches, requests, bytes requested, and blocks decoded and pruned. A write is one activity,

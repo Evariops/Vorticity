@@ -83,4 +83,13 @@ internal static class CommitKey
 
         return DataPrefix + uid + DataSuffix;
     }
+
+    /// <summary>The prefix every rollup's object key starts with (<see cref="RollupEntry"/>).</summary>
+    public const string RollupPrefix = "rollups/";
+
+    /// <summary>The suffix every rollup's object key ends with.</summary>
+    public const string RollupSuffix = ".vxr";
+
+    /// <summary>The key of a rollup's object, of the form <c>rollups/&lt;uid&gt;.vxr</c>, the uid its 32 hex digits.</summary>
+    public static string ForRollup(UInt128 uid) => RollupPrefix + uid.ToString("x32", CultureInfo.InvariantCulture) + RollupSuffix;
 }

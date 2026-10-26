@@ -7,9 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Tests.Scan;
 using Vorticity.Types.Variants;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Types.Variants;

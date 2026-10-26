@@ -23,15 +23,6 @@ public enum CompactionStyle
     /// key-disjoint.
     /// </summary>
     Tiered = 2,
-
-    /// <summary>
-    /// By periods of time, for a dataset that declares them (<see cref="DatasetOptions.Periods"/>), and
-    /// only for one: level 0's rows past every fresh object go to the first fresh level and the others
-    /// to a late level, <c>F</c> adjacent objects of one period in a fresh level merge into the next,
-    /// and the late level merges into itself past level 0's ceiling. A lookup by key opens at most
-    /// level 0, the late level and one object per other level.
-    /// </summary>
-    Periods = 3,
 }
 
 /// <summary>Which objects a job takes from a level over its size.</summary>
@@ -94,84 +85,6 @@ public enum CompactionTrigger
     /// order as merges make them grow with keys at random.
     /// </summary>
     Neighbours = 6,
-
-    /// <summary>
-    /// The late level of a dataset compacted by periods holds more objects than level 0's ceiling: they
-    /// are merged into one object per period, in that level.
-    /// </summary>
-    LateCeiling = 7,
-
-    /// <summary>
-    /// A fresh level of a dataset compacted by periods holds <c>F</c> adjacent objects of one period:
-    /// they are merged into one object of the next fresh level.
-    /// </summary>
-    FreshMerge = 8,
-
-    /// <summary>
-    /// A period of a dataset compacted by periods has ended, and the lateness horizon past it too: its
-    /// fresh objects, its late rows and its earlier object if it has one are written into one object of
-    /// the periods level, with its time slices. A sealed period is sealed again when its late rows
-    /// crowd the late level.
-    /// </summary>
-    Seal = 9,
-
-    /// <summary>
-    /// The periods level of a dataset compacted by periods holds <c>F</c> adjacent small objects of one
-    /// partition, each under an <c>F</c>-th of <see cref="CompactionOptions.JoinedPeriodBytes"/>: they are
-    /// joined into one object of that level, which spans their periods.
-    /// </summary>
-    Join = 10,
-}
-
-/// <summary>
-/// How a job of a dataset compacted by periods cuts what it writes: an object per period, and in
-/// level 0's exit, the rows whose instant lies past <c>FreshAfter</c> into the first fresh level and
-/// the others into the late level.
-/// </summary>
-/// <param name="Calendar">Where the periods start and end.</param>
-/// <param name="FreshAfter">
-/// In level 0's exit, the largest instant a fresh object or a period holds, past which a row is fresh;
-/// null when there is none, every row being fresh. Ignored by the other jobs, whose rows all go to
-/// their destination.
-/// </param>
-/// <param name="Exit">Whether the job is level 0's exit, which routes rows between two levels.</param>
-/// <param name="Slices">Whether the job is a seal, whose object declares its time slices.</param>
-internal sealed record PeriodCut(PeriodCalendar Calendar, long? FreshAfter, bool Exit, bool Slices = false)
-{
-    /// <summary>The unit the instant column counts in.</summary>
-    internal TimeUnit Unit => Calendar.Unit;
-
-    /// <summary>
-    /// For a seal, the newest instant the dataset held when it was planned, in any partition: a change of
-    /// length the period it writes asks for takes effect past it.
-    /// </summary>
-    internal long? Newest { get; init; }
-
-    /// <summary>
-    /// For a seal, the largest object the dataset's other partitions sealed of the period, its bytes and
-    /// rows, (0, 0) for none or without partitions: the length is weighed on the largest object of the
-    /// period, every one of which it bounds. Null while another partition still holds rows of the period
-    /// below the level of periods, when the seal weighs nothing, the period not yet sealed whole.
-    /// </summary>
-    internal (long Bytes, long Rows)? Peers { get; init; }
-
-    /// <summary>The lateness horizon, in the instant's unit: in level 0's exit, a row of a period it has closed comes later than it.</summary>
-    internal long Horizon { get; init; }
-
-    /// <summary>
-    /// The periods, from the start of the first to the end of the last, of the one object a join writes, or a seal
-    /// of the late rows of a period a joined object holds, which rewrites the whole object; null for a job that
-    /// writes an object per period.
-    /// </summary>
-    internal (long Start, long End)? Span { get; init; }
-
-    /// <summary>Whether level 0's exit takes a row of <paramref name="period"/> later than the horizon: its period closed by the newest instant held.</summary>
-    internal bool PastHorizon(long period) =>
-        Exit && FreshAfter is { } newest && newest != long.MaxValue && Calendar.Next(period) <= newest - Horizon;
-
-    /// <summary>The level a row of <paramref name="instant"/> goes to in a job whose destination is <paramref name="to"/>.</summary>
-    internal int LevelOf(long instant, int to) =>
-        !Exit ? to : FreshAfter is { } after && instant <= after ? PeriodLevels.Late : PeriodLevels.FirstFresh;
 }
 
 /// <summary>
@@ -189,11 +102,7 @@ public sealed record CompactionOptions
 
     internal const int DefaultMaxFragments = 4;
 
-    internal const long DefaultJoinedPeriodBytes = 1L << 30;
-
     private readonly int _maxLevels;
-
-    private readonly long _joinedPeriodBytes = DefaultJoinedPeriodBytes;
 
     /// <summary>What level 0 may hold before the read bound degrades; 8 by default.</summary>
     public int LevelZeroCeiling { get; init; } = DatasetLevels.DefaultLevelZeroCeiling;
@@ -230,30 +139,6 @@ public sealed record CompactionOptions
 
     /// <summary>The index fragments an object may carry before a fragment compaction is due; 4 by default.</summary>
     public int MaxFragments { get; init; } = DefaultMaxFragments;
-
-    /// <summary>
-    /// The size a dataset of periods joins its small sealed objects up to; 1 GiB by default, 0 to join none.
-    /// <see cref="Fanout"/> adjacent objects of one partition in the periods level, each under an <c>F</c>-th of
-    /// it, join into one object that spans their periods, so that a partition whose periods are small, a tenant
-    /// among larger ones, keeps objects near this size rather than one a period.
-    /// </summary>
-    /// <remarks>
-    /// The calendar of the periods is the dataset's, weighed on its largest partition: a partition that takes a
-    /// hundredth of the rows seals objects a hundred times smaller. A joined object grows in tiers, as the fresh
-    /// levels do, a row rewritten once each time its object grows <c>F</c>-fold. It never spans two months of the
-    /// calendar, an expiry keeping it until the last period it holds lies before the cutoff, and under an erasure delay
-    /// it stays what a purge rewrites within half of it.
-    /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
-    public long JoinedPeriodBytes
-    {
-        get => _joinedPeriodBytes;
-        init
-        {
-            ArgumentOutOfRangeException.ThrowIfNegative(value);
-            _joinedPeriodBytes = value;
-        }
-    }
 
     /// <summary>
     /// Leveled, tiered, or whichever the clustering key implies. A plan refuses tiered for a dataset
@@ -398,13 +283,11 @@ public sealed record CompactionOptions
     internal bool MovesFirst(CompactionStyle style) => Pick == CompactionPick.Auto && style == CompactionStyle.Leveled;
 
     /// <summary>
-    /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: by periods for a
-    /// dataset that declares them, leveled with a clustering key, whatever was asked, since a plan
-    /// refuses the others there first.
+    /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: leveled with a clustering key,
+    /// whatever was asked, since a plan refuses the others there first.
     /// </summary>
-    internal CompactionStyle StyleFor(bool clustered, bool periods = false) => Style switch
+    internal CompactionStyle StyleFor(bool clustered) => Style switch
     {
-        _ when periods => CompactionStyle.Periods,
         _ when clustered => CompactionStyle.Leveled,
         CompactionStyle.Leveled => CompactionStyle.Leveled,
         _ => CompactionStyle.Tiered,
@@ -511,8 +394,11 @@ public sealed record CompactionJob
     /// </summary>
     internal bool Moves { get; init; }
 
-    /// <summary>How a job of a dataset compacted by periods cuts its outputs; null for any other job.</summary>
-    internal PeriodCut? Cut { get; init; }
+    /// <summary>
+    /// The objects of rows that came late the exit may leave in level 0, kept apart rather than merged into the objects of
+    /// its destination they fall among (<see cref="LateRows"/>); none, the default, merges them in.
+    /// </summary>
+    internal int LateRoom { get; init; }
 }
 
 /// <summary>
@@ -553,17 +439,6 @@ public sealed record CompactionPlan
     /// compacting those reads index bytes only, and is planned once no compaction that moves rows is due.
     /// </summary>
     public long FragmentedObjects { get; init; }
-
-    /// <summary>
-    /// How many values of its partition columns the dataset holds rows of, counted from the objects' summaries
-    /// the plan reads; 0 for a dataset without partition columns (<see cref="DatasetOptions.PartitionColumns"/>).
-    /// </summary>
-    /// <remarks>
-    /// <see cref="DatasetOptions.MaxPartitionValues"/> bounds the values one append holds, which catches a column
-    /// of identifiers declared as a partition. Nothing bounds the values a dataset gathers over its life: each one
-    /// grows periods of its own, and this count, which the meter records too, is what shows them pile up.
-    /// </remarks>
-    public int Partitions { get; init; }
 
     /// <summary>Whether a compaction is due.</summary>
     public bool HasWork => Job is not null;

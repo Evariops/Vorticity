@@ -22,7 +22,6 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
-using Vorticity;
 using Vorticity.Serialization.Schemas;
 using Xunit;
 

@@ -1,8 +1,6 @@
 // The precision -> storage-width table is transcribed from the reference implementation's
 // smallest_decimal_value_type. Every boundary pair
 // is asserted on both sides, because a guessed boundary reads a legal file at the wrong width.
-using System;
-using Vorticity;
 using Vorticity.Types.Numerics;
 using Xunit;
 

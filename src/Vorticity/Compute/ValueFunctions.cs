@@ -350,6 +350,12 @@ internal sealed class InstantTruncate : ValueFunction
 
     internal override string Text { get; }
 
+    /// <summary>The calendar unit an instant is truncated to the start of.</summary>
+    internal CalendarUnit Unit => _unit;
+
+    /// <summary>Whether the truncation goes by a zone's calendar, whose offsets move its units' starts off the stored ones.</summary>
+    internal bool Zoned => _zone is not null;
+
     internal override PType Storage => PType.I64;
 
     protected override Int128 Reach => (_unit switch

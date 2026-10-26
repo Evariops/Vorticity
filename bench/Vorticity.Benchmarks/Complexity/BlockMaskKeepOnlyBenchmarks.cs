@@ -8,7 +8,6 @@ using System;
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Compute;
-using Vorticity.File;
 
 namespace Vorticity.Benchmarks.Complexity;
 

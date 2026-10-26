@@ -144,12 +144,13 @@ internal sealed record CommitHeader
 
     /// <summary>The features this library knows: a header that names another is refused, a later library's.</summary>
     internal const DatasetFeatures KnownFeatures =
-        DatasetFeatures.EntryFields | DatasetFeatures.ErasureDelay | DatasetFeatures.Periods | DatasetFeatures.Identifiers | DatasetFeatures.Partitions
-        | DatasetFeatures.ShreddedPaths | DatasetFeatures.JoinedPeriods;
+        DatasetFeatures.EntryFields | DatasetFeatures.ErasureDelay | DatasetFeatures.Periods | DatasetFeatures.Identifiers
+        | DatasetFeatures.ShreddedPaths | DatasetFeatures.Clustering | DatasetFeatures.Rollups;
 
     /// <summary>
-    /// Whether the dataset is compacted by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which the lateness
-    /// horizon goes with, a header that names one and not the other being refused.
+    /// Whether an earlier library wrote the dataset by periods: its flag (<see cref="DatasetFeatures.Periods"/>), which
+    /// every header after keeps. Its late level's objects overlap, as level 0's do, and its other levels' rows are in no
+    /// key order; it is read as it is, and compacted no further (<see cref="CompactionPolicy"/>).
     /// </summary>
     internal bool ByPeriods => (Features & DatasetFeatures.Periods) != 0;
 
@@ -159,31 +160,6 @@ internal sealed record CommitHeader
     /// for none. A header that carries one names <see cref="DatasetFeatures.ErasureDelay"/>.
     /// </summary>
     public TimeSpan? ErasureDelay { get; init; }
-
-    /// <summary>
-    /// The lateness horizon of a dataset compacted by periods (<see cref="DatasetOptions.Periods"/>),
-    /// fixed at creation and kept by every header; null for a dataset that is not. A header that
-    /// carries one names <see cref="DatasetFeatures.Periods"/>.
-    /// </summary>
-    public TimeSpan? Lateness { get; init; }
-
-    /// <summary>
-    /// The calendar unit a period of a dataset compacted by periods spans (<see cref="PeriodOptions.Length"/>),
-    /// which its every header names; null for a dataset that is not.
-    /// </summary>
-    internal SliceWidth? PeriodLength { get; init; }
-
-    /// <summary>
-    /// How many leading clustering-key columns are partition columns (<see cref="DatasetOptions.PartitionColumns"/>),
-    /// fixed at creation; 0 for none. A header that carries some names <see cref="DatasetFeatures.Partitions"/>.
-    /// </summary>
-    internal int PartitionColumns { get; init; }
-
-    /// <summary>
-    /// The changes of the period length the dataset made since its creation, in order
-    /// (<see cref="PeriodCalendar"/>); empty for none.
-    /// </summary>
-    internal IReadOnlyList<PeriodChange> PeriodChanges { get; init; } = [];
 
     /// <summary>
     /// The columns whose values questions look up (<see cref="DatasetOptions.Identifiers"/>), kept by
@@ -196,6 +172,18 @@ internal sealed record CommitHeader
     /// kept by every header; empty for none. A header that carries any names <see cref="DatasetFeatures.ShreddedPaths"/>.
     /// </summary>
     public IReadOnlyList<string> ShreddedPaths { get; init; } = [];
+
+    /// <summary>
+    /// How the dataset's jobs cut their objects (<see cref="DatasetOptions.Clustering"/>), fixed at creation and kept by
+    /// every header; null for none. A header that carries it names <see cref="DatasetFeatures.Clustering"/>.
+    /// </summary>
+    public ClusteringOptions? Clustering { get; init; }
+
+    /// <summary>
+    /// The tree of rollups (<see cref="RollupEntry"/>), as a level is recorded, without inlined pages; null for none. A header
+    /// that carries it names <see cref="DatasetFeatures.Rollups"/>.
+    /// </summary>
+    public CommitLevel? Rollups { get; init; }
 
     /// <summary>The longest delay a header reads, in seconds: what a <see cref="TimeSpan"/> holds.</summary>
     private const ulong MaxDelaySeconds = (ulong)(long.MaxValue / TimeSpan.TicksPerSecond);
@@ -220,18 +208,15 @@ internal sealed record CommitHeader
         internal const int LastDataChange = 16;
         internal const int Features = 17;
         internal const int ErasureDelay = 18;
-        internal const int Lateness = 19;
-        internal const int Identifiers = 20;
-        internal const int PeriodLength = 21;
-        internal const int PeriodChanges = 22;
-        internal const int PartitionColumns = 23;
-        internal const int ShreddedPaths = 24;
-    }
 
-    internal static class PeriodChangeField
-    {
-        internal const int From = 1;
-        internal const int Length = 2;
+        // 19, 21 and 22 held the periods' lateness horizon, length and changes, retired with them: never reused, and
+        // skipped when an earlier library's header holds them.
+        internal const int Identifiers = 20;
+
+        // 23 held the partition columns, retired with them: never reused.
+        internal const int ShreddedPaths = 24;
+        internal const int Clustering = 25;
+        internal const int Rollups = 26;
     }
 
     internal static class SourceField
@@ -251,6 +236,16 @@ internal sealed record CommitHeader
     {
         internal const int Name = 1;
         internal const int Current = 2;
+    }
+
+    internal static class ClusteringField
+    {
+        internal const int Function = 1;
+        internal const int Unit = 2;
+        internal const int Width = 3;
+        internal const int FloatWidth = 4;
+        internal const int ObjectBytes = 5;
+        internal const int BlockValue = 6;
     }
 
     internal static class LevelField
@@ -300,7 +295,12 @@ internal sealed record CommitHeader
         writer.WriteInt64(Field.CreatedAt, CreatedAtUnixMilliseconds);
         foreach (CommitLevel level in Levels)
         {
-            WriteLevel(ref writer, level);
+            WriteLevel(ref writer, level, Field.Levels);
+        }
+
+        if (Rollups is { } rollups)
+        {
+            WriteLevel(ref writer, rollups, Field.Rollups);
         }
 
         foreach (RetiredColumn column in Retired)
@@ -334,12 +334,6 @@ internal sealed record CommitHeader
             writer.WriteUInt64(Field.ErasureDelay, (ulong)delay.TotalSeconds);
         }
 
-        // Written even when zero: the field's presence is what says the dataset is compacted by periods.
-        if (Lateness is { } lateness)
-        {
-            writer.WriteUInt64Always(Field.Lateness, (ulong)lateness.TotalSeconds);
-        }
-
         foreach (string column in Identifiers)
         {
             writer.WriteString(Field.Identifiers, column);
@@ -350,29 +344,44 @@ internal sealed record CommitHeader
             writer.WriteString(Field.ShreddedPaths, path);
         }
 
-        if (PeriodLength is { } length)
+        if (Clustering is { } clustering)
         {
-            writer.WriteUInt64Always(Field.PeriodLength, (ulong)length);
+            WriteClustering(ref writer, clustering);
         }
+    }
 
-        foreach (PeriodChange change in PeriodChanges)
+    /// <summary>The clustering declaration, written whole even when it states nothing: its presence is what says the dataset has one.</summary>
+    private static void WriteClustering(ref ProtoWriter writer, ClusteringOptions clustering)
+    {
+        ProtoWriter inner = new ProtoWriter();
+        try
         {
-            ProtoWriter inner = new ProtoWriter();
-            try
+            if (clustering.Value is { } value)
             {
-                inner.WriteSInt64Always(PeriodChangeField.From, change.From);
-                inner.WriteUInt64Always(PeriodChangeField.Length, (ulong)change.Length);
-                writer.WriteBytes(Field.PeriodChanges, inner.WrittenSpan);
+                WriteValue(ref inner, value);
             }
-            finally
+
+            inner.WriteUInt64(ClusteringField.ObjectBytes, (ulong)clustering.ObjectBytes);
+            if (clustering.BlockValue is { } block)
             {
-                inner.Dispose();
+                // The block value, a message of the same fields as the value's, which a reader that knows none skips.
+                ProtoWriter nested = new ProtoWriter();
+                try
+                {
+                    WriteValue(ref nested, block);
+                    inner.WriteBytesAlways(ClusteringField.BlockValue, nested.WrittenSpan);
+                }
+                finally
+                {
+                    nested.Dispose();
+                }
             }
+
+            writer.WriteBytesAlways(Field.Clustering, inner.WrittenSpan);
         }
-
-        if (PartitionColumns > 0)
+        finally
         {
-            writer.WriteUInt64Always(Field.PartitionColumns, (ulong)PartitionColumns);
+            inner.Dispose();
         }
     }
 
@@ -492,7 +501,7 @@ internal sealed record CommitHeader
         }
     }
 
-    private static void WriteLevel(ref ProtoWriter writer, CommitLevel level)
+    private static void WriteLevel(ref ProtoWriter writer, CommitLevel level, int field)
     {
         ProtoWriter inner = new ProtoWriter();
         try
@@ -525,7 +534,7 @@ internal sealed record CommitHeader
                 inner.WriteBytes(LevelField.Pointer, level.Pointer.Span);
             }
 
-            writer.WriteBytes(Field.Levels, inner.WrittenSpan);
+            writer.WriteBytes(field, inner.WrittenSpan);
         }
         finally
         {
@@ -553,12 +562,10 @@ internal sealed record CommitHeader
         ulong lastDataChange = 0;
         DatasetFeatures features = DatasetFeatures.None;
         TimeSpan? erasureDelay = null;
-        TimeSpan? lateness = null;
         List<string> identifiers = [];
         List<string> shreddedPaths = [];
-        SliceWidth? periodLength = null;
-        List<PeriodChange> periodChanges = [];
-        int partitionColumns = 0;
+        ClusteringOptions? grouping = null;
+        CommitLevel? rollups = null;
 
         try
         {
@@ -621,23 +628,17 @@ internal sealed record CommitHeader
                     case (Field.ErasureDelay, ProtoWireType.Varint):
                         erasureDelay = TimeSpan.FromSeconds((long)Math.Min(reader.ReadVarint(), MaxDelaySeconds));
                         break;
-                    case (Field.Lateness, ProtoWireType.Varint):
-                        lateness = TimeSpan.FromSeconds((long)Math.Min(reader.ReadVarint(), MaxDelaySeconds));
-                        break;
                     case (Field.Identifiers, ProtoWireType.LengthDelimited):
                         identifiers.Add(System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                         break;
                     case (Field.ShreddedPaths, ProtoWireType.LengthDelimited):
                         shreddedPaths.Add(System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                         break;
-                    case (Field.PeriodLength, ProtoWireType.Varint):
-                        periodLength = PeriodUnit(reader.ReadVarint());
+                    case (Field.Clustering, ProtoWireType.LengthDelimited):
+                        grouping = ReadClustering(reader.ReadLengthDelimited());
                         break;
-                    case (Field.PeriodChanges, ProtoWireType.LengthDelimited):
-                        periodChanges.Add(ReadPeriodChange(reader.ReadLengthDelimited()));
-                        break;
-                    case (Field.PartitionColumns, ProtoWireType.Varint):
-                        partitionColumns = (int)Math.Min(reader.ReadVarint(), int.MaxValue);
+                    case (Field.Rollups, ProtoWireType.LengthDelimited):
+                        rollups = ReadLevel(reader.ReadLengthDelimited());
                         break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
@@ -664,10 +665,14 @@ internal sealed record CommitHeader
                 $"A commit header names features 0x{(ulong)(features & ~KnownFeatures):x} this library does not know: a later library wrote the dataset.");
         }
 
-        if (((features & DatasetFeatures.Periods) != 0) != lateness.HasValue || lateness.HasValue != periodLength.HasValue)
+        if (((features & DatasetFeatures.Clustering) != 0) != grouping is not null)
         {
-            throw new CommitFormatException(
-                "A commit header's flag of periods, its lateness horizon and its period length disagree: each goes with the others.");
+            throw new CommitFormatException("A commit header's flag of clustering and its clustering disagree: each goes with the other.");
+        }
+
+        if (rollups is not null && (features & DatasetFeatures.Rollups) == 0)
+        {
+            throw new CommitFormatException("A commit header carries a tree of rollups and does not name them.");
         }
 
         return new CommitHeader
@@ -690,36 +695,52 @@ internal sealed record CommitHeader
             LastDataChange = lastDataChange,
             Features = features,
             ErasureDelay = erasureDelay,
-            Lateness = lateness,
             Identifiers = identifiers,
             ShreddedPaths = shreddedPaths,
-            PeriodLength = periodLength,
-            PeriodChanges = periodChanges,
-            PartitionColumns = partitionColumns,
+            Clustering = grouping,
+            Rollups = rollups,
         };
     }
 
-    /// <summary>A period unit as a header writes it.</summary>
-    /// <exception cref="CommitFormatException">The code names no unit a period may span.</exception>
-    private static SliceWidth PeriodUnit(ulong unit) =>
-        unit is >= (ulong)SliceWidth.Minute and <= (ulong)SliceWidth.Month
-            ? (SliceWidth)unit
-            : throw new CommitFormatException($"A commit header names period unit {unit}, which is none of a minute, an hour, a day or a month.");
-
-    private static PeriodChange ReadPeriodChange(ReadOnlySpan<byte> bytes)
+    /// <summary>A clustering value's fields: its function, then its unit and widths where they are not nought.</summary>
+    private static void WriteValue(ref ProtoWriter writer, ClusteringValue value)
     {
-        long from = 0;
+        writer.WriteUInt64Always(ClusteringField.Function, (ulong)value.Function);
+        writer.WriteUInt64(ClusteringField.Unit, (ulong)value.Unit);
+        writer.WriteSInt64(ClusteringField.Width, value.Width);
+        writer.WriteDouble(ClusteringField.FloatWidth, value.FloatWidth);
+    }
+
+    private static ClusteringOptions ReadClustering(ReadOnlySpan<byte> bytes)
+    {
+        ClusteringValue? block = null;
+        ulong? function = null;
         ulong unit = 0;
+        long width = 0;
+        double floatWidth = 0;
+        ulong objectBytes = 0;
         ProtoReader reader = new ProtoReader(bytes);
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field, wire)
             {
-                case (PeriodChangeField.From, ProtoWireType.Varint):
-                    from = reader.ReadSInt64();
+                case (ClusteringField.Function, ProtoWireType.Varint):
+                    function = reader.ReadVarint();
                     break;
-                case (PeriodChangeField.Length, ProtoWireType.Varint):
+                case (ClusteringField.Unit, ProtoWireType.Varint):
                     unit = reader.ReadVarint();
+                    break;
+                case (ClusteringField.Width, ProtoWireType.Varint):
+                    width = reader.ReadSInt64();
+                    break;
+                case (ClusteringField.FloatWidth, ProtoWireType.Fixed64):
+                    floatWidth = reader.ReadDouble();
+                    break;
+                case (ClusteringField.ObjectBytes, ProtoWireType.Varint):
+                    objectBytes = reader.ReadVarint();
+                    break;
+                case (ClusteringField.BlockValue, ProtoWireType.LengthDelimited):
+                    block = ReadClustering(reader.ReadLengthDelimited()).Value;
                     break;
                 default:
                     reader.SkipField(wire);
@@ -727,7 +748,17 @@ internal sealed record CommitHeader
             }
         }
 
-        return new PeriodChange(from, PeriodUnit(unit));
+        if (objectBytes > long.MaxValue)
+        {
+            throw new CommitFormatException($"A commit header names objects of {objectBytes} bytes, past what an object holds.");
+        }
+
+        return new ClusteringOptions
+        {
+            Value = function is { } named ? ClusteringValue.Of(named, unit, width, floatWidth) : null,
+            ObjectBytes = (long)objectBytes,
+            BlockValue = block,
+        };
     }
 
     private static SourceOffset ReadSource(ReadOnlySpan<byte> bytes)

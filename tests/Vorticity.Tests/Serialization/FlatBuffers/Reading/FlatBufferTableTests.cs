@@ -1,7 +1,6 @@
 // Scalar accessors, schema defaults and the two vtable rules that are easy to get wrong in the
 // "over-reject" direction: a vtable that follows its table, and a vtable shared by two tables.
 using System;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Xunit;
 using static Vorticity.Tests.Serialization.FlatBuffers.TestFlatBuffers;

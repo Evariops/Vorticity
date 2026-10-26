@@ -280,8 +280,6 @@ internal static class DatasetCommitter
             SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired)
             {
                 WritePolicy = template.WritePolicy,
-                PeriodLength = template.PeriodLength,
-                PeriodChanges = template.PeriodChanges,
                 Identifiers = template.Identifiers,
                 ShreddedPaths = template.ShreddedPaths,
             };
@@ -292,14 +290,21 @@ internal static class DatasetCommitter
             DatasetLevels next = levels;
             foreach ((int level, List<TreeChange> batch) in changes)
             {
-                if (batch.Count > 0)
+                if (batch.Count == 0)
                 {
-                    next = next.With(
+                    continue;
+                }
+
+                // The tree of rollups, whose entries carry no bounds a fold reads.
+                next = level == RollupTree
+                    ? next.WithRollups(await next.Rollups
+                        .CommitAsync(batch, options.NewRule(), NoSummary.Instance, pages, builder, cancellationToken)
+                        .ConfigureAwait(false))
+                    : next.With(
                         level,
                         await next[level]
                             .CommitAsync(batch, options.NewRule(), options.NewFold(), pages, builder, cancellationToken)
                             .ConfigureAwait(false));
-                }
             }
 
             // Each level a replacement took its sources from records where it stopped, once the
@@ -322,6 +327,15 @@ internal static class DatasetCommitter
                         .RelocateAsync(reference => repack.Versions.Contains(reference.Version), pages, builder, cancellationToken)
                         .ConfigureAwait(false);
                     next = next.With(level, relocated);
+                    repack.Moved += moved;
+                }
+
+                if (!next.Rollups.IsEmpty)
+                {
+                    (DatasetTree relocated, int moved) = await next.Rollups
+                        .RelocateAsync(reference => repack.Versions.Contains(reference.Version), pages, builder, cancellationToken)
+                        .ConfigureAwait(false);
+                    next = next.WithRollups(relocated);
                     repack.Moved += moved;
                 }
 
@@ -353,7 +367,7 @@ internal static class DatasetCommitter
                 return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages, commit, knownAt);
             }
 
-            (IReadOnlyList<CommitLevel> recorded, IReadOnlyList<PagesStart> starts) = LevelsOf(next, builder, pages);
+            (IReadOnlyList<CommitLevel> recorded, CommitLevel? rollups, IReadOnlyList<PagesStart> starts) = LevelsOf(next, builder, pages);
             CommitHeader header = template with
             {
                 Version = version,
@@ -361,10 +375,10 @@ internal static class DatasetCommitter
                 Seed = options.Seed,
                 CreatedAtUnixMilliseconds = options.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
                 Levels = recorded,
+                Rollups = rollups,
                 Schema = schema.Schema,
                 Retired = schema.Retired,
                 WritePolicy = schema.WritePolicy,
-                PeriodChanges = schema.PeriodChanges,
                 Identifiers = schema.Identifiers,
                 ShreddedPaths = schema.ShreddedPaths,
                 LastDataChange = ChangesRows(options.Kind, outcomes) ? version : LastDataChangeOf(template, parent),
@@ -373,12 +387,6 @@ internal static class DatasetCommitter
                 Features = template.Features | FeaturesOf(operations) | schema.Declared,
             };
             header = Fitted(WithoutHeld(header));
-            if (header.ByPeriods != header.Lateness.HasValue)
-            {
-                throw new InvalidOperationException(
-                    "A commit would write a header whose flag of periods and lateness horizon disagree, which every reader refuses.");
-            }
-
             // 3. One conditional creation. Once it is in, nothing after it can exist yet.
             string key = CommitKey.For(version);
             byte[] bytes = builder.Build(header);
@@ -765,8 +773,7 @@ internal static class DatasetCommitter
 
     /// <summary>
     /// The features of format 4 the operations bring into the trees: an entry they add with fields of
-    /// format 4, and an object that joins periods. An entry rebuilt from one in the trees keeps its fields,
-    /// and its feature is named already.
+    /// format 4. An entry rebuilt from one in the trees keeps its fields, and its feature is named already.
     /// </summary>
     private static DatasetFeatures FeaturesOf(IReadOnlyList<DatasetOperation> operations)
     {
@@ -778,11 +785,13 @@ internal static class DatasetCommitter
                 case DatasetOperation.AddObject { Entry.HasFields: true }:
                     features |= DatasetFeatures.EntryFields;
                     break;
+                case DatasetOperation.PutRollup:
+                    features |= DatasetFeatures.Rollups;
+                    break;
                 case DatasetOperation.ReplaceObjects replace:
-                    features |= replace.Joins ? DatasetFeatures.JoinedPeriods : DatasetFeatures.None;
                     foreach ((int _, ReadOnlyMemory<byte> _, ObjectEntry entry) in replace.Outputs)
                     {
-                        if (entry.HasFields)
+                        if (entry.HasFields || entry.HasNegatives)
                         {
                             features |= DatasetFeatures.EntryFields;
                             break;
@@ -874,7 +883,7 @@ internal static class DatasetCommitter
     /// level 0 up, since every lookup descends level 0; a level whose top does not fit costs one
     /// request to read instead.
     /// </summary>
-    private static (IReadOnlyList<CommitLevel> Levels, IReadOnlyList<PagesStart> Starts) LevelsOf(
+    private static (IReadOnlyList<CommitLevel> Levels, CommitLevel? Rollups, IReadOnlyList<PagesStart> Starts) LevelsOf(
         DatasetLevels levels, CommitObjectBuilder builder, CommitPageSource pages)
     {
         List<CommitLevel> recorded = [];
@@ -891,7 +900,15 @@ internal static class DatasetCommitter
             });
         }
 
-        return (recorded, StartsOf(named, builder.Version, pages));
+        // The tree of rollups is named, never inlined: its leaves are no objects' entries, which an inlining reads.
+        CommitLevel? rollups = null;
+        if (levels.Rollups is { IsEmpty: false } held)
+        {
+            named.Add(held.Root);
+            rollups = new CommitLevel(0, held.Entries, held.Root) { Depth = held.Depth, Rows = held.Rows };
+        }
+
+        return (recorded, rollups, StartsOf(named, builder.Version, pages));
     }
 
     /// <summary>Re-applies the operations to the levels as they are now.</summary>
@@ -914,6 +931,10 @@ internal static class DatasetCommitter
         // another, so the entries pending are kept per level: the same key at two levels is two
         // objects. Looked up by the key's bytes, which needs no copy of them.
         Dictionary<int, Dictionary<byte[], ObjectEntry?>> pending = [];
+
+        // The rollups the batch puts, by their tree keys; and whether it changes the schema, which takes every rollup away.
+        Dictionary<byte[], RollupEntry> rollups = new Dictionary<byte[], RollupEntry>(Buffers.ByteKeys.Instance);
+        bool reschemed = false;
         List<OperationOutcome> outcomes = new List<OperationOutcome>(operations.Count);
 
         foreach (DatasetOperation operation in operations)
@@ -1058,6 +1079,14 @@ internal static class DatasetCommitter
                                 repack.Moved++;
                             }
 
+                            // So do the counts of its deleted rows.
+                            if (entry.NegativesAt.Exists && repack.Versions.Contains(entry.NegativesAt.Version))
+                            {
+                                await entry.ResolveNegativesAsync(pages, cancellationToken).ConfigureAwait(false);
+                                entry = entry.WithNegativesAt(builder.AddFragment(entry.EncodedNegatives.Span));
+                                repack.Moved++;
+                            }
+
                             Put(level, leaf.Key, entry);
                         }
                     }
@@ -1077,6 +1106,7 @@ internal static class DatasetCommitter
                         // retired names change only with it, so the bytes say it all.
                         schema.Schema = change.To;
                         schema.Retired = change.Retired;
+                        reschemed = true;
                         outcomes.Add(OperationOutcome.Applied);
                     }
                     else
@@ -1111,27 +1141,6 @@ internal static class DatasetCommitter
                     else
                     {
                         schema.WritePolicy = joined;
-                        outcomes.Add(OperationOutcome.Applied);
-                    }
-
-                    break;
-                }
-
-                case DatasetOperation.ChangePeriodLength change:
-                {
-                    // Dropped on a dataset with no periods, when worked out on a calendar another writer changed first, when it
-                    // asks for the length the calendar ends on already, or when it does not follow the calendar's last change:
-                    // the changes stay few, and in the order of their boundaries, which a calendar reads them in.
-                    IReadOnlyList<PeriodChange> held = schema.PeriodChanges;
-                    if (schema.PeriodLength is not { } first || held.Count != change.After
-                        || change.Change.Length == (held.Count > 0 ? held[^1].Length : first)
-                        || (held.Count > 0 && change.Change.From <= held[^1].From))
-                    {
-                        outcomes.Add(OperationOutcome.Dropped);
-                    }
-                    else
-                    {
-                        schema.PeriodChanges = [.. schema.PeriodChanges, change.Change];
                         outcomes.Add(OperationOutcome.Applied);
                     }
 
@@ -1189,11 +1198,40 @@ internal static class DatasetCommitter
                     break;
                 }
 
+                case DatasetOperation.PutRollup put:
+                {
+                    // A rollup is put over what the version holds as it summed it, or not at all: its level's entries over
+                    // its range, or the rollups of the rank below, hashed as its builder hashed them.
+                    (UInt128 fingerprint, int children) = await SummedAsync(levels, put.Entry, pages, cancellationToken).ConfigureAwait(false);
+                    if (fingerprint != put.Entry.Fingerprint || children != put.Entry.Children)
+                    {
+                        outcomes.Add(OperationOutcome.Dropped);
+                        break;
+                    }
+
+                    byte[] key = put.Entry.TreeKey;
+                    if (await levels.Rollups.FindAsync(key, pages, cancellationToken).ConfigureAwait(false) is { } held
+                        && RollupEntry.FromBytes(held.Key.Span, held.Value.Span).Fingerprint == put.Entry.Fingerprint)
+                    {
+                        outcomes.Add(OperationOutcome.AlreadyThere);
+                        break;
+                    }
+
+                    Batch(RollupTree)[key] = TreeChange.Put(key, put.Entry.ToBytes(), put.Entry.Rows);
+                    rollups[key] = put.Entry;
+                    outcomes.Add(OperationOutcome.Applied);
+                    break;
+                }
+
                 default:
                     throw new ArgumentException(
                         $"An operation of type {operation.GetType().Name} is not one a commit knows.", nameof(operations));
             }
         }
+
+        // A rollup covers every object of its level between its first and its last tree keys: an entry the batch puts or
+        // removes there takes it away, of every rank, with the rollups the batch put itself.
+        await InvalidateAsync().ConfigureAwait(false);
 
         Dictionary<int, List<TreeChange>> batches = [];
         foreach ((int level, SortedDictionary<byte[], TreeChange> sorted) in changes)
@@ -1202,6 +1240,86 @@ internal static class DatasetCommitter
         }
 
         return (batches, outcomes, repack);
+
+        async ValueTask InvalidateAsync()
+        {
+            // A rollup names its columns by their places in the schema it was summed under, as an object's counts do: a
+            // schema changed takes them all away, and a later job sums them again under the new one.
+            if (reschemed)
+            {
+                foreach (byte[] put in rollups.Keys)
+                {
+                    Batch(RollupTree).Remove(put);
+                }
+
+                if (!levels.Rollups.IsEmpty)
+                {
+                    await foreach (TreeEntry entry in levels.Rollups.EnumerateAsync(pages, cancellationToken).ConfigureAwait(false))
+                    {
+                        byte[] treeKey = entry.Key.ToArray();
+                        Batch(RollupTree)[treeKey] = TreeChange.Remove(treeKey);
+                    }
+                }
+
+                return;
+            }
+
+            // The levels' batches as they stand, since taking a rollup away adds the batch of the tree of rollups.
+            List<(int Level, SortedDictionary<byte[], TreeChange> Batch)> levelBatches = [];
+            foreach ((int level, SortedDictionary<byte[], TreeChange> batch) in changes)
+            {
+                if (level != RollupTree && batch.Count > 0)
+                {
+                    levelBatches.Add((level, batch));
+                }
+            }
+
+            foreach ((int level, SortedDictionary<byte[], TreeChange> batch) in levelBatches)
+            {
+
+                // The level's rollups, every rank: those the tree holds, read only when it holds any, and the batch's.
+                List<(RollupEntry Rollup, bool Held)> covering = [];
+                byte[] low = RollupEntry.PrefixOf(level, 0);
+                byte[] high = RollupEntry.PrefixOf(level + 1, 0);
+                if (await levels.Rollups.NextAsync(low, wrap: false, pages, cancellationToken).ConfigureAwait(false) is { } first
+                    && TreePage.Compare(first.Key.Span, high) < 0)
+                {
+                    await foreach (TreeEntry entry in RangeAsync(levels.Rollups, low, high, pages, cancellationToken).ConfigureAwait(false))
+                    {
+                        covering.Add((RollupEntry.FromBytes(entry.Key.Span, entry.Value.Span), true));
+                    }
+                }
+
+                foreach (RollupEntry put in rollups.Values)
+                {
+                    if (put.Level == level)
+                    {
+                        covering.Add((put, false));
+                    }
+                }
+
+                foreach ((RollupEntry rollup, bool held) in covering)
+                {
+                    foreach (byte[] key in batch.Keys)
+                    {
+                        if (rollup.Covers(key))
+                        {
+                            byte[] treeKey = rollup.TreeKey;
+                            if (held)
+                            {
+                                Batch(RollupTree)[treeKey] = TreeChange.Remove(treeKey);
+                            }
+                            else
+                            {
+                                Batch(RollupTree).Remove(treeKey);
+                            }
+
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         async ValueTask<ObjectEntry?> CurrentAsync(int level, ReadOnlyMemory<byte> key)
         {
@@ -1229,7 +1347,7 @@ internal static class DatasetCommitter
                     continue;
                 }
 
-                if (!Takes(replace, range.Level, key.Span) && range.Overlaps(held.Entry.Value))
+                if (!Takes(replace, range.Level, key.Span) && range.Overlaps(key.Span, held.Entry.Value))
                 {
                     return true;
                 }
@@ -1239,7 +1357,7 @@ internal static class DatasetCommitter
             {
                 foreach ((byte[] key, ObjectEntry? entry) in entries)
                 {
-                    if (entry is not null && !Takes(replace, range.Level, key) && range.Overlaps(entry.Summaries))
+                    if (entry is not null && !Takes(replace, range.Level, key) && range.Overlaps(key, entry))
                     {
                         return true;
                     }
@@ -1259,6 +1377,14 @@ internal static class DatasetCommitter
                 ReadOnlyMemory<byte> vector = entry.EncodedDeletions;
                 entry = entry.WithVectorAt(builder.AddFragment(vector.Span));
                 pages.Keep(entry.VectorAt, vector);
+            }
+
+            // The counts of the rows a delete took go there always, as a fragment does, and are kept as the vector is.
+            if (entry.NegativesPending)
+            {
+                ReadOnlyMemory<byte> negatives = entry.EncodedNegatives;
+                entry = entry.WithNegativesAt(builder.AddFragment(negatives.Span));
+                pages.Keep(entry.NegativesAt, negatives);
             }
 
             byte[] stored = Stored(level, key.Span);
@@ -1288,7 +1414,7 @@ internal static class DatasetCommitter
         {
             if (!pending.TryGetValue(level, out Dictionary<byte[], ObjectEntry?>? entries))
             {
-                entries = new Dictionary<byte[], ObjectEntry?>(KeyBytes.Instance);
+                entries = new Dictionary<byte[], ObjectEntry?>(Buffers.ByteKeys.Instance);
                 pending[level] = entries;
             }
 
@@ -1306,6 +1432,75 @@ internal static class DatasetCommitter
         // whatever the operations that touch it.
         byte[] Stored(int level, ReadOnlySpan<byte> key) =>
             Pending(level).GetAlternateLookup<ReadOnlySpan<byte>>().TryGetValue(key, out byte[]? held, out _) ? held : key.ToArray();
+    }
+
+    /// <summary>Where a batch's changes to the tree of rollups lie among its changes by level: past every level.</summary>
+    private const int RollupTree = -1;
+
+    /// <summary>
+    /// What a rollup of <paramref name="rollup"/>'s place sums in <paramref name="levels"/>, hashed as its builder hashes it,
+    /// and how many children: at rank 1, its level's entries between its first and its last tree keys, each its tree key and
+    /// its entry; past it, the rollups of the rank below over that range, each its first tree key and its fingerprint.
+    /// </summary>
+    internal static async ValueTask<(UInt128 Fingerprint, int Children)> SummedAsync(
+        DatasetLevels levels, RollupEntry rollup, IPageSource pages, CancellationToken cancellationToken)
+    {
+        System.IO.Hashing.XxHash128 hash = new System.IO.Hashing.XxHash128();
+        int children = 0;
+        if (rollup.Rank == 1)
+        {
+            await foreach (TreeEntry entry in RangeAsync(levels[rollup.Level], rollup.FirstKey, rollup.LastKey, pages, cancellationToken).ConfigureAwait(false))
+            {
+                hash.Append(entry.Key.Span);
+                hash.Append(ObjectEntry.FromBytes(entry.Value).ToBytes());
+                children++;
+            }
+        }
+        else
+        {
+            byte[] low = RollupEntry.TreeKeyOf(rollup.Level, rollup.Rank - 1, rollup.FirstKey.Span);
+            byte[] high = RollupEntry.TreeKeyOf(rollup.Level, rollup.Rank - 1, rollup.LastKey.Span);
+            byte[] fingerprint = new byte[16];
+            await foreach (TreeEntry entry in RangeAsync(levels.Rollups, low, high, pages, cancellationToken).ConfigureAwait(false))
+            {
+                RollupEntry child = RollupEntry.FromBytes(entry.Key.Span, entry.Value.Span);
+                hash.Append(child.FirstKey.Span);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt128BigEndian(fingerprint, child.Fingerprint);
+                hash.Append(fingerprint);
+                children++;
+            }
+        }
+
+        return (hash.GetCurrentHashAsUInt128(), children);
+    }
+
+    /// <summary>
+    /// The entries of <paramref name="tree"/> whose keys lie from <paramref name="low"/> to <paramref name="high"/>, both in,
+    /// in key order: a page whose bounds miss the range is not read.
+    /// </summary>
+    internal static async IAsyncEnumerable<TreeEntry> RangeAsync(
+        DatasetTree tree, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high, IPageSource pages,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (PositionedEntry held in tree.WalkAsync(
+            pages,
+            0,
+            long.MaxValue,
+            node => TreePage.Compare(node.MaxKey.Span, low.Span) >= 0 && TreePage.Compare(node.MinKey.Span, high.Span) <= 0,
+            cancellationToken).ConfigureAwait(false))
+        {
+            if (TreePage.Compare(held.Entry.Key.Span, low.Span) < 0)
+            {
+                continue;
+            }
+
+            if (TreePage.Compare(held.Entry.Key.Span, high.Span) > 0)
+            {
+                yield break;
+            }
+
+            yield return held.Entry;
+        }
     }
 
     /// <summary>Whether a replacement takes the object under <paramref name="key"/> in <paramref name="level"/> as an input.</summary>
@@ -1420,12 +1615,6 @@ internal static class DatasetCommitter
         /// <summary>The indexes every writer builds, as the header records them.</summary>
         internal ReadOnlyMemory<byte> WritePolicy { get; set; }
 
-        /// <summary>The first period length, as the header records it; null for the default.</summary>
-        internal SliceWidth? PeriodLength { get; init; }
-
-        /// <summary>The changes of the period length, as the header records them.</summary>
-        internal IReadOnlyList<PeriodChange> PeriodChanges { get; set; } = [];
-
         /// <summary>The identifiers, as the header records them.</summary>
         internal IReadOnlyList<string> Identifiers { get; set; } = [];
 
@@ -1486,26 +1675,5 @@ internal static class DatasetCommitter
         internal static KeyOrder Instance { get; } = new KeyOrder();
 
         public int Compare(byte[]? x, byte[]? y) => TreePage.Compare(x, y);
-    }
-
-    /// <summary>Keys equal by their bytes, looked up by a span of them as well as by an array.</summary>
-    private sealed class KeyBytes : IEqualityComparer<byte[]>, IAlternateEqualityComparer<ReadOnlySpan<byte>, byte[]>
-    {
-        internal static KeyBytes Instance { get; } = new KeyBytes();
-
-        public bool Equals(byte[]? x, byte[]? y) => x.AsSpan().SequenceEqual(y);
-
-        public int GetHashCode(byte[] obj) => GetHashCode((ReadOnlySpan<byte>)obj);
-
-        public bool Equals(ReadOnlySpan<byte> alternate, byte[] other) => alternate.SequenceEqual(other);
-
-        public int GetHashCode(ReadOnlySpan<byte> alternate)
-        {
-            HashCode hash = default;
-            hash.AddBytes(alternate);
-            return hash.ToHashCode();
-        }
-
-        public byte[] Create(ReadOnlySpan<byte> alternate) => alternate.ToArray();
     }
 }

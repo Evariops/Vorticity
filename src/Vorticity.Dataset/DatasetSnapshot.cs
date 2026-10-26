@@ -80,14 +80,16 @@ internal sealed class DatasetSnapshot
 
     /// <summary>
     /// The objects inside <c>[from, to)</c> whose summaries, and their ancestors', do not refute
-    /// the pruner, in key order. A null pruner keeps every object.
+    /// the pruner, in key order. A null pruner keeps every object. A subtree of a level that
+    /// <paramref name="covered"/> says another answer takes whole, rollups', is passed over as a refuted one is.
     /// </summary>
     internal async IAsyncEnumerable<PositionedObject> WalkAsync(
         SummaryPruner? pruner,
         long from,
         long to,
         DatasetScanCounters? metrics,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        Func<int, InternalEntry, bool>? covered = null)
     {
         // Each node and each entry is asked about the pruner's columns alone, decoded out of its
         // summaries in place; an entry is parsed whole only once it is kept.
@@ -97,7 +99,7 @@ internal sealed class DatasetSnapshot
             || ObjectSummaries.Of(ObjectSummaryFold.SummariesOf(node.Summary.Span, out _), wanted!).MayMatch(pruner, node.Rows);
 
         await foreach ((TreeEntry held, long firstRow, int level) in
-            EntriesAsync(from, to, mayMatch, metrics, cancellationToken).ConfigureAwait(false))
+            EntriesAsync(from, to, mayMatch, metrics, cancellationToken, covered).ConfigureAwait(false))
         {
             if (metrics is { } counters)
             {
@@ -161,6 +163,9 @@ internal sealed class DatasetSnapshot
     /// <exception cref="ObjectNotFoundException">
     /// The object is gone: this version fell out of the retention window and vacuum took it.
     /// </exception>
+    /// <summary>Whether the handle holds the object <paramref name="entry"/> names open, so that a rent of it reads nothing.</summary>
+    internal bool HoldsOpen(ObjectEntry entry) => _objects.Holds(entry);
+
     internal async ValueTask<ObjectLease> RentAsync(ObjectEntry entry, CancellationToken cancellationToken)
     {
         try
@@ -293,6 +298,39 @@ internal sealed class DatasetSnapshot
     /// <summary>The bounds of the column <see cref="Bounds"/> worked out last, from every root in hand; null before.</summary>
     private KnownBounds? _bounds;
 
+    /// <summary>Whether an object of the version keeps counts: 1, 0, or -1 before a walk found out.</summary>
+    private int _keepsCounts = -1;
+
+    /// <summary>Whether an object of the version may keep counts: false once a walk found none (<see cref="KeepsCountsAsync"/>).</summary>
+    internal bool MayKeepCounts => Volatile.Read(ref _keepsCounts) != 0;
+
+    /// <summary>
+    /// Whether an object of the version keeps counts (<see cref="Indexes.ObjectContents.Counts"/>), which the states
+    /// an aggregation asks for may come from: found by a walk of its entries the first time it is asked, and known after,
+    /// so that the questions on a version none of whose objects keeps counts walk nothing more than their rows.
+    /// </summary>
+    internal async ValueTask<bool> KeepsCountsAsync(CancellationToken cancellationToken)
+    {
+        int known = Volatile.Read(ref _keepsCounts);
+        if (known >= 0)
+        {
+            return known == 1;
+        }
+
+        bool any = false;
+        await foreach (PositionedObject held in WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        {
+            if (held.Entry.Contents is { Counts.Count: > 0 })
+            {
+                any = true;
+                break;
+            }
+        }
+
+        Volatile.Write(ref _keepsCounts, any ? 1 : 0);
+        return any;
+    }
+
     /// <summary>Keeps <paramref name="bounds"/> as the column's, worked out from every root of the version, and returns them.</summary>
     private Aggregating.KeyBounds? Known(string path, Aggregating.KeyBounds? bounds)
     {
@@ -391,7 +429,8 @@ internal sealed class DatasetSnapshot
         long to,
         Func<InternalEntry, bool>? mayMatch,
         DatasetScanCounters? metrics,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        Func<int, InternalEntry, bool>? covered = null)
     {
         List<DatasetTree> trees = [];
         List<int> levels = [];
@@ -405,9 +444,10 @@ internal sealed class DatasetSnapshot
         {
             DatasetTree only = trees.Count == 1 ? trees[0] : DatasetTree.Empty;
             int level = trees.Count == 1 ? levels[0] : 0;
-            Func<InternalEntry, bool>? descend = mayMatch is null ? null : node =>
+            Func<InternalEntry, bool>? kept = Kept(mayMatch, covered, level);
+            Func<InternalEntry, bool>? descend = kept is null ? null : node =>
             {
-                if (mayMatch(node))
+                if (kept(node))
                 {
                     return true;
                 }
@@ -435,7 +475,7 @@ internal sealed class DatasetSnapshot
         {
             for (int i = 0; i < trees.Count; i++)
             {
-                walks[i] = new TreeWalk(trees[i], Pages, mayMatch, cancellationToken);
+                walks[i] = new TreeWalk(trees[i], Pages, Kept(mayMatch, covered, levels[i]), cancellationToken);
                 live[i] = await walks[i].MoveNextAsync().ConfigureAwait(false);
             }
 
@@ -492,6 +532,20 @@ internal sealed class DatasetSnapshot
             }
         }
     }
+
+    /// <summary>
+    /// The subtrees of <paramref name="level"/> a walk enters: those <paramref name="mayMatch"/> keeps, past those
+    /// <paramref name="covered"/> takes; null for all of them.
+    /// </summary>
+    private static Func<InternalEntry, bool>? Kept(Func<InternalEntry, bool>? mayMatch, Func<int, InternalEntry, bool>? covered, int level) =>
+        covered is null ? mayMatch : Uncovered(mayMatch, covered, level);
+
+    /// <summary>
+    /// <see cref="Kept"/> under <paramref name="covered"/>, apart so that a walk with nothing covered builds no closure: one
+    /// over a method's parameters is built as the method starts.
+    /// </summary>
+    private static Func<InternalEntry, bool> Uncovered(Func<InternalEntry, bool>? mayMatch, Func<int, InternalEntry, bool> covered, int level) =>
+        mayMatch is null ? node => !covered(level, node) : node => mayMatch(node) && !covered(level, node);
 
     /// <summary>
     /// Whether a step of another level falls inside the key span of the subtree level

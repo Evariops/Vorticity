@@ -177,24 +177,23 @@ internal readonly struct AlpPlan
         // heap.
         int[] indices = ArrayPool<int>.Shared.Rent(rows);
         double[] patches = ArrayPool<double>.Shared.Rent(rows);
-        int patchCount = 0;
         bool kept = false;
         try
         {
-        patchCount = EncodeRows(values, mask, rows, e, f, encoded, indices, patches);
-        long size = Estimate<long>(encoded, patchCount, sizeof(double), sizeof(long));
-        if (size + Overhead >= plain)
-        {
-            return null;
-        }
+            int patchCount = EncodeRows(values, mask, rows, e, f, encoded, indices, patches);
+            long size = Estimate<long>(encoded, patchCount, sizeof(double), sizeof(long));
+            if (size + Overhead >= plain)
+            {
+                return null;
+            }
 
-        AlpPlan plan = new AlpPlan(
-            (byte)e, (byte)f, encodedBytes, encodedLength, PType.I64,
-            RentedCopy(indices.AsSpan(0, patchCount)),
-            RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
-            patchCount, sizeof(double), size);
-        kept = true;
-        return plan;
+            AlpPlan plan = new AlpPlan(
+                (byte)e, (byte)f, encodedBytes, encodedLength, PType.I64,
+                RentedCopy(indices.AsSpan(0, patchCount)),
+                RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
+                patchCount, sizeof(double), size);
+            kept = true;
+            return plan;
         }
         finally
         {
@@ -220,24 +219,23 @@ internal readonly struct AlpPlan
         Span<int> encoded = MemoryMarshal.Cast<byte, int>(encodedBytes.AsSpan(0, encodedLength));
         int[] indices = ArrayPool<int>.Shared.Rent(rows);
         float[] patches = ArrayPool<float>.Shared.Rent(rows);
-        int patchCount = 0;
         bool kept = false;
         try
         {
-        patchCount = EncodeRows(values, mask, rows, e, f, encoded, indices, patches);
-        long size = Estimate<int>(encoded, patchCount, sizeof(float), sizeof(int));
-        if (size + Overhead >= plain)
-        {
-            return null;
-        }
+            int patchCount = EncodeRows(values, mask, rows, e, f, encoded, indices, patches);
+            long size = Estimate<int>(encoded, patchCount, sizeof(float), sizeof(int));
+            if (size + Overhead >= plain)
+            {
+                return null;
+            }
 
-        AlpPlan plan = new AlpPlan(
-            (byte)e, (byte)f, encodedBytes, encodedLength, PType.I32,
-            RentedCopy(indices.AsSpan(0, patchCount)),
-            RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
-            patchCount, sizeof(float), size);
-        kept = true;
-        return plan;
+            AlpPlan plan = new AlpPlan(
+                (byte)e, (byte)f, encodedBytes, encodedLength, PType.I32,
+                RentedCopy(indices.AsSpan(0, patchCount)),
+                RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
+                patchCount, sizeof(float), size);
+            kept = true;
+            return plan;
         }
         finally
         {

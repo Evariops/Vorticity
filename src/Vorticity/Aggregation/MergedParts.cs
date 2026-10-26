@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
-using Vorticity.Scanning;
 
 namespace Vorticity.Aggregating;
 

@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using Vorticity.Arrays;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Layouts;
 

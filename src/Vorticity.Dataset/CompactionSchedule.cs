@@ -94,6 +94,12 @@ internal static class CompactionLoop
                 .ConfigureAwait(false);
             if (Choose(schedule, plan) is not { } job)
             {
+                // Nothing to compact: the first loop sums what the levels settled into rollups, then sleeps.
+                if (schedule.Loop == 0 && await DatasetRollups.RollUpAsync(dataset, cancellationToken, refreshed: true).ConfigureAwait(false) > 0)
+                {
+                    continue;
+                }
+
                 await Task.Delay(schedule.Idle, clock, cancellationToken).ConfigureAwait(false);
                 continue;
             }

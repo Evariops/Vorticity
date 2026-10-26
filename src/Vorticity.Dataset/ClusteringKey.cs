@@ -3,13 +3,11 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
@@ -20,12 +18,11 @@ internal sealed class ClusteringKey
     private readonly DType[] _dtypes;
     private readonly RowSortField[] _fields;
 
-    private ClusteringKey(string[] paths, DType[] dtypes, bool mayHoldNull, int partitionColumns)
+    private ClusteringKey(string[] paths, DType[] dtypes, bool mayHoldNull)
     {
         _paths = paths;
         _dtypes = dtypes;
         MayHoldNull = mayHoldNull;
-        PartitionColumns = partitionColumns;
         _fields = new RowSortField[paths.Length];
         Array.Fill(_fields, RowSortField.Ascending);
     }
@@ -33,20 +30,11 @@ internal sealed class ClusteringKey
     /// <summary>The key a dataset declares, in key order, or null when it declares none.</summary>
     /// <param name="paths">The key's columns, in key order.</param>
     /// <param name="schema">The dataset's schema.</param>
-    /// <param name="partitionColumns">How many leading columns are partition columns.</param>
-    /// <exception cref="ArgumentException">The partition columns leave no column of the key after them.</exception>
-    public static ClusteringKey? For(IReadOnlyList<string>? paths, DType schema, int partitionColumns = 0)
+    public static ClusteringKey? For(IReadOnlyList<string>? paths, DType schema)
     {
         if (paths is null || paths.Count == 0)
         {
             return null;
-        }
-
-        if (partitionColumns < 0 || partitionColumns >= paths.Count)
-        {
-            throw new ArgumentException(
-                $"A key of {paths.Count} column(s) has at most {paths.Count - 1} partition column(s) before the column they partition, not {partitionColumns}.",
-                nameof(partitionColumns));
         }
 
         string[] kept = [.. paths];
@@ -58,66 +46,11 @@ internal sealed class ClusteringKey
             mayHoldNull |= ColumnPath.MayBeNull(schema, kept[i]);
         }
 
-        return new ClusteringKey(kept, dtypes, mayHoldNull, partitionColumns);
+        return new ClusteringKey(kept, dtypes, mayHoldNull);
     }
 
-    /// <summary>How many leading columns of the key are partition columns: each object holds one value of them.</summary>
-    public int PartitionColumns { get; }
-
-    /// <summary>The partition columns, in key order; none for a dataset without.</summary>
-    public ReadOnlySpan<string> PartitionPaths => _paths.AsSpan(0, PartitionColumns);
-
-    /// <summary>
-    /// The key's first column past its partition columns: a dataset by periods' instant, and the column a level's
-    /// ranges are judged on inside a partition.
-    /// </summary>
-    public string InstantPath => _paths[PartitionColumns];
-
-    /// <summary>The dtype of <see cref="InstantPath"/>.</summary>
-    internal DType InstantType => _dtypes[PartitionColumns];
-
-    /// <summary>
-    /// The one value of each partition column an object holds, in key order, from its summaries: a bound may lie
-    /// outwards, so a minimum equal to the maximum is the value. Null without partition columns, or when a summary
-    /// does not say one value.
-    /// </summary>
-    internal FilterLiteral[]? PartitionOf(ObjectSummaries summaries)
-    {
-        if (PartitionColumns == 0)
-        {
-            return null;
-        }
-
-        FilterLiteral[] values = new FilterLiteral[PartitionColumns];
-        for (int i = 0; i < values.Length; i++)
-        {
-            if (!summaries.TryGet(_paths[i], out ColumnSummary column) || !column.HasMin || !column.HasMax || !column.Min.Equals(column.Max))
-            {
-                return null;
-            }
-
-            values[i] = column.Min;
-        }
-
-        return values;
-    }
-
-    /// <summary>The one partition value every one of <paramref name="objects"/> holds; null when they do not share one.</summary>
-    internal FilterLiteral[]? SharedPartition(IEnumerable<ObjectSummaries> objects)
-    {
-        FilterLiteral[]? shared = null;
-        foreach (ObjectSummaries summaries in objects)
-        {
-            if (PartitionOf(summaries) is not { } values || (shared is not null && !shared.AsSpan().SequenceEqual(values)))
-            {
-                return null;
-            }
-
-            shared = values;
-        }
-
-        return shared;
-    }
+    /// <summary>The key's first column: the one a clustering value is a function of, and the one a level's ranges are judged on.</summary>
+    public string InstantPath => _paths[0];
 
     /// <summary>
     /// The key a new dataset declares, which may not be over a column that may hold a null. A
@@ -130,31 +63,10 @@ internal sealed class ClusteringKey
     /// <param name="paths">The key's columns, in key order.</param>
     /// <param name="schema">The dataset's schema.</param>
     /// <param name="acceptsNullable">Whether a key of one column that may hold a null is accepted, as it was before: the tests of such datasets.</param>
-    /// <param name="partitionColumns">How many leading columns are partition columns.</param>
     /// <exception cref="ArgumentException">A path names no column, or a column of the key, or a struct on its path, may hold a null.</exception>
-    public static ClusteringKey? Declared(IReadOnlyList<string>? paths, DType schema, bool acceptsNullable = false, int partitionColumns = 0)
+    public static ClusteringKey? Declared(IReadOnlyList<string>? paths, DType schema, bool acceptsNullable = false)
     {
-        ClusteringKey? key = For(paths, schema, partitionColumns);
-        for (int i = 0; key is not null && i < key.PartitionColumns; i++)
-        {
-            // Each object holds one value of a partition column, which its entry names and every job keeps apart: a null
-            // names none, and a NaN equals no value, its own included.
-            DType values = key._dtypes[i];
-            while (values.Kind == DTypeKind.Extension)
-            {
-                values = values.StorageType;
-            }
-
-            if (key._dtypes[i].IsNullable || (values.Kind == DTypeKind.Primitive && values.PType.IsFloat()))
-            {
-                throw new ArgumentException(
-                    $"The partition column '{key._paths[i]}' {(key._dtypes[i].IsNullable ? "may hold a null" : "holds floats, whose NaN equals no value")}, " +
-                    "where every row names the partition it belongs to. Declare partition columns on non-nullable columns of " +
-                    "integers, text or other exact values.",
-                    nameof(paths));
-            }
-        }
-
+        ClusteringKey? key = For(paths, schema);
         if (key is { MayHoldNull: true } && (key.IsComposite || !acceptsNullable))
         {
             throw new ArgumentException(
@@ -173,8 +85,89 @@ internal sealed class ClusteringKey
     /// <summary>Whether a column of the key, or a struct on its path, is nullable.</summary>
     public bool MayHoldNull { get; }
 
+    /// <summary>
+    /// Whether an object's entry states its last key (<see cref="ObjectEntry.LastKey"/>): a composite key, whose leading
+    /// column's bounds take every object sharing a value of it, or a column a file's statistics do not bound, a text's.
+    /// A number's or a time's statistics bound a key of that column alone exactly, and its entries keep the commit
+    /// format the dataset would write without the field.
+    /// </summary>
+    public bool StatesLastKey
+    {
+        get
+        {
+            DType leading = _dtypes[0];
+            while (leading.Kind == DTypeKind.Extension)
+            {
+                leading = leading.StorageType;
+            }
+
+            return IsComposite || leading.Kind != DTypeKind.Primitive;
+        }
+    }
+
     /// <summary>The dtype of the key's first column.</summary>
     internal DType LeadingType => _dtypes[0];
+
+    /// <summary>The dtype of the key's column at <paramref name="position"/>.</summary>
+    internal DType TypeAt(int position) => _dtypes[position];
+
+    /// <summary>
+    /// <paramref name="summaries"/> with the key's first column bounded by an object's smallest key <paramref name="first"/>
+    /// and its largest <paramref name="last"/>, where they do not bound it: a text's, which a file's statistics leave
+    /// unbounded. The first value of each, row-encoded, read back, and no null, which the key's order would put at one end:
+    /// what a filter or a key on the column is then proven by over the object, as a number's statistics prove it. The
+    /// summaries as they are when they bound the column, or when a key's first value is a null.
+    /// </summary>
+    /// <param name="summaries">The object's summaries, as its entry holds them.</param>
+    /// <param name="first">Its smallest key, row-encoded.</param>
+    /// <param name="last">Its largest key, row-encoded.</param>
+    /// <param name="exact">Whether <paramref name="last"/> is the object's largest key, not a bound a delete left above it.</param>
+    internal ObjectSummaries Bounded(ObjectSummaries summaries, ReadOnlySpan<byte> first, ReadOnlySpan<byte> last, bool exact)
+    {
+        if (summaries.TryGet(_paths[0], out ColumnSummary held) && held.HasMin && held.HasMax)
+        {
+            return summaries;
+        }
+
+        FilterLiteral low = RowEncoder.ReadFirstValue(first, _dtypes[0]);
+        FilterLiteral high = RowEncoder.ReadFirstValue(last, _dtypes[0]);
+        if (low.Kind == FilterLiteralKind.Null || high.Kind == FilterLiteralKind.Null)
+        {
+            return summaries;
+        }
+
+        List<ColumnSummary> columns = [new ColumnSummary(_paths[0], low, true, high, true, exact, 0, true)];
+        foreach (ColumnSummary column in summaries.Columns)
+        {
+            if (!string.Equals(column.Path, _paths[0], StringComparison.Ordinal))
+            {
+                columns.Add(column);
+            }
+        }
+
+        return ObjectSummaries.From(columns);
+    }
+
+    /// <summary>
+    /// <paramref name="summaries"/> with the key's first column bounded by <paramref name="low"/> and <paramref name="high"/>,
+    /// those of a part of the rows they summarize, a rollup's bucket of one clustering value, a function of that column:
+    /// what a filter or a key on the column is then proven by over the part. The other columns keep the whole's bounds,
+    /// which hold over any part of it.
+    /// </summary>
+    internal ObjectSummaries Within(ObjectSummaries summaries, FilterLiteral low, FilterLiteral high)
+    {
+        bool held = summaries.TryGet(_paths[0], out ColumnSummary whole);
+        List<ColumnSummary> columns = [new ColumnSummary(_paths[0], low, true, high, true, held && whole.IsExact, held ? whole.NullCount : 0, held && whole.HasNullCount)];
+        foreach (ColumnSummary column in summaries.Columns)
+        {
+            if (!string.Equals(column.Path, _paths[0], StringComparison.Ordinal))
+            {
+                columns.Add(column);
+            }
+        }
+
+        return ObjectSummaries.From(columns);
+    }
 
     /// <summary>The key's columns, in key order.</summary>
     public IReadOnlyList<string> Paths => _paths;
@@ -184,16 +177,28 @@ internal sealed class ClusteringKey
 
     /// <summary>
     /// Whether an object whose rows come in key order needs no run to be walked by key: one
-    /// top-level column of integers that holds no null. Its file statistics then say the column is
-    /// sorted, and a sorted column is the source a key cursor and a key-ordered read take before any
-    /// run, with the zone map as its index, so a run beside it is bytes nobody reads.
+    /// top-level column of integers that holds no null, or of an extension stored as integers, an
+    /// instant or a date. Its file statistics then say the column is sorted, and a sorted column is
+    /// the source a key cursor and a key-ordered read take before any run, with the zone map as its
+    /// index, so a run beside it is bytes nobody reads: as much as the column itself.
     /// </summary>
-    public bool OrdersBySortedColumn =>
-        !IsComposite
-        && !_paths[0].Contains('.', StringComparison.Ordinal)
-        && _dtypes[0].Kind == DTypeKind.Primitive
-        && _dtypes[0].PType.IsInteger()
-        && !_dtypes[0].IsNullable;
+    public bool OrdersBySortedColumn
+    {
+        get
+        {
+            DType storage = _dtypes[0];
+            while (storage.Kind == DTypeKind.Extension)
+            {
+                storage = storage.StorageType;
+            }
+
+            return !IsComposite
+                && !_paths[0].Contains('.', StringComparison.Ordinal)
+                && storage.Kind == DTypeKind.Primitive
+                && storage.PType.IsInteger()
+                && !_dtypes[0].IsNullable;
+        }
+    }
 
     /// <summary>The caller's write options, with the mandatory sorted run on the key added.</summary>
     public VortexWriteOptions Applied(VortexWriteOptions options)
@@ -319,6 +324,16 @@ internal sealed class ClusteringKey
     /// minimum, so the order is approximate while no scan result changes.
     /// </summary>
     public async ValueTask<byte[]> MinimumAsync(
+        VortexFile file, ObjectSummaries summaries, CancellationToken cancellationToken) =>
+        (await BoundsAsync(file, summaries, cancellationToken).ConfigureAwait(false)).First;
+
+    /// <summary>
+    /// The object's smallest and largest keys, row-encoded, from one key cursor: what orders its leaf, and what its entry
+    /// bounds its keys by (<see cref="ObjectEntry.LastKey"/>). Without a key cursor the smallest falls back to the
+    /// summaries, as <see cref="MinimumAsync"/> says, and the largest is empty, which states nothing; so it is for a key
+    /// that may hold a null, which a cursor puts last and the encoding first.
+    /// </summary>
+    public async ValueTask<(byte[] First, byte[] Last)> BoundsAsync(
         VortexFile file, ObjectSummaries summaries, CancellationToken cancellationToken)
     {
         KeyCursor? cursor = await TryOpenAsync(file, cancellationToken).ConfigureAwait(false);
@@ -328,16 +343,20 @@ internal sealed class ClusteringKey
             {
                 if (!await cursor.SeekFirstAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    return [];
+                    return ([], []);
                 }
 
                 // A composite cursor's keys are already the row encoding; a single column's are values.
-                return IsComposite ? cursor.KeyBytes.ToArray() : Encode([cursor.Key]);
+                byte[] first = Current(cursor);
+                return !MayHoldNull && await cursor.SeekLastAsync(cancellationToken).ConfigureAwait(false) ? (first, Current(cursor)) : (first, []);
             }
         }
 
-        return FromSummaries(summaries);
+        return (FromSummaries(summaries), []);
     }
+
+    /// <summary>The key a cursor is on, row-encoded.</summary>
+    private byte[] Current(KeyCursor cursor) => IsComposite ? cursor.KeyBytes.ToArray() : Encode([cursor.Key]);
 
     /// <summary>The per-column minima, encoded as a tuple.</summary>
     private byte[] FromSummaries(ObjectSummaries summaries)

@@ -5,7 +5,6 @@
 // The detached LayoutTree.Parse overload takes exactly what this produces - the bytes, a schema,
 // the footer's layout_specs and the segment count - so an adversarial structural test never has to
 // forge a whole container.
-using System;
 using System.Collections.Generic;
 
 using Vorticity.Serialization.FlatBuffers;

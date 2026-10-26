@@ -523,7 +523,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     /// The tuples' arrays back to the shelf they grew from, each column's index's to its own unless a merge's parts
     /// share them, and the scratch of the calls back to the process's shelf; the keys are empty after. Left to the
     /// collector, every question grouped by a key of several columns grew them again: a count per service and per
-    /// 12 hours from the tables made 180 KB of arrays a question.
+    /// 12 hours from the synopsis tables of the time made 180 KB of arrays a question.
     /// </summary>
     internal override void Release()
     {

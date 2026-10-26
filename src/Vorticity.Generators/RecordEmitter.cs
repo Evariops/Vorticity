@@ -42,7 +42,7 @@ internal static class RecordEmitter
 
         EmitHelpers(w, model);
         w.Close();
-        foreach (ContainerModel unused in model.Containers)
+        foreach (ContainerModel _ in model.Containers)
         {
             w.Close();
         }

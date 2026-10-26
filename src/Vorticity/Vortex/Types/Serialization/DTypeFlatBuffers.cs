@@ -207,7 +207,7 @@ internal static class DTypeFlatBuffers
         {
             // More visits than a tree of this buffer's size can hold, so children are shared and
             // the walk is a DAG walk. Memoise from here on; a real file never reaches this line.
-            memo = walk.Memo = new Dictionary<int, DType>();
+            walk.Memo = new Dictionary<int, DType>();
         }
 
         DType result = ReadUnionValue(in dtypeTable, arena, depth, ref walk);

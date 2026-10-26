@@ -1,6 +1,5 @@
 using System;
 using System.Numerics;
-using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
 
@@ -18,7 +17,7 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
     private const long BytesPerValue = sizeof(int) + sizeof(long);
 
     private readonly int _bits;
-    private readonly Func<Distribution?, TResult> _final;
+    private readonly Func<QuantileSketch?, TResult> _final;
     private TValue[] _values = [];
     private MaskCache _rows;
     private ulong[] _clip = [];
@@ -29,7 +28,7 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
     private long _grown;
     private long _stepped;
 
-    internal DistributionSlot(int bits, Func<Distribution?, TResult> final)
+    internal DistributionSlot(int bits, Func<QuantileSketch?, TResult> final)
     {
         _bits = bits;
         _final = final;
@@ -102,7 +101,7 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
     }
 
     internal override TResult Result(int group) =>
-        _final(Held(group) is { Count: > 0 } sketch ? new Distribution(sketch) : null);
+        _final(Held(group) is { Count: > 0 } sketch ? sketch : null);
 
     /// <summary>Counts what <paramref name="values"/> values stepped into the sketches grew them by.</summary>
     private void Took(long grown, long values)

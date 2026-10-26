@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.Compute;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;

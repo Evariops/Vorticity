@@ -1,7 +1,5 @@
 using System;
-using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
-using System.Numerics;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
 using Vorticity.Compute;
@@ -94,6 +92,14 @@ public sealed class RecordBatch : IDisposable
     /// </summary>
     internal static RecordBatch OfStates(CanonicalArena arena, int rootCanonicalIndex, long startRow) =>
         new RecordBatch(arena, rootCanonicalIndex, startRow) { CarriesStates = true };
+
+    /// <summary>
+    /// A batch of a partial's states (<see cref="KeysApplied"/>) over <paramref name="arena"/>'s root
+    /// <paramref name="rootCanonicalIndex"/>: an aggregation's groups, their keys as its functions gave them, as a merge
+    /// of partials reads them.
+    /// </summary>
+    internal static RecordBatch OfPartial(CanonicalArena arena, int rootCanonicalIndex, long startRow) =>
+        new RecordBatch(arena, rootCanonicalIndex, startRow) { CarriesStates = true, KeysApplied = true };
 
     private RecordBatch(CanonicalArena arena, int rootCanonicalIndex, long startRow, ScanContext? context, bool owns = false)
     {
@@ -197,6 +203,7 @@ public sealed class RecordBatch : IDisposable
         _context = context;
         _root = rootCanonicalIndex;
         CarriesStates = false;
+        KeysApplied = false;
 
         // GetNode bounds-checks and throws VortexFormatException for an index outside the arena.
         CanonicalNode root = arena.GetNode(rootCanonicalIndex);
@@ -262,6 +269,13 @@ public sealed class RecordBatch : IDisposable
     /// <see cref="OfStates"/>; a batch bound again carries rows.
     /// </summary>
     internal bool CarriesStates { get; private set; }
+
+    /// <summary>
+    /// Whether the batch of states carries its groups' keys as they are, the functions of the keys applied, each under the
+    /// name <see cref="Aggregating.StateRequest.PartialKey"/> gives it: a partial of an aggregation
+    /// (<see cref="OfPartial"/>), where a synopsis's carry the columns the functions read.
+    /// </summary>
+    internal bool KeysApplied { get; private set; }
 
     private Buffers.VortexBuffer _selection;
     private int _selected;

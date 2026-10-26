@@ -20,7 +20,7 @@ namespace Vorticity.Indexes;
 /// </summary>
 /// <remarks>
 /// <para>
-/// An open reads the footer, a node per chunk and column, which for an object of a period runs to
+/// An open reads the footer, a node per chunk and column, which for an object of a day's rows runs to
 /// megabytes. A question that needs the rows of a slice or two (the edges of a window, an exact
 /// lookup, the rows to show) needs none of it. Opening this reader costs three small dependent
 /// requests (the EOF marker, the postscript, the index directory). The first read of a column adds
@@ -55,7 +55,7 @@ internal sealed class SliceReader : IDisposable
 
     private SliceReader(
         ISegmentReader source, DType schema, VortexReadOptions options, SliceTable slices, string[] encodings,
-        IReadOnlyList<IndexSegment> regions, long rows, SynopsisContents? contents = null)
+        IReadOnlyList<IndexSegment> regions, long rows, ObjectContents? contents = null)
     {
         _source = source;
         _schema = schema;
@@ -74,14 +74,14 @@ internal sealed class SliceReader : IDisposable
 
     /// <summary>
     /// How a file's paged directories lie, and what a reader read of them: each column's page table, and its pages, each its
-    /// chunks. The page tables are the contents' too (<see cref="SynopsisContents.PageTable"/>), which every later read of
+    /// chunks. The page tables are the contents' too (<see cref="ObjectContents.PageTable"/>), which every later read of
     /// the object starts from, its pages asked with their checksums.
     /// </summary>
-    private sealed class PagedColumns(ChunkPaging paging, int columns, SynopsisContents contents)
+    private sealed class PagedColumns(ChunkPaging paging, int columns, ObjectContents contents)
     {
         internal ChunkPaging Paging { get; } = paging;
 
-        internal SynopsisContents Contents { get; } = contents;
+        internal ObjectContents Contents { get; } = contents;
 
         internal SliceChunks.PageTable?[] Tables { get; } = new SliceChunks.PageTable?[columns];
 
@@ -193,7 +193,7 @@ internal sealed class SliceReader : IDisposable
     /// they do not cover the schema's columns.
     /// </summary>
     /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
-    internal static SliceReader? Open(ISegmentReader source, VortexReadOptions? options, SynopsisContents contents)
+    internal static SliceReader? Open(ISegmentReader source, VortexReadOptions? options, ObjectContents contents)
     {
         ArgumentNullException.ThrowIfNull(source);
         DType schema = contents.SchemaType;
@@ -385,22 +385,6 @@ internal sealed class SliceReader : IDisposable
     /// late which rows it reads, a lookup after its postings, reads first, beside its other reads.
     /// </summary>
     internal ValueTask LoadDirectoryAsync(int field, CancellationToken cancellationToken) => LoadAsync([field], [], cancellationToken);
-
-    /// <summary>
-    /// What column <paramref name="field"/> weighs in the file: the bytes of its chunks, as its chunk directory lists them, read
-    /// whole the first time it is asked for, every page of a paged one.
-    /// </summary>
-    internal async ValueTask<long> ColumnBytesAsync(int field, CancellationToken cancellationToken)
-    {
-        await LoadAsync([field], [new TimeSlice(0, 1, 0, _rows)], cancellationToken).ConfigureAwait(false);
-        long bytes = 0;
-        foreach (ChunkSpan chunk in Overlapping(field, 0, _rows))
-        {
-            bytes += chunk.Length;
-        }
-
-        return bytes;
-    }
 
     private int[] AllColumns()
     {

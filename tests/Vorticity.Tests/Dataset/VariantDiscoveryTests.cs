@@ -34,7 +34,7 @@ public sealed partial class VariantDiscoveryTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(Event.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 200 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 200,
         }, Ct);
         Random random = new Random(seed);
         Dictionary<(string, PathClass), long> truth = [];
@@ -79,7 +79,7 @@ public sealed partial class VariantDiscoveryTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(Event.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
             Write = new VortexWriteOptions { BlockRows = 100 },
         }, Ct);
         for (int part = 0; part < 16; part++)

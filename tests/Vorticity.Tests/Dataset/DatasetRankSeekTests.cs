@@ -5,12 +5,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -127,7 +125,7 @@ public sealed class DatasetRankSeekTests
     }
 
     internal static ValueTask<DatasetKeyCursor> OpenAsync(VortexDataset dataset, bool sortedColumn, CancellationToken ct) =>
-        DatasetKeyCursor.OpenAsync(dataset, dataset.Snapshot, "key", distinct: false, indexes: !sortedColumn, ct);
+        DatasetKeyCursor.OpenAsync(dataset.Snapshot, "key", distinct: false, indexes: !sortedColumn, ct);
 
     private static void AssertAt(DatasetKeyCursor cursor, List<(FilterLiteral Key, long Row, string Object)> walked, int rank)
     {

@@ -40,7 +40,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
     private protected override bool ArrivesInOrder(ScanSpec spec) => spec.OrderPath is { } path && Ordered(path, spec.Descending);
 
     /// <summary>A group by on a column the file lies in, ascending, closes its groups as the scan reaches past them.</summary>
-    internal override bool OrdersOnAsking(FieldExpr column) => Ordered(column.Path, descending: false);
+    internal override bool OrdersOnAsking(FieldExpr column, bool stopsEarly) => Ordered(column.Path, descending: false);
 
     /// <summary>
     /// Whether the file's rows lie in the order of the column at <paramref name="path"/>, ascending or

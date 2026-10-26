@@ -50,6 +50,44 @@ public sealed class IndexedSumTests
         }
     }
 
+    // A value split once and added to sums of every top, those whose top must rise, NaNs, infinities, values past the
+    // extractors, zeros and subnormals among them: each sum holds the words adding the value itself gives.
+    [Fact]
+    public void AValueSplitOnceAddsWhatTheValueAdds()
+    {
+        Random random = new Random(20261024);
+        double[] specials = [0, -0.0, double.NaN, double.PositiveInfinity, double.NegativeInfinity, double.Epsilon, -double.Epsilon,
+            double.MaxValue, -double.MaxValue, 1e300, Largest, 1e-310];
+        for (int trial = 0; trial < 2_000; trial++)
+        {
+            // Three sums started at different magnitudes, so that a value meets tops above, at and below its own.
+            IndexedSum[] split = new IndexedSum[3];
+            IndexedSum[] plain = new IndexedSum[3];
+            for (int s = 0; s < 3; s++)
+            {
+                double seed = Math.ScaleB(random.NextDouble() + 0.5, random.Next(-40, 40) * (s + 1));
+                split[s].Add(seed);
+                plain[s].Add(seed);
+            }
+
+            for (int v = 0; v < 50; v++)
+            {
+                double value = random.Next(20) == 0
+                    ? specials[random.Next(specials.Length)]
+                    : (random.NextDouble() - 0.5) * Math.ScaleB(1.0, random.Next(-60, 80));
+                IndexedSum.Split parts = IndexedSum.SplitOf(value);
+                for (int s = 0; s < 3; s++)
+                {
+                    split[s].Add(in parts);
+                    plain[s].Add(value);
+                    Assert.Equal(
+                        (plain[s].M0, plain[s].M1, plain[s].M2, plain[s].Meta),
+                        (split[s].M0, split[s].M1, split[s].M2, split[s].Meta));
+                }
+            }
+        }
+    }
+
     // The rounding in two words, which a sum's value takes, against the rounding of an Int128: the same
     // bits for totals of every length, both signs, ties to even, and exponents down past the subnormals.
     [Fact]

@@ -30,10 +30,10 @@ internal enum ScalarKind : byte
     /// <summary>A <see cref="System.TimeSpan"/>, an i64 of ticks.</summary>
     Duration,
 
-    /// <summary>An <see cref="System.Int128"/>, a decimal of scale 0.</summary>
+    /// <summary>A <c>System.Int128</c>, a decimal of scale 0.</summary>
     Int128,
 
-    /// <summary>A <see cref="System.UInt128"/>, a decimal of scale 0.</summary>
+    /// <summary>A <c>System.UInt128</c>, a decimal of scale 0.</summary>
     UInt128,
 
     /// <summary>A <see cref="System.Numerics.BigInteger"/>, a decimal of scale 0.</summary>

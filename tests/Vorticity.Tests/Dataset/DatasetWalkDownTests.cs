@@ -317,7 +317,7 @@ public sealed class DatasetWalkDownTests
         }
 
         internal ValueTask<DatasetKeyCursor> OpenAsync(bool distinct, CancellationToken ct) =>
-            DatasetKeyCursor.OpenAsync(Dataset, Dataset.Snapshot, "key", distinct, indexes: !_sortedColumn, ct);
+            DatasetKeyCursor.OpenAsync(Dataset.Snapshot, "key", distinct, indexes: !_sortedColumn, ct);
 
         /// <summary>Every key the walk holds, the keys just beside them and keys past both ends.</summary>
         internal IEnumerable<FilterLiteral> Probes()

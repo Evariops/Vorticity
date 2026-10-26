@@ -10,17 +10,14 @@
 // run of keys, so that an object waits for its turn, as the objects of a compacted level do.
 using System;
 using System.Collections.Generic;
-using System.Threading;
 using System.Threading.Tasks;
 
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity.Benchmarks.Complexity;
 

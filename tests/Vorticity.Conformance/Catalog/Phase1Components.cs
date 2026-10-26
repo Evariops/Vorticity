@@ -7,10 +7,8 @@
 // proves the corpus numbers below are the library's and not the harness's. Delete it and a
 // regression that empties the static constructor turns every passing file into a file the
 // harness quietly rescued.
-using System;
 using System.Text;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Layouts;
 

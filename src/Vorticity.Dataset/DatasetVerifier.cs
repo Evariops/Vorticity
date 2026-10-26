@@ -7,8 +7,8 @@ using System.IO.Hashing;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity;
-using Vorticity.File;
 using Vorticity.IO;
+using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
 
@@ -115,6 +115,7 @@ internal static class DatasetVerifier
         }
 
         await run.CheckEntriesAsync().ConfigureAwait(false);
+        await run.CheckRollupsAsync(targetLevels.Rollups).ConfigureAwait(false);
         await run.CheckCommitsAsync(version).ConfigureAwait(false);
         return new DatasetVerification
         {
@@ -305,6 +306,54 @@ internal static class DatasetVerifier
             }
         }
 
+        /// <summary>
+        /// The tree of rollups, every page of it, and each rollup's object: in the store, of the length its entry says. A
+        /// rollup's regions are checksummed, which its readers check as they read them.
+        /// </summary>
+        internal async ValueTask CheckRollupsAsync(DatasetTree rollups)
+        {
+            if (rollups.IsEmpty)
+            {
+                return;
+            }
+
+            List<(PageReference Reference, int Height)> pages = [(rollups.Root, rollups.Depth)];
+            while (pages.Count > 0)
+            {
+                (PageReference reference, int height) = pages[^1];
+                pages.RemoveAt(pages.Count - 1);
+                if (!_checked.Add(reference) || await ReadAsync(reference, height).ConfigureAwait(false) is not { } page)
+                {
+                    continue;
+                }
+
+                if (height > 1)
+                {
+                    foreach (InternalEntry child in TreePage.ReadInternal(page))
+                    {
+                        pages.Add((child.Child, height - 1));
+                    }
+
+                    continue;
+                }
+
+                foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
+                {
+                    RollupEntry rollup = RollupEntry.FromBytes(leaf.Key.Span, leaf.Value.Span);
+                    Objects++;
+                    ObjectHead? head = await store.HeadAsync(rollup.Key, cancellationToken).ConfigureAwait(false);
+                    if (head is not { } found)
+                    {
+                        Problems.Add($"the rollup '{rollup.Key}' is not in the store");
+                    }
+                    else if (found.Length != rollup.Bytes)
+                    {
+                        Problems.Add(Invariant($"the rollup '{rollup.Key}' holds {found.Length} bytes, and its entry says {rollup.Bytes}"));
+                    }
+                }
+            }
+        }
+
         internal async ValueTask CheckEntriesAsync()
         {
             foreach (ObjectEntry entry in _entries)
@@ -369,6 +418,50 @@ internal static class DatasetVerifier
             await CheckFileAsync(entry, fragments).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Checks the counts of an entry's deleted rows (<see cref="DeletedCounts"/>) against the rows its vector names, read
+        /// from the file and counted again: a question subtracts them from the object's own counts, and counts of other
+        /// rows would answer it wrongly where its rows answer it rightly.
+        /// </summary>
+        private async ValueTask CheckNegativesAsync(ObjectEntry entry, VortexFile file)
+        {
+            _commits.Add(entry.NegativesAt.Version);
+            DeletedCounts stored;
+            DeletionVector deletions;
+            try
+            {
+                stored = (await entry.NegativesAsync(_pages, cancellationToken).ConfigureAwait(false))!;
+                deletions = entry.Deletions;
+            }
+            catch (CommitFormatException malformed)
+            {
+                Problems.Add($"'{entry.Key}': its counts of deleted rows are not counts of them: {malformed.Message}");
+                return;
+            }
+            catch (InvalidOperationException)
+            {
+                // The vector did not resolve, which is reported already.
+                return;
+            }
+            catch (Exception unreadable) when (unreadable is TornCommitException or ObjectNotFoundException or ArgumentOutOfRangeException)
+            {
+                Problems.Add(Invariant($"'{entry.Key}': its counts of deleted rows in version {entry.NegativesAt.Version} at {entry.NegativesAt.Offset}+{entry.NegativesAt.Length}: {(unreadable is TornCommitException { InnerException: { } cause } ? cause : unreadable).Message}"));
+                return;
+            }
+
+            DeletedCounts.Builder counted = new DeletedCounts.Builder(file.DType, stored.Columns);
+            await foreach (RecordBatch batch in file.ScanBuilder().WithCompaction(false).WithEncodings(false).Take(deletions.Rows()).ExecuteAsync()
+                .WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                counted.Add(batch);
+            }
+
+            if (stored.Differs(counted.Finish()) is { } difference)
+            {
+                Problems.Add($"'{entry.Key}': its counts of deleted rows are not those of the rows it deletes: {difference}");
+            }
+        }
+
         private async ValueTask CheckFileAsync(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments)
         {
             VortexOpenOptions options = ObjectCache.OpenOptionsOf(entry, fragments);
@@ -427,6 +520,11 @@ internal static class DatasetVerifier
                         catch (Exception unreadable) when (unreadable is TornCommitException or ObjectNotFoundException or ArgumentOutOfRangeException)
                         {
                             Problems.Add(Invariant($"'{entry.Key}': its vector in version {entry.VectorAt.Version} at {entry.VectorAt.Offset}+{entry.VectorAt.Length}: {(unreadable is TornCommitException { InnerException: { } cause } ? cause : unreadable).Message}"));
+                        }
+
+                        if (entry.HasNegatives)
+                        {
+                            await CheckNegativesAsync(entry, file).ConfigureAwait(false);
                         }
                     }
 

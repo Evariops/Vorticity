@@ -29,11 +29,6 @@ internal static class KeyHash
     /// <summary>The seed of <see cref="Fold"/>'s second operand, and odd, the multiplier after it.</summary>
     private static readonly ulong Right = DrawSeed() | 1;
 
-    /// <summary><see cref="Chained"/>'s multipliers, odd.</summary>
-    private static readonly ulong ChainLow = DrawSeed() | 1;
-
-    private static readonly ulong ChainHigh = DrawSeed() | 1;
-
     /// <summary>
     /// Mixes a whole fixed-width value, zero-extended. The final fold is what makes the low bits
     /// good, and a power-of-two mask reads exactly those.
@@ -82,23 +77,6 @@ internal static class KeyHash
         ulong hash = ((upper ^ lower) * seeds.Right) + (ulong)tag;
         return hash ^ (hash >> 32);
     }
-
-    /// <summary>
-    /// A value's bits as two words and a tag that tells apart equal values -- the group it was seen
-    /// in -- for a table that chains its buckets: the high half of the sum of the words' products by
-    /// multipliers of the process, the tag added to that half.
-    /// </summary>
-    /// <remarks>
-    /// Multiply-shift is universal: whatever values a column holds, two of them share a hash about as
-    /// rarely as two random ones, which keeps every chain short on average, at one multiply for a
-    /// value of up to eight bytes. Under two tags, two values' high halves differ by as much as a
-    /// product of their difference does, which no column can aim either. It is not enough for a
-    /// table that probes linearly, where runs of neighbouring hashes merge: such a table takes
-    /// <see cref="Pair"/>.
-    /// </remarks>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static int Chained(ulong low, ulong high, int tag) =>
-        (int)(((low * ChainLow) + (high * ChainHigh) + ((ulong)(uint)tag << 32)) >> 32);
 
     /// <summary>
     /// A byte string's hash: one word mixed below eight bytes, words folded then mixed up to 64,

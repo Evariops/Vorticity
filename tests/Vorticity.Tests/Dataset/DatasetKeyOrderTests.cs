@@ -21,9 +21,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
-using Vorticity.Diagnostics;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.IO;
@@ -605,7 +603,9 @@ public sealed class DatasetKeyOrderTests
     {
         Seed = 0x0DE2_5EED,
 
-        // Small blocks, so that an object is several batches and a compaction's target is reached.
+        // Small blocks, so that an object is several batches and a compaction's target is reached; every
+        // column chunked with the object, so that the sizes the levels are judged by are those its blocks make.
+        ChunkBytes = 0,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
     };
 

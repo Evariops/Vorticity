@@ -4,15 +4,14 @@ using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.IO;
 
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// What building the client's log records costs (<c>--micro logwrite</c>): <c>--hours</c> hours of them at <c>--rate</c> a
 /// second (<see cref="LogGeneratorV2"/>), built as <c>--micro paths --qp</c> builds them, the way a client's ingestion does:
-/// written in objects of <c>--part-minutes</c> minutes, four hours at once, appended and compacted hour after hour in
-/// periods of a day, each job shredding their attributes. The time, the processors' time, and what each row cost them.
+/// written in objects of <c>--part-minutes</c> minutes, four hours at once, appended and compacted hour after hour,
+/// clustered by day, each job shredding their attributes. The time, the processors' time, and what each row cost them.
 /// The store and its scratch lie in a directory of their own under <c>--store</c>, removed after.
 /// </summary>
 internal static class LogWriteMicro
@@ -29,7 +28,7 @@ internal static class LogWriteMicro
             {
                 Session = session,
                 ClusteringKey = [nameof(LogRow.At)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
             };
 

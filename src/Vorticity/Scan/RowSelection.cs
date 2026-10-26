@@ -1,7 +1,5 @@
 using System;
 
-using Vorticity.File;
-
 namespace Vorticity.Scanning;
 
 /// <summary>

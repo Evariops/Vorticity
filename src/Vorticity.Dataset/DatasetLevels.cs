@@ -7,38 +7,45 @@ namespace Vorticity.Dataset;
 /// The trees of one version of a dataset, one per level. Levels hold the lookup bound: at most
 /// eight objects in level 0 and key-disjoint objects in every level above, so a lookup by key
 /// touches at most eight plus the level count. Empty levels keep their place, since a level's
-/// number is its meaning. A dataset compacted by periods keeps one level above 0 whose objects
-/// overlap, its late level (<see cref="PeriodLevels"/>), under a ceiling as level 0 is.
+/// number is its meaning. A dataset an earlier library wrote by periods keeps one level above 0 whose
+/// objects overlap, its late level (<see cref="LateLevel"/>), which it is still read by.
 /// </summary>
 internal sealed class DatasetLevels
 {
-    private static readonly DatasetLevels None = new DatasetLevels([], null, byPeriods: false);
-    private static readonly DatasetLevels NoneByPeriods = new DatasetLevels([], null, byPeriods: true);
+    private static readonly DatasetLevels None = new DatasetLevels([], null, byPeriods: false, DatasetTree.Empty);
+    private static readonly DatasetLevels NoneByPeriods = new DatasetLevels([], null, byPeriods: true, DatasetTree.Empty);
     private readonly DatasetTree[] _levels;
 
     // Where each level's last job stopped, by level; null while no level records one, which is
     // every version of a dataset compacted by its largest objects.
     private readonly ReadOnlyMemory<byte>[]? _pointers;
 
-    private DatasetLevels(DatasetTree[] levels, ReadOnlyMemory<byte>[]? pointers, bool byPeriods)
+    private DatasetLevels(DatasetTree[] levels, ReadOnlyMemory<byte>[]? pointers, bool byPeriods, DatasetTree rollups)
     {
         _levels = levels;
         _pointers = pointers;
         ByPeriods = byPeriods;
+        Rollups = rollups;
     }
 
     /// <summary>A dataset with nothing in it.</summary>
     public static DatasetLevels Empty => None;
 
-    /// <summary>Whether the dataset is compacted by periods, and so keeps a late level.</summary>
+    /// <summary>Whether an earlier library wrote the dataset by periods, and so it keeps a late level.</summary>
     public bool ByPeriods { get; }
+
+    /// <summary>
+    /// The tree of rollups (<see cref="RollupEntry"/>): the counts of runs of a level's objects, summed, by level, rank and
+    /// the first tree key each covers. Empty when the version keeps none; no level, so that no walk of the objects meets it.
+    /// </summary>
+    public DatasetTree Rollups { get; }
 
     /// <summary>
     /// Whether a level of a dataset with a clustering key holds objects each written in the key's
     /// order, null keys last: every level above 0, which only a merge on the key writes into, since a
     /// plan refuses tiered levels for such a dataset. Level 0 holds what appends wrote, in any order,
-    /// and a dataset of periods writes its objects in sorted slices, in the key's order slice by slice
-    /// only. Off the key, a level's objects are in no order of it.
+    /// and an earlier library wrote a dataset of periods in time slices, whose rows it may order by another
+    /// column inside each slice: in the key's order slice by slice only. Off the key, a level's objects are in no order of it.
     /// </summary>
     public bool RowsInKeyOrder(int level) => level > 0 && !ByPeriods;
 
@@ -48,7 +55,10 @@ internal sealed class DatasetLevels
     /// level, whose sorted objects overlap as level 0's do. A read by key opens at most one object of
     /// such a level at a time.
     /// </summary>
-    public bool IsDisjoint(int level) => level > 0 && !(ByPeriods && level == PeriodLevels.Late);
+    public bool IsDisjoint(int level) => level > 0 && !(ByPeriods && level == LateLevel);
+
+    /// <summary>The late level of a dataset written by periods, whose objects overlap: what such a dataset is still read by.</summary>
+    internal const int LateLevel = 1;
 
     /// <summary>How many levels the version names; level numbers run from 0 to this minus one.</summary>
     public int Count => _levels.Length;
@@ -114,7 +124,7 @@ internal sealed class DatasetLevels
         bool byPeriods = header.ByPeriods;
         if (highest < 0)
         {
-            return byPeriods ? NoneByPeriods : None;
+            return (byPeriods ? NoneByPeriods : None).WithRollups(RollupsOf(header));
         }
 
         DatasetTree[] trees = new DatasetTree[highest + 1];
@@ -133,7 +143,18 @@ internal sealed class DatasetLevels
             }
         }
 
-        return new DatasetLevels(trees, pointers, byPeriods);
+        return new DatasetLevels(trees, pointers, byPeriods, RollupsOf(header));
+    }
+
+    /// <summary>The tree of rollups a header names.</summary>
+    private static DatasetTree RollupsOf(CommitHeader header) =>
+        header.Rollups is { Top.Exists: true } rollups ? new DatasetTree(rollups.Top, rollups.Depth, rollups.Entries, rollups.Rows) : DatasetTree.Empty;
+
+    /// <summary>These levels with <paramref name="rollups"/> their tree of rollups.</summary>
+    public DatasetLevels WithRollups(DatasetTree rollups)
+    {
+        ArgumentNullException.ThrowIfNull(rollups);
+        return ReferenceEquals(rollups, Rollups) ? this : new DatasetLevels(_levels, _pointers, ByPeriods, rollups);
     }
 
     /// <summary>These levels with one of them replaced.</summary>
@@ -147,7 +168,7 @@ internal sealed class DatasetLevels
         Array.Fill(trees, DatasetTree.Empty);
         _levels.CopyTo(trees, 0);
         trees[level] = tree;
-        return new DatasetLevels(trees, _pointers, ByPeriods);
+        return new DatasetLevels(trees, _pointers, ByPeriods, Rollups);
     }
 
     /// <summary>
@@ -170,7 +191,7 @@ internal sealed class DatasetLevels
         ReadOnlyMemory<byte>[] pointers = new ReadOnlyMemory<byte>[Math.Max(_pointers?.Length ?? 0, level + 1)];
         _pointers?.CopyTo(pointers, 0);
         pointers[level] = key;
-        return new DatasetLevels(_levels, pointers, ByPeriods);
+        return new DatasetLevels(_levels, pointers, ByPeriods, Rollups);
     }
 
     /// <summary>

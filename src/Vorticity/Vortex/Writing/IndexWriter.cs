@@ -679,7 +679,7 @@ internal sealed class IndexWriter : IDisposable
             // The slice kinds and the variant paths describe the file as its writer cut it, which an
             // append changes, and the path directory counts rows the append does not parse.
             if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.VariantPaths
-                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns or IndexKinds.SynopsisTable
+                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks
                 || Kept(entry, boundary) is not { } kept)
             {
                 continue;
@@ -917,10 +917,13 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Whether the policy asks for no index: the writer holds this one only for what rides in the
-    /// directory, the time slices, and its ingest needs nothing of it.
+    /// Whether the policy asks for no index and no column keeps a sheet: the writer holds this one only for what rides
+    /// in the directory, the time slices, and its ingest needs nothing of it.
     /// </summary>
-    internal bool AsksNothing => !Asks(_policy);
+    internal bool AsksNothing => !Asks(_policy) && !_keepsSheets;
+
+    /// <summary>Whether a column keeps a sheet (<see cref="AddSheets"/>).</summary>
+    private bool _keepsSheets;
 
     /// <summary>Whether a column feeds a streaming builder, so the ingest has something to call.</summary>
     internal bool Streams
@@ -1061,46 +1064,8 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>Counts a chunk's data bytes toward its column, for `Auto`'s shares.</summary>
     internal void AddColumnBytes(int field, long bytes) => _columnBytes[field] += bytes;
 
-    /// <summary>The bytes of the chunks of column <paramref name="field"/> written so far.</summary>
-    internal long ColumnBytes(int field) => _columnBytes[field];
-
-    /// <summary>
-    /// The bytes the synopsis's tables may take over <paramref name="dataBytes"/> of data: the indexes' share,
-    /// a budget of their own, with no floor, so that a small object keeps none.
-    /// </summary>
-    internal long SynopsisBudget(long dataBytes) => dataBytes * _budgetPerMille / 1000;
-
-    /// <summary>
-    /// <see cref="SynopsisBudget"/> over the data written so far, <see cref="long.MaxValue"/> while that data is
-    /// under <see cref="EarlyChoiceFloor"/>: past it, what a table built as the data goes takes says whether it can be
-    /// worth its bytes, and one that cannot is given up before it grows further.
-    /// </summary>
-    internal long SynopsisBudgetSoFar(long dataBytes) => dataBytes < EarlyChoiceFloor ? long.MaxValue : SynopsisBudget(dataBytes);
-
-    /// <summary>
-    /// The data under which no synopsis table is given up before the end: the columns still gathered and the chunks
-    /// in flight would weigh too much of so little, and the tables cost too little for an early verdict to save
-    /// anything, so the choice at the end weighs them all, against the whole data.
-    /// </summary>
-    internal const long DefaultEarlyChoiceBytes = 64L << 20;
-
-    /// <summary>The data under which no synopsis table is given up before the end (<see cref="VortexWriteOptions.SynopsisEarlyChoiceBytes"/>).</summary>
-    internal long EarlyChoiceFloor { get; set; } = DefaultEarlyChoiceBytes;
-
-    /// <summary>Reports what became of a synopsis table, its keys fields or the paths <paramref name="paths"/> lists, and why, with the choice's numbers.</summary>
-    internal void ReportSynopsis(SynopsisTableInfo table, IReadOnlyList<SynopsisPath> paths, bool kept, string verdict, long bytes)
-    {
-        string[] keys = new string[table.Keys.Length];
-        for (int k = 0; k < keys.Length; k++)
-        {
-            keys[k] = SynopsisPath.Names(table.Keys[k]) && paths[SynopsisPath.Place(table.Keys[k])] is { } path
-                ? $"{_paths[path.Field]}[\"{path.Key}\"]"
-                : _paths[table.Keys[k]];
-        }
-
-        string grain = $"{table.Kind} per {table.Bucket} of ({string.Join(", ", keys)})";
-        _reports.Add(new IndexWriteReport(grain, IndexKinds.SynopsisTable, kept ? IndexOutcome.Built : IndexOutcome.Abandoned, verdict, kept ? bytes : 0));
-    }
+    /// <summary>The bytes of the data of each of the first <paramref name="fields"/> columns, the top-level ones, by their place.</summary>
+    internal long[] ColumnBytes(int fields) => _columnBytes[..fields];
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
@@ -1165,6 +1130,11 @@ internal sealed class IndexWriter : IDisposable
 
                 foreach (IndexBuilder builder in _builders[field])
                 {
+                    if (builder is ColumnSheetBuilder or ColumnCountsBuilder)
+                    {
+                        continue;
+                    }
+
                     builder.Abandon(
                         $"the required indexes take {required} bytes against {dataBytes} bytes of data, over the budget of " +
                         $"{_budgetPerMille}‰; raise it with IndexPolicy.WithBudgetPerMille");
@@ -1414,7 +1384,8 @@ internal sealed class IndexWriter : IDisposable
 
             foreach (IndexBuilder builder in _builders[field])
             {
-                if (builder.WrittenBytes > 0)
+                // No budget weighs a sheet nor a column's counts: they are what a dataset's object says of every column it holds.
+                if (builder.WrittenBytes > 0 || builder is ColumnSheetBuilder or ColumnCountsBuilder)
                 {
                     continue;
                 }
@@ -1806,6 +1777,163 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
+    /// Gives every top-level column of <paramref name="schema"/> a sheet can describe its builder, fed as the column's
+    /// indexes are, after them, so that no policy's builder moves.
+    /// </summary>
+    internal void AddSheets(DType schema)
+    {
+        for (int field = 0; _isTabular && field < _fieldCount; field++)
+        {
+            if (ColumnSheetBuilder.Supports(schema.GetField(field)))
+            {
+                _builders[field].Add(new ColumnSheetBuilder());
+                _keepsSheets = true;
+            }
+        }
+    }
+
+    /// <summary>The sheet builder of column <paramref name="field"/>, or null when it has none.</summary>
+    internal ColumnSheetBuilder? SheetOf(int field)
+    {
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            if (builder is ColumnSheetBuilder sheet)
+            {
+                return sheet;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Writes a synopsis of <paramref name="kind"/> of the top-level column <paramref name="field"/>, its sheet, its counts
+    /// or their sketches, one region from the sink's position, and adds the entry that names it: on the column, one run
+    /// over every block of the file's <paramref name="rows"/>.
+    /// </summary>
+    internal async ValueTask<IndexSegment> AddColumnRegionAsync(
+        ISegmentSink sink, string kind, int field, byte[] bytes, long rows, int blockRows, CancellationToken cancellationToken)
+    {
+        IndexSegment region = IndexSegment.Of(sink.Position, bytes, 0);
+        await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            kind, [checked((uint)field)], (ulong)length, [],
+            [new IndexRun(0, Blocks(rows, length), [region], [])]));
+        return region;
+    }
+
+    /// <summary>The plan the columns' counts share (<see cref="AddCounts"/>), or null when no column is counted.</summary>
+    private CountsPlan? _counts;
+
+    /// <summary>
+    /// Gives every top-level column with a sheet its counts, fed right after its sheet, which numbers its rows' values for
+    /// them.
+    /// </summary>
+    internal void AddCounts(CountsPlan plan)
+    {
+        _counts = plan;
+
+        // The text columns, wide until their first rows say otherwise, before any column's counts are made.
+        for (int field = 0; _isTabular && field < _fieldCount; field++)
+        {
+            if (plan.MeasureOf(field) < 0 && SheetOf(field) is { } sheet)
+            {
+                sheet.HashRows();
+                plan.Wide.Add(new WideColumn(field, sheet));
+            }
+        }
+
+        for (int field = 0; _isTabular && field < _fieldCount; field++)
+        {
+            if (SheetOf(field) is { } sheet)
+            {
+                _builders[field].Add(new ColumnCountsBuilder(sheet, plan, field));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gives every top-level column with a sheet its statistics over the blocks <paramref name="cuts"/> end, fed right after
+    /// its counts, from the values its sheet numbers and the measures the counts' plan reads; nothing for a file that keeps
+    /// no counts.
+    /// </summary>
+    internal void AddBlockStats(DType schema, BlockCuts cuts)
+    {
+        for (int field = 0; _counts is { } plan && _isTabular && field < _fieldCount; field++)
+        {
+            if (SheetOf(field) is { } sheet)
+            {
+                _builders[field].Add(new ColumnBlocksBuilder(sheet, plan, field, cuts, schema.GetField(field)));
+            }
+        }
+    }
+
+    /// <summary>The builder of column <paramref name="field"/>'s statistics over the blocks, or null when it has none.</summary>
+    internal ColumnBlocksBuilder? BlockStatsOf(int field)
+    {
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            if (builder is ColumnBlocksBuilder blocks)
+            {
+                return blocks;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Once a batch of <paramref name="rows"/> is in, every column's sheet having hashed its rows: the wide columns settled,
+    /// and each column of few values's registers of them raised.
+    /// </summary>
+    internal void AttachCounts(int rows)
+    {
+        if (_counts is not { Wide.Count: > 0 } plan)
+        {
+            return;
+        }
+
+        plan.SettleWide(end: false);
+        foreach (List<IndexBuilder> builders in _builders)
+        {
+            foreach (IndexBuilder builder in builders)
+            {
+                (builder as ColumnCountsBuilder)?.Attach(rows);
+            }
+        }
+    }
+
+    /// <summary>Reads a batch's instants and measures once for every column's counts, before the columns are fed.</summary>
+    internal void PrepareCounts(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows) =>
+        _counts?.Prepare(arena, fieldNodes, rows);
+
+    /// <summary>
+    /// The counts builder of column <paramref name="field"/>, or null when it has none; asked once every row is in, it
+    /// settles first which number columns are counted and which are carried, so that every column's counts carry the same.
+    /// </summary>
+    internal ColumnCountsBuilder? CountsOf(int field)
+    {
+        foreach (List<IndexBuilder> builders in _builders)
+        {
+            foreach (IndexBuilder builder in builders)
+            {
+                (builder as ColumnCountsBuilder)?.Settle();
+            }
+        }
+
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            if (builder is ColumnCountsBuilder counts)
+            {
+                return counts;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Writes the path directory of the variant column <paramref name="field"/>, one region from the
     /// sink's position, within the index budget of the file's <paramref name="dataBytes"/>, and adds the
     /// entry that names it: on the column, one run over every block of the file's <paramref name="rows"/>.
@@ -1851,27 +1979,6 @@ internal sealed class IndexWriter : IDisposable
         _entries.Add(new IndexEntry(
             IndexKinds.VariantBlocks, [checked((uint)field)], (ulong)length, stats.OptionBytes(),
             [new IndexRun(0, Blocks(rows, length), regions, [])]));
-    }
-
-    /// <summary>
-    /// Names each table of the synopsis part: an entry on the root, the table's options, its one run's payload the list of
-    /// its chunks (<see cref="SynopsisContents.TableChunks.List"/>), which names their regions and buckets, and those of the
-    /// distinct sketches a chunk lays apart. The list alone: a chunk's region and dtype each, a day's 4 759 chunks, took
-    /// 4.5 MB of the directory, which every reader of the directory read whole. A table's rows decode at the struct the
-    /// file's schema and its slices' paths give it (<see cref="SynopsisTableInfo.RowType"/>).
-    /// </summary>
-    internal void AddSynopsisTables(IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> tables, long rows, int blockRows)
-    {
-        int length = Math.Max(blockRows, 1);
-        foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) in tables)
-        {
-            if (chunks is SynopsisContents.TableChunks { List: { } list })
-            {
-                _entries.Add(new IndexEntry(
-                    IndexKinds.SynopsisTable, [], (ulong)length, table.OptionBytes(),
-                    [new IndexRun(0, Blocks(rows, length), [list], [], (ulong)table.Rows, [])]));
-            }
-        }
     }
 
     /// <summary>The bytes the index budget of <paramref name="dataBytes"/> leaves the variants' indexes still to write.</summary>
@@ -2060,10 +2167,11 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null, List<(IndexEntry Entry, int Start, int Length)>? located = null)
     {
-        // A file's time slices and its variant paths ride in the directory whatever the policy asks.
+        // A file's time slices, its variant paths and its columns' sheets and counts ride in the directory whatever the policy
+        // asks.
         if (!Enabled && _preserved is not { Count: > 0 }
             && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
-                or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns or IndexKinds.SynopsisTable))
+                or IndexKinds.VariantBlocks or IndexKinds.ColumnSheet or IndexKinds.ColumnCounts or IndexKinds.ColumnSketches))
         {
             return null;
         }

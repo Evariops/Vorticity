@@ -3,7 +3,6 @@
 // test, and the sweeps at the bottom assert the global property: nothing but
 // VortexFormatException ever escapes.
 using System;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Xunit;
 using static Vorticity.Tests.Serialization.FlatBuffers.TestFlatBuffers;

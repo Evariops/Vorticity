@@ -256,7 +256,13 @@ rows share costs less, a pair per block and value. Measured on a day's objects:
 
 Random ids leave the share lower only because the object itself compresses worse, by 58 %. Declare a
 column whose values questions look up one at a time, and no other: a column they filter or group by
-is answered by the synopses, and a key of a variant column they filter on is declared shredded, below.
+is read, its blocks pruned by their zone maps, and a key of a variant column they filter on is declared
+shredded, below.
+
+The postings serve aggregations too. A filter that leaves one value out, `r.RequestId != id`, keeps an
+object's counts: the object answers from them, less the rows the postings find holding the value, and
+an object that holds none reads its counts and the postings alone (see
+[How an aggregation is answered](datasets.md#how-an-aggregation-is-answered)).
 
 An identifier may also be a key of a variant column, read as a string or an integer, written as a filter
 writes it:
@@ -281,8 +287,8 @@ ShreddedPaths = ["Attributes['http.response.status_code'].AsInt64()"],
 
 Every compaction then keeps the key in a column of its own, whatever share of the rows holds it, so that
 `r.Attributes["http.response.status_code"].AsInt64() >= 500` reads that column instead of parsing the
-attributes, and the objects' synopses count its values. The class is one of `AsString`, `AsInt64`,
-`AsDouble` and `AsBool`; values of another class at the key stay in the column's residual.
+attributes. The class is one of `AsString`, `AsInt64`, `AsDouble` and `AsBool`; values of another class
+at the key stay in the column's residual.
 
 Appends leave the attributes whole, so a question over the last minutes, which no compaction has
 rewritten yet, still parses them once per query node. A handle opened with `ShredOnAppend = true`
@@ -304,8 +310,8 @@ await dataset.SetShreddedPathsAsync(["Attributes['http.response.status_code'].As
 from then on follows the new lists, the appends of every handle and the compactions of every loop,
 handles opened before the change included. The objects already written stay as they are: a lookup of
 an added identifier reads the rows of an object written before as a scan does, and finds them all the
-same, only slower, until a compaction rewrites that object. A period already sealed is not rewritten
-again, so its objects keep being read that way until the retention lets them go.
+same, only slower, until a compaction rewrites that object. An object no job takes again, such as a
+past day's under a clustering by day, keeps being read that way until an expiry drops it.
 
 Each call is checked against the dataset's schema and refused, before anything is committed, with the
 messages a creation gives. It throws `InvalidOperationException` when another writer changed the schema

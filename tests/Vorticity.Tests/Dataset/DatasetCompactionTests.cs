@@ -21,9 +21,7 @@ using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Dataset;
-using Vorticity.Diagnostics;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Keys;
@@ -1372,7 +1370,9 @@ public sealed class DatasetCompactionTests
         Seed = 0xC0A9AC7_5EED,
 
         // Small blocks, so that the sink's position moves while the object is being written and a
-        // roll at the destination's target size is something the merge can actually see.
+        // roll at the destination's target size is something the merge can actually see; every column
+        // chunked with the object, so that the sizes the levels are judged by are those its blocks make.
+        ChunkBytes = 0,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
     };
 

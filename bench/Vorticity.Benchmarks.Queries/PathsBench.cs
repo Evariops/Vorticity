@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.IO;
@@ -12,7 +11,7 @@ using Vorticity.IO;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// Every query path of a dataset of periods, at scale, over a store that waits a round trip per request
+/// Every query path of datasets clustered by hour or by day, at scale, over a store that waits a round trip per request
 /// (<c>--micro paths</c>): generated requests and log records written once into a directory that stands for the
 /// object store, then asked the questions of the time-window and variant designs, each from its synopses and from
 /// its rows, cold and warm, at each degree asked. The synopsis cache lives on the same disk, without the wait.
@@ -24,8 +23,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// tenth of a millisecond (<see cref="PreciseDelay"/>), the reads' bytes crossing one link of <c>--gbps</c> (10 by
 /// default, 0 for none) and each read's at most <c>--mbps</c> when set; the synopsis cache reads its own disk, with
 /// neither. A dataset is written the first time its parameters are asked for (<c>--hours</c>, <c>--rate</c> requests a
-/// second, <c>--log-rate</c> log records, <c>--design</c> at the design's own scale, its days loaded as sealed periods or,
-/// with <c>--incremental</c>, its hours appended and compacted as they come, <see cref="DesignBuild"/>) and kept beside a
+/// second, <c>--log-rate</c> log records, <c>--design</c> at the design's own scale, its hours appended and compacted as they come,
+/// <see cref="DesignBuild"/>) and kept beside a
 /// note of what it holds; <c>--rebuild</c> writes it again.
 /// </para>
 /// <para>
@@ -89,16 +88,15 @@ internal static partial class PathsBench
         /// <summary>Whether the bench asks the client's questions, QP-1 to QP-10, over the requests and the client's spans and log records (<c>--qp</c>).</summary>
         internal bool Qp { get; init; }
 
-        /// <summary>The hours of the client's spans and log records (<c>--qp-hours</c>): a day sealed, and the hours of the next fresh.</summary>
+        /// <summary>The hours of the client's spans and log records (<c>--qp-hours</c>): a day in objects of its own, and the hours of the next still being compacted.</summary>
         internal int QpHours { get; init; } = 30;
 
         /// <summary>Their rows a second (<c>--qp-rate</c>): a tenth of the design's.</summary>
         internal double QpRate { get; init; } = 5_000;
 
         /// <summary>
-        /// Whether the client's spans and log records declare what their questions read (<c>--declared</c>): groupings of the
-        /// spans' synopsis columns for QP-1 and QP-2, and the log records' status code and feature flag shredded, on append too,
-        /// for QP-3, QP-9 and QP-10. Their stores are named apart.
+        /// Whether the client's log records declare what their questions read (<c>--declared</c>): their status code and
+        /// feature flag shredded, on append too, for QP-3, QP-9 and QP-10. Their stores are named apart.
         /// </summary>
         internal bool Declared { get; init; }
 
@@ -114,12 +112,6 @@ internal static partial class PathsBench
 
         internal bool Design { get; init; }
 
-        /// <summary>Whether <c>--design</c> appends its hours and compacts them as they come (<see cref="DesignBuild.FillAsync"/>) rather than load its days as sealed periods (<see cref="DesignBuild.LoadAsync"/>).</summary>
-        internal bool Incremental { get; init; }
-
-        /// <summary>The days a load of <c>--design</c> writes at once.</summary>
-        internal int ParallelPeriods { get; init; } = 4;
-
         internal int ParallelHours { get; init; } = 4;
 
         internal int PartMinutes { get; init; } = 10;
@@ -134,6 +126,9 @@ internal static partial class PathsBench
         /// scan decodes its next split, which leaving its time out of the measure does not undo.
         /// </summary>
         internal bool NoDigest { get; init; }
+
+        /// <summary>Whether each question's warm asks are sampled for what they allocate, by type (<c>--alloc-types</c>).</summary>
+        internal bool AllocTypes { get; init; }
 
         /// <summary>The reads each session keeps in flight at most (<see cref="VortexSessionOptions.MaxConcurrentReads"/>); zero for the session's default.</summary>
         internal int MaxReads { get; init; }
@@ -202,12 +197,10 @@ internal static partial class PathsBench
 
         Built requests = await EnsureAsync(
             settings,
-            $"requests-{(!settings.Design ? string.Empty : settings.Incremental ? "design-" : "design-load-")}h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}{(settings.RandomIds ? "-rid" : string.Empty)}",
+            $"requests-{(settings.Design ? "design-" : string.Empty)}clustered-h{settings.Hours}-r{settings.Rate:0}-b{settings.Budget}{(settings.RandomIds ? "-rid" : string.Empty)}",
             store => !settings.Design ? FillRequestsAsync(store, settings)
-                : settings.Incremental
-                ? DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"), settings.RandomIds)
-                : DesignBuild.LoadAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelPeriods, settings.WriteDegree, Path.Combine(settings.Store, "scratch"), settings.RandomIds));
-        Built logs = await EnsureAsync(settings, $"logs-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
+                : DesignBuild.FillAsync(store, settings.Hours, settings.Rate, settings.Budget, settings.ParallelHours, settings.WriteDegree, settings.PartMinutes, Path.Combine(settings.Store, "scratch"), settings.RandomIds));
+        Built logs = await EnsureAsync(settings, $"logs-clustered-h{settings.LogHours}-r{settings.LogRate:0}-b{settings.Budget}", store => FillLogsAsync(store, settings));
         Built? spans = !settings.Qp ? null : await EnsureAsync(settings, SpansName(settings), store => FillSpansAsync(store, settings));
         Built? logs2 = !settings.Qp ? null : await EnsureAsync(settings, LogsV2Name(settings), store => FillLogsV2Async(store, settings));
         if (settings.BuildOnly)
@@ -215,7 +208,7 @@ internal static partial class PathsBench
             return 0;
         }
 
-        // --entries: each store's entries, and with --explain its tables, with no question asked.
+        // --entries: each store's entries and their tables of contents, with no question asked.
         if (settings.Entries)
         {
             foreach (Built? built in new[] { requests, logs, spans, logs2 })
@@ -224,10 +217,6 @@ internal static partial class PathsBench
                 {
                     Console.WriteLine($"  {built.Directory}");
                     await EntriesAsync(built.Directory);
-                    if (settings.Explain)
-                    {
-                        await TablesAsync(built);
-                    }
                 }
             }
 
@@ -243,17 +232,6 @@ internal static partial class PathsBench
             $"warm is the median of {settings.Rounds} ({settings.RowsRounds} for rows){(settings.SegmentCacheBytes > 0 ? $", segments kept in {settings.SegmentCacheBytes >> 20} MiB" : string.Empty)}; processor time from cycles at {ProcessCpu.GigaHertz:F2} GHz; {label}");
         Console.WriteLine(
             $"{"question",-62} {"path",-8} {"",-4} {"dop",3} {"ms",9} {"cpu ms",9} {"alloc MB",9} {"priv MB",8} {"ws MB",8} {"req",6} {"steps",6} {"MB",8} {"states",9} {"rows",11} {"groups",7}");
-
-        if (settings.Explain)
-        {
-            foreach (Built? built in new[] { requests, logs, spans, logs2 })
-            {
-                if (built is not null)
-                {
-                    await TablesAsync(built);
-                }
-            }
-        }
 
         DateTimeOffset end = QuestionBench.Start.AddHours(settings.Hours);
         DateTimeOffset lastHour = end.AddHours(-1);
@@ -363,8 +341,7 @@ internal static partial class PathsBench
     /// <summary>
     /// <c>--entries</c>, <c>--micro entries</c>: each object's entry in the tree of the dataset at
     /// <paramref name="directory"/>, which a walk reads for every object it plans and the handle's page cache keeps, and
-    /// what the table of contents of its synopsis holds: its slices, its tables' chunks, its synopsis columns' chunks, its
-    /// schema.
+    /// what its table of contents holds: its slices and its schema.
     /// </summary>
     internal static async Task EntriesAsync(string directory)
     {
@@ -378,45 +355,20 @@ internal static partial class PathsBench
             total += bytes;
             string parts = entry.Contents is not { } contents ? "no table of contents" : string.Create(
                 CultureInfo.InvariantCulture,
-                $"contents {entry.Synopsis.Length / 1e6:F2} MB: {contents.Slices.Slices.Count} slices in {contents.Slices.ToBytes().Length / 1e3:F1} KB, " +
-                $"{contents.Tables.Count} tables of {contents.Tables.Sum(table => table.Chunks.Count)} chunks, schema {contents.Schema.Length} B");
+                $"contents {entry.TableOfContents.Length / 1e6:F2} MB: {contents.Slices.Slices.Count} slices in {contents.Slices.ToBytes().Length / 1e3:F1} KB, " +
+                $"schema {contents.Schema.Length} B");
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {entry.Key}: {entry.Rows:N0} rows, entry {bytes / 1e6:F2} MB, {parts}"));
         }
 
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {total / 1e6:F2} MB of entries"));
     }
 
-    /// <summary>The synopsis tables each object of the store holds, as its entry's table of contents names them.</summary>
-    private static async Task TablesAsync(Built built)
-    {
-        await using FileObjectStore files = new FileObjectStore(built.Directory);
-        await using VortexDataset dataset = await VortexDataset.OpenAsync(files, new DatasetOptions());
-        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
-        {
-            if (held.Entry.Contents is not { } contents)
-            {
-                Console.WriteLine($"    tables {held.Entry.Key}: none, {held.Entry.Rows:N0} rows");
-                continue;
-            }
-
-            Vorticity.Types.DType schema = contents.SchemaType;
-            foreach ((Vorticity.Indexes.SynopsisTableInfo table, IReadOnlyList<Vorticity.Indexes.TableChunk> chunks) in contents.Tables)
-            {
-                string keys = string.Join(", ", table.Keys.Select(field => Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths)));
-                string measures = string.Join(", ", table.Measures.Select(field => Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths)));
-                string distinct = table.Distinct.Length == 0 ? string.Empty : $", distinct ({string.Join(", ", table.Distinct.Select(field =>
-                    Vorticity.Indexes.SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths) + (table.HoldsDistinct(field) ? string.Empty : " lost")))})";
-                Console.WriteLine($"    tables {held.Entry.Key}: {table.Kind} by {table.Bucket} on ({keys}) of [{measures}]{distinct}, {table.Rows:N0} rows in {chunks.Count} chunks");
-            }
-        }
-    }
-
     /// <summary>A question of the catalogue: its dataset, its name, and how it is asked of a dataset under scan options.</summary>
     private sealed record Question(string Set, string Name, bool Aggregates, Func<VortexDataset, ScanOptions, Asking> Ask)
     {
         /// <summary>
-        /// The window a newest-first asking cuts at its periods' starts, and the question asked over a part of it; null when the
-        /// question has no first result to time (<see cref="FirstAsync"/>).
+        /// The window an asking by values cuts where the clustering value changes, and the question asked over a part of it; null
+        /// when the question has no first result to time (<see cref="FirstAsync"/>).
         /// </summary>
         internal (DateTimeOffset From, DateTimeOffset To, Func<VortexDataset, ScanOptions, DateTimeOffset, DateTimeOffset, Asking> Ask)? Window { get; init; }
     }
@@ -511,8 +463,8 @@ internal static partial class PathsBench
 
     /// <summary>
     /// One question by one path: cold by a session and a handle opened for it, with an empty synopsis cache, then warm
-    /// by the same handle, the median of the rounds; each asked once first, with no wait and nothing kept, so that
-    /// neither pays the question's first compile.
+    /// by the same handle, the median of the rounds; each asked untimed first, with no wait and nothing kept, so that
+    /// neither pays the question's compiles.
     /// </summary>
     private static async Task<(Measured Cold, Measured Warm)> AskAsync(Settings settings, Built built, Question question, bool synopses, int degree)
     {
@@ -520,6 +472,12 @@ internal static partial class PathsBench
         await using FileObjectStore files = new FileObjectStore(built.Directory);
         LatencyObjectStore remote = new LatencyObjectStore(settings.KeepHandles ? new HeldFileObjectStore(files) : files);
         await using CountingObjectStore store = new CountingObjectStore(remote);
+
+        // Asked untimed with no wait, each time by a session and a handle of its own as the cold round is, for as long as
+        // --warm says and once at least: one ask leaves the question's code at the JIT's first tier, whose recompilation
+        // a cold round then shares or not, QP-3 on 32 lanes 73 to 79 ms or 164 to 169 after an ask on one (2026-10-26).
+        long compiledBy = Stopwatch.GetTimestamp() + (long)(settings.WarmSeconds * Stopwatch.Frequency);
+        do
         {
             await using VortexSession session = VortexSession.Create(o =>
             {
@@ -528,6 +486,15 @@ internal static partial class PathsBench
             });
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
             await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
+        }
+        while (Stopwatch.GetTimestamp() < compiledBy);
+
+        // And the JIT's recompilations in the background done: no method compiled for a tenth of a second, two seconds at most.
+        for (int calm = 0, waited = 0; calm < 2 && waited < 20; waited++)
+        {
+            long compiled = System.Runtime.JitInfo.GetCompiledMethodCount();
+            await Task.Delay(100);
+            calm = System.Runtime.JitInfo.GetCompiledMethodCount() == compiled ? calm + 1 : 0;
         }
 
         remote.Latency = TimeSpan.FromMilliseconds(settings.Latency);
@@ -583,6 +550,21 @@ internal static partial class PathsBench
             }
 
             warm.Sort((a, b) => a.Milliseconds.CompareTo(b.Milliseconds));
+
+            // --alloc-types: what a warm ask allocates, by type, over twenty more.
+            if (settings.AllocTypes)
+            {
+                using AllocationSampler sampler = new AllocationSampler();
+                for (int ask = 0; ask < 20; ask++)
+                {
+                    await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
+                }
+
+                foreach (string line in sampler.Lines(20, 15))
+                {
+                    Console.WriteLine(line);
+                }
+            }
 
             // --explain: what each object reads, once warm.
             if (settings.Explain && question.Ask(dataset, options) is { Explain: { } explain } asked)
@@ -662,13 +644,14 @@ internal static partial class PathsBench
         MemoryPeaks.Close(memory);
         ScanMetrics metrics = asking.Metrics();
         return new Measured(
-            store.Requests, store.DependentSteps, store.BytesRead, metrics.SynopsisRows, metrics.Rows, milliseconds, cpuMilliseconds, bytes, groups,
+            store.Requests, store.DependentSteps, store.BytesRead, 0L, metrics.Rows, milliseconds, cpuMilliseconds, bytes, groups,
             digests ? digest.ToString() : "-", memory.Private, memory.Working);
     }
 
     /// <summary>
     /// The first result of an aggregation, as the client's review defines it: cold, by a session and a handle opened for it with
-    /// an empty synopsis cache, the window asked part by part newest first (<see cref="VortexDataset.AskNewestFirstAsync"/>), and
+    /// an empty synopsis cache, the window asked a clustering value at a time, newest first
+    /// (<see cref="VortexDataset.AskByValuesAsync{TValue, TAnswer}"/>), and
     /// the time its first part took to arrive. The other figures are the whole asking's, its groups the parts, its rows the
     /// answers' rows.
     /// </summary>
@@ -704,7 +687,7 @@ internal static partial class PathsBench
             double first = 0;
             long parts = 0;
             long rows = 0;
-            await foreach (WindowPart<long> part in dataset.AskNewestFirstAsync(window.From, window.To, async (from, to, ct) =>
+            await foreach (ValuePart<DateTimeOffset, long> part in dataset.AskByValuesAsync(window.From, window.To, async (from, to, ct) =>
             {
                 Asking asking = window.Ask(dataset, options, from, to);
                 long answered = 0;
@@ -812,16 +795,16 @@ internal static partial class PathsBench
 
     /// <summary>
     /// The client's spans (<see cref="SpanGeneratorV2"/>) of <c>--qp-hours</c> at <c>--qp-rate</c>, appended and compacted
-    /// as a client's ingestion does, in periods of a day, their trace and span ids declared identifiers; and the trace id of
+    /// as a client's ingestion does, clustered by day, their trace and span ids declared identifiers; and the trace id of
     /// a span in the middle, a needle.
     /// </summary>
     /// <summary>The name of the client's spans' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
     private static string SpansName(Settings settings) =>
-        $"spans-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
+        $"spans-v2-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
 
     /// <summary>The name of the client's log records' store under <see cref="Settings.Store"/>, as the settings build it.</summary>
     private static string LogsV2Name(Settings settings) =>
-        $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
+        $"logs-v2{(settings.Declared ? "-declared" : string.Empty)}-clustered-h{settings.QpHours}-r{settings.QpRate:0}-b{settings.Budget}";
 
     /// <summary>
     /// <c>--qp-write spans|logs</c>: that one of the client's stores alone, built as <c>--qp</c> builds it, in a process of
@@ -870,19 +853,9 @@ internal static partial class PathsBench
         {
             Session = session,
             ClusteringKey = [nameof(GeneratedSpanV2.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
             Identifiers = [nameof(GeneratedSpanV2.TraceId), nameof(GeneratedSpanV2.SpanId)],
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
-
-            // --declared: the columns QP-1 and QP-2 filter and group by together, which the order of the spans' facets
-            // places far apart, and the service alone, whose durations' sketches by slice answer QP-6's last minutes.
-            SynopsisGroupings = !settings.Declared ? null :
-            [
-                [nameof(GeneratedSpanV2.Service), nameof(GeneratedSpanV2.HttpStatus), nameof(GeneratedSpanV2.Route)],
-                [nameof(GeneratedSpanV2.Route), nameof(GeneratedSpanV2.Pod)],
-                [nameof(GeneratedSpanV2.Pod), nameof(GeneratedSpanV2.Status), nameof(GeneratedSpanV2.ExceptionGroup)],
-                [nameof(GeneratedSpanV2.Service)],
-            ],
         };
         long rows = await IncrementalBuild.FillAsync<GeneratedSpanV2>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>
         {
@@ -918,14 +891,12 @@ internal static partial class PathsBench
         {
             Session = session,
             ClusteringKey = [nameof(LogRow.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Day },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
 
-            // --declared: the keys of the attributes QP-3, QP-9 and QP-10 filter by, shredded by every job and every append,
-            // and the service they group by with them.
+            // --declared: the keys of the attributes QP-3, QP-9 and QP-10 filter by, shredded by every job and every append.
             ShreddedPaths = !settings.Declared ? null : [StatusCode, NewCart],
             ShredOnAppend = settings.Declared,
-            SynopsisGroupings = !settings.Declared ? null : [[StatusCode, nameof(LogRow.ServiceName)], [NewCart, nameof(LogRow.ServiceName)]],
         };
         long rows = await IncrementalBuild.FillAsync<LogRow>(store, options, settings.QpHours, perHour, settings.ParallelHours, settings.PartMinutes, hour =>
         {

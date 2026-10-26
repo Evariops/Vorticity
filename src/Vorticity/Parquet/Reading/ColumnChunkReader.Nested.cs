@@ -4,7 +4,6 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Buffers;
-using Vorticity.Compute;
 using Vorticity.Parquet.Encodings;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Schema;

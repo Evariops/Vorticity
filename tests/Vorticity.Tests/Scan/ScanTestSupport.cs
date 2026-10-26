@@ -14,7 +14,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Buffers;
 using Vorticity.IO;

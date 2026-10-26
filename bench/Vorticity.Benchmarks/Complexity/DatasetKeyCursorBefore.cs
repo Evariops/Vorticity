@@ -27,7 +27,6 @@ internal sealed class DatasetKeyCursorBefore : IAsyncDisposable
     private readonly bool _bounded;
     private readonly bool _indexes;
     private readonly Slot[] _slots;
-    private readonly List<int>[] _levels;
     // The walks below start at the first key: no seek sets these.
     private readonly FilterLiteral _target = default;
     private readonly SeekMode _op = SeekMode.AtOrAfter;
@@ -36,7 +35,7 @@ internal sealed class DatasetKeyCursorBefore : IAsyncDisposable
     private bool _disposed;
 
     private DatasetKeyCursorBefore(
-        DatasetSnapshot version, ClusteringKey key, DType[] dtypes, bool bounded, bool indexes, Slot[] slots, List<int>[] levels)
+        DatasetSnapshot version, ClusteringKey key, DType[] dtypes, bool bounded, bool indexes, Slot[] slots)
     {
         _version = version;
         _key = key;
@@ -44,7 +43,6 @@ internal sealed class DatasetKeyCursorBefore : IAsyncDisposable
         _bounded = bounded;
         _indexes = indexes;
         _slots = slots;
-        _levels = levels;
     }
 
     /// <summary>Whether the cursor is positioned on an entry.</summary>
@@ -86,7 +84,7 @@ internal sealed class DatasetKeyCursorBefore : IAsyncDisposable
             });
         }
 
-        return new DatasetKeyCursorBefore(version, key, dtypes, bounded: true, indexes: true, all, [.. levels]);
+        return new DatasetKeyCursorBefore(version, key, dtypes, bounded: true, indexes: true, all);
     }
 
     /// <summary>Positions on the smallest key.</summary>

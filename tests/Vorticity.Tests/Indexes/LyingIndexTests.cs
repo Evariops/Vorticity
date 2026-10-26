@@ -42,7 +42,6 @@ using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Indexes;

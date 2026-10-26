@@ -2,9 +2,7 @@
 // line for line as the baseline of RetainedLookupBenchmarks: `RetainedChunks` in the library is the
 // same table with its entries hashed by key.
 using System;
-using System.Collections.Generic;
 using System.Threading;
-using Vorticity.Buffers;
 
 namespace Vorticity.Benchmarks.Complexity;
 

@@ -213,6 +213,43 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         }
     }
 
+    /// <summary>
+    /// The value at <paramref name="q"/> of the values counted, as their distribution answers it
+    /// (<see cref="Distribution.Quantile"/>): the estimate of the first bucket, in ascending order of value, whose values
+    /// reach past the rank <c>q (n - 1)</c>; walked in place, with no histogram made, null for no value.
+    /// </summary>
+    internal double? Quantile(double q)
+    {
+        if (Count == 0)
+        {
+            return null;
+        }
+
+        double rank = q * (Count - 1);
+        long below = 0;
+        if (_negative.Find(descending: true, rank, ref below) is int negative)
+        {
+            (double lower, double upper) = BoundsOf(negative);
+            return Estimate(-upper, -lower);
+        }
+
+        below += Zeros;
+        if (Zeros > 0 && below > rank)
+        {
+            return 0;
+        }
+
+        if (_positive.Find(descending: false, rank, ref below) is int positive)
+        {
+            (double low, double high) = BoundsOf(positive);
+            return Estimate(low, high);
+        }
+
+        // The rank lies below the count, so a bucket reaches past it; should rounding say otherwise, the distribution's
+        // own search answers.
+        return new Distribution(this).Quantile(q);
+    }
+
     /// <summary>The value a bucket answers with: <c>2LU / (L + U)</c>, as close relatively to either end; 0 for the zeros.</summary>
     internal static double Estimate(double lower, double upper)
     {
@@ -251,7 +288,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     /// negative's then the positive's, as their count and each one's index, the gap from the one before, and its count.
     /// A bucket's gap takes a byte where its neighbours hold values, and a count of fewer than 128 another.
     /// </summary>
-    internal void Encode(IBufferWriter<byte> into)
+    public void Encode(IBufferWriter<byte> into)
     {
         Span<byte> head = into.GetSpan(3 * MaxVarint);
         int at = Varint(head, (ulong)Bits);
@@ -600,6 +637,56 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         }
 
         /// <summary>The indices that hold values and their counts, ascending.</summary>
+        /// <summary>
+        /// The index of the first bucket, in ascending order of index or descending, at which the counts added to
+        /// <paramref name="below"/> pass <paramref name="rank"/>; null when none does, every count added.
+        /// </summary>
+        internal readonly int? Find(bool descending, double rank, ref long below)
+        {
+            if (_wide is not null)
+            {
+                List<(int Index, long Count)> sorted = Entries();
+                for (int i = 0; i < sorted.Count; i++)
+                {
+                    (int index, long count) = sorted[descending ? sorted.Count - 1 - i : i];
+                    below += count;
+                    if (below > rank)
+                    {
+                        return index;
+                    }
+                }
+
+                return null;
+            }
+
+            if (_window is { } window)
+            {
+                for (int i = 0; i < window.Length; i++)
+                {
+                    int at = descending ? window.Length - 1 - i : i;
+                    below += window[at];
+                    if (window[at] != 0 && below > rank)
+                    {
+                        return _low + at;
+                    }
+                }
+
+                return null;
+            }
+
+            for (int i = 0; i < _sparse; i++)
+            {
+                int at = descending ? _sparse - 1 - i : i;
+                below += _counts[at];
+                if (below > rank)
+                {
+                    return _keys[at];
+                }
+            }
+
+            return null;
+        }
+
         internal readonly List<(int Index, long Count)> Entries()
         {
             List<(int Index, long Count)> entries = [];

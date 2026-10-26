@@ -11,8 +11,6 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Tests.Columns;

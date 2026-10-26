@@ -1,10 +1,7 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
-using System.Text;
 using Vorticity.Expressions;
-using Vorticity.Types.Numerics;
 
 namespace Vorticity;
 
@@ -13,7 +10,7 @@ internal static class SymLowering
 {
     internal const string NoArithmetic = "Vortex does not push arithmetic down. Compute it on the columns after the scan.";
 
-    /// <summary>Where a value falls among a column's stored values; see <see cref="Place"/>.</summary>
+    /// <summary>Where a value falls among a column's stored values; see <see cref="Place{T}(ColumnSym, ClrShape, T)"/>.</summary>
     /// <param name="Floor">The stored value at or below it, when <paramref name="Beyond"/> is 0.</param>
     /// <param name="Exact">Whether it is that value.</param>
     /// <param name="Beyond">1 above every value the column can store, -1 below every one, 0 among them.</param>
@@ -74,13 +71,20 @@ internal static class SymLowering
     /// whether it is that value. A time or an instant finer than the column's unit falls between
     /// two, and one past what the column's integers reach falls beyond them all.
     /// </summary>
-    internal static Placement Place<T>(ColumnSym column, ClrShape shape, T value)
+    internal static Placement Place<T>(ColumnSym column, ClrShape shape, T value) =>
+        Place(column.Type, column.Extensions, column.Field.Path, shape, value);
+
+    /// <summary>
+    /// <see cref="Place{T}(ColumnSym, ClrShape, T)"/> among the values a column of <paramref name="type"/>, named
+    /// <paramref name="path"/>, stores: for a caller that names the column rather than binds it.
+    /// </summary>
+    internal static Placement Place<T>(VortexType type, VortexExtensionRegistry? extensions, string path, ClrShape shape, T value)
     {
         object boxed = value!;
         return shape.Kind is ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset
-            && column.Type.ExtensionId is ExtensionIds.Time or ExtensionIds.Timestamp
-            ? PlaceInstant(column.Type, shape.Kind, boxed)
-            : new Placement(Literal(column, shape, value), true, 0);
+            && type.ExtensionId is ExtensionIds.Time or ExtensionIds.Timestamp
+            ? PlaceInstant(type, shape.Kind, boxed)
+            : new Placement(Literal(type, extensions, path, shape, value), true, 0);
     }
 
     private static Placement PlaceInstant(VortexType type, ClrKind kind, object boxed)
@@ -180,11 +184,17 @@ internal static class SymLowering
     }
 
     /// <summary>The literal of <paramref name="value"/> in the storage units of <paramref name="column"/>.</summary>
-    internal static FilterLiteral Literal<T>(ColumnSym column, ClrShape shape, T value)
+    internal static FilterLiteral Literal<T>(ColumnSym column, ClrShape shape, T value) =>
+        Literal(column.Type, column.Extensions, column.Field.Path, shape, value);
+
+    /// <summary>
+    /// The literal of <paramref name="value"/> in the storage units of a column of <paramref name="type"/>, named
+    /// <paramref name="path"/>: for a caller that names the column rather than binds it.
+    /// </summary>
+    internal static FilterLiteral Literal<T>(VortexType type, VortexExtensionRegistry? extensions, string path, ClrShape shape, T value)
     {
         object boxed = value!;
-        VortexType type = column.Type;
-        if (type.Kind == VortexTypeKind.Extension && column.Extensions is { } extensions
+        if (type.Kind == VortexTypeKind.Extension && extensions is not null
             && extensions.TryGet(type.ExtensionId!, out ExtensionRegistration registration)
             && registration.ClrType == boxed.GetType())
         {
@@ -225,7 +235,7 @@ internal static class SymLowering
                 Placement at = PlaceInstant(type, shape.Kind, boxed);
                 return at.Exact && at.Beyond == 0
                     ? at.Floor
-                    : throw new VortexSchemaException($"{boxed} is not a value of '{column.Field.Path}', of {type}: its unit holds no such instant.");
+                    : throw new VortexSchemaException($"{boxed} is not a value of '{path}', of {type}: its unit holds no such instant.");
             }
             case ClrKind.Guid:
             {
@@ -236,7 +246,7 @@ internal static class SymLowering
 
             default:
                 throw new VortexUnsupportedException(
-                    ClrFit.Name(typeof(T)), ComponentKind.Feature, $"'{column.Field.Path}' cannot be compared with a {ClrFit.Name(typeof(T))}; a list is filtered by Contains.");
+                    ClrFit.Name(typeof(T)), ComponentKind.Feature, $"'{path}' cannot be compared with a {ClrFit.Name(typeof(T))}; a list is filtered by Contains.");
         }
     }
 

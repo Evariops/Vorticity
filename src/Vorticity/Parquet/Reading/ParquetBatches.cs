@@ -803,7 +803,6 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     /// </summary>
     private async ValueTask WindowsAsync(int batch)
     {
-        ParquetFooter footer = _file.Footer;
         List<ReadWindow> windows = _group.Windows;
         while (_window < windows.Count && windows[_window].FirstBatch <= batch)
         {

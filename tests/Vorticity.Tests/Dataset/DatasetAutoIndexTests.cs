@@ -7,7 +7,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
-using Vorticity.Tests.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;

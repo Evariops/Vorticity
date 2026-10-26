@@ -51,7 +51,7 @@ CompactionResult? compacted = await dataset.CompactAsync();
 
 ```
 compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128862 bytes in and 79036 out, 50000 rows
-  cost: 12 requests (10 read, 0 head, 2 put, 0 delete, 0 list), 12 dependent steps, 128862 bytes read, 79429 written
+  cost: 12 requests (10 read, 0 head, 2 put, 0 delete, 0 list), 12 dependent steps, 128862 bytes read, 79432 written
 now: 1 objects, lag 0; again: nothing to do
 ```
 
@@ -98,6 +98,16 @@ rows, or half of its vector's bound, a thousandth of its bytes and at least a ki
 rewritten alone in its level by a job whose `Trigger` is `Marks`. Those jobs come after the level
 limits and before the fragments, the most marked object first.
 
+An object a job writes, of a mebibyte or more, also keeps what aggregations answer from without its
+rows: the counts of each column whose values repeat and the statistics of its blocks, computed as the
+rows go out, with no pass of its own (see
+[How an aggregation is answered](datasets.md#how-an-aggregation-is-answered)). An output that holds
+all the rows of each of its inputs and nothing else, none of them marked, inherits the partials the
+questions learned of them, in the handle that compacts and in the session's `SynopsisCache`, so a
+question asked before the compaction reads nothing of it after. A moved object keeps its partials
+with its entry, and an output that holds part of an input, or rows of a marked one, learns again the
+first time a question reads its rows.
+
 When the application owes the erasure of deleted rows within a delay, it declares the delay when it
 creates the dataset:
 
@@ -125,16 +135,18 @@ DatasetVerification since = await dataset.VerifyAsync(since: checkedAt);
 ```
 
 ```
-verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 8 requests (6 read, 2 head, 0 put, 0 delete, 0 list), 8 dependent steps, 145609 bytes read, 0 written
-verify since 12: holds True, 1 objects, 1 pages; cost: 11 requests (9 read, 2 head, 0 put, 0 delete, 0 list), 11 dependent steps, 28178 bytes read, 0 written
+verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 8 requests (6 read, 2 head, 0 put, 0 delete, 0 list), 8 dependent steps, 145615 bytes read, 0 written
+verify since 12: holds True, 1 objects, 1 pages; cost: 11 requests (9 read, 2 head, 0 put, 0 delete, 0 list), 11 dependent steps, 28187 bytes read, 0 written
 ```
 
 `VerifyAsync` checks the version's tree pages, objects and index fragments against what their
 references promise, and reports every problem instead of throwing. `Problems` is a list of
 sentences, empty when `Holds` is true. Each object is hashed and compared with the hash its entry
 records. `Unhashed` counts the imported objects whose entry records no hash, and for those only the
-length is checked. `since` skips what an earlier, trusted version shares with this one: after one
-more append it read 28 178 bytes, where a full verification read 145 609.
+length is checked. An object a delete marked has its counts of the deleted rows recounted from the
+rows its vector names, and every rollup's object is checked to be in the store at its length. `since`
+skips what an earlier, trusted version shares with this one: after one more append it read 28 187
+bytes, where a full verification read 145 615.
 
 ## Vacuum
 
@@ -150,9 +162,9 @@ VacuumResult done = await dataset.VacuumAsync(later with { DryRun = false });
 ```
 
 ```
-vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 16 requests (13 read, 0 head, 0 put, 0 delete, 3 list), 16 dependent steps, 12649 bytes read, 0 written
-vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 5 requests (2 read, 0 head, 0 put, 0 delete, 3 list), 5 dependent steps, 672 bytes read, 0 written
-vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 7 requests (2 read, 0 head, 0 put, 2 delete, 3 list), 7 dependent steps, 672 bytes read, 0 written
+vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 16 requests (13 read, 0 head, 0 put, 0 delete, 3 list), 16 dependent steps, 12688 bytes read, 0 written
+vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 5 requests (2 read, 0 head, 0 put, 0 delete, 3 list), 5 dependent steps, 675 bytes read, 0 written
+vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 7 requests (2 read, 0 head, 0 put, 2 delete, 3 list), 7 dependent steps, 675 bytes read, 0 written
 and the data: 55000 rows, 2 objects
 ```
 
@@ -160,7 +172,9 @@ Today nothing goes, because every version is younger than the window. The window
 unless `DatasetOptions.RetentionWindow` set another when the dataset was created, and
 `RetainedVersions` keeps a number of versions whatever their age. Eight days later only the latest
 version is kept and 21 objects go: the ten data objects compaction replaced, and eleven of the
-twelve superseded commit objects. The twelfth still holds pages the latest version reads.
+twelve superseded commit objects. The twelfth still holds pages the latest version reads. A commit
+object that holds a delete's vector of positions, or its counts of the rows it marked, is kept the
+same way while a retained version names them, and the rollups a retained version names stay with it.
 
 `VacuumOptions.TimeProvider` is the clock vacuum measures ages against. That is how the sample
 jumps past the window, and how you can test your own retention. It must agree with the store's
@@ -192,7 +206,9 @@ stopped: 1 compactions, 2 objects, lag 0
 ```
 
 Each turn refreshes the handle (one round trip), plans, and runs the job that is due. When nothing
-is due it sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces the loop:
+is due, the first loop (`Loop` 0) sums the counts of the deepest level's new runs of objects into
+rollups (`RollUpAsync`, see [Rollups](datasets.md#how-an-aggregation-is-answered)), reading no row,
+then sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces the loop:
 after a job it waits until what the job wrote fits the rate, which leaves the store's bandwidth to
 the writers. The task ends with `OperationCanceledException` once the token is cancelled, or with
 the exception a job raised, which the host catches before starting the loop again.
@@ -233,7 +249,7 @@ long none = await dataset.Scan<Reading>().Where(r => r.Celsius == 25.15).CountAs
 ```
 
 ```
-indexed: 2 objects, 0 left, 2 walks, 2 commits, 9302 fragment bytes, version 26; cost: 20 requests (16 read, 2 head, 2 put, 0 delete, 0 list), 20 dependent steps, 399334 bytes read, 10623 written
+indexed: 2 objects, 0 left, 2 walks, 2 commits, 9302 fragment bytes, version 26; cost: 20 requests (16 read, 2 head, 2 put, 0 delete, 0 list), 20 dependent steps, 399334 bytes read, 10629 written
 a temperature no row holds: 0 rows; cost: 0 requests (0 read, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
 the same without the indexes: 0 rows; cost: 2 requests (2 read, 0 head, 0 put, 0 delete, 0 list), 2 dependent steps, 121736 bytes read, 0 written
 ```
@@ -255,19 +271,21 @@ is refused, since its encoder lives in a handle's options.
 
 ## Expiry
 
-A dataset that declares periods drops old data a period at a time, without reading it:
+An expiry drops old data without reading it: every object a filter covers whole goes in one commit.
 
 ```csharp
-DateTimeOffset applied = await dataset.ExpireAsync(DateTimeOffset.UtcNow - TimeSpan.FromDays(30), ct);
+DateTimeOffset cutoff = DateTimeOffset.UtcNow - TimeSpan.FromDays(30);
+RowChangeResult expired = await dataset.ExpireAsync<Request>(r => r.At < cutoff, ct);
 ```
 
-The cutoff is aligned down to the start of the period holding the instant you give, and returned. Every
-object whose rows all lie before it goes in one commit, decided from the dataset's tree, with no data
-object read. A row may therefore outlive the instant you gave by up to a period, or, in a partition
-small enough that its periods were joined (`CompactionOptions.JoinedPeriodBytes`), by up to the span of
-the joined object, a month at most, its periods kept until the last of them lies before the cutoff. To drop rows exactly,
-delete them (`DeleteAsync`), which opens the objects that straddle the cutoff and marks their rows.
-Expiry, like a delete, leaves the bytes to vacuum.
+It is decided from the objects' summaries in the dataset's tree, with no data object read, and
+`expired.Rows` says how many rows went. An object that holds rows on both sides of the bound stays
+whole, so a row may outlive the bound. Under a clustering value every object above level 0 holds rows
+of one value, so a bound on the key's first column covers whole objects up to the value it falls in:
+under a clustering by day, a row outlives the bound by a day at most. To drop rows exactly, delete them
+(`DeleteAsync`), which opens the objects that straddle the bound and marks their rows. A filter on a
+text covers no object, since an object's summaries bound numbers and times, not texts. Expiry, like a
+delete, leaves the bytes to vacuum.
 
 ## What each costs
 
@@ -304,8 +322,9 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
 * A compaction that dies leaves what it wrote, which no version names, and vacuum deletes it like any
   other object. An upload in parts it had started is aborted when the job fails, and one the abort
   could not reach, because the process died, stays in the bucket as parts no object shows. Give the
-  bucket a lifecycle rule that aborts incomplete uploads after a day. The seal of a dataset of periods
-  writes a period's object, gigabytes, in one upload, which makes the rule worth its line.
+  bucket a lifecycle rule that aborts incomplete uploads after a day. A job of a dataset clustered by
+  day writes a day's object, gigabytes at a few thousand rows a second, in one upload, which makes the
+  rule worth its line.
 * None of this changes the data. After all three operations, the same rows read back.
 
 ## Run it

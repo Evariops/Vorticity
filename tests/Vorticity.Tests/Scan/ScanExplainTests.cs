@@ -9,17 +9,13 @@
 // bytes at least the plan's (a segment is asked for once per batch that needs it, the plan counts
 // it once), and values decoded for every row delivered.
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
-using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;

@@ -14,11 +14,9 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Conformance.Comparison;
 using Vorticity.Conformance.Corpus;
 using Vorticity.Conformance.Sidecar;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Xunit;
 

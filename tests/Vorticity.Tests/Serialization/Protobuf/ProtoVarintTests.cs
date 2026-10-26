@@ -1,5 +1,4 @@
 using System;
-using Vorticity;
 using Vorticity.Serialization.Protobuf;
 using Xunit;
 

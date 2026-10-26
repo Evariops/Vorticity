@@ -10,7 +10,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
@@ -492,8 +491,6 @@ public sealed class DatasetPlanTests
     /// <summary>Fails unless every trigger was met and some shape ranked three jobs.</summary>
     private static void Met(Dictionary<CompactionTrigger, int> met, int ranks, CompactionTrigger? never = null)
     {
-        // A dataset of periods plans by reading every leaf, so its own triggers have no descent to hold
-        // to the full read (DatasetPeriodsCompactionTests meets them).
         foreach (CompactionTrigger trigger in Enum.GetValues<CompactionTrigger>())
         {
             if (trigger == never)
@@ -502,10 +499,7 @@ public sealed class DatasetPlanTests
                 continue;
             }
 
-            Assert.True(
-                trigger is CompactionTrigger.LateCeiling or CompactionTrigger.FreshMerge or CompactionTrigger.Seal or CompactionTrigger.Join
-                    || met.GetValueOrDefault(trigger) > 0,
-                $"no shape met {trigger}, so the test proves nothing of it");
+            Assert.True(met.GetValueOrDefault(trigger) > 0, $"no shape met {trigger}, so the test proves nothing of it");
         }
 
         Assert.True(ranks >= 3, $"no shape ranked more than {ranks} jobs, so the ranking is untested past them");

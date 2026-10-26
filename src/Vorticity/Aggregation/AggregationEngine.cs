@@ -1177,7 +1177,7 @@ internal sealed class AggregationPartition
     /// </summary>
     internal bool MustEvict(int rows)
     {
-        if (!CanEvict || Memory is not { } memory || _arrays is not { } arrays)
+        if (!CanEvict || Memory is null || _arrays is not { } arrays)
         {
             return false;
         }
@@ -2579,7 +2579,9 @@ internal sealed class AggregationPartition
         {
             for (int c = 0; c < _keyCount; c++)
             {
-                int node = FilterEvaluator.Resolve(arena, root, StateRequest.KeyField(_columns[c].Field), rows);
+                // A partial's keys are as the functions gave them, under names of their places.
+                FieldExpr key = batch.KeysApplied ? StateRequest.PartialField(c) : StateRequest.KeyField(_columns[c].Field);
+                int node = FilterEvaluator.Resolve(arena, root, key, rows);
                 while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
                 {
                     node = arena.GetNode(node).StorageIndex;
@@ -2661,6 +2663,12 @@ internal sealed class AggregationPartition
             Account(memory);
         }
     }
+
+    /// <summary>
+    /// The group of each of the first <paramref name="rows"/> rows of the last batch of states the partition folded: what an
+    /// estimate sums by stratum beside the states the partition merges.
+    /// </summary>
+    internal ReadOnlySpan<int> StateGroups(int rows) => _rowGroups.AsSpan(0, rows);
 
     /// <summary>
     /// The states of <paramref name="column"/>'s aggregate in a batch of states, and with <paramref name="sketched"/>, a
@@ -3420,7 +3428,7 @@ internal abstract class AggregationHost
         Begin();
         try
         {
-            ScanSpec spec = Spec(rows);
+            ScanSpec spec = await AlignedSpecAsync(plan, rows, cancellationToken).ConfigureAwait(false);
             AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Counters, plan, cancellationToken).ConfigureAwait(false);
             if (plan.Chosen.Length > 0)
             {
@@ -3464,7 +3472,7 @@ internal abstract class AggregationHost
         Begin();
         try
         {
-            ScanSpec spec = Spec(query.RowFilter);
+            ScanSpec spec = await AlignedSpecAsync(query.Plan, query.RowFilter, cancellationToken).ConfigureAwait(false);
 
             // The first groups of an order on the key: each lane keeps the best it has met alone; with
             // no order, one lane keeps the first it met.
@@ -3472,7 +3480,7 @@ internal abstract class AggregationHost
 
             // With no order nor window over the groups, a core delivers them part by part.
             bool parted = query.Plan.CoreParted && top is null && !Array.Exists(query.Operators, op => op is GroupOrder or GroupWindow);
-            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Counters, query.Plan, cancellationToken, top, parted, builder).ConfigureAwait(false);
+            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Counters, query.Plan, cancellationToken, top, parted, builder, query.Exports).ConfigureAwait(false);
             query.PeakGroups = Math.Max(top?.Peak ?? 0, outcome.Keys?.Count ?? 1);
             if (outcome.Parts is not null && Array.Exists(query.Operators, op => op is GroupOrder))
             {
@@ -3498,20 +3506,22 @@ internal abstract class AggregationHost
         }
     }
 
-    /// <summary>The plan of the pass the aggregation would run, before the statistics settle any of it.</summary>
-    internal ValueTask<ScanPlan> ExplainAsync(AggregationPlan plan, CancellationToken cancellationToken, VortexExpr? rows = null)
+    /// <summary>The plan of the pass the aggregation would run, before the statistics settle any of it, with the window it applies.</summary>
+    internal async ValueTask<ScanPlan> ExplainAsync(AggregationPlan plan, CancellationToken cancellationToken, VortexExpr? rows = null)
     {
         AggregateSlot?[] settled = new AggregateSlot?[plan.Aggregates.Length];
         (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, settled);
-        ScanSpec pass = AggregationEngine.PassSpec(Spec(rows), columns, plan, Source.Schema);
+        (ScanSpec spec, VortexExpr? window) = await AlignAsync(plan, rows, cancellationToken).ConfigureAwait(false);
+        ScanSpec pass = AggregationEngine.PassSpec(spec, columns, plan, Source.Schema);
 
         // The states the pass would ask for, so that a source that keeps them says per object what it reads.
         if (pass.Options.UseSynopses && Source.KeepsStates && StateRequest.Of(plan, settled, top: null) is { } states)
         {
-            pass = pass with { States = states };
+            pass = pass with { States = states, Family = Source.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, Source) : null };
         }
 
-        return Source.ExplainAsync(pass, cancellationToken);
+        ScanPlan explained = await Source.ExplainAsync(pass, cancellationToken).ConfigureAwait(false);
+        return window is null ? explained : explained with { Window = window };
     }
 
     /// <summary>The scan's spec, its filter joined with <paramref name="rows"/>: the conjuncts on a group's key, which filter rows.</summary>
@@ -3519,6 +3529,32 @@ internal abstract class AggregationHost
     {
         ScanSpec spec = Spec();
         return rows is null ? spec : spec with { Filter = spec.Filter is { } filter ? Expr.Logical(true, filter, rows) : rows };
+    }
+
+    /// <summary>
+    /// <see cref="Spec(VortexExpr?)"/> for an aggregation of <paramref name="plan"/>, its filter the one the source applies
+    /// under <see cref="ScanOptions.AlignWindow"/> (<see cref="ScanSource.AlignAsync"/>), whose range the metrics then
+    /// give: every read of the aggregation, the statistics', the states' and the rows', answers that one.
+    /// </summary>
+    internal async ValueTask<ScanSpec> AlignedSpecAsync(AggregationPlan plan, VortexExpr? rows, CancellationToken cancellationToken)
+    {
+        (ScanSpec spec, VortexExpr? window) = await AlignAsync(plan, rows, cancellationToken).ConfigureAwait(false);
+        Counters.Window = window;
+        return spec;
+    }
+
+    /// <summary>The spec <see cref="AlignedSpecAsync"/> gives, and the range its filter applies when the source grew it; null when it grew none.</summary>
+    private async ValueTask<(ScanSpec Spec, VortexExpr? Window)> AlignAsync(AggregationPlan plan, VortexExpr? rows, CancellationToken cancellationToken)
+    {
+        ScanSpec spec = Spec(rows);
+        if (!spec.Options.AlignWindow || !spec.Options.UseSynopses || !Source.KeepsStates || spec.MatchesNothing || spec.Filter is null
+            || StateRequest.Of(plan, new AggregateSlot?[plan.Aggregates.Length], top: null) is not { } states
+            || await Source.AlignAsync(spec, states, cancellationToken).ConfigureAwait(false) is not { } aligned)
+        {
+            return (spec, null);
+        }
+
+        return (spec with { Filter = aligned.Filter }, aligned.Window);
     }
 }
 
@@ -3531,11 +3567,14 @@ internal static class AggregationEngine
 {
     internal static async ValueTask<AggregationOutcome> RunAsync(
         ScanSource source, ScanSpec spec, ScanCounters metrics, AggregationPlan plan, CancellationToken cancellationToken, KeyTop? top = null, bool parted = false,
-        PartBuilder? builder = null)
+        PartBuilder? builder = null, bool exports = false)
     {
         IAggregateNode[] aggregates = plan.Aggregates;
         AggregateSlot?[] settled = new AggregateSlot?[aggregates.Length];
-        if (!plan.Grouped && StatisticsView.For(source, spec) is { } statistics)
+
+        // A run that gives its states rather than its answers (AggregationQuery.Exports) takes none from the file statistics,
+        // an answer they give being no state; a count of rows from the structures is one.
+        if (!exports && !plan.Grouped && StatisticsView.For(source, spec) is { } statistics)
         {
             for (int i = 0; i < aggregates.Length; i++)
             {
@@ -3561,7 +3600,7 @@ internal static class AggregationEngine
                 if (filter is null)
                 {
                     count = count >= 0 ? count : await source.CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
-                    answers[i] = new SettledSlot<long>(count);
+                    answers[i] = new SettledSlot<long>(count) { CountsRows = true };
                     continue;
                 }
 
@@ -3582,6 +3621,13 @@ internal static class AggregationEngine
         // The blocks the zone maps answer are not read: the pass's mask has them dead, and each
         // partition folds them as its rows reach them.
         ZoneSettling? settling = await ZoneSettling.PlanAsync(source, pass, plan, metrics, cancellationToken).ConfigureAwait(false);
+        if (settling is null && source.SettlesBlocks && ZoneSettling.Applies(pass, plan))
+        {
+            // A dataset settles each object's blocks as it reads it, those no delete marked a row of, and the rows of the
+            // others as before, states or rows: the pass names the aggregation, and its mask is the dataset's.
+            pass = pass with { Settles = plan };
+        }
+
         if (settling is not null)
         {
             pass = settling.Pass(pass);
@@ -3592,7 +3638,7 @@ internal static class AggregationEngine
         // that the cut leaves whole what states answer.
         else if (pass.Options.UseSynopses && source.KeepsStates && StateRequest.Of(plan, settled, top) is { } states)
         {
-            pass = pass with { States = states };
+            pass = pass with { States = states, Family = source.LearnsPartials && top is null ? LearnedFamily.Of(plan, pass.Filter, source) : null };
         }
 
         // On several lanes the structures are read once, before the rows are cut, so that the cut
@@ -4740,9 +4786,6 @@ internal static class AggregationEngine
             OrderPath = null,
             Descending = false,
             Options = spec.Options with { Compact = false },
-
-            // The window a dataset grows for the question, the same whether its states or its rows answer.
-            Aligning = spec.Options.AlignWindow ? StateRequest.Of(plan, new AggregateSlot?[plan.Aggregates.Length], top: null) : null,
         };
     }
 

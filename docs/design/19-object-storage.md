@@ -30,7 +30,7 @@ Five requirements, each of which becomes a test or a ratchet once built:
 |---|---|
 | the same API | a file opens, scans and is written with the calls it has on a path, given a location instead, though an object takes no append. A dataset takes a store, or a location. Nothing else in the public API changes, whichever provider holds the bytes |
 | few round trips | every operation has a count of requests and of dependent steps, written in [the budget](#5-requests-per-operation), and counting tests hold it. Opening a file is one request on a store that reads suffixes, and opening an object of a dataset is one request on any store. Nothing that a response already said is asked again |
-| the bandwidth of the link | reads run in parallel on many connections, coalesced into ranges of up to 16 MiB, and large objects go up in parts sent in parallel |
+| the bandwidth of the link | reads run in parallel on many connections, coalesced into ranges of up to 8 MiB across gaps of up to 256 KiB, and large objects go up in parts sent in parallel |
 | bounded allocation, one copy | a request allocates a constant amount, never a buffer the size of its body, and this library's own code allocates nothing per batch. A response body reaches the block the scan decodes from with no copy but the one TLS makes |
 | secure by default | HTTPS only, credentials from the platform's identity where the platform offers one, no secret in a message, a log or a trace, and a conditional write whose outcome cannot be proven reported as unknown, never as lost |
 
@@ -187,7 +187,7 @@ The interface is the seam every store implements, the ones this package ships an
 caller writes. It changes in five places, each for a request saved, a copy avoided or a correctness
 gap closed:
 
-| change | today | revised | what it buys |
+| change | before | revised | what it buys |
 |---|---|---|---|
 | a read fills the caller's buffer | `GetRangeAsync` returns bytes the store owns, and the dataset's object source copies each segment out of them into an aligned block (`ObjectSegmentSource.cs`, `Aligned`) | `ReadAsync(key, offset, destination, ifToken)` reads into memory the caller gives and returns the bytes read, the object's length and its token | the body lands in the block the scan decodes from, and the per-segment copy disappears |
 | the end of an object, without its length | the open asks the length first (`GetLengthAsync`, a head), then reads the tail (`VortexFile.cs`, the open path) | `ReadTailAsync(key, destination)` reads the last bytes and returns the object's length with them | one request instead of two on a store that reads suffixes. Another store answers with a head and a read, as today |
@@ -266,13 +266,15 @@ open of a dataset's object passes the length its entry records, which any store 
 the listing with heads removes vacuum's serial heads. On a dataset of a thousand commits on S3, at
 20 ms a head, that is twenty seconds of vacuum spent on heads, and none with the listing.
 
-A question a dataset answers from its synopses reads each object's tables with no open of it, in one
-request an object, and the objects side by side. With a `SynopsisCache` on the session, the second time
-reads them from the local disk and asks the store nothing, and a question whose window cuts slices asks
-it only for the chunks of those slices. `WarmAsync` reads a window's tables into the cache ahead of the
-first question. The requests a store refuses past its limits (thousands a second per prefix on S3, fewer
-on smaller services) are what this saves at a page's scale: a cold month is one request an object, a warm
-one none.
+A question a dataset answers reads the objects it needs side by side. A lookup of an identifier in a
+large object reads the object's directories with no open of it, through the table of contents its entry
+carries; a question that reads rows opens each object it reads, its last 64 KiB read from the store.
+With a `SynopsisCache` on the session, the regions a table of contents declares are read from the
+local disk the second time, and the store is asked nothing for them.
+`WarmAsync` reads a window's directories into the cache ahead of the first question. The requests a
+store refuses past its limits (thousands a second per prefix on S3, fewer on smaller services) are what
+this saves at a page's scale; what each question of the design sends the store is in
+[22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#9-what-the-store-sees).
 
 ## 6. The HTTP layer
 
@@ -296,11 +298,11 @@ adapter, would be lost. And each fix the runtime ships for its client would have
 again here. The platform's client also makes the store testable without a network: a test gives it a
 message handler that answers with delays, resets, throttling and refusals.
 
-The allocations that matter are this library's own. The dataset's object source allocates on every
-batch today: a list of slots, an array of tasks and a task per read, an array of ranges and a sorting
-delegate (`ObjectSegmentSource.cs`, `ReadManyAsync`). They go, replaced by pooled arrays and value
-tasks, so that what a scan over a store allocates per batch is the platform's constant per request and
-nothing else.
+The allocations that matter are this library's own. The dataset's object source allocated on every
+batch: a list of slots, an array of tasks and a task per read, an array of ranges and a sorting
+delegate (`ObjectSegmentSource.cs`, `ReadManyAsync`, before the revision). They went, replaced by
+pooled arrays and value tasks (`ObjectStoreSource.cs`), so that what a scan over a store allocates per
+batch is the platform's constant per request and nothing else.
 
 ### 6.2 How it is configured
 
@@ -600,7 +602,17 @@ The session's bound on reads in flight counts batch reads, 128 by default, on ev
 takes one slot, and the source then issues every coalesced range of the batch at once
 (`SessionReader.cs`, `ReadManyAsync`, and `ObjectSegmentSource.cs`, the reads issued together). Over
 HTTP/1.1 a request in flight is a connection, and the store sends at most `MaxConnections` requests
-at once, so the memory the reads hold and the connections they open are both bounded.
+at once, so the memory the reads hold and the connections they open are both bounded. Every store of
+the process draws besides from one budget of requests (`RequestBudget`, 256 in flight and 2 000 a
+second by default): a request takes a place in flight, then a turn from a bucket of a tenth of a
+second's requests. A throttle halves the rate of the store whose service sent it, under the budget,
+once per episode, and empties that store's bucket, so that the requests sent again wait for their turns
+rather than burst into the next episode; after a second of calm the store's rate grows by a sixteenth of
+the budget's a second. The other stores keep their pace: a budget the process shares does not move, since
+its stores' services may not be the one that throttles. Throttles that come together drop it fast
+to its floor, a sixty-fourth of the ceiling, and the short calm lets it climb back to what the service
+sustains, where ten seconds kept it at its floor: 400 reads under a service that throttles past 150 a
+second took 12 s with a calm of ten seconds and take about 3 with one.
 
 What a link needs in flight is its bandwidth times its latency. At 10 Gb/s and 30 ms that is about
 37 MB, three ranges of 16 MiB or 36 of 1 MiB. A window in bytes, sized from the throughput and the
@@ -642,35 +654,41 @@ be checked against the service ([Azure's checksums](#83-checksums)).
 ### 10.5 The synopsis cache on the local disk
 
 A session may keep on the local disk what questions read of a dataset's objects without their data
-(`VortexSessionOptions.SynopsisCache`): their synopsis tables, their slices' chunk directories, their
-index directories and their variant columns' path directories, and the fence pages and run segments a
-lookup of an identifier reads; and the pages of the dataset's tree, by the hash of their bytes ([the
-pages a handle keeps](13-dataset.md#3-objects-and-keys)), unless the dataset is sealed. Only a region
-of an index enters it, never the data nor the footer: one
-an object's table of contents declares, with a checksum, or a page or a segment of a run its reader
-names with the checksum the directory or the parent page gave. An object never changes, so an entry is
-never stale: its key is the object's uid, the region's place and length and its checksum, all known
-before the region is read. Warm, a lookup asks the store for the chunks of the blocks it found alone: a
-count per service and per 12 hours of every row but one request's, over 3 objects of 180 M rows, asked
-for 11 regions in 23 ms, a fence page and two segments of each object's postings beside the chunks of
-the block that holds the id, and asks for those 2 chunks in 12.7 ms. An object the dataset opens to
-read its rows reads the same regions through the cache: the rows of one request id over the same
-objects take 2 requests in one round trip warm, against 7 in 5, 14.6 ms against 37.4.
+(`VortexSessionOptions.SynopsisCache`): their slices' chunk directories, their index directories and
+their variant columns' path directories, and the fence pages and run segments a lookup of an identifier
+reads; and the pages of the dataset's tree, by the hash of their bytes ([the pages a handle
+keeps](13-dataset.md#3-objects-and-keys)), unless the dataset is sealed. Only a region of an index
+enters it, never the data nor the footer: one an object's table of contents declares, with a checksum,
+or a page or a segment of a run its reader names with the checksum the directory or the parent page
+gave. An object never changes, so an entry is never stale: its key is the object's uid, the region's
+place and length and its checksum, all known before the region is read. Given a quota of its own
+(`dataCapacityBytes`), it keeps besides the other segments a reader reads of a plain object, its data
+and its footer, by the object's uid and the segment's place and length: no directory gives their
+checksum, so their file holds their XXH3-64 after them, which each read from the disk checks, within
+their own S3-FIFO queues and capacity, so that they never push a region out. A sealed object's data
+never enters it, and a segment whose write would wait past the bytes waiting for their writes is not
+kept, so that a question never writes data on its own time. Warm, a lookup asks the store for the chunks
+of the blocks it found alone: a count per service and per 12 hours of every row but one request's, over
+3 objects of 180 M rows, asked for 11 regions in 23 ms, a fence page and two segments of each object's
+postings beside the chunks of the block that holds the id, and asks for those 2 chunks in 12.7 ms. An
+object the dataset opens to read its rows reads the same regions through the cache: the rows of one
+request id over the same objects take 2 requests in one round trip warm, against 7 in 5, 14.6 ms against
+37.4.
 
 An entry is a file named by that key, in directories sharded by the uid, written under a temporary
 name and then renamed, so a reader never sees half a file. It is written behind the question that read
 its region: the buffer the region was read into is held until one of two writers of the cache's own has
 written it, and a read of the region meanwhile is served from that buffer. A file costs about 1.7 ms to
-create, close and rename on Windows, which the question paid for each region it read: an unaligned
-window over 3 objects of 180 M rows, which read 104 MB of tables, took 276 ms cold against 159 written
-behind, and a count per service over 48 hourly objects 50 ms against 38 at one lane, 44 against 27 at
-sixteen. Past 256 MiB waiting, a region is written before its reader goes on, and the cache's dispose
+create, close and rename on Windows, which the question paid for each region it read: when objects still
+held the synopsis tables of the time, an unaligned window over 3 objects of 180 M rows, which read 104 MB
+of them, took 276 ms cold against 159 written behind, and a count per service over 48 hourly objects
+50 ms against 38 at one lane, 44 against 27 at sixteen. Past 256 MiB waiting, a region is written before its reader goes on, and the cache's dispose
 writes what waits. A sealed object's frames are written at once. The cache walks its directory when it opens,
 and the entries an earlier cache left are its own. One cache owns a directory, through a lock of the
 operating system. An entry's file is opened at its first read and mapped, and kept so while the cache
 keeps up to 4 096 files open: a region read from the disk is a view of the mapping, with no read of the
 system and no copy, and its batches decode from it. On Windows a read took a fifth of a warm question
-over 48 hourly objects' tables, 5.8 ms a question against 4.6 mapped; under Linux (WSL2), the warm
+over the tables of 48 hourly objects of the time, 5.8 ms a question against 4.6 mapped; under Linux (WSL2), the warm
 questions the cache serves alone take up to 12 % less mapped (QP-10, 0.095 ms against 0.105). A
 file the cache maps is one no writer changes while it does: it is whole once renamed, only its own cache
 writes its directory, and the caches that share its root read it without mapping it, so no mapping sees
@@ -690,8 +708,8 @@ fails, or a region whose plaintext fails its checksum, is dropped with its group
 store, and a trailer that does not open the object is dropped and read again too. No key reaches the disk:
 the session unwraps the data key as it does for a read from the store, from its keyring or from the keys
 it holds in memory. A frame of 64 KiB is the unit kept, so a small region costs the disk its frame. On six
-hours of sealed requests, a count per service from the synopses takes 12 requests in two round trips cold
-and none warm, where every question read them again before. Questions that miss the same frames of a
+hours of sealed requests, a count per service from the synopsis tables of the time took 12 requests in two
+round trips cold and none warm, where every question read them again before. Questions that miss the same frames of a
 sealed object at once read them each.
 
 Past its capacity it drops entries as S3-FIFO does, counting bytes. A new region waits in a small
@@ -726,7 +744,13 @@ before it asks the store, by its file's name and length: a region read whole and
 checksum, a sealed object's frames and trailer and a tree's pages handed to their readers, which check
 them as they check the local cache's. What it reads there it does not keep again, so a region the
 processes read lies once on the disk, unless two of them read it from the store before either kept it;
-a sealed frame another directory holds counts as held, and is not kept again either. The root's own
+a sealed frame another directory holds counts as held, and is not kept again either. A file of another
+directory read once stays open, up to 1 024 of them, the least recently read closed first, and checked
+against its checksum once: an entry never changes once renamed, so the next read of it needs neither an
+open nor a hash, and a file its cache deletes meanwhile reads as it was. A question warm from another's
+directory then takes what it takes from its own: 10.05 ms against 10.04 over 16 objects of 200 000 rows,
+38.5 against 36.5 over 64, where an open and a hash at every read made them 7 % and 36 % slower
+(`vortex-queries --micro peercache`). The root's own
 lock is held shared by every cache of the root, which a cache of its own, holding it alone, refuses and
 is refused by: a root is shared or owned, never both.
 
@@ -864,23 +888,25 @@ bounds what the store keeps, unbounded by default). The commit completes the pip
 upload.
 
 A rewrite, a compaction's or a delete's that keeps some of an object's rows, announces a bound with
-that put (`ObjectBound`): what it reads, times 1.03, the most bytes a rewrite wrote for each byte it read
-on the lifecycle bench (1.024 at worst over periods of a day and of an hour and the leveled style,
-1.000 for a seal). Without it, parts sized for an unknown length reach about a terabyte on S3, but
-168 GB on R2, whose parts keep one size, and 106 GB on Scaleway, which takes a thousand parts, short of
-a period of a day at a few thousand rows a second, which would fail at its end, every time it ran. With
-it, the parts are sized for the bound from the first. Content that runs past the bound is what the
-store refuses, so the sink checks it at each write, before the put has sent the bytes past it, and the
-rewrite gives its objects up and starts again under a bound twice as large; a delete does so without
-taking one of its attempts, since no other writer caused it. An append has no inputs to bound it and
-goes with an unknown length, so an append of one object past those reaches needs the spool there. The
-parts in flight are the bound's share of the service's parts: a period of 173 GB on Scaleway sends parts
-of about 180 MB, four at a time by default, where a period of an hour, 7 GB, keeps the parts of 16 MiB. The object's statistics and first key are then read from the store, its footer in one request
-when its entry records the footer's length, which an object past the threshold takes as a few requests
-among the dozens its parts took. An object given up completes its pipe with an error, and the store
-gives its upload up. A data object's key ends with a fresh uid and is never taken, so its put carries
-no condition, whole or in parts, on every service, and a lost answer needs no head: sent again, it
-writes the same bytes. A commit object keeps its condition everywhere.
+that put (`ObjectBound`): what it reads, times 1.03, the most bytes a rewrite wrote for each byte it
+read on the lifecycle bench, measured when the library compacted by periods too (1.024 at worst over
+periods of a day and of an hour and the leveled style, 1.000 for a seal). Without it, parts sized for
+an unknown length reach about a terabyte on S3, but 168 GB on R2, whose parts keep one size, and 106 GB
+on Scaleway, which takes a thousand parts, short of an object of a day at a few thousand rows a second,
+which would fail at its end, every time it ran. With it, the parts are sized for the bound from the
+first. Content that runs past the bound is what the store refuses, so the sink checks it at each write,
+before the put has sent the bytes past it, and the rewrite gives its objects up and starts again under
+a bound twice as large; a delete does so without taking one of its attempts, since no other writer
+caused it. An append has no inputs to bound it and goes with an unknown length, so an append of one
+object past those reaches needs the spool there. The parts in flight are the bound's share of the
+service's parts: an object of a day, 173 GB, on Scaleway sends parts of about 180 MB, four at a time by
+default, where an object of an hour, 7 GB, keeps the parts of 16 MiB. The object's statistics and first
+key are then read from the store, its footer in one request when its entry records the footer's length,
+which an object past the threshold takes as a few requests among the dozens its parts took. An object
+given up completes its pipe with an error, and the store gives its upload up. A data object's key ends
+with a fresh uid and is never taken, so its put carries no condition, whole or in parts, on every
+service, and a lost answer needs no head: sent again, it writes the same bytes. A commit object keeps
+its condition everywhere.
 
 ### 11.3 Checksums
 

@@ -109,7 +109,7 @@ buffers, which the caller disposes.
 The public interface is `Vorticity.IO.ISegmentSource` (`IO/SegmentSeam.cs`): a length, a single
 read, and a batch read of many ranges into many leases. The batch read is the real entry point. A
 scan registers every segment a split needs before reading, which lets a source coalesce nearby
-ranges (with a 1 MiB gap by default) and issue them together, and a scan requests each segment at
+ranges (across a gap of 1 MiB by default, 256 KiB for an object store's) and issue them together, and a scan requests each segment at
 most once, every block in it decoding from the one lease. That is what makes or breaks performance
 on an object store.
 

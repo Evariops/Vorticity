@@ -17,11 +17,9 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Tests.Scan;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Writing;

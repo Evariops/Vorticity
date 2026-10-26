@@ -1,14 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.IO;
 
 namespace Vorticity.Samples;
 
-/// <summary>A request as a dataset of periods holds it.</summary>
+/// <summary>A request as a dataset clustered by day holds it.</summary>
 [VortexRecord]
 public partial record struct Request(DateTimeOffset At, string Service, string Method, short Status, string RequestId, long Bytes);
 
@@ -21,9 +20,9 @@ public partial record struct ServiceTotals(string Service, long Count, long Byte
 public partial record struct Logged(string Retention, DateTimeOffset At, string Message);
 
 /// <summary>
-/// The time-window part of the datasets page: a dataset compacted by periods, its questions answered from the
-/// synopses, a request left out, a window asked newest first, the synopsis cache, and rows kept apart by
-/// retention and expired by it.
+/// The time-window part of the datasets page: a dataset whose objects each hold a day, questions that read the rows their
+/// window reaches, a request found through its identifier, a window asked day by day newest first, the objects'
+/// directories kept on the local disk, and rows of two retentions kept in a dataset each and expired on their own.
 /// </summary>
 internal static class TimeWindows
 {
@@ -38,7 +37,7 @@ internal static class TimeWindows
         await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(Request.At)],
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
             Identifiers = [nameof(Request.RequestId)],
         }))
         {
@@ -67,28 +66,28 @@ internal static class TimeWindows
 
             DateTimeOffset from = Start;
             DateTimeOffset to = Start.AddDays(2);
-            foreach (bool synopses in new[] { true, false })
-            {
-                Aggregation question = dataset.Scan<Request>().With(new ScanOptions { UseSynopses = synopses })
-                    .Where(r => r.At >= from && r.At < to)
-                    .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)));
-                List<ServiceTotals> totals = await question.As<ServiceTotals>().ToRecordsAsync().ToListAsync();
-                Console.WriteLine(
-                    $"two days by service, synopses {(synopses ? "on" : "off")}: {string.Join(", ", totals.OrderBy(t => t.Service, StringComparer.Ordinal).Select(t => $"{t.Service} {t.Count}"))}; " +
-                    $"{question.Metrics.SynopsisRows} table rows, {question.Metrics.Rows} rows read");
-            }
+            Aggregation question = dataset.Scan<Request>()
+                .Where(r => r.At >= from && r.At < to)
+                .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)));
+            List<ServiceTotals> totals = await question.As<ServiceTotals>().ToRecordsAsync().ToListAsync();
+            Console.WriteLine(
+                $"two days by service: {string.Join(", ", totals.OrderBy(t => t.Service, StringComparer.Ordinal).Select(t => $"{t.Service} {t.Count}"))}; " +
+                $"{question.Metrics.Rows} rows read");
 
-            // One request found through its identifier's hashed postings, then left out of a count.
+            // A window inside a day reads the blocks its instants reach, and no other.
+            Aggregation quarter = dataset.Scan<Request>()
+                .Where(r => r.At >= to.AddMinutes(-15) && r.At < to)
+                .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)));
+            List<ServiceTotals> last = await quarter.As<ServiceTotals>().ToRecordsAsync().ToListAsync();
+            Console.WriteLine($"the last quarter of an hour of the second day: {last.Sum(t => t.Count)} requests; blocks decoded {quarter.Metrics.BlocksDecoded}, pruned {quarter.Metrics.BlocksPruned}");
+
+            // One request found through its identifier's hashed postings.
             Scan<Request> lookup = dataset.Scan<Request>().Where(r => r.RequestId == needle);
             List<Request> found = await lookup.ToRecordsAsync().ToListAsync();
             Console.WriteLine($"{needle}: {found.Count} row, at {found[0].At:MM-dd HH:mm:ss}, {lookup.Metrics.BlocksPruned} blocks pruned");
 
-            ScanPlan plan = await dataset.Scan<Request>().Where(r => r.At >= from && r.At < to && r.RequestId != needle)
-                .GroupBy(r => r.Service).Select(g => (g.Key, g.Count())).ExplainAsync();
-            Console.WriteLine($"leaving {needle} out, each object reads: {string.Join(", ", plan.States.GroupBy(step => step.Read).Select(kind => $"{kind.Count()} {kind.Key}"))}");
-
-            // The newest day first, then the one before: each part's answer is final for its range of time.
-            await foreach (WindowPart<List<ServiceTotals>> part in dataset.AskNewestFirstAsync(from, to, async (start, end, ct) =>
+            // The newest day first, then the one before: each part's answer is final for its day.
+            await foreach (ValuePart<DateTimeOffset, List<ServiceTotals>> part in dataset.AskByValuesAsync(from, to, async (start, end, ct) =>
                 await dataset.Scan<Request>().Where(r => r.At >= start && r.At < end)
                     .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)))
                     .As<ServiceTotals>().ToRecordsAsync(ct).ToListAsync(ct)))
@@ -97,60 +96,64 @@ internal static class TimeWindows
             }
         }
 
-        // A session that keeps the tables on the local disk: the second question asks the store nothing for them.
+        // A session that keeps on the local disk the directories the objects' tables of contents declare, which a read with
+        // no open of an object, such as a lookup in a large one, then finds there.
         await using (VortexSession session = VortexSession.Create(options =>
             options.SynopsisCache = new SynopsisCache(Demo.Path("synopsis-cache"), capacityBytes: 64L << 20)))
         await using (VortexDataset cached = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }))
         {
             long warmed = await cached.WarmAsync<Request>(r => r.At >= Start);
-            store.Reset();
-            List<ServiceTotals> again = await cached.Scan<Request>().Where(r => r.At >= Start && r.At < Start.AddDays(2))
-                .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))).As<ServiceTotals>().ToRecordsAsync().ToListAsync();
-            Console.WriteLine($"warmed {warmed} bytes of tables; two days by service again: {again.Count} services, {store.Requests} requests to the store");
+            List<ServiceTotals> again = await TwoDaysAsync(cached);
+            Console.WriteLine($"warmed {warmed} bytes of directories; two days by service again: {again.Count} services");
         }
 
         await RetentionAsync();
     }
 
-    /// <summary>Rows kept for different lengths of time in one dataset, each retention expired on its own.</summary>
+    /// <summary>The count and bytes per service over the first two days.</summary>
+    private static async Task<List<ServiceTotals>> TwoDaysAsync(VortexDataset dataset) =>
+        await dataset.Scan<Request>().Where(r => r.At >= Start && r.At < Start.AddDays(2))
+            .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))).As<ServiceTotals>().ToRecordsAsync().ToListAsync();
+
+    /// <summary>
+    /// Rows kept for different lengths of time: a dataset per retention, each expired on its own, its objects an hour's,
+    /// dropped unread once the expiry's bound passes them.
+    /// </summary>
     private static async Task RetentionAsync()
     {
-        await using IObjectStore store = new FileObjectStore(Demo.Path("retention"));
+        await using IObjectStore debugStore = new FileObjectStore(Demo.Path("retention-debug"));
+        await using IObjectStore infoStore = new FileObjectStore(Demo.Path("retention-info"));
         DatasetOptions options = new DatasetOptions
         {
-            ClusteringKey = [nameof(Logged.Retention), nameof(Logged.At)],
-            PartitionColumns = 1,
-            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+            ClusteringKey = [nameof(Logged.At)],
+            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
         };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Logged.Schema, options);
+        await using VortexDataset debug = await VortexDataset.CreateAsync(debugStore, Logged.Schema, options);
+        await using VortexDataset info = await VortexDataset.CreateAsync(infoStore, Logged.Schema, options);
         for (int hour = 0; hour < 3 * 24; hour++)
         {
             Logged[] rows = [.. Enumerable.Range(0, 60).Select(i => new Logged(i % 3 == 0 ? "info" : "debug", Start.AddHours(hour).AddMinutes(i), $"line {hour}-{i}"))];
-            await using ObjectDraft draft = dataset.StartObject();
-            await draft.Writer.WriteAsync<Logged>(rows);
-            await dataset.AppendAsync(draft);
+            await AppendAsync(debug, [.. rows.Where(r => r.Retention == "debug")]);
+            await AppendAsync(info, [.. rows.Where(r => r.Retention == "info")]);
         }
 
-        while (await dataset.CompactAsync() is not null)
+        while (await debug.CompactAsync() is not null)
         {
         }
 
-        long debug = await dataset.Scan<Logged>().Where(r => r.Retention == "debug").CountAsync();
-        DateTimeOffset cutoff = await dataset.ExpireAsync<Logged>(r => r.Retention == "debug", Start.AddDays(2));
-        long kept = await dataset.Scan<Logged>().Where(r => r.Retention == "debug").CountAsync();
-        long info = await dataset.Scan<Logged>().Where(r => r.Retention == "info").CountAsync();
-        Console.WriteLine($"debug lines expired before {cutoff:MM-dd}: {debug} then {kept}; info lines untouched: {info}");
+        long before = await debug.Scan<Logged>().CountAsync();
+        DateTimeOffset cutoff = Start.AddDays(2);
+        RowChangeResult expired = await debug.ExpireAsync<Logged>(r => r.At < cutoff);
+        long kept = await debug.Scan<Logged>().CountAsync();
+        long untouched = await info.Scan<Logged>().CountAsync();
+        Console.WriteLine($"debug lines expired before {cutoff:MM-dd}: {before} then {kept}, {expired.Rows} dropped; info lines untouched: {untouched}");
+    }
 
-        await using VortexDataset refusing = await VortexDataset.OpenAsync(store, new DatasetOptions { Periods = new PeriodOptions { RefuseLateRows = true } });
-        try
-        {
-            await using ObjectDraft late = refusing.StartObject();
-            await late.Writer.WriteAsync<Logged>([new Logged("info", Start.AddHours(1), "a line two days late")]);
-            await refusing.AppendAsync(late);
-        }
-        catch (ArgumentException refused)
-        {
-            Console.WriteLine($"a late row refused: {refused.Message}");
-        }
+    /// <summary>Appends <paramref name="rows"/> to <paramref name="dataset"/> as one object.</summary>
+    private static async Task AppendAsync(VortexDataset dataset, Logged[] rows)
+    {
+        await using ObjectDraft draft = dataset.StartObject();
+        await draft.Writer.WriteAsync<Logged>(rows);
+        await dataset.AppendAsync(draft);
     }
 }

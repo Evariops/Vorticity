@@ -47,20 +47,6 @@ public sealed class ObjectDraft : IAsyncDisposable
     /// </summary>
     internal bool BySortedColumn { get; init; }
 
-    /// <summary>
-    /// Whether the object is written in sorted slices with no run on the clustering key, the instant
-    /// its slice table is on: its seal checks that a key cursor opens on that table, since nothing
-    /// else walks it by key.
-    /// </summary>
-    internal bool BySlices { get; init; }
-
-    /// <summary>
-    /// The one value of each partition column the object's rows hold, in key order, when its writer knows it: a split
-    /// append, a compaction job, a rewrite. Its entry's summaries then hold it as an exact bound, which a file's
-    /// statistics do not give a text column; null when the dataset has none, or the writer does not know it.
-    /// </summary>
-    internal Expressions.FilterLiteral[]? Partition { get; set; }
-
     /// <summary>Abandons the object unless a commit took it.</summary>
     /// <returns>A task that completes when the writer's buffers are released.</returns>
     public async ValueTask DisposeAsync()

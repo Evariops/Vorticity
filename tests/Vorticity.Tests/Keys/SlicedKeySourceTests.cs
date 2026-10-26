@@ -10,7 +10,6 @@ using System.Linq;
 using Vorticity.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Keys;
@@ -255,7 +254,7 @@ public sealed partial class SlicedKeySourceTests
         Random random = new Random(7);
         Hit[] inTime = [.. Enumerable.Range(0, Rows).Select(i => new Hit(DateTimeOffset.FromUnixTimeMilliseconds((Noon / 1000) + (i / 3 * 90L)), random.Next(5)))];
         long[] instants = [.. inTime.Select(hit => Micros(hit.At))];
-        List<TimeSlice> slices = TimeSlicer.Cut(instants, TimeUnit.Microseconds, targetRows: 2_500);
+        List<TimeSlice> slices = Dataset.TimeSliceTests.Slices(instants, 2_500);
         List<Hit> sorted = [];
         foreach (TimeSlice slice in slices)
         {
@@ -265,8 +264,7 @@ public sealed partial class SlicedKeySourceTests
         long hour = 3_600_000_000;
         SliceTable table = new SliceTable(
             TimeUnit.Microseconds,
-            shifted ? [.. slices.Select(slice => slice with { Start = slice.Start + hour, End = slice.End + hour })] : slices,
-            [1]);
+            shifted ? [.. slices.Select(slice => slice with { Start = slice.Start + hour, End = slice.End + hour })] : slices);
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-sliced-keys-{Guid.NewGuid():N}.vortex");
         try
         {

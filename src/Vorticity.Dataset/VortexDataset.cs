@@ -6,14 +6,11 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
-using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
@@ -53,10 +50,6 @@ public sealed class VortexDataset : IAsyncDisposable
 
     // The store the handle made for a local directory it was given by location, which it disposes.
     private IObjectStore? _ownedStore;
-
-    // The newest instant this handle appended to a dataset of periods, in its column's unit; the
-    // least long before the first: what the lateness of the next append is measured against.
-    private long _newestInstant = long.MinValue;
 
     // The location the handle was opened at, as its caller named it, which tags the activities of its
     // commits, compactions and vacuums; null for a handle given a store.
@@ -350,51 +343,6 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// Records how late the oldest row of an object this handle appends to a dataset of periods came,
-    /// behind the newest instant the handle appended before: zero for rows in order. Read from the
-    /// object's summary of its instant, so it costs no read.
-    /// </summary>
-    private void ObserveLateness(WrittenObject? written)
-    {
-        if (written is not { } produced || _options.Periods is null || Key is not { } key
-            || !produced.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
-            || !summary.HasMin || !summary.HasMax
-            || summary.Min.Kind != FilterLiteralKind.Signed || summary.Max.Kind != FilterLiteralKind.Signed)
-        {
-            return;
-        }
-
-        long oldest = summary.Min.SignedValue;
-        long newest = Volatile.Read(ref _newestInstant);
-        if (newest != long.MinValue)
-        {
-            DatasetTelemetry.Late(Math.Max(0, (double)newest - oldest) / UnitsPerSecond(PeriodOptions.InstantOf(key)));
-        }
-
-        long latest = summary.Max.SignedValue;
-        while (latest > newest)
-        {
-            long seen = Interlocked.CompareExchange(ref _newestInstant, latest, newest);
-            if (seen == newest)
-            {
-                break;
-            }
-
-            newest = seen;
-        }
-    }
-
-    /// <summary>How many of <paramref name="unit"/> a second holds.</summary>
-    private static double UnitsPerSecond(TimeUnit unit) => unit switch
-    {
-        TimeUnit.Nanoseconds => 1e9,
-        TimeUnit.Microseconds => 1e6,
-        TimeUnit.Milliseconds => 1e3,
-        TimeUnit.Seconds => 1,
-        _ => 1.0 / 86_400,
-    };
-
-    /// <summary>
     /// The identifiers as a commit keeps them: a top-level column of <paramref name="schema"/>, or a key
     /// of one of its variant columns read as a string or an integer, <c>Attributes['user'].AsString()</c>,
     /// written as a plan writes it. Refuses any other, and one named twice.
@@ -659,53 +607,50 @@ public sealed class VortexDataset : IAsyncDisposable
     public Scan Scan(params ReadOnlySpan<string> columns) => new Scan(new DatasetScanSource(this, Snapshot), columns);
 
     /// <summary>
-    /// Asks <paramref name="question"/> over the window from <paramref name="from"/> to <paramref name="to"/>
-    /// part by part, newest first: the window cut at the starts of the periods it crosses, each part's
-    /// answer delivered once it and every newer part are in.
+    /// Asks <paramref name="question"/> over the values of the clustering key's first column from <paramref name="from"/>
+    /// up to <paramref name="to"/> part by part, a part a clustering value (<see cref="ClusteringOptions.Value"/>), the last
+    /// part first unless <paramref name="descending"/> is false: each part's answer delivered once it and every part before
+    /// it are in, with the share of the range they cover (<see cref="ValuePart{TValue, TAnswer}.Covered"/>).
     /// </summary>
+    /// <typeparam name="TValue">The values of the key's first column: an instant, a date, an integer.</typeparam>
     /// <typeparam name="TAnswer">What the question answers.</typeparam>
-    /// <param name="from">The window's first instant.</param>
-    /// <param name="to">The instant past its last.</param>
+    /// <param name="from">The range's first value.</param>
+    /// <param name="to">The value past its last.</param>
     /// <param name="question">
-    /// The question, asked with each part's bounds, the first in the part and the second past it, which it
-    /// applies to its own filter: <c>(from, to, ct) =&gt; dataset.Scan&lt;Request&gt;().Where(r =&gt; r.At &gt;= from &amp;&amp; r.At &lt; to)…</c>.
+    /// The question, asked with each part's bounds, the first in the part and the second past it, which it applies to its
+    /// own filter: <c>(from, to, ct) =&gt; dataset.Scan&lt;Request&gt;().Where(r =&gt; r.At &gt;= from &amp; r.At &lt; to)…</c>.
     /// </param>
+    /// <param name="descending">Whether the last part comes first, as a page that shows the newest of its values does; true by default.</param>
     /// <param name="cancellationToken">Cancels the questions in flight.</param>
-    /// <returns>The parts, newest first, each with its bounds and its answer.</returns>
-    /// <exception cref="InvalidOperationException">The dataset declares no periods (<see cref="DatasetOptions.Periods"/>).</exception>
-    /// <exception cref="ArgumentException">The window is empty.</exception>
+    /// <returns>The parts, in the order asked, each with its bounds, its answer and the share of the range covered so far.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The dataset declares no clustering value, or one of a column whose next value no function tells, a text's or a
+    /// float's.
+    /// </exception>
+    /// <exception cref="ArgumentException">The range holds no value the column stores.</exception>
     /// <remarks>
-    /// A page that shows a month can show its newest day while the rest is read: a part's answer is final
-    /// for its range of time, so once a part is delivered the window from its start to the window's end is
-    /// answered. A question over one period reads the synopses of its sealed objects, a round trip for
-    /// them all, and the parts are asked several at once, sixteen at most and no more than the session lets
-    /// reads be in flight, so a month asked part by part costs about the round trips of one question over it. Answers over
-    /// parts add up for counts and sums, and their extremes are the window's, but a mean over the window
-    /// is its sum over its count.
+    /// A part's answer is final for its values, so a page that shows a range part by part shows the first part asked while
+    /// the rest is read. Every object above level 0 holds rows of one clustering value, so a part's question reads whole
+    /// objects but at the range's ends. The parts are asked several at once, sixteen at most and no more than the session
+    /// lets reads be in flight. Answers over parts add up for counts and sums, and their extremes are the range's, but a
+    /// mean over the range is its sum over its count.
     /// </remarks>
-    public IAsyncEnumerable<WindowPart<TAnswer>> AskNewestFirstAsync<TAnswer>(
-        DateTimeOffset from, DateTimeOffset to, Func<DateTimeOffset, DateTimeOffset, CancellationToken, ValueTask<TAnswer>> question,
+    public IAsyncEnumerable<ValuePart<TValue, TAnswer>> AskByValuesAsync<TValue, TAnswer>(
+        TValue from, TValue to, Func<TValue, TValue, CancellationToken, ValueTask<TAnswer>> question, bool descending = true,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(question);
-        if (to <= from)
-        {
-            throw new ArgumentException($"The window from {from:O} to {to:O} is empty.", nameof(to));
-        }
-
-        if (!Snapshot.Header.ByPeriods || Key is not { } key)
-        {
-            throw new InvalidOperationException(
-                "A window is asked part by part on the periods of a dataset, and this dataset declares none (DatasetOptions.Periods): ask its question over the whole window.");
-        }
-
-        PeriodCalendar calendar = PeriodCalendar.Of(Snapshot.Header, PeriodOptions.InstantOf(key));
-        return WindowParts.AskAsync(WindowParts.Of(calendar, from, to), Math.Min(Session.Options.MaxConcurrentReads, WindowParts.Width), question, cancellationToken);
+        return WindowParts.AskAsync(
+            ValueParts.Of(Snapshot.Schema, Session.Options.Extensions, from, to, descending),
+            Math.Min(Session.Options.MaxConcurrentReads, WindowParts.Width),
+            question,
+            static (lower, upper, covered, answer) => new ValuePart<TValue, TAnswer>(lower, upper, answer) { Covered = covered },
+            cancellationToken);
     }
 
     /// <summary>
     /// Reads into the session's <see cref="VortexSessionOptions.SynopsisCache"/>, before a question needs
-    /// them, the tables and directories of every object whose summaries say it may hold a row
+    /// them, the directories of every object whose summaries say it may hold a row
     /// <paramref name="filter"/> selects: <c>dataset.WarmAsync&lt;Request&gt;(r =&gt; r.At &gt;= DateTime.UtcNow.AddDays(-30))</c>.
     /// </summary>
     /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
@@ -766,17 +711,16 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>Reads through the cache the regions of one object it does not hold yet: the bytes it read.</summary>
-    private async Task<long> WarmObjectAsync(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken)
+    private async Task<long> WarmObjectAsync(SynopsisCache cache, ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken)
     {
         if (_store is SealedObjectStore { Seals: true })
         {
             return await WarmSealedAsync(cache, entry, contents, cancellationToken).ConfigureAwait(false);
         }
 
-        // The lists of the tables' chunks first, from the disk when it holds them: the chunks they name are regions too.
-        bool listed = entry.Uid != UInt128.Zero && Indexes.SynopsisTableReader.LoadListsHeld(cache, entry.Uid, contents, null);
-        List<Indexes.IndexSegment> missing = Missing(cache, entry, contents);
-        if ((listed && missing.Count == 0) || entry.Uid == UInt128.Zero)
+        List<Indexes.IndexSegment> missing = contents.Declared();
+        missing.RemoveAll(region => cache.Holds(entry.Uid, region));
+        if (missing.Count == 0 || entry.Uid == UInt128.Zero)
         {
             return 0;
         }
@@ -786,17 +730,6 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             ISegmentReader reader = Footerless(source, entry, contents);
             long bytes = 0;
-            if (!listed)
-            {
-                foreach (Indexes.SynopsisContents.TableChunks table in contents.Unloaded(null) ?? [])
-                {
-                    bytes += table.List!.Value.Length;
-                }
-
-                await Indexes.SynopsisTableReader.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
-                missing = Missing(cache, entry, contents);
-            }
-
             using SegmentRequestSet requests = new SegmentRequestSet(missing.Count);
             foreach (Indexes.IndexSegment region in missing)
             {
@@ -807,20 +740,13 @@ public sealed class VortexDataset : IAsyncDisposable
             await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             return bytes;
         }
-
-        static List<Indexes.IndexSegment> Missing(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents)
-        {
-            List<Indexes.IndexSegment> regions = contents.Declared();
-            regions.RemoveAll(region => cache.Holds(entry.Uid, region));
-            return regions;
-        }
     }
 
     /// <summary>
     /// Reads the regions of one sealed object through a reader that keeps their frames, those the cache keeps
     /// from the disk, the rest from the store: the bytes it kept, its trailer and its frames as the store holds them.
     /// </summary>
-    private async Task<long> WarmSealedAsync(SynopsisCache cache, ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken)
+    private async Task<long> WarmSealedAsync(SynopsisCache cache, ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken)
     {
         if (SealedSynopsisCache.Over(cache, entry.Uid, contents) is not { } kept)
         {
@@ -830,9 +756,7 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken, kept).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            // The lists of the tables' chunks first: the chunks they name are regions it keeps too.
             ISegmentReader reader = Footerless(source, entry, contents);
-            await Indexes.SynopsisTableReader.LoadListsAsync(reader, contents, null, cancellationToken).ConfigureAwait(false);
             List<Indexes.IndexSegment> regions = contents.Declared();
             using SegmentRequestSet requests = new SegmentRequestSet(regions.Count);
             foreach (Indexes.IndexSegment region in regions)
@@ -934,14 +858,29 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ObjectDraft StartObjectUnder(
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool sliced = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
-        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, IReadOnlyList<string>? synopsis = null, long byteBound = -1)
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, bool blocked = false)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(
             _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes, byteBound);
-        VortexWriteOptions write = _options.Write.WithIdentity(identity) with { RowBound = rowBound, CarriesSlices = sliced };
+
+        VortexWriteOptions write = _options.Write.WithIdentity(identity) with
+        {
+            RowBound = rowBound,
+            CarriesSlices = sliced,
+            GatheredChunkBytes = _options.ChunkBytes,
+            GatheredGroupRows = _options.GroupRows,
+
+            // A sliced object, which a job writes, keeps a sheet of each column its table of contents names, when it is
+            // large enough for a scan to read the sheets before it, and the counts of each column over its rows.
+            ColumnSheetBytes = sliced ? _options.SheetObjectBytes : null,
+            Counted = sliced,
+
+            // An object a job writes in its key's order, in blocks, keeps each column's statistics over them.
+            Blocked = sliced && blocked,
+        };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
         // handle says so (DatasetOptions.ShredOnAppend), and nothing otherwise.
@@ -958,13 +897,6 @@ public sealed class VortexDataset : IAsyncDisposable
         if (directories is { Count: > 0 })
         {
             write = write with { VariantDirectories = directories };
-        }
-
-        // The synopsis columns lie together after the rest of the data, which a question that needs only
-        // them reads alone.
-        if (synopsis is { Count: > 0 })
-        {
-            write = write with { SynopsisColumns = synopsis };
         }
 
         if (_store is SealedObjectStore { Seals: true })
@@ -1005,11 +937,8 @@ public sealed class VortexDataset : IAsyncDisposable
 
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
 
-        // An object in sorted slices on a key of its instant alone is walked through its slice table,
-        // which finds a key's slice, and the slice's instants ranked: a run on the key would repeat
-        // them, with a row for each.
-        bool bySlices = sliced && schema.Key is { IsComposite: false };
-        if (schema.Key is { } clustering && !bySortedColumn && !bySlices)
+        // An object in key slices keeps its run, or its sorted column.
+        if (schema.Key is { } clustering && !bySortedColumn)
         {
             // The mandatory sorted run on the clustering key, added to the caller's own policy.
             write = clustering.Applied(write);
@@ -1019,7 +948,6 @@ public sealed class VortexDataset : IAsyncDisposable
         return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session))
         {
             BySortedColumn = bySortedColumn,
-            BySlices = bySlices,
         };
     }
 
@@ -1045,171 +973,74 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(draft);
         List<WrittenObject> written = await WrittenAsync(draft, cancellationToken).ConfigureAwait(false);
-        return written.Count > 0
-            ? await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false)
-            : Version;
+        if (written.Count == 0)
+        {
+            return Version;
+        }
+
+        ulong version = await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false);
+        await KeptUpAsync(written, cancellationToken).ConfigureAwait(false);
+        return version;
     }
 
+    /// <summary>How long a family this handle's questions asked is kept up: the objects it appends learn its partials as they are written.</summary>
+    internal static readonly TimeSpan KeptUpFor = TimeSpan.FromHours(1);
+
     /// <summary>
-    /// The objects an append of <paramref name="draft"/> adds: the draft's own, completed and put; or, when the
-    /// dataset has partition columns and its rows hold several values of them, an object per value, its rows read
-    /// back and split, the draft's object left for vacuum.
+    /// Learns, of each object an append wrote, the partial of each family this handle's questions asked in the last
+    /// <see cref="KeptUpFor"/> (<see cref="LearnedPartials.Asked"/>), as the object makes it (<see cref="FamilyProof"/>): the
+    /// family run over the object's rows as the append left them, so that a question of it answers the object with no read.
     /// </summary>
+    private async ValueTask KeptUpAsync(List<WrittenObject> written, CancellationToken cancellationToken)
+    {
+        List<Aggregating.LearnedFamily> live = Partials.Live(_options.TimeProvider.GetUtcNow().UtcTicks - KeptUpFor.Ticks);
+        if (live.Count == 0)
+        {
+            return;
+        }
+
+        DatasetSchema schema = Snapshot.Schema;
+        SynopsisCache? cache = Session.Options.SynopsisCache;
+        foreach (WrittenObject made in written)
+        {
+            ObjectEntry entry = made.Entry;
+            ObjectLease? lease = null;
+            try
+            {
+                foreach (Aggregating.LearnedFamily family in live)
+                {
+                    if (new FamilyProof(family, schema).Of(entry.Summaries, entry.PhysicalRows) is not { } own || Partials.Holds(entry.Uid, own.Key, cache))
+                    {
+                        continue;
+                    }
+
+                    lease ??= await RentAsync(entry, cancellationToken).ConfigureAwait(false);
+                    AggregationPartial partial = await own.Family.LearnAsync(
+                        new FileScanSource(lease.File), new RowRange(0, lease.File.RowCount), ScanOptions.Default, cancellationToken).ConfigureAwait(false);
+                    Partials.Keep(entry.Uid, own.Key, partial, cache);
+                }
+            }
+            finally
+            {
+                if (lease is not null)
+                {
+                    await lease.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+        }
+    }
+
+    /// <summary>The objects an append of <paramref name="draft"/> adds: the draft's own, completed and put.</summary>
     private async ValueTask<List<WrittenObject>> WrittenAsync(ObjectDraft draft, CancellationToken cancellationToken)
     {
         WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
-        return await ObservedAsync(written is { } produced ? await PartitionedAsync(produced, cancellationToken).ConfigureAwait(false) : [], cancellationToken)
-            .ConfigureAwait(false);
+        return written is { } produced ? [produced] : [];
     }
 
-    /// <summary>
-    /// Notes how late the rows of an append's objects came, refuses them when they come later than the horizon and the
-    /// handle says so, and hands them on.
-    /// </summary>
-    private async ValueTask<List<WrittenObject>> ObservedAsync(List<WrittenObject> written, CancellationToken cancellationToken)
-    {
-        foreach (WrittenObject produced in written)
-        {
-            ObserveLateness(produced);
-        }
-
-        await RefuseLateAsync(written, cancellationToken).ConfigureAwait(false);
-        return written;
-    }
-
-    /// <summary>
-    /// Refuses an append whose objects hold a row later than the lateness horizon, when the handle says so
-    /// (<see cref="PeriodOptions.RefuseLateRows"/>): a row of a period the newest instant its partition holds past
-    /// level 0 and the late level has closed. Nothing is committed, and the objects are left for vacuum.
-    /// </summary>
-    /// <exception cref="ArgumentException">An object holds such a row.</exception>
-    private async ValueTask RefuseLateAsync(List<WrittenObject> written, CancellationToken cancellationToken)
-    {
-        if (_options.Periods is not { RefuseLateRows: true } || Key is not { } key || written.Count == 0)
-        {
-            return;
-        }
-
-        DatasetSnapshot version = Snapshot;
-        TimeUnit unit = PeriodOptions.InstantOf(key);
-        PeriodCalendar calendar = PeriodCalendar.Of(version.Header, unit);
-        long horizon = TimeSlicer.Units(version.Header.Lateness ?? TimeSpan.Zero, unit);
-
-        // Only the objects whose instants may reach the earliest end of a period an appended row lies in, past the
-        // horizon, found by their summaries and their pages': an object short of it closes none of their periods, and a
-        // walk of every object read every page of the dataset at each append.
-        long earliest = long.MaxValue;
-        foreach (WrittenObject produced in written)
-        {
-            if (Instants(produced.Entry.Summaries, key) is { } appended)
-            {
-                earliest = Math.Min(earliest, calendar.Next(calendar.Floor(appended.Least)));
-            }
-        }
-
-        if (earliest == long.MaxValue)
-        {
-            return;
-        }
-
-        long reach = horizon > 0 && earliest > long.MaxValue - horizon ? long.MaxValue : earliest + horizon;
-        SummaryPruner closing = new SummaryPruner(Expr.Ge(Expr.Field(key.InstantPath), Expr.Literal(FilterLiteral.From(reach))));
-        Dictionary<string, long> newest = new Dictionary<string, long>(StringComparer.Ordinal);
-        await foreach (PositionedObject held in version.WalkAsync(closing, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
-        {
-            if (held.Level is not (0 or PeriodLevels.Late) && Instants(held.Entry.Summaries, key) is { } instants)
-            {
-                string partition = PartitionName(held.Entry.Summaries, key);
-                newest[partition] = Math.Max(newest.GetValueOrDefault(partition, long.MinValue), instants.Greatest);
-            }
-        }
-
-        foreach (WrittenObject produced in written)
-        {
-            if (Instants(produced.Entry.Summaries, key) is { } instants
-                && newest.TryGetValue(PartitionName(produced.Entry.Summaries, key), out long held)
-                && calendar.Next(calendar.Floor(instants.Least)) <= held - horizon)
-            {
-                throw new ArgumentException(
-                    $"The append holds rows from {TimeSlicer.TimeOf(instants.Least, unit):O}, of a period the dataset has closed: " +
-                    $"they come later than its lateness horizon of {version.Header.Lateness}, and this handle refuses such rows (PeriodOptions.RefuseLateRows).");
-            }
-        }
-    }
-
-    /// <summary>The least and the greatest instant an object's summaries state, or null.</summary>
-    private static (long Least, long Greatest)? Instants(ObjectSummaries summaries, ClusteringKey key) =>
-        summaries.TryGet(key.InstantPath, out ColumnSummary instant)
-            && instant is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
-            ? (instant.Min.SignedValue, instant.Max.SignedValue)
-            : null;
-
-    /// <summary>A name of the partition an object holds, empty without partition columns or when its summaries do not say it.</summary>
-    private static string PartitionName(ObjectSummaries summaries, ClusteringKey key) =>
-        key.PartitionOf(summaries) is { } values ? Convert.ToHexString(key.Encode(values)) : string.Empty;
-
-    /// <summary>
-    /// An object a writer of this dataset put, as the objects it stands for: itself, unless the dataset has partition
-    /// columns and its rows hold several values of them, an object per value then, its rows read back and split and
-    /// the object itself left for vacuum.
-    /// </summary>
-    internal async ValueTask<List<WrittenObject>> PartitionedAsync(WrittenObject produced, CancellationToken cancellationToken)
-    {
-        if (Key is not { PartitionColumns: > 0 } key || key.PartitionOf(produced.Entry.Summaries) is not null)
-        {
-            return [produced];
-        }
-
-        PartitionedAppend split = new PartitionedAppend(this, key, _options.MaxPartitionValues);
-        await using (split.ConfigureAwait(false))
-        {
-            ObjectLease lease = await RentAsync(produced.Entry, cancellationToken).ConfigureAwait(false);
-            await using (lease.ConfigureAwait(false))
-            {
-                await foreach (RecordBatch batch in lease.File.ScanBuilder().ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
-                {
-                    await split.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
-                }
-            }
-
-            return await WrittenAsync(split, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>The objects of a split append completed and put, an object per partition value its rows hold.</summary>
-    private async ValueTask<List<WrittenObject>> WrittenAsync(PartitionedAppend split, CancellationToken cancellationToken)
-    {
-        long end = await EndAsync(cancellationToken).ConfigureAwait(false);
-        List<WrittenObject> written = [];
-        foreach (ObjectDraft draft in split.Drafts)
-        {
-            if (await CompleteAsync(draft, end, cancellationToken).ConfigureAwait(false) is { } produced)
-            {
-                written.Add(produced);
-            }
-        }
-
-        return written;
-    }
-
-    /// <summary>The batches of an append, as one object, or one per partition value when the dataset has partition columns.</summary>
+    /// <summary>The batches of an append, as one object.</summary>
     private async ValueTask<List<WrittenObject>> WrittenAsync(IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken)
     {
-        if (Key is { PartitionColumns: > 0 } key)
-        {
-            PartitionedAppend split = new PartitionedAppend(this, key, _options.MaxPartitionValues);
-            await using (split.ConfigureAwait(false))
-            {
-                await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
-                {
-                    await split.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
-                }
-
-                return await ObservedAsync(await WrittenAsync(split, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
-            }
-        }
-
         ObjectDraft draft = StartObject();
         try
         {
@@ -1253,9 +1084,14 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(batches);
         List<WrittenObject> written = await WrittenAsync(batches, cancellationToken).ConfigureAwait(false);
-        return written.Count > 0
-            ? await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false)
-            : Version;
+        if (written.Count == 0)
+        {
+            return Version;
+        }
+
+        ulong version = await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false);
+        await KeptUpAsync(written, cancellationToken).ConfigureAwait(false);
+        return version;
     }
 
     /// <summary>
@@ -1654,59 +1490,55 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// Drops, in one commit and reading none of them, every object of a dataset of periods whose rows
-    /// all lie before <paramref name="before"/>, aligned down to the start of the period holding it.
-    /// </summary>
-    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
-    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
-    /// <returns>The cutoff applied: the start of the period holding <paramref name="before"/>.</returns>
-    /// <exception cref="InvalidOperationException">The dataset declares no periods (<see cref="DatasetOptions.Periods"/>).</exception>
-    /// <remarks>
-    /// A row may outlive the cutoff by up to a period, the one that holds it, and an object of level 0
-    /// that straddles it stays until compaction cuts it by period. What drops a row exactly is
-    /// <see cref="DeleteAsync(VortexExpr, CancellationToken)"/>, which opens the objects it touches.
-    /// </remarks>
-    public ValueTask<DateTimeOffset> ExpireAsync(DateTimeOffset before, CancellationToken cancellationToken = default) =>
-        DatasetExpiry.RunAsync(this, null, before, cancellationToken);
-
-    /// <summary>
-    /// Drops, in one commit and reading none of them, every object of the partitions <paramref name="partition"/> keeps
-    /// whose rows all lie before <paramref name="before"/>, aligned down to the start of the period holding it:
-    /// <c>dataset.ExpireAsync&lt;Logged&gt;(r =&gt; r.Retention == "debug", now - TimeSpan.FromDays(7))</c>.
+    /// Drops, in one commit and reading none of them, every object whose rows <paramref name="filter"/> is true for, as
+    /// the bounds its entry states prove: what a delete of those rows does to such an object, with no other opened.
     /// </summary>
     /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
-    /// <param name="partition">A filter on the partition columns alone, each compared with values.</param>
-    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
+    /// <param name="filter">A lambda over the record's columns: <c>r =&gt; r.At &lt; cutoff</c>.</param>
     /// <param name="cancellationToken">Cancels the walk and the commit.</param>
-    /// <returns>The cutoff applied: the start of the period holding <paramref name="before"/>.</returns>
-    /// <exception cref="InvalidOperationException">The dataset declares no periods, or no partition columns (<see cref="DatasetOptions.PartitionColumns"/>).</exception>
-    /// <exception cref="ArgumentException">The filter reads another column, or reads the partition columns otherwise than compared with values: a delete, not an expiry.</exception>
+    /// <returns>
+    /// The version created and the rows dropped; <see cref="OperationOutcome.AlreadyThere"/> and the version the handle
+    /// held when the filter covers no object whole.
+    /// </returns>
     /// <remarks>
-    /// Each partition holds its own periods, so the objects of the partitions the filter keeps hold no row of another,
-    /// and their entries say which partition they hold: nothing is read but the version's pages.
+    /// <para>
+    /// The rows of an object the filter does not cover whole stay, those of an object of level 0 that straddles its bound
+    /// among them, until an expiry finds them in objects it covers; a delete takes them as well, at the price of the
+    /// objects it opens. Under a clustering value (<see cref="DatasetOptions.Clustering"/>), every object above level 0
+    /// holds rows of one value, so a filter that keeps the values from one on covers whole objects: <c>r =&gt; r.At &lt;
+    /// day</c>, on objects cut at every midnight, drops every day before <c>day</c>, and a row outlives the filter by a
+    /// value at most.
+    /// </para>
+    /// <para>
+    /// An object's bounds are those of its summaries, which a number and a time have and a text has not: a filter on a
+    /// text covers no object.
+    /// </para>
     /// </remarks>
-    public ValueTask<DateTimeOffset> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate> partition, DateTimeOffset before, CancellationToken cancellationToken = default)
+    /// <exception cref="VortexSchemaException">A literal or a column of the filter does not fit the dataset.</exception>
+    /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this expiry would drop on every attempt.</exception>
+    public ValueTask<RowChangeResult> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate> filter, CancellationToken cancellationToken = default)
         where TRecord : IVortexRecord<TRecord>
     {
-        ArgumentNullException.ThrowIfNull(partition);
-        Predicate predicate = partition(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
-        return DatasetExpiry.RunAsync(this, predicate.IsAll || predicate.IsNone ? null : Checked(predicate.Node), before, cancellationToken, removes: !predicate.IsNone);
+        ArgumentNullException.ThrowIfNull(filter);
+        Predicate predicate = filter(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
+        return predicate.IsNone
+            ? ValueTask.FromResult(Unchanged())
+            : DatasetRowChanges.ExpireAsync(this, Checked(predicate.Node), cancellationToken);
     }
 
     /// <summary>
-    /// As <see cref="ExpireAsync{TRecord}(Func{Probe{TRecord}, Predicate}, DateTimeOffset, CancellationToken)"/>, for a
-    /// caller without a record type.
+    /// Drops the objects <paramref name="filter"/> covers whole, for a caller without a record type; see
+    /// <see cref="ExpireAsync{TRecord}(Func{Probe{TRecord}, Predicate}, CancellationToken)"/>.
     /// </summary>
-    /// <param name="partition">A filter on the partition columns alone, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
-    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
+    /// <param name="filter">The filter, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
     /// <param name="cancellationToken">Cancels the walk and the commit.</param>
-    /// <returns>The cutoff applied.</returns>
-    /// <exception cref="InvalidOperationException">The dataset declares no periods, or no partition columns.</exception>
-    /// <exception cref="ArgumentException">The filter is not one of the partition columns compared with values.</exception>
-    public ValueTask<DateTimeOffset> ExpireAsync(VortexExpr partition, DateTimeOffset before, CancellationToken cancellationToken = default)
+    /// <returns>The version created and the rows dropped.</returns>
+    /// <exception cref="VortexSchemaException">The filter names a column the dataset does not have, or compares one with a literal of a type it cannot compare to.</exception>
+    /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this expiry would drop on every attempt.</exception>
+    public ValueTask<RowChangeResult> ExpireAsync(VortexExpr filter, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(partition);
-        return DatasetExpiry.RunAsync(this, Checked(ToolPaths.Check(Schema, partition)), before, cancellationToken);
+        ArgumentNullException.ThrowIfNull(filter);
+        return DatasetRowChanges.ExpireAsync(this, Checked(ToolPaths.Check(Schema, filter)), cancellationToken);
     }
 
     /// <summary>
@@ -1922,8 +1754,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The version created, which this handle now reads; the one it held when the dataset has every identifier already.</returns>
     /// <remarks>
     /// A lookup of an added identifier reads an object written since by its postings, and one written before as a scan
-    /// reads any object, its rows found all the same, until a compaction rewrites it: a period already sealed, which no
-    /// job takes again, is read so until the retention lets it go. Two writers that add one identifier each keep both.
+    /// reads any object, its rows found all the same, until a compaction rewrites it: an object no job takes again, one of the
+    /// last level, is read so until an expiry drops it. Two writers that add one identifier each keep both.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="identifiers"/> is null.</exception>
     /// <exception cref="ArgumentException">An identifier names neither a column of the schema nor such a key, or is named twice.</exception>
@@ -2018,6 +1850,17 @@ public sealed class VortexDataset : IAsyncDisposable
             ? await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false)
             : null;
     }
+
+    /// <summary>
+    /// Sums the counts of the deepest level's objects into rollups, rank by rank, where the latest version holds none yet:
+    /// runs of about <see cref="DatasetOptions.RollupFanout"/> consecutive objects, then of as many rollups, each summed
+    /// from what its children keep, with no row read. A question over a long range of the key then reads a rollup where it
+    /// would read the counts of its objects. A commit that puts or takes away an object takes away the rollups over it,
+    /// which a later call sums again; <see cref="RunCompactionAsync"/> calls this when no job is due.
+    /// </summary>
+    /// <param name="cancellationToken">Stops the work between rollups or inside one; a rollup written and not put is swept by a vacuum.</param>
+    /// <returns>The rollups put.</returns>
+    public ValueTask<int> RollUpAsync(CancellationToken cancellationToken = default) => DatasetRollups.RollUpAsync(this, cancellationToken);
 
     /// <summary>
     /// Runs compaction in the background until <paramref name="cancellationToken"/> is cancelled:
@@ -2216,24 +2059,14 @@ public sealed class VortexDataset : IAsyncDisposable
             await ((SealedObjectStore)store).StartSealedAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        if (options.PartitionColumns > 0 && options.Periods is null)
-        {
-            throw new ArgumentException(
-                "Partition columns split a dataset compacted by periods, each partition growing its own: declare DatasetOptions.Periods with them.",
-                nameof(options));
-        }
-
-        ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey, options.PartitionColumns);
+        ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
         DatasetFeatures features = options.ErasureDelay is null ? DatasetFeatures.None : DatasetFeatures.ErasureDelay;
-        if (options.Periods is not null)
+        if (options.Clustering is { } clustering)
         {
-            _ = PeriodOptions.InstantOf(key);
-            features |= DatasetFeatures.Periods;
-        }
-
-        if (options.PartitionColumns > 0)
-        {
-            features |= DatasetFeatures.Partitions;
+            // Resolved once here, so that a value the key's first column does not take is refused before anything is written.
+            _ = ValueCut.Of(clustering, key);
+            _ = ValueCut.OfBlocks(clustering, key);
+            features |= DatasetFeatures.Clustering;
         }
 
         string[] declared = [];
@@ -2262,11 +2095,9 @@ public sealed class VortexDataset : IAsyncDisposable
                 : options.Compaction,
             LockedStore = options.LockedStore,
             ErasureDelay = options.ErasureDelay,
-            Lateness = options.Periods?.Lateness,
-            PeriodLength = options.Periods?.Length,
-            PartitionColumns = options.PartitionColumns,
             Identifiers = declared,
             ShreddedPaths = shredded,
+            Clustering = options.Clustering,
             Features = features,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
@@ -2472,27 +2303,17 @@ public sealed class VortexDataset : IAsyncDisposable
     internal LevelZeroMemo LevelZero { get; } = new LevelZeroMemo();
 
     /// <summary>
-    /// The chunks of the synopsis tables of the object <paramref name="entry"/> names that <paramref name="wanted"/>
-    /// keeps, every one when it is null, read with no open of the object: the regions its entry's table of
-    /// contents names, in one round trip. Null when the entry carries no table of contents this library reads.
+    /// The deepest level's root and the tree of rollups' root as this handle's last <see cref="RollUpAsync"/> left them: a
+    /// call that finds both where they were has nothing to sum, and walks nothing.
     /// </summary>
-    internal async ValueTask<Indexes.SynopsisTableSet?> ReadSynopsisAsync(
-        ObjectEntry entry, Indexes.ISynopsisReads? wanted, CancellationToken cancellationToken)
-    {
-        if (entry.Contents is not { } contents)
-        {
-            return null;
-        }
-
-        return await ReadSynopsisAsync(entry, contents, wanted, cancellationToken).ConfigureAwait(false);
-    }
+    internal (PageReference Bottom, PageReference Rollups)? RolledUp { get; set; }
 
     /// <summary>
     /// The store's reader of an object read with no open of it, which the caller disposes: a sealed object's
     /// keeps its trailer and the frames of the regions its table of contents declares in the session's synopsis
     /// cache, the bytes the store holds.
     /// </summary>
-    private ValueTask<ISegmentReader> OpenFooterlessAsync(ObjectEntry entry, Indexes.SynopsisContents contents, CancellationToken cancellationToken) =>
+    private ValueTask<ISegmentReader> OpenFooterlessAsync(ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken) =>
         SealedObjectStore.OpenDataAsync(
             _store, entry.Key, entry.Uid, entry.Bytes, cancellationToken,
             _store is SealedObjectStore { Seals: true } ? SealedSynopsisCache.Over(Session.Options.SynopsisCache, entry.Uid, contents) : null);
@@ -2502,90 +2323,16 @@ public sealed class VortexDataset : IAsyncDisposable
     /// session's, through the session's synopsis cache for the regions the object's table of contents declares
     /// when the object is plain. A sealed object's reader decrypts what its cache keeps, which holds no plaintext.
     /// </summary>
-    private ISegmentReader Footerless(ISegmentReader source, ObjectEntry entry, Indexes.SynopsisContents contents) =>
+    private ISegmentReader Footerless(ISegmentReader source, ObjectEntry entry, Indexes.ObjectContents contents) =>
         SessionReader.Wrap(
             source is ObjectStoreSource ? SynopsisCacheReader.Over(source, Session.Options.SynopsisCache, entry.Uid, contents) : source,
             Session);
 
     /// <summary>
-    /// Loads, for each object of <paramref name="answered"/>, the lists of the chunks of the tables its answer reads, every
-    /// table without one, that its entry names apart (<see cref="Indexes.SynopsisContents.TableChunks.List"/>): from the
-    /// session's synopsis cache when it holds them, the others from the store, an object's in one round trip and the objects
-    /// side by side, as many as the session lets reads be in flight. A question weighs and cuts its answers by their chunks,
-    /// before it reads one.
-    /// </summary>
-    internal async ValueTask LoadSynopsisListsAsync(
-        IReadOnlyList<(ObjectEntry Entry, Indexes.SynopsisContents Contents, Indexes.ISynopsisReads? Reads)> answered, CancellationToken cancellationToken)
-    {
-        List<Task>? loads = null;
-        foreach ((ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? reads) in answered)
-        {
-            // Lists another question loaded since the answer was made are news to it as well.
-            if (!contents.HasUnloaded(reads))
-            {
-                reads?.Loaded(contents);
-                continue;
-            }
-
-            if (Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
-                && Indexes.SynopsisTableReader.LoadListsHeld(cache, entry.Uid, contents, reads))
-            {
-                continue;
-            }
-
-            (loads ??= []).Add(LoadAsync(entry, contents, reads));
-        }
-
-        if (loads is not null)
-        {
-            await Task.WhenAll(loads).ConfigureAwait(false);
-        }
-
-        async Task LoadAsync(ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? reads)
-        {
-            ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-            await using (source.ConfigureAwait(false))
-            {
-                await Indexes.SynopsisTableReader.LoadListsAsync(Footerless(source, entry, contents), contents, reads, cancellationToken).ConfigureAwait(false);
-            }
-        }
-    }
-
-    /// <summary>
-    /// The chunks <see cref="ReadSynopsisAsync(ObjectEntry, Indexes.SynopsisContents, Indexes.ISynopsisReads?, CancellationToken)"/>
-    /// reads, when the session's synopsis cache holds every one of a plain object: read from the disk on the spot, with no
-    /// reader opened; null when one is not there, or the object is sealed.
-    /// </summary>
-    internal Indexes.SynopsisTableSet? ReadSynopsisCached(ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted) =>
-        Session.Options.SynopsisCache is { } cache && entry.Uid != UInt128.Zero && _store is not SealedObjectStore { Seals: true }
-            ? Indexes.SynopsisTableReader.ReadHeld(cache, entry.Uid, contents, wanted, SynopsisContexts.Shared, null)
-            : null;
-
-    /// <summary>
-    /// As <see cref="ReadSynopsisAsync(ObjectEntry, Indexes.ISynopsisReads?, CancellationToken)"/>, with the entry's
-    /// table of contents already read: <paramref name="wanted"/> is asked of its tables, and of the fields of their rows.
-    /// </summary>
-    internal async ValueTask<Indexes.SynopsisTableSet> ReadSynopsisAsync(
-        ObjectEntry entry, Indexes.SynopsisContents contents, Indexes.ISynopsisReads? wanted, CancellationToken cancellationToken)
-    {
-        if (ReadSynopsisCached(entry, contents, wanted) is { } cached)
-        {
-            return cached;
-        }
-
-        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-        await using (source.ConfigureAwait(false))
-        {
-            return await Indexes.SynopsisTableReader.ReadAsync(
-                Footerless(source, entry, contents), contents, wanted, SynopsisContexts.Shared, null, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
     /// Whether an index on the column of a field of <paramref name="schema"/>'s root is one <paramref name="filter"/> may
-    /// read, by the columns it names, their first field from the root; none on the root itself, the synopsis tables and the
-    /// slices' chunks, whose runs a lookup parsed at every question for nothing; null, every one, when a name is none of
-    /// the schema's or past the 64th field.
+    /// read, by the columns it names, their first field from the root; none on the root itself, the slices' chunks,
+    /// whose runs a lookup parsed at every question for nothing; null, every one, when a name is none of the schema's or
+    /// past the 64th field.
     /// </summary>
     private static Func<uint, bool>? ColumnsOf(VortexExpr filter, DType schema)
     {
@@ -2644,7 +2391,8 @@ public sealed class VortexDataset : IAsyncDisposable
             // The directory's entries on the columns the filter reads alone: its runs' segments were a list each, every
             // index of the object parsed at every lookup, three fifths of what a question that leaves an identifier out
             // allocated. Read alone, those of the locating indexes, when the contents name them apart: the whole directory
-            // of a day's object, every chunk of its synopsis tables in it, was 11.5 MB a lookup read for a few runs.
+            // of a day's object, when it named every chunk of the synopsis tables of the time, was 11.5 MB a lookup read for a
+            // few runs.
             DType schema = contents.SchemaType;
             Func<uint, bool>? indexed = ColumnsOf(filter, schema);
             List<Indexes.IndexSegment>? named = Named(contents, indexed);
@@ -2769,10 +2517,10 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// The regions of the entries of the locating indexes on the columns <paramref name="indexed"/> keeps, every one when it
-    /// is null, that <paramref name="contents"/> name (<see cref="Indexes.SynopsisContents.Locating"/>); null when they name
+    /// is null, that <paramref name="contents"/> name (<see cref="Indexes.ObjectContents.Locating"/>); null when they name
     /// none, and a lookup reads the whole directory.
     /// </summary>
-    private static List<Indexes.IndexSegment>? Named(Indexes.SynopsisContents contents, Func<uint, bool>? indexed)
+    private static List<Indexes.IndexSegment>? Named(Indexes.ObjectContents contents, Func<uint, bool>? indexed)
     {
         if (contents.Locating is not { Count: > 0 } locating)
         {
@@ -2791,11 +2539,427 @@ public sealed class VortexDataset : IAsyncDisposable
         return regions;
     }
 
+    /// <summary>The synopses this handle read, its objects' column sheets, counts and sketches, by object and region (<see cref="ReadSynopsesAsync"/>).</summary>
+    private readonly SynopsisMemo _synopses = new SynopsisMemo();
+
+    /// <summary>The partials this handle learned of its objects' families, kept in memory and in the session's cache (<see cref="LearnedPartials"/>).</summary>
+    internal LearnedPartials Partials { get; } = new LearnedPartials();
+
+    /// <summary>The batches where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
+    internal PredicatePages Predicates { get; } = new PredicatePages();
+
+    /// <summary>What a clustering of each column the filters of this handle's questions read would have spared them (<see cref="ClusteringAdvisor"/>).</summary>
+    internal ClusteringAdvisor Advisor { get; } = new ClusteringAdvisor();
+
+    /// <summary>
+    /// The columns a clustering by which would have spared the questions this handle asked the most bytes, the most first: of
+    /// each object read as rows under a filter, its bytes of the columns read, by the cost formula, times the share of its rows
+    /// the filter left out, credited to each top-level column the filter reads but the key's first. A diagnostic, which
+    /// the telemetry counts too (<c>vortex.dataset.clustering.avoidable_bytes</c>, by column): the library never clusters by
+    /// a column on its own, a clustering being declared when the dataset is created.
+    /// </summary>
+    /// <returns>The columns credited, ranked; empty before a question read an object as rows under a filter.</returns>
+    public IReadOnlyList<ClusteringAdvice> RecommendClustering() => Advisor.Ranked();
+
+    /// <summary>A synopsis read from the bytes of the region at <paramref name="position"/> of those asked, and the bytes it holds in memory.</summary>
+    private delegate (object Synopsis, long Bytes) SynopsisReader(int position, ReadOnlySpan<byte> bytes);
+
+    /// <summary>
+    /// The sheets of columns <paramref name="fields"/> of the object <paramref name="entry"/> names, by their position in
+    /// <paramref name="fields"/>, read with no open of the object: the regions its entry's table of contents names, in
+    /// one round trip, none once the session's cache holds them, and none once this handle read them. A column the object
+    /// keeps no sheet of, or an object with no table of contents this library reads, has none.
+    /// </summary>
+    internal async ValueTask<Indexes.ColumnSheet?[]> ReadSheetsAsync(ObjectEntry entry, IReadOnlyList<int> fields, CancellationToken cancellationToken)
+    {
+        Indexes.ColumnSheet?[] sheets = new Indexes.ColumnSheet?[fields.Count];
+        if (entry.Contents is not { Sheets.Count: > 0 } contents)
+        {
+            return sheets;
+        }
+
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[fields.Count];
+        for (int i = 0; i < fields.Count; i++)
+        {
+            regions[i] = contents.SheetOf(fields[i]);
+        }
+
+        await ReadSynopsesAsync(entry, contents, regions, sheets, static (_, bytes) => (Indexes.ColumnSheet.From(bytes), bytes.Length), cancellationToken)
+            .ConfigureAwait(false);
+        return sheets;
+    }
+
+    /// <summary>
+    /// The counts of column <paramref name="field"/> of the object <paramref name="entry"/> names, and when
+    /// <paramref name="sketches"/> asks their sketches, read with no open of the object: the regions its entry's table of
+    /// contents names, side by side in one round trip, none once this handle read them. A column the object keeps no
+    /// counts or sketches of, or an object with no table of contents this library reads, has none.
+    /// </summary>
+    internal async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadCountsAsync(
+        ObjectEntry entry, int field, bool sketches, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { Counts.Count: > 0 } contents)
+        {
+            return (null, null);
+        }
+
+        object?[] read = new object?[2];
+        Indexes.IndexSegment?[] regions = [contents.CountsOf(field), sketches ? contents.SketchesOf(field) : null];
+        await ReadSynopsesAsync(entry, contents, regions, read, CountsOrSketches, cancellationToken).ConfigureAwait(false);
+        return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
+    }
+
+    /// <summary>
+    /// The counts of every column the object <paramref name="entry"/> names keeps them of, by the column's place, read as
+    /// <see cref="ReadCountsAsync"/> reads one's, side by side in one round trip; null when it keeps none, or one of them
+    /// does not read.
+    /// </summary>
+    internal async ValueTask<IReadOnlyList<(int Field, Indexes.ColumnCounts Counts)>?> ReadEveryCountsAsync(
+        ObjectEntry entry, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { Counts.Count: > 0 } contents)
+        {
+            return null;
+        }
+
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[contents.Counts.Count];
+        for (int i = 0; i < regions.Length; i++)
+        {
+            regions[i] = contents.Counts[i].Region;
+        }
+
+        object?[] read = new object?[regions.Length];
+        await ReadSynopsesAsync(entry, contents, regions, read, static (_, bytes) => CountsOrSketches(0, bytes), cancellationToken).ConfigureAwait(false);
+        (int Field, Indexes.ColumnCounts Counts)[] counted = new (int Field, Indexes.ColumnCounts Counts)[regions.Length];
+        for (int i = 0; i < regions.Length; i++)
+        {
+            if (read[i] is not Indexes.ColumnCounts counts)
+            {
+                return null;
+            }
+
+            counted[i] = (contents.Counts[i].Field, counts);
+        }
+
+        return counted;
+    }
+
+    /// <summary>
+    /// The blocks of the object <paramref name="entry"/> names (<see cref="Indexes.BlockTable"/>), on its key's first
+    /// column <paramref name="field"/>, read with no open of the object: the region its entry's table of contents names, none
+    /// once this handle read it. An object that keeps none, or whose table of contents this library does not read, has none.
+    /// </summary>
+    internal async ValueTask<Indexes.BlockTable?> ReadBlocksAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
+    {
+        if (entry.Contents is not { Blocks.Count: > 0 } contents)
+        {
+            return null;
+        }
+
+        object?[] read = new object?[1];
+        await ReadSynopsesAsync(entry, contents, [contents.BlocksOf(field)], read, static (_, bytes) => Indexes.BlockTable.From(bytes) is { } table
+            ? (table, table.Bytes)
+            : throw new VortexFormatException("The blocks of an object do not decode as a table of blocks."), cancellationToken).ConfigureAwait(false);
+        return read[0] as Indexes.BlockTable;
+    }
+
+    /// <summary>
+    /// Where the values of columns <paramref name="fields"/> of the object <paramref name="entry"/> names live
+    /// (<see cref="Indexes.ColumnWhere"/>), and with <paramref name="stats"/> each one's statistics over the object's blocks
+    /// (<see cref="Indexes.ColumnBlocks"/>), by their position in <paramref name="fields"/>, read with no open of the object:
+    /// the regions its entry's table of contents names, side by side in one round trip, a column's statistics right after
+    /// its index, none once this handle read them. A column the object keeps none of has none.
+    /// </summary>
+    internal async ValueTask<(Indexes.ColumnWhere? Where, Indexes.ColumnBlocks? Blocks)[]> ReadBlockColumnsAsync(
+        ObjectEntry entry, IReadOnlyList<int> fields, bool stats, CancellationToken cancellationToken)
+    {
+        (Indexes.ColumnWhere?, Indexes.ColumnBlocks?)[] columns = new (Indexes.ColumnWhere?, Indexes.ColumnBlocks?)[fields.Count];
+        if (entry.Contents is not { BlockStats.Count: > 0 } contents)
+        {
+            return columns;
+        }
+
+        object?[] read = new object?[2 * fields.Count];
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[read.Length];
+        for (int i = 0; i < fields.Count; i++)
+        {
+            regions[2 * i] = contents.WhereOf(fields[i]);
+            regions[(2 * i) + 1] = stats ? contents.BlockStatsOf(fields[i]) : null;
+        }
+
+        await ReadSynopsesAsync(entry, contents, regions, read, WhereOrBlocks, cancellationToken).ConfigureAwait(false);
+        for (int i = 0; i < fields.Count; i++)
+        {
+            columns[i] = (read[2 * i] as Indexes.ColumnWhere, read[(2 * i) + 1] as Indexes.ColumnBlocks);
+        }
+
+        return columns;
+    }
+
+    /// <summary>Where a column's values live, at an even position, or its statistics over the blocks, at an odd one, and the bytes they hold in memory.</summary>
+    private static (object Synopsis, long Bytes) WhereOrBlocks(int position, ReadOnlySpan<byte> bytes)
+    {
+        if (position % 2 == 0)
+        {
+            Indexes.ColumnWhere where = Indexes.ColumnWhere.From(bytes)
+                ?? throw new VortexFormatException("Where an object's values live does not decode as an index of them.");
+            return (where, where.Bytes);
+        }
+
+        Indexes.ColumnBlocks blocks = Indexes.ColumnBlocks.From(bytes)
+            ?? throw new VortexFormatException("A column's statistics over an object's blocks do not decode as statistics.");
+        return (blocks, blocks.Bytes);
+    }
+
+    /// <summary>The counts, at the first position, or their sketches, at the second, and the bytes they hold in memory.</summary>
+    private static (object Synopsis, long Bytes) CountsOrSketches(int position, ReadOnlySpan<byte> bytes)
+    {
+        if (position == 0)
+        {
+            Indexes.ColumnCounts counts = Indexes.ColumnCounts.From(bytes);
+            return (counts, counts.Bytes);
+        }
+
+        Indexes.ColumnSketches sketches = Indexes.ColumnSketches.From(bytes);
+        return (sketches, sketches.Bytes);
+    }
+
+    /// <summary>
+    /// Reads into <paramref name="synopses"/>, by their position, the synopses of <paramref name="regions"/> of the object
+    /// <paramref name="entry"/> names, each as <paramref name="reader"/> reads its bytes: those this handle read before
+    /// from its memo, the others with no open of the object, side by side in one round trip, none once the session's cache
+    /// holds them, and kept. A region null, or whose bytes fail their checksum, reads none.
+    /// </summary>
+    private ValueTask ReadSynopsesAsync(
+        ObjectEntry entry, Indexes.ObjectContents contents, Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader,
+        CancellationToken cancellationToken) =>
+        Recalled(entry.Uid, regions, synopses) == 0 ? default : ReadUnheldAsync(entry, contents, regions, synopses, reader, cancellationToken);
+
+    /// <summary>
+    /// <see cref="ReadSynopsesAsync"/>'s regions its memo does not hold, apart so that a call that reads none builds no
+    /// opener: a closure over its parameters would be built as the call starts.
+    /// </summary>
+    private ValueTask ReadUnheldAsync(
+        ObjectEntry entry, Indexes.ObjectContents contents, Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader,
+        CancellationToken cancellationToken) =>
+        ReadRegionsAsync(
+            entry.Uid, ct => OpenFooterlessAsync(entry, contents, ct), source => Footerless(source, entry, contents), regions, synopses, reader, cancellationToken);
+
+    /// <summary>
+    /// A region of a rollup's counts that a reader of some values reads by its header, then their chunks, holds more than
+    /// this many chunks past its header: a smaller one is read whole, in the one request the header alone would take.
+    /// </summary>
+    internal const int PartialChunks = 4;
+
+    /// <summary>The bit that keys a region's header in the memo apart from the region read whole, which starts where it does.</summary>
+    private const ulong HeadKey = 1UL << 63;
+
+    /// <summary>
+    /// The counts of column <paramref name="field"/> a rollup (<see cref="RollupEntry"/>) keeps over its objects, and when
+    /// <paramref name="sketches"/> asks their sketches, side by side in one round trip with no open, none once this handle
+    /// read them: (null, null) for a column it keeps none of, or whose bytes fail a checksum. Its counts by bucket in
+    /// place of its totals under <paramref name="buckets"/>. Under <paramref name="values"/>, the values a question reads
+    /// alone, a large region (<see cref="ReadsInPart"/>) gives the groups of the chunks that hold them alone, read after its
+    /// header (<see cref="ReadRollupValuesAsync"/>).
+    /// </summary>
+    internal async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadRollupCountsAsync(
+        RollupEntry rollup, int field, bool sketches, IReadOnlyList<byte[]>? values, bool buckets, CancellationToken cancellationToken)
+    {
+        if (rollup.ColumnOf(field) is not { } column || column.Regions(buckets) is not ({ } counted, var sketched, _, _))
+        {
+            return (null, null);
+        }
+
+        if (ReadsInPart(column, sketches, values, buckets) && !_synopses.TryGet(rollup.Uid, counted.Offset, out Indexes.ColumnCounts? _))
+        {
+            return await ReadRollupValuesAsync(rollup, column, sketches, values!, buckets, cancellationToken).ConfigureAwait(false);
+        }
+
+        object?[] read = new object?[2];
+        Indexes.IndexSegment?[] regions = [counted, sketches ? sketched : null];
+        if (Recalled(rollup.Uid, regions, read, 0) > 0)
+        {
+            await ReadRollupRegionsAsync(rollup, regions, read, CountsOrSketches, 0, cancellationToken).ConfigureAwait(false);
+        }
+
+        return (read[0] as Indexes.ColumnCounts, read[1] as Indexes.ColumnSketches);
+    }
+
+    /// <summary>
+    /// Whether a reader of <paramref name="values"/> alone reads the totals <paramref name="column"/>, or its counts by
+    /// bucket under <paramref name="buckets"/>, by their header, then the chunks that hold them: counts of more than
+    /// <see cref="PartialChunks"/> chunks, each chunk and the header checksummed, and their sketches too when
+    /// <paramref name="sketches"/> asks them.
+    /// </summary>
+    internal static bool ReadsInPart(RollupColumn column, bool sketches, IReadOnlyList<byte[]>? values, bool buckets) =>
+        values is not null && column.Regions(buckets) is ({ } counts, var sketched, int countsHead, int sketchesHead)
+        && countsHead > 0 && counts.Length - countsHead > PartialChunks * Indexes.ColumnCounts.ChunkBytes
+        && (!sketches || sketched is null || sketchesHead > 0);
+
+    /// <summary>
+    /// The groups of <paramref name="values"/> in a rollup's totals <paramref name="column"/>, or its counts by bucket under
+    /// <paramref name="buckets"/>, and when <paramref name="sketches"/> asks their sketches: the headers side by side in a
+    /// round trip, then the chunks that hold
+    /// the values and their entries' sketches in another, each checked against its checksum, none once this handle read
+    /// them. The counts hold those chunks' groups alone, their entries from 0, and the sketches as many entries; (null,
+    /// null) when a header or a chunk fails its checksum.
+    /// </summary>
+    private async ValueTask<(Indexes.ColumnCounts? Counts, Indexes.ColumnSketches? Sketches)> ReadRollupValuesAsync(
+        RollupEntry rollup, RollupColumn column, bool sketches, IReadOnlyList<byte[]> values, bool buckets, CancellationToken cancellationToken)
+    {
+        (Indexes.IndexSegment? regionOfCounts, Indexes.IndexSegment? regionOfSketches, int countsHead, int sketchesHead) = column.Regions(buckets);
+        Indexes.IndexSegment counted = regionOfCounts!.Value;
+        Indexes.IndexSegment? sketched = sketches ? regionOfSketches : null;
+        try
+        {
+            object?[] heads = new object?[2];
+            Indexes.IndexSegment?[] headRegions =
+            [
+                new Indexes.IndexSegment(counted.Offset, (uint)countsHead, 0),
+                sketched is { } region ? new Indexes.IndexSegment(region.Offset, (uint)sketchesHead, 0) : null,
+            ];
+            if (Recalled(rollup.Uid, headRegions, heads, HeadKey) > 0)
+            {
+                await ReadRollupRegionsAsync(rollup, headRegions, heads, Directories, HeadKey, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (heads[0] is not Indexes.CountsDirectory directory || (sketched is not null && heads[1] is not Indexes.SketchesDirectory)
+                || (directory.Groups > 0 && directory.Chunks.Count == 0))
+            {
+                return (null, null);
+            }
+
+            // The chunks of the values asked, then those of the sketches of every entry they hold.
+            Indexes.SketchesDirectory? sketchDirectory = heads[1] as Indexes.SketchesDirectory;
+            List<int> chunks = Indexes.ColumnCounts.ChunksOf(directory, values, leading: false);
+            List<int> sketchChunks = sketchDirectory is null ? [] : Indexes.ColumnSketches.ChunksOf(sketchDirectory, Indexes.ColumnCounts.EntriesOf(directory, chunks));
+            Indexes.IndexSegment?[] pieces = new Indexes.IndexSegment?[chunks.Count + sketchChunks.Count];
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                Indexes.CountsChunk chunk = directory.Chunks[chunks[i]];
+                pieces[i] = new Indexes.IndexSegment(counted.Offset + (ulong)(directory.HeaderBytes + chunk.Offset), (uint)chunk.Length, 0);
+            }
+
+            for (int i = 0; i < sketchChunks.Count; i++)
+            {
+                (int offset, int length, _, _) = sketchDirectory!.Chunks[sketchChunks[i]];
+                pieces[chunks.Count + i] = new Indexes.IndexSegment(sketched!.Value.Offset + (ulong)(sketchDirectory.HeaderBytes + offset), (uint)length, 0);
+            }
+
+            object?[] read = new object?[pieces.Length];
+            if (Recalled(rollup.Uid, pieces, read, 0) > 0)
+            {
+                await ReadRollupRegionsAsync(rollup, pieces, read, Raw, 0, cancellationToken).ConfigureAwait(false);
+            }
+
+            ReadOnlyMemory<byte>[] bytes = new ReadOnlyMemory<byte>[read.Length];
+            for (int i = 0; i < read.Length; i++)
+            {
+                bytes[i] = read[i] as byte[] ?? throw new VortexFormatException("A chunk of a rollup's counts read no bytes.");
+            }
+
+            Indexes.ColumnCounts counts = Indexes.ColumnCounts.FromChunks(directory, chunks, bytes.AsSpan(0, chunks.Count).ToArray(), out int[] entries);
+            return (counts, sketchDirectory is null ? null : Indexes.ColumnSketches.FromEntries(sketchDirectory, sketchChunks, bytes[chunks.Count..], entries));
+        }
+        catch (VortexFormatException)
+        {
+            // A header or a chunk that fails its checksum reads none, as a region read whole does.
+            return (null, null);
+        }
+    }
+
+    /// <summary>The directory of a rollup's totals, at the first position, or of their sketches, at the second.</summary>
+    private static (object Synopsis, long Bytes) Directories(int position, ReadOnlySpan<byte> bytes) =>
+        position == 0 ? (Indexes.ColumnCounts.ReadDirectory(bytes), bytes.Length) : (Indexes.ColumnSketches.ReadDirectory(bytes), bytes.Length);
+
+    /// <summary>A chunk's bytes, which its directory checks once read.</summary>
+    private static (object Synopsis, long Bytes) Raw(int position, ReadOnlySpan<byte> bytes) => (bytes.ToArray(), bytes.Length);
+
+    /// <summary>
+    /// The regions of the rollup <paramref name="rollup"/> its memo does not hold, apart as <see cref="ReadUnheldAsync"/> is,
+    /// each as <paramref name="reader"/> reads it and kept under its offset with <paramref name="keyed"/>.
+    /// </summary>
+    private ValueTask ReadRollupRegionsAsync(
+        RollupEntry rollup, Indexes.IndexSegment?[] regions, object?[] read, SynopsisReader reader, ulong keyed, CancellationToken cancellationToken) =>
+        ReadRegionsAsync(
+            rollup.Uid,
+            ct => SealedObjectStore.OpenDataAsync(_store, rollup.Key, rollup.Uid, rollup.Bytes, ct, null),
+            source => SessionReader.Wrap(source, Session),
+            regions,
+            read,
+            reader,
+            cancellationToken,
+            keyed);
+
+    /// <summary>
+    /// Takes into <paramref name="synopses"/>, by their position, the regions <paramref name="regions"/> of the object of
+    /// <paramref name="uid"/> this handle read before, from its memo under their offsets with <paramref name="keyed"/>, and
+    /// leaves them null among the regions: the number of regions left to read.
+    /// </summary>
+    private int Recalled(UInt128 uid, Indexes.IndexSegment?[] regions, object?[] synopses, ulong keyed = 0)
+    {
+        int asked = 0;
+        for (int i = 0; i < regions.Length; i++)
+        {
+            if (regions[i] is { } region && _synopses.TryGet(uid, region.Offset | keyed, out object? held))
+            {
+                synopses[i] = held;
+                regions[i] = null;
+            }
+
+            asked += regions[i] is null ? 0 : 1;
+        }
+
+        return asked;
+    }
+
+    /// <summary>
+    /// Reads into <paramref name="synopses"/>, by their position, the regions <paramref name="regions"/> of the object of
+    /// <paramref name="uid"/> not null, those its memo does not hold (<see cref="Recalled"/>), each as
+    /// <paramref name="reader"/> reads its bytes: side by side in one round trip through the reader <paramref name="open"/>
+    /// gives and <paramref name="wrap"/> wraps, and kept under their offsets with <paramref name="keyed"/>. A region whose
+    /// bytes fail their checksum reads none.
+    /// </summary>
+    private async ValueTask ReadRegionsAsync(
+        UInt128 uid, Func<CancellationToken, ValueTask<ISegmentReader>> open, Func<ISegmentReader, ISegmentReader> wrap,
+        Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader, CancellationToken cancellationToken, ulong keyed = 0)
+    {
+        int asked = 0;
+        foreach (Indexes.IndexSegment? region in regions)
+        {
+            asked += region is null ? 0 : 1;
+        }
+
+        ISegmentReader source = await open(cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            using SegmentRequestSet requests = new SegmentRequestSet(asked);
+            int[] slots = new int[regions.Length];
+            for (int i = 0; i < regions.Length; i++)
+            {
+                slots[i] = regions[i] is { } region
+                    ? requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
+                    : -1;
+            }
+
+            await wrap(source).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            for (int i = 0; i < regions.Length; i++)
+            {
+                if (slots[i] >= 0 && regions[i]!.Value.Holds(requests.GetBuffer(slots[i]).Span))
+                {
+                    (object synopsis, long bytes) = reader(i, requests.GetBuffer(slots[i]).Span);
+                    synopses[i] = synopsis;
+                    _synopses.Keep(uid, regions[i]!.Value.Offset | keyed, synopsis, bytes);
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// The path directory of variant column <paramref name="field"/> of the object <paramref name="entry"/>
     /// names, read with no open of the object: the region its entry's table of contents names, in one round
-    /// trip, none once the session's cache holds it. What a question on a path the tables do not name reads
-    /// first. Null when the entry carries no table of contents this library reads, or the column no directory.
+    /// trip, none once the session's cache holds it. Null when the entry carries no table of contents this
+    /// library reads, or the column no directory.
     /// </summary>
     internal async ValueTask<Indexes.VariantDirectory?> ReadPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
     {
@@ -2828,9 +2992,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// The variant column <paramref name="field"/> of the slices of the object <paramref name="entry"/> names
     /// that may hold a value at <paramref name="key"/>, a top-level key, read with no open of the object: its
     /// path directory and the column's chunk directory together, then those slices' chunks together, two
-    /// round trips cold, none once the session's cache holds them. What a question on a path no synopsis
-    /// table names reads. Null when the entry carries no table of contents this library reads; empty when the
-    /// object holds no value there.
+    /// round trips cold, none once the session's cache holds them. Null when the entry carries no table of
+    /// contents this library reads; empty when the object holds no value there.
     /// </summary>
     internal async ValueTask<List<RecordBatch>?> ReadPathAsync(ObjectEntry entry, int field, string key, CancellationToken cancellationToken)
     {
@@ -2897,32 +3060,12 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// The rows of <paramref name="slices"/> of the object <paramref name="entry"/> names, read with no open of
-    /// the object through its table of contents <paramref name="contents"/>: per slice, in order, a batch of
-    /// <paramref name="columns"/>, every column when null, counted from the object's first row, which the
-    /// caller disposes. The columns' chunk directories, then every slice's chunks together, a chunk two
-    /// slices share read once: two round trips cold, however many slices.
-    /// </summary>
-    internal async ValueTask<RecordBatch[]> ReadSlicesAsync(
-        ObjectEntry entry, Indexes.SynopsisContents contents, IReadOnlyList<Indexes.TimeSlice> slices, int[]? columns,
-        CancellationToken cancellationToken)
-    {
-        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-        await using (source.ConfigureAwait(false))
-        {
-            using Indexes.SliceReader reader = Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents)
-                ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
-            return await reader.ReadSpansAsync(slices, columns, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
     /// The rows strictly inside <paramref name="first"/> to <paramref name="end"/> of the object <paramref name="entry"/>
     /// names at which a chunk of one of <paramref name="columns"/> starts, read from its chunk directories with no open of it
     /// (<see cref="Indexes.SliceReader.ChunkStartsAsync"/>): where a span of its rows may be cut between lanes.
     /// </summary>
     internal async ValueTask<long[]> ChunkStartsAsync(
-        ObjectEntry entry, Indexes.SynopsisContents contents, int[] columns, long first, long end, CancellationToken cancellationToken)
+        ObjectEntry entry, Indexes.ObjectContents contents, int[] columns, long first, long end, CancellationToken cancellationToken)
     {
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
@@ -2988,17 +3131,18 @@ public sealed class VortexDataset : IAsyncDisposable
         // left unnamed, as an abandoned job's are, for a vacuum to take.
         ObjectSummaries summaries;
         byte[] prefix;
+        byte[] last;
         bool streamed = draft.Sink.IsStreamed;
         try
         {
             if (!streamed)
             {
                 SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true, _options.Session.Options.EnginePool);
-                (summaries, prefix) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
+                (summaries, prefix, last) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
             }
             else
             {
-                (summaries, prefix) = (ObjectSummaries.Empty, []);
+                (summaries, prefix, last) = (ObjectSummaries.Empty, [], []);
             }
 
             if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
@@ -3018,11 +3162,12 @@ public sealed class VortexDataset : IAsyncDisposable
         if (streamed)
         {
             ISegmentReader stored = await SealedObjectStore.OpenDataAsync(_store, draft.Key, Uid(draft.Identity), bytes, cancellationToken).ConfigureAwait(false);
-            (summaries, prefix) = await DescribeAsync(stored, firstRow, draft, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
+            (summaries, prefix, last) = await DescribeAsync(stored, firstRow, draft, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
         }
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
             .WithFooterBytes(draft.Writer.TailBytes)
-            .WithSynopsis(draft.Writer.SynopsisContents);
+            .WithTableOfContents(draft.Writer.TableOfContents)
+            .WithLastKey(last);
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes);
     }
 
@@ -3179,8 +3324,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// column a reader is most likely to filter by.
     /// </summary>
     /// <param name="file">The object, open.</param>
-    /// <param name="partition">The one value of each partition column its writer knows it holds, an exact bound of each; null for none.</param>
-    private ObjectSummaries Summaries(VortexFile file, Expressions.FilterLiteral[]? partition = null)
+    private ObjectSummaries Summaries(VortexFile file)
     {
         IReadOnlyList<ColumnSummary> columns = _options.SummaryColumns is { } declared
             ? ColumnSummaries.Of(file, declared)
@@ -3190,18 +3334,8 @@ public sealed class VortexDataset : IAsyncDisposable
             return ObjectSummaries.From(columns);
         }
 
-        // The partition first: its exact value stands for whatever bounds the file states, or does not.
         List<ColumnSummary> all = [];
         HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
-        if (partition is not null && partition.Length == clustering.PartitionColumns)
-        {
-            for (int i = 0; i < partition.Length; i++)
-            {
-                all.Add(new ColumnSummary(clustering.PartitionPaths[i], partition[i], true, partition[i], true, true, 0, true));
-                seen.Add(clustering.PartitionPaths[i]);
-            }
-        }
-
         foreach (ColumnSummary column in columns)
         {
             if (seen.Add(column.Path))
@@ -3231,7 +3365,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="draft">The object's draft, which says what walks it by key without a run: its rows in key order, or its slices, which is checked.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <param name="tailBytes">The bytes of its footer when they pass an open's first read, so that the open reads them at once; 0 otherwise.</param>
-    private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix)> DescribeAsync(
+    private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix, byte[] Last)> DescribeAsync(
         ISegmentReader source, long firstRow, ObjectDraft draft, CancellationToken cancellationToken, long tailBytes = 0)
     {
         VortexOpenOptions options = tailBytes > ObjectEntry.FirstReadBytes
@@ -3245,14 +3379,10 @@ public sealed class VortexDataset : IAsyncDisposable
             {
                 await CheckSortedAsync(file, cancellationToken).ConfigureAwait(false);
             }
-            else if (draft.BySlices)
-            {
-                await CheckSlicedAsync(file, cancellationToken).ConfigureAwait(false);
-            }
 
-            ObjectSummaries summaries = Summaries(file, draft.Partition);
-            return (summaries, await PrefixAsync(file, summaries, firstRow, cancellationToken)
-                .ConfigureAwait(false));
+            ObjectSummaries summaries = Summaries(file);
+            (byte[] prefix, byte[] last) = await BoundsAsync(file, summaries, firstRow, cancellationToken).ConfigureAwait(false);
+            return (summaries, prefix, last);
         }
     }
 
@@ -3276,22 +3406,15 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// Refuses an object written in sorted slices without a run whose slice table does not walk its
-    /// key: none, one on another column, or one that does not cover its rows. A key cursor would find
-    /// no source in it, and take it for an object without the key.
+    /// What orders an object's leaf, its smallest key or its position, and its largest key, which its entry states when
+    /// its statistics do not bound the key (<see cref="ClusteringKey.StatesLastKey"/>): empty otherwise, without a key, or
+    /// without a cursor to say it.
     /// </summary>
-    private async ValueTask CheckSlicedAsync(VortexFile file, CancellationToken cancellationToken)
-    {
-        string instant = Key!.Paths[0];
-        (Keys.SlicedKeySource? source, string? reason) = await Keys.SlicedKeySource.OpenAsync(file, instant, cancellationToken).ConfigureAwait(false);
-        if (source is null)
-        {
-            throw new DatasetIntegrityException(
-                $"An object written in sorted slices carries no run on '{instant}' and no slice table that walks it: {reason}.");
-        }
-
-        await source.DisposeAsync().ConfigureAwait(false);
-    }
+    private async ValueTask<(byte[] Prefix, byte[] Last)> BoundsAsync(
+        VortexFile file, ObjectSummaries summaries, long firstRow, CancellationToken cancellationToken) =>
+        Key is not { } clustering ? (PositionOf(firstRow), [])
+        : clustering.StatesLastKey ? await clustering.BoundsAsync(file, summaries, cancellationToken).ConfigureAwait(false)
+        : (await clustering.MinimumAsync(file, summaries, cancellationToken).ConfigureAwait(false), []);
 
     /// <summary>What orders an object's leaf: its smallest key, or its position.</summary>
     private async ValueTask<byte[]> PrefixAsync(

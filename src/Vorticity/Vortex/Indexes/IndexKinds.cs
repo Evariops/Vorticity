@@ -1,5 +1,3 @@
-using System;
-
 namespace Vorticity.Indexes;
 
 /// <summary>
@@ -74,17 +72,47 @@ internal static class IndexKinds
     public const string VariantBlocks = "vorticity.variant.blocks.v1";
 
     /// <summary>
-    /// Where a synopsis column's chunks lie in the synopsis part, on that column: its run's payload
-    /// regions are the chunks' segments, each with its checksum, and its options the part's extent, so
-    /// that a reader of the part alone needs no footer.
+    /// What a column holds, on that column: its rows and nulls, its distinct values and a sketch of them, its most
+    /// frequent values, and a filter of its values when they repeat, in one payload region that a table of contents
+    /// names, so that a question on a value an object lacks passes the object unopened (<see cref="ColumnSheet"/>).
     /// </summary>
-    public const string SynopsisColumns = "vorticity.synopsis.columns.v1";
+    public const string ColumnSheet = "vorticity.column.sheet.v1";
 
     /// <summary>
-    /// One table of an object's synopsis, on the root: its kind, bucket, keys, measures and rows in its
-    /// options, its rows an array payload of its one run (<see cref="SynopsisTableInfo"/>).
+    /// A column's counts over the object's rows, on that column: for each of its values, its nulls and the values its budget
+    /// left out, an entry with its rows and the states of every measure column over them, in one payload region that a table of
+    /// contents names, so that a question on that column alone is answered with no row read (<see cref="ColumnCounts"/>).
     /// </summary>
-    public const string SynopsisTable = "vorticity.synopsis.table.v1";
+    public const string ColumnCounts = "vorticity.column.counts.v1";
+
+    /// <summary>
+    /// The sketches of a column's counts, on that column: for each entry of its counts, a quantile sketch of each
+    /// measure and the registers of the distinct values of each wide column, in one payload region right after the
+    /// counts, which a table of contents names, so that a question of counts alone reads none of them
+    /// (<see cref="ColumnSketches"/>).
+    /// </summary>
+    public const string ColumnSketches = "vorticity.column.sketches.v1";
+
+    /// <summary>
+    /// The blocks of a file whose rows follow a key, on its first column: runs of rows of one value of it, each its rows and
+    /// the first and the last key it holds, in one payload region that a table of contents names, which the statistics of
+    /// each column of each block extend (<see cref="Indexes.BlockTable"/>).
+    /// </summary>
+    public const string BlockTable = "vorticity.block.table.v1";
+
+    /// <summary>
+    /// One column's statistics over the blocks of <see cref="BlockTable"/>: each block's rows, nulls, values and their
+    /// rows, and a measure's count, exact sum and extremes, in one payload region that a table of contents names
+    /// (<see cref="ColumnBlocks"/>).
+    /// </summary>
+    public const string BlockStats = "vorticity.block.stats.v1";
+
+    /// <summary>
+    /// Where each value of a column lives: its values by their bytes, each with the ranges of rows of the blocks it appears
+    /// in, or none where it lives everywhere, in one payload region that a table of contents names
+    /// (<see cref="Indexes.ColumnWhere"/>).
+    /// </summary>
+    public const string ColumnWhere = "vorticity.column.where.v1";
 
     /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
@@ -96,8 +124,8 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks or SynopsisColumns
-                or SynopsisTable => true,
+                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks
+                or ColumnSheet or ColumnCounts or ColumnSketches or BlockTable or BlockStats or ColumnWhere => true,
             _ => false,
         };
 

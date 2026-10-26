@@ -1,7 +1,6 @@
 using System;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
-using Vorticity.File;
 
 namespace Vorticity;
 

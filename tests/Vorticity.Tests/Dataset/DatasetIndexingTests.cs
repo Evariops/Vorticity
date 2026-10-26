@@ -19,7 +19,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.File;
@@ -570,10 +569,6 @@ public sealed class DatasetIndexingTests
         .Bloom("tag", falsePositiveRate: 0.0001)
         .SortedRuns("id", required: true)
         .WithBudgetPerMille(100_000);
-
-    /// <summary>A handle whose writes refuse no index for its budget, and build none of their own beyond the key's.</summary>
-    private static DatasetOptions Generous(DatasetOptions options) =>
-        options with { Write = options.Write with { IndexBudgetPerMille = 100_000 } };
 
     /// <summary>Whether the object holds an index of <paramref name="kind"/> on <paramref name="column"/> over all its blocks, in itself or in its fragments.</summary>
     private static async Task<bool> HoldsAsync(VortexDataset dataset, PositionedObject held, string kind, string column)

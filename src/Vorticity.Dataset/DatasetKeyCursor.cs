@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Keys;
 
 namespace Vorticity.Dataset;
@@ -159,7 +158,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="path"/> names no column of the dataset.</exception>
     internal static ValueTask<DatasetKeyCursor> OpenAsync(
-        VortexDataset dataset, DatasetSnapshot version, string path, bool distinct, bool indexes, CancellationToken cancellationToken)
+        DatasetSnapshot version, string path, bool distinct, bool indexes, CancellationToken cancellationToken)
     {
         ClusteringKey? key = version.Schema.Key;
         bool clustering = key is { IsComposite: false } && string.Equals(key.Paths[0], path, StringComparison.Ordinal);
@@ -1206,7 +1205,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
 
         // An object above level 0 is a merge's, its rows in the clustering key's order with null keys
         // last, so on that key an entry's rank is its row and a deleted row's rank needs no read; not
-        // for a dataset of periods, whose objects are sorted slice by slice.
+        // for a dataset of periods, whose objects may order each slice by another column.
         slot.Cursor = await _key.TryOpenAsync(
                 slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded && _version.Levels.RowsInKeyOrder(slot.Level), cancellationToken)
             .ConfigureAwait(false)

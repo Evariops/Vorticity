@@ -1,5 +1,4 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Runtime.InteropServices;
@@ -35,9 +34,6 @@ internal sealed class CommitObjectBuilder : IPageSink
 
     /// <summary>The pages added so far.</summary>
     public int PageCount => _pages.Count;
-
-    /// <summary>The fragments added so far.</summary>
-    public int FragmentCount => _fragmentReferences.Count;
 
     /// <summary>Copies a tree page in and returns the reference that names it.</summary>
     public PageReference AddPage(ReadOnlySpan<byte> page)

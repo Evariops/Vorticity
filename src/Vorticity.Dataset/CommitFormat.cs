@@ -116,19 +116,15 @@ internal enum DatasetFeatures : ulong
     ErasureDelay = 2,
 
     /// <summary>
-    /// Compaction by periods, under a lateness horizon: a library that does not know it would compact
-    /// the levels as it compacts any dataset, against the order its tiers keep.
+    /// A dataset an earlier library compacted by periods: a library that does not know it would compact its levels as it
+    /// compacts any dataset's, against the order they keep. This one reads such a dataset and compacts it no further.
     /// </summary>
     Periods = 4,
 
     /// <summary>Columns whose values questions look up, which a library that does not know them would drop from the headers it writes.</summary>
     Identifiers = 8,
 
-    /// <summary>
-    /// Leading key columns that partition the objects: a library that does not know them would merge objects of
-    /// two partitions, against the retention each holds.
-    /// </summary>
-    Partitions = 16,
+    // 16 named partition columns, retired with them: a header that still names it is refused, never reused.
 
     /// <summary>
     /// Keys of variant columns every job shreds into columns of their own, which a library that does not know them
@@ -136,11 +132,20 @@ internal enum DatasetFeatures : ulong
     /// </summary>
     ShreddedPaths = 32,
 
+    // 64 named objects that joined several sealed periods, retired with the joins: a header that still names it is
+    // refused, never reused.
+
     /// <summary>
-    /// Objects of the periods level that join several sealed periods of one partition: a library that does not know
-    /// them would seal a period one of them holds a second time, beside it.
+    /// Objects cut by a clustering value or aimed at a size (<see cref="DatasetOptions.Clustering"/>): a library that does
+    /// not know it would write objects across values and past the size, against the cut every writer keeps.
     /// </summary>
-    JoinedPeriods = 64,
+    Clustering = 128,
+
+    /// <summary>
+    /// A tree of rollups (<see cref="RollupEntry"/>), whose pages and objects a library that does not know it would leave
+    /// unmarked in a vacuum, and whose rollups its commits would leave stale over the objects they change.
+    /// </summary>
+    Rollups = 256,
 }
 
 /// <summary>

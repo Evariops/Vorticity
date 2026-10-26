@@ -7,14 +7,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -144,7 +142,7 @@ public sealed class DatasetKeyCursorReadTests
         }
 
         sorted.Sort((left, right) => string.CompareOrdinal(left.City, right.City) is int order and not 0 ? order : left.Row.CompareTo(right.Row));
-        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, dataset.Snapshot, "City", distinct: false, indexes: true, ct);
+        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset.Snapshot, "City", distinct: false, indexes: true, ct);
         Action<int> at = index =>
         {
             Assert.Equal(sorted[index].City, Encoding.UTF8.GetString(cursor.KeyBytes));
@@ -236,10 +234,12 @@ public sealed class DatasetKeyCursorReadTests
             },
 
             // Pages of a few entries, so that a level's tree is many leaves under internal pages,
-            // and a delete marks its rows rather than rewriting their object.
+            // and a delete marks its rows rather than rewriting their object; every column chunked with
+            // the object, so that the objects a compaction rolls at its sizes are those its blocks make.
             Rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024),
             MarkedObjectBytes = 0,
             MarkedShare = 1,
+            ChunkBytes = 0,
         };
 
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, ChangeRow.Schema, options, ct);

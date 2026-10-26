@@ -207,15 +207,20 @@ public sealed partial class DatasetGroupTests
         }
 
         await dataset.DeleteAsync<Tick>(r => r.Value == 0, Ct);
-        Vorticity.Aggregation byDay = dataset.Scan<Tick>().GroupBy(r => r.Day).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
-        Assert.True(StreamingGroupBatches.Streaming((AggregationQuery)byDay.Query) >= 0);
-        List<DayTotal> days = await ListAsync(byDay.As<DayTotal>());
 
-        // In the key's order, as the rows' groups say, each day out once its last row is read.
+        // Every day: the pass that holds the groups, on every lane, the key-ordered read being for a read a take stops.
+        Vorticity.Aggregation byDay = dataset.Scan<Tick>().GroupBy(r => r.Day).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
+        Assert.Equal(-1, StreamingGroupBatches.Streaming((AggregationQuery)byDay.Query));
+        List<DayTotal> days = [.. (await ListAsync(byDay.As<DayTotal>())).OrderBy(day => day.Day)];
         Assert.Equal(
             ticks.Where(t => t.Value != 0).GroupBy(t => t.Day).OrderBy(g => g.Key).Select(g => new DayTotal(g.Key, g.Count(), g.Sum(t => t.Value))),
             days);
-        Assert.True(((AggregationQuery)byDay.Query).PeakGroups < days.Count, $"{((AggregationQuery)byDay.Query).PeakGroups} groups held");
+
+        // The first days under a take: in the key's order, as the rows' groups say, each day out once its last row is read.
+        Vorticity.Aggregation firstDays = dataset.Scan<Tick>().GroupBy(r => r.Day).OrderBy(g => g.Key).Take(5).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
+        Assert.True(StreamingGroupBatches.Streaming((AggregationQuery)firstDays.Query) >= 0);
+        Assert.Equal(days.Take(5), await ListAsync(firstDays.As<DayTotal>()));
+        Assert.True(((AggregationQuery)firstDays.Query).PeakGroups < 10, $"{((AggregationQuery)firstDays.Query).PeakGroups} groups held");
 
         // The last days first, under a take: the objects merged in the key's order backwards.
         Vorticity.Aggregation lastDays = dataset.Scan<Tick>().GroupBy(r => r.Day).OrderByDescending(g => g.Key).Take(5).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
@@ -237,6 +242,10 @@ public sealed partial class DatasetGroupTests
         MarkedObjectBytes = 0,
         MarkedVectorBytes = 1 << 20,
         LeastPieceRows = 8_192,
+
+        // Chunks of 16 KiB a column, every column's ending together each 8 192 rows: an object a pass cuts.
+        ChunkBytes = 16 << 10,
+        GroupRows = 8_192,
         Write = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 16 << 10 },
     };
 

@@ -22,7 +22,6 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Tests.Writing;

@@ -8,10 +8,8 @@ using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Keys;
-using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity;
 

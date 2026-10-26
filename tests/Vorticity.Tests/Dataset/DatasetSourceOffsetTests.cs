@@ -219,10 +219,11 @@ public sealed class DatasetSourceOffsetTests
         await AppendPlainAsync(dataset, 0, 10, ct);
         Assert.Equal(CommitFormat.Version, await FormatAsync(store, dataset.Version, ct));
 
-        // From the first offset on, and for as long as one is counted, a commit of any kind.
+        // From the first offset on, and for as long as one is counted, a commit of any kind: a compaction into level 1,
+        // whose objects aim under a mebibyte and keep no table of contents, which would take format 4.
         await AppendAsync(dataset, Spans, 0, 10, ct);
         Assert.Equal(CommitFormat.WithSources, await FormatAsync(store, dataset.Version, ct));
-        Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30 }, ct));
+        Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 512L << 10 }, ct));
         Assert.Equal(CommitFormat.WithSources, await FormatAsync(store, dataset.Version, ct));
         await dataset.ForgetSourcesAsync([Spans], ct);
         Assert.Equal(CommitFormat.Version, await FormatAsync(store, dataset.Version, ct));

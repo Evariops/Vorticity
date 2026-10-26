@@ -17,12 +17,8 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
 
 using BenchmarkDotNet.Attributes;
-
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 
@@ -96,6 +92,7 @@ public class RowEncodingBenchmarks
     /// <summary>
     /// What one invocation moves: the batch's rows, and the key bytes they encode to.
     /// </summary>
+    /// <param name="method">The benchmark method, which moves the same rows as the other.</param>
     /// <param name="parameters">The case's parameters; <c>Entry</c> says which file.</param>
     /// <remarks>
     /// THIS REPLACES A LINE ON STDERR. The setup printed `rows=… keyBytes=…`

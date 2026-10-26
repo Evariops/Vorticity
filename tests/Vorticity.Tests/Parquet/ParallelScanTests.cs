@@ -6,7 +6,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Parquet;
-using Vorticity.Scanning;
 using Xunit;
 
 namespace Vorticity.Tests.Parquet;

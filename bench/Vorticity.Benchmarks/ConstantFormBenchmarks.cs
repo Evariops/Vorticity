@@ -27,7 +27,6 @@
 // each shape implies, and both are fully determined by the shape.
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;

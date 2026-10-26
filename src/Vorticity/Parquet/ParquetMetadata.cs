@@ -55,7 +55,7 @@ public sealed class ParquetMetadata
             ParquetChunkInfo[] chunks = new ParquetChunkInfo[leaves.Length];
             for (int c = 0; c < leaves.Length; c++)
             {
-                chunks[c] = Chunk(file, leaves[c], footer.Chunk(g, c));
+                chunks[c] = Chunk(leaves[c], footer.Chunk(g, c));
             }
 
             SortingColumn[] sorting = footer.SortingColumns(g);
@@ -90,7 +90,7 @@ public sealed class ParquetMetadata
     /// <summary>The key-value pairs the footer carries, as <see cref="ParquetFile.KeyValueMetadata"/> gives them.</summary>
     public IReadOnlyList<KeyValuePair<string, string?>> KeyValueMetadata { get; }
 
-    private static ParquetChunkInfo Chunk(ParquetFile file, ParquetColumn column, ColumnChunkMetadata chunk)
+    private static ParquetChunkInfo Chunk(ParquetColumn column, ColumnChunkMetadata chunk)
     {
         List<string> encodings = [];
         for (int encoding = 0; encoding < 32; encoding++)

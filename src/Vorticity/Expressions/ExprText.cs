@@ -810,9 +810,6 @@ internal static class ExprText
 
     private readonly record struct Token(TokenKind Kind, string Text, int Position, FilterLiteral Value = default);
 
-    /// <summary>The column path the last predicate of <paramref name="text"/> names, for the hole that follows it.</summary>
-    internal static string[]? LastField(string text) => LastPath(text)?.Names;
-
     /// <summary>
     /// The field the last predicate of <paramref name="text"/> names, for the hole that follows it: its
     /// column path, and when it is a path of a variant column its steps and its read, null when none is written.

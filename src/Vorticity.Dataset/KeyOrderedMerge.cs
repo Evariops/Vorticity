@@ -3,11 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.RowEncoding;
-using Vorticity.Scanning;
-using Vorticity.Types;
 
 namespace Vorticity.Dataset;
 
@@ -90,27 +86,23 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
 
     /// <summary>The run's first key, row-encoded.</summary>
-    internal ReadOnlySpan<byte> FirstKey
-    {
-        get
-        {
-            MergeInput input = Emitting();
-            return input.KeyAt(input.Row);
-        }
-    }
+    internal ReadOnlySpan<byte> FirstKey => KeyAt(0);
 
     /// <summary>The run's last key, row-encoded.</summary>
-    internal ReadOnlySpan<byte> LastKey
+    internal ReadOnlySpan<byte> LastKey => KeyAt(_count - 1);
+
+    /// <summary>The key of the run's row <paramref name="row"/>, row-encoded.</summary>
+    internal ReadOnlySpan<byte> KeyAt(int row)
     {
-        get
-        {
-            MergeInput input = Emitting();
-            return input.KeyAt(input.Row + _count - 1);
-        }
+        MergeInput input = Emitting();
+        return input.KeyAt(input.Row + row);
     }
 
     /// <summary>The most inputs held open at once.</summary>
     internal int MostOpen { get; private set; }
+
+    /// <summary>The key in the store of the object the run comes from.</summary>
+    internal string CurrentObject => Emitting().Object;
 
     /// <summary>Where the rows of the object the run comes from start among the dataset's.</summary>
     internal long CurrentFirstRow => Emitting().FirstRow;

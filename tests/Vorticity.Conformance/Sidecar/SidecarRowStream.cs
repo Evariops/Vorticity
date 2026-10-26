@@ -3,8 +3,6 @@
 // The scan hands out batches in row order and the sidecar stores values in row order, so the two
 // are consumed in lockstep and neither is ever materialized whole. 108 MB of sidecar across the
 // corpus is the reason that matters.
-using System;
-
 namespace Vorticity.Conformance.Sidecar;
 
 /// <summary>A row-by-row view over a <see cref="SidecarReader"/>'s value stream.</summary>

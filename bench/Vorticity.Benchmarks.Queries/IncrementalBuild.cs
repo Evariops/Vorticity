@@ -10,10 +10,10 @@ using Vorticity.IO;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// A dataset of periods built the way a client's ingestion builds one, rather than loaded as sealed periods: each hour's
-/// rows drawn in time order and written as objects of some minutes each, several hours at once, then appended hour after
-/// hour and compacted as they come, so that the periods past their lateness are sealed and the last hours stay fresh. What
-/// <c>--qp</c> builds the client's spans and log records with.
+/// A dataset built the way a client's ingestion builds one: each hour's rows drawn in time order and written as objects
+/// of some minutes each, several hours at once, then appended hour after hour and compacted as they come, so that the
+/// past days lie in objects of their own and the last hours still in level 0 and the levels above it. What <c>--qp</c>
+/// builds the client's spans and log records with.
 /// </summary>
 internal static class IncrementalBuild
 {

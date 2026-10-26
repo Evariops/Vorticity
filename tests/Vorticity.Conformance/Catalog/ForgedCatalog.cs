@@ -6,7 +6,6 @@
 // ForgedFixtureTests does exactly that before any behaviour is asserted on it.
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Text;
 using Vorticity.Conformance.Sidecar;
 

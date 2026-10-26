@@ -2,14 +2,11 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
-using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.Compute;
 using Vorticity.Layouts;
-using Vorticity.Types;
 using Vorticity.Writing;
 
 namespace Vorticity;
@@ -489,8 +486,6 @@ public sealed partial class VortexFileWriter
 
         // The index builders hold pooled hash sets and a payload arena; their results survive.
         _indexes?.Dispose();
-        _synopsisPart?.Dispose();
-        _synopsisPart = null;
         ReleaseBuilders();
 
         // The blob workspace's builder and metadata writer rent from the shared pool, and the threads

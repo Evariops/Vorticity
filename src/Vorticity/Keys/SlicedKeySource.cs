@@ -9,7 +9,6 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
@@ -18,9 +17,9 @@ using Vorticity.Types;
 namespace Vorticity.Keys;
 
 /// <summary>
-/// The entries of an instant column whose file is sorted slice by slice (<see cref="IndexKinds.Slices"/>):
+/// The entries of an instant column whose file is cut in time slices (<see cref="IndexKinds.Slices"/>):
 /// the slices follow each other in time, so a seek finds its slice in the slice table, and inside the
-/// slice, whose rows other columns order first, the slice's instants are read and ranked when a position
+/// slice, whose rows another column may order first, the slice's instants are read and ranked when a position
 /// first needs them. A rank before a slice is the rows of the slices before it, read from the table.
 /// </summary>
 /// <remarks>
@@ -131,8 +130,11 @@ internal sealed class SlicedKeySource : KeySource
                 return (null, $"the slice table is on a {storage.Kind} column, not one of 64-bit instants");
             }
 
+            // A table bounded by keys is a file's whose rows lie in key order, which its own run or column walks.
             return SliceTable.FromBytes(entry.Options) is { } table && table.Rows == file.RowCount
-                ? (new SlicedKeySource(file, path, table), null)
+                ? table.ByKey
+                    ? (null, "the slices are bounded by keys, not by instants")
+                    : (new SlicedKeySource(file, path, table), null)
                 : (null, "the slice table does not decode, or does not cover the file's rows");
         }
 

@@ -10,7 +10,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;

@@ -8,7 +8,6 @@ using System.Threading;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
-using Vorticity.File;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 

@@ -5,7 +5,6 @@
 using System;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;

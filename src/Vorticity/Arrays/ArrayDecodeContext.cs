@@ -786,10 +786,6 @@ internal sealed class ArrayDecodeContext
     public int NewCanonical(CanonicalKind kind, DType dtype, int length, Validity validity) =>
         Canonical.AddBare(kind, dtype, length, validity);
 
-    /// <summary>The id text of encoding spec <paramref name="specIndex"/>, for an exception message.</summary>
-    /// <param name="specIndex">The wire <c>u16</c> from <c>ArrayNode.encoding</c>.</param>
-    public string GetEncodingIdText(int specIndex) => _scan.GetArrayEncodingIdText(specIndex);
-
     // ---------------------------------------------------------------- shared validation helpers
 
     /// <summary>Requires an exact child count.</summary>
@@ -1027,9 +1023,7 @@ internal sealed class ArrayDecodeContext
     /// <summary>Whether a bit range is all zero, all one, or mixed. O(bits/8), no allocation.</summary>
     internal static ValidityBitmapShape ClassifyValidityBits(ReadOnlySpan<byte> bits, int bitOffset, int length)
     {
-        int start = bitOffset;
         long endExclusive = (long)bitOffset + length;
-        int firstByte = start >> 3;
         int lastByte = (int)((endExclusive - 1) >> 3);
 
         if (lastByte >= bits.Length)
@@ -1040,7 +1034,7 @@ internal sealed class ArrayDecodeContext
         }
 
         Decoders.Canonical.BitmapKernels.Classify(
-            bits, start, length, out bool anySet, out bool anyClear);
+            bits, bitOffset, length, out bool anySet, out bool anyClear);
         return (anySet, anyClear) switch
         {
             (true, true) => ValidityBitmapShape.Mixed,

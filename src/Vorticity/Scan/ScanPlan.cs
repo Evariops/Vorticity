@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using Vorticity.Scanning;
@@ -16,13 +15,22 @@ namespace Vorticity;
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
 
 /// <summary>
-/// What an aggregation reads of one object of a dataset: a table of its synopsis, whose states stand for
-/// the rows of the buckets it folds; the rows of the slices a window cuts; or its rows whole, and why.
+/// What an aggregation reads of one object of a dataset whose synopses answer it: the states of its counts, or of its blocks'
+/// statistics, which stand for its rows.
 /// </summary>
 /// <param name="Object">The object, by its key in the dataset.</param>
-/// <param name="Read"><c>table</c>, <c>edges</c> or <c>rows</c>.</param>
-/// <param name="Detail">The table's kind, its bucket and the columns that key it; or why the rows are read.</param>
-/// <param name="Count">The buckets the table folds, the slices read at the edges, or the object's rows.</param>
+/// <param name="Read">
+/// What it reads: <c>states</c>, <c>rollup</c> for a rollup's totals, which stand for its objects', or <c>blocks</c> for the
+/// statistics of its columns over its blocks, the rows of the blocks they do not answer read besides.
+/// </param>
+/// <param name="Detail">
+/// The column whose counts it reads, and their sketches when a quantile asks them; for blocks, the bytes and requests of
+/// their statistics and those of the rows they were weighed against.
+/// </param>
+/// <param name="Count">
+/// The regions the states read: the counts, and their sketches; a rollup's totals read in part, under the values a
+/// question asks, count their header and their chunks; the requests of the blocks' statistics.
+/// </param>
 public sealed record StatesStep(string Object, string Read, string Detail, long Count);
 
 /// <summary>
@@ -52,10 +60,16 @@ public sealed record ScanPlan(
     public GroupPlan? Grouping { get; init; }
 
     /// <summary>
-    /// For an aggregation over a dataset whose objects keep synopses, what each object reads: its tables'
-    /// states, the rows at a window's edges, or its rows and why; empty otherwise.
+    /// For an aggregation over a dataset whose objects keep counts, what each object they answer reads: its counts' states;
+    /// empty when they answer none, every object read as rows.
     /// </summary>
     public ImmutableArray<StatesStep> States { get; init; } = [];
+
+    /// <summary>
+    /// The range an aggregation over a dataset would answer under <see cref="ScanOptions.AlignWindow"/>, when it grows the
+    /// one asked (<see cref="ScanMetrics.Window"/>); null when it applies its filter as asked.
+    /// </summary>
+    public VortexExpr? Window { get; init; }
 
     /// <summary>The engine's own explanation, with its splits, for the tests that hold the plan to the execution.</summary>
     internal ScanExplanation? Detail { get; init; }
@@ -111,31 +125,17 @@ public readonly record struct ScanMetrics(
     /// <summary>What a group by did with the rows; null without a group by, or before it ran.</summary>
     public GroupMetrics? Grouping { get; init; }
 
-    /// <summary>Rows of a dataset's synopsis tables an aggregation folded as states, in place of the rows they stand for.</summary>
-    public long SynopsisRows { get; init; }
-
-    /// <summary>Rows of the slices at a window's edges, read beside their objects' states: part of <see cref="Rows"/>.</summary>
-    public long EdgeRows { get; init; }
-
     /// <summary>
-    /// The first instant of the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>,
-    /// at or before the one asked; null for a scan that aligned no window, or one with no lower bound.
+    /// The range on the first column of a dataset's clustering key its aggregation answered under
+    /// <see cref="ScanOptions.AlignWindow"/>, when it grew the one asked: the conjuncts on that column the answer applies,
+    /// whose bounds lie at or outside those asked. Null for a scan that applied its filter as asked.
     /// </summary>
-    public DateTimeOffset? WindowFrom { get; init; }
-
-    /// <summary>
-    /// The instant past the window a dataset's aggregation answered under <see cref="ScanOptions.AlignWindow"/>, at
-    /// or after the one asked; null for a scan that aligned no window, or one with no upper bound.
-    /// </summary>
-    public DateTimeOffset? WindowTo { get; init; }
+    public VortexExpr? Window { get; init; }
 
     internal static ScanMetrics From(ScanCounters counters) => new ScanMetrics(
         counters.Rows, counters.Batches, counters.SegmentRequests, counters.BytesRequested, counters.BlocksDecoded, counters.BlocksPruned, counters.CacheHits)
     {
-        SynopsisRows = counters.SynopsisRows,
-        EdgeRows = counters.EdgeRows,
-        WindowFrom = counters.WindowFrom,
-        WindowTo = counters.WindowTo,
+        Window = counters.Window,
     };
 }
 

@@ -37,9 +37,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using BenchmarkDotNet.Running;
-
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
 
 namespace Vorticity.Benchmarks;

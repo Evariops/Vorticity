@@ -1,4 +1,4 @@
-// The query paths of a dataset of periods, held to a ratchet.
+// The query paths of a dataset cut by the hour of its instant, held to a ratchet.
 //
 // WHAT IS HELD, per path: the requests and the bytes a question asks of the store, cold (a session and
 // a handle opened for it, an empty synopsis cache) and warm (the same handle again, the cache filled),
@@ -8,13 +8,10 @@
 // a ceiling just above what it costs, lowered by hand in the commit that earns it, and printed with its
 // headroom so that a ceiling left far above its path shows.
 //
-// And the answer: every question that folds states answers the bits its rows give, synopses on and off.
-//
-// THE PATHS are the ones `vortex-queries --micro paths` measures at scale: the tables of whole hours, a
-// window that cuts slices (its edges read as rows), an identifier left out (the rows its postings find,
-// taken out of the tables), a variant's shredded path, the measures' states, the rows when the
-// synopses are off (a group by of time once read every object twice in key order), and a needle;
-// and the tables of whole hours on eight lanes, which once made each object a lane's piece of its own.
+// THE PATHS are the questions `vortex-queries --micro paths` asks at scale, every one read from the rows:
+// counts over whole hours, a window that cuts objects, an identifier left out, a variant's shredded path,
+// measures, a group by of time (which once read every object twice in key order), a needle; and two of them
+// on eight lanes, whose lanes share the objects' segments.
 //
 // WHY THE FLOOR OF SEVERAL WARM ASKS: the first asks pay the JIT's tiering and the pools' first rents;
 // the least of several is the steady state, and anything allocated on every ask still raises it.
@@ -22,7 +19,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
@@ -50,38 +46,25 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
 
     /// <summary>
     /// The ceilings of each path: requests and bytes cold, requests and bytes warm, and the bytes one warm ask
-    /// allocates, 2 % above what it measured alone: in the full suite, the pools other classes left hold more or
-    /// less, which moved a path by 1.3 %. Measured on 2026-10-20 at the commit that set them. The cold requests of the
-    /// paths that fold tables rose by one an object on 2026-10-22: the lists of the tables' chunks, which their entries
-    /// no longer hold, read before the chunks. The cold bytes of four paths rose by 36 the same day, the tables of
-    /// sketches laying their distinct sketches apart: 28 for those regions, which the objects' index directories name,
-    /// and 8 for where the rest of the objects then lies. Then the directories stopped listing the synopsis tables'
-    /// chunks and columns, an object 17.5 KB lighter: an open reads the last 64 KB from an offset aligned on 64 bytes,
-    /// up to 63 bytes more or less with the file's length, and five paths read 72 more over their four objects. The
-    /// requests then fell back the same day, and those bytes with them: an entry keeps the chunks of the tables whose
-    /// lists would take 512 bytes or less, as all of these hours' do. An answer then grew by a field, the values of
-    /// identifiers it takes for absent, and the path at eight lanes, which makes one for each lane's part, rose from
-    /// 27,288 bytes to 27,376 alone, past its ceiling, set again 2 % above. A part of an object that one slice its window
-    /// cuts holds then read that edge by the object's chunk directories rather than by a scan of its rows, which opened the
-    /// object: the unaligned window rose from 81,248 bytes to 81,648, its ceiling set again 2 % above, and the same window
-    /// at eight lanes, whose lanes read their shares of an edge so, was given ceilings. The small objects a needle reads as
-    /// rows were then read ahead together, the rows each keeps copied into batches of its own: the rows of one id rose
-    /// past their ceiling of 60,864 bytes to 63,496, the ceiling set again 2 % above.
+    /// allocates, 2 % above what it measured in a process of its own, as `tests/runs-alone.sh` runs it: beside other
+    /// classes, the pools they left move a path by up to 3 %. Measured on 2026-10-24, every question read from the rows
+    /// of objects that keep them in the order they came, with no synopsis part nor tables; the ceilings the cost formulas
+    /// give come with the per-column synopses and the planner. The bytes cold measured again on 2026-10-25, the dataset
+    /// cut by the hour of its instant where it took periods of an hour. The allocations of the questions whose filter is evaluated on rows raised on 2026-10-25 by some 0.5 KB, each
+    /// in a process of its own: the filter's key, its canonical text hashed, and the lookup of its pages (PredicatePages).
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["synopses: count by service"] = new(4, 6640, 0, 0, 25152),
-        ["synopses: count by service, at eight lanes"] = new(4, 6640, 0, 0, 27968),
-        ["synopses: count by service and hour"] = new(4, 6640, 0, 0, 29888),
-        ["synopses: by minute, the last hour, under a predicate"] = new(3, 101020, 2, 35424, 61440),
-        ["synopses: an unaligned window"] = new(7, 107200, 2, 66728, 83280),
-        ["synopses: an unaligned window, at eight lanes"] = new(7, 107200, 2, 66728, 95392),
-        ["synopses: every row but one id"] = new(8, 297122, 4, 34768, 54528),
-        ["synopses: measures by region and hour"] = new(4, 3872, 0, 0, 41664),
-        ["synopses: count by route, a shredded path"] = new(8, 268256, 4, 5902, 65216),
-        ["rows: count by service and hour"] = new(8, 392866, 4, 130512, 43520),
-        ["rows: count by route, a shredded path"] = new(8, 268256, 4, 5902, 58816),
-        ["rows: the rows of one id"] = new(6, 335730, 2, 73408, 64768),
+        ["count by service"] = new(4, 168519, 0, 0, 36144),
+        ["count by service, at eight lanes"] = new(4, 168519, 0, 0, 58240),
+        ["count by service and hour"] = new(4, 168519, 0, 0, 41648),
+        ["by minute, the last hour, under a predicate"] = new(1, 41890, 0, 0, 40964),
+        ["an unaligned window"] = new(3, 126629, 0, 0, 45076),
+        ["an unaligned window, at eight lanes"] = new(3, 126629, 0, 0, 65117),
+        ["every row but one id"] = new(4, 168519, 0, 0, 47998),
+        ["measures by region and hour"] = new(4, 168519, 0, 0, 49328),
+        ["count by route, a shredded path"] = new(4, 168519, 0, 0, 55888),
+        ["the rows of one id"] = new(4, 168519, 0, 0, 81328),
     };
 
     private readonly Fixture _fixture;
@@ -125,12 +108,6 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
                 $"warm {warmRequests} requests {warmBytes} bytes (ceilings {Shown(ceiling.WarmRequests)}, {Shown(ceiling.WarmBytes)}), " +
                 $"{allocated} bytes allocated warm (ceiling {Shown(ceiling.Allocated)}), {warm.Count} rows answered.\n"));
 
-            // The synopses answer the bits the rows give.
-            if (path.StartsWith("synopses: ", StringComparison.Ordinal))
-            {
-                Assert.Equal(await AskAsync(dataset, path, synopses: false), warm);
-            }
-
             Assert.True(coldRequests <= ceiling.ColdRequests, $"{path}: {coldRequests} requests cold, over {ceiling.ColdRequests}");
             Assert.True(coldBytes <= ceiling.ColdBytes, $"{path}: {coldBytes} bytes cold, over {ceiling.ColdBytes}");
             Assert.True(warmRequests <= ceiling.WarmRequests, $"{path}: {warmRequests} requests warm, over {ceiling.WarmRequests}");
@@ -146,17 +123,16 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     private static string Shown(long ceiling) => ceiling == long.MaxValue ? "none" : ceiling.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>The rows <paramref name="path"/> answers, each a line of its values, sorted; none when not <paramref name="describe"/>.</summary>
-    private static async Task<List<string>> AskAsync(VortexDataset dataset, string path, bool? synopses = null, bool describe = true)
+    private static async Task<List<string>> AskAsync(VortexDataset dataset, string path, bool describe = true)
     {
-        bool fromTables = synopses ?? !path.StartsWith("rows: ", StringComparison.Ordinal);
         const string Lanes = ", at eight lanes";
         bool wide = path.EndsWith(Lanes, StringComparison.Ordinal);
         path = wide ? path[..^Lanes.Length] : path;
-        Scan<Hit> scan = dataset.Scan<Hit>().With(new ScanOptions { UseSynopses = fromTables, DegreeOfParallelism = wide ? 8 : 1 });
+        Scan<Hit> scan = dataset.Scan<Hit>().With(new ScanOptions { DegreeOfParallelism = wide ? 8 : 1 });
         DateTimeOffset lastHour = Noon.AddHours(Hours - 1);
         DateTimeOffset cutFrom = Noon.AddMinutes(37.5);
         DateTimeOffset cutTo = Noon.AddMinutes(155.25);
-        IAsyncEnumerator<RecordBatch> batches = path[(path.IndexOf(':', StringComparison.Ordinal) + 2)..] switch
+        IAsyncEnumerator<RecordBatch> batches = path switch
         {
             "count by service" => scan.GroupBy(r => r.Service).Select(g => (g.Key, g.Count())).Query.Batches(Ct),
             "count by service and hour" => scan.GroupBy(r => (r.Service, r.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count())).Query.Batches(Ct),
@@ -191,9 +167,8 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     private readonly record struct Budget(long ColdRequests, long ColdBytes, long WarmRequests, long WarmBytes, long Allocated);
 
     /// <summary>
-    /// Four hours of requests from noon, a row every two seconds, appended in parts of five minutes and compacted:
-    /// the sealed hours in sorted slices of a minute with every table kept, their attributes shredded, and the
-    /// request ids indexed.
+    /// Four hours of requests from noon, a row every two seconds, appended in parts of five minutes and compacted, cut by
+    /// the hour: each hour in slices bounded by its keys, its attributes shredded, and the request ids indexed.
     /// </summary>
     public sealed class Fixture : IAsyncLifetime
     {
@@ -209,7 +184,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
             {
                 ClusteringKey = [nameof(Hit.At)],
                 Identifiers = [nameof(Hit.RequestId)],
-                Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 100 },
+                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 100,
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(10_000) },
             });
             Random random = new Random(59);

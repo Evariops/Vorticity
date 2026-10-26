@@ -401,6 +401,144 @@ chunks from the last one backwards and stops once the seventh group is out. A to
 such as `OrderByDescending(g => g.Count()).Take(10)`, holds every group until the end, because a
 count is only known then.
 
+## A question in parts, on several nodes
+
+When one process is not enough, a question can be cut into parts that other nodes run, each over a
+range of rows, and merged where the answer is wanted. The question is code, so every node builds the
+same one, over the same version of the same dataset:
+
+```csharp
+static Aggregation Hourly(Scan<Request> scan) => scan
+    .Where(r => r.At >= from && r.At < to)
+    .GroupBy(r => (r.Region, r.At.Truncate(CalendarUnit.Hour)))
+    .Select(g => (g.Key.Region, g.Key.Item2, g.Count(), g.Sum(r => r.Bytes), g.Average(r => r.Latency), g.Quantile(r => r.Latency, 0.9)));
+
+// The coordinator cuts the rows.
+RowRange[] parts = await Hourly(dataset.Scan<Request>()).PartsAsync(nodes);
+
+// Each node runs its part and sends back the bytes of its partial.
+AggregationPartial partial = await Hourly(dataset.Scan<Request>().Rows(part)).PartialAsync();
+ReadOnlyMemory<byte> sent = partial.Bytes;
+
+// The coordinator merges what it received.
+List<HourTotal> answers = await Hourly(dataset.Scan<Request>())
+    .Merge(received.Select(AggregationPartial.FromBytes))
+    .As<HourTotal>().ToRecordsAsync().ToListAsync();
+```
+
+`PartsAsync` cuts a dataset at its objects, and a large object at its chunks, and a file at its
+chunks. It then gathers the pieces into ranges of about as many rows each, which follow one another.
+A partial holds no answers, only each group's states: the rows it counts, each measure's exact sum,
+count of values, least and greatest, and the sketches of its quantiles and approximate distinct
+counts. The merge folds these states the way the whole question folds its rows. Integer and float
+sums are exact, and a sketch's buckets are integer counts, so the merged answers are the same bits as
+the whole question's, whatever order the partials arrive in.
+
+The filters on groups, the order and the window (`Where` on `g`, `OrderBy`, `Take`) apply at the
+merge, never in a part: a part cannot know which groups the whole question keeps. A node can also
+merge a few partials and send on their partial, `Merge(partials).PartialAsync()`, so the merges can
+form a tree.
+
+The size of a partial follows its groups. In the tests, a question by region and hour with a
+quantile and an approximate distinct count wrote partials of 68 to 81 KB for 28 to 35 groups each, the
+sketches taking most of that. A question by key over 800 000 rows gave partials of 2.2 to 3.8 MB for
+about 170 000 to 290 000 groups. A part runs under its session's memory budget like any question, and a part
+whose groups do not fit spills them and still gives its states. The merge does the same.
+
+A question takes parts when every aggregate in it is one a state answers whole: a count of rows, a
+sum, least, greatest or mean of a number column, a distribution or quantile of one, or an approximate
+distinct count. `PartsAsync`, `PartialAsync` and `Merge` throw `NotSupportedException` for any other
+aggregate, such as an exact distinct count, a filtered aggregate, a chosen row, a variance, a decimal
+sum or an aggregator of your own. A partial whose keys or measures are not the question's throws
+`InvalidDataException` when the merge reads it. A partial of the same shape but another filter cannot
+be told apart, so the question on each node is yours to keep the same. To keep the version the same,
+open the dataset at the version the coordinator cut (`VortexDataset.OpenAsync(store, version)`).
+
+## Exact, estimated or progressive, and at what cost
+
+Every way of asking gives the exact answer in the end, or says it does not. Which one to take depends on
+what the exact answer costs, which `CostAsync()` says before anything is read:
+
+| you want | ask | what comes back |
+|---|---|---|
+| the exact answer | the question itself, `ToListAsync()`, `ToRecordsAsync()` | the rows' answer, to the bit; on a dataset each object answered by the cheapest path its plan proves (counts, blocks, partials, rows) |
+| the exact answer when it is cheap, estimates when it is not | `EstimateAsync(new EstimateOptions { ExactUnder = … })` | under the threshold, the exact answer at once; over it, the tiers below |
+| something soon, then better, then exact | `EstimateAsync()` | tiers from 0.1 %, 1 % and 10 % of the rows, each count, sum and mean with a 95 % margin, then the exact answer |
+| a long range of a dataset, newest first | `AskByValuesAsync` ([datasets.md](datasets.md)) | each part's exact answer, the newest first |
+| the answer from several nodes | `PartsAsync`, `PartialAsync`, `Merge` | the exact answer, the same bits as one node gives |
+
+The price is the time the exact answer's reads take cold on an object store, at the planner's paths:
+1.25 GB/s, a request worth 293 KB of transfer. It says nothing of a warm cache, which answers faster,
+and a single file's source cannot say. It counts what each object's path reads, the columns the
+question filters by included, and bounds it: on 182 questions over every column of a dataset, in the
+order of arrival and clustered, a cold read took at most an eighth more bytes than the price, and much
+less where an index of values or the blocks narrowed it.
+
+## Estimates first, then the exact answer
+
+A question over a long window can be answered first from a share of its rows, each count and sum with
+its margin, then from more rows, until the exact answer:
+
+```csharp
+Aggregation question = dataset.Scan<Hit>().Where(r => r.At >= from)
+    .GroupBy(r => (r.Region, r.Status))
+    .Select(g => (g.Key.Region, g.Key.Status, g.Count(), g.Sum(r => r.Bytes), g.Average(r => r.Latency)));
+
+await foreach (AggregationEstimate tier in question.EstimateAsync())
+{
+    List<HitEstimate> groups = await tier.As<HitEstimate>().ToRecordsAsync().ToListAsync();
+    Console.WriteLine($"{tier.Share:P1} of the rows, {tier.Groups} groups{(tier.IsExact ? ", exact" : "")}");
+}
+
+[VortexRecord]
+public partial record struct HitEstimate(
+    string Region, int Status, long Rows, long Bytes, double? Latency,
+    double RowsMargin, double BytesMargin, double LatencyMargin);
+```
+
+By default the tiers read 0.1 %, 1 % and 10 % of the question's rows, then all of them. Each tier
+reads the rows of the one before and adds more. The rows are read in ranges, never block by block. A
+range runs between two places where the chunks of every column the question reads end together, and it
+holds at least 1 MiB of the narrowest of those columns, so it costs a few requests. The ranges are drawn
+at random within strata, runs of neighbouring objects, at least two ranges in each stratum.
+
+A tier scales the counts and sums of the ranges it read up to every row. Each comes with a margin, the
+half-width of a 95 % interval computed from how much the ranges of each stratum differ. A mean is the
+ratio of the scaled sum to the scaled count of its values, with a margin of its own. A least, a
+greatest, a distribution, a quantile or an approximate distinct count is the value over the rows read,
+without a margin: the least of those rows is never below the least of all rows. A group that no range
+read is missing from the tier. The last tier reads every range and is the exact answer, the same bits
+as the question itself gives, every margin 0.
+
+The record of a tier takes the selection's elements in order, then one `double` for each count of rows,
+sum and mean among them, in the same order. `EstimateOptions` sets the shares, whether the exact tier
+comes at the end, the bytes of a range and the seed of the draw.
+
+Each tier also says what the exact answer costs before it is read, `ExactCost`: the time its reads take
+cold over a link of 1.25 GB/s, each request worth its round trip, as the dataset's planner prices them
+object by object (counts, blocks or rows) from what its entries say, with no read. Under
+`EstimateOptions.ExactUnder`, a second by default, the exact answer comes at once, one tier and no
+estimate: on the tests' 400 000 rows it costs 7.6 ms. `TimeSpan.Zero` draws the tiers whatever the cost,
+and so does a source that cannot price its reads, a single file's. `CostAsync()` gives the same price
+before anything is asked, from the entries alone, null for a source that cannot say: the exact answer,
+the estimates or a threshold of the application's own can be chosen from it.
+
+```csharp
+TimeSpan? cost = await question.CostAsync();
+IAsyncEnumerable<AggregationEstimate> tiers = question.EstimateAsync(
+    new EstimateOptions { ExactUnder = cost < TimeSpan.FromSeconds(5) ? TimeSpan.FromSeconds(5) : TimeSpan.Zero });
+```
+
+In the tests, with 140 groups spread over 400 000 rows and 200 draws, the margins held the exact counts,
+sums and means 94.8 % of the time at 5 % of the rows, with three ranges drawn per stratum, and 95.1 % of
+the time at 20 %. A tier made about one request per range and per column read: 53 requests for 14
+ranges of four columns.
+
+An estimate answers every group it meets, so a question with `Where` on its groups, an order or a
+window throws `NotSupportedException`; it takes the aggregates a question in parts takes. A stratum
+draws two ranges at least, so the first tier of a source with few ranges reads more than its share.
+Read each tier before asking for the next.
+
 ## Decimals at any precision
 
 A decimal column sums exactly, whatever its precision and its row count. The total is kept in 320

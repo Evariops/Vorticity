@@ -53,12 +53,6 @@ internal abstract record DatasetOperation
         /// read the level, and the outputs would overlap it.
         /// </summary>
         public LevelRange? Range { get; init; }
-
-        /// <summary>
-        /// Whether an output joins several sealed periods of a dataset of periods, which every header names from
-        /// then on (<see cref="DatasetFeatures.JoinedPeriods"/>).
-        /// </summary>
-        public bool Joins { get; init; }
     }
 
     /// <summary>Attaches an index fragment to an object.</summary>
@@ -134,13 +128,12 @@ internal abstract record DatasetOperation
     public sealed record ChangeShreddedPaths(ReadOnlyMemory<byte> Schema, IReadOnlyList<string> From, IReadOnlyList<string> To) : DatasetOperation;
 
     /// <summary>
-    /// Changes the length of a dataset's periods from an instant on, as the seal that weighed the
-    /// period it wrote asks: applied on the calendar it was worked out on, after <paramref name="After"/>
-    /// changes, and dropped when another writer changed the calendar first.
+    /// Puts a rollup (<see cref="RollupEntry"/>) into the tree of rollups: applied when what it sums is in the version as
+    /// it summed it, by the fingerprint of the level's entries it covers, or of the rollups of the rank below; dropped when
+    /// one of them changed since, which a later rollup sums again.
     /// </summary>
-    /// <param name="Change">The change.</param>
-    /// <param name="After">How many changes the calendar held when the change was worked out.</param>
-    public sealed record ChangePeriodLength(PeriodChange Change, int After) : DatasetOperation;
+    /// <param name="Entry">The rollup, its object written.</param>
+    public sealed record PutRollup(RollupEntry Entry) : DatasetOperation;
 }
 
 /// <summary>What a commit made of one change, once re-applied to the version it landed on.</summary>

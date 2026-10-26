@@ -104,8 +104,9 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// The component of a query's key its groups stream on, or -1: the first the statistics say is
-    /// sorted, or the source reads in its order when asked, and no order but those that start with
-    /// it, all one way. Descending, the rows are read in the component's order backwards.
+    /// sorted, or the source reads in its order when asked (<see cref="ScanSource.OrdersOnAsking"/>),
+    /// and no order but those that start with it, all one way. Descending, the rows are read in the
+    /// component's order backwards.
     /// </summary>
     /// <remarks>
     /// Backwards, a group's rows come last first and a window before the order would take the groups
@@ -121,7 +122,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         int streaming = -1;
         for (int c = 0; c < keys.Length && streaming < 0; c++)
         {
-            streaming = AggregationEngine.IsSorted(source, keys[c]) || source.OrdersOnAsking(keys[c].Column.Field) ? c : -1;
+            streaming = AggregationEngine.IsSorted(source, keys[c]) || source.OrdersOnAsking(keys[c].Column.Field, StopsEarly(query)) ? c : -1;
         }
 
         if (streaming < 0)
@@ -151,6 +152,25 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         return descending == true && (windowFirst || !bounded || !OrderFree(query.Plan)) ? -1 : streaming;
+    }
+
+    /// <summary>Whether a take or a window stops the query's read early: what a source's order asked for is worth most to (<see cref="ScanSource.OrdersOnAsking"/>).</summary>
+    internal static bool StopsEarly(AggregationQuery query)
+    {
+        if (query.Take != long.MaxValue)
+        {
+            return true;
+        }
+
+        foreach (GroupOperator op in query.Operators)
+        {
+            if (op is GroupWindow { Take: not long.MaxValue })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Whether every aggregate of the plan gives the same answer whatever the order its rows come in.</summary>
@@ -354,7 +374,8 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _query.Plan.LastGroups = 0;
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
-        ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
+        ScanSpec spec = await host.AlignedSpecAsync(plan, _query.RowFilter, _cancellationToken).ConfigureAwait(false);
+        ScanSpec pass = AggregationEngine.PassSpec(spec, columns, plan, host.Source.Schema);
         int streaming = _zones is null ? Streaming(_query) : 0;
 
         // A source that brings the rows in the component's order when asked is asked, backwards
@@ -364,7 +385,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         FieldExpr ordered = plan.Keys[streaming].Column.Field;
         bool descending = Descends(_query);
         bool sorted = AggregationEngine.IsSorted(host.Source, plan.Keys[streaming]);
-        if (!sorted && host.Source.OrdersOnAsking(ordered))
+        if (!sorted && host.Source.OrdersOnAsking(ordered, StopsEarly(_query)))
         {
             pass = pass with { OrderPath = ordered.Path, Descending = descending };
         }

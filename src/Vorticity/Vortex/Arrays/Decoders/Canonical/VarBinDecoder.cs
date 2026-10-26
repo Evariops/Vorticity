@@ -1,5 +1,4 @@
 using System;
-using System.Text.Unicode;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Types;

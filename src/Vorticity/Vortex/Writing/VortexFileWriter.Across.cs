@@ -526,7 +526,7 @@ public sealed partial class VortexFileWriter
             if (!_flushing)
             {
                 writer.Gather(gathering, chunk!, _nodes[field], _rows, _blocks);
-                if (gathering.Bytes < gathering.Target)
+                if (!gathering.Due)
                 {
                     return;
                 }
@@ -544,6 +544,7 @@ public sealed partial class VortexFileWriter
             _gatheredRows[field] = rows;
             gathering.Nodes.Clear();
             gathering.Rows = 0;
+            gathering.Cut = gathering.Bytes;
             gathering.Bytes = 0;
             gathering.Blocks = 0;
             try

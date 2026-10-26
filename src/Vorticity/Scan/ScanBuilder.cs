@@ -2,11 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
@@ -436,22 +434,6 @@ internal sealed class ScanBuilder
         _orderComposite = [.. paths];
         return this;
     }
-
-    /// <summary>
-    /// Walks the key order in windows of about <paramref name="rows"/> entries rather than the file's zone length, for
-    /// a reader of the whole file in key order, such as a compaction: a window reads every split its rows lie in, so on
-    /// rows mostly in key order, some of them a few seconds late, small windows read the splits ahead of them again and
-    /// again for the few late rows each holds, where a wide one finds them among its own. The window is a power of two,
-    /// <paramref name="rows"/> rounded down to one, its exponent held in a byte so that no scan grows.
-    /// </summary>
-    internal ScanBuilder WithKeyWindow(int rows)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(rows);
-        _keyWindowShift = (byte)System.Numerics.BitOperations.Log2((uint)rows);
-        return this;
-    }
-
-    private byte _keyWindowShift;
 
     private void ThrowIfOrdered(string method)
     {
@@ -1191,12 +1173,6 @@ internal sealed class ScanBuilder
         }
 
         long batch = _filter is null && _take is null && _orderPath is null ? WindowBatch(natural) : natural;
-
-        // A reader of the whole object in key order walks windows of its own size, as many zones as fit.
-        if (_orderPath is not null && _take is null && _keyWindowShift > 0 && (1L << _keyWindowShift) > natural)
-        {
-            batch = (1L << _keyWindowShift) / natural * natural;
-        }
 
         return (rows, natural, Capped(batch));
     }

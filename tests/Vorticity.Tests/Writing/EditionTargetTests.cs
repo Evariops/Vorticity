@@ -13,14 +13,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Arrays;
-using Vorticity.Columns;
 using Vorticity.Editions;
-using Vorticity.File;
-using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Writing;

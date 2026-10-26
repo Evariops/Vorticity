@@ -46,6 +46,9 @@ internal enum CommitKind
 
     /// <summary>The keys of variant columns every job shreds changed.</summary>
     Layout = 12,
+
+    /// <summary>Rollups put over runs of objects, which only read what the objects keep.</summary>
+    Rollup = 13,
 }
 
 /// <summary>How a commit ended, as the dataset's telemetry names it.</summary>
@@ -97,51 +100,16 @@ internal static class DatasetTelemetry
     private static readonly Counter<long> VacuumDeleted = VortexTelemetry.Meter.CreateCounter<long>(
         "vortex.dataset.vacuum.objects_deleted", "{object}", "Objects vacuums deleted.");
 
-    private static readonly Histogram<double> Lateness = VortexTelemetry.Meter.CreateHistogram<double>(
-        "vortex.dataset.lateness", "s", "How far behind the newest instant a handle appended the oldest row of each append to a dataset of periods came.");
+    private static readonly Counter<long> ClusteringAvoidableBytes = VortexTelemetry.Meter.CreateCounter<long>(
+        "vortex.dataset.clustering.avoidable_bytes", "By",
+        "Bytes the objects read as rows under a filter would have been spared by a clustering of the filter's column, by column (ClusteringAdvice).");
 
-    /// <summary>Records how late an append's oldest row came: what tells a lateness horizon too short.</summary>
-    private static readonly Counter<long> RowsPastHorizon = VortexTelemetry.Meter.CreateCounter<long>(
-        "vortex.dataset.rows_past_horizon", "{row}", "Rows a dataset by periods took later than its lateness horizon, kept in the late level beside their period.");
-
-    /// <summary>Rows level 0's exit sent to the late level for a period already closed.</summary>
-    internal static void PastHorizon(long rows) => RowsPastHorizon.Add(rows);
-
-    internal static void Late(double seconds)
+    /// <summary>Counts the bytes a clustering by <paramref name="column"/> would have spared an object read as rows, once an object.</summary>
+    internal static void ClusteringAvoidable(string column, long bytes)
     {
-        if (Lateness.Enabled)
+        if (ClusteringAvoidableBytes.Enabled)
         {
-            Lateness.Record(seconds);
-        }
-    }
-
-    private static readonly Histogram<long> Partitions = VortexTelemetry.Meter.CreateHistogram<long>(
-        "vortex.dataset.partitions", "{partition}", "The values of its partition columns a dataset holds rows of, at each plan of its compaction.");
-
-    /// <summary>
-    /// Records the partitions a plan found a dataset to hold: one append's values are bounded, a dataset's
-    /// over its life are not, and this is what shows them pile up.
-    /// </summary>
-    internal static void PartitionsHeld(int partitions)
-    {
-        if (Partitions.Enabled)
-        {
-            Partitions.Record(partitions);
-        }
-    }
-
-    private static readonly Histogram<double> PeriodLoad = VortexTelemetry.Meter.CreateHistogram<double>(
-        "vortex.dataset.period.load", "By/s", "The bytes per second of data time of each period a seal wrote, with the period length that load calls for.");
-
-    /// <summary>
-    /// Records the load a seal weighed and the length it calls for: the measure the length's rule is
-    /// built on, which a deployment reads to see whether the rule's constants fit it.
-    /// </summary>
-    internal static void PeriodWeighed(double bytesPerSecond, SliceWidth length)
-    {
-        if (PeriodLoad.Enabled)
-        {
-            PeriodLoad.Record(bytesPerSecond, new KeyValuePair<string, object?>("length", length.ToString()));
+            ClusteringAvoidableBytes.Add(bytes, new KeyValuePair<string, object?>("vortex.column", column));
         }
     }
 
@@ -229,7 +197,8 @@ internal static class DatasetTelemetry
 
     /// <summary>
     /// Starts the activity of one pass of a compaction job, a child of the job's, or returns null when nothing
-    /// listens: <c>plan</c>, the first pass of a job that writes sorted slices, which cuts them from the rows,
+    /// listens: <c>plan</c>, the first pass of a job that writes key slices over a variant column, which counts the paths
+    /// of each clustering value's rows,
     /// or <c>write</c>, the pass that reads the rows again and writes the outputs.
     /// </summary>
     internal static Activity? StartCompactionPass(string pass) =>
@@ -356,6 +325,7 @@ internal static class DatasetTelemetry
         CommitKind.Rekey => "rekey",
         CommitKind.Sources => "sources",
         CommitKind.Layout => "layout",
+        CommitKind.Rollup => "rollup",
         _ => "other",
     };
 
@@ -384,10 +354,6 @@ internal static class DatasetTelemetry
         CompactionTrigger.Marks => "marks",
         CompactionTrigger.Erasure => "erasure",
         CompactionTrigger.Neighbours => "neighbours",
-        CompactionTrigger.LateCeiling => "late_ceiling",
-        CompactionTrigger.FreshMerge => "fresh_merge",
-        CompactionTrigger.Seal => "seal",
-        CompactionTrigger.Join => "join",
         _ => "none",
     };
 }

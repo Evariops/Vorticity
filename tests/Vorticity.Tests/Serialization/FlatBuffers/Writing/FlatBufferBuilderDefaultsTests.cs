@@ -6,7 +6,6 @@
 // `nan_count: uint64 = null`, where absent means "nobody computed it" and present-and-zero means
 // "computed, and it is zero". Those are untrusted hints that results and fast paths rely on: a
 // lying one cannot corrupt memory, but conflating "unknown" with "zero" produces wrong answers.
-using System;
 using Vorticity.Serialization.FlatBuffers;
 using Xunit;
 
