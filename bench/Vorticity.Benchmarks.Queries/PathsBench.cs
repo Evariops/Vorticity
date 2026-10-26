@@ -461,8 +461,8 @@ internal static partial class PathsBench
 
     /// <summary>
     /// One question by one path: cold by a session and a handle opened for it, with an empty synopsis cache, then warm
-    /// by the same handle, the median of the rounds; each asked once first, with no wait and nothing kept, so that
-    /// neither pays the question's first compile.
+    /// by the same handle, the median of the rounds; each asked untimed first, with no wait and nothing kept, so that
+    /// neither pays the question's compiles.
     /// </summary>
     private static async Task<(Measured Cold, Measured Warm)> AskAsync(Settings settings, Built built, Question question, bool synopses, int degree)
     {
@@ -470,6 +470,12 @@ internal static partial class PathsBench
         await using FileObjectStore files = new FileObjectStore(built.Directory);
         LatencyObjectStore remote = new LatencyObjectStore(settings.KeepHandles ? new HeldFileObjectStore(files) : files);
         await using CountingObjectStore store = new CountingObjectStore(remote);
+
+        // Asked untimed with no wait, each time by a session and a handle of its own as the cold round is, for as long as
+        // --warm says and once at least: one ask leaves the question's code at the JIT's first tier, whose recompilation
+        // a cold round then shares or not, QP-3 on 32 lanes 73 to 79 ms or 164 to 169 after an ask on one (2026-10-26).
+        long compiledBy = Stopwatch.GetTimestamp() + (long)(settings.WarmSeconds * Stopwatch.Frequency);
+        do
         {
             await using VortexSession session = VortexSession.Create(o =>
             {
@@ -478,6 +484,15 @@ internal static partial class PathsBench
             });
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
             await MeasureAsync(store, dataset, question, options, !settings.NoDigest);
+        }
+        while (Stopwatch.GetTimestamp() < compiledBy);
+
+        // And the JIT's recompilations in the background done: no method compiled for a tenth of a second, two seconds at most.
+        for (int calm = 0, waited = 0; calm < 2 && waited < 20; waited++)
+        {
+            long compiled = System.Runtime.JitInfo.GetCompiledMethodCount();
+            await Task.Delay(100);
+            calm = System.Runtime.JitInfo.GetCompiledMethodCount() == compiled ? calm + 1 : 0;
         }
 
         remote.Latency = TimeSpan.FromMilliseconds(settings.Latency);
