@@ -8,11 +8,7 @@ using System.Globalization;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Scanning;
-using Vorticity.Types;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;

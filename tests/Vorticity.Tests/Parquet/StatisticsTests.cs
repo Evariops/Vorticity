@@ -9,7 +9,6 @@ using Vorticity.Expressions;
 using Vorticity.Parquet;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Reading;
-using Vorticity.Parquet.Schema;
 using Vorticity.Parquet.Writing;
 using Xunit;
 

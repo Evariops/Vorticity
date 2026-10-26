@@ -1,6 +1,5 @@
 using System;
 using System.Numerics;
-using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
 

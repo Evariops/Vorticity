@@ -31,16 +31,13 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -827,7 +824,7 @@ public sealed class DatasetFuzzTests
                 case 2:
                 {
                     // The same indexer, dropping one: by its content, wherever a commit wrote it.
-                    (ReadOnlyMemory<byte> key, ObjectEntry entry) = seen[random.Next(seen.Count)];
+                    (ReadOnlyMemory<byte> key, _) = seen[random.Next(seen.Count)];
                     batch.Add(new DatasetOperation.DropFragment(key, Content(FragmentBytes(random.Next(8)))));
                     break;
                 }

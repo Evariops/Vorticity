@@ -8,7 +8,6 @@ using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
-using Vorticity.IO;
 
 namespace Vorticity.Benchmarks.Queries;
 

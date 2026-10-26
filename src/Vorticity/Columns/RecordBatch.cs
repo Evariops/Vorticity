@@ -1,7 +1,5 @@
 using System;
-using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
-using System.Numerics;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
 using Vorticity.Compute;

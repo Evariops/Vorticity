@@ -2,8 +2,6 @@
 // fields and one nested message, as the blob writer's workspace does for each node's metadata;
 // `Fields` writes one message of 4,096 varint fields, where the capacity check is most of the work.
 // Each against `ProtoWriterBefore`, the writer as it kept its waiting lengths in an array of its own.
-using System;
-
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Serialization.Protobuf;

@@ -7,7 +7,6 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Indexes;
 using Vorticity.Types;
-using Vorticity.Types.Numerics;
 
 namespace Vorticity.Writing;
 

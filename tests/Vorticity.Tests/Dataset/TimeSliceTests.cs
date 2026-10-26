@@ -8,14 +8,10 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
-using Vorticity.Dataset;
 using Vorticity.Indexes;
-using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Tests.File;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;

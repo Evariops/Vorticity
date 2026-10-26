@@ -5,17 +5,12 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Aggregating;
-using Vorticity.Arrays;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Types.Variants;
-using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
@@ -567,7 +562,6 @@ internal static class DatasetCompactor
         ObjectStream? lateOutputs,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<string> paths = key.Paths;
         KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
         ValueCut? values = schema.Cut;
         long rows = 0;

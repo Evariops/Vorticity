@@ -7,14 +7,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -144,7 +142,7 @@ public sealed class DatasetKeyCursorReadTests
         }
 
         sorted.Sort((left, right) => string.CompareOrdinal(left.City, right.City) is int order and not 0 ? order : left.Row.CompareTo(right.Row));
-        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, dataset.Snapshot, "City", distinct: false, indexes: true, ct);
+        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset.Snapshot, "City", distinct: false, indexes: true, ct);
         Action<int> at = index =>
         {
             Assert.Equal(sorted[index].City, Encoding.UTF8.GetString(cursor.KeyBytes));

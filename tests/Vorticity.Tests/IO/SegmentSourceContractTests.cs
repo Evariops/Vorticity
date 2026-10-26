@@ -1,7 +1,6 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity;
 using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;

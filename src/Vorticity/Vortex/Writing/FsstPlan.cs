@@ -1,6 +1,5 @@
 using System;
 using System.Buffers;
-using System.Collections.Generic;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;

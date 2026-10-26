@@ -1,4 +1,3 @@
-using System;
 using Vorticity.Arrays;
 
 namespace Vorticity.RowEncoding;

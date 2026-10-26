@@ -14,8 +14,6 @@
 //
 // The spreading is also the one part of pco upstream marks "needs to remain backward compatible":
 // a reimplementation has no freedom in it, and a disagreement decodes silently to other symbols.
-using System;
-
 using Vorticity.Arrays.Decoders.Compressed.Pco;
 using Xunit;
 

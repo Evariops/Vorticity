@@ -7,7 +7,6 @@ using System.IO.Hashing;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 

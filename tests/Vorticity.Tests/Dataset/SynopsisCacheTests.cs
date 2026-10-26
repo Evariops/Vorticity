@@ -6,15 +6,11 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Dataset;
 using Vorticity.Indexes;
-using Vorticity.IO;
-using Vorticity.Tests.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;

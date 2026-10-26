@@ -9,7 +9,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
-using Vorticity;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Serialization.Schemas;

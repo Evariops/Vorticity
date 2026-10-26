@@ -15,7 +15,6 @@
 // including cuts of one row.
 using System;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;

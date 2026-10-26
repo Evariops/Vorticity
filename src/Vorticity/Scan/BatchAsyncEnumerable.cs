@@ -9,10 +9,8 @@ using System.Threading.Tasks.Sources;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
-using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.Types;

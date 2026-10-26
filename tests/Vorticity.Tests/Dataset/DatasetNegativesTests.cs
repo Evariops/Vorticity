@@ -15,7 +15,6 @@ using Vorticity.Dataset;
 using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Serialization.Protobuf;
-using Vorticity.Tests.Scan;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;

@@ -10,7 +10,6 @@ using System.Linq;
 using Vorticity.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Keys;

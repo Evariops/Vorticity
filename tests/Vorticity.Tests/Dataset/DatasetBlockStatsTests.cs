@@ -14,7 +14,6 @@ using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
-using Vorticity.IO;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;

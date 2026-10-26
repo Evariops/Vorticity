@@ -1,9 +1,7 @@
 // A distinct sketch as a table of sketches holds it: the same bytes for the same content, whatever the form that held it,
 // merged into a sketch as the sketch it encodes merges, and bytes that hold no sketch refused.
-using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.Linq;
 using Vorticity.Aggregating;
 using Xunit;
 

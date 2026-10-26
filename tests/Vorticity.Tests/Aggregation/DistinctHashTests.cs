@@ -34,7 +34,7 @@ public sealed class DistinctHashTests
     /// <summary>The values of a forged column.</summary>
     public enum Forgery
     {
-        /// <summary>(k << 32) | k, whose default hash folds its halves together into 0.</summary>
+        /// <summary><c>(k &lt;&lt; 32) | k</c>, whose default hash folds its halves together into 0.</summary>
         EqualHalves,
 
         /// <summary>The multiples of the bucket count, which a hash that is the value takes to one bucket.</summary>

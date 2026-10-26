@@ -442,12 +442,12 @@ internal sealed class PcoBinTrainer : IDisposable
 
         if (latents[c] < latents[b])
         {
-            (b, c) = (c, b);
+            b = c;
         }
 
         if (latents[b] < latents[a])
         {
-            (a, b) = (b, a);
+            b = a;
         }
 
         return b;

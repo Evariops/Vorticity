@@ -4,7 +4,6 @@ using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.IO;
 
 namespace Vorticity.Benchmarks.Queries;
 

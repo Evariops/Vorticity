@@ -4,7 +4,6 @@ using System;
 using System.Collections.Generic;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Serialization.Protobuf;
-using Vorticity.Types;
 using Xunit;
 
 namespace Vorticity.Tests.Arrays.Metadata;

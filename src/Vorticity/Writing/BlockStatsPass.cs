@@ -619,7 +619,6 @@ internal static class BlockStatsPass
             }
 
             step = delta;
-            known = true;
             last = head;
             i++;
             if (!Progression(values, start + i, start + count, last, step))
@@ -2318,8 +2317,8 @@ internal static class BlockStatsPass
         where T : unmanaged, IBinaryInteger<T>, ISignedNumber<T>, IMinMaxValue<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
-        T min = T.MaxValue;
-        T max = T.MinValue;
+        T min;
+        T max;
         Order(values, in mask, start, ref stats);
 
         // The bounds loop holds two compares per value and nothing else, which is the shape the JIT
@@ -2849,8 +2848,8 @@ internal static class BlockStatsPass
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>, IMinMaxValue<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes).Slice(start, count);
-        T min = T.MaxValue;
-        T max = T.MinValue;
+        T min;
+        T max;
         Order(values, in mask, start, ref stats);
 
         // Same discipline as the signed loop: bounds alone in the hot loop, widths in a second walk

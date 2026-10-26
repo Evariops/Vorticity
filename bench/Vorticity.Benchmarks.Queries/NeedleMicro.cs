@@ -13,7 +13,6 @@ using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Indexes;
 using Vorticity.Types;
-using Vorticity.Types.Serialization;
 
 namespace Vorticity.Benchmarks.Queries;
 

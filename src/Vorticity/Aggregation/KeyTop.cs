@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Threading;
 using Vorticity.Arrays;
@@ -129,7 +128,7 @@ internal sealed class KeyTop
 
         if (o == operators.Length)
         {
-            (start, reach) = Narrowed(start, reach, query.Skip, query.Take);
+            (_, reach) = Narrowed(start, reach, query.Skip, query.Take);
         }
 
         return reach is > 0 and <= MostKept ? new KeyTop(query, order, (int)reach, extreme) : null;
@@ -181,7 +180,7 @@ internal sealed class KeyTop
 
         if (o == operators.Length)
         {
-            (start, reach) = Narrowed(start, reach, query.Skip, query.Take);
+            (_, reach) = Narrowed(start, reach, query.Skip, query.Take);
         }
 
         return reach is > 0 and <= MostKept ? new KeyTop(query, null, (int)reach, extreme: false) : null;

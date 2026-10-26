@@ -12,7 +12,6 @@ using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
-using Vorticity.IO;
 using Vorticity.Scanning;
 using Xunit;
 

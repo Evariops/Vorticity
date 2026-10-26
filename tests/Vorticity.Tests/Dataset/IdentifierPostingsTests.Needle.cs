@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.Expressions;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;

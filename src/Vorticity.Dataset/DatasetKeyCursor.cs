@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Keys;
 
 namespace Vorticity.Dataset;
@@ -159,7 +158,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="path"/> names no column of the dataset.</exception>
     internal static ValueTask<DatasetKeyCursor> OpenAsync(
-        VortexDataset dataset, DatasetSnapshot version, string path, bool distinct, bool indexes, CancellationToken cancellationToken)
+        DatasetSnapshot version, string path, bool distinct, bool indexes, CancellationToken cancellationToken)
     {
         ClusteringKey? key = version.Schema.Key;
         bool clustering = key is { IsComposite: false } && string.Equals(key.Paths[0], path, StringComparison.Ordinal);

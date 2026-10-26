@@ -19,7 +19,6 @@ using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Xunit;

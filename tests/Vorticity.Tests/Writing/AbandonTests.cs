@@ -17,11 +17,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.Scanning;
-using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
@@ -303,7 +300,7 @@ public sealed class AbandonTests
         DataBlockTargetBytes = 1L << 24,
     };
 
-    /// <summary>A sink that passes <paramref name="allow"/> writes through, then refuses.</summary>
+    /// <summary>A sink that passes a number of writes through, then refuses.</summary>
     private sealed class RefusingSink : ISegmentSink, IAsyncDisposable
     {
         private readonly StreamSegmentSink _inner;

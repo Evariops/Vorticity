@@ -11,7 +11,6 @@ using System;
 using System.Collections.Generic;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
-using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;

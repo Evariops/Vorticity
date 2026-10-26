@@ -267,7 +267,7 @@ internal sealed class DatasetScanSource : ScanSource
     internal override bool MayMatch(VortexExpr filter) => _version.MayMatch(filter);
 
     internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
-        await DatasetKeyCursor.OpenAsync(_dataset, _version, path, distinct, indexes, cancellationToken).ConfigureAwait(false);
+        await DatasetKeyCursor.OpenAsync(_version, path, distinct, indexes, cancellationToken).ConfigureAwait(false);
 
     internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         DatasetKeyCursor.ExplainAsync(_version, path, indexes, cancellationToken);

@@ -1,5 +1,4 @@
 using System;
-using Vorticity;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 using Xunit;

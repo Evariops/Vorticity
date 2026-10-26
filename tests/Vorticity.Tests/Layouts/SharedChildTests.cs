@@ -6,7 +6,6 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Layouts;
 using Vorticity.Tests.Scan;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Layouts;

@@ -2,14 +2,11 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
-using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.Compute;
 using Vorticity.Layouts;
-using Vorticity.Types;
 using Vorticity.Writing;
 
 namespace Vorticity;

@@ -13,7 +13,6 @@ using System.Linq;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
-using Vorticity.File;
 using Vorticity.Layouts;
 
 using Xunit;

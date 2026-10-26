@@ -9,7 +9,6 @@
 // What is NOT negotiable either way: the builder must never emit a buffer the reader then rejects,
 // and must never silently produce one that reads back different values.
 using System;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Xunit;
 

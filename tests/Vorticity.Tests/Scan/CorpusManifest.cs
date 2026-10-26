@@ -48,7 +48,7 @@ internal sealed class CorpusEntry
 
     /// <summary>
     /// <see langword="false"/> for a file written with <c>exclude_dtype()</c>. Opening one without
-    /// <see cref="Vorticity.File.VortexOpenOptions.DType"/> is a format error by design, so the
+    /// <see cref="VortexOpenOptions.Schema"/> is a format error by design, so the
     /// scan tests skip it: it never reaches the scan at all.
     /// </summary>
     internal bool HasDTypeSegment { get; }

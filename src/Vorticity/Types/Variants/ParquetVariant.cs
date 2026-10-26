@@ -2,7 +2,6 @@ using System;
 using System.Buffers.Binary;
 
 using Vorticity.Arrays;
-using Vorticity.Types.Numerics;
 
 namespace Vorticity.Types.Variants;
 

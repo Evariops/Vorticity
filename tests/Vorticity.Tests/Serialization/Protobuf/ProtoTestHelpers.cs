@@ -1,4 +1,3 @@
-using System;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Tests.Serialization.Protobuf;

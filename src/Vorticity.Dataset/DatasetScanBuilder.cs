@@ -5,11 +5,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
-using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
-using Vorticity.Indexes;
 using Vorticity.Keys;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
@@ -1882,7 +1879,7 @@ internal sealed class DatasetScanBuilder
         if (!_wholeKnown)
         {
             SummaryPruner pruner = new SummaryPruner(filter);
-            bool alone = _dataset.Key is { } key && pruner.ReadsColumns;
+            bool alone = _dataset.Key is not null && pruner.ReadsColumns;
             foreach (string path in pruner.Paths)
             {
                 alone &= string.Equals(path, _dataset.Key!.InstantPath, StringComparison.Ordinal);

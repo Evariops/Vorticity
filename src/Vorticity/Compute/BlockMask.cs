@@ -2,7 +2,6 @@ using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays.Decoders.Canonical;
-using Vorticity.File;
 
 namespace Vorticity.Compute;
 

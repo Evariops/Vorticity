@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;

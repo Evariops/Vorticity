@@ -10,14 +10,10 @@
 // exercised against real decoded values from distributions/float_specials_f64_r1024, whose row 1
 // is -0.0 and whose rows 2-4 are three different NaN bit patterns.
 using System;
-using System.Globalization;
-using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Conformance.Comparison;
 using Vorticity.Conformance.Corpus;
 using Vorticity.Conformance.Sidecar;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Xunit;
 

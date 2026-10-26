@@ -4,13 +4,11 @@
 // dataset's object goes sealed and its sealed length is recorded.
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.IO;
 using Vorticity.ObjectStorage;
 using Xunit;
 using Reading = Vorticity.Tests.ObjectStorage.LocationTests.Reading;

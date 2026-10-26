@@ -1,7 +1,6 @@
 // Round trip, tri-state and adversarial tests for `table Array`, `table ArrayNode` and
 // `table ArrayStats`.
 using System;
-using Vorticity;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
 using Xunit;

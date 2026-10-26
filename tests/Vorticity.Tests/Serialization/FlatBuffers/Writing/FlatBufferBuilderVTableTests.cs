@@ -11,7 +11,6 @@
 // vtable only when they also start at the same alignment. That is what flatc does too, and it is
 // why every fixture here uses 4-byte fields and 4-byte-sized vtables: the head then stays 4-byte
 // aligned table after table and the dedup counts are deterministic rather than luck.
-using System;
 using Vorticity.Serialization.FlatBuffers;
 using Xunit;
 

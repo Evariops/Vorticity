@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using Vorticity.Aggregating;
-using Vorticity.Expressions;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;

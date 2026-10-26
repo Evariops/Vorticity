@@ -4,7 +4,6 @@
 using System;
 using System.Buffers.Binary;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.File;
 using Vorticity.Types;
 using Xunit;

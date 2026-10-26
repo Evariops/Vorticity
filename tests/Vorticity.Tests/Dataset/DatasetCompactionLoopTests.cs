@@ -6,7 +6,6 @@
 // take distinct jobs from one plan, and that the pace is the rate it was given.
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;

@@ -1177,7 +1177,7 @@ internal sealed class AggregationPartition
     /// </summary>
     internal bool MustEvict(int rows)
     {
-        if (!CanEvict || Memory is not { } memory || _arrays is not { } arrays)
+        if (!CanEvict || Memory is null || _arrays is not { } arrays)
         {
             return false;
         }

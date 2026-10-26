@@ -1,11 +1,8 @@
 using System;
-using System.Buffers.Binary;
 using System.Globalization;
 using System.Text;
 using Vorticity.Arrays;
-using Vorticity.Buffers;
 using Vorticity.Expressions;
-using Vorticity.Indexes;
 using Vorticity.Types;
 using Vorticity.Writing;
 

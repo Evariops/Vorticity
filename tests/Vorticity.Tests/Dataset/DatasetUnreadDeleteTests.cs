@@ -1,11 +1,9 @@
 // A delete whose filter the summaries prove true for every row of an object removes it without reading it.
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.Expressions;
 using Vorticity.IO;
 using Xunit;
 

@@ -2,11 +2,8 @@
 // The wire bytes are produced by the library's ScalarProtobuf writer, so these exercise the typed
 // interpreter and not a hand-rolled encoder.
 using System;
-using System.Text;
-using Vorticity;
 using Vorticity.Arrays;
 using Vorticity.Types;
-using Vorticity.Types.Numerics;
 using Vorticity.Types.Serialization;
 using Xunit;
 

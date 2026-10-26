@@ -1,5 +1,4 @@
 using System;
-using System.Buffers.Binary;
 using Vorticity.Arrays;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;

@@ -1,7 +1,6 @@
 // The rules Patches enforces on a patch set. Every one of them is exercised through
 // vortex.sparse, which is the shortest path to Patches.Create with a real decoded indices child.
 using System;
-using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;

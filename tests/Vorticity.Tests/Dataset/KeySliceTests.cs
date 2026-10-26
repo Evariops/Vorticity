@@ -9,11 +9,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
-using Vorticity.Scanning;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;

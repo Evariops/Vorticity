@@ -10,7 +10,6 @@ using Vorticity.Buffers;
 using Vorticity.Layouts;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Writing;

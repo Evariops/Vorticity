@@ -1,6 +1,5 @@
 using System;
 using System.Runtime.CompilerServices;
-using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 

@@ -10,7 +10,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
-using Vorticity.IO;
 using Vorticity.Tests.Writing;
 using Xunit;
 

@@ -1,9 +1,7 @@
 // A group by of millions of groups over a dataset under a budget of query memory: whatever the budget leaves, the lanes'
 // tables, the core and their spills keep within it, and the answer is the one a budget that grants everything gives.
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;

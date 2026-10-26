@@ -215,6 +215,8 @@ public sealed partial class GroupAllocationTests
     /// Runs <paramref name="query"/> and reads its result as the batches it is, its counts summed: the
     /// rows the groups hold, and the path the groups took.
     /// </summary>
+    /// <param name="query">The query to run.</param>
+    /// <param name="lanes">The lanes it runs on.</param>
     /// <param name="counted">The column of the counts.</param>
     private static async Task<(long, GroupCoreReason)> CountAsync<TRecord>(Vorticity.Aggregation query, int lanes, int counted)
         where TRecord : IVortexRecord<TRecord>

@@ -1,8 +1,6 @@
 using System;
 using System.Buffers;
 using Vorticity.Arrays;
-using Vorticity.Columns;
-using Vorticity.Types;
 
 namespace Vorticity.RowEncoding;
 

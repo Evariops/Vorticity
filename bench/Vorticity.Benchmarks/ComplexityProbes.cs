@@ -6,7 +6,6 @@
 // means nothing could re-measure them after a change; that is what this class exists to end.
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,13 +14,10 @@ using BenchmarkDotNet.Attributes;
 
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity.Benchmarks;
 
@@ -219,7 +215,7 @@ public class ComplexityProbes
         }
     }
 
-    /// <summary>Counts the rows an <c>IN</c> of <see cref="Literals"/> values keeps.</summary>
+    /// <summary>Counts the rows an <c>IN</c> of <paramref name="literals"/> values keeps.</summary>
     /// <remarks>
     /// Pruning and indexes are off so the number is the comparison kernel's and nothing else's: with
     /// them on, a narrow set of literals is answered by the zone map and the curve measures the

@@ -1,15 +1,11 @@
 using System;
 using System.Buffers;
 using System.Numerics;
-using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
-using Vorticity.Arrays.Decoders.Compressed;
-using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;

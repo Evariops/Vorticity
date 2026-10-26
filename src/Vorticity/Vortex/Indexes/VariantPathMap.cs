@@ -5,7 +5,6 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.File;
 using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Serialization.Schemas;

@@ -1,10 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using Vorticity.Aggregating;
-using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Canonical;
-using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;

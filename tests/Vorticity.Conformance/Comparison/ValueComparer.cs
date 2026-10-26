@@ -19,10 +19,8 @@
 // `null` is JSON null and nothing else ever is: an empty string, an empty list and an empty map are
 // values. That is one branch, taken before the dtype is even looked at.
 using System;
-using System.Buffers.Binary;
 using System.Globalization;
 using System.Text;
-using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.Conformance.Sidecar;
 using Vorticity.Types;

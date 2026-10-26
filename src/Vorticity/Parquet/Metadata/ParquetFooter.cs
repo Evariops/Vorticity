@@ -100,7 +100,6 @@ internal sealed class ParquetFooter
         ThriftCompactReader reader = new(span);
         int found = 0;
         int version = 0;
-        long rowCount = 0;
         SchemaElement[] schema = [];
         RowGroupEntry[] rowGroups = [];
         (ByteRange, ByteRange)[] keyValues = [];
@@ -125,7 +124,7 @@ internal sealed class ParquetFooter
                     break;
                 case 3:
                     ThriftCompactReader.Expect(type, ThriftType.I64);
-                    rowCount = reader.ReadI64();
+                    reader.ReadI64();
                     found |= 4;
                     break;
                 case 4:
@@ -187,7 +186,7 @@ internal sealed class ParquetFooter
 
         // The rows are the row groups': some writers left the file's own count at 0, and no read
         // depends on it.
-        rowCount = rows;
+        long rowCount = rows;
 
         ParquetFooter footer = new(bytes, rowGroups.Length)
         {

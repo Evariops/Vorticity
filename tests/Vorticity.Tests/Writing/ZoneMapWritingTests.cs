@@ -16,13 +16,10 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
-using Vorticity.Types;
-using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Writing;

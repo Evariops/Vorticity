@@ -3,11 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.RowEncoding;
-using Vorticity.Scanning;
-using Vorticity.Types;
 
 namespace Vorticity.Dataset;
 

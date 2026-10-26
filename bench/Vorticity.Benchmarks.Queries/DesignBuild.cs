@@ -2,15 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
-using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Arrays;
 using Vorticity.Dataset;
-using Vorticity.Indexes;
 using Vorticity.IO;
-using Vorticity.Types;
 
 namespace Vorticity.Benchmarks.Queries;
 

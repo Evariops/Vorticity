@@ -1,12 +1,10 @@
 using System;
 using System.Buffers;
-using System.Numerics;
 using System.Runtime.InteropServices;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed.Pco;
-using Vorticity.Types;
 
 namespace Vorticity.Writing;
 

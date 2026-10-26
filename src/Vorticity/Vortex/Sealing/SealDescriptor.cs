@@ -32,13 +32,11 @@ internal sealed class SealDescriptor
     private const int FixedBytes = 2 + 1 + SealedFormat.ObjectIdBytes + SealedFormat.BindingBytes + 1 + 1 + 2
         + SealedFormat.SaltBytes + SealedFormat.CommitmentBytes;
 
-    private SealDescriptor(byte[] bytes, int frameLog2, string keyId, int keyIdAt, int keyIdLength, int contextAt, int contextLength, int wrappedAt, int wrappedLength)
+    private SealDescriptor(byte[] bytes, int frameLog2, string keyId, int contextAt, int contextLength, int wrappedAt, int wrappedLength)
     {
         Bytes = bytes;
         FrameLog2 = frameLog2;
         KeyId = keyId;
-        _keyIdAt = keyIdAt;
-        _keyIdLength = keyIdLength;
         _contextAt = contextAt;
         _contextLength = contextLength;
         _wrappedAt = wrappedAt;
@@ -46,8 +44,6 @@ internal sealed class SealDescriptor
         Hash = SHA256.HashData(bytes.AsSpan(0, bytes.Length - SealedFormat.CommitmentBytes));
     }
 
-    private readonly int _keyIdAt;
-    private readonly int _keyIdLength;
     private readonly int _contextAt;
     private readonly int _contextLength;
     private readonly int _wrappedAt;
@@ -71,8 +67,6 @@ internal sealed class SealDescriptor
     internal ReadOnlySpan<byte> ObjectId => Bytes.AsSpan(3, SealedFormat.ObjectIdBytes);
 
     internal ReadOnlySpan<byte> Binding => Bytes.AsSpan(3 + SealedFormat.ObjectIdBytes, SealedFormat.BindingBytes);
-
-    internal ReadOnlyMemory<byte> KeyIdBytes => Bytes.AsMemory(_keyIdAt, _keyIdLength);
 
     /// <summary>What the keyring passed to the key service with the data key, which unwrapping it needs back.</summary>
     internal ReadOnlyMemory<byte> KeyContext => Bytes.AsMemory(_contextAt, _contextLength);
@@ -126,7 +120,6 @@ internal sealed class SealDescriptor
         binding[..SealedFormat.BindingBytes].CopyTo(span[(3 + SealedFormat.ObjectIdBytes)..]);
         int at = 3 + SealedFormat.ObjectIdBytes + SealedFormat.BindingBytes;
         span[at++] = (byte)keyIdLength;
-        int keyIdAt = at;
         at += StrictUtf8.GetBytes(keyId, span[at..]);
         span[at++] = (byte)keyContext.Length;
         int contextAt = at;
@@ -138,7 +131,7 @@ internal sealed class SealDescriptor
         wrappedKey.CopyTo(span[at..]);
         at += wrappedKey.Length;
         salt[..SealedFormat.SaltBytes].CopyTo(span[at..]);
-        return new SealDescriptor(bytes, frameLog2, keyId, keyIdAt, keyIdLength, contextAt, keyContext.Length, wrappedAt, wrappedKey.Length);
+        return new SealDescriptor(bytes, frameLog2, keyId, contextAt, keyContext.Length, wrappedAt, wrappedKey.Length);
     }
 
     /// <summary>Writes the commitment, the one field the hash leaves out.</summary>
@@ -220,7 +213,7 @@ internal sealed class SealDescriptor
         }
 
         consumed = at;
-        return new SealDescriptor(bytes[..at].ToArray(), frameLog2, keyId, keyIdAt, keyIdLength, contextAt, contextLength, wrappedAt, wrappedLength);
+        return new SealDescriptor(bytes[..at].ToArray(), frameLog2, keyId, contextAt, contextLength, wrappedAt, wrappedLength);
     }
 
     /// <summary>Whether <paramref name="other"/> holds exactly these bytes, as the two copies of one object must.</summary>

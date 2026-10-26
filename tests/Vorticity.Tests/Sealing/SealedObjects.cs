@@ -8,7 +8,6 @@ using Vorticity.IO;
 using Vorticity.Sealing;
 using Vorticity.Tests.Api;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity.Tests.Sealing;
 

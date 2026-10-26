@@ -1,13 +1,10 @@
 using System;
 using System.Buffers;
-using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
-using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Editions;
 using Vorticity.Types;
@@ -932,7 +929,7 @@ internal static class ColumnCompressor
             return ColumnPlan.Canonical;
         }
 
-        ColumnPlan sparse = SparseOf(arena, in node, target, in stats, measured);
+        ColumnPlan sparse = SparseOf(in node, target, in stats, measured);
         if (sparse.Scheme != ColumnScheme.None)
         {
             return sparse;
@@ -1717,7 +1714,7 @@ internal static class ColumnCompressor
         // positions, when that costs less than the runs the nulls make -- before the run-end rule,
         // which would otherwise take every such chunk as runs, and before a decimal's parts, which
         // would take its nulls into the integers.
-        ColumnPlan sparse = SparseOf(arena, in node, target, in stats, measured);
+        ColumnPlan sparse = SparseOf(in node, target, in stats, measured);
         if (sparse.Scheme != ColumnScheme.None)
         {
             return sparse;
@@ -1953,7 +1950,7 @@ internal static class ColumnCompressor
     /// doubles and text alike (<c>vortex-queries --micro sparsecost</c>).
     /// </remarks>
     private static ColumnPlan SparseOf(
-        CanonicalArena arena, in CanonicalNode node, VortexEdition target, in BlockStats stats, bool measured,
+        in CanonicalNode node, VortexEdition target, in BlockStats stats, bool measured,
         bool pinned = false)
     {
         int length = node.Length;
@@ -2124,7 +2121,7 @@ internal static class ColumnCompressor
             }
 
             case ColumnScheme.Sparse:
-                return SparseOf(arena, in node, target, in stats, measured: stats.IsPresent && stats.Rows == length, pinned);
+                return SparseOf(in node, target, in stats, measured: stats.IsPresent && stats.Rows == length, pinned);
 
             case ColumnScheme.Pco:
             {

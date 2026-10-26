@@ -14,11 +14,8 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-
-using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.Parquet;
-using Vorticity.Writing;
 
 using Set = Vorticity.Bench.Scenarios.ScenarioSet;
 

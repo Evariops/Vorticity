@@ -12,7 +12,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Aggregating;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
 using Xunit;

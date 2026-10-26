@@ -1,7 +1,6 @@
 // Extension dtype metadata is hand-rolled, not Protobuf, and every one of these cases
 // is a byte layout a careless reader gets wrong in a way that reads plausibly.
 using System;
-using Vorticity;
 using Vorticity.Arrays;
 using Vorticity.Types;
 using Xunit;

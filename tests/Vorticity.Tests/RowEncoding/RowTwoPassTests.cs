@@ -8,7 +8,6 @@
 // DIFFERENT bytes and require the results to be identical. A byte the encoder never wrote is the
 // one thing that would differ.
 using System;
-using Vorticity.Columns;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 using Vorticity.RowEncoding;

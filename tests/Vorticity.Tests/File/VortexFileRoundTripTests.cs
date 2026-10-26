@@ -8,7 +8,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
 using Vorticity.File;
-using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Xunit;

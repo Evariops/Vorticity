@@ -11,10 +11,8 @@ using BenchmarkDotNet.Attributes;
 
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity.Benchmarks.Complexity;
 

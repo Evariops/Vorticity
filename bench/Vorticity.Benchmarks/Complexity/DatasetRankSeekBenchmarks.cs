@@ -7,17 +7,14 @@
 // from the first, one step per entry. Run in a checkout of the original and in the tree.
 using System;
 using System.Collections.Generic;
-using System.Threading;
 using System.Threading.Tasks;
 
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Arrays;
 using Vorticity.Buffers;
-using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Types;
-using Vorticity.Writing;
 
 namespace Vorticity.Benchmarks.Complexity;
 

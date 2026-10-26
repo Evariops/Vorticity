@@ -1,6 +1,5 @@
 using System;
 using System.Buffers;
-using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
 

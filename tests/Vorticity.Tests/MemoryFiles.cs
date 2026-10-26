@@ -1,6 +1,5 @@
 // Files the tests write to bytes and open as a store would serve them.
 using System.Threading.Tasks;
-using Vorticity.File;
 using Vorticity.IO;
 
 namespace Vorticity.Tests;

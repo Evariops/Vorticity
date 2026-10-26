@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
 using Vorticity.Parquet;
-using Vorticity.Parquet.Reading;
 using Xunit;
 
 namespace Vorticity.Tests.Parquet;

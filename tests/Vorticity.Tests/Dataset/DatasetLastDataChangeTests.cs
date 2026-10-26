@@ -3,8 +3,6 @@
 // it only moves them, as a compaction, an index fragment, the purge of deletion marks and a repack
 // do (a rekey is checked with the encrypted dataset's tests). A commit that applies nothing creates
 // no version, and a header written before the field reads as its own version.
-using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;

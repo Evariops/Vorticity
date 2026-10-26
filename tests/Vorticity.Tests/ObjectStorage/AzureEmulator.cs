@@ -18,7 +18,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
-using Vorticity.ObjectStorage.Azure;
 
 namespace Vorticity.Tests.ObjectStorage;
 

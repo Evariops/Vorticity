@@ -6,14 +6,11 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Columns;
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
-using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 

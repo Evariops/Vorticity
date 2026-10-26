@@ -11,7 +11,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
-using Vorticity.File;
 using Xunit;
 
 namespace Vorticity.Tests.File;

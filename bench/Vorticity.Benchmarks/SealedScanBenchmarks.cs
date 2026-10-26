@@ -18,7 +18,6 @@ using System.Threading.Tasks;
 using BenchmarkDotNet.Attributes;
 
 using Vorticity.Expressions;
-using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Sealing;
 

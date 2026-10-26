@@ -505,7 +505,7 @@ internal sealed class BlockAnswer
         judged.Clear();
         foreach (BlockColumn column in columns)
         {
-            if (column.SummaryOf(block, rows) is { } own)
+            if (column.SummaryOf(block) is { } own)
             {
                 judged.Add(own);
             }
@@ -585,7 +585,7 @@ internal sealed class BlockAnswer
             for (int k = 0; k < KeyFields.Length; k++)
             {
                 int place = Array.IndexOf(Fields, KeyFields[k]);
-                states.SetKey(row, k, place == varying ? value : columns[place].ConstantOf(block, rows, KeyOf(place)!));
+                states.SetKey(row, k, place == varying ? value : columns[place].ConstantOf(block, rows));
             }
         }
 
@@ -620,20 +620,6 @@ internal sealed class BlockAnswer
         return true;
     }
 
-    /// <summary>The key whose column is <see cref="Fields"/>' <paramref name="place"/>, the first such; null for a column no key reads.</summary>
-    private FieldExpr? KeyOf(int place)
-    {
-        foreach ((int field, FieldExpr key) in _keys)
-        {
-            if (field == Fields[place])
-            {
-                return key;
-            }
-        }
-
-        return null;
-    }
-
     /// <summary>A block no column of the question varies in, the filter proven over its rows: its rows and each measure's states, a row of states.</summary>
     private bool AddWhole(int block, long rows, BlockColumn[] columns, BlockStateRows states)
     {
@@ -641,7 +627,7 @@ internal sealed class BlockAnswer
         for (int k = 0; k < KeyFields.Length; k++)
         {
             int place = Array.IndexOf(Fields, KeyFields[k]);
-            states.SetKey(row, k, columns[place].ConstantOf(block, rows, KeyOf(place)!));
+            states.SetKey(row, k, columns[place].ConstantOf(block, rows));
         }
 
         int word = 1;
@@ -696,10 +682,10 @@ internal sealed class BlockColumn(string path, DType dtype, ColumnWhere? where, 
     }
 
     /// <summary>
-    /// The summary block <paramref name="block"/> of <paramref name="rows"/> rows makes of the column: the least and the
-    /// greatest of the values it lists or of its measure, exact, and its nulls; null when it keeps no statistics.
+    /// The summary block <paramref name="block"/> makes of the column: the least and the greatest of the values it lists
+    /// or of its measure, exact, and its nulls; null when it keeps no statistics.
     /// </summary>
-    internal ColumnSummary? SummaryOf(int block, long rows)
+    internal ColumnSummary? SummaryOf(int block)
     {
         if (Blocks is not { } stats)
         {
@@ -794,10 +780,11 @@ internal sealed class BlockColumn(string path, DType dtype, ColumnWhere? where, 
     }
 
     /// <summary>
-    /// The value of the column that stands for block <paramref name="block"/>'s one group of <paramref name="key"/>, as the
-    /// column stores it: its value, or its least under a function that sends its extremes to one group; null for nulls.
+    /// The value of the column that stands for the one group of block <paramref name="block"/> of <paramref name="rows"/>
+    /// rows, as the column stores it: its value, or its least under a function that sends its extremes to one group; null
+    /// for nulls.
     /// </summary>
-    internal byte[]? ConstantOf(int block, long rows, FieldExpr key)
+    internal byte[]? ConstantOf(int block, long rows)
     {
         ColumnBlocks stats = Blocks!;
         if (stats.Nulls[block] == rows)
