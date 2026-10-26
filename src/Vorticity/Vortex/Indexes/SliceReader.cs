@@ -14,14 +14,14 @@ using Vorticity.Types;
 namespace Vorticity.Indexes;
 
 /// <summary>
-/// Reads the rows of a sliced file's time slices without its footer: the postscript names the index
+/// Reads the rows of a sliced file's slices without its footer: the postscript names the index
 /// directory, the directory the slice table and the regions of the chunk directory, and those the
 /// chunks that hold a slice's rows, decoded from their own bytes against the schema the caller knows.
 /// </summary>
 /// <remarks>
 /// <para>
 /// An open reads the footer, a node per chunk and column, which for an object of a day's rows runs to
-/// megabytes. A question that needs the rows of a slice or two (the edges of a window, an exact
+/// megabytes. A question that needs the rows of a slice or two (the edges of a range of the key, an exact
 /// lookup, the rows to show) needs none of it. Opening this reader costs three small dependent
 /// requests (the EOF marker, the postscript, the index directory). The first read of a column adds
 /// one for that column's chunk directory, then each slice costs one request, its chunks read together.
@@ -105,7 +105,7 @@ internal sealed class SliceReader : IDisposable
         }
     }
 
-    /// <summary>The file's time slices.</summary>
+    /// <summary>The file's slices.</summary>
     internal SliceTable Slices { get; }
 
     /// <summary>The chunks of column <paramref name="field"/>, loaded first.</summary>
@@ -224,7 +224,7 @@ internal sealed class SliceReader : IDisposable
     /// one request set, after the chunk directories of the columns not read before.
     /// </summary>
     internal ValueTask<RecordBatch> ReadRowsAsync(long first, long rows, int[]? columns, CancellationToken cancellationToken) =>
-        ReadSpanAsync(new TimeSlice(0, 1, first, rows), columns, cancellationToken);
+        ReadSpanAsync(RowRange.FromLength(first, rows), columns, cancellationToken);
 
     /// <summary>
     /// The rows of each of <paramref name="spans"/>, a batch per span in order, as <see cref="ReadRowsAsync"/>
@@ -236,7 +236,7 @@ internal sealed class SliceReader : IDisposable
     /// <param name="columns">The columns to read, in the order the batches hold them; every column when null.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <exception cref="VortexFormatException">A column's chunk directory or a chunk does not decode.</exception>
-    internal async ValueTask<RecordBatch[]> ReadSpansAsync(IReadOnlyList<TimeSlice> spans, int[]? columns, CancellationToken cancellationToken)
+    internal async ValueTask<RecordBatch[]> ReadSpansAsync(IReadOnlyList<RowRange> spans, int[]? columns, CancellationToken cancellationToken)
     {
         int[] fields = columns ?? AllColumns();
         await LoadAsync(fields, spans, cancellationToken).ConfigureAwait(false);
@@ -292,7 +292,7 @@ internal sealed class SliceReader : IDisposable
         }
     }
 
-    private async ValueTask<RecordBatch> ReadSpanAsync(TimeSlice span, int[]? columns, CancellationToken cancellationToken)
+    private async ValueTask<RecordBatch> ReadSpanAsync(RowRange span, int[]? columns, CancellationToken cancellationToken)
     {
         int[] fields = columns ?? AllColumns();
         // The span a paged column reads the pages of; none for a file whose directories are all read whole.
@@ -313,19 +313,19 @@ internal sealed class SliceReader : IDisposable
     }
 
     /// <summary>Registers in <paramref name="requests"/> the chunks of <paramref name="fields"/> that hold the span's rows: their slots, field by field.</summary>
-    private int[] ChunksOf(SegmentRequestSet requests, TimeSlice span, int[] fields)
+    private int[] ChunksOf(SegmentRequestSet requests, RowRange span, int[] fields)
     {
         int chunkCount = 0;
         foreach (int field in fields)
         {
-            chunkCount += Overlapping(field, span.FirstRow, span.Rows).Length;
+            chunkCount += Overlapping(field, span.Start, span.Length).Length;
         }
 
         int[] slots = new int[chunkCount];
         int next = 0;
         foreach (int field in fields)
         {
-            foreach (ChunkSpan chunk in Overlapping(field, span.FirstRow, span.Rows))
+            foreach (ChunkSpan chunk in Overlapping(field, span.Start, span.Length))
             {
                 slots[next++] = requests.Add(new SegmentSpec(chunk.Offset, chunk.Length, chunk.AlignmentExponent, 0, 0));
             }
@@ -335,9 +335,9 @@ internal sealed class SliceReader : IDisposable
     }
 
     /// <summary>The span's rows decoded from the chunks <paramref name="context"/> holds, as a batch that adopts it.</summary>
-    private RecordBatch Batch(ScanContext context, TimeSlice span, int[] fields, int[]? columns, int[] slots)
+    private RecordBatch Batch(ScanContext context, RowRange span, int[] fields, int[]? columns, int[] slots)
     {
-        int length = checked((int)span.Rows);
+        int length = checked((int)span.Length);
 
         // A projection's struct is built in the context's own arena, and its fields decode at the
         // types it holds, so the batch's columns and its schema are the same nodes.
@@ -346,12 +346,12 @@ internal sealed class SliceReader : IDisposable
         int next = 0;
         for (int i = 0; i < fields.Length; i++)
         {
-            decoded[i] = Column(context, schema.GetField(i), Overlapping(fields[i], span.FirstRow, span.Rows), span, length, slots, ref next);
+            decoded[i] = Column(context, schema.GetField(i), Overlapping(fields[i], span.Start, span.Length), span, length, slots, ref next);
         }
 
         int root = context.Canonical.AddStruct(
             schema, length, schema.IsNullable ? Validity.AllValid : Validity.NonNullable, decoded);
-        return RecordBatch.Adopt(context, root, span.FirstRow, null, null);
+        return RecordBatch.Adopt(context, root, span.Start, null, null);
     }
 
     /// <summary>
@@ -362,7 +362,7 @@ internal sealed class SliceReader : IDisposable
     /// </summary>
     internal async ValueTask<long[]> ChunkStartsAsync(int[] fields, long first, long end, CancellationToken cancellationToken)
     {
-        TimeSlice span = new TimeSlice(0, 1, first, end - first);
+        RowRange span = new RowRange(first, end);
         await LoadAsync(fields, [span], cancellationToken).ConfigureAwait(false);
         SortedSet<long> starts = [];
         foreach (int field in fields)
@@ -433,7 +433,7 @@ internal sealed class SliceReader : IDisposable
     /// checked against its checksum in the table, and its chunks against the rows the table of contents places it at.
     /// </summary>
     /// <exception cref="VortexFormatException">A directory, a page table or a page does not decode, or does not cover the file's rows.</exception>
-    private async ValueTask LoadAsync(int[] fields, IReadOnlyList<TimeSlice> spans, CancellationToken cancellationToken)
+    private async ValueTask LoadAsync(int[] fields, IReadOnlyList<RowRange> spans, CancellationToken cancellationToken)
     {
         foreach (int field in fields)
         {
@@ -472,7 +472,7 @@ internal sealed class SliceReader : IDisposable
             ChunkSpan[]?[]? pages = System.Threading.Volatile.Read(ref _paged!.Pages[field]);
             for (int s = 0; s < spans.Count; s++)
             {
-                (int from, int to) = _paged!.Paging.PagesOf(spans[s].FirstRow, spans[s].Rows);
+                (int from, int to) = _paged!.Paging.PagesOf(spans[s].Start, spans[s].Length);
                 for (int page = from; page <= to; page++)
                 {
                     if (pages is not null && System.Threading.Volatile.Read(ref pages[page]) is not null)
@@ -651,7 +651,7 @@ internal sealed class SliceReader : IDisposable
 
     /// <summary>One column's rows of the slice: its <paramref name="chunks"/> that overlap it decoded, cut to the slice and joined.</summary>
     private static int Column(
-        ScanContext context, DType type, ReadOnlySpan<ChunkSpan> chunks, TimeSlice span, int length, int[] slots, ref int next)
+        ScanContext context, DType type, ReadOnlySpan<ChunkSpan> chunks, RowRange span, int length, int[] slots, ref int next)
     {
         int[] parts = new int[chunks.Length];
         for (int i = 0; i < chunks.Length; i++)
@@ -660,8 +660,8 @@ internal sealed class SliceReader : IDisposable
             context.Decode.LoadBlob(context.Segments.GetBuffer(slots[next++]));
             ArrayNode root = context.Nodes.Root;
             int node = context.Decode.DecodeRoot(in root, type, checked((int)chunk.Rows));
-            long from = Math.Max(span.FirstRow, chunk.FirstRow);
-            long to = Math.Min(span.FirstRow + span.Rows, chunk.EndRow);
+            long from = Math.Max(span.Start, chunk.FirstRow);
+            long to = Math.Min(span.End, chunk.EndRow);
             parts[i] = CanonicalSlice.Slice(context.Decode, node, (int)(from - chunk.FirstRow), (int)(to - from));
         }
 

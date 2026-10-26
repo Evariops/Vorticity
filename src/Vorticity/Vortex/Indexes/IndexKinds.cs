@@ -37,8 +37,8 @@ internal static class IndexKinds
     public const string PostingsHashed = "vorticity.postings.hashed.v1";
 
     /// <summary>
-    /// The time slices of a file, on its instant column: per slice its bounds, its first row and its
-    /// row count, held in the entry's options with no payload (<see cref="SliceTable"/>).
+    /// The slices of a file whose rows lie in the order of a key, on the key's first column: per slice its rows and its
+    /// first key, and the last key of the last slice, held in the entry's options with no payload (<see cref="SliceTable"/>).
     /// </summary>
     public const string Slices = "vorticity.slices.v1";
 

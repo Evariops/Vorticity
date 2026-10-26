@@ -317,9 +317,8 @@ internal sealed class DatasetScanSource : ScanSource
         long to = spec.Rows?.End ?? long.MaxValue;
         List<(PositionedObject Held, RowRange Rows)> objects = [];
         long total = 0;
-        long low = long.MinValue;
-        long high = long.MaxValue;
-        bool windowed = spec.Filter is { } bounded && _dataset.Key is { } instant && DatasetScanBuilder.Bound(bounded, instant.InstantPath, ref low, ref high);
+        ClusteringKey? key = _dataset.Key;
+        (byte[] Low, byte[] High)? bounds = spec.Filter is { } bounded && key is not null ? DatasetScanBuilder.KeyBounds(bounded, key) : null;
         CountsAnswer? answer = spec.States is { } request && spec.Options.UseSynopses
             && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
             ? CountsAnswer.Of(request, spec.Filter, _version)
@@ -349,12 +348,12 @@ internal sealed class DatasetScanSource : ScanSource
                 continue;
             }
 
-            // An object reads the slices its window reaches alone, as its scan does (DatasetScanBuilder.Of): those are the
-            // rows its lanes share, where a day's object cut at its every row left the last 15 minutes, 45 M rows, to two
-            // of its 128 pieces, every other piece reading nothing.
-            if (windowed && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } sliced
-                && DatasetScanBuilder.WindowRows(sliced.Slices.Slices, low, high) is { } window)
+            // An object reads the slices the filter's range of the key's first column reaches alone, as its scan does
+            // (DatasetScanBuilder.Of): those are the rows its lanes share, where pieces cut over every row of it would leave
+            // most lanes reading nothing.
+            if (bounds is { } range && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } sliced)
             {
+                RowRange window = DatasetScanBuilder.KeyRows(sliced.Slices, range.Low, range.High, key!.LeadingType);
                 start = System.Math.Max(start, held.FirstRow + window.Start);
                 end = System.Math.Min(end, held.FirstRow + window.End);
             }
@@ -445,19 +444,18 @@ internal sealed class DatasetScanSource : ScanSource
         SummaryPruner? pruner = pass.Options.UseStatistics && pass.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
         long from = pass.Rows?.Start ?? 0;
         long to = pass.Rows?.End ?? long.MaxValue;
-        long low = long.MinValue;
-        long high = long.MaxValue;
-        bool windowed = pass.Filter is { } bounded && _dataset.Key is { } instant && DatasetScanBuilder.Bound(bounded, instant.InstantPath, ref low, ref high);
+        ClusteringKey? key = _dataset.Key;
+        (byte[] Low, byte[] High)? bounds = pass.Filter is { } bounded && key is not null ? DatasetScanBuilder.KeyBounds(bounded, key) : null;
         List<Task<RowRange[]>> objects = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
 
-            // An object reads the slices its window reaches alone, as its scan does.
-            if (windowed && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } sliced
-                && DatasetScanBuilder.WindowRows(sliced.Slices.Slices, low, high) is { } window)
+            // An object reads the slices the filter's range of the key's first column reaches alone, as its scan does.
+            if (bounds is { } range && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } sliced)
             {
+                RowRange window = DatasetScanBuilder.KeyRows(sliced.Slices, range.Low, range.High, key!.LeadingType);
                 start = System.Math.Max(start, held.FirstRow + window.Start);
                 end = System.Math.Min(end, held.FirstRow + window.End);
             }

@@ -2448,7 +2448,7 @@ public sealed class VortexDataset : IAsyncDisposable
             await pruner.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
 
             // The third: every run of blocks left, their chunks together, a chunk two runs share read once.
-            List<Indexes.TimeSlice> ranges = [];
+            List<RowRange> ranges = [];
             ReadOnlySpan<ulong> words = live.Words;
             int block = 0;
             while (block < live.BlockCount)
@@ -2467,7 +2467,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
                 long start = first * blockRows;
                 long end = Math.Min(block * blockRows, host.RowCount);
-                ranges.Add(new Indexes.TimeSlice(0, 1, start, end - start));
+                ranges.Add(new RowRange(start, end));
             }
 
             return [.. await slices.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
@@ -3044,7 +3044,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 }
             }
 
-            Indexes.TimeSlice[] spans = new Indexes.TimeSlice[wanted.Count];
+            RowRange[] spans = new RowRange[wanted.Count];
             for (int i = 0; i < spans.Length; i++)
             {
                 spans[i] = slices.Slices.Slices[wanted[i]];

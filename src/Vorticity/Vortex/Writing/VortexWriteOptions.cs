@@ -267,7 +267,7 @@ public sealed record VortexWriteOptions
     internal long RowBound { get; init; }
 
     /// <summary>
-    /// Whether the writer will be given the file's time slices, which ride in its index directory: it
+    /// Whether the writer will be given the file's slices, which ride in its index directory: it
     /// then keeps that directory whatever its policy builds, which may be nothing.
     /// </summary>
     internal bool CarriesSlices { get; init; }

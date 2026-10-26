@@ -335,21 +335,21 @@ internal static class ZonePruningPlan
         long end = -1;
         for (int slice = 0; slice < slices; slice++)
         {
-            Indexes.TimeSlice cut = table.Slices[slice];
+            RowRange cut = table.Slices[slice];
             if (Indexes.VariantDirectory.MayMatch(filter, directories, slice))
             {
                 continue;
             }
 
             // Neighbouring slices refuted make one run, so that a block astride them dies too.
-            if (start >= 0 && end == cut.FirstRow)
+            if (start >= 0 && end == cut.Start)
             {
-                end = cut.FirstRow + cut.Rows;
+                end = cut.End;
                 ranges![^1] = new RowRange(start, end);
                 continue;
             }
 
-            (start, end) = (cut.FirstRow, cut.FirstRow + cut.Rows);
+            (start, end) = (cut.Start, cut.End);
             (ranges ??= []).Add(new RowRange(start, end));
         }
 

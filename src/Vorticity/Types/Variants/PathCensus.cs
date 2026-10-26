@@ -16,11 +16,10 @@ namespace Vorticity.Types.Variants;
 /// directory holds: text bounds cut to <paramref name="stringBoundBytes"/>, as a text column's zones
 /// cut theirs, none at 0.
 /// <para>
-/// Given each row's instant, rows in time order, each path also keeps the spans of time its values lie
-/// in, from which the directory says which slices of the object hold it. Two values of a path closer
-/// than a slice is wide, <paramref name="sliceTargetRows"/> rows at the rate counted so far, share a
-/// span, so a path keeps about a span per slice at most and the slices a span names are a superset of
-/// those that hold it.
+/// Given <paramref name="sliceTargetRows"/>, each path also keeps the spans of rows its values lie in,
+/// from which the directory says which slices of the object hold it. Two values of a path that many
+/// rows apart or fewer share a span, so a path keeps about a span per slice at most and the slices a
+/// span names are a superset of those that hold it.
 /// </para>
 /// </remarks>
 internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows = 0)
@@ -41,11 +40,8 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
     /// </summary>
     private const long MaxHeldIds = 1 << 18;
 
-    // The instant of the row being counted, long.MinValue without one; the first instant, and the gap
-    // under which two values of a path share a span.
-    private long _instant = long.MinValue;
-    private long _firstInstant = long.MinValue;
-    private long _gap;
+    // The rows within which two values of a path share a span; 0 when the paths keep no spans.
+    private readonly long _gap = sliceTargetRows;
 
     /// <summary>
     /// The most keys the census counts, every depth of objects together: past them, the values of a key it has not met
@@ -80,10 +76,10 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
 
     /// <summary>
     /// Counts every row of the variant column <paramref name="field"/> of <paramref name="batch"/>'s root
-    /// struct, at <paramref name="instants"/>, one a row in time order, or at none.
+    /// struct, after the rows counted before.
     /// </summary>
     /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
-    internal void Add(RecordBatch batch, int field, ReadOnlySpan<long> instants = default)
+    internal void Add(RecordBatch batch, int field)
     {
         Arrays.CanonicalArena arena = batch.Arena;
         int column = arena.GetNode(batch.RootIndex).GetFieldIndex(field);
@@ -92,15 +88,6 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
         int value = EncodedForms.Canonical(arena, variant.GetFieldIndex(1));
         Arrays.CanonicalNode metadataNode = arena.GetNode(metadata);
         Arrays.CanonicalNode valueNode = arena.GetNode(value);
-        bool timed = sliceTargetRows > 0 && instants.Length == batch.RowCount;
-        if (timed && instants.Length > 0)
-        {
-            // A slice is as wide as its target rows take at the rate of the rows counted, this batch's among them: the
-            // first batch too, whose values would otherwise each open a span of their own.
-            _firstInstant = _firstInstant == long.MinValue ? instants[0] : _firstInstant;
-            _gap = (long)Math.Min((double)(instants[^1] - _firstInstant) / Math.Max(Rows + batch.RowCount, 1) * sliceTargetRows, long.MaxValue / 4);
-        }
-
         for (int row = 0; row < batch.RowCount; row++)
         {
             if (!Arrays.ArenaWords.IsValid(arena, column, row))
@@ -109,35 +96,19 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
                 continue;
             }
 
-            Count(
+            Add(
                 Compute.LiteralReader.ViewAt(metadataNode, row),
-                Arrays.ArenaWords.IsValid(arena, value, row) ? Compute.LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue,
-                timed ? instants[row] : long.MinValue);
+                Arrays.ArenaWords.IsValid(arena, value, row) ? Compute.LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue);
         }
     }
 
     /// <summary>
-    /// Counts a row of <paramref name="value"/>, its keys named by <paramref name="metadata"/>, at
-    /// <paramref name="instant"/>, after the rows counted before; long.MinValue for none.
+    /// Counts a row of <paramref name="value"/>, its keys named by <paramref name="metadata"/>, after the rows counted
+    /// before.
     /// </summary>
     /// <exception cref="VortexFormatException">The value or the metadata does not decode.</exception>
-    internal void Add(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, long instant = long.MinValue)
+    internal void Add(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value)
     {
-        // A slice as wide as its target rows take at the rate of the rows counted so far, this one among them, as a
-        // batch of rows reckons it for all its rows at once.
-        if (sliceTargetRows > 0 && instant != long.MinValue)
-        {
-            _firstInstant = _firstInstant == long.MinValue ? instant : _firstInstant;
-            _gap = (long)Math.Min((double)(instant - _firstInstant) / (Rows + 1) * sliceTargetRows, long.MaxValue / 4);
-        }
-
-        Count(metadata, value, instant);
-    }
-
-    /// <summary>Counts a row of <paramref name="value"/> at <paramref name="instant"/>, under the gap reckoned for it.</summary>
-    private void Count(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, long instant)
-    {
-        _instant = instant;
         Rows++;
         ValueBytes += value.Length;
         if (metadata.Length != _metadataLength || !metadata.SequenceEqual(_metadata.AsSpan(0, _metadataLength)))
@@ -215,7 +186,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
         private bool _false;
         private bool _true;
 
-        // The spans of time the values lie in, a first and a last instant each, the last span open.
+        // The spans of rows the values lie in, a first and a last row each, the last span open.
         private long[]? _spans;
         private int _spanCount;
 
@@ -256,16 +227,16 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
         /// <summary>The values a question reads as <paramref name="class"/>.</summary>
         internal long Read(PathClass @class) => _read[(int)@class];
 
-        /// <summary>The spans of time the values lie in, a first and a last instant each, in time order; empty without instants.</summary>
+        /// <summary>The spans of rows the values lie in, a first and a last row each, in order; empty when the census keeps none.</summary>
         internal ReadOnlySpan<long> Spans => _spans.AsSpan(0, 2 * _spanCount);
 
-        /// <summary>Notes a value at <paramref name="instant"/>, in the open span when it is within <paramref name="gap"/> of its end.</summary>
-        private void Occur(long instant, long gap)
+        /// <summary>Notes a value at <paramref name="row"/>, in the open span when it is within <paramref name="gap"/> rows of its end.</summary>
+        private void Occur(long row, long gap)
         {
             int last = (2 * _spanCount) - 1;
-            if (_spanCount > 0 && instant - _spans![last] <= gap)
+            if (_spanCount > 0 && row - _spans![last] <= gap)
             {
-                _spans[last] = Math.Max(_spans[last], instant);
+                _spans[last] = row;
                 return;
             }
 
@@ -274,8 +245,8 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
                 Array.Resize(ref _spans, Math.Max(4, 2 * (_spans?.Length ?? 0)));
             }
 
-            _spans[last + 1] = instant;
-            _spans[last + 2] = instant;
+            _spans[last + 1] = row;
+            _spans[last + 2] = row;
             _spanCount++;
         }
 
@@ -306,9 +277,10 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
         internal void Add(PathCensus census, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth)
         {
             Values++;
-            if (census._instant != long.MinValue)
+            // At the row being counted, the census's last.
+            if (census._gap > 0)
             {
-                Occur(census._instant, census._gap);
+                Occur(census.Rows - 1, census._gap);
             }
 
             switch (value[0] & 0x03)

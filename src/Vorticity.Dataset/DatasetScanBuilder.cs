@@ -3193,21 +3193,9 @@ internal sealed class DatasetScanBuilder
         // The range is the dataset's; the file's is the part of it that falls inside this object.
         (long lower, long upper) = PhysicalRange(held);
 
-        // An object sliced by time holds its rows slice by slice, every row's instant within its slice's bounds, so the
-        // filter's window on the instant is a range of its rows: the slices it reaches. The scan's plan, its zone maps and
-        // its walk then cover those alone, where they covered every row of the object at every question, the window's
-        // slices a day's object's 1 440 minutes for a window of an hour.
-        long low = long.MinValue;
-        long high = long.MaxValue;
-        if (held.Entry.Deletions.IsEmpty && filter is not null && _dataset.Key is { } key && Bound(filter, key.InstantPath, ref low, ref high)
-            && held.Entry.Contents is { Slices.ByKey: false } contents && WindowRows(contents.Slices.Slices, low, high) is { } window)
-        {
-            lower = Math.Max(lower, window.Start);
-            upper = Math.Min(upper, window.End);
-        }
-
-        // An object in slices bounded by its keys, the same of a range of the key's first column, of any type.
-        if (held.Entry.Deletions.IsEmpty && filter is not null && _dataset.Key is { } keyed && held.Entry.Contents is { Slices.ByKey: true } sliced
+        // An object in slices bounded by its keys holds the rows of a range of the key's first column, of any type, in the
+        // slices that range reaches: the scan's plan, its zone maps and its walk then cover those alone.
+        if (held.Entry.Deletions.IsEmpty && filter is not null && _dataset.Key is { } keyed && held.Entry.Contents is { } sliced
             && KeyBounds(filter, keyed) is { } bounds)
         {
             RowRange range = KeyRows(sliced.Slices, bounds.Low, bounds.High, keyed.LeadingType);
@@ -3227,59 +3215,6 @@ internal sealed class DatasetScanBuilder
         }
 
         return scan;
-    }
-
-    /// <summary>
-    /// Narrows <paramref name="low"/> and <paramref name="high"/>, inclusive, by the conjuncts of <paramref name="filter"/>
-    /// that compare <paramref name="instant"/> itself; whether one did. A walk of the conjunctions, which allocates nothing.
-    /// </summary>
-    internal static bool Bound(VortexExpr filter, string instant, ref long low, ref long high)
-    {
-        if (filter is LogicalExpr { IsAnd: true } both)
-        {
-            bool left = Bound(both.Left, instant, ref low, ref high);
-            return Bound(both.Right, instant, ref low, ref high) | left;
-        }
-
-        return BoundBy(filter, instant, ref low, ref high);
-    }
-
-    /// <summary>
-    /// Narrows the window by a comparison of the instant itself with an integer, in its units; false for
-    /// any other predicate on it.
-    /// </summary>
-    private static bool BoundBy(VortexExpr conjunct, string instant, ref long low, ref long high)
-    {
-        if (conjunct is not ComparisonExpr { Value.Kind: FilterLiteralKind.Signed } comparison
-            || comparison.Field is not ColumnFieldExpr || !string.Equals(comparison.Field.Path, instant, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        long value = comparison.Value.SignedValue;
-        switch (comparison.Op)
-        {
-            case ComparisonOp.Equal:
-                low = Math.Max(low, value);
-                high = Math.Min(high, value);
-                return true;
-            case ComparisonOp.Greater:
-                low = value == long.MaxValue ? long.MaxValue : Math.Max(low, value + 1);
-                high = value == long.MaxValue ? long.MinValue : high;
-                return true;
-            case ComparisonOp.GreaterOrEqual:
-                low = Math.Max(low, value);
-                return true;
-            case ComparisonOp.Less:
-                high = value == long.MinValue ? long.MinValue : Math.Min(high, value - 1);
-                low = value == long.MinValue ? long.MaxValue : low;
-                return true;
-            case ComparisonOp.LessOrEqual:
-                high = Math.Min(high, value);
-                return true;
-            default:
-                return false;
-        }
     }
 
     /// <summary>
@@ -3341,7 +3276,7 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     internal static RowRange KeyRows(Indexes.SliceTable table, ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, Types.DType column)
     {
-        IReadOnlyList<Indexes.TimeSlice> slices = table.Slices;
+        IReadOnlyList<RowRange> slices = table.Slices;
 
         // A slice reaches the range when the first value of the key above its keys is at its low or past, and the first
         // value of its first key at its high or before.
@@ -3359,39 +3294,9 @@ internal sealed class DatasetScanBuilder
 
         return last < first
             ? RowRange.Empty
-            : new RowRange(slices[first].FirstRow, slices[last].FirstRow + slices[last].Rows);
+            : new RowRange(slices[first].Start, slices[last].End);
 
         static ReadOnlySpan<byte> FirstValue(ReadOnlySpan<byte> key, Types.DType column) => key[..RowEncoding.RowEncoder.FirstValueLength(key, column)];
-    }
-
-    /// <summary>
-    /// The rows of the slices of <paramref name="slices"/> the window from <paramref name="low"/> to <paramref name="high"/>,
-    /// inclusive, reaches, from the first's first row to the last's last, empty when it reaches none; null when the object
-    /// has no slice.
-    /// </summary>
-    internal static RowRange? WindowRows(IReadOnlyList<Indexes.TimeSlice> slices, long low, long high)
-    {
-        if (slices.Count == 0)
-        {
-            return null;
-        }
-
-        // A slice [Start, End) the window [low, high] reaches: one that ends past its low and starts at its high or before.
-        int first = 0;
-        while (first < slices.Count && slices[first].End <= low)
-        {
-            first++;
-        }
-
-        int last = slices.Count - 1;
-        while (last >= first && slices[last].Start > high)
-        {
-            last--;
-        }
-
-        return last < first
-            ? RowRange.Empty
-            : new RowRange(slices[first].FirstRow, slices[last].FirstRow + slices[last].Rows);
     }
 
     /// <summary>

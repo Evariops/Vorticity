@@ -915,7 +915,7 @@ internal static class DatasetCompactor
                 _draft = _dataset.StartObjectUnder(
                     _schema, _inKeyOrder, _rowBound, sliced: KeySliced is not null, shredded: shredding?.Shredded, variantChunks: shredding?.VariantChunks,
                     byteBound: _byteBound, blocked: Blocked is not null);
-                _census = shredding is null ? null : [.. VariantColumns(_schema.DType).Select(_ => new PathCensus(_dataset.Options.Write.StringBoundBytes, SliceTarget))];
+                _census = shredding is null ? null : Census();
             }
 
             // The blocks the rows before these and these themselves closed, declared before their rows are written: the
@@ -930,55 +930,39 @@ internal static class DatasetCompactor
             _sliceFilled += batch.RowCount;
             if (_census is { } census)
             {
-                // Each row counted at its place in the object, which the slices' rows tell apart.
-                Count(census, batch, _rows - batch.RowCount);
+                // Each row counted after the object's rows before it, at its place, which the slices' rows tell apart.
+                for (int v = 0; v < census.Length; v++)
+                {
+                    census[v].Add(batch, _variants![v]);
+                }
             }
 
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
         }
 
-        /// <summary>Counts the paths of each variant column of <paramref name="batch"/>, its first row at <paramref name="first"/> of the object.</summary>
-        private void Count(PathCensus[] census, RecordBatch batch, long first)
+        /// <summary>A census for each variant column of the object about to be written, the columns found once a stream.</summary>
+        private PathCensus[] Census()
         {
-            if (_places.Length < batch.RowCount)
+            _variants ??= VariantColumns(_schema.DType);
+            PathCensus[] census = new PathCensus[_variants.Length];
+            for (int v = 0; v < census.Length; v++)
             {
-                _places = new long[Math.Max(batch.RowCount, _places.Length * 2)];
+                census[v] = new PathCensus(_dataset.Options.Write.StringBoundBytes, SliceTarget);
             }
 
-            Span<long> places = _places.AsSpan(0, batch.RowCount);
-            for (int row = 0; row < places.Length; row++)
-            {
-                places[row] = first + row;
-            }
-
-            int[] variants = VariantColumns(_schema.DType);
-            for (int v = 0; v < variants.Length; v++)
-            {
-                census[v].Add(batch, variants[v], places);
-            }
+            return census;
         }
 
         /// <summary>
         /// Declares to <paramref name="writer"/> each variant column's path directory, of what <paramref name="census"/>
-        /// counted, each path naming the slices of <paramref name="slices"/> that hold it, told apart by their rows.
+        /// counted, each path naming the slices of <paramref name="slices"/> that hold it.
         /// </summary>
         private void DeclareDirectories(VortexFileWriter writer, PathCensus[] census, SliceTable? slices, ImmutableDictionary<string, VariantShredding> shredded)
         {
-            List<TimeSlice>? places = null;
-            if (slices is not null)
+            for (int v = 0; v < census.Length; v++)
             {
-                places = new List<TimeSlice>(slices.Slices.Count);
-                foreach (TimeSlice slice in slices.Slices)
-                {
-                    places.Add(new TimeSlice(slice.FirstRow, slice.FirstRow + slice.Rows, slice.FirstRow, slice.Rows));
-                }
-            }
-
-            int[] variants = VariantColumns(_schema.DType);
-            for (int v = 0; v < variants.Length; v++)
-            {
-                string name = _schema.DType.GetFieldName(variants[v]);
-                writer.DeclareDirectory(name, VariantDirectory.From(census[v], shredded.GetValueOrDefault(name), places));
+                string name = _schema.DType.GetFieldName(_variants![v]);
+                writer.DeclareDirectory(name, VariantDirectory.From(census[v], shredded.GetValueOrDefault(name), slices?.Slices));
             }
         }
 
@@ -1186,11 +1170,11 @@ internal static class DatasetCompactor
         internal ValueCut? Values { get; init; }
 
         // The place among the shreddings of the value being written and its first key; the paths of the object being
-        // written, a census a variant column, counted at each row's place in the object.
+        // written, a census a variant column, and the columns.
         private int _value = -1;
         private byte[]? _valueKey;
         private PathCensus[]? _census;
-        private long[] _places = [];
+        private int[]? _variants;
 
         /// <summary>
         /// Records the first key of the rows written next, which starts a slice bounded by keys when they do, and the next

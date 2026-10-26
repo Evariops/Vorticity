@@ -940,7 +940,6 @@ internal sealed class ScanBuilder
         string structure = cover.Kind switch
         {
             KeySourceKind.SortedColumn => "sorted column",
-            KeySourceKind.Slices => "time slices",
             _ => "sorted runs",
         };
         long[]? proven;

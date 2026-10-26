@@ -118,7 +118,7 @@ internal sealed class VariantDirectory
     /// <paramref name="shredding"/>, the shredding the object's column was written with, or null, and
     /// each named the <paramref name="slices"/> of the object it may hold a value in when there are.
     /// </summary>
-    internal static VariantDirectory From(PathCensus census, VariantShredding? shredding, IReadOnlyList<TimeSlice>? slices = null)
+    internal static VariantDirectory From(PathCensus census, VariantShredding? shredding, IReadOnlyList<RowRange>? slices = null)
     {
         List<PathEntry> entries = [];
         List<string> path = [];
@@ -127,7 +127,7 @@ internal sealed class VariantDirectory
     }
 
     private static void Walk(
-        PathCensus.PathCount count, VariantShredding? shredding, IReadOnlyList<TimeSlice>? slices, List<string> path, List<PathEntry> entries)
+        PathCensus.PathCount count, VariantShredding? shredding, IReadOnlyList<RowRange>? slices, List<string> path, List<PathEntry> entries)
     {
         string[] keys = [.. path];
         byte[]? held = slices is { Count: > 0 } ? SlicesOf(count.Spans, slices) : null;
@@ -159,9 +159,9 @@ internal sealed class VariantDirectory
 
     /// <summary>
     /// A bit for each of <paramref name="slices"/> one of <paramref name="spans"/> reaches into; null when
-    /// every slice is reached, or the spans name no time and so may lie anywhere.
+    /// every slice is reached, or the census kept no spans and the values may lie anywhere.
     /// </summary>
-    private static byte[]? SlicesOf(ReadOnlySpan<long> spans, IReadOnlyList<TimeSlice> slices)
+    private static byte[]? SlicesOf(ReadOnlySpan<long> spans, IReadOnlyList<RowRange> slices)
     {
         if (spans.IsEmpty)
         {
@@ -173,7 +173,7 @@ internal sealed class VariantDirectory
         int slice = 0;
         for (int i = 0; i < spans.Length; i += 2)
         {
-            // Spans and slices are both in time order: the first slice that ends past the span's start.
+            // Spans and slices both follow the rows: the first slice that ends past the span's start.
             while (slice < slices.Count && slices[slice].End <= spans[i])
             {
                 slice++;

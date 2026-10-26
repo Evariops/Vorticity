@@ -423,7 +423,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
     private readonly IndexWriter? _indexes;
 
-    // The time slices the caller declared, written with the indexes at completion; null for none.
+    // The slices the caller declared, written with the indexes at completion; null for none.
     private (int Field, SliceTable Table)? _slices;
 
     // The blocks the caller declared on its key's first column, written after the counts at completion; null for none.
@@ -463,9 +463,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// Declares the file's time slices on its top-level instant column <paramref name="column"/>, which
-    /// completion writes into the index directory: the caller, which writes its rows slice by slice,
-    /// knows them. They must cover the file's rows once, in order, which completion checks.
+    /// Declares the file's slices on its key's first column <paramref name="column"/>, top-level, which completion
+    /// writes into the index directory: the caller, which writes its rows in the key's order slice by slice, knows them. They must cover the file's rows once, in order, which completion checks.
     /// </summary>
     /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold them.</exception>
     /// <exception cref="ArgumentException"><paramref name="column"/> names no top-level column.</exception>
@@ -474,7 +473,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ArgumentNullException.ThrowIfNull(table);
         if (_indexes is null)
         {
-            throw new InvalidOperationException("A file's time slices ride in its index directory, which a writer that builds no index does not write.");
+            throw new InvalidOperationException("A file's slices ride in its index directory, which a writer that builds no index does not write.");
         }
 
         int field = _isTabular ? _schema.IndexOfField(column) : -1;

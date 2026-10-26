@@ -918,7 +918,7 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// Whether the policy asks for no index and no column keeps a sheet: the writer holds this one only for what rides
-    /// in the directory, the time slices, and its ingest needs nothing of it.
+    /// in the directory, the slices, and its ingest needs nothing of it.
     /// </summary>
     internal bool AsksNothing => !Asks(_policy) && !_keepsSheets;
 
@@ -2167,7 +2167,7 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null, List<(IndexEntry Entry, int Start, int Length)>? located = null)
     {
-        // A file's time slices, its variant paths and its columns' sheets and counts ride in the directory whatever the policy
+        // A file's slices, its variant paths and its columns' sheets and counts ride in the directory whatever the policy
         // asks.
         if (!Enabled && _preserved is not { Count: > 0 }
             && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
