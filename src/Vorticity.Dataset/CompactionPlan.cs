@@ -393,6 +393,12 @@ public sealed record CompactionJob
     /// alone would write its rows as one object of the same bounds.
     /// </summary>
     internal bool Moves { get; init; }
+
+    /// <summary>
+    /// The objects of rows that came late the exit may leave in level 0, kept apart rather than merged into the objects of
+    /// its destination they fall among (<see cref="LateRows"/>); none, the default, merges them in.
+    /// </summary>
+    internal int LateRoom { get; init; }
 }
 
 /// <summary>

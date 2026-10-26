@@ -223,11 +223,24 @@ internal static partial class CompactionPolicy
             return null;
         }
 
-        if (levels.Count > 0 && objects[0] > settings.LevelZeroCeiling && !taken.Contains(0)
-            && Build(dataset, levels, 0, settings, style, CompactionTrigger.LevelZeroCeiling) is { } drained
-            && !taken.Contains(drained.ToLevel))
+        if (levels.Count > 0 && objects[0] > settings.LevelZeroCeiling && !taken.Contains(0))
         {
-            return drained;
+            // Leveled under a key, the objects of level 0 that came late wait apart, within half the ceiling (LateRows).
+            if (style == CompactionStyle.Leveled && dataset.Key is { } lateKey)
+            {
+                LateRows.Frontier? frontier = LateRows.Frontier.Of(LastOfEach(levels), lateKey);
+                if (LateRows.Exit(levels[0], frontier, settings.LevelZeroCeiling) is ({ } sources, int room)
+                    && Build(dataset, levels, 0, sources, settings.PickFor(style), settings, style, CompactionTrigger.LevelZeroCeiling) is { } exit
+                    && !taken.Contains(exit.ToLevel))
+                {
+                    return exit with { LateRoom = room };
+                }
+            }
+            else if (Build(dataset, levels, 0, settings, style, CompactionTrigger.LevelZeroCeiling) is { } drained
+                && !taken.Contains(drained.ToLevel))
+            {
+                return drained;
+            }
         }
 
         // The lowest level over its size first: compacting it feeds the one above. A level of one
@@ -260,7 +273,8 @@ internal static partial class CompactionPolicy
                 && Neighbours(levels[level].GetRange(Math.Max(0, levels[level].Count - Window(settings)), Math.Min(levels[level].Count, Window(settings))), level, settings, dataset.Cut) is { } small
                 && Unspanned(small, Spanning(levels, level, LevelRange.Of(level, small, clustering)), level, clustering, settings) is { } alone)
             {
-                return Merged(dataset, alone, level, settings, style);
+                LevelRange merged = LevelRange.Of(level, alone, clustering);
+                return Merged(dataset, [.. alone, .. levels[0].FindAll(held => merged.Holds(held.Key.Span, held.Entry))], level, settings, style);
             }
         }
 
@@ -317,6 +331,18 @@ internal static partial class CompactionPolicy
             ? Leveled(levels[from], from, pick, pointer)
             : Contiguous(levels, from, pick, pointer);
         return sources.Count == 0 ? null : Build(dataset, levels, from, sources, pick, settings, style, trigger);
+    }
+
+    /// <summary>The entry of the last object of each level past 0 that holds one: what the levels' frontier is drawn from.</summary>
+    private static IEnumerable<ObjectEntry> LastOfEach(List<List<CompactionInput>> levels)
+    {
+        for (int level = 1; level < levels.Count; level++)
+        {
+            if (levels[level].Count > 0)
+            {
+                yield return levels[level][^1].Entry;
+            }
+        }
     }
 
     /// <summary>The job that empties <paramref name="sources"/> out of level <paramref name="from"/>, with what it overlaps where it goes.</summary>
@@ -587,14 +613,38 @@ internal static partial class CompactionPolicy
                 return Tiered(dataset, await RunAsync(dataset, 0, cancellationToken).ConfigureAwait(false), 0, settings, CompactionTrigger.LevelZeroCeiling);
             }
 
-            List<CompactionInput> sources = [];
+            List<CompactionInput> level0 = [];
             await foreach (TreeEntry entry in dataset.Levels[0].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
             {
-                sources.Add(new CompactionInput(0, entry.Key, ObjectEntry.FromBytes(entry.Value)));
+                level0.Add(new CompactionInput(0, entry.Key, ObjectEntry.FromBytes(entry.Value)));
             }
 
-            return await LeveledAsync(dataset, sources, 0, destination, settings, CompactionTrigger.LevelZeroCeiling, default, cancellationToken)
-                .ConfigureAwait(false);
+            // Under a key, the objects that came late wait apart, within half the ceiling (LateRows).
+            List<ObjectEntry> lasts = [];
+            for (int level = 1; dataset.Key is not null && level < levels; level++)
+            {
+                foreach (TreeEntry entry in await dataset.Levels[level].LastAsync(dataset.Pages, 1, cancellationToken).ConfigureAwait(false))
+                {
+                    lasts.Add(ObjectEntry.FromBytes(entry.Value));
+                }
+            }
+
+            LateRows.Frontier? frontier = dataset.Key is { } lateKey ? LateRows.Frontier.Of(lasts, lateKey) : null;
+            if (LateRows.Exit(level0, frontier, settings.LevelZeroCeiling) is ({ } sources, int room))
+            {
+                long held = 0;
+                foreach (CompactionInput source in sources)
+                {
+                    held += source.Entry.Bytes;
+                }
+
+                int to = settings.LevelZeroDestination(held);
+                if (!taken.Contains(to))
+                {
+                    return await LeveledAsync(dataset, sources, 0, to, settings, CompactionTrigger.LevelZeroCeiling, default, cancellationToken)
+                        .ConfigureAwait(false) with { LateRoom = room };
+                }
+            }
         }
 
         for (int level = 1; level < levels; level++)
@@ -657,7 +707,18 @@ internal static partial class CompactionPolicy
                         clustering,
                         settings) is { } alone)
             {
-                return Merged(dataset, alone, level, settings, style);
+                LevelRange merged = LevelRange.Of(level, alone, clustering);
+                List<CompactionInput> inputs = [.. alone];
+                await foreach (TreeEntry entry in dataset.Levels[0].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
+                {
+                    ObjectEntry held = ObjectEntry.FromBytes(entry.Value);
+                    if (merged.Holds(entry.Key.Span, held))
+                    {
+                        inputs.Add(new CompactionInput(0, entry.Key, held));
+                    }
+                }
+
+                return Merged(dataset, inputs, level, settings, style);
             }
         }
 
@@ -1021,11 +1082,15 @@ internal static partial class CompactionPolicy
         return false;
     }
 
-    /// <summary>The objects outside <paramref name="level"/> that may hold a key inside <paramref name="range"/>.</summary>
+    /// <summary>
+    /// The objects of the levels past 0 but <paramref name="level"/> that may hold a key inside <paramref name="range"/>.
+    /// Level 0 is left out: an exit merges its objects with what they meet and never moves one whole, so a merge that spans
+    /// one leaves no rewrite behind, where the late rows an exit keeps there (LateRows) would stop it.
+    /// </summary>
     private static List<CompactionInput> Spanning(List<List<CompactionInput>> levels, int level, LevelRange range)
     {
         List<CompactionInput> found = [];
-        for (int other = 0; other < levels.Count; other++)
+        for (int other = 1; other < levels.Count; other++)
         {
             if (other == level)
             {
@@ -1049,7 +1114,7 @@ internal static partial class CompactionPolicy
         PlannedVersion dataset, int level, LevelRange range, CancellationToken cancellationToken)
     {
         List<CompactionInput> found = [];
-        for (int other = 0; other < dataset.Levels.Count; other++)
+        for (int other = 1; other < dataset.Levels.Count; other++)
         {
             if (other == level)
             {
@@ -1070,7 +1135,10 @@ internal static partial class CompactionPolicy
         return found;
     }
 
-    /// <summary>The job that merges small neighbours into one object, in their own level.</summary>
+    /// <summary>
+    /// The job that merges small neighbours into one object, in their own level, and the objects of level 0 their range holds
+    /// whole: the rows an exit kept apart as late (LateRows), which come in with the rewrite of their place.
+    /// </summary>
     private static CompactionJob Merged(
         PlannedVersion dataset, List<CompactionInput> neighbours, int level, CompactionOptions settings, CompactionStyle style) =>
         new CompactionJob(level, level, style, CompactionTrigger.Neighbours, neighbours, settings.TargetBytes(level), FirstRow(dataset, neighbours[0]));

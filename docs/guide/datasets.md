@@ -380,11 +380,12 @@ and drops the first two:
 debug lines expired before 10-03: 2880 then 960, 1920 dropped; info lines untouched: 1440
 ```
 
-A row that comes late, after rows of later keys, is appended as any other, into level 0, and the job
-that takes it down rewrites the objects of the level below that its key reaches. On 48 hours of
-requests at 20 a second from four writers, clustered by hour, one row in fifty a few seconds late and
-one in ten thousand up to an hour late, a row is rewritten 6.5 times on its way down, against 2.8 when
-none comes late (`vortex-queries --micro lifecycle`). A writer that can hold its rows until the late
+A row that comes late, after rows of later keys, is appended as any other, into level 0. The job that
+takes level 0 down leaves such rows there, an object a clustering value, rather than rewrite the
+objects of the level below that their keys reach, as long as they stay few; a later job takes them in.
+On 48 hours of requests at 20 a second from four writers, clustered by hour, one row in fifty a few
+seconds late and one in ten thousand up to an hour late, a row is rewritten 5.0 times on its way down,
+against 2.8 when none comes late (`vortex-queries --micro lifecycle`). A writer that can hold its rows until the late
 ones are in, and append them in key order, pays the second figure.
 
 ### The local cache

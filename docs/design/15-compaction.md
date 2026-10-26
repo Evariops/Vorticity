@@ -222,8 +222,8 @@ where the first keeps the band whole for the merges of neighbours at the level's
 make the first object overlap the level above as much as any, and the largest goes, as before: the churn
 bench at random keys takes the same jobs and writes the same bytes either way. The question costs a
 walk of the level above that skips what lies outside the first object's range. Under late rows and
-four writers, where levels interleave anyway, the lifecycle bench rewrites a row 10.4 times without a
-clustering value, and 6.5 times clustered by hour, against 2.8 when no row comes late
+four writers, where levels interleave anyway, the lifecycle bench rewrites a row 6.9 times without a
+clustering value, and 5.0 times clustered by hour, against 2.8 when no row comes late
 ([clustering](#clustering-by-a-value-and-a-size)).
 
 A tiered job concatenates a run of one level's objects with nothing else between them, and where the
@@ -297,10 +297,29 @@ the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing, u
 to shred the paths it declares (`DatasetOptions.ShredOnAppend`).
 
 Late rows are what the value does not buy. A row that comes after rows of later keys reaches level 0
-with its append, and the job that takes it out rewrites what its key meets in the level below. On the
-lifecycle bench, four writers, one row in fifty a few seconds late and one in ten thousand up to an
-hour late, a row is rewritten 6.5 times clustered by hour, 10.4 times without a clustering value, and
-2.8 times clustered by hour when no row comes late (`vortex-queries --micro lifecycle`).
+with its append, and a job that merges it into the level below rewrites what its key meets there: a
+row a few seconds late made almost every exit of level 0 read the last object of level 1, which grew
+through its value, and write it whole again. So an exit keeps such rows apart. The rows at or before
+the last key of the objects it meets in its destination lead its merge in key order; it writes them
+back to level 0, an object a clustering value, reads its sources alone, and those objects stand.
+Level 0 holds overlapping objects anyway, which every question reads by their summaries, and these
+lie within one value. The rows stay apart while they weigh an eighth of the rows of the objects they
+meet at most, and while level 0 holds fewer such objects than half its ceiling: an exit then takes
+the objects that came in order alone, once they pass the ceiling, and may leave late objects up to
+that half. An object is late when every key it holds lies at or before the greatest key of the levels
+above 0, which the last object of each level gives. Past either bound, an exit takes all of level 0
+and merges it with what it meets, as before, and a merge of neighbours takes in the late objects of
+level 0 its range holds whole. Level 0 keeps within its ceiling throughout.
+
+On the lifecycle bench, four writers, one row in fifty a few seconds late and one in ten thousand up
+to an hour late, a row is rewritten 5.0 times clustered by hour, against 6.5 when every exit merged
+its late rows in, 6.9 times without a clustering value, against 10.4, and 2.8 times clustered by hour
+when no row comes late, which the rule leaves as it was. A window of a day covers 60 objects, against
+63 (`vortex-queries --micro lifecycle`). Where late rows seldom reach the level below, the rule can
+cost more than it saves: the exit that merges them in reads the objects they fall in, which merges of
+neighbours have grown meanwhile. On 9 600 rows appended 100 at a time, 2 % of them up to 50 ids late, the exits
+read 5 494 rows of level 1 against 1 313, for 1.54 rewrites a row against 1.50; 20 to 200 ids late,
+7 196 against 20 065, for 1.75 against 3.03 (`DatasetLateRowsTests`).
 
 ### Rollups
 

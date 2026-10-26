@@ -144,9 +144,16 @@ internal static class DatasetCompactor
             shreddings = await PlanValuesAsync(dataset, schema, job, key!, cancellationToken).ConfigureAwait(false);
         }
 
+        // A leveled exit of level 0 keeps the rows that came late apart, in an object of level 0, while they weigh little
+        // against the objects of its destination they fall among (LateRows): it reads its sources alone, and those
+        // objects stand. Past that weight, it runs again as the merge with them it was planned as.
+        LateRows? late = merge ? LateRows.Of(job, key!) : null;
+        CompactionJob ran = late is null ? job : LateRows.Sources(job);
+
         // Each object it streams is announced to the store as at most what the job reads, times what a job
         // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
         ObjectStream outputs;
+        ObjectStream? lateOutputs = null;
         long rows;
         Provenance? provenance = null;
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
@@ -154,9 +161,12 @@ internal static class DatasetCompactor
         {
             for (int doublings = 0; ; doublings++)
             {
+                lateOutputs = late is null ? null : new ObjectStream(
+                    dataset, schema, ran.Bytes, ran.FirstRow, inKeyOrder: true, rowBound: ran.Rows,
+                    0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn));
                 outputs = new ObjectStream(
-                    dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge, rowBound: job.Rows,
-                    job.ToLevel, ObjectBound.Of(job.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                    dataset, schema, ran.TargetBytes, ran.FirstRow, inKeyOrder: merge, rowBound: ran.Rows,
+                    ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
                 {
                     KeySliced = keySliced,
                     Blocked = keySliced is null ? null : key!.LeadingType,
@@ -169,18 +179,32 @@ internal static class DatasetCompactor
                 {
                     provenance = new Provenance();
                     rows = merge
-                        ? await MergeAsync(dataset, schema, job, key!, outputs, provenance, cancellationToken).ConfigureAwait(false)
-                        : await ConcatenateAsync(dataset, schema, job, outputs, provenance, cancellationToken).ConfigureAwait(false);
+                        ? await MergeAsync(dataset, schema, ran, key!, outputs, provenance, late, lateOutputs, cancellationToken).ConfigureAwait(false)
+                        : await ConcatenateAsync(dataset, schema, ran, outputs, provenance, cancellationToken).ConfigureAwait(false);
                     await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
                     break;
                 }
                 catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
                 {
-                    await outputs.AbandonAsync().ConfigureAwait(false);
+                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                }
+                catch (LateRows.Overflow)
+                {
+                    // The late rows weigh too much to stand apart: the exit as planned, merged with the objects they meet.
+                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                    late = null;
+                    lateOutputs = null;
+                    ran = job;
+                    doublings = -1;
                 }
                 catch
                 {
-                    await outputs.AbandonAsync().ConfigureAwait(false);
+                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -190,30 +214,38 @@ internal static class DatasetCompactor
             writing?.Dispose();
         }
 
-        if (rows != job.Rows)
+        if (rows != ran.Rows)
         {
             throw new DatasetIntegrityException(
-                $"The compaction read {job.Rows} row(s) from {job.Inputs.Count} object(s) and wrote " +
+                $"The compaction read {ran.Rows} row(s) from {ran.Inputs.Count} object(s) and wrote " +
                 $"{rows}: a rewrite that loses rows is the one failure it must not have.");
         }
 
         List<(int Level, ReadOnlyMemory<byte> Key)> consumed = [];
-        foreach (CompactionInput input in job.Inputs)
+        foreach (CompactionInput input in ran.Inputs)
         {
             consumed.Add((input.Level, input.Key));
         }
 
+        // The late rows' objects go back to level 0, the others to the destination, past every object there they met.
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = [];
+        List<CompactionInput> filled = [];
+        for (int i = 0; i < (lateOutputs?.Written.Count ?? 0); i++)
+        {
+            produced.Add((lateOutputs!.Levels[i], lateOutputs.Written[i].Key, lateOutputs.Written[i].Entry));
+        }
+
         for (int i = 0; i < outputs.Written.Count; i++)
         {
             WrittenObject written = outputs.Written[i];
             produced.Add((outputs.Levels[i], written.Key, written.Entry));
+            filled.Add(new CompactionInput(outputs.Levels[i], written.Key, written.Entry));
         }
 
         // What each input was read as: a delete that marked rows in one meanwhile leaves it under its
         // key, and outputs worked out from the rows before the delete would bring them back.
-        List<ObjectEntry> read = new List<ObjectEntry>(job.Inputs.Count);
-        foreach (CompactionInput input in job.Inputs)
+        List<ObjectEntry> read = new List<ObjectEntry>(ran.Inputs.Count);
+        foreach (CompactionInput input in ran.Inputs)
         {
             read.Add(input.Entry);
         }
@@ -222,7 +254,9 @@ internal static class DatasetCompactor
         {
             Expected = read,
             Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
-            Range = job.Range,
+
+            // Apart, the outputs take over the part of the destination they fill alone, which no object it holds may meet.
+            Range = late is null ? job.Range : filled.Count == 0 ? null : LevelRange.Of(job.ToLevel, filled, key!),
         };
 
         CommitResult commit = await dataset
@@ -231,11 +265,11 @@ internal static class DatasetCompactor
         // An object written from inputs none of which a delete marked, each of which sent it every row, holds their rows,
         // all and no other: the partials the questions learned of them, summed, are its own (LearnedPartials).
         OperationOutcome outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied;
-        if (outcome == OperationOutcome.Applied && !job.Inputs.Any(static input => input.Entry.HasDeletions))
+        if (outcome == OperationOutcome.Applied && !ran.Inputs.Any(static input => input.Entry.HasDeletions))
         {
             for (int o = 0; o < outputs.Written.Count; o++)
             {
-                if (provenance!.SoleInputsOf(o, job.Inputs) is { Length: > 0 and <= LearnedPartials.MaxInputs } inputs)
+                if (provenance!.SoleInputsOf(o, ran.Inputs) is { Length: > 0 and <= LearnedPartials.MaxInputs } inputs)
                 {
                     dataset.Partials.Inherit(outputs.Written[o].Entry.Uid, inputs, dataset.Session.Options.SynopsisCache);
                 }
@@ -249,13 +283,23 @@ internal static class DatasetCompactor
             ToLevel = job.ToLevel,
             Trigger = job.Trigger,
             Style = job.Style,
-            ObjectsIn = job.Inputs.Count,
-            ObjectsOut = outputs.Written.Count,
+            ObjectsIn = ran.Inputs.Count,
+            ObjectsOut = outputs.Written.Count + (lateOutputs?.Written.Count ?? 0),
             Rows = rows,
-            BytesIn = job.Bytes,
-            BytesOut = outputs.Bytes,
+            BytesIn = ran.Bytes,
+            BytesOut = outputs.Bytes + (lateOutputs?.Bytes ?? 0),
             Outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied,
         };
+    }
+
+    /// <summary>Abandons what a job's streams wrote: its outputs, and its late rows' when it kept them apart.</summary>
+    private static async ValueTask AbandonAsync(ObjectStream outputs, ObjectStream? lateOutputs)
+    {
+        await outputs.AbandonAsync().ConfigureAwait(false);
+        if (lateOutputs is not null)
+        {
+            await lateOutputs.AbandonAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -519,6 +563,8 @@ internal static class DatasetCompactor
         ClusteringKey key,
         ObjectStream outputs,
         Provenance provenance,
+        LateRows? late,
+        ObjectStream? lateOutputs,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<string> paths = key.Paths;
@@ -530,9 +576,32 @@ internal static class DatasetCompactor
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
                 RecordBatch run = merge.Current;
+
+                // The rows that came late lead the merge, keys ascending: those of the run go to level 0, kept apart.
+                // An object a clustering value, so that each lies within the rows of its value, which a merge of neighbours
+                // there takes in with them.
+                int start = late?.End(merge, 0, run.RowCount) ?? 0;
+                if (start > 0)
+                {
+                    late!.Add(start);
+                    provenance.Wrote(merge.CurrentObject, LateRows.Output);
+                    for (int at = 0, end; at < start; at = end)
+                    {
+                        end = values is null ? start : values.EndOfValue(merge, at, start);
+                        if (values is not null && lateOutputs!.HoldsOtherValue(values, merge.KeyAt(at)))
+                        {
+                            await lateOutputs.RollAsync(cancellationToken).ConfigureAwait(false);
+                            late.Opens(lateOutputs.Written.Count + 1);
+                        }
+
+                        lateOutputs!.Note(merge.KeyAt(end - 1));
+                        await lateOutputs.WriteAsync(at == 0 && end == run.RowCount ? run : run.Window(at, end - at), cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
                 // An object holds the rows of one clustering value: a run of several is written in parts, one a value,
                 // and a part of another value than the object's seals it. A key has one value, so no part splits a key.
-                for (int at = 0, end; at < run.RowCount; at = end)
+                for (int at = start, end; at < run.RowCount; at = end)
                 {
                     end = values is null ? run.RowCount : values.EndOfValue(merge, at, run.RowCount);
 

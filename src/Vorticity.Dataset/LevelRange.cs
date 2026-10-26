@@ -144,6 +144,21 @@ internal sealed class LevelRange
         return !_bounded || Overlaps(ObjectSummaries.Of(ObjectEntry.SummaryOf(entry).Span, _leading));
     }
 
+    /// <summary>
+    /// Whether every key of the object under <paramref name="treeKey"/> with <paramref name="entry"/> lies inside the range:
+    /// by its keys when both state theirs, by its summaries otherwise; false when neither says.
+    /// </summary>
+    internal bool Holds(ReadOnlySpan<byte> treeKey, ObjectEntry entry)
+    {
+        if (_lowKey is not null && _highKey is not null && !entry.LastKey.IsEmpty)
+        {
+            return FirstKey(treeKey).SequenceCompareTo(_lowKey) >= 0 && entry.LastKey.Span.SequenceCompareTo(_highKey) <= 0;
+        }
+
+        return _bounded && entry.Summaries.TryGet(Path, out ColumnSummary column) && column.HasMin && column.HasMax
+            && KeyCursor.Compare(column.Min, _low) >= 0 && KeyCursor.Compare(column.Max, _high) <= 0;
+    }
+
     /// <summary>Whether an object with these summaries may hold a key inside the range.</summary>
     internal bool Overlaps(ObjectSummaries summaries) =>
         !_bounded || !summaries.TryGet(Path, out ColumnSummary column) || Meets(column);
