@@ -187,14 +187,14 @@ DatasetOptions options = new()
 };
 ```
 
-| setting | default | what it governs |
+| setting, as planned | default | what it governs |
 |---|---|---|
-| `ObjectBytes` | 1 GiB | the largest object a merge or a consolidation writes |
-| `MergeFanout` | 8 | objects of one size class merged at once |
-| `CalmAfter` | 1 hour | when a partition is consolidated |
-| `LateShare` | 8 | late rows wait until they weigh an eighth of what they overlap |
-| `AppendBufferBytes` | 256 MiB | the in-memory sort buffer of an append |
-| `MaxPartitionsPerAppend` | 100 | the partitions one append may touch |
+| object bytes | 1 GiB | the largest object a merge or a consolidation writes |
+| merge fan-out | 8 | objects of one size class merged at once |
+| calm after | 1 hour | when a partition is consolidated |
+| late share | 8 | late rows wait until they weigh an eighth of what they overlap |
+| append buffer bytes | 256 MiB | the in-memory sort buffer of an append |
+| maximum partitions per append | 100 | the partitions one append may touch |
 | organization | tiered with a partition; key-disjoint levels with a sort key and no partition | how objects are organized |
 
 The partition, the sort key, its prefix and the organization are fixed when the dataset is created. The other settings
