@@ -436,6 +436,33 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The bytes of an identifier's values a place of its hashed postings spans (spec C, 5): the chunk bytes of the dataset's
+    /// objects, a mebibyte when they are chunked with the object, under <see cref="IdentifierLocation.Chunk"/>; none, a
+    /// place a granule, under <see cref="IdentifierLocation.Granule"/>.
+    /// </summary>
+    internal long HashedUnitBytes => _options.IdentifierLocation == IdentifierLocation.Granule ? 0 : _options.ChunkBytes > 0 ? _options.ChunkBytes : 1L << 20;
+
+    /// <summary>
+    /// The blocks a place of the hashed postings of each of <paramref name="identifiers"/> spans in an object of
+    /// <paramref name="schema"/>, as its writer places them (<see cref="Indexes.KeyRunOptions.HashedUnitBlocks"/>): by the
+    /// width of a column's values, or of a variant key's class.
+    /// </summary>
+    internal int[] UnitBlocksOf(DType schema, IReadOnlyList<string> identifiers)
+    {
+        int[] units = new int[identifiers.Count];
+        for (int i = 0; i < units.Length; i++)
+        {
+            int field = schema.IndexOfField(identifiers[i]);
+            int width = field >= 0
+                ? Indexes.KeyLayout.TryOf(schema.GetField(field), out Indexes.KeyLayout layout) ? layout.Width : 0
+                : IdentifierPath(identifiers[i], schema) is { Class: Types.Variants.VariantClass.Integer } ? sizeof(long) : 0;
+            units[i] = Indexes.KeyRunOptions.HashedUnitBlocks(width, HashedUnitBytes, _options.Write.BlockRows);
+        }
+
+        return units;
+    }
+
+    /// <summary>
     /// The key of a variant column an identifier names, and the class its values are read in, for an
     /// identifier written <c>Attributes['user'].AsString()</c> or <c>.AsInt64()</c>; null for any other,
     /// a column's name among them. <c>Text</c> is the path as a plan writes it, the name a write
@@ -945,6 +972,9 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             write = write with { HashTaps = postings.TapsOf(Uid(identity)) };
         }
+
+        // Their places, units of granules that hold about a chunk's bytes of each (spec C, 5).
+        write = write with { HashedUnitBytes = HashedUnitBytes };
 
         // The session's degree and its lanes, which every writer of the session shares.
         return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session));
@@ -2473,13 +2503,14 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// The rows of the blocks <paramref name="blocks"/> of the object <paramref name="entry"/> names, blocks of
+    /// The rows of the places <paramref name="blocks"/> of the object <paramref name="entry"/> names, places of
     /// <paramref name="blockRows"/> rows, ascending, which the index of its partition located (<see cref="PartitionLookup"/>):
-    /// read with no open of it by the chunks that hold them, the columns <paramref name="columns"/> names or every one, its
-    /// chunk directories and the chunks two requests. None for no block; null when the object keeps no table of contents.
+    /// read with no open of it, the columns <paramref name="columns"/> names or every one, as <see cref="FoundRowsAsync"/>
+    /// reads the rows <paramref name="filter"/> is looked up in. None for no place; null when the object keeps no table of
+    /// contents.
     /// </summary>
     internal async ValueTask<List<RecordBatch>?> ReadBlocksAsync(
-        ObjectEntry entry, uint[] blocks, int blockRows, int[]? columns, CancellationToken cancellationToken)
+        ObjectEntry entry, uint[] blocks, int blockRows, VortexExpr filter, int[]? columns, CancellationToken cancellationToken)
     {
         if (blocks.Length == 0)
         {
@@ -2501,15 +2532,8 @@ public sealed class VortexDataset : IAsyncDisposable
 
             using Indexes.SpanReader rowsOf = opened;
             DType schema = contents.SchemaType;
-            Task[] chunks = new Task[columns?.Length ?? schema.FieldCount];
-            for (int c = 0; c < chunks.Length; c++)
-            {
-                chunks[c] = rowsOf.LoadDirectoryAsync(columns?[c] ?? c, cancellationToken).AsTask();
-            }
 
-            await Task.WhenAll(chunks).ConfigureAwait(false);
-
-            // Each run of neighbouring blocks one span of rows.
+            // Each run of neighbouring places one span of rows.
             List<RowRange> ranges = [];
             for (int i = 0; i < blocks.Length;)
             {
@@ -2529,8 +2553,129 @@ public sealed class VortexDataset : IAsyncDisposable
                 i++;
             }
 
-            return ranges.Count == 0 ? [] : [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
+            return await FoundRowsAsync(rowsOf, ranges, filter, schema, columns, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="ranges"/>, spans of an object's rows its locating indexes left for <paramref name="filter"/>,
+    /// ascending, read by <paramref name="rowsOf"/>, the columns <paramref name="columns"/> names or every one. Spans of a
+    /// granule or two are read whole. Wider ones, the units hashed postings place a value in (spec C, 4 and 5), are read in
+    /// two steps: the filter's columns over them, then the columns at the rows the filter keeps alone, rows closer than two
+    /// FastLanes blocks one span, which a granule of each column holds: about a chunk of the identifier and a granule of
+    /// every other column a value, where reading every column over its units would read a chunk of each. The rows a span
+    /// holds but the filter does not keep are the caller's to leave out. None when nothing is kept.
+    /// </summary>
+    private async ValueTask<List<RecordBatch>> FoundRowsAsync(
+        Indexes.SpanReader rowsOf, List<RowRange> ranges, VortexExpr filter, DType schema, int[]? columns, CancellationToken cancellationToken)
+    {
+        if (ranges.Count == 0)
+        {
+            return [];
+        }
+
+        long rows = 0;
+        foreach (RowRange range in ranges)
+        {
+            rows += range.Length;
+        }
+
+        long granuleRows = Math.Max(_options.Write.BlockRows, 1);
+        if (rows <= 2 * granuleRows * ranges.Count || FilterFields(filter, schema, columns) is not { } filtered)
+        {
+            return [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
+        }
+
+        // The first step: the filter's columns over the units, and the rows it keeps there.
+        List<RowRange> kept = [];
+        RecordBatch[] first = await rowsOf.ReadSpansAsync(ranges, filtered, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            foreach (RecordBatch batch in first)
+            {
+                Compute.FilterEvaluator.Select(batch, filter);
+                Kept(batch, kept);
+            }
+        }
+        finally
+        {
+            foreach (RecordBatch batch in first)
+            {
+                batch.Dispose();
+            }
+        }
+
+        // The second: every column at those rows.
+        return kept.Count == 0 ? [] : [.. await rowsOf.ReadSpansAsync(kept, columns, cancellationToken).ConfigureAwait(false)];
+    }
+
+    /// <summary>
+    /// Adds the rows <paramref name="batch"/> keeps to <paramref name="kept"/>, by their places in the object, ascending: a row
+    /// closer than two FastLanes blocks to the span before joins it, as the flat reader's clusters do.
+    /// </summary>
+    private static void Kept(RecordBatch batch, List<RowRange> kept)
+    {
+        if (batch.SelectedRows == 0)
+        {
+            return;
+        }
+
+        ReadOnlySpan<ulong> words = batch.SelectionWords;
+        if (words.IsEmpty)
+        {
+            Keep(kept, batch.StartRow, batch.StartRow + batch.RowCount);
+            return;
+        }
+
+        for (int word = 0; word < words.Length; word++)
+        {
+            for (ulong bits = words[word]; bits != 0; bits &= bits - 1)
+            {
+                int row = (word << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits);
+                if (row >= batch.RowCount)
+                {
+                    return;
+                }
+
+                Keep(kept, batch.StartRow + row, batch.StartRow + row + 1);
+            }
+        }
+
+        static void Keep(List<RowRange> kept, long start, long end)
+        {
+            if (kept.Count > 0 && start - kept[^1].End < Layouts.FlatLayoutReader.ClusterGap)
+            {
+                kept[^1] = new RowRange(kept[^1].Start, Math.Max(kept[^1].End, end));
+                return;
+            }
+
+            kept.Add(new RowRange(start, end));
+        }
+    }
+
+    /// <summary>
+    /// The top-level columns <paramref name="filter"/> reads, ascending, when they are fewer than those a read keeps
+    /// (<paramref name="columns"/>, or every one of <paramref name="schema"/>'s): what the first of two steps reads. Null
+    /// when the filter reads a part of a column, or all the read keeps, and one step reads as much.
+    /// </summary>
+    private static int[]? FilterFields(VortexExpr filter, DType schema, int[]? columns)
+    {
+        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
+        filter.CollectFields(named);
+        List<int> fields = new List<int>(named.Count);
+        foreach (string path in named)
+        {
+            int field = schema.IndexOfField(path);
+            if (field < 0)
+            {
+                return null;
+            }
+
+            fields.Add(field);
+        }
+
+        fields.Sort();
+        return fields.Count == 0 || fields.Count >= (columns?.Length ?? schema.FieldCount) ? null : [.. fields];
     }
 
     /// <summary>
@@ -2605,19 +2750,19 @@ public sealed class VortexDataset : IAsyncDisposable
                 return null;
             }
 
-            // The second: the runs' segments that may hold a value the filter asks.
-            Indexes.IndexEntry? located = null;
+            // The second: the runs' segments that may hold a value the filter asks, over the blocks of the finest of the
+            // locating entries, a place of hashed postings spanning a unit of them.
+            long blockRows = 0;
             foreach (Indexes.IndexEntry index in directory!.Entries)
             {
-                if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks or Indexes.IndexKinds.PostingsHashed)
+                if (index.Kind is Indexes.IndexKinds.SortedRuns or Indexes.IndexKinds.PostingsBlocks or Indexes.IndexKinds.PostingsHashed
+                    && index.BlockLength > 0 && (blockRows == 0 || (long)index.BlockLength < blockRows))
                 {
-                    located = index;
-                    break;
+                    blockRows = (long)index.BlockLength;
                 }
             }
 
             Indexes.FooterlessIndexes host = new Indexes.FooterlessIndexes(reader, schema, directory, [.. contents.Encodings]);
-            long blockRows = (long)(located?.BlockLength ?? 0);
             if (blockRows <= 0
                 || await Indexes.KeyIndexPruner.BuildAsync(host, filter, blockRows, cancellationToken).ConfigureAwait(false) is not { } pruner)
             {
@@ -2627,7 +2772,8 @@ public sealed class VortexDataset : IAsyncDisposable
             Compute.BlockMask live = new Compute.BlockMask(host.RowCount, blockRows);
             await pruner.RefineAsync(host, live, cancellationToken).ConfigureAwait(false);
 
-            // The third: every run of blocks left, their chunks together, a chunk two runs share read once.
+            // The third: every run of blocks left, their granules together, a granule two runs share read once; the
+            // fourth, when a unit of hashed postings left them, the columns at the rows the filter keeps there.
             List<RowRange> ranges = [];
             ReadOnlySpan<ulong> words = live.Words;
             int block = 0;
@@ -2650,7 +2796,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 ranges.Add(new RowRange(start, end));
             }
 
-            return [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
+            return await FoundRowsAsync(rowsOf, ranges, filter, schema, columns, cancellationToken).ConfigureAwait(false);
 
             // The whole directory, its entries on the filter's columns kept.
             async Task<Indexes.IndexDirectory?> WholeAsync()

@@ -37,16 +37,21 @@ internal sealed class PartitionPostings : IDisposable
     private const int ReadPageBytes = 4 << 20;
 
     private readonly string[] _identifiers;
+    private readonly int[] _unitBlocks;
     private readonly RunScratch _scratch;
     private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
     private readonly List<Run> _runs = [];
     private readonly ConcurrentDictionary<UInt128, Tap[]> _taps = new();
     private readonly ConcurrentDictionary<UInt128, int> _blockRows = new();
 
-    /// <summary>The postings of <paramref name="identifiers"/>, their runs sealed in the scratch when <paramref name="seal"/> asks.</summary>
-    internal PartitionPostings(IReadOnlyList<string> identifiers, bool seal)
+    /// <summary>
+    /// The postings of <paramref name="identifiers"/>, a place of each the blocks <paramref name="unitBlocks"/> gives in the
+    /// same order (spec C, 5), their runs sealed in the scratch when <paramref name="seal"/> asks.
+    /// </summary>
+    internal PartitionPostings(IReadOnlyList<string> identifiers, IReadOnlyList<int> unitBlocks, bool seal)
     {
         _identifiers = [.. identifiers];
+        _unitBlocks = [.. unitBlocks];
         _scratch = new RunScratch(ScratchMemoryBytes, null, seal);
     }
 
@@ -150,7 +155,9 @@ internal sealed class PartitionPostings : IDisposable
             {
                 for (int i = 0; i < _identifiers.Length; i++)
                 {
-                    PartitionIndex.Identifier? held = old?.Of(_identifiers[i]);
+                    // The previous index's postings of the identifier, unless their places span other blocks than its
+                    // objects' now do: those objects are then no longer covered for it, and their rows read as any.
+                    PartitionIndex.Identifier? held = old?.Of(_identifiers[i]) is { } named && named.UnitBlocks == _unitBlocks[i] ? named : null;
                     ulong[] covered = new ulong[(objects.Count + 63) / 64];
                     for (int rank = 0; rank < renamed.Length; rank++)
                     {
@@ -165,7 +172,7 @@ internal sealed class PartitionPostings : IDisposable
                         covered[rank >> 6] |= 1UL << (rank & 63);
                     }
 
-                    writer.Begin(_identifiers[i], covered);
+                    writer.Begin(_identifiers[i], _unitBlocks[i], covered);
                     await MergeAsync(writer, i, ranks, held, before, renamed, cancellationToken).ConfigureAwait(false);
                     await writer.EndAsync(cancellationToken).ConfigureAwait(false);
                 }

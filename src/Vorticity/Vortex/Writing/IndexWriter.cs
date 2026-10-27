@@ -94,7 +94,7 @@ internal sealed class IndexWriter : IDisposable
         IKeyEncoder? keyEncoder = null, string? scratchDirectory = null, long scratchMemoryBytes = DefaultScratchMemoryBytes,
         long wideRowsAbove = uint.MaxValue, bool sealScratch = false,
         IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null,
-        Func<string, IHashTap?>? taps = null)
+        Func<string, IHashTap?>? taps = null, long hashedUnitBytes = 0)
     {
         _policy = policy;
         _isTabular = isTabular;
@@ -134,7 +134,7 @@ internal sealed class IndexWriter : IDisposable
             (_nested ??= new int[]?[total])[slot] = chain;
             _refusals[slot] = column.Kind == IndexPolicyKind.Auto
                 ? "Auto chooses among the top-level columns; a nested column is indexed when its override names a kind"
-                : Explicit(column, leaf, _builders[slot], taps?.Invoke(path));
+                : Explicit(column, leaf, _builders[slot], taps?.Invoke(path), hashedUnitBytes, blockRows);
         }
 
         // Each shredded key in its class is a column of its own, under the policy that names it, as
@@ -158,7 +158,7 @@ internal sealed class IndexWriter : IDisposable
                 IndexPolicyKind.None => null,
                 IndexPolicyKind.Auto when BloomBuilder.Supports(dtype, out _) => AutoBloom(_builders[slot], blockRows),
                 IndexPolicyKind.Auto => null,
-                IndexPolicyKind.Bloom or IndexPolicyKind.HashedPostings => Explicit(column, dtype, _builders[slot], taps?.Invoke(path.Text)),
+                IndexPolicyKind.Bloom or IndexPolicyKind.HashedPostings => Explicit(column, dtype, _builders[slot], taps?.Invoke(path.Text), hashedUnitBytes, blockRows),
                 _ => $"a path takes a Bloom filter or hashed postings, and {column.Kind} reads no path yet",
             };
         }
@@ -200,7 +200,7 @@ internal sealed class IndexWriter : IDisposable
 
                     break;
                 default:
-                    reason = Explicit(column, dtype, builders, taps?.Invoke(_paths[field]));
+                    reason = Explicit(column, dtype, builders, taps?.Invoke(_paths[field]), hashedUnitBytes, blockRows);
                     break;
             }
 
@@ -252,7 +252,7 @@ internal sealed class IndexWriter : IDisposable
         return supported ? null : reason;
     }
 
-    private static string? Explicit(IndexSpec column, DType dtype, List<IndexBuilder> builders, IHashTap? tap)
+    private static string? Explicit(IndexSpec column, DType dtype, List<IndexBuilder> builders, IHashTap? tap, long hashedUnitBytes, int blockRows)
     {
         string? reason = null;
         switch (column.Kind)
@@ -289,7 +289,8 @@ internal sealed class IndexWriter : IDisposable
             case IndexPolicyKind.HashedPostings:
                 if (KeyIndexBuilder.Supports(dtype, out KeyLayout values, out _, out reason))
                 {
-                    builders.Add(KeyIndexBuilder.ForHashes(values, column.SegmentEntries, tap));
+                    builders.Add(KeyIndexBuilder.ForHashes(
+                        values, column.SegmentEntries, tap, KeyRunOptions.HashedUnitBlocks(values.Width, hashedUnitBytes, blockRows)));
                 }
 
                 break;
@@ -1598,8 +1599,9 @@ internal sealed class IndexWriter : IDisposable
             return;
         }
 
+        // A hashed builder's places are units of blocks (KeyRunOptions.HashedUnitBlocks): the entry's block is the unit.
         _entries.Add(EntryOf(new IndexEntry(
-            kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1), ExpectedOptions(field, keys), runs), field));
+            kind, ColumnPath(field), (ulong)Math.Max(blockRows, 1) * (ulong)keys.UnitBlocks, ExpectedOptions(field, keys), runs), field));
         Report(field, kind, IndexOutcome.Built, null, bytes, 0, runs.Count);
         foreach (PagedRun pages in paged ?? [])
         {

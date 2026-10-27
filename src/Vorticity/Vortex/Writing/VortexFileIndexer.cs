@@ -526,7 +526,8 @@ public static class VortexFileIndexer
             policy, schema, isTabular: true, fields,
             options?.IndexBudgetPerMille ?? VortexWriteOptions.Default.IndexBudgetPerMille, blockRows, options?.KeyEncoder,
             options?.ScratchDirectory, options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes,
-            options?.WideRowsAbove ?? uint.MaxValue, sealScratch || file.SealedLayout is not null || file.Session.Seals)
+            options?.WideRowsAbove ?? uint.MaxValue, sealScratch || file.SealedLayout is not null || file.Session.Seals,
+            hashedUnitBytes: options?.HashedUnitBytes ?? 0)
         {
             Fences = options?.Fences ?? FenceShape.Default,
             Spared = options?.BudgetSpares,

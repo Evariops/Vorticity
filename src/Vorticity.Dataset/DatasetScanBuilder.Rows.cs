@@ -272,7 +272,7 @@ internal sealed partial class DatasetScanBuilder
                             continue;
                         }
 
-                        objects.Add((held, _dataset.ReadBlocksAsync(held.Entry, located.Blocks, located.BlockRows, columns, stopped.Token).AsTask(), true));
+                        objects.Add((held, _dataset.ReadBlocksAsync(held.Entry, located.Blocks, located.BlockRows, lookup, columns, stopped.Token).AsTask(), true));
                         continue;
                     }
 

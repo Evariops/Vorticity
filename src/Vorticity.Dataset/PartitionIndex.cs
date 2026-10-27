@@ -20,21 +20,21 @@ namespace Vorticity.Dataset;
 /// The object holds the pages of each identifier, one after another, then its directory, then a tail of
 /// <see cref="TailBytes"/>: where the directory starts, its length and its XXH3-64, and the magic <c>VXPI</c>. The
 /// directory names, behind a version, the objects the index was written for, each by uid, rows and rows a block, its
-/// rank being its place; then each identifier: its name, the ranks it covers, a bit a rank (an identifier declared after
-/// some objects were written covers those written since), and its pages, from the offset of the first, each by its first
-/// hash, its length and its XXH3-64.
+/// rank being its place; then each identifier: its name, the blocks a place of its postings spans (a unit of hashed
+/// postings, spec C, 5), the ranks it covers, a bit a rank (an identifier declared after some objects were written covers
+/// those written since), and its pages, from the offset of the first, each by its first hash, its length and its XXH3-64.
 /// </para>
 /// <para>
 /// A page lists hashes ascending, each the XXH3-64 of a value's bytes as hashed postings key it, coded forward against
-/// the one before as a varint, the first against the page's first, which the directory gives; then how many blocks hold
-/// it, and each by rank and block, ascending: the rank coded forward against the posting before, the block against the
+/// the one before as a varint, the first against the page's first, which the directory gives; then how many places hold
+/// it, and each by rank and place, ascending: the rank coded forward against the posting before, the place against the
 /// one before when the rank is the same. A hash's postings lie in one page, which ends past <see cref="PageBytes"/>.
 /// </para>
 /// </remarks>
 internal sealed class PartitionIndex
 {
-    /// <summary>The version of the directory.</summary>
-    internal const ulong Version = 1;
+    /// <summary>The version of the directory: 2 since each identifier says the blocks of its places.</summary>
+    internal const ulong Version = 2;
 
     /// <summary>The bytes of the tail: the directory's offset, length and XXH3-64, and the magic.</summary>
     internal const int TailBytes = 24;
@@ -96,11 +96,14 @@ internal sealed class PartitionIndex
         }
     }
 
-    /// <summary>An identifier's postings in the index: the ranks it covers and its pages.</summary>
-    internal sealed class Identifier(string name, ulong[] ranks, Page[] pages)
+    /// <summary>An identifier's postings in the index: the blocks a place spans, the ranks it covers and its pages.</summary>
+    internal sealed class Identifier(string name, int unitBlocks, ulong[] ranks, Page[] pages)
     {
         /// <summary>The identifier, as the dataset declares it.</summary>
         internal string Name => name;
+
+        /// <summary>The blocks of an object a place of its postings spans (<see cref="Indexes.KeyRunOptions.HashedUnitBlocks"/>).</summary>
+        internal int UnitBlocks => unitBlocks;
 
         /// <summary>The ranks it covers, a bit a rank.</summary>
         internal ReadOnlySpan<ulong> Ranks => ranks;
@@ -178,6 +181,12 @@ internal sealed class PartitionIndex
             for (int i = 0; i < identifiers.Length; i++)
             {
                 string name = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                int unitBlocks = checked((int)reader.ReadVarint());
+                if (unitBlocks is < 1 or > Indexes.KeyRunOptions.MostUnitBlocks)
+                {
+                    return null;
+                }
+
                 ulong[] ranks = new ulong[checked((int)reader.ReadVarint())];
                 for (int word = 0; word < ranks.Length; word++)
                 {
@@ -194,7 +203,7 @@ internal sealed class PartitionIndex
                     offset += length;
                 }
 
-                identifiers[i] = new Identifier(name, ranks, pages);
+                identifiers[i] = new Identifier(name, unitBlocks, ranks, pages);
             }
 
             return reader.End ? new PartitionIndex(objects, identifiers) : null;
@@ -275,7 +284,7 @@ internal sealed class PartitionIndex
     /// </summary>
     internal sealed class Writer(ObjectSegmentSink output) : IDisposable
     {
-        private readonly List<(string Name, ulong[] Ranks, long Offset, List<Page> Pages)> _identifiers = [];
+        private readonly List<(string Name, int UnitBlocks, ulong[] Ranks, long Offset, List<Page> Pages)> _identifiers = [];
         private ProtoWriter _page = new ProtoWriter(PageBytes + 1024);
         private readonly List<(int Rank, uint Block)> _group = [];
         private ulong _pageFirst;
@@ -290,8 +299,11 @@ internal sealed class PartitionIndex
         /// <summary>Whether a page is full, to go out before the next posting.</summary>
         internal bool PageFull => _page.WrittenSpan.Length >= PageBytes;
 
-        /// <summary>Starts the postings of <paramref name="name"/>, which cover the ranks of <paramref name="ranks"/>.</summary>
-        internal void Begin(string name, ulong[] ranks) => _identifiers.Add((name, ranks, output.Position, []));
+        /// <summary>
+        /// Starts the postings of <paramref name="name"/>, a place <paramref name="unitBlocks"/> blocks, which cover the ranks
+        /// of <paramref name="ranks"/>.
+        /// </summary>
+        internal void Begin(string name, int unitBlocks, ulong[] ranks) => _identifiers.Add((name, unitBlocks, ranks, output.Position, []));
 
         /// <summary>Adds a posting, past every one added to the identifier; one that repeats the last is left out.</summary>
         internal void Add(ulong hash, int rank, uint block)
@@ -341,11 +353,12 @@ internal sealed class PartitionIndex
                 }
 
                 directory.WriteVarint((ulong)_identifiers.Count);
-                foreach ((string name, ulong[] ranks, long offset, List<Page> pages) in _identifiers)
+                foreach ((string name, int unitBlocks, ulong[] ranks, long offset, List<Page> pages) in _identifiers)
                 {
                     byte[] utf8 = Encoding.UTF8.GetBytes(name);
                     directory.WriteVarint((ulong)utf8.Length);
                     directory.WriteRawBytes(utf8);
+                    directory.WriteVarint((ulong)unitBlocks);
                     directory.WriteVarint((ulong)ranks.Length);
                     foreach (ulong word in ranks)
                     {

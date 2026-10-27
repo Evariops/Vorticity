@@ -157,7 +157,7 @@ internal static partial class DatasetCompactor
         // A consolidation of a dataset with identifiers hands their postings to the index of its partition (D13), which it
         // writes over the one before for the objects that one covers still: its own objects keep none.
         using PartitionPostings? postings = merge && indexed && job.Trigger == CompactionTrigger.Consolidation && schema.Identifiers.Count > 0
-            ? new PartitionPostings(schema.Identifiers, dataset.Store is SealedObjectStore { Seals: true })
+            ? new PartitionPostings(schema.Identifiers, dataset.UnitBlocksOf(schema.DType, schema.Identifiers), dataset.Store is SealedObjectStore { Seals: true })
             : null;
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job

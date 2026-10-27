@@ -266,6 +266,14 @@ public sealed record VortexWriteOptions
     internal Func<string, IHashTap?>? HashTaps { get; init; }
 
     /// <summary>
+    /// The bytes of an identifier's values the place of its hashed postings spans (spec C, 5): a value lies at a unit of
+    /// blocks whose rows hold about that many of the column's bytes (<see cref="Indexes.KeyRunOptions.HashedUnitBlocks"/>),
+    /// so that a lookup reads that much of the identifier's column for each unit a value lies in, and its postings need
+    /// fewer bits a place. 0, the default, places a value at its block. A dataset sets it to its chunk bytes.
+    /// </summary>
+    internal long HashedUnitBytes { get; init; }
+
+    /// <summary>
     /// The most rows the file will hold, when the caller knows a bound, 0 otherwise: a compaction knows
     /// its inputs' rows. A writer that sizes its chunks (no <see cref="ChunkTargetBytes"/>) then keeps
     /// them long enough that the footer, a node per chunk and column, stays within half the tables a

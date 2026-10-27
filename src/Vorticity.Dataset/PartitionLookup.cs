@@ -79,8 +79,9 @@ internal sealed class PartitionLookup
     }
 
     /// <summary>
-    /// The blocks of the object <paramref name="held"/> that may hold a value sought, ascending, and the rows of a block; null
-    /// when no index of its partition covers it for the identifier, whose own postings then answer.
+    /// The places of the object <paramref name="held"/> that may hold a value sought, ascending, and the rows of a place, its
+    /// identifier's unit of blocks (spec C, 5); null when no index of its partition covers it for the identifier, whose own
+    /// postings then answer.
     /// </summary>
     internal async ValueTask<(uint[] Blocks, int BlockRows)?> BlocksAsync(PositionedObject held, CancellationToken cancellationToken)
     {
@@ -97,7 +98,8 @@ internal sealed class PartitionLookup
             return null;
         }
 
-        return (known.Blocks.TryGetValue(rank, out SortedSet<uint>? blocks) ? [.. blocks] : [], known.Index.Objects[rank].BlockRows);
+        return (known.Blocks.TryGetValue(rank, out SortedSet<uint>? blocks) ? [.. blocks] : [],
+            known.Index.Objects[rank].BlockRows * known.Postings.UnitBlocks);
     }
 
     /// <summary>The partition <paramref name="held"/>'s rows hold, row-encoded as its tree key leads with it; empty for a dataset without one.</summary>

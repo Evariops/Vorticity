@@ -314,6 +314,13 @@ public sealed record DatasetOptions
     public IReadOnlyList<string>? Identifiers { get; init; }
 
     /// <summary>
+    /// What the postings of the <see cref="Identifiers"/> place each value at (spec C, 5): a unit of granules that holds
+    /// about <see cref="ChunkBytes"/> of the identifier's values, the default, or the granule, for a dataset whose questions
+    /// are mostly lookups of one value. A setting of the writer: each object says what its postings place values at.
+    /// </summary>
+    public IdentifierLocation IdentifierLocation { get; init; }
+
+    /// <summary>
     /// Keys of variant columns that every object a job writes keeps in a column of its own, in one class, written as a
     /// filter reads them, <c>Attributes['http.status_code'].AsInt64()</c>: shredded whatever the rows a job counts, so
     /// that a question on the key reads that column rather than parse the variant. A key read as a string, an integer, a double or a boolean (<c>AsString</c>, <c>AsInt64</c>,

@@ -232,6 +232,31 @@ internal static class KeyRunOptions
         return Math.Max(0, 64 - bits - HashedSpareBits);
     }
 
+    /// <summary>The bytes a value of variable width is taken to hold when hashed postings size their unit: a hex trace id's.</summary>
+    internal const int VariableValueBytes = 32;
+
+    /// <summary>The most blocks a unit of hashed postings spans.</summary>
+    internal const int MostUnitBlocks = 256;
+
+    /// <summary>
+    /// The blocks of <paramref name="blockRows"/> rows a place of hashed postings spans (spec C, 5): a power of two whose rows
+    /// hold about <paramref name="unitBytes"/> of the values' bytes, <paramref name="width"/> each, or
+    /// <see cref="VariableValueBytes"/> for a value of variable width (0), so that a lookup reads about that much of the
+    /// identifier's column for each place a value lies in. One, a block, when <paramref name="unitBytes"/> is 0. What a value
+    /// lies at depends on its column's type alone, so that the places of an identifier mean the same in every object.
+    /// </summary>
+    internal static int HashedUnitBlocks(int width, long unitBytes, long blockRows)
+    {
+        if (unitBytes <= 0 || blockRows <= 0)
+        {
+            return 1;
+        }
+
+        long bytes = width > 0 ? width : VariableValueBytes;
+        long blocks = unitBytes / (bytes * blockRows);
+        return blocks <= 1 ? 1 : (int)Math.Min(1L << (63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)blocks)), MostUnitBlocks);
+    }
+
     /// <summary>
     /// Whether an append may read the kind's runs back and merge them into its own: a hashed run keeps
     /// only the bits of its hashes its own pairs need, which a larger run cannot extend, so its runs

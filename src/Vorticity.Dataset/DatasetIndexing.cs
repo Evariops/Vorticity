@@ -121,8 +121,8 @@ internal static class DatasetIndexing
             .ConfigureAwait(false);
         int commits = added.Created ? 1 : 0;
 
-        // The fragments are built under the policy's budget and encoder.
-        VortexWriteOptions build = VortexWriteOptions.Default with { Indexes = policy };
+        // The fragments are built under the policy's budget and encoder, hashed postings at the dataset's units.
+        VortexWriteOptions build = VortexWriteOptions.Default with { Indexes = policy, HashedUnitBytes = dataset.HashedUnitBytes };
         HashSet<string> left = new HashSet<string>(StringComparer.Ordinal);
         long indexed = 0;
         long bytes = 0;
@@ -255,7 +255,8 @@ internal static class DatasetIndexing
 
     /// <summary>
     /// Whether the object's own indexes and its fragments together hold an index of
-    /// <paramref name="kind"/> on <paramref name="path"/> over every one of its blocks.
+    /// <paramref name="kind"/> on <paramref name="path"/> over every one of its blocks, hashed postings over every unit of
+    /// them their places span (spec C, 5).
     /// </summary>
     private static bool Covers(IndexDirectory? directory, VortexFile file, string path, string kind, long blockRows)
     {
@@ -264,15 +265,17 @@ internal static class DatasetIndexing
             return false;
         }
 
-        ulong blocks = (ulong)((file.RowCount + blockRows - 1) / blockRows);
         foreach (IndexEntry entry in directory.Entries)
         {
-            if (!string.Equals(entry.Kind, kind, StringComparison.Ordinal) || entry.BlockLength != (ulong)blockRows
+            bool units = entry.Kind == IndexKinds.PostingsHashed && entry.BlockLength > (ulong)blockRows && entry.BlockLength % (ulong)blockRows == 0;
+            if (!string.Equals(entry.Kind, kind, StringComparison.Ordinal) || (entry.BlockLength != (ulong)blockRows && !units)
                 || !KeyIndexPruner.TryResolve(file.DType, entry.ColumnPath, out string named, out _)
                 || !string.Equals(named, path, StringComparison.Ordinal))
             {
                 continue;
             }
+
+            ulong blocks = ((ulong)file.RowCount + entry.BlockLength - 1) / entry.BlockLength;
 
             // The runs, from the object and from its fragments, in block order: covered when they
             // leave no block out between the first and the last.
