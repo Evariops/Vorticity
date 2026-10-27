@@ -47,9 +47,7 @@ internal static class Churn
     {
         DatasetOptions datasetOptions = new DatasetOptions
         {
-            ClusteringKey = [ChurnRow.ColumnNames.Key],
-            // The clustering key's run takes twelve bytes a row, which the default budget of a tenth of
-            // the data refuses on any row narrower than 120 bytes once an object passes a mebibyte.
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(ChurnRow.ColumnNames.Key)] },
             Write = options.IndexBudget > 0
                 ? new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(options.IndexBudget) }
                 : new VortexWriteOptions(),

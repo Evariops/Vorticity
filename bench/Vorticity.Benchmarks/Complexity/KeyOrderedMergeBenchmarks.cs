@@ -98,7 +98,7 @@ public class KeyOrderedMergeBenchmarks
     {
         long rows = 0;
         KeyOrderedMerge merge = new KeyOrderedMerge(
-            _dataset.Snapshot, ObjectsAsync(), Paths, descending: false, rankedTies: true,
+            _dataset.Snapshot, ObjectsAsync(), SortKey.OfColumns(_dataset.Snapshot.Schema.DType, Paths, descending: false), rankedTies: true,
             (lease, _) => lease.File.ScanBuilder().InKeyOrder(Paths, false).ExecuteAsync(), null, CancellationToken.None);
         await using (merge.ConfigureAwait(false))
         {
@@ -134,7 +134,7 @@ public class KeyOrderedMergeBenchmarks
         {
             Seed = 0xC1057E_5EED,
             Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 8 << 10 },
-            ClusteringKey = ["key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
         };
 
         VortexDataset dataset = await VortexDataset.CreateAsync(_store, schema, options).ConfigureAwait(false);

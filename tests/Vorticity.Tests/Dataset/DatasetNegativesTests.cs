@@ -107,7 +107,7 @@ public sealed partial class DatasetNegativesTests
 
             HashSet<string> marked = [.. (await EntriesAsync(dataset)).Where(e => e.HasDeletions).Select(e => e.Key)];
             ScanPlan plan = await Scan(dataset).GroupBy(h => (h.Service, h.Status)).Select(g => (g.Key.Service, g.Key.Status, g.Count())).ExplainAsync(Ct);
-            Assert.Contains(plan.States, step => step.Read == "blocks" && marked.Contains(step.Object));
+            Assert.Contains(plan.Units, step => step.Alternative == "granules" && marked.Contains(step.Unit));
         }
 
         await using CountingObjectStore store = new CountingObjectStore(memory);
@@ -133,7 +133,7 @@ public sealed partial class DatasetNegativesTests
         Assert.True((await dataset.DeleteAsync<Hit>(h => h.Size < 3_000, Ct)).ObjectsMarked >= 2);
 
         ScanPlan plan = await Scan(dataset).GroupBy(h => h.Service).Select(g => (g.Key, g.Max(h => h.Size))).ExplainAsync(Ct);
-        Assert.DoesNotContain(plan.States, step => step.Detail.Contains("less those of its deleted rows", StringComparison.Ordinal));
+        Assert.DoesNotContain(plan.Units, step => step.Detail.Contains("less those of its deleted rows", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -222,7 +222,7 @@ public sealed partial class DatasetNegativesTests
         PageReference at = new PageReference(11, 200, encoded.Length, XxHash128.HashToUInt128(encoded));
         byte[] bytes = pending.WithNegativesAt(at).ToBytes();
         ObjectEntry read = ObjectEntry.FromBytes(bytes.AsMemory());
-        Assert.Equal((at, false, true), (read.NegativesAt, read.NegativesPending, read.HasFields));
+        Assert.Equal((at, false), (read.NegativesAt, read.NegativesPending));
         Assert.True(ObjectEntry.NamesAny(bytes, [11]));
         Assert.False(ObjectEntry.NamesAny(bytes, [10]));
         Assert.True(read.NamesAny([11]));
@@ -270,7 +270,7 @@ public sealed partial class DatasetNegativesTests
     private static async Task<int> MarkedAnsweredAsync(VortexDataset dataset)
     {
         ScanPlan plan = await Scan(dataset).GroupBy(h => h.Service).Select(g => (g.Key, g.Count(), g.Sum(h => h.Size), g.Average(h => h.Latency))).ExplainAsync(Ct);
-        return plan.States.Count(step => step.Read == "states" && step.Detail.Contains("less those of its deleted rows", StringComparison.Ordinal));
+        return plan.Units.Count(step => step.Alternative == "counts" && step.Detail.Contains("less those of its deleted rows", StringComparison.Ordinal));
     }
 
     private static Scan<Hit> Scan(VortexDataset dataset) => dataset.Scan<Hit>().With(new ScanOptions { UseSynopses = true });
@@ -313,7 +313,7 @@ public sealed partial class DatasetNegativesTests
 
         random.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rows));
         VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Hit.Schema, options with { ClusteringKey = [nameof(Hit.Service), nameof(Hit.At)], Clustering = new ClusteringOptions { ObjectBytes = 256 << 10 } }, Ct);
+            store, Hit.Schema, options with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Hit.Service)), LayoutValue.Column(nameof(Hit.At))], ObjectBytes = 256 << 10 } }, Ct);
         for (int from = 0; from < rows.Count; from += 20_000)
         {
             await using ObjectDraft draft = dataset.StartObject();

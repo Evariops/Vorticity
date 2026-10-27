@@ -44,7 +44,7 @@ public sealed class DatasetChangeFuzzTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = 0xF022_C4A6,
-            ClusteringKey = ["Key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
             Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
             MarkedObjectBytes = marked ? 0 : long.MaxValue,
             MarkedShare = 1,

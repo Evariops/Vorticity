@@ -1,5 +1,5 @@
-// The table of contents a sealed period's entry carries: a slice of the object reads in two round trips, and a key of its
-// variant column in two, with no open of the object and no footer read.
+// The table of contents a sealed partition's entry carries: a granule of the object reads in two round trips, and a key of
+// its variant column in two, with no open of the object and no footer read.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -19,11 +19,11 @@ public sealed partial class ObjectContentsTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>
-    /// Two sealed hours of calls on a store that answers in 100 ms: a slice of one takes two round trips, its chunk
-    /// directory then its chunks, and holds the rows a whole open reads.
+    /// Two sealed hours of calls on a store that answers in 100 ms, in granules of 256 rows: a granule of one takes two round
+    /// trips, its columns' chunk directories then its chunks, and holds the rows a whole open reads.
     /// </summary>
     [Fact]
-    public async Task ASliceReadsInTwoRoundTrips()
+    public async Task AGranuleReadsInTwoRoundTrips()
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
@@ -34,9 +34,8 @@ public sealed partial class ObjectContentsTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(Call.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
-            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000), BlockRows = GranuleRows },
         }, Ct);
         Random random = new Random(5);
         for (int part = 0; part < 16; part++)
@@ -59,27 +58,43 @@ public sealed partial class ObjectContentsTests
         }
 
         Assert.Equal(3, periods.Count);
-        ObjectContents contents = ObjectContents.From(periods[0].TableOfContents.Span)!;
+        Assert.True(periods[0].Rows > 4 * GranuleRows, $"an hour of {periods[0].Rows} rows");
 
-        // A slice: its columns' chunk directories, then its chunks. A latency longer than what readying a read takes,
+        // A granule: its columns' chunk directories, then its chunks. A latency longer than what readying a read takes,
         // which the tests running beside this one stretch, keeps the two round trips apart.
         inner.Latency = TimeSpan.FromMilliseconds(100);
         store.Reset();
-        TimeSlice slice = contents.Slices.Slices[3];
-        using (RecordBatch batch = (await dataset.ReadSliceAsync(periods[0], 3, null, Ct))!)
+        const int Granule = 3;
+        List<RecordBatch> read = (await dataset.ReadBlocksAsync(periods[0], [Granule], GranuleRows, VortexExpr.Parse("Duration >= 0"), null, Ct))!;
+        try
         {
             Assert.Equal(2, store.DependentSteps);
-            Assert.Equal(slice.Rows, batch.RowCount);
+            List<(DateTimeOffset At, long Duration)> held = [];
+            foreach (RecordBatch batch in read)
+            {
+                Columns<Call> columns = batch.As<Call>();
+                DateTimeOffset[] at = new DateTimeOffset[batch.RowCount];
+                long[] durations = new long[batch.RowCount];
+                columns.Column<DateTimeOffset>(0).CopyTo(at);
+                columns.Column<long>(3).CopyTo(durations);
+                held.AddRange(at.Zip(durations));
+            }
+
             await using ObjectLease lease = await dataset.RentAsync(periods[0], Ct);
             List<Call> stored = await lease.File.Scan<Call>().ToRecordsAsync(Ct).ToListAsync(Ct);
-            Columns<Call> columns = batch.As<Call>();
-            DateTimeOffset[] at = new DateTimeOffset[batch.RowCount];
-            long[] durations = new long[batch.RowCount];
-            columns.Column<DateTimeOffset>(0).CopyTo(at);
-            columns.Column<long>(3).CopyTo(durations);
-            Assert.Equal(stored.GetRange((int)slice.FirstRow, (int)slice.Rows).Select(r => (r.At, r.Duration)), at.Zip(durations));
+            Assert.Equal(stored.GetRange(Granule * GranuleRows, GranuleRows).Select(r => (r.At, r.Duration)), held);
+        }
+        finally
+        {
+            foreach (RecordBatch batch in read)
+            {
+                batch.Dispose();
+            }
         }
     }
+
+    /// <summary>The rows of a granule of the objects these tests write.</summary>
+    private const int GranuleRows = 256;
 
     /// <summary>
     /// An hour of calls whose attributes hold a route, and on about one row in a hundred a rare key: a question on that key
@@ -120,8 +135,7 @@ public sealed partial class ObjectContentsTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Tagged.Schema, new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(Tagged.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Tagged.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Tagged.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(3);
         for (int part = 0; part < 16; part++)
@@ -202,17 +216,16 @@ public sealed partial class ObjectContentsTests
     [Fact]
     public void TheContentsAndTheEntryRoundTrip()
     {
-        SliceTable slices = new SliceTable(TimeUnit.Microseconds, [new TimeSlice(0, 60_000_000, 0, 10), new TimeSlice(60_000_000, 120_000_000, 10, 5)]);
         ObjectContents contents = new ObjectContents(
             Vorticity.Types.Serialization.DTypeFlatBuffers.Serialize(Vorticity.VortexTypes.ToDType(Call.Schema, new Vorticity.Types.DTypeArena())),
             ["vortex.primitive", "vortex.runend"],
-            slices,
+            15,
             [new IndexSegment(100, 20, 0, 7), new IndexSegment(120, 30, 0, 8)],
             [(2, new IndexSegment(150, 40, 0, 9))]);
         ObjectContents back = ObjectContents.From(contents.ToBytes())!;
         Assert.Equal(contents.Schema, back.Schema);
         Assert.Equal(contents.Encodings, back.Encodings);
-        Assert.Equal(contents.Slices.Slices, back.Slices.Slices);
+        Assert.Equal(contents.Rows, back.Rows);
         Assert.Equal(contents.ChunkDirectories, back.ChunkDirectories);
         Assert.Equal(contents.PathDirectories, back.PathDirectories);
         Assert.Null(ObjectContents.From([1, 2, 3]));

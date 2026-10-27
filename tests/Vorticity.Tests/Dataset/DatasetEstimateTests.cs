@@ -25,7 +25,7 @@ public sealed partial class DatasetEstimateTests
     /// <summary>Objects whose columns end their chunks together every 4 096 rows, so that each holds a dozen ranges of 1 KiB of its narrowest column.</summary>
     private static readonly DatasetOptions Chunked = new DatasetOptions
     {
-        ClusteringKey = [nameof(Hit.At)],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Hit.At))] },
         ChunkBytes = 4 << 10,
         GroupRows = 4_096,
         Write = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 16 << 10 },

@@ -225,7 +225,7 @@ public sealed class DatasetKeyCursorReadTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = Seed,
-            ClusteringKey = ["Key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
             Write = new VortexWriteOptions
             {
                 RowBlockSize = 64,
@@ -295,7 +295,7 @@ public sealed class DatasetKeyCursorReadTests
             ["key", "measure"],
             [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
             Nullability.NonNullable);
-        DatasetOptions options = new DatasetOptions { Seed = Seed, ClusteringKey = ["key"] };
+        DatasetOptions options = new DatasetOptions { Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
         List<DatasetOperation> adds = new List<DatasetOperation>(Objects);
         await using (VortexDataset writer = await VortexDataset.CreateAsync(store, schema, options, ct))
         {
@@ -332,9 +332,7 @@ public sealed class DatasetKeyCursorReadTests
         }
 
         draft.Take();
-        await draft.Writer.CompleteAsync(ct);
-        await draft.Writer.DisposeAsync();
-        WrittenObject written = Assert.NotNull(await dataset.SealAsync(draft, draft.Writer.RowCount, 0, ct));
+        WrittenObject written = Assert.Single(await draft.Writer.FinishAsync(0, ct));
         return new DatasetOperation.AddObject(written.Key, written.Entry) { Level = 1 };
     }
 

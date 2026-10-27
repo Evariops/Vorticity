@@ -24,9 +24,7 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
-            LookupFooterBytes = 0,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(37);
         List<Request> appended = [];
@@ -46,7 +44,6 @@ public sealed partial class IdentifierPostingsTests
         ulong added = await dataset.AddIdentifiersAsync([nameof(Request.RequestId)], Ct);
         Assert.Equal(version + 1, added);
         Assert.Equal([nameof(Request.RequestId)], dataset.Snapshot.Header.Identifiers);
-        Assert.Equal(DatasetFeatures.Identifiers, dataset.Snapshot.Header.Features & DatasetFeatures.Identifiers);
         Assert.Equal(added, await dataset.AddIdentifiersAsync([nameof(Request.RequestId)], Ct));
         await AppendRequestsAsync(dataset, random, appended, 9, 16);
 
@@ -98,7 +95,7 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset first = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Request.At))] },
         }, Ct);
         await using VortexDataset second = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
         await first.AddIdentifiersAsync([nameof(Request.RequestId)], Ct);

@@ -1,8 +1,9 @@
-// What a clustering of each column the questions' filters read would have spared them, ranked: the column the questions
-// lean on most, a diagnostic the library never acts on alone.
+// The key the questions' filters call for: what an order of the rows by each column they read would have spared them, and
+// the order a key would take them in, a diagnostic the library never acts on alone.
 //
-// THE ORACLE IS THE LOG: on a log of questions drawn, a selective column asked often ranks first, a column of few values
-// kept by most rows after it, and the key's first column, which the dataset is clustered by already, never.
+// THE ORACLE IS THE LOG: on a log of questions drawn, a selective column asked often is credited the most bytes, a column
+// of few values kept by most rows fewer, and the key's first column, which the dataset is ordered by already, nothing; the
+// key takes the column of fewer values first, which groups the longer runs.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,7 +14,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Dataset;
 
-public sealed partial class DatasetClusteringAdviceTests
+public sealed partial class DatasetLayoutAdviceTests
 {
     private static readonly DateTimeOffset Noon = new DateTimeOffset(2026, 10, 26, 12, 0, 0, TimeSpan.Zero);
 
@@ -25,8 +26,7 @@ public sealed partial class DatasetClusteringAdviceTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Call.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled },
         }, Ct);
         Random random = new Random(0xE5);
         for (int hour = 0; hour < 4; hour++)
@@ -41,7 +41,7 @@ public sealed partial class DatasetClusteringAdviceTests
             await dataset.AppendAsync(draft, Ct);
         }
 
-        Assert.Empty(dataset.RecommendClustering());
+        Assert.Empty((await dataset.RecommendLayoutAsync(Ct)).Components);
 
         // A log: a tenant asked eight times, a status eight times, windows of the instant four times.
         string[] filters =
@@ -55,11 +55,12 @@ public sealed partial class DatasetClusteringAdviceTests
             Assert.NotEmpty(await DatasetPlannerTests.AskAsync(dataset, [], ["count()", "sum(Size)"], filter, synopses: false));
         }
 
-        IReadOnlyList<ClusteringAdvice> ranked = dataset.RecommendClustering();
-        Console.WriteLine($"CLUSTERING ADVICE: {string.Join("; ", ranked.Select(a => $"{a.Column} {a.BytesAvoided:N0} bytes over {a.Objects} objects"))}");
-        Assert.Equal(["Tenant", "Status"], ranked.Select(a => a.Column));
-        Assert.True(ranked[0].BytesAvoided * 2 > ranked[1].BytesAvoided * 3, "a tenant leaves 98 % of the rows out, a status half of them on the whole");
-        Assert.All(ranked, advice => Assert.Equal(8 * 4, advice.Objects));
+        LayoutAdvice advice = await dataset.RecommendLayoutAsync(Ct);
+        IReadOnlyList<ComponentAdvice> ranked = advice.Components;
+        Console.WriteLine($"LAYOUT ADVICE: {string.Join("; ", ranked.Select(a => $"{a.Path} {a.BytesAvoided:N0} bytes over {a.Objects} objects, {a.DistinctPerPartition:F0} values a partition"))}, prefix {advice.IndexedPrefix}");
+        Assert.Equal(["Status", "Tenant"], ranked.Select(a => a.Path));
+        Assert.True(ranked[1].BytesAvoided * 2 > ranked[0].BytesAvoided * 3, "a tenant leaves 98 % of the rows out, a status half of them on the whole");
+        Assert.All(ranked, component => Assert.Equal(8 * 4, component.Objects));
     }
 
     [VortexRecord]

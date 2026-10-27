@@ -46,8 +46,6 @@ internal static class ShredWriteMicro
 
             int field = file.DType.IndexOfField(nameof(ShredEvent.Attributes));
 
-            // A row's instant, a millisecond apart, as a job hands the census each row's.
-            long[][] instants = [.. batches.Select(batch => Enumerable.Range(0, batch.RowCount).Select(row => (batch.StartRow + row) * 1_000L).ToArray())];
             double census = double.MaxValue;
             double whole = double.MaxValue;
             double shredded = double.MaxValue;
@@ -58,18 +56,19 @@ internal static class ShredWriteMicro
             long shreddedBytes = 0;
             for (int round = 0; round < rounds; round++)
             {
-                // As a job counts: text bounds cut as a text column's zones cut theirs, and the path
-                // directory built beside the choice.
+                // As a job counts: text bounds cut as a text column's zones cut theirs, its rows in groups of a granule, and
+                // the path directory built beside the choice.
                 long begin = Stopwatch.GetTimestamp();
-                PathCensus counted = new PathCensus(VortexWriteOptions.Default.StringBoundBytes, Vorticity.Dataset.DatasetOptions.DefaultSliceTargetRows);
+                int granuleRows = VortexWriteOptions.Default.BlockRows;
+                PathCensus counted = new PathCensus(VortexWriteOptions.Default.StringBoundBytes, granuleRows);
                 for (int b = 0; b < batches.Count; b++)
                 {
-                    counted.Add(batches[b], field, instants[b]);
+                    counted.Add(batches[b], field);
                 }
 
                 plan = ShreddingChoice.Choose(counted);
                 chunk = ShreddingChoice.ChunkTargetBytes(counted);
-                directory = Vorticity.Indexes.VariantDirectory.From(counted, plan);
+                directory = Vorticity.Indexes.VariantDirectory.From(counted, plan, granuleRows);
                 census = Math.Min(census, Stopwatch.GetElapsedTime(begin).TotalMilliseconds);
 
                 (double time, long bytes) = await WriteAsync(batches, target, null, 0);

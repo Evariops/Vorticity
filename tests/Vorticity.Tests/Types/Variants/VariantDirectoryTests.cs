@@ -123,26 +123,24 @@ public sealed class VariantDirectoryTests
     }
 
     /// <summary>
-    /// A hundred rows over four slices of 25: a key held by the first ten rows, one by the last ten, one
-    /// by every row. Each names the slices it lies in, the one held everywhere none, and a question asked
-    /// of one slice is refuted where its key is not.
+    /// A hundred rows over four groups of 25: a key held by the first ten rows, one by the last ten, one
+    /// by every row. Each names the groups it lies in, the one held everywhere none, and a question asked
+    /// of one group is refuted where its key is not.
     /// </summary>
     [Fact]
-    public void ADirectoryNamesTheSlicesEachPathLiesIn()
+    public void ADirectoryNamesTheGroupsEachPathLiesIn()
     {
-        PathCensus census = new PathCensus();
+        PathCensus census = new PathCensus(groupRows: 25);
         for (int i = 0; i < 100; i++)
         {
             Variant row = Variant.Object([("all", Variant.From((long)i)), .. (i < 10 ? [("early", Variant.From(true))] : (i >= 90 ? new[] { ("late", Variant.From("x")) } : []))]);
-            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+            census.Add(row.Metadata.Span, row.Value.Span);
         }
-
-        TimeSlice[] slices = [.. Enumerable.Range(0, 4).Select(s => new TimeSlice(s * 25_000L, (s + 1) * 25_000L, s * 25L, 25))];
-        VariantDirectory directory = VariantDirectory.From(census, null, slices);
-        Assert.Equal(4, directory.SliceCount);
-        Assert.Null(Entry(directory, ["all"], PathClass.Integer).Slices);
-        Assert.Equal([0b0001], Entry(directory, ["early"], PathClass.Boolean).Slices);
-        Assert.Equal([0b1000], Entry(directory, ["late"], PathClass.String).Slices);
+        VariantDirectory directory = VariantDirectory.From(census, null, groupRows: 25);
+        Assert.Equal(4, directory.GroupCount);
+        Assert.Null(Entry(directory, ["all"], PathClass.Integer).Groups);
+        Assert.Equal([0b0001], Entry(directory, ["early"], PathClass.Boolean).Groups);
+        Assert.Equal([0b1000], Entry(directory, ["late"], PathClass.String).Groups);
 
         Dictionary<string, VariantDirectory> directories = new() { ["Attributes"] = VariantDirectory.From(directory.ToBytes())! };
         Assert.Equal(
@@ -218,20 +216,20 @@ public sealed class VariantDirectoryTests
     }
 
     /// <summary>
-    /// A hundred rows a second apart, counted one at a time in slices of 25 rows: a path every row holds keeps one span
-    /// of time from its first rows on, where a census that reckoned no gap for rows counted one at a time kept one a row.
+    /// A hundred rows counted one at a time in groups of 25 rows: a path every row holds keeps one span of rows from its
+    /// first row on, where a census that reckoned no gap for rows counted one at a time kept one a row.
     /// </summary>
     [Fact]
-    public void ACensusSpansAPathBySlicesFromItsFirstRows()
+    public void ACensusSpansAPathByGroupsFromItsFirstRows()
     {
-        PathCensus census = new PathCensus(sliceTargetRows: 25);
+        PathCensus census = new PathCensus(groupRows: 25);
         for (int i = 0; i < 100; i++)
         {
             Variant row = Variant.Object(("all", Variant.From((long)i)));
-            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+            census.Add(row.Metadata.Span, row.Value.Span);
         }
 
-        Assert.Equal([0L, 99_000L], census.Root.Keys["all"].Spans.ToArray());
+        Assert.Equal([0L, 99L], census.Root.Keys["all"].Spans.ToArray());
     }
 
     /// <summary>
@@ -270,8 +268,8 @@ public sealed class VariantDirectoryTests
     }
 
     /// <summary>
-    /// A directory read for some paths holds their entries alone, as the whole one holds them, slices included, and
-    /// answers every question on those paths as the whole one does, slice by slice too; it holds nothing of a path it
+    /// A directory read for some paths holds their entries alone, as the whole one holds them, groups included, and
+    /// answers every question on those paths as the whole one does, group by group too; it holds nothing of a path it
     /// was not read for, and a region that does not decode is no directory either way.
     /// </summary>
     [Fact]
@@ -281,7 +279,7 @@ public sealed class VariantDirectoryTests
         byte[] bytes = whole.ToBytes();
         string[][] paths = [["status"], ["user", "id"], ["missing"]];
         VariantDirectory some = VariantDirectory.From(bytes, Utf8(paths))!;
-        Assert.Equal((whole.Rows, whole.SliceCount, whole.Partial), (some.Rows, some.SliceCount, some.Partial));
+        Assert.Equal((whole.Rows, whole.GroupCount, whole.Partial), (some.Rows, some.GroupCount, some.Partial));
         foreach (string[] path in paths)
         {
             AssertSameEntries(whole.Of(path).ToArray(), some.Of(path).ToArray());
@@ -308,18 +306,16 @@ public sealed class VariantDirectoryTests
 
         Assert.Null(VariantDirectory.From(bytes.AsSpan(0, bytes.Length - 3), Utf8(paths)));
 
-        // The slices a path lies in, read for it alone.
-        PathCensus census = new PathCensus();
+        // The groups a path lies in, read for it alone.
+        PathCensus census = new PathCensus(groupRows: 25);
         for (int i = 0; i < 100; i++)
         {
             Variant row = Variant.Object([("all", Variant.From((long)i)), .. (i < 10 ? [("early", Variant.From(true))] : (i >= 90 ? new[] { ("late", Variant.From("x")) } : []))]);
-            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+            census.Add(row.Metadata.Span, row.Value.Span);
         }
-
-        TimeSlice[] slices = [.. Enumerable.Range(0, 4).Select(s => new TimeSlice(s * 25_000L, (s + 1) * 25_000L, s * 25L, 25))];
-        byte[] sliced = VariantDirectory.From(census, null, slices).ToBytes();
-        Dictionary<string, VariantDirectory> early = new() { ["Attributes"] = VariantDirectory.From(sliced, Utf8([["early"]]))! };
-        Dictionary<string, VariantDirectory> everything = new() { ["Attributes"] = VariantDirectory.From(sliced)! };
+        byte[] grouped = VariantDirectory.From(census, null, groupRows: 25).ToBytes();
+        Dictionary<string, VariantDirectory> early = new() { ["Attributes"] = VariantDirectory.From(grouped, Utf8([["early"]]))! };
+        Dictionary<string, VariantDirectory> everything = new() { ["Attributes"] = VariantDirectory.From(grouped)! };
         Assert.All(Enumerable.Range(-1, 5), s => Assert.Equal(
             VariantDirectory.MayMatch(Has("early"), everything, s), VariantDirectory.MayMatch(Has("early"), early, s)));
         AssertSameEntries(everything["Attributes"].Of(["early"]).ToArray(), early["Attributes"].Of(["early"]).ToArray());
@@ -327,22 +323,20 @@ public sealed class VariantDirectoryTests
 
     /// <summary>
     /// A path that keeps its integers' entry but whose rare texts a directory over its budget leaves out: a question on its
-    /// texts may match, over the object and over the slice they lie in, while the classes and bounds a whole directory
+    /// texts may match, over the object and over the group they lie in, while the classes and bounds a whole directory
     /// holds still refute what they refute.
     /// </summary>
     [Fact]
     public void ATrimmedDirectoryRefutesNoClassItLeftOut()
     {
-        PathCensus census = new PathCensus(stringBoundBytes: 8);
+        PathCensus census = new PathCensus(stringBoundBytes: 8, groupRows: 750);
         for (int i = 0; i < 3_000; i++)
         {
             Variant code = i == 2_999 ? Variant.From("x") : Variant.From((long)(i % 7));
             Variant row = Variant.Object(("code", code), ($"k{i % 600}", Variant.From(1L)), ($"u{i}", Variant.From(true)));
-            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+            census.Add(row.Metadata.Span, row.Value.Span);
         }
-
-        TimeSlice[] slices = [.. Enumerable.Range(0, 4).Select(s => new TimeSlice(s * 750_000L, (s + 1) * 750_000L, s * 750L, 750))];
-        VariantDirectory whole = VariantDirectory.From(census, null, slices);
+        VariantDirectory whole = VariantDirectory.From(census, null, groupRows: 750);
         VariantDirectory trimmed = VariantDirectory.From(whole.Within(whole.ToBytes().Length / 8).ToBytes())!;
         Assert.True(trimmed.Partial);
         Assert.Single(trimmed.Of(["code"]).ToArray(), entry => entry.Class == PathClass.Integer);
@@ -352,11 +346,11 @@ public sealed class VariantDirectoryTests
         Dictionary<string, VariantDirectory> partial = new() { ["Attributes"] = trimmed };
         VortexExpr text = Path(VariantRead.AsString, ComparisonOp.Equal, FilterLiteral.From("x"), "code");
         VortexExpr present = VariantFilterExpr.Of(new NullCheckExpr(new VariantFieldExpr(new ColumnFieldExpr("Attributes"), [VariantStep.Of("code")], VariantRead.AsString), isNull: false));
-        foreach (int slice in new[] { -1, 3 })
+        foreach (int group in new[] { -1, 3 })
         {
-            Assert.True(VariantDirectory.MayMatch(text, complete, slice));
-            Assert.True(VariantDirectory.MayMatch(text, partial, slice));
-            Assert.True(VariantDirectory.MayMatch(present, partial, slice));
+            Assert.True(VariantDirectory.MayMatch(text, complete, group));
+            Assert.True(VariantDirectory.MayMatch(text, partial, group));
+            Assert.True(VariantDirectory.MayMatch(present, partial, group));
         }
 
         // The whole directory refutes by class and by bounds; the trimmed one by the bounds of the entries it keeps.
@@ -366,8 +360,8 @@ public sealed class VariantDirectoryTests
     }
 
     /// <summary>
-    /// Random rows of mixed classes over five slices, their directory trimmed to random budgets: every value a row holds may
-    /// match, over the object and over the row's slice, whatever the directory left out.
+    /// Random rows of mixed classes over five groups, their directory trimmed to random budgets: every value a row holds may
+    /// match, over the object and over the row's group, whatever the directory left out.
     /// </summary>
     [Theory]
     [InlineData(1)]
@@ -379,7 +373,7 @@ public sealed class VariantDirectoryTests
     {
         Random random = new Random(seed);
         const int Rows = 600;
-        PathCensus census = new PathCensus();
+        PathCensus census = new PathCensus(groupRows: 120);
         List<(int Row, string Key, VariantRead Read, FilterLiteral Value)> held = [];
         for (int i = 0; i < Rows; i++)
         {
@@ -404,11 +398,9 @@ public sealed class VariantDirectoryTests
             }
 
             Variant row = Variant.Object([.. fields]);
-            census.Add(row.Metadata.Span, row.Value.Span, instant: i * 1_000L);
+            census.Add(row.Metadata.Span, row.Value.Span);
         }
-
-        TimeSlice[] slices = [.. Enumerable.Range(0, 5).Select(s => new TimeSlice(s * 120_000L, (s + 1) * 120_000L, s * 120L, 120))];
-        VariantDirectory whole = VariantDirectory.From(census, null, slices);
+        VariantDirectory whole = VariantDirectory.From(census, null, groupRows: 120);
         int bytes = whole.ToBytes().Length;
         foreach (double share in new[] { 1.0, 0.5, 0.2, 0.05, 0.0 })
         {
@@ -420,7 +412,7 @@ public sealed class VariantDirectoryTests
             {
                 VortexExpr equal = Path(read, ComparisonOp.Equal, value, key);
                 Assert.True(VariantDirectory.MayMatch(equal, directories), $"row {row}, {key} at {share}");
-                Assert.True(VariantDirectory.MayMatch(equal, directories, row / 120), $"row {row}, {key} at {share}, its slice");
+                Assert.True(VariantDirectory.MayMatch(equal, directories, row / 120), $"row {row}, {key} at {share}, its group");
             }
         }
 
@@ -444,7 +436,7 @@ public sealed class VariantDirectoryTests
                 (got[i].Class, got[i].Values, got[i].Place, got[i].Low, got[i].High, got[i].NaNs));
             Assert.Equal(want[i].MinText, got[i].MinText);
             Assert.Equal(want[i].MaxText, got[i].MaxText);
-            Assert.Equal(want[i].Slices, got[i].Slices);
+            Assert.Equal(want[i].Groups, got[i].Groups);
         }
     }
 

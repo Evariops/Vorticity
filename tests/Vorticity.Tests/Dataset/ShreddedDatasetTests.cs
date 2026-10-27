@@ -33,12 +33,11 @@ public sealed partial class ShreddedDatasetTests
         await using MemoryObjectStore levelsStore = new MemoryObjectStore();
         await using VortexDataset clustered = await VortexDataset.CreateAsync(clusteredStore, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         await using VortexDataset levels = await VortexDataset.CreateAsync(levelsStore, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))] },
         }, Ct);
 
         await AppendAsync(clustered, levels);
@@ -94,12 +93,11 @@ public sealed partial class ShreddedDatasetTests
         await using MemoryObjectStore levelsStore = new MemoryObjectStore();
         await using VortexDataset clustered = await VortexDataset.CreateAsync(clusteredStore, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         await using VortexDataset levels = await VortexDataset.CreateAsync(levelsStore, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))] },
         }, Ct);
         await AppendAsync(clustered, levels);
         foreach (VortexDataset dataset in new[] { clustered, levels })
@@ -149,8 +147,7 @@ public sealed partial class ShreddedDatasetTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         await AppendAsync(dataset);
         while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)

@@ -57,7 +57,7 @@ public sealed class DatasetFuzzTests
         Template = new CommitHeader
         {
             Version = 1,
-            ClusteringKey = ["k"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("k")] },
             Chunker = new ChunkerSettings(256, 512, 1_024),
         },
     };
@@ -368,7 +368,7 @@ public sealed class DatasetFuzzTests
         // runs between them now and then. Entry n of source s is the row of key s * 1 000 000 + n.
         Decoders.EnsureRegistered();
         await using MemoryObjectStore store = new MemoryObjectStore();
-        DatasetOptions options = new DatasetOptions { Seed = Seed, ClusteringKey = ["Key"] };
+        DatasetOptions options = new DatasetOptions { Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] } };
         await using VortexDataset first = await VortexDataset.CreateAsync(store, ChangeRow.Schema, options, ct);
         VortexDataset[] writers = [first, .. await Task.WhenAll(Enumerable.Range(1, Writers - 1).Select(_ => VortexDataset.OpenAsync(store, options, ct).AsTask()))];
         string[] sources = ["s0", "s1", "s2"];
@@ -524,7 +524,7 @@ public sealed class DatasetFuzzTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = Seed,
-            ClusteringKey = ["key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
             RetentionWindow = TimeSpan.FromSeconds(3_600),
             Write = new VortexWriteOptions { RowBlockSize = 128, DataBlockTargetBytes = 8 << 10 },
             TimeProvider = clock,
@@ -683,7 +683,7 @@ public sealed class DatasetFuzzTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = Seed,
-            ClusteringKey = ["key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
             Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
         };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);

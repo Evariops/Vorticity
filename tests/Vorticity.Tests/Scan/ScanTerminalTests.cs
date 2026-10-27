@@ -189,7 +189,7 @@ public sealed class ScanTerminalTests
         VortexExpr filter = Filter("banded = 5");
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
         Assert.Equal(1, plan.LiveBlocks);
         long zoneMaps = plan.Pruning[0].SegmentsRead;
 
@@ -220,7 +220,7 @@ public sealed class ScanTerminalTests
         VortexExpr filter = Filter("monotone < 0");
 
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
         Assert.Equal(0, plan.LiveBlocks);
 
         ScanCounters metrics = new ScanCounters();

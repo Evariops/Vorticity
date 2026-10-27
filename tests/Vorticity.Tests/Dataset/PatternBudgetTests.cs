@@ -161,10 +161,10 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Spanned.Schema, new DatasetOptions
             {
-                ClusteringKey = [nameof(Spanned.At)],
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Spanned.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Spanned.At))], Organization = LayoutOrganization.Leveled },
                 Identifiers = [nameof(Spanned.TraceId)],
                 ShreddedPaths = ["Attributes['http.status_code'].AsInt64()"],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+                ContentsObjectBytes = 0,
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(10_000) },
             });
             Random random = new Random(67);

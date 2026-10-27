@@ -24,7 +24,7 @@ public sealed partial class ObjectKeyBoundsTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Tenanted.Schema, new DatasetOptions { ClusteringKey = [nameof(Tenanted.Tenant), nameof(Tenanted.Id)] }, Ct);
+            store, Tenanted.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Tenanted.Tenant)), LayoutValue.Column(nameof(Tenanted.Id))] } }, Ct);
         Random random = new Random(0xB0);
         List<Tenanted> appended = [];
         for (int append = 0; append < 6; append++)
@@ -54,12 +54,12 @@ public sealed partial class ObjectKeyBoundsTests
     [Fact]
     public async Task AKeyOfOneNumberStatesNoLastKeyWhichItsStatisticsBound()
     {
-        // A number's statistics bound a key of it alone, and its entries keep the format they had; a composite key of
-        // numbers states its last key, since its leading column's bounds would take every object of a value of it.
+        // A number's statistics bound a key of it alone; a composite key of numbers states its last key, since its leading
+        // column's bounds would take every object of a value of it.
         foreach ((string[] key, bool states) in new[] { ((string[])[nameof(Numbered.Id)], false), ([nameof(Numbered.Group), nameof(Numbered.Id)], true) })
         {
             await using MemoryObjectStore store = new MemoryObjectStore();
-            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Numbered.Schema, new DatasetOptions { ClusteringKey = key }, Ct);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Numbered.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [.. key.Select(LayoutValue.Column)] } }, Ct);
             await using (ObjectDraft draft = dataset.StartObject())
             {
                 await draft.Writer.WriteAsync<Numbered>([.. Enumerable.Range(0, 100).Select(i => new Numbered(i % 3, 100 - i))], Ct);
@@ -69,7 +69,6 @@ public sealed partial class ObjectKeyBoundsTests
             await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, Ct))
             {
                 Assert.Equal(states, !held.Entry.LastKey.IsEmpty);
-                Assert.Equal(states, held.Entry.HasFields);
             }
         }
     }
@@ -81,7 +80,7 @@ public sealed partial class ObjectKeyBoundsTests
         // objects, where a range of the text's summaries, which bound nothing, took every object of the level.
         string[] tenants = ["acme", "globex", "initech", "umbrella"];
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Tenanted.Schema, Options(ClusteringValue.Column), Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Tenanted.Schema, Options(), Ct);
         long id = 0;
         foreach (string tenant in tenants)
         {
@@ -124,7 +123,7 @@ public sealed partial class ObjectKeyBoundsTests
         // Rows of one tenant at a time, in key order, a few at an append: the small objects each tenant leaves merge.
         string[] tenants = ["acme", "globex", "initech"];
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Tenanted.Schema, Options(ClusteringValue.Column), Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Tenanted.Schema, Options(), Ct);
         long id = 0;
         long appended = 0;
         foreach (string tenant in tenants)
@@ -182,11 +181,10 @@ public sealed partial class ObjectKeyBoundsTests
         await dataset.AppendAsync(draft, Ct);
     }
 
-    private static DatasetOptions Options(ClusteringValue value) => new DatasetOptions
+    private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0xB0_0D5,
-        ClusteringKey = [nameof(Tenanted.Tenant), nameof(Tenanted.Id)],
-        Clustering = new ClusteringOptions { Value = value },
+        Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Tenanted.Tenant)), SortKey = [LayoutValue.Column(nameof(Tenanted.Tenant)), LayoutValue.Column(nameof(Tenanted.Id))], Organization = LayoutOrganization.Leveled },
         ChunkBytes = 0,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
     };

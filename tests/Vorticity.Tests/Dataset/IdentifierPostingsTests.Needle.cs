@@ -103,10 +103,9 @@ public sealed partial class IdentifierPostingsTests
     {
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(Request.RequestId)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
-            LookupFooterBytes = 0,
+            ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(seed);
         List<Request> appended = [];

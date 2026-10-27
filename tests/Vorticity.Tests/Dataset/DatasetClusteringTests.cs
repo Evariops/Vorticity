@@ -43,7 +43,7 @@ public sealed class DatasetClusteringTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
-        Assert.Equal(["key"], dataset.ClusteringKey);
+        Assert.Equal([LayoutValue.Column("key")], dataset.Layout!.SortKey);
         Assert.NotNull(dataset.Key);
 
         foreach (int residue in (int[])[3, 1, 0, 2])
@@ -230,7 +230,7 @@ public sealed class DatasetClusteringTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         DatasetOptions narrow = Clustered() with
         {
-            ClusteringKey = ["measure"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("measure")] },
             SummaryColumnLimit = 1,
         };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, narrow, ct);
@@ -327,7 +327,7 @@ public sealed class DatasetClusteringTests
         [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
         Nullability.NonNullable);
 
-    private static DatasetOptions Clustered() => Unclustered() with { ClusteringKey = ["key"] };
+    private static DatasetOptions Clustered() => Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
 
     private static DatasetOptions Unclustered() => new DatasetOptions
     {

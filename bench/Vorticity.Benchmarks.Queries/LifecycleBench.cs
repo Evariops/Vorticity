@@ -39,8 +39,11 @@ internal static class LifecycleBench
         await using CountingObjectStore store = new CountingObjectStore(memory);
         DatasetOptions options = new DatasetOptions
         {
-            ClusteringKey = [nameof(GeneratedRequest.At)],
-            Clustering = clustering == "off" ? null : new ClusteringOptions { Value = ClusteringValue.Truncate(clustering == "day" ? CalendarUnit.Day : CalendarUnit.Hour) },
+            Layout = new DatasetLayout
+            {
+                Partition = clustering == "off" ? null : LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(clustering == "day" ? CalendarUnit.Day : CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))],
+            },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
         };
         VortexDataset[] handles = new VortexDataset[writers];

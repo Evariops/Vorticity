@@ -27,8 +27,7 @@ internal static class LogWriteMicro
             DatasetOptions options = new DatasetOptions
             {
                 Session = session,
-                ClusteringKey = [nameof(LogRow.At)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(LogRow.At))], Organization = LayoutOrganization.Leveled },
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget), ScratchDirectory = scratch },
             };
 

@@ -966,7 +966,7 @@ public sealed class DatasetCompactionTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        DatasetOptions composite = Unclustered() with { ClusteringKey = ["key", "measure"] };
+        DatasetOptions composite = Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key"), LayoutValue.Column("measure")] } };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, composite, ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
@@ -1007,7 +1007,7 @@ public sealed class DatasetCompactionTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(
-            async () => await VortexDataset.CreateAsync(store, schema, Unclustered() with { ClusteringKey = ["key", "measure"] }, ct));
+            async () => await VortexDataset.CreateAsync(store, schema, Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key"), LayoutValue.Column("measure")] } }, ct));
         Assert.Contains("may hold a null", refused.Message, StringComparison.Ordinal);
         Assert.Equal(0UL, await DatasetCommitter.NewestVersionAsync(store, ct));
     }
@@ -1034,7 +1034,7 @@ public sealed class DatasetCompactionTests
         {
             await using MemoryObjectStore store = new MemoryObjectStore();
             ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(
-                async () => await VortexDataset.CreateAsync(store, schema, Unclustered() with { ClusteringKey = [key] }, ct));
+                async () => await VortexDataset.CreateAsync(store, schema, Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(key)] } }, ct));
             Assert.Contains("may hold a null", refused.Message, StringComparison.Ordinal);
             Assert.Contains("non-nullable column", refused.Message, StringComparison.Ordinal);
             Assert.Equal(0UL, await DatasetCommitter.NewestVersionAsync(store, ct));
@@ -1044,7 +1044,7 @@ public sealed class DatasetCompactionTests
         // refusal is the creation's, not the key's.
         await using MemoryObjectStore earlier = new MemoryObjectStore();
         await using (VortexDataset created = await VortexDataset.CreateAsync(
-            earlier, flat, Unclustered() with { ClusteringKey = ["measure"], AcceptsNullableKey = true }, ct))
+            earlier, flat, Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("measure")] } }, ct))
         {
             await created.AppendAsync(NullableMeasures(types, flat, residue: 0, nullEvery: 7, measureFirst: true), ct);
         }
@@ -1076,7 +1076,7 @@ public sealed class DatasetCompactionTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, Unclustered() with { ClusteringKey = ["measure"], AcceptsNullableKey = true }, ct);
+            store, schema, Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("measure")] } }, ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
             await dataset.AppendAsync(NullableMeasures(types, schema, residue, nullEvery: 7, measureFirst: true), ct);
@@ -1363,7 +1363,7 @@ public sealed class DatasetCompactionTests
         [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
         Nullability.NonNullable);
 
-    private static DatasetOptions Clustered() => Unclustered() with { ClusteringKey = ["key"] };
+    private static DatasetOptions Clustered() => Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
 
     private static DatasetOptions Unclustered() => new DatasetOptions
     {

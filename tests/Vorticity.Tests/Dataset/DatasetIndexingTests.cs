@@ -108,7 +108,7 @@ public sealed class DatasetIndexingTests
 
             // And the fragment's filter prunes inside the object: a tag no row holds.
             VortexExpr noTag = Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(1L)));
-            ScanExplanation plan = await lease.File.ScanBuilder().Where(noTag).ExplainAsync(ct);
+            ScanExplanation plan = await lease.File.ScanBuilder().Where(noTag).ExplainAsync(analyze: true, ct);
             Assert.Equal(0, plan.LiveBlocks);
         }
 
@@ -685,7 +685,7 @@ public sealed class DatasetIndexingTests
         ],
         Nullability.NonNullable);
 
-    private static DatasetOptions Clustered() => Unclustered() with { ClusteringKey = ["key"] };
+    private static DatasetOptions Clustered() => Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
 
     private static DatasetOptions Unclustered() => new DatasetOptions
     {

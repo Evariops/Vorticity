@@ -115,8 +115,8 @@ public sealed class DatasetClusteredSynopsesTests
             }
 
             ScanPlan plan = await DatasetPlannerTests.Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
-            answered += plan.States.Any(step => step.Read is "states" or "rollup") ? 1 : 0;
-            rollups += plan.States.Any(step => step.Read == "rollup") ? 1 : 0;
+            answered += plan.Units.Any(step => step.Alternative is "counts" or "rollup") ? 1 : 0;
+            rollups += plan.Units.Any(step => step.Alternative == "rollup") ? 1 : 0;
         }
 
         Console.WriteLine($"CLUSTERED {clustering}: {rolled} rollups; the counts answered {answered} questions of {Questions}, the rollups {rollups} of them");
@@ -133,24 +133,30 @@ public sealed class DatasetClusteredSynopsesTests
         Drawn[] columns = DatasetCountsTests.Draw(random);
         string[] byInstant = ["At"];
         VortexWriteOptions small = new VortexWriteOptions { RowBlockSize = 512, DataBlockTargetBytes = 8 << 10 };
-        (string[] key, ClusteringOptions cut, VortexWriteOptions write) = clustering switch
+        // The partition, a function of the key's first column, and the bytes an object aims at, 0 for the layout's own.
+        (string[] key, Func<LayoutValue, LayoutValue>? cut, long objectBytes, VortexWriteOptions write) = clustering switch
         {
-            "an instant's hour" => (byInstant, new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, VortexWriteOptions.Default),
-            "an instant's 40 minutes" => (byInstant, new ClusteringOptions { Value = ClusteringValue.Bucket(TimeSpan.FromMinutes(40)) }, VortexWriteOptions.Default),
-            "a code" => (Lead(columns, 1), new ClusteringOptions { Value = ClusteringValue.Column }, VortexWriteOptions.Default),
-            "a code's bucket of 8" => (Lead(columns, 1), new ClusteringOptions { Value = ClusteringValue.Bucket(8L) }, VortexWriteOptions.Default),
+            "an instant's hour" => (byInstant, (LayoutValue v) => v.Truncate(CalendarUnit.Hour), 0L, VortexWriteOptions.Default),
+            "an instant's 40 minutes" => (byInstant, (LayoutValue v) => v.Bucket(TimeSpan.FromMinutes(40)), 0L, VortexWriteOptions.Default),
+            "a code" => (Lead(columns, 1), (LayoutValue v) => v, 0L, VortexWriteOptions.Default),
+            "a code's bucket of 8" => (Lead(columns, 1), (LayoutValue v) => v.Bucket(8L), 0L, VortexWriteOptions.Default),
             "a float's bucket of 400" => (Lead(columns = [.. columns, new Drawn(Kind.Float64, false, 0)], columns.Length - 1),
-                new ClusteringOptions { Value = ClusteringValue.Bucket(400.0) }, VortexWriteOptions.Default),
-            "a text" => (Lead(columns, 0, values: 2 + random.Next(8)), new ClusteringOptions { Value = ClusteringValue.Column }, VortexWriteOptions.Default),
-            "96 KiB" => (byInstant, new ClusteringOptions { ObjectBytes = 96L << 10 }, small),
-            "an instant's hour and 40 KiB" => (byInstant, new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour), ObjectBytes = 40L << 10 }, small),
+                (LayoutValue v) => v.Bucket(400.0), 0L, VortexWriteOptions.Default),
+            "a text" => (Lead(columns, 0, values: 2 + random.Next(8)), (LayoutValue v) => v, 0L, VortexWriteOptions.Default),
+            "96 KiB" => (byInstant, (Func<LayoutValue, LayoutValue>?)null, 96L << 10, small),
+            "an instant's hour and 40 KiB" => (byInstant, (LayoutValue v) => v.Truncate(CalendarUnit.Hour), 40L << 10, small),
             _ => throw new ArgumentException($"No clustering named '{clustering}'.", nameof(clustering)),
         };
 
         return (columns, new DatasetOptions
         {
-            ClusteringKey = key,
-            Clustering = cut,
+            Layout = new DatasetLayout
+            {
+                Partition = cut?.Invoke(LayoutValue.Column(key[0])),
+                SortKey = [.. key.Select(LayoutValue.Column)],
+                Organization = cut is null ? null : LayoutOrganization.Leveled,
+                ObjectBytes = objectBytes > 0 ? objectBytes : new DatasetLayout().ObjectBytes,
+            },
             Write = write,
             SheetObjectBytes = 0,
             ContentsObjectBytes = 0,

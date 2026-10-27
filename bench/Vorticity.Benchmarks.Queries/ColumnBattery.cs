@@ -54,8 +54,7 @@ internal static class ColumnBattery
         await using CountingObjectStore arrival = new CountingObjectStore(arrivalReads);
         Layout arrivalLayout = await FillAsync("arrival", arrival, batches, new DatasetOptions
         {
-            ClusteringKey = [nameof(EmitterRequest.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(EmitterRequest.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(EmitterRequest.At))], Organization = LayoutOrganization.Leveled },
         });
 
         // Clustered by service into objects of the arrival's size, so that the two differ by the order of their rows alone.
@@ -63,8 +62,7 @@ internal static class ColumnBattery
         await using CountingObjectStore service = new CountingObjectStore(serviceReads);
         Layout serviceLayout = await FillAsync("service", service, batches, new DatasetOptions
         {
-            ClusteringKey = [nameof(EmitterRequest.Service), nameof(EmitterRequest.At)],
-            Clustering = new ClusteringOptions { BlockValue = ClusteringValue.Truncate(CalendarUnit.Hour), ObjectBytes = arrivalLayout.Bytes / Math.Max(1, arrivalLayout.Objects) },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(EmitterRequest.Service)), LayoutValue.Column(nameof(EmitterRequest.At)).Truncate(CalendarUnit.Hour), LayoutValue.Column(nameof(EmitterRequest.At))], IndexedPrefix = 2, ObjectBytes = arrivalLayout.Bytes / Math.Max(1, arrivalLayout.Objects) },
         });
 
         Console.WriteLine(
@@ -155,9 +153,9 @@ internal static class ColumnBattery
                 Add("1 column sheets", contents.Sheets);
                 Add("2 counts", contents.Counts);
                 Add("3 counts' sketches", contents.Sketches);
-                Add("4 block table", contents.Blocks);
-                Add("5 block statistics", contents.BlockStats);
-                Add("6 where values live", contents.Wheres);
+                Add("4 granule statistics", contents.GranuleStats);
+                Add("5 granule histograms", contents.GranuleHistograms);
+                Add("6 where values lie", contents.Locates);
             }
         }
 
@@ -193,8 +191,8 @@ internal static class ColumnBattery
 
     /// <summary>
     /// What a unit of each synopsis weighs, against the design's figures (22 §5): a sheet, against its formula over the
-    /// object's distinct values; an entry of the counts, and a sketch; a block's statistics over every column; a value of
-    /// the index of where values live.
+    /// object's distinct values; an entry of the counts, and a sketch; a granule's statistics and histograms over every
+    /// column; a value of the index of where values lie.
     /// </summary>
     private static async Task UnitsAsync(VortexDataset dataset, SortedDictionary<string, long> synopses)
     {
@@ -230,15 +228,20 @@ internal static class ColumnBattery
                 sketched += sketches is null ? 0 : (long)sketches.Entries * (sketches.Measures + sketches.Attached);
             }
 
-            // Every column's statistics describe the object's blocks alike: their count is any one's.
-            int objectBlocks = 0;
-            foreach ((Vorticity.Indexes.ColumnWhere? where, Vorticity.Indexes.ColumnBlocks? columnBlocks) in await dataset.ReadBlockColumnsAsync(held.Entry, all, stats: true, default))
+            // Every column's statistics describe the object's granules alike: their count is any one's.
+            int objectGranules = 0;
+            (Vorticity.Indexes.GranuleStats?[] stats, _) = await dataset.ReadGranuleStatsAsync(held.Entry, all, [], default);
+            foreach (Vorticity.Indexes.GranuleStats? column in stats)
             {
-                values += where?.Values.Length ?? 0;
-                objectBlocks = Math.Max(objectBlocks, columnBlocks?.Count ?? 0);
+                objectGranules = Math.Max(objectGranules, column?.Count ?? 0);
             }
 
-            blocks += objectBlocks;
+            foreach (Vorticity.Indexes.ColumnLocate? locate in await dataset.ReadLocatesAsync(held.Entry, all, default))
+            {
+                values += locate?.Values.Count ?? 0;
+            }
+
+            blocks += objectGranules;
         }
 
         Console.WriteLine(string.Create(
@@ -246,8 +249,8 @@ internal static class ColumnBattery
             $"  a sheet {synopses.GetValueOrDefault("1 column sheets") / (double)Math.Max(1, sheets):F0} bytes, by its formula {sheetFormula / Math.Max(1, sheets):F0}; " +
             $"a counts entry {synopses.GetValueOrDefault("2 counts") / (double)Math.Max(1, entries):F1} bytes over {entries:N0}; " +
             $"a sketch {synopses.GetValueOrDefault("3 counts' sketches") / (double)Math.Max(1, sketched):F0} bytes over {sketched:N0}; " +
-            $"a block {(synopses.GetValueOrDefault("5 block statistics") + synopses.GetValueOrDefault("4 block table")) / (double)Math.Max(1, blocks):F0} bytes over {blocks:N0}; " +
-            $"a value where it lives {synopses.GetValueOrDefault("6 where values live") / (double)Math.Max(1, values):F1} bytes over {values:N0}"));
+            $"a granule {(synopses.GetValueOrDefault("4 granule statistics") + synopses.GetValueOrDefault("5 granule histograms")) / (double)Math.Max(1, blocks):F0} bytes over {blocks:N0}; " +
+            $"a value where it lies {synopses.GetValueOrDefault("6 where values lie") / (double)Math.Max(1, values):F1} bytes over {values:N0}"));
     }
 
     /// <summary>
@@ -267,9 +270,9 @@ internal static class ColumnBattery
             ScanPlan plan = await question.ExplainAsync();
             path = Path(plan);
             trace?.WriteLine($"# {layout} {name}: priced {priced}");
-            foreach (StatesStep step in plan.States)
+            foreach (UnitStep step in plan.Units)
             {
-                trace?.WriteLine($"#   {step.Object} {step.Read} {step.Detail}");
+                trace?.WriteLine($"#   {step.Unit} {step.Alternative} {step.Detail}");
             }
         }
 
@@ -310,15 +313,15 @@ internal static class ColumnBattery
     /// <summary>What the plan says each object reads, counted by kind.</summary>
     private static string Path(ScanPlan plan)
     {
-        if (plan.States.IsEmpty)
+        if (plan.Units.IsEmpty)
         {
             return "rows";
         }
 
         SortedDictionary<string, int> kinds = new SortedDictionary<string, int>(StringComparer.Ordinal);
-        foreach (StatesStep step in plan.States)
+        foreach (UnitStep step in plan.Units)
         {
-            kinds[step.Read] = kinds.GetValueOrDefault(step.Read) + 1;
+            kinds[step.Alternative] = kinds.GetValueOrDefault(step.Alternative) + 1;
         }
 
         return string.Join(", ", kinds.Select(kind => $"{kind.Value} {kind.Key}"));
@@ -371,7 +374,7 @@ internal static class ColumnBattery
 
     /// <summary>
     /// The frontier of the reads on the fly: at the design's rate, with an object an hour, the longest window whose rows a
-    /// question reads within a second, cold, at the price of a request and a byte (<see cref="ReadCost"/>): requests of a
+    /// question reads within a second, cold, at the price of a request and a byte (<see cref="Vorticity.IO.CostProfile.Remote"/>): requests of a
     /// mebibyte of a column's chunks and an open an object. A filter on a service reads its share of the rows clustered by
     /// service, and every row in the order they arrive, where each block holds every service.
     /// </summary>
@@ -410,8 +413,8 @@ internal static class ColumnBattery
         static string Window(double bytesPerRow)
         {
             // T(W) = (bytes(W) (1 + a request a mebibyte) + W an open) / link, an object an hour; T(W) = 1 s.
-            double perHour = DesignRate * 3600 * bytesPerRow * (1 + (ReadCost.RequestBytes / (double)(1 << 20)));
-            double hours = ReadCost.LinkBytesPerSecond / (perHour + ReadCost.RequestBytes);
+            double perHour = DesignRate * 3600 * bytesPerRow * (1 + (Vorticity.IO.CostProfile.Remote.RequestBytes / (double)(1 << 20)));
+            double hours = Vorticity.IO.CostProfile.Remote.Store.BytesPerSecond / (perHour + Vorticity.IO.CostProfile.Remote.RequestBytes);
             return hours >= 48 ? $"{hours / 24:F1} d" : hours >= 1 ? $"{hours:F1} h" : $"{hours * 60:F1} min";
         }
     }
@@ -444,7 +447,7 @@ internal static class ColumnBattery
                 _worst = Math.Max(_worst, ratio);
 
                 // Past the price by a tenth and a request's worth: what the formula did not foresee.
-                _over += read > (price.Bytes * 1.1) + ReadCost.RequestBytes ? 1 : 0;
+                _over += read > (price.Bytes * 1.1) + Vorticity.IO.CostProfile.Remote.RequestBytes ? 1 : 0;
             }
         }
 

@@ -21,8 +21,7 @@ internal static class FacetsBench
         long rows = 0;
         await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedSpan.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(GeneratedSpan.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedSpan.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(GeneratedSpan.At))], Organization = LayoutOrganization.Leveled },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget) },
         }))
         {

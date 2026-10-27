@@ -96,10 +96,10 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
         // The plan says so object by object: the blocks' path, its requests and bytes, and the rows' it was weighed against.
         await using VortexDataset explained = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
         ScanPlan plan = await Ask(explained, question, synopses: true).ExplainAsync(Ct);
-        StatesStep[] blocks = [.. plan.States.Where(step => step.Read == "blocks")];
+        UnitStep[] blocks = [.. plan.Units.Where(step => step.Alternative == "granules")];
         Console.WriteLine($"BLOCK PLAN {question}: {blocks.Length} objects, {blocks.FirstOrDefault()?.Detail}");
         Assert.NotEmpty(blocks);
-        Assert.All(blocks, step => Assert.True(step.Count >= 1, step.Detail));
+        Assert.All(blocks, step => Assert.True(step.Requests >= 1, step.Detail));
     }
 
     /// <summary>
@@ -207,8 +207,9 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
     /// <summary>
     /// Four services, each 150 000 calls over two hours from noon, from three hosts of its own, on six routes, keyed by the
     /// service then the instant, appended in parts and compacted into objects of 4 MiB: each service a run of blocks of
-    /// some 65 000 rows, about fifty minutes each. The same calls again in a dataset whose clustering declares a block
-    /// value, the instant's hour, the application's choice: its blocks end at each hour too.
+    /// some 65 000 rows, about fifty minutes each. The same calls again in a dataset whose key holds the instant's hour
+    /// between the service and the instant, the prefix its objects index, the application's choice: its blocks end at each
+    /// hour too.
     /// </summary>
     public sealed class Fixture : IAsyncLifetime
     {
@@ -219,8 +220,17 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
         public async ValueTask InitializeAsync()
         {
             List<Call> rows = Draw();
-            await FillAsync(Store, rows, new ClusteringOptions { ObjectBytes = 4 << 20 });
-            await FillAsync(Hourly, rows, new ClusteringOptions { ObjectBytes = 4 << 20, BlockValue = ClusteringValue.Truncate(CalendarUnit.Hour) });
+            await FillAsync(Store, rows, new DatasetLayout
+            {
+                SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))],
+                ObjectBytes = 4 << 20,
+            });
+            await FillAsync(Hourly, rows, new DatasetLayout
+            {
+                SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), LayoutValue.Column(nameof(Call.At))],
+                IndexedPrefix = 2,
+                ObjectBytes = 4 << 20,
+            });
         }
 
         private static List<Call> Draw()
@@ -246,12 +256,11 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             return rows;
         }
 
-        private static async Task FillAsync(MemoryObjectStore store, List<Call> rows, ClusteringOptions clustering)
+        private static async Task FillAsync(MemoryObjectStore store, List<Call> rows, DatasetLayout layout)
         {
             DatasetOptions options = new DatasetOptions
             {
-                ClusteringKey = [nameof(Call.Service), nameof(Call.At)],
-                Clustering = clustering,
+                Layout = layout,
                 ContentsObjectBytes = 1,
             };
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, options, Ct);

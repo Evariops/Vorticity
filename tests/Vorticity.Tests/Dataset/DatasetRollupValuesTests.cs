@@ -55,19 +55,19 @@ public sealed partial class DatasetRollupValuesTests : IClassFixture<DatasetRoll
         Assert.Equal(states, await AskAsync(dataset, question, synopses: true));
         long again = store.Requests;
 
-        StatesStep[] rolled = [.. plan.States.Where(step => step.Read == "rollup")];
+        UnitStep[] rolled = [.. plan.Units.Where(step => step.Alternative == "rollup")];
         int inPart = rolled.Count(step => step.Detail.StartsWith("the header of the totals", StringComparison.Ordinal));
         long whole = 0;
         foreach (RollupEntry rollup in await RollupsAsync(dataset))
         {
-            if (rolled.Any(step => step.Object == rollup.Key))
+            if (rolled.Any(step => step.Unit == rollup.Key))
             {
                 whole += rollup.Columns.Sum(column => column.Counts.Length + (question.StartsWith("median", StringComparison.Ordinal) ? column.Sketches?.Length ?? 0 : 0));
             }
         }
 
         Console.WriteLine(
-            $"ROLLUP VALUES {question}: {rolled.Length} rollups, {inPart} read in part, {plan.States.Length - rolled.Length} other steps; " +
+            $"ROLLUP VALUES {question}: {rolled.Length} rollups, {inPart} read in part, {plan.Units.Length - rolled.Length} other steps; " +
             $"{requests} requests, {bytes} bytes against {whole} for the rollups' regions whole; {again} requests again");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
@@ -80,7 +80,7 @@ public sealed partial class DatasetRollupValuesTests : IClassFixture<DatasetRoll
         else
         {
             Assert.Equal(rolled.Length, inPart);
-            Assert.Equal((2 * rolled.Length) + plan.States.Length - rolled.Length, requests);
+            Assert.Equal((2 * rolled.Length) + plan.Units.Length - rolled.Length, requests);
         }
 
         if (question == "count by hour, one route")
@@ -155,8 +155,7 @@ public sealed partial class DatasetRollupValuesTests : IClassFixture<DatasetRoll
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Hit.Schema, Options() with
             {
-                ClusteringKey = [nameof(Hit.At)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Hit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Hit.At))], Organization = LayoutOrganization.Leveled },
             });
             Random random = new Random(31);
             int part = RowsPerHour / 2;

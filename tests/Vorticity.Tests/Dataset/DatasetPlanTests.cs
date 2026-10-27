@@ -372,7 +372,8 @@ public sealed class DatasetPlanTests
     /// <summary>
     /// The tally under a page, counted here from its leaves -- sums and maxima written out, the share
     /// and the vector read off the decoded entry, not the tally's own arithmetic -- and held against
-    /// the one every parent entry carries for it.
+    /// the one every parent entry carries for it, but for its size classes, which the levels' targets
+    /// decide.
     /// </summary>
     private static async Task<ObjectTally> TallyAsync(VortexDataset dataset, PageReference reference, int depth, CancellationToken ct)
     {
@@ -383,6 +384,7 @@ public sealed class DatasetPlanTests
         long fragments = 0;
         long marked = 0;
         long vector = 0;
+        long latest = 0;
         if (depth == 1)
         {
             foreach (TreeEntry entry in TreePage.ReadLeaf(page))
@@ -394,25 +396,27 @@ public sealed class DatasetPlanTests
                 fragments = Math.Max(fragments, held.Fragments.Count);
                 marked = Math.Max(marked, held.DeletedRows * ObjectTally.Whole / held.PhysicalRows);
                 vector = Math.Max(vector, held.HasDeletions ? held.Deletions.ToBytes().Length : 0);
+                latest = Math.Max(latest, held.Arrival);
             }
 
-            return new ObjectTally(bytes, largest, deleted, fragments, marked, vector);
+            return new ObjectTally(bytes, largest, deleted, fragments, marked, vector, latest, default);
         }
 
         foreach (InternalEntry child in TreePage.ReadInternal(page))
         {
             ObjectTally below = await TallyAsync(dataset, child.Child, depth - 1, ct);
             ObjectSummaryFold.SummariesOf(child.Summary.Span, out ObjectTally? carried);
-            Assert.Equal(below, carried);
+            Assert.Equal(below, Assert.NotNull(carried) with { Classes = default });
             bytes += below.Bytes;
             largest = Math.Max(largest, below.Largest);
             deleted += below.DeletedRows;
             fragments = Math.Max(fragments, below.MostFragments);
             marked = Math.Max(marked, below.MostMarked);
             vector = Math.Max(vector, below.LargestVector);
+            latest = Math.Max(latest, below.Latest);
         }
 
-        return new ObjectTally(bytes, largest, deleted, fragments, marked, vector);
+        return new ObjectTally(bytes, largest, deleted, fragments, marked, vector, latest, default);
     }
 
     /// <summary>Tree keys in the order a tree holds them.</summary>
@@ -710,7 +714,7 @@ public sealed class DatasetPlanTests
     private static DatasetOptions Options(IBoundaryRule? rule, bool clustered = true, bool erasure = false) => new DatasetOptions
     {
         Seed = Seed,
-        ClusteringKey = clustered ? ["key"] : null,
+        Layout = clustered ? new DatasetLayout { SortKey = [LayoutValue.Column("key")] } : null,
         Rule = rule,
         TimeProvider = Clock,
         ErasureDelay = erasure ? Delay : null,

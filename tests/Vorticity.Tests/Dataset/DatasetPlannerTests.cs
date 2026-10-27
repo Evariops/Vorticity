@@ -61,11 +61,11 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         (long requests, long bytes) = (store.Requests, store.BytesRead);
         ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
         Console.WriteLine($"PLANNER {question}: {rowBytes} bytes read as rows, {bytes} in {requests} requests with the counts of " +
-            $"{plan.States.Count(step => step.Read == "states")} objects");
+            $"{plan.Units.Count(step => step.Alternative == "counts")} objects");
         Assert.True(bytes < rowBytes, $"{question}: {bytes} bytes with the counts, against {rowBytes} as rows");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
-        Assert.Contains(plan.States, step => step.Read == "states");
+        Assert.Contains(plan.Units, step => step.Alternative == "counts");
     }
 
     [Fact]
@@ -75,9 +75,9 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         // rows of the two it cuts; on the hours, it holds its two objects whole.
         await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.Store, Options(), Ct);
         ScanPlan plan = await Ask(dataset, "measures by service, an unaligned window", synopses: true).ExplainAsync(Ct);
-        Assert.Equal(1, plan.States.Count(step => step.Read == "states"));
+        Assert.Equal(1, plan.Units.Count(step => step.Alternative == "counts"));
         ScanPlan aligned = await Ask(dataset, "count by service, an aligned window", synopses: true).ExplainAsync(Ct);
-        Assert.Equal(2, aligned.States.Count(step => step.Read == "states"));
+        Assert.Equal(2, aligned.Units.Count(step => step.Alternative == "counts"));
     }
 
     // Questions drawn at random on the tables DatasetCountsTests draws, columns of every kind and nulls among them: a key
@@ -107,7 +107,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             Assert.True(read.SequenceEqual(counted), $"{asked}: {read.Count} groups as rows, {counted.Count} with the counts, " +
                 $"first apart: '{read.Except(counted).FirstOrDefault()}' against '{counted.Except(read).FirstOrDefault()}'");
             ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
-            answered += plan.States.Any(step => step.Read == "states") ? 1 : 0;
+            answered += plan.Units.Any(step => step.Alternative == "counts") ? 1 : 0;
         }
 
         // A window that cuts every object it reaches reads their rows, and so does a number column of many values, which no
@@ -135,8 +135,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         await using CountingObjectStore store = new CountingObjectStore(memory);
         await using VortexDataset dataset = await DatasetCountsTests.WriteAsync(store, columns, rows, new DatasetOptions
         {
-            ClusteringKey = ["c1", "At"],
-            Clustering = new ClusteringOptions { BlockValue = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("c1"), LayoutValue.Column("At").Truncate(CalendarUnit.Hour), LayoutValue.Column("At")], IndexedPrefix = 2 },
             ContentsObjectBytes = 0,
             SheetObjectBytes = 0,
         });
@@ -151,19 +150,19 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             Assert.True(read.SequenceEqual(answers), $"{asked}: {read.Count} groups as rows, {answers.Count} with the synopses, " +
                 $"first apart: '{read.Except(answers).FirstOrDefault()}' against '{answers.Except(read).FirstOrDefault()}'");
             ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
-            answered += plan.States.Any(step => step.Read == "blocks") ? 1 : 0;
+            answered += plan.Units.Any(step => step.Alternative == "granules") ? 1 : 0;
         }
 
         Console.WriteLine($"PLANNER BY A COLUMN seed {seed}: the blocks answered objects of {answered} questions of {Questions}");
         Assert.True(answered > 0, $"seed {seed}: the blocks answered no question");
 
-        // Every object that keeps its blocks keeps each column's statistics over them: merged from several inputs, its
-        // blocks end where its writes do too, which its columns' statistics must cut alike.
+        // Every object, its rows in the key's order, keeps its columns' statistics over its granules: merged from several inputs,
+        // its granules end where its writes do too, which its columns' statistics must cut alike.
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
-            if (held.Entry.Contents is { Blocks.Count: > 0 } contents)
+            if (held.Entry.Contents is { } contents)
             {
-                Assert.True(contents.BlockStats.Count > 0, $"seed {seed}: an object of {held.Entry.Rows} rows keeps its blocks and no statistics over them");
+                Assert.True(contents.GranuleStats.Count > 0, $"seed {seed}: an object of {held.Entry.Rows} rows keeps no statistics over its granules");
             }
         }
     }
@@ -176,8 +175,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, Options() with
         {
-            ClusteringKey = [nameof(Call.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(87);
         for (int part = 0; part < 24; part++)
@@ -358,8 +356,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Call.Schema, Options() with
             {
-                ClusteringKey = [nameof(Call.At)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0,
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
             });
             Random random = new Random(83);
             int row = 0;

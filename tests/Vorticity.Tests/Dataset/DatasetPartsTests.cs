@@ -162,7 +162,7 @@ public sealed partial class DatasetPartsTests
     /// <summary>Six objects of four hours each, appended in the order of their hours.</summary>
     private static async Task<VortexDataset> FilledAsync(MemoryObjectStore store)
     {
-        VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions { ClusteringKey = [nameof(Request.At)] }, Ct);
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Request.At))] } }, Ct);
         for (int o = 0; o < Objects; o++)
         {
             await using ObjectDraft draft = dataset.StartObject();

@@ -624,7 +624,7 @@ public sealed class DatasetSchemaEvolutionTests
     {
         Seed = 0x5C4E_3A,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
-        ClusteringKey = clustered ? ["Key"] : null,
+        Layout = clustered ? new DatasetLayout { SortKey = [LayoutValue.Column("Key")] } : null,
     };
 
     private static async Task<List<TRecord>> RowsAsync<TRecord>(VortexDataset dataset, CancellationToken ct)

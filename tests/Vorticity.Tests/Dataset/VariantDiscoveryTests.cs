@@ -33,8 +33,7 @@ public sealed partial class VariantDiscoveryTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 200,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(seed);
         Dictionary<(string, PathClass), long> truth = [];
@@ -78,8 +77,7 @@ public sealed partial class VariantDiscoveryTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Event.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
             Write = new VortexWriteOptions { BlockRows = 100 },
         }, Ct);
         for (int part = 0; part < 16; part++)

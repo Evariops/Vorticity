@@ -18,7 +18,7 @@ public sealed class SliceChunkPagesTests
     [Fact]
     public void AColumnsPagesReadBackItsChunks()
     {
-        ChunkSpan[] chunks = [.. Enumerable.Range(0, 10).Select(i => new ChunkSpan((ulong)(1_024 + (i * 640)), 600, 6, i * 100L, 100))];
+        ChunkSpan[] chunks = [.. Enumerable.Range(0, 10).Select(i => new ChunkSpan((ulong)(1_024 + (i * 640)), 600, 6, i * 100L, 100, i))];
         SliceChunks directory = new(["vortex.primitive"], [chunks, chunks]);
         (int[] columns, long[] rows) = directory.Paging(4)!.Value;
         Assert.Equal([0, 1], columns);
@@ -56,7 +56,7 @@ public sealed class SliceChunkPagesTests
     [Fact]
     public void TheColumnsOfTheSameRowsAndMoreThanAPageArePaged()
     {
-        ChunkSpan[] chunks = [.. Enumerable.Range(0, 10).Select(i => new ChunkSpan((ulong)(1_024 + (i * 640)), 600, 6, i * 100L, 100))];
+        ChunkSpan[] chunks = [.. Enumerable.Range(0, 10).Select(i => new ChunkSpan((ulong)(1_024 + (i * 640)), 600, 6, i * 100L, 100, i))];
         ChunkSpan[] elsewhere = [.. chunks.Select((c, i) => i == 3 ? c with { Rows = 99 } : i == 4 ? c with { FirstRow = 399, Rows = 101 } : c)];
         ChunkSpan[] aligned = [.. chunks.Select((c, i) => i == 7 ? c with { AlignmentExponent = 3 } : c)];
         ChunkSpan[] few = chunks[..4];

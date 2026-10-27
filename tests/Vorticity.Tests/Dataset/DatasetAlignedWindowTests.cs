@@ -42,7 +42,7 @@ public sealed partial class DatasetAlignedWindowTests
         Vorticity.Scan aligned = Grouped(dataset, asked, new ScanOptions { AlignWindow = true });
         ScanPlan plan = await aligned.ExplainAsync(Ct);
         VortexExpr window = Assert.IsAssignableFrom<VortexExpr>(plan.Window);
-        Console.WriteLine($"ALIGNED {asked} grows to {window}, the counts of {plan.States.Count(step => step.Read == "states")} objects answering");
+        Console.WriteLine($"ALIGNED {asked} grows to {window}, the counts of {plan.Units.Count(step => step.Alternative == "counts")} objects answering");
 
         // The range applied starts at the object's first tenant, and its answer is that range's rows, the counts answering.
         List<string> answered = await RowsAsync(aligned);
@@ -50,11 +50,11 @@ public sealed partial class DatasetAlignedWindowTests
         VortexExpr applied = Expr.Ge(Expr.Field(nameof(Ticket.Tenant)), Expr.Literal(FilterLiteral.From(first)));
         Assert.Equal(await RowsAsync(Grouped(dataset, applied, new ScanOptions { UseSynopses = false })), answered);
         Assert.NotEqual(await RowsAsync(Grouped(dataset, asked, new ScanOptions())), answered);
-        Assert.Contains(plan.States, step => step.Read == "states");
+        Assert.Contains(plan.Units, step => step.Alternative == "counts");
         ScanPlan exact = await Grouped(dataset, asked, new ScanOptions()).ExplainAsync(Ct);
         Assert.Null(exact.Window);
-        int answeredAligned = plan.States.Count(step => step.Read == "states");
-        int answeredAsked = exact.States.Count(step => step.Read == "states");
+        int answeredAligned = plan.Units.Count(step => step.Alternative == "counts");
+        int answeredAsked = exact.Units.Count(step => step.Alternative == "counts");
         Assert.True(answeredAligned > answeredAsked, $"the counts of {answeredAligned} objects answered aligned, {answeredAsked} as asked");
     }
 
@@ -80,15 +80,15 @@ public sealed partial class DatasetAlignedWindowTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await WriteAsync(
-            store, [nameof(Ticket.Tenant), nameof(Ticket.At)], tenants: 6, rowsPerTenant: 2_000, new ClusteringOptions { Value = ClusteringValue.Column });
+            store, [nameof(Ticket.Tenant), nameof(Ticket.At)], tenants: 6, rowsPerTenant: 2_000, LayoutValue.Column(nameof(Ticket.Tenant)));
 
         // Grouped by the status, filtered on a tenant: the status's counts of the tenant's objects, which hold it alone.
         foreach (string filter in (string[])["Tenant = 't03'", "Tenant in ('t01', 't04')", "Tenant >= 't02' and Tenant < 't05'"])
         {
             VortexExpr asked = VortexExpr.Parse(filter);
             ScanPlan plan = await Grouped(dataset, asked, new ScanOptions()).ExplainAsync(Ct);
-            Console.WriteLine($"LEADING TEXT {filter}: the counts of {plan.States.Count(step => step.Read == "states")} objects answer");
-            Assert.Contains(plan.States, step => step.Read == "states");
+            Console.WriteLine($"LEADING TEXT {filter}: the counts of {plan.Units.Count(step => step.Alternative == "counts")} objects answer");
+            Assert.Contains(plan.Units, step => step.Alternative == "counts");
             Assert.Equal(
                 await RowsAsync(Grouped(dataset, asked, new ScanOptions { UseSynopses = false })),
                 await RowsAsync(Grouped(dataset, asked, new ScanOptions())));
@@ -135,16 +135,17 @@ public sealed partial class DatasetAlignedWindowTests
 
     /// <summary>
     /// <paramref name="tenants"/> tenants' tickets, <paramref name="rowsPerTenant"/> each, appended in twelve parts that
-    /// mix them and compacted to the end, cut by <paramref name="clustering"/>, or by 16 KiB over blocks of a few
-    /// kilobytes; every object a job writes keeps its counts.
+    /// mix them and compacted to the end, partitioned by <paramref name="partition"/> in levels, or cut at 16 KiB, over
+    /// blocks of a few kilobytes; every object a job writes keeps its counts.
     /// </summary>
     private static async Task<VortexDataset> WriteAsync(
-        MemoryObjectStore store, string[] key, int tenants, int rowsPerTenant, ClusteringOptions? clustering = null)
+        MemoryObjectStore store, string[] key, int tenants, int rowsPerTenant, LayoutValue? partition = null)
     {
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Ticket.Schema, new DatasetOptions
         {
-            ClusteringKey = key,
-            Clustering = clustering ?? new ClusteringOptions { ObjectBytes = 16L << 10 },
+            Layout = partition is null
+                ? new DatasetLayout { SortKey = [.. key.Select(LayoutValue.Column)], ObjectBytes = 16L << 10 }
+                : new DatasetLayout { Partition = partition, SortKey = [.. key.Select(LayoutValue.Column)], Organization = LayoutOrganization.Leveled },
             Write = new VortexWriteOptions { RowBlockSize = 512, DataBlockTargetBytes = 4 << 10 },
             SheetObjectBytes = 0,
             ContentsObjectBytes = 0,

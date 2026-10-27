@@ -115,8 +115,7 @@ internal static class QuestionBench
         {
             Session = session ?? VortexSession.Default,
             Encrypted = keyring is not null,
-            ClusteringKey = [nameof(GeneratedRequest.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
             Write = write,
         });
@@ -153,8 +152,7 @@ internal static class QuestionBench
         {
             Session = session ?? VortexSession.Default,
             Encrypted = keyring is not null,
-            ClusteringKey = [nameof(LogRow.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(LogRow.At))], Organization = LayoutOrganization.Leveled },
             Write = write,
         });
 
@@ -293,10 +291,10 @@ internal static class QuestionBench
         ScanPlan plan = await ask(dataset.Scan<TRecord>().With(new ScanOptions { AlignWindow = align })).ExplainAsync();
         SortedDictionary<string, int> kinds = new SortedDictionary<string, int>(StringComparer.Ordinal);
         string? why = null;
-        foreach (StatesStep step in plan.States)
+        foreach (UnitStep step in plan.Units)
         {
-            kinds[step.Read] = kinds.GetValueOrDefault(step.Read) + 1;
-            why ??= step.Read == "rows" ? step.Detail : null;
+            kinds[step.Alternative] = kinds.GetValueOrDefault(step.Alternative) + 1;
+            why ??= step.Alternative == "rows" ? step.Detail : null;
         }
 
         return kinds.Count == 0

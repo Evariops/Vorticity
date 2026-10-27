@@ -340,7 +340,7 @@ public sealed class DatasetKeyOrderTests
             Nullability.NonNullable);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        DatasetOptions clustered = Unclustered() with { ClusteringKey = ["f"] };
+        DatasetOptions clustered = Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("f")] } };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, clustered, ct);
 
         double negativeNaN = BitConverter.Int64BitsToDouble(unchecked((long)0xFFF8_0000_0000_0000UL));
@@ -597,7 +597,7 @@ public sealed class DatasetKeyOrderTests
         [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
         Nullability.NonNullable);
 
-    private static DatasetOptions Clustered() => Unclustered() with { ClusteringKey = ["key"] };
+    private static DatasetOptions Clustered() => Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
 
     private static DatasetOptions Unclustered() => new DatasetOptions
     {

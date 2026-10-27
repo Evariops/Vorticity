@@ -159,14 +159,14 @@ public sealed class ListBloomTests
             Assert.Equal(expected.Count, await withFilters.ScanBuilder().Where(filter).CountAsync(ct));
 
             // What the filters proved: every block but those that hold the value.
-            ScanExplanation plan = await withFilters.ScanBuilder().Where(filter).ExplainAsync(ct);
+            ScanExplanation plan = await withFilters.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
             int holding = BlocksHolding(shape, value);
             Assert.True(plan.LiveBlocks <= Math.Max(holding, 0) + FalsePositives(plan.Blocks), $"{what}: {plan.LiveBlocks} live of {plan.Blocks}, {holding} holding");
             PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
             Assert.True(bloom.BlocksPruned > 0, what);
 
             // An equality on the list column is not the same question, and the filter claims nothing.
-            ScanExplanation equality = await withFilters.ScanBuilder().Where(Expr.Eq(Expr.Field("items"), Expr.Literal(FilterLiteral.From(value)))).ExplainAsync(ct);
+            ScanExplanation equality = await withFilters.ScanBuilder().Where(Expr.Eq(Expr.Field("items"), Expr.Literal(FilterLiteral.From(value)))).ExplainAsync(analyze: true, ct);
             Assert.DoesNotContain(equality.Pruning, step => step.Structure == "bloom filter" && step.BlocksPruned > 0);
 
             // The file-level filter answers for the whole file.
@@ -236,7 +236,7 @@ public sealed class ListBloomTests
             await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             VortexExpr ghost = Expr.ListContains(Expr.Field("person.tags"), FilterLiteral.From("ghost"));
             Assert.Equal(0, await file.ScanBuilder().Where(ghost).CountAsync(ct));
-            ScanExplanation plan = await file.ScanBuilder().Where(ghost).ExplainAsync(ct);
+            ScanExplanation plan = await file.ScanBuilder().Where(ghost).ExplainAsync(analyze: true, ct);
             Assert.Equal(0, plan.LiveBlocks);
 
             VortexExpr tag = Expr.ListContains(Expr.Field("person.tags"), FilterLiteral.From("tag-5"));
@@ -308,8 +308,8 @@ public sealed class ListBloomTests
             VortexExpr filter = Expr.ListContains(Expr.Field("items"), FilterLiteral.From(Element(12_345)));
             await using VortexFile a = await VortexFile.OpenAsync(later, ct);
             await using VortexFile b = await VortexFile.OpenAsync(written, ct);
-            ScanExplanation planA = await a.ScanBuilder().Where(filter).ExplainAsync(ct);
-            ScanExplanation planB = await b.ScanBuilder().Where(filter).ExplainAsync(ct);
+            ScanExplanation planA = await a.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
+            ScanExplanation planB = await b.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
             Assert.Equal(planB.LiveBlocks, planA.LiveBlocks);
             Assert.Equal(await RowsAsync(b, filter), await RowsAsync(a, filter));
         }
@@ -349,7 +349,7 @@ public sealed class ListBloomTests
             VortexExpr contains = Expr.ListContains(Expr.Field("items"), FilterLiteral.From(Block + 5L));
             foreach (VortexExpr filter in new[] { contains, Expr.Not(contains) })
             {
-                ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
+                ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(analyze: true, ct);
                 PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
                 Assert.Equal(1, zones.BlocksPruned);
             }

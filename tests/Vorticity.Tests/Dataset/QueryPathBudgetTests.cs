@@ -182,9 +182,9 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Hit.Schema, new DatasetOptions
             {
-                ClusteringKey = [nameof(Hit.At)],
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Hit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Hit.At))], Organization = LayoutOrganization.Leveled },
                 Identifiers = [nameof(Hit.RequestId)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 100,
+                ContentsObjectBytes = 0,
                 Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(10_000) },
             });
             Random random = new Random(59);

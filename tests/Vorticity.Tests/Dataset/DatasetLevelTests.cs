@@ -39,7 +39,7 @@ public sealed class DatasetLevelTests
         Template = new CommitHeader
         {
             Version = 1,
-            ClusteringKey = ["k"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("k")] },
             Chunker = new ChunkerSettings(256, 512, 1_024),
         },
     };

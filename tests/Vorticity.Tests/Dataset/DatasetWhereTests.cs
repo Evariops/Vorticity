@@ -94,8 +94,7 @@ public sealed partial class DatasetWhereTests
         random.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rows));
         DatasetOptions options = new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.Source), nameof(Request.At)],
-            Clustering = new ClusteringOptions { ObjectBytes = 8 << 20 },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Request.Source)), LayoutValue.Column(nameof(Request.At))], ObjectBytes = 8 << 20 },
             ContentsObjectBytes = 1,
             ChunkBytes = 64 << 10,
         };

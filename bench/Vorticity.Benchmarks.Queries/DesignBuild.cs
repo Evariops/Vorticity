@@ -41,8 +41,7 @@ internal static class DesignBuild
         VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedRequest.Schema, new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(GeneratedRequest.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
             Write = WriteOptions(budget, scratch),
         });

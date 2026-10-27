@@ -1,8 +1,8 @@
-// The objects a dataset's jobs write, as the application asks them cut: where its clustering value changes, at the bytes
-// an object aims at, or both. The value is any function of the key's first column the library knows to be non-decreasing,
-// of any type: a day of an instant, a tenant's name, a bucket of a number.
+// The objects a dataset's jobs write, as the application lays them out in levels: where its partition changes, at the
+// bytes an object aims at, or both. The partition is any function of a column the library knows to be non-decreasing, of
+// any type: a day of an instant, a tenant's name, a bucket of a number.
 //
-// THE DATA CROSSES EVERY CUT IN EVERY OBJECT LEVEL 0 HOLDS: each append spreads its rows over every value, so that no
+// THE DATA CROSSES EVERY PARTITION IN EVERY OBJECT LEVEL 0 HOLDS: each append spreads its rows over every value, so that no
 // level-0 object holds one value and every job out of level 0 has to cut its runs. The oracle is the rows themselves,
 // read back in key order against the rows appended sorted, and each object's own summaries, which say what it holds.
 using System;
@@ -20,59 +20,64 @@ using Xunit;
 
 namespace Vorticity.Tests.Dataset;
 
-public sealed partial class DatasetClusteringValueTests
+public sealed partial class DatasetPartitionTests
 {
     private static readonly DateTimeOffset Midnight = new(2026, 10, 18, 0, 0, 0, TimeSpan.Zero);
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [Fact]
-    public async Task CreationRefusesAValueItCannotCut()
+    public async Task CreationRefusesAPartitionItCannotWorkOut()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
 
-        // A value is a function of the key's first column: no key, no value; a size alone needs none.
+        // A partition reads a column of the schema through a function its type takes; a size alone needs none.
         await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(
-            store, Event.Schema, new DatasetOptions { Clustering = new ClusteringOptions { Value = ClusteringValue.Column } }, Ct));
+            store, Event.Schema, new DatasetOptions { Layout = new DatasetLayout { Partition = LayoutValue.Column("Nowhere") } }, Ct));
         await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(
-            store, Event.Schema, Options([nameof(Event.Name)], ClusteringValue.Truncate(CalendarUnit.Day)), Ct));
+            store, Event.Schema, Options([nameof(Event.Name)], LayoutValue.Column(nameof(Event.Name)).Truncate(CalendarUnit.Day)), Ct));
         await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(
-            store, Event.Schema, Options([nameof(Event.At)], ClusteringValue.Bucket(10)), Ct));
+            store, Event.Schema, Options([nameof(Event.At)], LayoutValue.Column(nameof(Event.At)).Bucket(10.0)), Ct));
 
         await using MemoryObjectStore sized = new MemoryObjectStore();
         await using VortexDataset unkeyed = await VortexDataset.CreateAsync(
-            sized, Event.Schema, new DatasetOptions { Clustering = new ClusteringOptions { ObjectBytes = 1L << 20 } }, Ct);
+            sized, Event.Schema, new DatasetOptions { Layout = new DatasetLayout { ObjectBytes = 1L << 20 } }, Ct);
         Assert.Null(unkeyed.Snapshot.Schema.Cut);
     }
 
     [Fact]
-    public async Task EveryHeaderCarriesTheClusteringAndAHandleFollowsIt()
+    public async Task EveryHeaderCarriesTheLayoutAndAHandleFollowsIt()
     {
-        ClusteringOptions clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day), ObjectBytes = 1L << 20 };
+        DatasetLayout layout = new DatasetLayout
+        {
+            Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Day),
+            SortKey = [LayoutValue.Column(nameof(Event.At))],
+            ObjectBytes = 1L << 20,
+        };
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using (VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Event.Schema, new DatasetOptions { ClusteringKey = [nameof(Event.At)], Clustering = clustering }, Ct))
+        await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions { Layout = layout }, Ct))
         {
             await AppendAsync(dataset, [.. Enumerable.Range(0, 10).Select(i => new Event(Midnight.AddHours(i), $"e{i}"))]);
         }
 
         (_, CommitObject? latest) = await DatasetCommitter.LatestAsync(store, Ct);
-        Assert.Equal(clustering, latest!.Header.Clustering);
-        Assert.Equal(DatasetFeatures.Clustering, latest.Header.Features & DatasetFeatures.Clustering);
+        Assert.Equal(layout, latest!.Header.Layout);
 
         // A handle follows the dataset's, whatever its own options ask.
         await using VortexDataset reopened = await VortexDataset.OpenAsync(
-            store, new DatasetOptions { Clustering = new ClusteringOptions { ObjectBytes = 5 } }, Ct);
-        Assert.Equal(clustering, reopened.Options.Clustering);
-        Assert.Equal(clustering.Value, reopened.Snapshot.Schema.Cut!.Value);
+            store, new DatasetOptions { Layout = new DatasetLayout { ObjectBytes = 5 } }, Ct);
+        Assert.Equal(layout, reopened.Layout);
+        Assert.NotNull(reopened.Snapshot.Schema.Cut);
 
-        // A dataset that declares none carries none.
+        // A dataset of a key and no partition carries its key and cuts nothing; one that declares nothing carries no layout.
         await using MemoryObjectStore plain = new MemoryObjectStore();
-        await using VortexDataset leveled = await VortexDataset.CreateAsync(plain, Event.Schema, new DatasetOptions { ClusteringKey = [nameof(Event.At)] }, Ct);
-        (_, CommitObject? first) = await DatasetCommitter.LatestAsync(plain, Ct);
-        Assert.Null(first!.Header.Clustering);
-        Assert.Equal(DatasetFeatures.None, first.Header.Features & DatasetFeatures.Clustering);
+        await using VortexDataset leveled = await VortexDataset.CreateAsync(plain, Event.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))] } }, Ct);
         Assert.Null(leveled.Snapshot.Schema.Cut);
+        Assert.Equal(LayoutValue.Column(nameof(Event.At)), Assert.Single(leveled.Layout!.SortKey));
+        await using MemoryObjectStore bare = new MemoryObjectStore();
+        await using VortexDataset arrival = await VortexDataset.CreateAsync(bare, Event.Schema, new DatasetOptions(), Ct);
+        (_, CommitObject? first) = await DatasetCommitter.LatestAsync(bare, Ct);
+        Assert.Null(first!.Header.Layout);
     }
 
     [Fact]
@@ -80,7 +85,7 @@ public sealed partial class DatasetClusteringValueTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Event.Schema, Options([nameof(Event.At), nameof(Event.Name)], ClusteringValue.Truncate(CalendarUnit.Day)), Ct);
+            store, Event.Schema, Options([nameof(Event.At), nameof(Event.Name)], LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Day)), Ct);
 
         // Each append holds rows of every day, out of order: the job out of level 0 cuts its runs.
         Random random = new Random(0xDA7);
@@ -114,7 +119,7 @@ public sealed partial class DatasetClusteringValueTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Tenanted.Schema, Options([nameof(Tenanted.Tenant), nameof(Tenanted.Id)], ClusteringValue.Column), Ct);
+            store, Tenanted.Schema, Options([nameof(Tenanted.Tenant), nameof(Tenanted.Id)], LayoutValue.Column(nameof(Tenanted.Tenant))), Ct);
 
         string[] tenants = ["acme", "globex", "initech", "umbrella", "umbrella-labs"];
         List<Tenanted> appended = [];
@@ -155,7 +160,7 @@ public sealed partial class DatasetClusteringValueTests
         const long Aimed = 8L << 10;
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Numbered.Schema, Options([nameof(Numbered.Id)], value: null, objectBytes: Aimed), Ct);
+            store, Numbered.Schema, Options([nameof(Numbered.Id)], partition: null, objectBytes: Aimed), Ct);
 
         Random random = new Random(0x5172E);
         long rows = 0;
@@ -173,7 +178,7 @@ public sealed partial class DatasetClusteringValueTests
         Assert.Equal(rows, dataset.RowCount);
         Assert.True(objects.Count > 4, $"{objects.Count} object(s) for {rows} rows at {Aimed} bytes each");
         Console.Out.Write(FormattableString.Invariant(
-            $"CLUSTERING SIZE: {objects.Count} objects, aimed at {Aimed} bytes, the largest {objects.Max(held => held.Entry.Bytes)}, the median {objects.Select(held => held.Entry.Bytes).Order().ElementAt(objects.Count / 2)}.\n"));
+            $"PARTITION SIZE: {objects.Count} objects, aimed at {Aimed} bytes, the largest {objects.Max(held => held.Entry.Bytes)}, the median {objects.Select(held => held.Entry.Bytes).Order().ElementAt(objects.Count / 2)}.\n"));
         Assert.All(objects, held => Assert.True(held.Entry.Bytes <= 2 * Aimed, $"an object of {held.Entry.Bytes} bytes, aimed at {Aimed}"));
     }
 
@@ -185,7 +190,7 @@ public sealed partial class DatasetClusteringValueTests
         const long Aimed = 8L << 10;
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Tenanted.Schema, Options([nameof(Tenanted.Tenant)], value: null, objectBytes: Aimed), Ct);
+            store, Tenanted.Schema, Options([nameof(Tenanted.Tenant)], partition: null, objectBytes: Aimed), Ct);
         string[] tenants = [.. Enumerable.Range(0, 24).Select(t => $"tenant-{t:D2}")];
         for (int append = 0; append < 8; append++)
         {
@@ -210,7 +215,7 @@ public sealed partial class DatasetClusteringValueTests
         }
 
         Console.Out.Write(FormattableString.Invariant(
-            $"CLUSTERING REPEATED KEY: {objects.Count} objects, aimed at {Aimed} bytes, the largest {objects.Max(o => o.Bytes)}.\n"));
+            $"PARTITION REPEATED KEY: {objects.Count} objects, aimed at {Aimed} bytes, the largest {objects.Max(o => o.Bytes)}.\n"));
         Assert.True(objects.Count > 4, $"{objects.Count} object(s) for {tenants.Length} tenants at {Aimed} bytes each");
         foreach (IGrouping<int, (int Level, string First, string Last, long Bytes)> level in objects.GroupBy(o => o.Level))
         {
@@ -225,11 +230,11 @@ public sealed partial class DatasetClusteringValueTests
     [Fact]
     public async Task KeysInOrderMergeTheNeighboursOfOneValueAndCloseEachValue()
     {
-        Stream cut = await InOrderAsync(ClusteringValue.Bucket(1_000));
-        Stream whole = await InOrderAsync(value: null);
+        Stream cut = await InOrderAsync(LayoutValue.Column(nameof(Numbered.Id)).Bucket(1_000));
+        Stream whole = await InOrderAsync(partition: null);
 
         Console.Out.Write(FormattableString.Invariant(
-            $"CLUSTERING NEIGHBOURS, keys in order: {cut.Appended} rows; cut by 1000 ids, {cut.Objects} objects above level 0 for {cut.Values} values, {cut.Rewritten} rows rewritten ({(double)cut.Rewritten / cut.Appended:F2}x); uncut, {whole.Objects} objects, {whole.Rewritten} rows rewritten ({(double)whole.Rewritten / whole.Appended:F2}x).\n"));
+            $"PARTITION NEIGHBOURS, keys in order: {cut.Appended} rows; cut by 1000 ids, {cut.Objects} objects above level 0 for {cut.Values} values, {cut.Rewritten} rows rewritten ({(double)cut.Rewritten / cut.Appended:F2}x); uncut, {whole.Objects} objects, {whole.Rewritten} rows rewritten ({(double)whole.Rewritten / whole.Appended:F2}x).\n"));
 
         // Each value ends in objects of its own, a few a value: its last small ones merged once the next value started.
         Assert.True(cut.Objects <= 3 * cut.Values, $"{cut.Objects} objects for {cut.Values} values");
@@ -244,11 +249,11 @@ public sealed partial class DatasetClusteringValueTests
         // Rows mostly in order, a share of each append late, its ids drawn among all those before: each late row merges
         // into the objects of its value it overlaps on its way up, which the cut keeps within one value. Measured against
         // the same stream uncut.
-        Stream cut = await InOrderAsync(ClusteringValue.Bucket(1_000), latePercent);
-        Stream whole = await InOrderAsync(value: null, latePercent);
+        Stream cut = await InOrderAsync(LayoutValue.Column(nameof(Numbered.Id)).Bucket(1_000), latePercent);
+        Stream whole = await InOrderAsync(partition: null, latePercent);
 
         Console.Out.Write(FormattableString.Invariant(
-            $"CLUSTERING LATE ROWS, {latePercent} % late: {cut.Appended} rows; cut by 1000 ids, {cut.Objects} objects above level 0 for {cut.Values} values, {cut.Rewritten} rows rewritten ({(double)cut.Rewritten / cut.Appended:F2}x); uncut, {whole.Objects} objects, {whole.Rewritten} rows rewritten ({(double)whole.Rewritten / whole.Appended:F2}x).\n"));
+            $"PARTITION LATE ROWS, {latePercent} % late: {cut.Appended} rows; cut by 1000 ids, {cut.Objects} objects above level 0 for {cut.Values} values, {cut.Rewritten} rows rewritten ({(double)cut.Rewritten / cut.Appended:F2}x); uncut, {whole.Objects} objects, {whole.Rewritten} rows rewritten ({(double)whole.Rewritten / whole.Appended:F2}x).\n"));
         Assert.True(cut.Rewritten <= 2 * whole.Rewritten, $"{cut.Rewritten} rows rewritten cut, {whole.Rewritten} uncut");
     }
 
@@ -257,10 +262,10 @@ public sealed partial class DatasetClusteringValueTests
     /// rows appended, rewritten, the objects above level 0 and the values they hold. The ids follow each other, but for
     /// <paramref name="latePercent"/> of each append, drawn among the ids before it.
     /// </summary>
-    private static async Task<Stream> InOrderAsync(ClusteringValue? value, int latePercent = 0)
+    private static async Task<Stream> InOrderAsync(LayoutValue? partition, int latePercent = 0)
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Numbered.Schema, Options([nameof(Numbered.Id)], value), Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Numbered.Schema, Options([nameof(Numbered.Id)], partition), Ct);
         Random random = new Random(0x1A7E);
         List<long> ids = [];
         long next = 0;
@@ -293,7 +298,7 @@ public sealed partial class DatasetClusteringValueTests
 
             objects++;
             (FilterLiteral min, FilterLiteral max) = Bounds(entry, nameof(Numbered.Id));
-            if (value is not null)
+            if (partition is not null)
             {
                 Assert.Equal(min.SignedValue / 1_000, max.SignedValue / 1_000);
             }
@@ -370,7 +375,7 @@ public sealed partial class DatasetClusteringValueTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Event.Schema, Options([nameof(Event.At)], ClusteringValue.Truncate(CalendarUnit.Day)), Ct);
+            store, Event.Schema, Options([nameof(Event.At)], LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Day)), Ct);
         Random random = new Random(0x50C);
         List<Event> appended = [];
         for (int append = 0; append < 4; append++)
@@ -399,11 +404,16 @@ public sealed partial class DatasetClusteringValueTests
 
     private static DateTime DayOf(FilterLiteral micros) => DateTimeOffset.UnixEpoch.AddTicks(micros.SignedValue * 10).UtcDateTime.Date;
 
-    private static DatasetOptions Options(string[] key, ClusteringValue? value, long objectBytes = 0) => new DatasetOptions
+    private static DatasetOptions Options(string[] key, LayoutValue? partition, long objectBytes = 0) => new DatasetOptions
     {
         Seed = 0xC1A5_7E12,
-        ClusteringKey = key,
-        Clustering = new ClusteringOptions { Value = value, ObjectBytes = objectBytes },
+        Layout = new DatasetLayout
+        {
+            Partition = partition,
+            SortKey = [.. key.Select(LayoutValue.Column)],
+            Organization = LayoutOrganization.Leveled,
+            ObjectBytes = objectBytes > 0 ? objectBytes : new DatasetLayout().ObjectBytes,
+        },
 
         // Small blocks, so that an object's size moves as its rows are written and a roll at a target is something a job sees.
         ChunkBytes = 0,

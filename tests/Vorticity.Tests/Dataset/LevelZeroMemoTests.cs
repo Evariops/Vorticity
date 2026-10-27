@@ -25,7 +25,7 @@ public sealed partial class LevelZeroMemoTests
     public async Task AKeyOfLevelZeroIsParsedOncePerObjectAndNode()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { ClusteringKey = [nameof(Doc.Id)] }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Doc.Id))] } }, Ct);
         List<Doc> rows = await AppendAsync(dataset);
         LevelZeroMemo memo = dataset.LevelZero;
 
@@ -62,7 +62,7 @@ public sealed partial class LevelZeroMemoTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexSession session = VortexSession.Create(static options => options.MemoryBudget = new QueryMemoryBudget(1_024));
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { ClusteringKey = [nameof(Doc.Id)], Session = session }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Doc.Id))] }, Session = session }, Ct);
         List<Doc> rows = await AppendAsync(dataset);
 
         Assert.Equal(Routes(rows), await RoutesAsync(dataset));
@@ -82,7 +82,7 @@ public sealed partial class LevelZeroMemoTests
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         HoldingStore store = new HoldingStore(inner);
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { ClusteringKey = [nameof(Doc.Id)] }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Doc.Id))] } }, Ct);
         List<Doc> rows = await AppendAsync(dataset);
         await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, Ct))
         {

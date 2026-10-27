@@ -355,7 +355,7 @@ internal static partial class PathsBench
             total += bytes;
             string parts = entry.Contents is not { } contents ? "no table of contents" : string.Create(
                 CultureInfo.InvariantCulture,
-                $"contents {entry.TableOfContents.Length / 1e6:F2} MB: {contents.Slices.Slices.Count} slices in {contents.Slices.ToBytes().Length / 1e3:F1} KB, " +
+                $"contents {entry.TableOfContents.Length / 1e6:F2} MB: {contents.Rows:N0} rows, {contents.GranuleStats.Count} columns of granule statistics, " +
                 $"schema {contents.Schema.Length} B");
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {entry.Key}: {entry.Rows:N0} rows, entry {bytes / 1e6:F2} MB, {parts}"));
         }
@@ -570,9 +570,9 @@ internal static partial class PathsBench
             if (settings.Explain && question.Ask(dataset, options) is { Explain: { } explain } asked)
             {
                 await asked.Batches.DisposeAsync();
-                foreach (StatesStep step in (await explain()).States)
+                foreach (UnitStep step in (await explain()).Units)
                 {
-                    Console.WriteLine($"    plan {step.Object}: {step.Read} {step.Detail} x{step.Count}");
+                    Console.WriteLine($"    plan {step.Unit}: {step.Alternative} {step.Detail} x{step.Requests}");
                 }
             }
 
@@ -852,8 +852,7 @@ internal static partial class PathsBench
         DatasetOptions options = new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(GeneratedSpanV2.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(GeneratedSpanV2.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(GeneratedSpanV2.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(GeneratedSpanV2.TraceId), nameof(GeneratedSpanV2.SpanId)],
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
         };
@@ -890,8 +889,7 @@ internal static partial class PathsBench
         DatasetOptions options = new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(LogRow.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(LogRow.At))], Organization = LayoutOrganization.Leveled },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(settings.Budget), ScratchDirectory = Path.Combine(settings.Store, "scratch") },
 
             // --declared: the keys of the attributes QP-3, QP-9 and QP-10 filter by, shredded by every job and every append.

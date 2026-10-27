@@ -13,7 +13,7 @@ internal static class DatasetMaintenance
         await using CountingObjectStore store = new CountingObjectStore(new MemoryObjectStore(), ownsInner: true);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions
         {
-            ClusteringKey = [Reading.ColumnNames.Day],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(Reading.ColumnNames.Day)] },
         });
 
         const int Appends = 10;

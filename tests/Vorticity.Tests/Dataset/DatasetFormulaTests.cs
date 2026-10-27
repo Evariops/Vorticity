@@ -61,11 +61,11 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
             objects++;
             Assert.NotNull(held.Entry.Contents);
             long rows = held.Entry.Rows;
-            Assert.InRange(held.Entry.Contents.PureBlockRows, 0, rows);
-            pure += held.Entry.Contents.PureBlockRows;
+            Assert.InRange(held.Entry.Contents.PureGranuleRows, 0, rows);
+            pure += held.Entry.Contents.PureGranuleRows;
         }
 
-        Console.WriteLine($"FORMULA pure blocks: {pure:N0} rows of {Large * LargeCalls:N0} large calls in {objects} objects");
+        Console.WriteLine($"FORMULA pure granules: {pure:N0} rows of {Large * LargeCalls:N0} large calls in {objects} objects");
         Assert.Equal(Large * LargeCalls, pure);
     }
 
@@ -109,11 +109,11 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
         {
             await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
             {
-                Assert.Equal(0, held.Entry.Contents!.PureBlockRows);
+                Assert.Equal(0, held.Entry.Contents!.PureGranuleRows);
             }
 
             ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
-            Assert.Equal(answered, plan.States.Any(step => step.Read == "blocks"));
+            Assert.Equal(answered, plan.Units.Any(step => step.Alternative == "granules"));
         }
 
         (long read, _) = await ReadAsync(store, question, synopses: true);
@@ -170,12 +170,18 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
         public async ValueTask InitializeAsync()
         {
             List<Call> rows = Draw();
-            await FillAsync(ByService, rows, [nameof(Call.Service), nameof(Call.At)], new ClusteringOptions
+            await FillAsync(ByService, rows, new DatasetLayout
             {
+                SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), LayoutValue.Column(nameof(Call.At))],
+                IndexedPrefix = 2,
                 ObjectBytes = 1 << 20,
-                BlockValue = ClusteringValue.Truncate(CalendarUnit.Hour),
             });
-            await FillAsync(ByArrival, rows, [nameof(Call.At)], new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) });
+            await FillAsync(ByArrival, rows, new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour),
+                SortKey = [LayoutValue.Column(nameof(Call.At))],
+                Organization = LayoutOrganization.Leveled,
+            });
         }
 
         private static List<Call> Draw()
@@ -202,12 +208,11 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
             return rows;
         }
 
-        private static async Task FillAsync(MemoryObjectStore store, List<Call> rows, string[] key, ClusteringOptions clustering)
+        private static async Task FillAsync(MemoryObjectStore store, List<Call> rows, DatasetLayout layout)
         {
             DatasetOptions options = new DatasetOptions
             {
-                ClusteringKey = key,
-                Clustering = clustering,
+                Layout = layout,
                 ContentsObjectBytes = 1,
                 SheetObjectBytes = 0,
             };

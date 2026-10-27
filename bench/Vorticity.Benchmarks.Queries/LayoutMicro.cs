@@ -28,7 +28,7 @@ internal static class LayoutMicro
 
         Dictionary<string, double> arrival = await BytesAsync(Path.Combine(root, "arrival"), batches, new DatasetOptions());
         Dictionary<string, double> emitter = await BytesAsync(
-            Path.Combine(root, "emitter"), batches, new DatasetOptions { ClusteringKey = [nameof(EmitterRequest.Emitter), nameof(EmitterRequest.At)] });
+            Path.Combine(root, "emitter"), batches, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(EmitterRequest.Emitter)), LayoutValue.Column(nameof(EmitterRequest.At))] } });
 
         Console.WriteLine($"{"column",-12} {"arrival B/row",14} {"by emitter B/row",17}");
         foreach (string column in arrival.Keys)

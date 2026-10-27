@@ -53,8 +53,8 @@ public sealed partial class DatasetExclusionTests
         // Every object answers by its counts, less the rows its postings find.
         ScanPlan plan = await dataset.Scan<Call>().With(new ScanOptions { UseSynopses = true }).Where(c => c.RequestId != Solo)
             .GroupBy(c => c.Service).Select(g => (g.Key, g.Count())).ExplainAsync(Ct);
-        Assert.NotEmpty(plan.States);
-        Assert.All(plan.States, step => Assert.Contains("its postings find", step.Detail, StringComparison.Ordinal));
+        Assert.NotEmpty(plan.Units);
+        Assert.All(plan.Units, step => Assert.Contains("its postings find", step.Detail, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -112,8 +112,7 @@ public sealed partial class DatasetExclusionTests
         random.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rows));
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Call.Service), nameof(Call.At)],
-            Clustering = new ClusteringOptions { ObjectBytes = 256 << 10 },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], ObjectBytes = 256 << 10 },
             Identifiers = [nameof(Call.RequestId)],
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,

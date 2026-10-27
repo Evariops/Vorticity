@@ -160,7 +160,7 @@ public sealed partial class DatasetDataCacheTests
     /// <summary>Four objects of 20 000 samples each, appended, their values random enough not to compress to nothing.</summary>
     private static async Task FillAsync(IObjectStore store)
     {
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Sample.Schema, new DatasetOptions { ClusteringKey = [nameof(Sample.Id)] }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Sample.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Sample.Id))] } }, Ct);
         Random random = new Random(0xCA5E);
         for (int part = 0; part < 4; part++)
         {

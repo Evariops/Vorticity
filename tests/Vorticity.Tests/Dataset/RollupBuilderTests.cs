@@ -60,8 +60,7 @@ public sealed class RollupBuilderTests
         await using CountingObjectStore store = new CountingObjectStore(memory);
         await using VortexDataset dataset = await DatasetCountsTests.WriteAsync(store, columns, rows, new DatasetOptions
         {
-            ClusteringKey = ["At"],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour), ObjectBytes = 48L << 10 },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column("At").Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column("At")], Organization = LayoutOrganization.Leveled, ObjectBytes = 48L << 10 },
             Write = new VortexWriteOptions { RowBlockSize = 512, DataBlockTargetBytes = 4 << 10 },
             SheetObjectBytes = 0,
             ContentsObjectBytes = 0,

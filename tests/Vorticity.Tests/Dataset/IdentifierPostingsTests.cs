@@ -30,9 +30,9 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(Request.RequestId)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(19);
         List<Request> appended = [];
@@ -98,9 +98,9 @@ public sealed partial class IdentifierPostingsTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(Request.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(Request.RequestId)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(23);
         List<Request> appended = [];
@@ -176,9 +176,9 @@ public sealed partial class IdentifierPostingsTests
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
             {
                 Session = session,
-                ClusteringKey = [nameof(Request.At)],
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled },
                 Identifiers = [nameof(Request.RequestId)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+                ContentsObjectBytes = 0,
                 Write = paged ? new VortexWriteOptions { Fences = new global::Vorticity.Writing.FenceShape(InlineFences: 1, PageBytes: 512) } : VortexWriteOptions.Default,
             }, Ct);
             // The same two hours and a quarter; in pages, enough rows that a run of an hour's postings takes more
@@ -287,9 +287,9 @@ public sealed partial class IdentifierPostingsTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
         {
             Session = session,
-            ClusteringKey = [nameof(Visit.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = ["Attributes['user'].AsString()"],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(31);
         List<string> users = [];
@@ -358,7 +358,7 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Visit.At)],
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Visit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Visit.At))] },
             Identifiers = [identifier],
         }, Ct));
         Assert.Contains("Attributes['user'].AsString()", refused.Message, StringComparison.Ordinal);
@@ -397,9 +397,9 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Logged.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Logged.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Logged.At))], Organization = LayoutOrganization.Leveled },
             Identifiers = [nameof(Logged.TraceId)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour) }, ContentsObjectBytes = 0, SliceTargetRows = 500,
+            ContentsObjectBytes = 0,
         }, Ct);
         List<Logged> appended = [];
         for (int part = 0; part < 6; part++)
@@ -445,9 +445,8 @@ public sealed partial class IdentifierPostingsTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
-            ClusteringKey = [nameof(Request.At)],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Request.At))] },
             Identifiers = [nameof(Request.RequestId)],
-            LookupFooterBytes = 0,
         }, Ct);
         await using (ObjectDraft draft = dataset.StartObject())
         {

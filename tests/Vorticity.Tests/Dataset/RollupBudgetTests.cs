@@ -69,11 +69,11 @@ public sealed partial class RollupBudgetTests : IClassFixture<RollupBudgetTests.
         List<string> states = await AskAsync(asked, question, synopses: true);
         (long requests, long bytes) = (fresh.Requests, fresh.BytesRead);
 
-        int rollups = plan.States.Count(step => step.Read == "rollup");
-        int byBucket = plan.States.Count(step => step.Read == "rollup" && step.Detail.Contains("by bucket", StringComparison.Ordinal));
-        int inPart = plan.States.Count(step => step.Read == "rollup" && step.Detail.StartsWith("the header", StringComparison.Ordinal));
+        int rollups = plan.Units.Count(step => step.Alternative == "rollup");
+        int byBucket = plan.Units.Count(step => step.Alternative == "rollup" && step.Detail.Contains("by bucket", StringComparison.Ordinal));
+        int inPart = plan.Units.Count(step => step.Alternative == "rollup" && step.Detail.StartsWith("the header", StringComparison.Ordinal));
         Console.WriteLine(
-            $"ROLLUP BUDGET {question}: {rollups} rollups, {byBucket} by bucket, {inPart} in part, {plan.States.Length - rollups} objects' counts; " +
+            $"ROLLUP BUDGET {question}: {rollups} rollups, {byBucket} by bucket, {inPart} in part, {plan.Units.Length - rollups} objects' counts; " +
             $"{requests} requests and {bytes} bytes (ceilings {Shown(requestsCeiling)}, {Shown(bytesCeiling)}), {states.Count} rows answered");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
@@ -134,8 +134,7 @@ public sealed partial class RollupBudgetTests : IClassFixture<RollupBudgetTests.
         {
             await using VortexDataset dataset = await VortexDataset.CreateAsync(Store, Hit.Schema, Options() with
             {
-                ClusteringKey = [nameof(Hit.At)],
-                Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
+                Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Hit.At)).Truncate(CalendarUnit.Day), SortKey = [LayoutValue.Column(nameof(Hit.At))], Organization = LayoutOrganization.Leveled },
             });
             Random random = new Random(37);
             int part = RowsPerDay / 2;

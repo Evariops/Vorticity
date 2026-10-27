@@ -168,7 +168,7 @@ public sealed class DatasetCompactionPointerTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0x9_014_7E2,
-        ClusteringKey = ["Key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
     };
 

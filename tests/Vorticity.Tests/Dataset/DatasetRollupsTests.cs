@@ -41,7 +41,7 @@ public sealed partial class DatasetRollupsTests
         Assert.Equal(put, rollups.Count);
         Assert.Contains(rollups, r => r.Rank == 1);
         Assert.Contains(rollups, r => r.Rank == 2);
-        Assert.True(dataset.Snapshot.Header.Features.HasFlag(DatasetFeatures.Rollups));
+        Assert.NotNull(dataset.Snapshot.Header.Rollups);
 
         // A rollup of rank 1 holds one hour; one of rank 2 keeps each of its hours apart.
         Assert.All(rollups.Where(r => r.Rank == 1), r => Assert.Single(r.Buckets));
@@ -160,10 +160,10 @@ public sealed partial class DatasetRollupsTests
         List<string> rows = await AskAsync(dataset, question, synopses: false);
         List<string> states = await AskAsync(dataset, question, synopses: true);
         ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
-        int rollups = plan.States.Count(step => step.Read == "rollup");
-        int objects = plan.States.Count(step => step.Read == "states");
-        int byBucket = plan.States.Count(step => step.Read == "rollup" && step.Detail.Contains("by bucket", StringComparison.Ordinal));
-        Console.WriteLine($"ROLLUPS {question}: {rollups} rollups, {byBucket} of them by bucket, and {objects} objects' counts answer, {plan.States.Length - rollups - objects} other steps");
+        int rollups = plan.Units.Count(step => step.Alternative == "rollup");
+        int objects = plan.Units.Count(step => step.Alternative == "counts");
+        int byBucket = plan.Units.Count(step => step.Alternative == "rollup" && step.Detail.Contains("by bucket", StringComparison.Ordinal));
+        Console.WriteLine($"ROLLUPS {question}: {rollups} rollups, {byBucket} of them by bucket, and {objects} objects' counts answer, {plan.Units.Length - rollups - objects} other steps");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
         if (question is "count by service" or "measures by service, hours two to eight" or "median bytes by service" or "count by service and hour")
@@ -333,8 +333,7 @@ public sealed partial class DatasetRollupsTests
     {
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Hit.Schema, Options() with
         {
-            ClusteringKey = [nameof(Hit.At)],
-            Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Hour), ObjectBytes = 12L << 10 },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Hit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Hit.At))], Organization = LayoutOrganization.Leveled, ObjectBytes = 12L << 10 },
             Write = new VortexWriteOptions { RowBlockSize = 256, DataBlockTargetBytes = 2 << 10 },
         }, Ct);
         Random random = new Random(29);

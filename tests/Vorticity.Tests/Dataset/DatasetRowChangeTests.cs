@@ -318,7 +318,7 @@ public sealed class DatasetRowChangeTests
     {
         Seed = 0xDE1E7E,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
-        ClusteringKey = clustered ? ["Key"] : null,
+        Layout = clustered ? new DatasetLayout { SortKey = [LayoutValue.Column("Key")] } : null,
     };
 
     private static async Task<List<ChangeRow>> RowsAsync(VortexDataset dataset, CancellationToken ct) =>

@@ -55,7 +55,7 @@ public sealed class DatasetBudgetTests
         Template = new CommitHeader
         {
             Version = 1,
-            ClusteringKey = ["k"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("k")] },
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,
@@ -341,7 +341,7 @@ public sealed class DatasetBudgetTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = Seed,
-            ClusteringKey = ["key"],
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
             Write = new VortexWriteOptions
             {
                 RowBlockSize = 128,
@@ -397,7 +397,7 @@ public sealed class DatasetBudgetTests
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
         string[] names = [.. Enumerable.Range(0, columns).Select(column => column == 0 ? "key" : FormattableString.Invariant($"c{column:D4}"))];
         DType schema = types.Struct(names, [.. names.Select(_ => i64)], Nullability.NonNullable);
-        DatasetOptions options = new DatasetOptions { Seed = Seed, ClusteringKey = ["key"] };
+        DatasetOptions options = new DatasetOptions { Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
 
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
@@ -415,8 +415,6 @@ public sealed class DatasetBudgetTests
 
         ObjectEntry entry = Assert.Single(entries);
         Assert.InRange(entry.FooterBytes, ObjectEntry.FirstReadBytes + 1, entry.Bytes);
-        (ulong _, CommitObject? latest) = await DatasetCommitter.LatestAsync(store, ct);
-        Assert.Equal(DatasetFeatures.EntryFields, Assert.IsType<CommitObject>(latest).Header.Features);
 
         store.Reset();
         await using (ObjectLease lease = await dataset.RentAsync(entry, ct))
@@ -465,7 +463,7 @@ public sealed class DatasetBudgetTests
             DatasetOptions options = new DatasetOptions
             {
                 Seed = Seed,
-                ClusteringKey = ["key"],
+                Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
                 Session = session,
                 Encrypted = encrypted,
                 StreamedObjectBytes = streamedFrom,

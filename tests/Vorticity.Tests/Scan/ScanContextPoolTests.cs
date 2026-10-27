@@ -106,7 +106,7 @@ public sealed class ScanContextPoolTests
         context.KeepEncodings = true;
         context.ExchangePushedFields(FieldMask.All);
         context.FieldsHonoured = true;
-        context.ExchangePushedPredicate("monotone"u8.ToArray(), ComparisonOp.Equal, FilterLiteral.From(1L), prefix: false);
+        context.ExchangePushedPredicate("monotone"u8.ToArray(), Vorticity.Compute.EncodedPredicate.Compare(ComparisonOp.Equal, FilterLiteral.From(1L)));
         uint? outer = context.BeginNodeCheckScope(3);
         long key = ScanContext.NodeCheckKey(3, 2)!.Value;
         context.MarkNodeChecked(key);

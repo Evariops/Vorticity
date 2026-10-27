@@ -425,7 +425,7 @@ public sealed class DatasetVacuumTests
     private static DatasetOptions Options() => new DatasetOptions
     {
         Seed = 0x7AC_0017,
-        ClusteringKey = ["key"],
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] },
         RetentionWindow = Window,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
     };
