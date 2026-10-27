@@ -68,6 +68,41 @@ public sealed partial class Scan<TRecord>
         return this;
     }
 
+    /// <summary>The distinct values a semi-join takes at most by default (spec G, 4): past them, filter its first question further.</summary>
+    public const int SemiJoinValues = 1 << 20;
+
+    /// <summary>
+    /// Keeps the rows whose <paramref name="column"/> is one of the values <paramref name="values"/> gives, a semi-join
+    /// (spec G, 4): the first question read now, each of its values once, the set an <c>In</c> of this scan's filter, which
+    /// the column's localisation, postings and zone maps prune by and its rows are judged by.
+    /// </summary>
+    /// <typeparam name="TKey">The column's type.</typeparam>
+    /// <param name="column">The column the values are looked for in.</param>
+    /// <param name="values">The first question: a projection of one value a row, over any source.</param>
+    /// <param name="maxValues">The distinct values taken at most.</param>
+    /// <param name="cancellationToken">Cancels the first question.</param>
+    /// <returns>This scan, the first question read; with no value, a scan that keeps no row and reads none.</returns>
+    /// <exception cref="InvalidOperationException">The first question gives more than <paramref name="maxValues"/> distinct values.</exception>
+    public async ValueTask<Scan<TRecord>> WhereInAsync<TKey>(
+        Func<Probe<TRecord>, Sym<TKey>> column, Projection<TKey> values, int maxValues = SemiJoinValues, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+        ArgumentNullException.ThrowIfNull(values);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxValues);
+        HashSet<TKey> distinct = [];
+        await foreach (TKey value in values.ToValuesAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (value is not null && distinct.Add(value) && distinct.Count > maxValues)
+            {
+                throw new InvalidOperationException(
+                    $"The first question of a semi-join gives more than {maxValues:N0} values: filter it further, or take more of them.");
+            }
+        }
+
+        TKey[] set = [.. distinct];
+        return Where(record => column(record).In(set));
+    }
+
     /// <summary>Scans the rows of <paramref name="range"/> only.</summary>
     /// <param name="range">The rows, in file coordinates; intersected with the file.</param>
     /// <returns>This scan.</returns>
