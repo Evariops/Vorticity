@@ -1128,8 +1128,6 @@ public sealed class VortexDataset : IAsyncDisposable
     /// each ends at or before it, and throws otherwise, since its rows mix its sources and cannot
     /// apply in part. Act outside the dataset, a notification for one, only on
     /// <see cref="OperationOutcome.Applied"/>: the commit names the one writer that counted the ranges.
-    /// A dataset whose commits count source offsets is written in commit format 3, which a library
-    /// that predates them refuses rather than forget the offsets at its first commit.
     /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="consumed"/> is empty, or names a source twice.</exception>
     /// <exception cref="SourceOffsetConflictException">

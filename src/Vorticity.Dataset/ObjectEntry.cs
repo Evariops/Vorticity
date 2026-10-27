@@ -26,9 +26,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     private readonly PageReference _vectorAt;
 
     /// <summary>
-    /// The fields of commit format 4, as the entry carries them: tagged, so that a field a later
-    /// library adds is carried through as it was read. Null when the entry has none, so that its
-    /// bytes are those an earlier format wrote.
+    /// The entry's tagged fields, as it carries them, so that a field a later library adds is carried
+    /// through as it was read. Null when the entry has none.
     /// </summary>
     private readonly byte[]? _fields;
 
@@ -139,9 +138,6 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// dataset that erases deleted rows within a delay; 0 when the entry does not say.
     /// </summary>
     public long MarkedAt { get; private set; }
-
-    /// <summary>Whether the entry carries fields of commit format 4, which an earlier library cannot read.</summary>
-    public bool HasFields => _fields is not null;
 
     /// <summary>
     /// The rows a delete took out of the object without rewriting it, by their positions in the
@@ -447,7 +443,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// <summary>
     /// The entry with <paramref name="footerBytes"/> as the bytes an open of its object reads from the
     /// end, which it then reads in one request. Recorded only past what an open reads first, so that
-    /// the entry of an object whose footer that read holds stays in an earlier format's bytes.
+    /// the entry of an object whose footer that read holds carries no tagged field for it.
     /// </summary>
     /// <param name="footerBytes">The bytes from the object's first footer structure to its end.</param>
     public ObjectEntry WithFooterBytes(long footerBytes)
@@ -542,7 +538,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     internal const long FirstReadBytes = 65_536;
 
     /// <summary>
-    /// The fields of format 4, tagged and in the order of their tags, those this library knows written
+    /// The tagged fields, in the order of their tags, those this library knows written
     /// afresh and those it does not carried as they were read; null when there are none.
     /// </summary>
     private byte[]? Fields(long footerBytes, long markedAt, ReadOnlySpan<byte> contents, ReadOnlySpan<byte> lastKey, PageReference negativesAt)
@@ -594,12 +590,12 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         }
     }
 
-    /// <summary>Reads the fields of format 4 this library knows.</summary>
+    /// <summary>Reads the tagged fields this library knows.</summary>
     private void ReadFields(byte[] fields)
     {
         if (fields.Length == 0)
         {
-            throw new CommitFormatException("An object entry's fields of format 4 are empty, which no writer writes.");
+            throw new CommitFormatException("An object entry's tagged fields are empty, which no writer writes.");
         }
 
         try
@@ -632,7 +628,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         }
         catch (VortexFormatException cause)
         {
-            throw new CommitFormatException($"An object entry's fields of format 4 do not decode: {cause.Message}", cause);
+            throw new CommitFormatException($"An object entry's tagged fields do not decode: {cause.Message}", cause);
         }
     }
 
@@ -663,7 +659,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         }
     }
 
-    /// <summary>The tags of the fields of format 4.</summary>
+    /// <summary>The tags of the entry's fields.</summary>
     private static class FieldTag
     {
         internal const int FooterBytes = 1;
@@ -674,7 +670,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     }
 
     /// <summary>
-    /// The version of the commit object the counts of the deleted rows lie in, read in place from the fields of format 4,
+    /// The version of the commit object the counts of the deleted rows lie in, read in place from the tagged fields,
     /// <paramref name="fields"/> from their leading zero to their end; null when they name none.
     /// </summary>
     private static ulong? NegativesVersion(ReadOnlySpan<byte> fields)
@@ -696,7 +692,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         }
         catch (VortexFormatException cause)
         {
-            throw new CommitFormatException($"An object entry's fields of format 4 do not decode: {cause.Message}", cause);
+            throw new CommitFormatException($"An object entry's tagged fields do not decode: {cause.Message}", cause);
         }
 
         return null;
@@ -790,7 +786,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             }
         }
 
-        // Past the fragments and the summaries, the fields of format 4 may name the counts of the deleted
+        // Past the fragments and the summaries, the tagged fields may name the counts of the deleted
         // rows; past them, a vector out of line ends the entry: its reference's version is its first eight bytes.
         Skip(value, ref at, references.Length);
         Skip(value, ref at, (long)Read(value, ref at));
@@ -875,8 +871,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         summaries.CopyTo(at);
         at = at[summaries.Length..];
 
-        // The fields of format 4, when there are any: a zero where a count of deleted rows would
-        // stand, which no entry of an earlier format holds there, then their length and their bytes.
+        // The tagged fields, when there are any: a zero where a count of deleted rows would stand,
+        // which no count is, then their length and their bytes.
         if (_fields is not null)
         {
             at = Write(at, 0);
@@ -944,7 +940,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         Skip(span, ref at, (long)Read(span, ref at) * PageReference.Bytes);
         Skip(span, ref at, (long)Read(span, ref at));
 
-        // The fields of format 4 stand behind a zero, where an earlier format's count of deleted rows would.
+        // The tagged fields stand behind a zero, where a count of deleted rows would.
         int start = at;
         if (!SkipFields(span, ref at))
         {
@@ -969,7 +965,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         }
         catch (VortexFormatException cause)
         {
-            throw new CommitFormatException($"An object entry's fields of format 4 do not decode: {cause.Message}", cause);
+            throw new CommitFormatException($"An object entry's tagged fields do not decode: {cause.Message}", cause);
         }
 
         return default;
@@ -1133,7 +1129,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     }
 
     /// <summary>
-    /// The fields of format 4 that start at <paramref name="at"/>, past the summaries, moved past; null
+    /// The tagged fields that start at <paramref name="at"/>, past the summaries, moved past; null
     /// when the entry has none. They start with a zero, which no count of deleted rows is.
     /// </summary>
     private static byte[]? ReadFieldBytes(ReadOnlySpan<byte> value, ref int at)
@@ -1147,7 +1143,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         int length = Length(Read(value, ref at), "fields");
         if (at + length > value.Length)
         {
-            throw new CommitFormatException("An object entry's fields of format 4 run past its bytes.");
+            throw new CommitFormatException("An object entry's tagged fields run past its bytes.");
         }
 
         byte[] fields = value.Slice(at, length).ToArray();
@@ -1156,7 +1152,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     }
 
     /// <summary>
-    /// Moves past the fields of format 4 that start at <paramref name="at"/>, if there are any: an entry
+    /// Moves past the tagged fields that start at <paramref name="at"/>, if there are any: an entry
     /// read in place reaches its deleted rows past them.
     /// </summary>
     /// <returns>Whether there were fields.</returns>
