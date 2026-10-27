@@ -23,10 +23,10 @@ namespace Vorticity.Writing;
 /// A row costs a look at its value's mark and a count, and a measure's fold; a granule, a sort of the numbers it met.
 /// </para>
 /// <para>
-/// The values' part holds while the sheet numbers every row and keeps every value's bytes; the measure's while the plan
-/// carries the column as a measure, read from every batch. An integer under an extension, an instant or a date, which
-/// the plan does not carry, is a measure of its own granules: its extremes say which group of a function of it, a
-/// truncation, a granule falls in whole. A column that keeps neither part keeps no statistics.
+/// The values' part holds while the sheet numbers every row and keeps every value's bytes, and a granule lists them; the
+/// measure's while the plan carries the column as a measure, read from every batch. An integer under an extension, an
+/// instant or a date, which the plan does not carry, is a measure of its own granules: its extremes say which group of a
+/// function of it, a truncation, a granule falls in whole. A column that keeps neither part keeps no statistics.
 /// </para>
 /// </remarks>
 internal sealed class GranuleStatsBuilder : IndexBuilder
@@ -40,11 +40,13 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     private long[] _ownValues = [];
     private byte[] _ownValid = [];
 
-    // The rows taken; the open granule's first row and nulls; the granules closed.
+    // The rows taken; the open granule's first row and nulls; the granules closed, and those that list their values.
     private long _row;
     private long _granuleStart;
     private long _granuleNulls;
     private int _granules;
+    private int _listing;
+    private long _listedRows;
 
     // Whether each part still holds: every row numbered, every batch of the measure read.
     private bool _values = true;
@@ -403,6 +405,12 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
             Span<int> met = _met.AsSpan(0, _metCount);
             met.Sort();
             int listed = met.Length <= GranuleStats.ListedValues ? met.Length : 0;
+            if (met.Length <= GranuleStats.ListedValues)
+            {
+                _listing++;
+                _listedRows += rows;
+            }
+
             Span<long> counted = listed <= 64 ? stackalloc long[listed] : new long[listed];
             for (int i = 0; i < met.Length; i++)
             {
@@ -441,16 +449,18 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     }
 
     /// <summary>
-    /// The statistics, once every one of the file's <paramref name="rows"/> is in, and the measure's histograms over the
-    /// granules (<see cref="GranuleHistograms"/>) for a measure the plan reads: null for a column that keeps neither part.
-    /// The values' part needs every value's bytes, which its dictionary keeps; the measure's is the plan's verdict, asked once
-    /// every column's counts settled it.
+    /// The statistics, once every one of the file's <paramref name="rows"/> is in, the measure's histograms over the
+    /// granules (<see cref="GranuleHistograms"/>) for a measure the plan reads, and the rows of the granules that list their
+    /// values (<see cref="ObjectContents.ListedRows"/>), 0 with no values' part: null for a column that keeps neither part.
+    /// The values' part needs every value's bytes, which its dictionary keeps, and a granule that lists them: past
+    /// <see cref="GranuleStats.ListedValues"/> in every granule, it answers nothing and is not written. The measure's is the
+    /// plan's verdict, asked once every column's counts settled it.
     /// </summary>
-    internal (byte[] Statistics, byte[]? Histograms)? Finish(long rows)
+    internal (byte[] Statistics, byte[]? Histograms, long ListedRows)? Finish(long rows)
     {
         End();
         _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
-        byte[]?[]? values = _values && _sheet.Counting ? _sheet.ValuesByNumber() : null;
+        byte[]?[]? values = _values && _listing > 0 && _sheet.Counting ? _sheet.ValuesByNumber() : null;
         if (values is not null && Array.Exists(values, value => value is null))
         {
             values = null;
@@ -481,7 +491,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 GranuleStats.WriteDictionary(ref writer, values);
             }
 
-            return (writer.WrittenSpan.ToArray(), _measured && _histogram is not null ? Histograms() : null);
+            return (writer.WrittenSpan.ToArray(), _measured && _histogram is not null ? Histograms() : null, values is null ? 0 : _listedRows);
         }
         finally
         {

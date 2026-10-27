@@ -222,6 +222,17 @@ internal sealed class ObjectContents(
     internal long PureGranuleRows { get; init; } = -1;
 
     /// <summary>
+    /// The rows of the object's granules whose statistics list each top-level column's values (<see cref="GranuleStats"/>),
+    /// at most <see cref="GranuleStats.ListedValues"/> of them a granule, by the column's place: those whose groups by the
+    /// column, or whose rows of a value of it, the statistics answer. Empty when the object does not say; 0 for a column
+    /// whose statistics list none.
+    /// </summary>
+    internal IReadOnlyList<long> ListedRows { get; init; } = [];
+
+    /// <summary>The rows of the granules whose statistics list column <paramref name="field"/>'s values (<see cref="ListedRows"/>).</summary>
+    internal long ListedRowsOf(int field) => (uint)field < (uint)ListedRows.Count ? ListedRows[field] : 0;
+
+    /// <summary>
     /// Each top-level column's geometry (<see cref="ColumnMarks"/>), the regions of its index entry, in column order: what a
     /// read of a few granules reads before their bytes alone. Empty when the object keeps none, and its chunks read whole.
     /// </summary>
@@ -275,6 +286,7 @@ internal sealed class ObjectContents(
             ColumnChunks = ColumnChunks,
             ColumnClasses = ColumnClasses,
             PureGranuleRows = PureGranuleRows,
+            ListedRows = ListedRows,
             Marks = Marks,
             Dictionaries = Dictionaries,
             KeyIndex = KeyIndex,
@@ -381,6 +393,9 @@ internal sealed class ObjectContents(
     private const int TagPathLocate = 31;
     private const int TagPathLocateKey = 3;
     private const int TagPathLocateClass = 4;
+
+    // The rows of the granules whose statistics list each top-level column's values, packed, by the column's place.
+    private const int TagListedRows = 32;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -677,6 +692,15 @@ internal sealed class ObjectContents(
                 writer.WriteUInt64Always(TagPureGranuleRows, (ulong)PureGranuleRows);
             }
 
+            if (ListedRows.Count > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagListedRows);
+                foreach (long rows in ListedRows)
+                {
+                    writer.WriteVarint((ulong)rows);
+                }
+            }
+
             if (DirectoryRegion is { } directoryRegion)
             {
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
@@ -734,6 +758,7 @@ internal sealed class ObjectContents(
             List<long> columnChunks = [];
             List<uint> columnClasses = [];
             long pureGranuleRows = -1;
+            List<long> listedRows = [];
             List<IndexSegment> marks = [];
             List<(int Field, ColumnDictionary Dictionary)> dictionaries = [];
             IndexSegment? indexDirectory = null;
@@ -859,6 +884,14 @@ internal sealed class ObjectContents(
                     case (TagPureGranuleRows, ProtoWireType.Varint):
                         pureGranuleRows = checked((long)reader.ReadVarint());
                         break;
+                    case (TagListedRows, ProtoWireType.LengthDelimited):
+                        ProtoReader listing = reader.ReadMessage();
+                        while (!listing.End)
+                        {
+                            listedRows.Add(checked((long)listing.ReadVarint()));
+                        }
+
+                        break;
                     case (TagLocate, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } lying)
                         {
@@ -923,6 +956,7 @@ internal sealed class ObjectContents(
                     ColumnChunks = columnChunks,
                     ColumnClasses = [.. columnClasses],
                     PureGranuleRows = pureGranuleRows,
+                    ListedRows = listedRows,
                     Marks = marks.Count == directories.Count ? marks : [],
                     Dictionaries = Placed(dictionaries, directories.Count),
                 }

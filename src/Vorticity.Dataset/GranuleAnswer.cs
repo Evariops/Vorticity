@@ -373,10 +373,12 @@ internal sealed class GranuleAnswer
     /// The share of the rows of the object <paramref name="held"/> whose granules its statistics are not expected to answer:
     /// those of the granules that hold several values of the key's first column or of the granule value
     /// (<see cref="ObjectContents.PureGranuleRows"/>), short runs gathered, unless the question would answer such a granule too,
-    /// every column it keys or filters but one, under counts alone, constant over the object; none when the object does not
-    /// say, the granules then taken to answer, as before it said. With <paramref name="edges"/>, for a price that bounds what
-    /// is read, those a window on a column of the key cuts too, which the choice of the path need not weigh: a window on
-    /// the granule value cuts no granule of one value.
+    /// every column it keys or filters but one, under counts alone, constant over the object, and then those of the granules
+    /// that do not list that column's values (<see cref="ObjectContents.ListedRows"/>); none when the object does not say,
+    /// the granules then taken to answer, as before it said. And those of the granules that hold a row a delete marked,
+    /// which are read as rows (<see cref="Settle"/>). With <paramref name="edges"/>, for a price that bounds what is
+    /// read, those a window on a column of the key cuts too, which the choice of the path need not weigh: a window on the
+    /// granule value cuts no granule of one value.
     /// </summary>
     internal double Unanswered(in PositionedObject held, bool edges = false)
     {
@@ -393,19 +395,39 @@ internal sealed class GranuleAnswer
         if (entry.Contents is { PureGranuleRows: >= 0 } contents)
         {
             // In a granule of several runs, the first column varies, and so does every key and filtered column the object's
-            // summaries do not hold constant.
+            // summaries do not hold constant. One column that varies, under counts alone, answers where its values are
+            // listed; a function of one, a truncation, where the granule's extremes fall in one group, as they mostly do.
             int varying = 0;
+            int listing = -1;
             foreach ((int field, FieldExpr key) in _keys)
             {
-                varying += CountsAnswer.ConstantOf(summaries, _schema.Columns[field].Name, key) is null ? 1 : 0;
+                if (CountsAnswer.ConstantOf(summaries, _schema.Columns[field].Name, key) is null)
+                {
+                    varying++;
+                    listing = key is ColumnFieldExpr ? field : -1;
+                }
             }
 
             foreach (int field in proven ? [] : _filtered)
             {
-                varying += !Keyed(field) && Array.IndexOf(_ranged, field) < 0 ? 1 : 0;
+                if (!Keyed(field) && Array.IndexOf(_ranged, field) < 0)
+                {
+                    varying++;
+                    listing = field;
+                }
             }
 
-            share = varying <= (CountsOnly ? 1 : 0) ? 0 : 1 - Math.Clamp(contents.PureGranuleRows / (double)entry.PhysicalRows, 0, 1);
+            share = varying > (CountsOnly ? 1 : 0) ? 1 - Math.Clamp(contents.PureGranuleRows / (double)entry.PhysicalRows, 0, 1)
+                : varying == 1 && listing >= 0 ? 1 - Math.Clamp(contents.ListedRowsOf(listing) / (double)entry.PhysicalRows, 0, 1)
+                : 0;
+        }
+
+        // A granule that holds a row a delete marked is read as rows: the deleted rows taken to lie apart, as an erasure's do,
+        // the share of the others' granules that none of them falls in e^(-deleted / granules).
+        if (entry.DeletedRows > 0)
+        {
+            double granules = Math.Max(1, entry.PhysicalRows / (double)_granuleRows);
+            share += (1 - share) * (1 - Math.Exp(-entry.DeletedRows / granules));
         }
 
         // A window the object's summaries do not prove cuts the granules at its bounds, read as rows: two at most on the first
