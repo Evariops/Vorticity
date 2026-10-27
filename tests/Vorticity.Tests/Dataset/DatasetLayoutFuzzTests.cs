@@ -94,6 +94,13 @@ public sealed partial class DatasetLayoutFuzzTests
                 }
 
                 schedule.Add($"merge {jobs}");
+
+                // Under tiers, the due merges done, no class holds k objects of a partition.
+                if (layout.Organization == LayoutOrganization.Tiered)
+                {
+                    CompactionPlan plan = await dataset.PlanCompactionAsync(options, Ct);
+                    Assert.All(plan.Partitions, partition => Assert.True(partition.Lag == 0, $"seed {seed}: partition {partition.Partition} owes {partition.Lag} objects past k - 1 a class"));
+                }
             }
             else
             {
