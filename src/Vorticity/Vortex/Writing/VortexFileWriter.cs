@@ -194,7 +194,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
         List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres,
-        long[] columnBytes, long[] columnChunks) =>
+        long[] columnBytes, long[] columnChunks, IndexSegment[] marks) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
@@ -206,6 +206,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             ColumnBytes = columnBytes,
             ColumnChunks = columnChunks,
             PureBlockRows = blockStats.Count > 0 && _blocks is { } declared ? declared.PureRows : -1,
+            Marks = marks,
         };
 
     /// <summary>
@@ -422,6 +423,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
     private readonly IndexWriter? _indexes;
 
+    // The geometry of each column's chunks, collected as their blobs are written, for a file that carries slices: what a
+    // reader of a few granules needs before their bytes (ColumnMarks); null for a file that carries none.
+    private List<ChunkGeometry>[]? _geometry;
+    private ChunkGeometryBuilder? _geometryBuilder;
+
     // The slices the caller declared, written with the indexes at completion; null for none.
     private (int Field, SliceTable Table)? _slices;
 
@@ -510,7 +516,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             for (int chunk = 0; chunk < spans.Length; chunk++)
             {
                 SegmentSpec spec = _segments[segments[chunk]];
-                spans[chunk] = new ChunkSpan(spec.Offset, spec.Length, spec.AlignmentExponent, row, chunkRows[chunk]);
+                spans[chunk] = new ChunkSpan(spec.Offset, spec.Length, spec.AlignmentExponent, row, chunkRows[chunk], chunk);
                 row += chunkRows[chunk];
             }
 
@@ -827,6 +833,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _budget = session?.WriteLanes,
         };
         writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
+        if (options.CarriesSlices)
+        {
+            writer._geometry = new List<ChunkGeometry>[writer._fieldCount];
+            for (int field = 0; field < writer._fieldCount; field++)
+            {
+                writer._geometry[field] = [];
+            }
+        }
+
         if (writer._indexes is { } built)
         {
             built.Spared = options.BudgetSpares;
@@ -2180,6 +2195,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
+            if (_geometry is { } geometry)
+            {
+                // The chunk's tree, and where its granules start in its buffers of variable length, while its blob is in hand.
+                long rows = _columns[field].Chunk(firstBlock, blocks).Rows;
+                geometry[field].Add((_geometryBuilder ??= new ChunkGeometryBuilder()).Of(
+                    blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema, checked((int)rows), _blockRows));
+            }
+
             int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
             if (_pathMaps?[field] is { } map)
             {
@@ -2490,6 +2513,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
             SliceChunks? chunks = null;
             IndexSegment[] chunkDirectories = [];
+            IndexSegment[] marks = [];
             ChunkPaging? paging = null;
             if (_slices is not null)
             {
@@ -2502,6 +2526,21 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 paging = paged is { } laid
                     ? new ChunkPaging(_chunkPageEntries, chunks.Columns[laid.Columns[0]].Length, laid.PageRows, laid.Columns)
                     : null;
+
+                // Each column's geometry beside where its chunks lie, when every chunk's was collected.
+                if (_geometry is { } geometry && Array.TrueForAll(geometry, static column => column.Count > 0)
+                    && chunks.Columns.Count == geometry.Length)
+                {
+                    ColumnMarks[] columns = new ColumnMarks[geometry.Length];
+                    for (int field = 0; field < columns.Length; field++)
+                    {
+                        columns[field] = geometry[field].Count == chunks.Columns[field].Length
+                            ? new ColumnMarks(_blockRows, null, default, [.. geometry[field]])
+                            : new ColumnMarks(_blockRows, null, default, []);
+                    }
+
+                    marks = await closed.AddMarksAsync(_sink, columns, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                }
             }
 
             // Where each shredded key of a variant column lies, for a reader of one key.
@@ -2535,7 +2574,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_slices is { } sliced)
             {
                 _contents = Contents(
-                    sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks());
+                    sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

@@ -50,6 +50,13 @@ internal static class IndexKinds
     public const string SliceChunks = "vorticity.slices.chunks.v1";
 
     /// <summary>
+    /// The geometry of every top-level column's chunks, on the root, a payload region per column: each chunk's encoding
+    /// tree, where each granule starts in its buffers of variable length, and the column's object dictionary, which a read
+    /// of a few granules needs before it reads their bytes alone (<see cref="Indexes.ColumnMarks"/>).
+    /// </summary>
+    public const string Marks = "vorticity.marks.v1";
+
+    /// <summary>
     /// Where each shredded key of a variant column lies, chunk by chunk, on that column: the
     /// encodings and the keys in its options, and a payload region per key holding the range of its
     /// buffers and its tree in each chunk, so a read of one key fetches its bytes alone
@@ -120,7 +127,7 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks
+                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or Marks or VariantPaths or VariantDirectory or VariantBlocks
                 or ColumnSheet or ColumnCounts or ColumnSketches or BlockStats or ColumnWhere => true,
             _ => false,
         };

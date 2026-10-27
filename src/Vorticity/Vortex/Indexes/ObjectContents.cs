@@ -132,6 +132,12 @@ internal sealed class ObjectContents(
     /// </summary>
     internal long PureBlockRows { get; init; } = -1;
 
+    /// <summary>
+    /// Each top-level column's geometry (<see cref="ColumnMarks"/>), the regions of its index entry, in column order: what a
+    /// read of a few granules reads before their bytes alone. Empty when the object keeps none, and its chunks read whole.
+    /// </summary>
+    internal IReadOnlyList<IndexSegment> Marks { get; init; } = [];
+
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
         foreach ((int column, IndexSegment region) in regions)
@@ -171,6 +177,7 @@ internal sealed class ObjectContents(
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
             PureBlockRows = PureBlockRows,
+            Marks = Marks,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -245,6 +252,9 @@ internal sealed class ObjectContents(
     // The rows of the blocks that hold one value of the key's first column and of the block value.
     private const int TagPureBlockRows = 22;
 
+    // A column's geometry, its region, one a column in column order.
+    private const int TagMarks = 23;
+
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
     internal DType SchemaIn(DTypeArena types) => DTypeFlatBuffers.Read(Schema, types);
@@ -312,6 +322,11 @@ internal sealed class ObjectContents(
         }
 
         foreach (IndexSegment region in ChunkDirectories)
+        {
+            Declare(region);
+        }
+
+        foreach (IndexSegment region in Marks)
         {
             Declare(region);
         }
@@ -398,6 +413,11 @@ internal sealed class ObjectContents(
             foreach (IndexSegment directory in ChunkDirectories)
             {
                 IndexDirectory.WriteSegment(ref writer, TagChunkDirectory, directory);
+            }
+
+            foreach (IndexSegment marks in Marks)
+            {
+                IndexDirectory.WriteSegment(ref writer, TagMarks, marks);
             }
 
             writer.WriteBytes(TagSchema, Schema);
@@ -518,6 +538,7 @@ internal sealed class ObjectContents(
             List<long> columnBytes = [];
             List<long> columnChunks = [];
             long pureBlockRows = -1;
+            List<IndexSegment> marks = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -542,6 +563,9 @@ internal sealed class ObjectContents(
                         break;
                     case (TagChunkDirectory, ProtoWireType.LengthDelimited):
                         directories.Add(IndexDirectory.ReadSegment(reader.ReadMessage()));
+                        break;
+                    case (TagMarks, ProtoWireType.LengthDelimited):
+                        marks.Add(IndexDirectory.ReadSegment(reader.ReadMessage()));
                         break;
                     case (TagSchema, ProtoWireType.LengthDelimited):
                         schema = reader.ReadLengthDelimited().ToArray();
@@ -657,6 +681,7 @@ internal sealed class ObjectContents(
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,
                     PureBlockRows = pureBlockRows,
+                    Marks = marks.Count == directories.Count ? marks : [],
                 }
                 : null;
         }

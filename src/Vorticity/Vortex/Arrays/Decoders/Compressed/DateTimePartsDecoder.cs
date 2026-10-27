@@ -65,6 +65,23 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
     public override bool SelectsWithoutFullDecode => true;
 
     /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.ChildCount == 3
+            && context.ChildDecodesRange(in node, 0) && context.ChildDecodesRange(in node, 1) && context.ChildDecodesRange(in node, 2);
+    }
+
+    /// <summary>The three parts' ranges, recomposed: a range of timestamps is the same range of each part.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
+    }
+
+    /// <inheritdoc/>
     public override bool EvaluatesWithoutFullDecode => true;
 
     /// <summary>
@@ -328,7 +345,7 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start = 0, int count = -1)
     {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 3, Id);
@@ -345,15 +362,15 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
         // The array's nullability rides on `days` alone; the other two are always non-nullable.
         CanonicalNode days = DecodePart(
             context, in node, 0, "days", metadata.DaysPType, dtype.Nullability, length,
-            wanted, selective);
+            wanted, selective, start, count);
         CanonicalNode seconds = DecodePart(
             context, in node, 1, "seconds", metadata.SecondsPType, Nullability.NonNullable, length,
-            wanted, selective);
+            wanted, selective, start, count);
         CanonicalNode subseconds = DecodePart(
             context, in node, 2, "subseconds", metadata.SubsecondsPType, Nullability.NonNullable,
-            length, wanted, selective);
+            length, wanted, selective, start, count);
 
-        int produced = selective ? wanted.Length : length;
+        int produced = selective ? wanted.Length : count >= 0 ? count : length;
         int storageIndex = produced == 0
             ? context.Canonical.AddPrimitive(
                 storageDType, 0, days.Validity, PType.I64, VortexBuffer.Empty)
@@ -408,15 +425,20 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
         Nullability nullability,
         int length,
         ReadOnlySpan<int> wanted,
-        bool selective)
+        bool selective,
+        int start,
+        int count)
     {
         DType childType = context.Types.Primitive(ptype, nullability);
+        bool ranged = count >= 0 && (start != 0 || count != length);
         int index = selective
             ? context.DecodeChildSelected(in node, childIndex, childType, length, wanted)
-            : context.DecodeChild(in node, childIndex, childType, length);
+            : ranged
+                ? context.DecodeChildRange(in node, childIndex, childType, length, start, count)
+                : context.DecodeChild(in node, childIndex, childType, length);
         index = CanonicalSupport.ExpandIfConstant(context, index);
         CanonicalNode child = context.Canonical.GetNode(index);
-        int produced = selective ? wanted.Length : length;
+        int produced = selective ? wanted.Length : ranged ? count : length;
 
         if (child.Kind != CanonicalKind.Primitive)
         {

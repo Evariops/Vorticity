@@ -101,18 +101,37 @@ internal sealed class ZigZagDecoder : ArrayDecoder
         return dtype.PType;
     }
 
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.ChildCount == 1 && context.ChildDecodesRange(in node, 0);
+    }
+
+    /// <summary>Transparent to a range as to a take: the child's range, unzigzagged.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
+    }
+
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start = 0, int count = -1)
     {
         PType signed = Signed(in node, dtype);
         PType unsigned = CompressedValues.ToUnsigned(signed);
         DType encodedType = context.Types.Primitive(unsigned, dtype.Nullability);
+        bool ranged = count >= 0 && (start != 0 || count != length);
 
         int encoded = selective
             ? context.DecodeChildSelected(in node, 0, encodedType, length, wanted)
-            : context.DecodeChild(in node, 0, encodedType, length);
-        int produced = selective ? wanted.Length : length;
+            : ranged
+                ? context.DecodeChildRange(in node, 0, encodedType, length, start, count)
+                : context.DecodeChild(in node, 0, encodedType, length);
+        int produced = selective ? wanted.Length : ranged ? count : length;
         encoded = CanonicalSupport.ExpandIfConstant(context, encoded);
         CanonicalNode child = context.Canonical.GetNode(encoded);
         if (child.Kind != CanonicalKind.Primitive)

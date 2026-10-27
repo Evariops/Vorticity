@@ -68,12 +68,36 @@ internal sealed class DecimalBytePartsDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, 0, length);
+    }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.ChildCount == 1 && context.ChildDecodesRange(in node, 0);
+    }
+
+    /// <summary>The part's range, relabelled: the unscaled values of the range's rows.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, start, count);
+    }
+
+    private static int Core(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
         PType msp = Part(in node, dtype);
 
         // The child is typed with the array's own nullability, and its validity becomes the whole
         // array's.
         DType childType = context.Types.Primitive(msp, dtype.Nullability);
-        int childIndex = CanonicalSupport.ExpandIfConstant(context, context.DecodeChild(in node, 0, childType, length));
+        int childIndex = CanonicalSupport.ExpandIfConstant(context, start == 0 && count == length
+            ? context.DecodeChild(in node, 0, childType, length)
+            : context.DecodeChildRange(in node, 0, childType, length, start, count));
+        length = count;
         CanonicalNode child = context.Canonical.GetNode(childIndex);
 
         if (child.Kind != CanonicalKind.Primitive)

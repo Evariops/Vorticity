@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -53,6 +54,12 @@ internal sealed class SliceReader : IDisposable
     // of whose directories is paged, whose readers hold none of it.
     private readonly PagedColumns? _paged;
 
+    // Each column's geometry, its region named by the table of contents, and what a read loaded of it: null for a file that
+    // keeps none, whose chunks a read reads whole.
+    private readonly IReadOnlyList<IndexSegment>? _markRegions;
+    private readonly ColumnMarks?[] _marks;
+    private readonly bool[] _marksRead;
+
     private SliceReader(
         ISegmentReader source, DType schema, VortexReadOptions options, SliceTable slices, string[] encodings,
         IReadOnlyList<IndexSegment> regions, long rows, ObjectContents? contents = null)
@@ -66,6 +73,9 @@ internal sealed class SliceReader : IDisposable
         _counts = new int[regions.Count];
         _rows = rows;
         _paged = contents?.Paging is { } paging ? new PagedColumns(paging, regions.Count, contents) : null;
+        _markRegions = contents?.Marks is { Count: > 0 } marks && marks.Count == regions.Count ? marks : null;
+        _marks = new ColumnMarks?[regions.Count];
+        _marksRead = new bool[regions.Count];
         Slices = slices;
     }
 
@@ -241,42 +251,30 @@ internal sealed class SliceReader : IDisposable
         int[] fields = columns ?? AllColumns();
         await LoadAsync(fields, spans, cancellationToken).ConfigureAwait(false);
         using SegmentRequestSet shared = new SegmentRequestSet();
-        int[][] slots = new int[spans.Count][];
-        for (int s = 0; s < slots.Length; s++)
-        {
-            slots[s] = ChunksOf(shared, spans[s], fields);
-        }
 
-        await _source.ReadManyAsync(shared, cancellationToken).ConfigureAwait(false);
-
-        // Each batch owns a context of its own, its chunks views of the shared reads it retains.
+        // Each batch owns a context of its own, its chunks views of the shared reads it retains, and the regions of the chunks
+        // it reads the granules of in its arena: planned in it before the reads, filled from them after.
+        ScanContext[] contexts = new ScanContext[spans.Count];
+        ChunkRead[][] reads = new ChunkRead[spans.Count][];
         RecordBatch[] batches = new RecordBatch[spans.Count];
         int made = 0;
         try
         {
+            GranuleBytes granules = new GranuleBytes();
+            for (int s = 0; s < spans.Count; s++)
+            {
+                contexts[s] = new ScanContext(_encodings, _options);
+                reads[s] = ChunksOf(shared, contexts[s], spans[s], fields, granules);
+            }
+
+            await _source.ReadManyAsync(shared, cancellationToken).ConfigureAwait(false);
             for (; made < batches.Length; made++)
             {
-                ScanContext context = new ScanContext(_encodings, _options);
-                try
-                {
-                    int[] own = ChunksOf(context.Segments, spans[made], fields);
-                    for (int i = 0; i < own.Length; i++)
-                    {
-                        if (!context.Segments.IsFilled(own[i]))
-                        {
-                            int read = slots[made][i];
-                            context.Segments.SetSharedResult(own[i], shared.GetOwner(read), shared.GetBuffer(read));
-                        }
-                    }
-
-                    context.Segments.Complete();
-                    batches[made] = Batch(context, spans[made], fields, columns, own);
-                }
-                catch
-                {
-                    context.Dispose();
-                    throw;
-                }
+                ScanContext context = contexts[made];
+                Fill(context, shared, reads[made]);
+                context.Segments.Complete();
+                batches[made] = Batch(context, spans[made], fields, columns, reads[made]);
+                contexts[made] = null!;
             }
 
             return batches;
@@ -286,6 +284,11 @@ internal sealed class SliceReader : IDisposable
             for (int i = 0; i < made; i++)
             {
                 batches[i].Dispose();
+            }
+
+            foreach (ScanContext? context in contexts)
+            {
+                context?.Dispose();
             }
 
             throw;
@@ -301,9 +304,10 @@ internal sealed class SliceReader : IDisposable
         ScanContext context = new ScanContext(_encodings, _options);
         try
         {
-            int[] slots = ChunksOf(context.Segments, span, fields);
+            ChunkRead[] reads = ChunksOf(context.Segments, context, span, fields, new GranuleBytes());
             await _source.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
-            return Batch(context, span, fields, columns, slots);
+            Fill(context, context.Segments, reads);
+            return Batch(context, span, fields, columns, reads);
         }
         catch
         {
@@ -312,30 +316,150 @@ internal sealed class SliceReader : IDisposable
         }
     }
 
-    /// <summary>Registers in <paramref name="requests"/> the chunks of <paramref name="fields"/> that hold the span's rows: their slots, field by field.</summary>
-    private int[] ChunksOf(SegmentRequestSet requests, RowRange span, int[] fields)
+    /// <summary>
+    /// What reading one chunk of a span takes: its whole segment, at <see cref="Whole"/>; or the ranges of its region of
+    /// buffers that the span's granules hold, read into <see cref="Region"/>, which its tree is loaded over.
+    /// </summary>
+    private sealed class ChunkRead(ChunkSpan chunk)
     {
-        int chunkCount = 0;
-        foreach (int field in fields)
-        {
-            chunkCount += Overlapping(field, span.Start, span.Length).Length;
-        }
+        internal ChunkSpan Chunk { get; } = chunk;
 
-        int[] slots = new int[chunkCount];
-        int next = 0;
+        /// <summary>The whole segment's slot in the requests it was registered in, then in the context's own; -1 for granules.</summary>
+        internal int Whole { get; set; } = -1;
+
+        /// <summary>The chunk's tree, for granules.</summary>
+        internal ReadOnlyMemory<byte> Tree { get; init; }
+
+        /// <summary>The chunk's region of buffers, in the batch's arena, zeroed, for granules.</summary>
+        internal VortexBuffer Region { get; init; }
+
+        /// <summary>The first slot of the ranges, registered one after another.</summary>
+        internal int FirstSlot { get; init; }
+
+        /// <summary>Where each range lies in the region.</summary>
+        internal (long Start, long End)[] Ranges { get; init; } = [];
+    }
+
+    /// <summary>
+    /// Registers in <paramref name="requests"/> what reading the chunks of <paramref name="fields"/> that hold the span's rows
+    /// takes, field by field: a chunk the span covers whole, or whose granules cannot be read alone, as its segment; a chunk
+    /// it covers in part, when the column's marks say where its granules lie, as the ranges of its region they hold.
+    /// </summary>
+    private ChunkRead[] ChunksOf(SegmentRequestSet requests, ScanContext context, RowRange span, int[] fields, GranuleBytes granules)
+    {
+        List<ChunkRead> reads = [];
         foreach (int field in fields)
         {
+            ColumnMarks? marks = System.Threading.Volatile.Read(ref _marks[field]);
             foreach (ChunkSpan chunk in Overlapping(field, span.Start, span.Length))
             {
-                slots[next++] = requests.Add(new SegmentSpec(chunk.Offset, chunk.Length, chunk.AlignmentExponent, 0, 0));
+                if (marks is not null && Granules(requests, context, chunk, span, marks, _schema.GetField(field), granules) is { } ranged)
+                {
+                    reads.Add(ranged);
+                    continue;
+                }
+
+                reads.Add(new ChunkRead(chunk) { Whole = requests.Add(new SegmentSpec(chunk.Offset, chunk.Length, chunk.AlignmentExponent, 0, 0)) });
             }
         }
 
-        return slots;
+        return [.. reads];
+    }
+
+    /// <summary>The share of a chunk's bytes past which its granules are read with the rest of it, in one request.</summary>
+    private const double WholeShare = 0.75;
+
+    /// <summary>
+    /// The read of the span's granules of <paramref name="chunk"/>, their ranges registered in <paramref name="requests"/>;
+    /// null when the span covers the chunk whole, its geometry is not known, or its granules hold most of its bytes.
+    /// </summary>
+    private static ChunkRead? Granules(
+        SegmentRequestSet requests, ScanContext context, ChunkSpan chunk, RowRange span, ColumnMarks marks, DType type,
+        GranuleBytes granules)
+    {
+        long from = Math.Max(span.Start, chunk.FirstRow);
+        long to = Math.Min(span.End, chunk.EndRow);
+        if ((from == chunk.FirstRow && to == chunk.EndRow) || (uint)chunk.Ordinal >= (uint)marks.Chunks.Length)
+        {
+            return null;
+        }
+
+        ChunkGeometry geometry = marks.Chunks[chunk.Ordinal];
+        (long Start, long Length)[] layout = ArrayBlobReader.BufferLayout(geometry.Tree.Span, out long regionLength);
+        if (regionLength > chunk.Length || regionLength <= 0)
+        {
+            return null;
+        }
+
+        VortexBuffer region = context.Canonical.Allocate(checked((int)regionLength), 1 << chunk.AlignmentExponent, out _);
+        context.Decode.LoadBlob(geometry.Tree.Span, region);
+        ArrayNode root = context.Nodes.Root;
+        int start = (int)(from - chunk.FirstRow);
+        int count = (int)(to - from);
+        if (!context.Decode.DecodesRange(in root)
+            || !granules.TryPlan(in root, Width(type), checked((int)chunk.Rows), start, count, layout, geometry, marks.GranuleRows)
+            || granules.Bytes > WholeShare * chunk.Length)
+        {
+            return null;
+        }
+
+        (long Start, long End)[] ranges = [.. granules.Ranges];
+        int first = -1;
+        foreach ((long rangeStart, long rangeEnd) in ranges)
+        {
+            int slot = requests.Add(new SegmentSpec(chunk.Offset + (ulong)rangeStart, checked((uint)(rangeEnd - rangeStart)), 0, 0, 0));
+            first = first < 0 ? slot : first;
+        }
+
+        return new ChunkRead(chunk) { Tree = geometry.Tree, Region = region, FirstSlot = first, Ranges = ranges };
+    }
+
+    /// <summary>The bytes of a value of <paramref name="type"/>, a number or the storage of one; 0 for another type.</summary>
+    private static int Width(DType type) => type.Kind switch
+    {
+        DTypeKind.Primitive => type.PType.ByteWidth(),
+        DTypeKind.Extension => Width(type.StorageType),
+        _ => 0,
+    };
+
+    /// <summary>
+    /// The reads of a span made the context's: a whole segment read into shared requests lent to the context, a chunk's
+    /// granules copied into its region from wherever they were read.
+    /// </summary>
+    private static void Fill(ScanContext context, SegmentRequestSet requests, ChunkRead[] reads)
+    {
+        bool shared = !ReferenceEquals(requests, context.Segments);
+        foreach (ChunkRead read in reads)
+        {
+            if (read.Ranges.Length == 0)
+            {
+                if (shared)
+                {
+                    ChunkSpan chunk = read.Chunk;
+                    int own = context.Segments.Add(new SegmentSpec(chunk.Offset, chunk.Length, chunk.AlignmentExponent, 0, 0));
+                    if (!context.Segments.IsFilled(own))
+                    {
+                        context.Segments.SetSharedResult(own, requests.GetOwner(read.Whole), requests.GetBuffer(read.Whole));
+                    }
+
+                    read.Whole = own;
+                }
+
+                continue;
+            }
+
+            // The region is the batch's arena's, writable: the decode that follows reads it as the chunk's bytes.
+            Span<byte> region = MemoryMarshal.CreateSpan(ref MemoryMarshal.GetReference(read.Region.Span), read.Region.Length);
+            for (int r = 0; r < read.Ranges.Length; r++)
+            {
+                (long start, long end) = read.Ranges[r];
+                requests.GetBuffer(read.FirstSlot + r).Span[..(int)(end - start)].CopyTo(region[(int)start..]);
+            }
+        }
     }
 
     /// <summary>The span's rows decoded from the chunks <paramref name="context"/> holds, as a batch that adopts it.</summary>
-    private RecordBatch Batch(ScanContext context, RowRange span, int[] fields, int[]? columns, int[] slots)
+    private RecordBatch Batch(ScanContext context, RowRange span, int[] fields, int[]? columns, ChunkRead[] reads)
     {
         int length = checked((int)span.Length);
 
@@ -346,7 +470,7 @@ internal sealed class SliceReader : IDisposable
         int next = 0;
         for (int i = 0; i < fields.Length; i++)
         {
-            decoded[i] = Column(context, schema.GetField(i), Overlapping(fields[i], span.Start, span.Length), span, length, slots, ref next);
+            decoded[i] = Column(context, schema.GetField(i), Overlapping(fields[i], span.Start, span.Length).Length, span, length, reads, ref next);
         }
 
         int root = context.Canonical.AddStruct(
@@ -443,12 +567,31 @@ internal sealed class SliceReader : IDisposable
             }
         }
 
-        if (_paged is null)
+        // The columns' geometry beside their directories, in a request set of its own read at once with theirs.
+        ValueTask marks = LoadMarksAsync(fields, cancellationToken);
+        try
         {
-            await LoadWholeAsync(fields, cancellationToken).ConfigureAwait(false);
-            return;
+            if (_paged is null)
+            {
+                await LoadWholeAsync(fields, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await LoadPagedAsync(fields, spans, cancellationToken).ConfigureAwait(false);
+            }
         }
+        finally
+        {
+            await marks.ConfigureAwait(false);
+        }
+    }
 
+    /// <summary>
+    /// Reads what the <paramref name="spans"/> of the <paramref name="fields"/> need of a file whose directories lie in pages:
+    /// a column's whole directory, or a paged one's page table and the pages that hold the spans' rows.
+    /// </summary>
+    private async ValueTask LoadPagedAsync(int[] fields, IReadOnlyList<RowRange> spans, CancellationToken cancellationToken)
+    {
         // What each column asks, by its slot: its directory or its page table (page -1), and its pages, a page with its checksum
         // when its table is known, which the synopsis cache keeps it by. A read whose directories are all in hand, as a warm
         // question's, asks nothing and makes no set.
@@ -532,6 +675,61 @@ internal sealed class SliceReader : IDisposable
             lock (_gate)
             {
                 _paged!.Pages[field]![page] ??= chunks;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads the geometry of the <paramref name="fields"/> not read yet, when the file keeps it: a region a column, which a
+    /// read of a few granules plans their bytes by. A region that does not decode leaves its column's chunks read whole.
+    /// </summary>
+    private async ValueTask LoadMarksAsync(int[] fields, CancellationToken cancellationToken)
+    {
+        if (_markRegions is null)
+        {
+            return;
+        }
+
+        int missing = 0;
+        foreach (int field in fields)
+        {
+            missing += System.Threading.Volatile.Read(ref _marksRead[field]) ? 0 : 1;
+        }
+
+        if (missing == 0)
+        {
+            return;
+        }
+
+        using SegmentRequestSet requests = new SegmentRequestSet(missing);
+        int[] slots = new int[fields.Length];
+        IndexSegment[] regions = new IndexSegment[missing];
+        for (int i = 0; i < fields.Length; i++)
+        {
+            IndexSegment region = _markRegions[fields[i]];
+            slots[i] = System.Threading.Volatile.Read(ref _marksRead[fields[i]])
+                ? -1
+                : requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+            if (slots[i] >= 0)
+            {
+                regions[slots[i]] = region;
+            }
+        }
+
+        await _source.ReadRegionsAsync(requests, regions.AsMemory(0, requests.Count), cancellationToken).ConfigureAwait(false);
+        for (int i = 0; i < fields.Length; i++)
+        {
+            if (slots[i] < 0)
+            {
+                continue;
+            }
+
+            ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[i]).Span;
+            ColumnMarks? marks = _markRegions[fields[i]].Holds(bytes) ? ColumnMarks.From(bytes.ToArray()) : null;
+            lock (_gate)
+            {
+                _marks[fields[i]] ??= marks;
+                System.Threading.Volatile.Write(ref _marksRead[fields[i]], true);
             }
         }
     }
@@ -649,20 +847,33 @@ internal sealed class SliceReader : IDisposable
         return arena.Struct(names, types, _schema.Nullability);
     }
 
-    /// <summary>One column's rows of the slice: its <paramref name="chunks"/> that overlap it decoded, cut to the slice and joined.</summary>
+    /// <summary>
+    /// One column's rows of the span: its <paramref name="chunks"/> chunks that overlap it, each decoded whole and cut to the
+    /// span, or its granules decoded alone over the region they were read into, joined.
+    /// </summary>
     private static int Column(
-        ScanContext context, DType type, ReadOnlySpan<ChunkSpan> chunks, RowRange span, int length, int[] slots, ref int next)
+        ScanContext context, DType type, int chunks, RowRange span, int length, ChunkRead[] reads, ref int next)
     {
-        int[] parts = new int[chunks.Length];
-        for (int i = 0; i < chunks.Length; i++)
+        int[] parts = new int[chunks];
+        for (int i = 0; i < chunks; i++)
         {
-            ChunkSpan chunk = chunks[i];
-            context.Decode.LoadBlob(context.Segments.GetBuffer(slots[next++]));
-            ArrayNode root = context.Nodes.Root;
-            int node = context.Decode.DecodeRoot(in root, type, checked((int)chunk.Rows));
+            ChunkRead read = reads[next++];
+            ChunkSpan chunk = read.Chunk;
             long from = Math.Max(span.Start, chunk.FirstRow);
             long to = Math.Min(span.End, chunk.EndRow);
-            parts[i] = CanonicalSlice.Slice(context.Decode, node, (int)(from - chunk.FirstRow), (int)(to - from));
+            if (read.Ranges.Length == 0)
+            {
+                context.Decode.LoadBlob(context.Segments.GetBuffer(read.Whole));
+                ArrayNode root = context.Nodes.Root;
+                int node = context.Decode.DecodeRoot(in root, type, checked((int)chunk.Rows));
+                parts[i] = CanonicalSlice.Slice(context.Decode, node, (int)(from - chunk.FirstRow), (int)(to - from));
+                continue;
+            }
+
+            context.Decode.LoadBlob(read.Tree.Span, read.Region);
+            ArrayNode ranged = context.Nodes.Root;
+            parts[i] = context.Decode.DecodeRootRange(
+                in ranged, type, checked((int)chunk.Rows), (int)(from - chunk.FirstRow), (int)(to - from), keepEncoding: false);
         }
 
         return parts.Length == 1 ? parts[0] : CanonicalConcat.Concat(context.Decode, type, length, parts);

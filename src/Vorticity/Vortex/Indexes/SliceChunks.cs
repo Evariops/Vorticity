@@ -7,8 +7,8 @@ using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Indexes;
 
-/// <summary>One chunk of a column: where its segment lies, its alignment, and the rows it holds.</summary>
-internal readonly record struct ChunkSpan(ulong Offset, uint Length, byte AlignmentExponent, long FirstRow, long Rows)
+/// <summary>One chunk of a column: where its segment lies, its alignment, the rows it holds, and its place among the column's chunks.</summary>
+internal readonly record struct ChunkSpan(ulong Offset, uint Length, byte AlignmentExponent, long FirstRow, long Rows, int Ordinal)
 {
     internal long EndRow => FirstRow + Rows;
 }
@@ -232,7 +232,7 @@ internal sealed class SliceChunks
                 return null;
             }
 
-            chunks[i] = new ChunkSpan(BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]), BinaryPrimitives.ReadUInt32LittleEndian(entry[16..]), table.Alignment, first, rows);
+            chunks[i] = new ChunkSpan(BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]), BinaryPrimitives.ReadUInt32LittleEndian(entry[16..]), table.Alignment, first, rows, (page * table.PageEntries) + i);
             row += rows;
         }
 
@@ -435,7 +435,7 @@ internal sealed class SliceChunks
                     uint length = checked((uint)reader.ReadVarint());
                     byte alignment = checked((byte)reader.ReadVarint());
                     long rows = checked((long)reader.ReadVarint());
-                    rented[i] = new ChunkSpan(offset, length, alignment, row, rows);
+                    rented[i] = new ChunkSpan(offset, length, alignment, row, rows, i);
                     row = checked(row + rows);
                 }
 
@@ -490,7 +490,7 @@ internal sealed class SliceChunks
                 uint length = checked((uint)reader.ReadVarint());
                 byte alignment = checked((byte)reader.ReadVarint());
                 long rows = checked((long)reader.ReadVarint());
-                chunks[i] = new ChunkSpan(offset, length, alignment, row, rows);
+                chunks[i] = new ChunkSpan(offset, length, alignment, row, rows, i);
                 row = checked(row + rows);
             }
 

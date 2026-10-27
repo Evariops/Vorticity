@@ -678,7 +678,7 @@ internal sealed class IndexWriter : IDisposable
         {
             // The slice kinds and the variant paths describe the file as its writer cut it, which an
             // append changes, and the path directory counts rows the append does not parse.
-            if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.VariantPaths
+            if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.Marks or IndexKinds.VariantPaths
                     or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks
                 || Kept(entry, boundary) is not { } kept)
             {
@@ -1755,6 +1755,26 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
+    /// Writes the geometry of every column's chunks, a region per column from the sink's position, and adds the entry that
+    /// names them: on the root, one run over every block of the file's <paramref name="rows"/>; the regions, in column order.
+    /// </summary>
+    internal async ValueTask<IndexSegment[]> AddMarksAsync(
+        ISegmentSink sink, IReadOnlyList<ColumnMarks> columns, long rows, int blockRows, CancellationToken cancellationToken)
+    {
+        IndexSegment[] regions = new IndexSegment[columns.Count];
+        for (int column = 0; column < regions.Length; column++)
+        {
+            byte[] bytes = columns[column].ToBytes();
+            regions[column] = IndexSegment.Of(sink.Position, bytes, 0);
+            await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        }
+
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(IndexKinds.Marks, [], (ulong)length, [], [new IndexRun(0, Blocks(rows, length), regions, [])]));
+        return regions;
+    }
+
+    /// <summary>
     /// Writes where each shredded key of the variant column <paramref name="field"/> lies, a region per
     /// key from the sink's position, and adds the entry that names them: on the column, the encodings
     /// and the keys in its options, one run over every block of the file's <paramref name="rows"/>.
@@ -2170,7 +2190,7 @@ internal sealed class IndexWriter : IDisposable
         // A file's slices, its variant paths and its columns' sheets and counts ride in the directory whatever the policy
         // asks.
         if (!Enabled && _preserved is not { Count: > 0 }
-            && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
+            && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.Marks or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
                 or IndexKinds.VariantBlocks or IndexKinds.ColumnSheet or IndexKinds.ColumnCounts or IndexKinds.ColumnSketches))
         {
             return null;

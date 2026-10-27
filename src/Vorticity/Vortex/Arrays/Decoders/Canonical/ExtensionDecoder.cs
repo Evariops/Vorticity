@@ -48,6 +48,31 @@ internal sealed class ExtensionDecoder : ArrayDecoder
     }
 
     /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.ChildCount == 1 && context.ChildDecodesRange(in node, 0);
+    }
+
+    /// <summary>The storage's range under the label: a range of timestamps is a range of their integers.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        EncodingMetadata.RequireEmpty(node.Metadata, Id);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 1, Id);
+        CanonicalSupport.RequireKind(dtype, DTypeKind.Extension, Id);
+
+        DType storageDType = dtype.StorageType;
+        ValidateExtensionDType(dtype, storageDType, context.Scan.HasFile ? context.Scan.File.Session.Options.Extensions : null);
+        context.KeepEncodingInChild();
+        int storageIndex = context.DecodeChildRange(in node, 0, storageDType, length, start, count);
+        return context.Canonical.AddExtension(dtype, count, storageIndex);
+    }
+
+    /// <inheritdoc/>
     public override bool EvaluatesWithoutFullDecode => true;
 
     /// <summary>

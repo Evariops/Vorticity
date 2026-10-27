@@ -167,6 +167,39 @@ internal static class ArrayBlobReader
         arena.SetRoot(root);
     }
 
+    /// <summary>
+    /// Where each buffer of a blob lies in its region, from its tree alone: what a read of a few of a chunk's bytes plans
+    /// before it reads any, and the region's length, the buffers' end.
+    /// </summary>
+    /// <param name="arrayTree">The blob's <c>Array</c> FlatBuffer.</param>
+    /// <param name="regionLength">The bytes the buffers take, their padding included.</param>
+    /// <returns>Each buffer's start and length, in the blob's order.</returns>
+    /// <exception cref="VortexFormatException">The tree is malformed, or declares a buffer compression.</exception>
+    internal static (long Start, long Length)[] BufferLayout(ReadOnlySpan<byte> arrayTree, out long regionLength)
+    {
+        int tableBudget = VortexLimits.MaxFlatBufferTables;
+        ArrayView view = ArrayView.Root(arrayTree, ref tableBudget);
+        ReadOnlySpan<BufferSpec> specs = view.Buffers;
+        (long Start, long Length)[] layout = new (long, long)[specs.Length];
+        long offset = 0;
+        for (int i = 0; i < specs.Length; i++)
+        {
+            ref readonly BufferSpec spec = ref specs[i];
+            if (spec.Compression != (byte)BufferCompression.None)
+            {
+                ThrowBufferCompression(i, spec.Compression);
+            }
+
+            _ = VortexLimits.CheckAlignmentExponent(spec.AlignmentExponent);
+            long start = offset + spec.Padding;
+            layout[i] = (start, spec.Length);
+            offset = start + spec.Length;
+        }
+
+        regionLength = offset;
+        return layout;
+    }
+
     private static void ResolveBuffers(ArrayNodeArena arena, ArrayView view, VortexBuffer region)
     {
         ReadOnlySpan<BufferSpec> specs = view.Buffers;
