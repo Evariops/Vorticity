@@ -229,14 +229,20 @@ one the tree and the merges compare. A granule's rows hold keys from its key to 
 included, since granules are not cut where the key changes.
 
 The object's table of contents names the entry and its payload, so a reader reads the options with no
-open of the object, then the pages a range of the key reaches, all in one request, and keeps the pages
-it read with the entry's table of contents. A scan of an object's rows under a range of the key's first
-column covers the granules the index keeps: from the first whose next key reaches the range's low end to
-the last whose key does not pass its high end, found by halves over the pages, then over their
-granules. About sixteen bytes a granule for a prefix of a few components: an object of a gibibyte, some
-3 300 granules, holds an index of some fifty kilobytes. The writer builds it at completion from the keys
-the job declares, over its own granules and rows. It replaces the slices of `vorticity.slices.v1`, cut
-at changes of key, retired with it; an append drops it, since it describes the file as its writer cut it.
+open of the object, then every page in one request, and keeps them with the entry's table of contents.
+A scan under a filter on the key's components reads the granules whose bounds may hold a row it keeps.
+Two keys bound the rows between them: on the components they share, those values; on the next one, a
+value between theirs; on the rest, anything. That box, mapped to the columns the components read, a
+function's bounds through its preimage, is judged by the pruner of the summaries; a range of entries it
+refutes is passed over, and any other of more than one entry is cut in eight, each judged in turn, over
+the pages first, then over the granules of the pages kept. Leading components bound a range of granules
+in a few judgments; a later one prunes where the components before it hold few values, as a filter on
+the hour under `(service, hour)` keeps in each service the granules of its hours. An object's own key
+range, from its tree key to its last key, is judged the same way before it is opened. About sixteen
+bytes a granule for a prefix of a few components: an object of a gibibyte, some 3 300 granules, holds an
+index of some fifty kilobytes. A dataset's writers build it at completion from the keys they declare,
+over the object's own granules and rows. It replaces the slices of `vorticity.slices.v1`, cut at
+changes of key, retired with it.
 
 A file with a table of contents also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
 root. Its options hold the file's table of array encodings, and its one run has a payload region per

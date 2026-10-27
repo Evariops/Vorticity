@@ -317,8 +317,7 @@ internal sealed class DatasetScanSource : ScanSource
         long to = spec.Rows?.End ?? long.MaxValue;
         List<(PositionedObject Held, RowRange Rows)> objects = [];
         long total = 0;
-        ClusteringKey? key = _dataset.Key;
-        (byte[] Low, byte[] High)? bounds = spec.Filter is { } bounded && key is not null ? DatasetScanBuilder.KeyBounds(bounded, key) : null;
+        KeyPruning? pruning = spec.Options.UseStatistics && spec.Options.UseIndexes ? KeyPruning.Of(_version.Schema, spec.Filter) : null;
         CountsAnswer? answer = spec.States is { } request && spec.Options.UseSynopses
             && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
             ? CountsAnswer.Of(request, spec.Filter, _version)
@@ -348,19 +347,12 @@ internal sealed class DatasetScanSource : ScanSource
                 continue;
             }
 
-            // An object reads the granules the filter's range of the key's first column reaches alone, by its sparse index:
-            // those are the rows its lanes share, where pieces cut over every row of it would leave most lanes reading nothing.
-            if (bounds is { } range && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } contents)
+            // An object reads the granules the key's pruning keeps alone, by its sparse index: those are the rows its lanes
+            // share, where pieces cut over every row of it would leave most lanes reading nothing.
+            foreach (RowRange kept in await KeptAsync(held, pruning, new RowRange(start, end), cancellationToken).ConfigureAwait(false))
             {
-                RowRange window = await _dataset.KeyRowsAsync(held.Entry, contents, range.Low, range.High, cancellationToken).ConfigureAwait(false);
-                start = System.Math.Max(start, held.FirstRow + window.Start);
-                end = System.Math.Min(end, held.FirstRow + window.End);
-            }
-
-            if (end > start)
-            {
-                objects.Add((held, new RowRange(start, end)));
-                total += end - start;
+                objects.Add((held, kept));
+                total += kept.Length;
             }
         }
 
@@ -443,29 +435,69 @@ internal sealed class DatasetScanSource : ScanSource
         SummaryPruner? pruner = pass.Options.UseStatistics && pass.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
         long from = pass.Rows?.Start ?? 0;
         long to = pass.Rows?.End ?? long.MaxValue;
-        ClusteringKey? key = _dataset.Key;
-        (byte[] Low, byte[] High)? bounds = pass.Filter is { } bounded && key is not null ? DatasetScanBuilder.KeyBounds(bounded, key) : null;
+        KeyPruning? pruning = pass.Options.UseStatistics && pass.Options.UseIndexes ? KeyPruning.Of(_version.Schema, pass.Filter) : null;
         List<Task<RowRange[]>> objects = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
 
-            // An object reads the granules the filter's range of the key's first column reaches alone, by its sparse index.
-            if (bounds is { } range && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } contents)
+            // An object reads the granules the key's pruning keeps alone, by its sparse index.
+            foreach (RowRange kept in await KeptAsync(held, pruning, new RowRange(start, end), cancellationToken).ConfigureAwait(false))
             {
-                RowRange window = await _dataset.KeyRowsAsync(held.Entry, contents, range.Low, range.High, cancellationToken).ConfigureAwait(false);
-                start = System.Math.Max(start, held.FirstRow + window.Start);
-                end = System.Math.Min(end, held.FirstRow + window.End);
-            }
-
-            if (end > start)
-            {
-                objects.Add(ClustersAsync(held, new RowRange(start, end), pass.Projection, rangeBytes, cancellationToken));
+                objects.Add(ClustersAsync(held, kept, pass.Projection, rangeBytes, cancellationToken));
             }
         }
 
         return await Task.WhenAll(objects).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The parts of <paramref name="rows"/>, rows of the dataset inside an object's, that the key's pruning keeps of it
+    /// (<see cref="KeyPruning"/>): none when the filter refutes its key range, the ranges of the granules it may keep a row of
+    /// by its sparse index, and the rows whole otherwise, or for an object with marked rows, whose index counts the rows
+    /// before the marks.
+    /// </summary>
+    private async ValueTask<List<RowRange>> KeptAsync(PositionedObject held, KeyPruning? pruning, RowRange rows, CancellationToken cancellationToken)
+    {
+        List<RowRange> kept = [];
+        if (rows.IsEmpty)
+        {
+            return kept;
+        }
+
+        ReadOnlyMemory<byte> first = held.TreeKey.Length > VortexDataset.UidBytes ? VortexDataset.OrderOf(held.TreeKey) : default;
+        if (pruning is null || first.IsEmpty)
+        {
+            kept.Add(rows);
+            return kept;
+        }
+
+        if (!pruning.MayHold(first.Span, held.Entry.LastKey.Span))
+        {
+            return kept;
+        }
+
+        if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: not null } contents
+            || await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false) is not { } keys
+            || keys.Rows != held.Entry.PhysicalRows)
+        {
+            kept.Add(rows);
+            return kept;
+        }
+
+        int prefix = _version.Schema.Partitioned ? _version.Schema.Tree!.PrefixLength(first.Span, 1) : 0;
+        foreach ((int from, int end) in pruning.Granules(keys, prefix > 0 ? first.Span[..prefix] : default))
+        {
+            long start = System.Math.Max(rows.Start, held.FirstRow + ((long)from * keys.GranuleRows));
+            long stop = System.Math.Min(rows.End, held.FirstRow + System.Math.Min((long)end * keys.GranuleRows, keys.Rows));
+            if (stop > start)
+            {
+                kept.Add(new RowRange(start, stop));
+            }
+        }
+
+        return kept;
     }
 
     /// <summary>The rows <paramref name="rows"/> of an object as an estimate's ranges, between its chunks: a deleted row counts for none.</summary>

@@ -3152,13 +3152,12 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// The sparse index of the object <paramref name="entry"/> names, with the pages that may hold a key from
-    /// <paramref name="low"/> to keys that start with <paramref name="high"/>, read with no open of the object and kept on its
-    /// table of contents: its table, then its pages in one request, none once they are held. Null when the object keeps
-    /// none, or what was read does not decode.
+    /// The sparse index of the object <paramref name="entry"/> names, every page in hand, read with no open of the object and
+    /// kept on its table of contents: its table, then its pages in one request, some fifty kilobytes for an object of a
+    /// gibibyte; none once they are held. Null when the object keeps none, or what was read does not decode.
     /// </summary>
     internal async ValueTask<Indexes.GranuleKeys?> KeyIndexAsync(
-        ObjectEntry entry, Indexes.ObjectContents contents, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high, CancellationToken cancellationToken)
+        ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken)
     {
         if (contents.KeyIndex is not { } table)
         {
@@ -3166,7 +3165,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         Indexes.GranuleKeys? keys = contents.Keys;
-        if (keys is not null && Held(keys, keys.PagesOf(low.Span, high.Span)))
+        if (keys is { HoldsEvery: true })
         {
             return keys;
         }
@@ -3186,8 +3185,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 keys = contents.KeepKeys(read);
             }
 
-            (int first, int end) = keys.PagesOf(low.Span, high.Span);
-            if (Held(keys, (first, end)))
+            if (keys.HoldsEvery)
             {
                 return keys;
             }
@@ -3204,7 +3202,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 return null;
             }
 
-            for (int page = first; page < end; page++)
+            for (int page = 0; page < keys.Pages; page++)
             {
                 (long offset, int length, ulong _) = keys.PageAt(page);
                 if (!keys.HasPage(page) && (offset + length > all.Length || !keys.TakePage(page, all.Slice((int)offset, length))))
@@ -3216,40 +3214,8 @@ public sealed class VortexDataset : IAsyncDisposable
             return keys;
         }
 
-        static bool Held(Indexes.GranuleKeys keys, (int First, int End) pages)
-        {
-            for (int page = pages.First; page < pages.End; page++)
-            {
-                if (!keys.HasPage(page))
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
         static Serialization.Schemas.SegmentSpec SpecOf(Indexes.IndexSegment region) =>
             new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0);
-    }
-
-    /// <summary>
-    /// The rows of the object <paramref name="entry"/> names whose keys may lie from <paramref name="low"/> to keys that start
-    /// with <paramref name="high"/>, by its sparse index: from the first granule that may hold one to the last; every row when
-    /// the object keeps no index.
-    /// </summary>
-    internal async ValueTask<RowRange> KeyRowsAsync(
-        ObjectEntry entry, Indexes.ObjectContents contents, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high, CancellationToken cancellationToken)
-    {
-        if (await KeyIndexAsync(entry, contents, low, high, cancellationToken).ConfigureAwait(false) is not { } keys)
-        {
-            return new RowRange(0, entry.PhysicalRows);
-        }
-
-        (int first, int end) = keys.GranulesOf(low.Span, high.Span);
-        return first < end
-            ? new RowRange((long)first * keys.GranuleRows, Math.Min((long)end * keys.GranuleRows, keys.Rows))
-            : RowRange.Empty;
     }
 
     /// <summary>

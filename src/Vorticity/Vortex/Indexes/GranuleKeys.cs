@@ -173,25 +173,6 @@ internal sealed class GranuleKeys
     }
 
     /// <summary>
-    /// The pages whose granules may hold a key from <paramref name="low"/> to keys that start with
-    /// <paramref name="high"/>, both included: <c>[first, end)</c>, empty when none may. A bound left empty bounds nothing.
-    /// </summary>
-    internal (int First, int End) PagesOf(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high) => Range(Pages, 0, Pages, low, high, granules: false);
-
-    /// <summary>
-    /// The granules that may hold a key from <paramref name="low"/> to keys that start with <paramref name="high"/>, both
-    /// included: <c>[first, end)</c>, empty when none may. The pages <see cref="PagesOf"/> names in hand first, the only ones
-    /// the search reads.
-    /// </summary>
-    internal (int First, int End) GranulesOf(ReadOnlySpan<byte> low, ReadOnlySpan<byte> high)
-    {
-        (int first, int end) = PagesOf(low, high);
-        return first < end
-            ? Range(Granules, first * PageEntries, (int)Math.Min((long)end * PageEntries, Granules), low, high, granules: true)
-            : (0, 0);
-    }
-
-    /// <summary>
     /// The first granule whose key lies at or past <paramref name="key"/>, <see cref="Granules"/> when none does: the one
     /// before it may hold keys at or past it too, those before that none. Every page in hand first.
     /// </summary>
@@ -214,89 +195,6 @@ internal sealed class GranuleKeys
 
         return lo;
     }
-
-    /// <summary>The key of entry <paramref name="entry"/>: a granule's, or a page's first.</summary>
-    private ReadOnlySpan<byte> EntryKey(int entry, bool granules) => granules ? Key(entry) : _pageKeys[entry];
-
-    /// <summary>
-    /// The key entry <paramref name="entry"/> − 1 runs to: entry <paramref name="entry"/>'s, the last key past the last
-    /// entry; a granule that starts a page has its page's first key, which the table holds.
-    /// </summary>
-    private ReadOnlySpan<byte> NextKey(int entry, int count, bool granules) =>
-        entry == count ? LastKey
-        : !granules ? _pageKeys[entry]
-        : entry % PageEntries == 0 ? _pageKeys[entry / PageEntries]
-        : Key(entry);
-
-    /// <summary>
-    /// The entries <c>[first, end)</c> among <paramref name="from"/> to <paramref name="to"/> of <paramref name="count"/>,
-    /// granules or pages, each starting at its key and running to the next's, that may hold a key in the bounds: past the
-    /// last whose next key lies below <paramref name="low"/>, up to the last whose key does not lie past
-    /// <paramref name="high"/> as a prefix. The entries outside the window hold none.
-    /// </summary>
-    private (int First, int End) Range(int count, int from, int to, ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, bool granules)
-    {
-        if (from >= to)
-        {
-            return (from, from);
-        }
-
-        // The first entry whose next key reaches the low bound: the next keys are the entries' past the first, then the key
-        // past the window.
-        int first = from;
-        if (!low.IsEmpty)
-        {
-            int lo = from + 1;
-            int hi = to;
-            while (lo < hi)
-            {
-                int middle = lo + ((hi - lo) >> 1);
-                if (EntryKey(middle, granules).SequenceCompareTo(low) < 0)
-                {
-                    lo = middle + 1;
-                }
-                else
-                {
-                    hi = middle;
-                }
-            }
-
-            // Entry lo − 1 runs to entry lo's key, the first at or past the bound; past the window, to the key past it.
-            first = lo - 1;
-            if (lo == to && NextKey(to, count, granules).SequenceCompareTo(low) < 0)
-            {
-                return (to, to);
-            }
-        }
-
-        // One past the last entry whose key does not lie past the high bound, compared over the bound's bytes.
-        int end = to;
-        if (!high.IsEmpty)
-        {
-            int lo = first;
-            int hi = to;
-            while (lo < hi)
-            {
-                int middle = lo + ((hi - lo) >> 1);
-                if (Past(EntryKey(middle, granules), high))
-                {
-                    hi = middle;
-                }
-                else
-                {
-                    lo = middle + 1;
-                }
-            }
-
-            end = lo;
-        }
-
-        return first < end ? (first, end) : (first, first);
-    }
-
-    /// <summary>Whether <paramref name="key"/> lies past every key that starts with <paramref name="high"/>.</summary>
-    private static bool Past(ReadOnlySpan<byte> key, ReadOnlySpan<byte> high) =>
-        key[..Math.Min(key.Length, high.Length)].SequenceCompareTo(high) > 0;
 
     /// <summary>
     /// The table and the pages of the index of an object of <paramref name="rows"/> rows in granules of

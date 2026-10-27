@@ -27,6 +27,15 @@ internal sealed class DatasetScanCounters
     /// <summary>Objects whose own summaries refuted the predicate, so nothing was opened.</summary>
     public long ObjectsSkipped { get; internal set; }
 
+    /// <summary>
+    /// The objects whose key range the filter refutes, passed over unopened, and the granules of the objects read that the
+    /// key's pruning passed over by their sparse indexes (<see cref="KeyPruning"/>).
+    /// </summary>
+    public long ObjectsPrunedByKey { get; internal set; }
+
+    /// <summary>The granules of the objects read that the key's pruning passed over.</summary>
+    public long GranulesPrunedByKey { get; internal set; }
+
     /// <summary>Objects whose column sheets proved a value the predicate asks for absent, so nothing but the sheets was read.</summary>
     public long ObjectsRefutedBySheets { get; internal set; }
 
@@ -698,7 +707,7 @@ internal sealed class DatasetScanBuilder
             yield break;
         }
 
-        IAsyncEnumerator<PositionedObject> walk = WalkAsync(cancellationToken).GetAsyncEnumerator(cancellationToken);
+        IAsyncEnumerator<PositionedObject> walk = WalkAsync(cancellationToken, granules: true).GetAsyncEnumerator(cancellationToken);
         await using (walk.ConfigureAwait(false))
         {
             using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -1978,7 +1987,7 @@ internal sealed class DatasetScanBuilder
     {
         long rows = 0;
         KeyRange? range = CountRange();
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        await foreach (PositionedObject held in WalkAsync(cancellationToken, granules: true).ConfigureAwait(false))
         {
             long covered = Covered(held);
             if (covered == 0)
@@ -2012,7 +2021,7 @@ internal sealed class DatasetScanBuilder
     public async ValueTask<bool> AnyAsync(CancellationToken cancellationToken = default)
     {
         KeyRange? range = CountRange();
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        await foreach (PositionedObject held in WalkAsync(cancellationToken, granules: true).ConfigureAwait(false))
         {
             if (Covered(held) == 0)
             {
@@ -2481,6 +2490,12 @@ internal sealed class DatasetScanBuilder
 
         long lower = Math.Max(_from, held.FirstRow);
         long upper = Math.Min(_to, held.FirstRow + held.Entry.Rows);
+        if (held.Granules is { } part)
+        {
+            lower = Math.Max(lower, held.FirstRow + part.Start);
+            upper = Math.Min(upper, held.FirstRow + part.End);
+        }
+
         return Math.Max(upper - lower, 0);
     }
 
@@ -2576,13 +2591,80 @@ internal sealed class DatasetScanBuilder
     /// The objects the scan walks: those the summaries keep, and of them those the sheets do not refute, but the objects
     /// whose counts <paramref name="answered"/> answers, which read no sheet.
     /// </summary>
-    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken, CountsAnswer? answered = null, RollupChoice? rollups = null)
+    private IAsyncEnumerable<PositionedObject> WalkAsync(
+        CancellationToken cancellationToken, CountsAnswer? answered = null, RollupChoice? rollups = null, bool granules = false)
     {
         IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(
             Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers);
-        return _summaries && _filter is { } filter && SheetPruning.Asks(filter, _version.Schema.DType)
-            ? SheetPrunedAsync(walk, filter, answered, rollups, cancellationToken)
+        if (_summaries && _filter is { } filter && SheetPruning.Asks(filter, _version.Schema.DType))
+        {
+            walk = SheetPrunedAsync(walk, filter, answered, rollups, cancellationToken);
+        }
+
+        return granules && _summaries && _indexes && _take is null && KeyPruning.Of(_version.Schema, _filter) is { } pruning
+            ? KeyPrunedAsync(walk, pruning, cancellationToken)
             : walk;
+    }
+
+    /// <summary>
+    /// The objects of <paramref name="walk"/> as the key's pruning keeps them (<see cref="KeyPruning"/>): an object whose key
+    /// range the filter refutes is passed over unopened, and one that keeps a sparse index is read by the ranges of its
+    /// granules the filter may keep a row of, a part of it each. An object with marked rows, whose index counts its rows
+    /// before the marks, is read whole past its range.
+    /// </summary>
+    private async IAsyncEnumerable<PositionedObject> KeyPrunedAsync(
+        IAsyncEnumerable<PositionedObject> walk, KeyPruning pruning, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        DatasetSchema schema = _version.Schema;
+        await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            ReadOnlyMemory<byte> first = held.TreeKey.Length > VortexDataset.UidBytes ? VortexDataset.OrderOf(held.TreeKey) : default;
+            if (!first.IsEmpty && !pruning.MayHold(first.Span, held.Entry.LastKey.Span))
+            {
+                if (_considers && _metrics is { } skipped)
+                {
+                    skipped.ObjectsPrunedByKey++;
+                }
+
+                continue;
+            }
+
+            if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: not null } contents
+                || await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false) is not { } keys
+                || keys.Rows != held.Entry.PhysicalRows)
+            {
+                yield return held;
+                continue;
+            }
+
+            int prefix = schema.Partitioned && !first.IsEmpty ? schema.Tree!.PrefixLength(first.Span, 1) : 0;
+            List<(int First, int End)> ranges = pruning.Granules(keys, prefix > 0 ? first.Span[..prefix] : default);
+            int kept = 0;
+            foreach ((int from, int end) in ranges)
+            {
+                kept += end - from;
+            }
+
+            if (_considers && _metrics is { } metrics)
+            {
+                metrics.GranulesPrunedByKey += keys.Granules - kept;
+                metrics.ObjectsPrunedByKey += ranges.Count == 0 ? 1 : 0;
+            }
+
+            if (ranges.Count == 1 && ranges[0] == (0, keys.Granules))
+            {
+                yield return held;
+                continue;
+            }
+
+            foreach ((int from, int end) in ranges)
+            {
+                yield return held with
+                {
+                    Granules = new RowRange((long)from * keys.GranuleRows, Math.Min((long)end * keys.GranuleRows, keys.Rows)),
+                };
+            }
+        }
     }
 
     /// <summary>
@@ -3269,8 +3351,13 @@ internal sealed class DatasetScanBuilder
             return scan.Take(local);
         }
 
-        // The range is the dataset's; the file's is the part of it that falls inside this object.
+        // The range is the dataset's; the file's is the part of it that falls inside this object, and inside its part.
         (long lower, long upper) = PhysicalRange(held);
+        if (held.Granules is { } part)
+        {
+            lower = Math.Max(lower, part.Start);
+            upper = Math.Min(upper, part.End);
+        }
 
         if (within is { } inside)
         {
@@ -3285,59 +3372,6 @@ internal sealed class DatasetScanBuilder
 
         return scan;
     }
-
-    /// <summary>
-    /// The bounds the conjuncts of <paramref name="filter"/> that compare the key's first column with a value put on it,
-    /// each row-encoded as the key encodes the column, inclusive, an empty array for a side none bounds; null when none
-    /// does. A strict comparison bounds as a loose one: the granules it reaches are among those, and the filter takes out
-    /// the rest. A value the column's type does not take bounds nothing.
-    /// </summary>
-    internal static (byte[] Low, byte[] High)? KeyBounds(VortexExpr filter, ClusteringKey key)
-    {
-        byte[]? low = null;
-        byte[]? high = null;
-        Narrow(filter, key, ref low, ref high);
-        return low is null && high is null ? null : (low ?? [], high ?? []);
-
-        static void Narrow(VortexExpr conjunct, ClusteringKey key, ref byte[]? low, ref byte[]? high)
-        {
-            if (conjunct is LogicalExpr { IsAnd: true } both)
-            {
-                Narrow(both.Left, key, ref low, ref high);
-                Narrow(both.Right, key, ref low, ref high);
-                return;
-            }
-
-            if (conjunct is not ComparisonExpr { Field: ColumnFieldExpr field } comparison || comparison.Value.Kind == FilterLiteralKind.Null
-                || !string.Equals(field.Path, key.InstantPath, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            byte[] bound;
-            try
-            {
-                bound = key.Encode([comparison.Value]);
-            }
-            catch (ArgumentException)
-            {
-                return;
-            }
-
-            if (comparison.Op is ComparisonOp.Equal or ComparisonOp.Greater or ComparisonOp.GreaterOrEqual
-                && (low is null || bound.AsSpan().SequenceCompareTo(low) > 0))
-            {
-                low = bound;
-            }
-
-            if (comparison.Op is ComparisonOp.Equal or ComparisonOp.Less or ComparisonOp.LessOrEqual
-                && (high is null || bound.AsSpan().SequenceCompareTo(high) < 0))
-            {
-                high = bound;
-            }
-        }
-    }
-
 
     /// <summary>
     /// The part of the scan's range inside an object, at the object's own positions: the range
@@ -3582,6 +3616,12 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
 {
     /// <summary>The level whose tree holds it; level 0 is the one an append lands in.</summary>
     public int Level { get; init; }
+
+    /// <summary>
+    /// The rows of the object, its own, that a read takes of it: the granules the key's pruning kept, one range a part
+    /// (<see cref="KeyPruning"/>); null for every row.
+    /// </summary>
+    internal RowRange? Granules { get; init; }
 
     /// <summary>Its key in that tree: what orders it, then its uid.</summary>
     internal ReadOnlyMemory<byte> TreeKey { get; init; }

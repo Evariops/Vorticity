@@ -89,7 +89,7 @@ internal static partial class DatasetCompactor
             }
 
             if (input.Entry.Contents is { KeyIndex: not null } contents
-                && await dataset.KeyIndexAsync(input.Entry, contents, default, default, cancellationToken).ConfigureAwait(false) is { Granules: > 0 } keys)
+                && await dataset.KeyIndexAsync(input.Entry, contents, cancellationToken).ConfigureAwait(false) is { Granules: > 0 } keys)
             {
                 indexes[i] = keys;
                 granules += keys.Granules;
