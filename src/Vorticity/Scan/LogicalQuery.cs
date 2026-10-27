@@ -96,10 +96,13 @@ internal sealed record RowsShape(string? OrderPath = null, bool Descending = fal
 }
 
 /// <summary>The smallest or largest value of a column among the rows.</summary>
-/// <param name="Path">The column.</param>
+/// <param name="Column">The column.</param>
 /// <param name="Min">Whether the smallest.</param>
-internal sealed record ExtremeShape(string Path, bool Min) : LogicalShape
+internal sealed record ExtremeShape(FieldExpr Column, bool Min) : LogicalShape
 {
+    /// <summary>The column's path.</summary>
+    internal string Path => Column.Path;
+
     internal override bool ReadsColumns => false;
 
     public override string ToString() => $"{(Min ? "min" : "max")}({Path})";

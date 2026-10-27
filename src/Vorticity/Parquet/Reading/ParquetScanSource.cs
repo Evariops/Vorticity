@@ -22,7 +22,7 @@ namespace Vorticity.Parquet.Reading;
 /// prove the count of is counted without being read. A count that asks only for rows is the
 /// footer's, read with no request.
 /// </remarks>
-internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
+internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource, IRowsCapability, IStatisticsCapability, ITasksCapability
 {
     internal ParquetFile File => file;
 
@@ -32,7 +32,9 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
 
     internal override LogicalSource Logical => new LogicalSource(LogicalSourceKind.File);
 
-    internal override long RowBound => file.RowCount;
+    internal override ITasksCapability Tasks => this;
+
+    public long RowBound => file.RowCount;
 
     private protected override string Kind => "Parquet file";
 
@@ -42,7 +44,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
     private protected override bool ArrivesInOrder(ScanSpec spec) => spec.OrderPath is { } path && Ordered(path, spec.Descending);
 
     /// <summary>A group by on a column the file lies in, ascending, closes its groups as the scan reaches past them.</summary>
-    internal override bool OrdersOnAsking(FieldExpr column, bool stopsEarly) => Ordered(column.Path, descending: false);
+    public bool OrdersOnAsking(FieldExpr column, bool stopsEarly) => Ordered(column.Path, descending: false);
 
     /// <summary>
     /// Whether the file's rows lie in the order of the column at <paramref name="path"/>, ascending or
@@ -118,7 +120,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         return any;
     }
 
-    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    private protected override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing)
         {
@@ -159,7 +161,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         return any ? count + await CountAsync(spec, metrics, undecided, cancellationToken).ConfigureAwait(false) : count;
     }
 
-    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    private protected override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (!spec.MatchesNothing && spec.Filter is not null)
         {
@@ -182,9 +184,9 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
     /// nothing but nulls in it, with no read, unless the scan prunes nothing; otherwise, and for a
     /// float whose extreme is a zero, whose sign the data's first zero decides, the rows are read.
     /// </remarks>
-    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
+    private protected override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
-        if (spec is { Filter: null, Rows: null, Take: null, Live: null, MatchesNothing: false, Options.UseStatistics: true }
+        if (spec is { Filter: null, Rows: null, Take: null, Analysis.Live: null, MatchesNothing: false, Options.UseStatistics: true }
             && column is not FunctionFieldExpr
             && Leaf(column.Path) is int leaf
             && TryExtremes(leaf, exact: true, out FilterLiteral low, out FilterLiteral high))
@@ -205,7 +207,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
     /// are cut whole. A row group is cut inside only where the groups are fewer than two a lane, since a
     /// range cut inside one decodes its dictionaries again.
     /// </remarks>
-    internal override async ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
+    public async ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
     {
         // An ordered read is one stream: pieces read side by side would come in no order.
         if (degree <= 1 || spec.Take is not null || spec.MatchesNothing || spec.OrderPath is not null)
@@ -354,7 +356,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         return cuts;
     }
 
-    internal override bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
+    public bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
     {
         min = FilterLiteral.Null;
         max = FilterLiteral.Null;
@@ -371,7 +373,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
     /// hold each key twice over. A bound need not be exact to bound; a value past one, which a
     /// writer's wrong statistics would let through, goes to the hashed table.
     /// </summary>
-    internal override Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key)
+    public Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key)
     {
         if (key.Kind != Aggregating.StorageKind.Primitive || !Vorticity.Types.PTypeExtensions.IsInteger(key.PType) || key.Column.FieldPath.Length != 1
             || (uint)key.Column.FieldPath[0] >= (uint)file.Compiled.Fields.Length
@@ -453,7 +455,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             && !(max.Kind == FilterLiteralKind.Float && max.FloatValue == 0);
     }
 
-    internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
+    public override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
         // Every row group the plan reads, its page index, its Bloom filters and its dictionaries read
         // as the scan reads them, and every chunk of the columns read of a group they leave a batch

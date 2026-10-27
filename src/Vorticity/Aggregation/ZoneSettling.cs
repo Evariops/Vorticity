@@ -81,7 +81,7 @@ internal sealed class ZoneSettling
 
     /// <summary>
     /// The settling of the blocks of a dataset's object <paramref name="file"/> within <paramref name="rows"/>, its own,
-    /// for <paramref name="plan"/>, which a pass names (<see cref="ScanSpec.Settles"/>), or null when none settles: as a
+    /// for <paramref name="plan"/>, which a pass names (<see cref="StatesAsked.Settles"/>), or null when none settles: as a
     /// file's, but for the blocks that hold a row <paramref name="excluded"/> leaves out, a row a delete marked, which
     /// the file's statistics count. The dataset reads the object's other rows itself, so no split crosses a block.
     /// </summary>
@@ -189,8 +189,7 @@ internal sealed class ZoneSettling
     /// </summary>
     internal ScanSpec Pass(ScanSpec pass) => pass with
     {
-        Pruned = true,
-        Live = Live,
+        Analysis = new ScanAnalysis(Live),
         Options = pass.Options with
         {
             BatchRows = pass.Options.BatchRows > 0 && pass.Options.BatchRows < _blockRows ? pass.Options.BatchRows : (int)_blockRows,

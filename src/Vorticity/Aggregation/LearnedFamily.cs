@@ -203,7 +203,7 @@ internal sealed class LearnedFamily
         await using (file.ConfigureAwait(false))
         {
             long row = firstRow;
-            await foreach (RecordBatch batch in new FileScanSource(file).BatchesAsync(new ScanSpec(), new ScanCounters()).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in new FileScanSource(file).Rows.BatchesAsync(new ScanSpec(), new ScanCounters()).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 RecordBatch states = PartialsSource.Canonical(batch, row);
                 row += batch.RowCount;

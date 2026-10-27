@@ -32,6 +32,9 @@ internal sealed class ObjectStoreSource : ISegmentReader
     internal const int TailBytes = 65_536;
 
     private readonly IObjectStore _store;
+
+    /// <summary>What reading the store costs (<see cref="IObjectStore.CostProfile"/>).</summary>
+    internal CostProfile Profile => _store.CostProfile;
     private readonly string _key;
     private readonly SegmentReadOptions _options;
     private readonly bool _ownsStore;

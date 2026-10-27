@@ -312,7 +312,7 @@ internal sealed class ProjectedBatches : IAsyncEnumerator<RecordBatch>
         {
             _query.Host.Begin();
             _begun = true;
-            _inner = _query.Host.Source.BatchesAsync(_spec, _query.Counters).GetAsyncEnumerator(_cancellationToken);
+            _inner = _query.Host.Source.Rows.BatchesAsync(_spec, _query.Counters).GetAsyncEnumerator(_cancellationToken);
         }
 
         // Once the window is served the scan is asked for nothing more: a Take stops the reads.

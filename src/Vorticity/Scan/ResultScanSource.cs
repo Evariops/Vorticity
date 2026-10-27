@@ -73,7 +73,7 @@ internal sealed class ResultScanSource : StreamScanSource
 
     private protected override string Kind => "result";
 
-    internal override ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken) => _query.ExplainAsync(cancellationToken);
+    public override ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken) => _query.ExplainAsync(cancellationToken);
 
     /// <summary>The result's batches, every column of every row: the query delivers them as it runs.</summary>
     private protected override IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, CancellationToken cancellationToken) =>

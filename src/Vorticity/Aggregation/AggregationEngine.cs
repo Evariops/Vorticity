@@ -3518,9 +3518,9 @@ internal abstract class AggregationHost
         ScanSpec pass = AggregationEngine.PassSpec(spec, columns, plan, Source.Schema);
 
         // The states the pass would ask for, so that a source that keeps them says per object what it reads.
-        if (pass.Options.UseSynopses && Source.KeepsStates && StateRequest.Of(plan, settled, top: null) is { } states)
+        if (pass.Options.UseSynopses && Source.States is { } kept && StateRequest.Of(plan, settled, top: null) is { } states)
         {
-            pass = pass with { States = states, Family = Source.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, Source) : null };
+            pass = pass with { Answering = new StatesAsked(states, Family: kept.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, Source) : null) };
         }
 
         ScanPlan explained = await Source.PlanAsync(pass, cancellationToken).ConfigureAwait(false);
@@ -3537,7 +3537,7 @@ internal abstract class AggregationHost
     /// <summary>
     /// <see cref="Spec(VortexExpr?)"/> for an aggregation of <paramref name="plan"/>, <paramref name="operators"/> on its
     /// groups, its filter the one the source applies under <see cref="ScanOptions.AlignWindow"/>
-    /// (<see cref="ScanSource.AlignAsync"/>), whose range the metrics then give: every read of the aggregation, the
+    /// (<see cref="IStatesCapability.AlignAsync"/>), whose range the metrics then give: every read of the aggregation, the
     /// statistics', the states' and the rows', answers that one.
     /// </summary>
     internal async ValueTask<ScanSpec> AlignedSpecAsync(AggregationPlan plan, VortexExpr? rows, CancellationToken cancellationToken, GroupOperator[]? operators = null)
@@ -3555,9 +3555,9 @@ internal abstract class AggregationHost
     {
         ScanSpec spec = Spec(rows);
         spec = spec with { Query = spec.Query?.Aggregating(plan, operators) };
-        if (!spec.Options.AlignWindow || !spec.Options.UseSynopses || !Source.KeepsStates || spec.MatchesNothing || spec.Filter is null
+        if (!spec.Options.AlignWindow || !spec.Options.UseSynopses || Source.States is not { } kept || spec.MatchesNothing || spec.Filter is null
             || StateRequest.Of(plan, new AggregateSlot?[plan.Aggregates.Length], top: null) is not { } states
-            || await Source.AlignAsync(spec, states, cancellationToken).ConfigureAwait(false) is not { } aligned)
+            || await kept.AlignAsync(spec, states, cancellationToken).ConfigureAwait(false) is not { } aligned)
         {
             return (spec, null);
         }
@@ -3607,15 +3607,15 @@ internal static class AggregationEngine
                 RowFilter? filter = aggregates[i].Filter;
                 if (filter is null)
                 {
-                    count = count >= 0 ? count : await source.CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
+                    count = count >= 0 ? count : (await source.Rows.AnswerAsync(spec, LogicalShape.Count, metrics, cancellationToken).ConfigureAwait(false)).Rows;
                     answers[i] = new SettledSlot<long>(count) { CountsRows = true };
                     continue;
                 }
 
                 ScanSpec rows = filter.IsNothing ? spec with { MatchesNothing = true } : spec with { Filter = Joined(spec.Filter, filter) };
                 answers[i] = aggregates[i].Kind == AggregateKind.Any
-                    ? new SettledSlot<bool>(await source.AnyAsync(rows, metrics, cancellationToken).ConfigureAwait(false))
-                    : new SettledSlot<long>(await source.CountAsync(rows, metrics, cancellationToken).ConfigureAwait(false));
+                    ? new SettledSlot<bool>((await source.Rows.AnswerAsync(rows, LogicalShape.Any, metrics, cancellationToken).ConfigureAwait(false)).Rows > 0)
+                    : new SettledSlot<long>((await source.Rows.AnswerAsync(rows, LogicalShape.Count, metrics, cancellationToken).ConfigureAwait(false)).Rows);
             }
 
             return new AggregationOutcome(plan, answers, null, [0]);
@@ -3629,11 +3629,11 @@ internal static class AggregationEngine
         // The blocks the zone maps answer are not read: the pass's mask has them dead, and each
         // partition folds them as its rows reach them.
         ZoneSettling? settling = await ZoneSettling.PlanAsync(source, pass, plan, metrics, cancellationToken).ConfigureAwait(false);
-        if (settling is null && source.SettlesBlocks && ZoneSettling.Applies(pass, plan))
+        if (settling is null && source.States?.SettlesBlocks == true && ZoneSettling.Applies(pass, plan))
         {
             // A dataset settles each object's blocks as it reads it, those no delete marked a row of, and the rows of the
             // others as before, states or rows: the pass names the aggregation, and its mask is the dataset's.
-            pass = pass with { Settles = plan };
+            pass = pass with { Answering = new StatesAsked(Settles: plan) };
         }
 
         if (settling is not null)
@@ -3644,9 +3644,9 @@ internal static class AggregationEngine
         // A source that keeps states of some of its rows, a dataset's synopses, answers those as states,
         // for a pass whose every aggregate and key a state answers whole: asked before the rows are cut, so
         // that the cut leaves whole what states answer.
-        else if (pass.Options.UseSynopses && source.KeepsStates && StateRequest.Of(plan, settled, top) is { } states)
+        else if (pass.Options.UseSynopses && source.States is { } answering && StateRequest.Of(plan, settled, top) is { } states)
         {
-            pass = pass with { States = states, Family = source.LearnsPartials && top is null ? LearnedFamily.Of(plan, pass.Filter, source) : null };
+            pass = pass with { Answering = new StatesAsked(states, Family: answering.LearnsPartials && top is null ? LearnedFamily.Of(plan, pass.Filter, source) : null) };
         }
 
         // On several lanes the structures are read once, before the rows are cut, so that the cut
@@ -3658,14 +3658,14 @@ internal static class AggregationEngine
             BlockMask? live = await ZonePruningPlan
                 .RefineAsync(file.File, file.File.LayoutTree, FunctionFieldExpr.Ranges(kept), cancellationToken, steps: null, metrics, pass.Options.UseIndexes)
                 .ConfigureAwait(false);
-            pass = pass with { Pruned = true, Live = live };
+            pass = pass with { Analysis = new ScanAnalysis(live) };
         }
 
         // A file's rows are cut here, at its chunks; another source cuts its own, a dataset at its objects.
         AggregationPartition[] partitions;
         RowRange[]? ranges = Ranges(source, pass, degree)
             ?? (degree > 1 && pass.Take is null && !pass.MatchesNothing && source is not FileScanSource
-                ? await source.PiecesAsync(pass, degree, cancellationToken).ConfigureAwait(false)
+                ? source.Tasks is { } tasks ? await tasks.PiecesAsync(pass, degree, cancellationToken).ConfigureAwait(false) : null
                 : null);
         // What the lanes' tables and the merge hold, reserved in the session's budget as they grow,
         // brought down to the result once the groups are merged and given back when it is delivered;
@@ -3694,9 +3694,10 @@ internal static class AggregationEngine
             // their working memory, admitted with it: the largest split of the layout, so many a lane. A pass on
             // one lane reads ahead too over a store whose read is a round trip, its decode then the caller's, as
             // many splits as the lanes of a wide pass read together: each of its reads waited on the one before.
-            bool readsAhead = ranges is not null || source.ReadsRoundTrips;
-            long splitBytes = readsAhead ? source.ReadAheadBytes(pass) : 0;
-            int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, source.ReadsRoundTrips, out int ahead);
+            bool roundTrips = source.Cost?.ReadsRoundTrips == true;
+            bool readsAhead = ranges is not null || roundTrips;
+            long splitBytes = readsAhead ? source.Cost?.ReadAheadBytes(pass) ?? 0 : 0;
+            int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, roundTrips, out int ahead);
 
             // A lane's table reads its slots ahead once past its share of a cache: one lane alone has its
             // cluster's to itself.
@@ -3729,7 +3730,7 @@ internal static class AggregationEngine
                     Pressure = pressure,
                     Spill = spill,
                     Spilling = spilledRow > 0,
-                    ExpectedRows = core is null && top is null ? source.RowBound : -1,
+                    ExpectedRows = core is null && top is null ? source.Statistics?.RowBound ?? -1 : -1,
                 };
                 if (core is { Lean: true })
                 {
@@ -3768,7 +3769,7 @@ internal static class AggregationEngine
                         TurnOnNew = pressure is not null && plan.CoreOnNew && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes)
                             && facts?.Rows is long sourceRows && sourceRows >= lanes * AggregationPartition.LaneRows,
                         TurnOnSpread = pressure is not null && plan.CoreScattered && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes),
-                        ExpectedRows = core is null && top is null && source.RowBound >= 0 ? source.RowBound / lanes : -1,
+                        ExpectedRows = core is null && top is null && source.Statistics?.RowBound is long bound and >= 0 ? bound / lanes : -1,
                         Spill = spill,
                         Spilling = spilledRow > 0,
                         Lanes = lanes,
@@ -4905,10 +4906,10 @@ internal static class AggregationEngine
             ColumnShape key = keys[k];
             bounds[k] = key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 || key.Field is VariantFieldExpr
                 ? null
-                : await source.BoundsAsync(key, cancellationToken).ConfigureAwait(false);
+                : source.Statistics is { } known ? await known.BoundsAsync(key, cancellationToken).ConfigureAwait(false) : null;
         }
 
-        return new KeyFacts(sorted, bounds, source.RowBound);
+        return new KeyFacts(sorted, bounds, source.Statistics?.RowBound ?? -1);
     }
 
     /// <summary>What the statistics say of each column of a key: whether it is sorted, and what bounds it.</summary>
@@ -4922,7 +4923,7 @@ internal static class AggregationEngine
             bounds[k] = Bounds(source, keys[k]);
         }
 
-        return new KeyFacts(sorted, bounds, source.RowBound);
+        return new KeyFacts(sorted, bounds, source.Statistics?.RowBound ?? -1);
     }
 
     /// <summary>
@@ -4932,7 +4933,7 @@ internal static class AggregationEngine
     /// </summary>
     /// <remarks>A variant's path has none: the variant column's statistics describe the column, not a path in it.</remarks>
     internal static KeyBounds? Bounds(ScanSource source, ColumnShape key) =>
-        key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 || key.Field is VariantFieldExpr ? null : source.Bounds(key);
+        key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 || key.Field is VariantFieldExpr ? null : source.Statistics?.Bounds(key);
 
     /// <summary>The smallest and the largest value of an integer column of a key, when <paramref name="file"/>'s statistics hold them exactly.</summary>
     internal static KeyBounds? FileBounds(VortexFile file, ColumnShape key)
@@ -5007,7 +5008,7 @@ internal static class AggregationEngine
 
         FieldMask mask = spec.Projection ?? FieldMask.All;
         SplitPlan plan = SplitPlan.Compute(tree, rows, in mask, blockRows);
-        BlockMask? live = spec.Pruned ? spec.Live : null;
+        BlockMask? live = spec.Analysis?.Live;
         long alive = Live(live, rows);
         if (alive < 2 * blockRows)
         {
@@ -5100,7 +5101,7 @@ internal static class AggregationEngine
     internal static async Task RunPartitionAsync(ScanSource source, ScanSpec spec, ScanCounters metrics, AggregationPartition partition, CancellationToken cancellationToken)
     {
         long start = Stopwatch.GetTimestamp();
-        await foreach (RecordBatch batch in source.BatchesAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+        await foreach (RecordBatch batch in source.Rows.BatchesAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             // Under pressure, a lane turns to the core between two batches, and one whose
             // rows the core could not take waits for the next table given back: on tasks, never a thread.
@@ -5167,7 +5168,7 @@ internal static class AggregationEngine
         // The splits the lanes were granted together go to those that read rows: lanes that answer a dataset's objects
         // from their synopses read none, and two lanes left reading rows among sixteen waited on each of their reads.
         // As many in flight as the lanes were granted, ReadAheadTotal a lane at most.
-        int readers = Math.Clamp(source.RangesReadingRows(ranges), 1, partitions.Length);
+        int readers = Math.Clamp(ranges.Length, 1, partitions.Length);
         int shared = ahead > 0 ? Math.Max(ahead, Math.Min(ReadAheadTotal, ahead * partitions.Length / readers)) : ahead;
         ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = shared };
         int[] next = [-1];

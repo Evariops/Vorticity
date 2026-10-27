@@ -147,7 +147,7 @@ public sealed partial class Scan
     {
         Begin();
         CancellationToken token = cancellationToken.CanBeCanceled ? cancellationToken : _cancellation;
-        return new AsyncEnumerator(this, _source.BatchesAsync(Spec(), _counters).GetAsyncEnumerator(token), Schema, _source.Session);
+        return new AsyncEnumerator(this, _source.Rows.BatchesAsync(Spec(), _counters).GetAsyncEnumerator(token), Schema, _source.Session);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>
@@ -158,7 +158,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _source.Rows.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return RecordBatch.Own(batch.Arena, batch.RootIndex, batch.StartRow, Schema, _source.Session, batch.SelectionWords, batch.SelectedRows);
             }
@@ -177,7 +177,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.CountAsync(Query(LogicalShape.Count).Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return (await _source.Rows.AnswerAsync(Query(LogicalShape.Count).Spec().Reading([]), LogicalShape.Count, _counters, cancellationToken).ConfigureAwait(false)).Rows;
         }
         finally
         {
@@ -193,7 +193,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.AnyAsync(Query(LogicalShape.Any).Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return (await _source.Rows.AnswerAsync(Query(LogicalShape.Any).Spec().Reading([]), LogicalShape.Any, _counters, cancellationToken).ConfigureAwait(false)).Rows > 0;
         }
         finally
         {

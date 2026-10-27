@@ -15,7 +15,8 @@ namespace Vorticity.Dataset;
 /// scan, its batches count the dataset's rows, and an answer takes the cheapest proof each object
 /// offers: its entry, its statistics, then its blocks.
 /// </summary>
-internal sealed class DatasetScanSource : ScanSource
+internal sealed class DatasetScanSource
+    : ScanSource, IRowsCapability, IStatisticsCapability, IKeysCapability, IStatesCapability, ITasksCapability, ICostCapability
 {
     private readonly VortexDataset _dataset;
     private readonly DatasetSnapshot _version;
@@ -32,31 +33,42 @@ internal sealed class DatasetScanSource : ScanSource
 
     internal override LogicalSource Logical => new LogicalSource(LogicalSourceKind.Dataset, _version.Version);
 
+    internal override IRowsCapability Rows => this;
+
+    internal override IStatisticsCapability Statistics => this;
+
+    internal override IKeysCapability Keys => this;
+
+    /// <summary>Its, when its jobs' objects keep counts: those answer some aggregations as states (<see cref="CountsAnswer"/>).</summary>
+    internal override IStatesCapability? States => _version.MayKeepCounts ? this : null;
+
+    internal override ITasksCapability Tasks => this;
+
+    internal override ICostCapability Cost => this;
+
     /// <summary>The dataset's: its options' profile, or its store's.</summary>
-    internal override IO.CostProfile Profile => _dataset.Profile;
+    public IO.CostProfile Profile => _dataset.Profile;
 
     /// <summary>The rows of every object of the version, deleted ones counted, as its levels hold them: what bounds a table of a key's groups by value.</summary>
-    internal override long RowBound => _version.RowCount;
+    public long RowBound => _version.RowCount;
 
     /// <summary>Its objects are read from its store, a request each.</summary>
-    internal override bool ReadsRoundTrips => true;
+    public bool ReadsRoundTrips => true;
 
-    /// <summary>It settles each object's blocks as it reads it, those no delete marked a row of (<see cref="ScanSpec.Settles"/>).</summary>
-    internal override bool SettlesBlocks => true;
+    /// <summary>It settles each object's blocks as it reads it, those no delete marked a row of (<see cref="StatesAsked.Settles"/>).</summary>
+    public bool SettlesBlocks => true;
 
-    /// <summary>It learns the partials of an aggregation's family from the objects it reads as rows (<see cref="ScanSpec.Family"/>).</summary>
-    internal override bool LearnsPartials => true;
+    /// <summary>It learns the partials of an aggregation's family from the objects it reads as rows (<see cref="StatesAsked.Family"/>).</summary>
+    public bool LearnsPartials => true;
 
     /// <summary>The version every sink of the scan reads.</summary>
     internal ulong Version => _version.Version;
 
-    /// <summary>A dataset whose jobs' objects keep counts: those answer some aggregations as states (<see cref="CountsAnswer"/>).</summary>
-    internal override bool KeepsStates => _version.MayKeepCounts;
-
-    internal override async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
-        KeepsStates && spec.Options.UseSynopses && !spec.MatchesNothing
+    public async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
+        _version.MayKeepCounts && spec.Options.UseSynopses && !spec.MatchesNothing
         && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
-        && (spec.Family is not null || await Builder(spec with { States = states }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false));
+        && (spec.Answering?.Family is not null
+            || await Builder(spec with { Answering = (spec.Answering ?? new StatesAsked()) with { States = states } }, null).AnswersAnyAsync(cancellationToken).ConfigureAwait(false));
 
     /// <summary>
     /// The filter grown so that its range on the key's first column covers whole the objects it cuts whose counts would
@@ -67,12 +79,12 @@ internal sealed class DatasetScanSource : ScanSource
     /// column, which a clustering value never leaves. Two walks of the version's entries. Null when the range cuts no such
     /// object or stays, the filter bounds no range of the column, or the counts answer no object of the question.
     /// </summary>
-    internal override async ValueTask<(VortexExpr Filter, VortexExpr Window)?> AlignAsync(
+    public async ValueTask<(VortexExpr Filter, VortexExpr Window)?> AlignAsync(
         ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken)
     {
         // The column a window is aligned on: the key's first, or under a partition the column it reads, objects holding one
         // partition each.
-        if (!KeepsStates || spec.Filter is not { } filter || AlignedOn() is not { } key
+        if (!_version.MayKeepCounts || spec.Filter is not { } filter || AlignedOn() is not { } key
             || !await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false))
         {
             return null;
@@ -251,16 +263,24 @@ internal sealed class DatasetScanSource : ScanSource
         }
     }
 
-    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
+    public IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
         spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>() : Builder(spec, metrics).ExecuteAsync();
 
-    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+    /// <summary>A form of the question, answered by the count, the proof of a row, or the extreme the version works out.</summary>
+    public async ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken) => form switch
+    {
+        ExtremeShape extreme => new FormAnswer(0, await ExtremeAsync(spec, extreme.Column, extreme.Min, metrics, cancellationToken).ConfigureAwait(false)),
+        _ when ReferenceEquals(form, LogicalShape.Any) => new FormAnswer(await AnyAsync(spec, metrics, cancellationToken).ConfigureAwait(false) ? 1 : 0, FilterLiteral.Null),
+        _ => new FormAnswer(await CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false), FilterLiteral.Null),
+    };
+
+    private async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         spec.MatchesNothing ? 0L : await Builder(spec, metrics).CountAsync(cancellationToken).ConfigureAwait(false);
 
-    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+    private async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         !spec.MatchesNothing && await Builder(spec, metrics).AnyAsync(cancellationToken).ConfigureAwait(false);
 
-    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
+    private async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing)
         {
@@ -273,18 +293,18 @@ internal sealed class DatasetScanSource : ScanSource
             : await builder.MaxAsync(column.Path, cancellationToken).ConfigureAwait(false);
     }
 
-    internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
+    public async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
         ScanPlan plan = await Builder(spec, null).PlanAsync(cancellationToken).ConfigureAwait(false);
         return spec.MatchesNothing ? plan with { MayMatch = false } : plan;
     }
 
-    internal override bool MayMatch(VortexExpr filter) => _version.MayMatch(filter);
+    public bool MayMatch(VortexExpr filter) => _version.MayMatch(filter);
 
-    internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         await DatasetKeyCursor.OpenAsync(_version, path, distinct, indexes, cancellationToken).ConfigureAwait(false);
 
-    internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         DatasetKeyCursor.ExplainAsync(_version, path, indexes, cancellationToken);
 
     /// <summary>
@@ -296,7 +316,7 @@ internal sealed class DatasetScanSource : ScanSource
     /// read on one lane of eight, where the pass read them on four, and at one lane allocated three times what the pass
     /// did, in 1.5 times its time.
     /// </summary>
-    internal override bool OrdersOnAsking(FieldExpr column, bool stopsEarly) =>
+    public bool OrdersOnAsking(FieldExpr column, bool stopsEarly) =>
         stopsEarly && _version.Schema.Key is { } key && key.Paths.Count > 0
         && string.Equals(key.Paths[0], column.Path, System.StringComparison.Ordinal);
 
@@ -305,10 +325,10 @@ internal sealed class DatasetScanSource : ScanSource
     /// every object: a table of a key's groups by value over the objects,
     /// as over a file, with no read of its own.
     /// </summary>
-    internal override Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => _version.Bounds(key.Path);
+    public Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => _version.Bounds(key.Path);
 
     /// <summary>The version's roots read first, as its walk reads them: then in hand.</summary>
-    internal override async ValueTask<Aggregating.KeyBounds?> BoundsAsync(Aggregating.ColumnShape key, CancellationToken cancellationToken)
+    public async ValueTask<Aggregating.KeyBounds?> BoundsAsync(Aggregating.ColumnShape key, CancellationToken cancellationToken)
     {
         await _version.ReadRootsAsync(cancellationToken).ConfigureAwait(false);
         return _version.Bounds(key.Path);
@@ -320,7 +340,7 @@ internal sealed class DatasetScanSource : ScanSource
     /// that a lane on a slow core takes fewer and no lane waits on a large object the others finished
     /// beside.
     /// </summary>
-    internal override async ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
+    public async ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
     {
         if (spec.OrderPath is not null || spec.Take is not null)
         {
@@ -334,7 +354,7 @@ internal sealed class DatasetScanSource : ScanSource
         List<(PositionedObject Held, RowRange Rows)> objects = [];
         long total = 0;
         KeyPruning? pruning = spec.Options.UseStatistics && spec.Options.UseIndexes ? KeyPruning.Of(_version.Schema, spec.Filter) : null;
-        CountsAnswer? answer = spec.States is { } request && spec.Options.UseSynopses
+        CountsAnswer? answer = spec.Answering?.States is { } request && spec.Options.UseSynopses
             && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
             ? CountsAnswer.Of(request, spec.Filter, _version)
             : null;
@@ -430,7 +450,7 @@ internal sealed class DatasetScanSource : ScanSource
         return pieces.Count > 1 ? [.. pieces] : null;
     }
 
-    internal override async ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken)
+    public async ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
         PathCosts.Cost cost = await Builder(spec, null).CostAsync(cancellationToken).ConfigureAwait(false);
         return (cost.Requests, cost.Bytes);
@@ -442,7 +462,7 @@ internal sealed class DatasetScanSource : ScanSource
     /// lane's piece is, into ranges of <paramref name="rangeBytes"/> of the narrowest column at least. The objects are opened
     /// side by side; the scans of the ranges find them open.
     /// </summary>
-    internal override async ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken)
+    public async ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken)
     {
         if (pass.MatchesNothing)
         {
@@ -613,17 +633,17 @@ internal sealed class DatasetScanSource : ScanSource
 
         ScanOptions options = spec.Options;
         builder.WithOptions(options, spec.KeepEncodings, spec.SinkDecodes, spec.PositionsUnread).WithIndexes(options.UseIndexes).WithSummaries(options.UseStatistics);
-        if (spec.States is { } states && options.UseSynopses)
+        if (spec.Answering?.States is { } states && options.UseSynopses)
         {
             builder.WithStates(states);
         }
 
-        if (spec.Settles is { } plan)
+        if (spec.Answering?.Settles is { } plan)
         {
             builder.WithSettles(plan);
         }
 
-        if (spec.Family is { } family && spec.States is not null && options.UseSynopses)
+        if (spec.Answering is { Family: { } family, States: not null } && options.UseSynopses)
         {
             builder.WithFamily(family, this);
         }

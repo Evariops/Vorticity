@@ -8,7 +8,7 @@ using Vorticity.Serialization.Schemas;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The ranges an estimate draws from in a file or an object (<see cref="ScanSource.StrataAsync"/>): its rows cut where the
+/// The ranges an estimate draws from in a file or an object (<see cref="ITasksCapability.StrataAsync"/>): its rows cut where the
 /// chunks of every column the question reads end together, gathered until a range holds a given number of bytes of the
 /// narrowest of them. A range then reads whole chunks of each column, never a block alone: a block holds some 15 KB of
 /// two columns, and drawn one by one a share of a month would be as many requests as blocks.

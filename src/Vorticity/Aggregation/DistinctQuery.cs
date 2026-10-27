@@ -277,7 +277,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             };
             plan.Watch?.Invoke([_partition]);
             _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
-            _inner = projection.Host.Source.BatchesAsync(spec, projection.Counters).GetAsyncEnumerator(_cancellationToken);
+            _inner = projection.Host.Source.Rows.BatchesAsync(spec, projection.Counters).GetAsyncEnumerator(_cancellationToken);
         }
 
         // Once the values asked for are met the scan is asked for nothing more.

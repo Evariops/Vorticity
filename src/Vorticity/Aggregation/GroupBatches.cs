@@ -229,7 +229,7 @@ internal sealed class AggregationQuery : ResultQuery
     /// order a key streams in, so a pass that takes them delivers its groups once it has run.
     /// </summary>
     private StateRequest? States =>
-        Host.Source.KeepsStates && Host.Spec().Options.UseSynopses
+        Host.Source.States is not null && Host.Spec().Options.UseSynopses
             ? StateRequest.Of(Plan, new AggregateSlot?[Plan.Aggregates.Length], top: null)
             : null;
 

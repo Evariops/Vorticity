@@ -12,7 +12,7 @@ namespace Vorticity.Aggregating;
 
 /// <summary>
 /// An aggregation's estimates, tier after tier (<see cref="Aggregation.EstimateAsync"/>): the question's rows cut into
-/// ranges, file by file and object by object (<see cref="ScanSource.StrataAsync"/>), runs of them gathered into strata,
+/// ranges, file by file and object by object (<see cref="ITasksCapability.StrataAsync"/>), runs of them gathered into strata,
 /// each stratum's ranges drawn in an order at random; each tier reads the ranges its share adds, each as a part of the
 /// question giving its groups' states (<see cref="AggregationQuery.Ranged"/>), merges them, and scales their totals.
 /// </summary>
@@ -108,7 +108,7 @@ internal sealed class EstimateRun
     /// </summary>
     internal static async ValueTask<TimeSpan?> CostOfAsync(AggregationQuery question, CancellationToken cancellationToken) =>
         await ReadsOfAsync(question, cancellationToken).ConfigureAwait(false) is (long requests, long bytes)
-            ? question.Host.Source.Profile.Time(requests, bytes)
+            ? (question.Host.Source.Cost?.Profile ?? IO.CostProfile.Remote).Time(requests, bytes)
             : null;
 
     /// <summary>The requests and bytes the exact answer to <paramref name="question"/> reads, as its source's planner prices them; null for a source that cannot say.</summary>
@@ -119,9 +119,9 @@ internal sealed class EstimateRun
         AggregateSlot?[] settled = new AggregateSlot?[plan.Aggregates.Length];
         (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, settled);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(question.RowFilter), columns, plan, host.Source.Schema);
-        StateRequest? states = host.Source.KeepsStates && pass.Options.UseSynopses ? StateRequest.Of(plan, settled, null) : null;
-        LearnedFamily? family = states is not null && host.Source.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, host.Source) : null;
-        return host.Source.CostAsync(pass with { States = states, Family = family }, cancellationToken);
+        StateRequest? states = host.Source.States is not null && pass.Options.UseSynopses ? StateRequest.Of(plan, settled, null) : null;
+        LearnedFamily? family = states is not null && host.Source.States!.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, host.Source) : null;
+        return host.Source.Cost is { } cost ? cost.CostAsync(pass with { Answering = new StatesAsked(states, Family: family) }, cancellationToken) : default;
     }
 
     /// <summary>The tiers: one a share of the ranges, each reading those the share adds, then the exact answer.</summary>
@@ -135,15 +135,15 @@ internal sealed class EstimateRun
         _exactCost = await CostOfAsync(_question, cancellationToken).ConfigureAwait(false);
         if (_exactCost is { } exactCost)
         {
-            if (exactCost <= _options.ExactUnder && _options.Exact && host.Source.RowBound >= 0)
+            if (exactCost <= _options.ExactUnder && _options.Exact && host.Source.Statistics?.RowBound is long whole and >= 0)
             {
-                await ReadWholeAsync(host.Source.RowBound, cancellationToken).ConfigureAwait(false);
+                await ReadWholeAsync(whole, cancellationToken).ConfigureAwait(false);
                 yield return Estimate(exact: true);
                 yield break;
             }
         }
 
-        RowRange[][] pieces = await host.Source.StrataAsync(pass, _options.RangeBytes, cancellationToken).ConfigureAwait(false)
+        RowRange[][] pieces = (host.Source.Tasks is { } tasks ? await tasks.StrataAsync(pass, _options.RangeBytes, cancellationToken).ConfigureAwait(false) : null)
             ?? throw new NotSupportedException("A source with no ranges of its own, such as a query's result, takes no estimate.");
         Random random = _options.Seed is int seed ? new Random(seed) : new Random();
         int least = _options.Shares.Count == 0 ? 1 : (int)Math.Ceiling(2 / _options.Shares[0]);
@@ -275,7 +275,7 @@ internal sealed class EstimateRun
         ParallelOptions parallel = new ParallelOptions
         {
             CancellationToken = cancellationToken,
-            MaxDegreeOfParallelism = source.ReadsRoundTrips ? Math.Max(degree, RoundTripRanges) : degree,
+            MaxDegreeOfParallelism = source.Cost?.ReadsRoundTrips == true ? Math.Max(degree, RoundTripRanges) : degree,
         };
 
         await Parallel.ForEachAsync(drawn, parallel, async (draw, token) =>

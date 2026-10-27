@@ -105,7 +105,7 @@ internal static class Aggregators
 
     /// <summary>A count of 32 bits where the source's rows are known to stay below 2^32, of 64 otherwise.</summary>
     private static AggregateSlot<long> Counter(ScanSource? source) =>
-        source is { RowBound: >= 0 and <= uint.MaxValue } ? new CountSlot<uint>() : new CountSlot<long>();
+        source?.Statistics is { RowBound: >= 0 and <= uint.MaxValue } ? new CountSlot<uint>() : new CountSlot<long>();
 
     /// <summary>
     /// Whether the group holds a row <paramref name="filter"/> keeps: <c>Any(p)</c> when its last
@@ -318,15 +318,15 @@ internal static class Aggregators
     /// <summary>Whether the source's rows times the column's largest magnitude, from its statistics, stay at or below <paramref name="limit"/>.</summary>
     private static bool Proven(ScanSource? source, ColumnShape shape, UInt128 limit)
     {
-        if (source is null || source.RowBound < 0
-            || !source.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral min, out Expressions.FilterLiteral max)
+        if (source?.Statistics is not { RowBound: >= 0 } known
+            || !known.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral min, out Expressions.FilterLiteral max)
             || !TryMagnitude(min, out UInt128 low) || !TryMagnitude(max, out UInt128 high))
         {
             return false;
         }
 
         // Each magnitude is below 2^64 and the rows below 2^63: the product fits 128 bits.
-        return UInt128.Max(low, high) * (ulong)source.RowBound <= limit;
+        return UInt128.Max(low, high) * (ulong)known.RowBound <= limit;
     }
 
     private static bool TryMagnitude(Expressions.FilterLiteral bound, out UInt128 magnitude)
@@ -461,7 +461,7 @@ internal static class Aggregators
         where TValue : unmanaged, INumberBase<TValue>
     {
         double center = 0;
-        if (source is not null && source.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral min, out Expressions.FilterLiteral max))
+        if (source?.Statistics is { } known && known.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral min, out Expressions.FilterLiteral max))
         {
             double middle = (Number(min, unit) * 0.5) + (Number(max, unit) * 0.5);
             center = double.IsFinite(middle) ? middle : 0;
@@ -487,7 +487,7 @@ internal static class Aggregators
     /// <see cref="WideIndexedSum"/>'s 40.
     /// </summary>
     internal static bool HoldsNarrowFloatSums(ScanSource? source) =>
-        source is { RowBound: >= 0 } && source.RowBound <= IndexedSum.Endurance - (WordFold.Run * 64);
+        source?.Statistics is { RowBound: >= 0 } known && known.RowBound <= IndexedSum.Endurance - (WordFold.Run * 64);
 
     /// <summary>The state of an exact float sum, chosen as the run starts by <see cref="HoldsNarrowFloatSums"/>.</summary>
     private static Func<ScanSource?, AggregateSlot<TResult>> FloatSum<TValue, TResult>(
@@ -628,7 +628,7 @@ internal static class Aggregators
         }
 
         if (shape.Kind != StorageKind.Primitive || source is null
-            || !source.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral low, out Expressions.FilterLiteral high))
+            || source.Statistics is not { } known || !known.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral low, out Expressions.FilterLiteral high))
         {
             return false;
         }

@@ -89,7 +89,7 @@ internal sealed class ZoneFinality
 
     /// <summary>Whether the query's budget is short of what a blocking pass's tables may hold: <see cref="BlockingRowBytes"/> a row of the source.</summary>
     private static bool Pressed(AggregationQuery query) =>
-        query.Host.Source.Session.Options.MemoryBudget is { } budget && query.Host.Source.RowBound is long rows and > 0
+        query.Host.Source.Session.Options.MemoryBudget is { } budget && query.Host.Source.Statistics?.RowBound is long rows and > 0
         && budget.CeilingBytes < rows * BlockingRowBytes;
 
     /// <summary>

@@ -174,7 +174,7 @@ public sealed partial class Scan<TRecord>
         // The one sink whose consumer can read a column encoded: Column<T>.Encoding and its views.
         ScanSpec spec = Spec() with { KeepEncodings = true };
         CancellationToken token = cancellationToken.CanBeCanceled ? cancellationToken : _cancellation;
-        return new AsyncEnumerator(this, _source.BatchesAsync(spec, _counters).GetAsyncEnumerator(token), binding);
+        return new AsyncEnumerator(this, _source.Rows.BatchesAsync(spec, _counters).GetAsyncEnumerator(token), binding);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>
@@ -185,7 +185,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _source.Rows.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return Own(batch);
             }
@@ -206,7 +206,7 @@ public sealed partial class Scan<TRecord>
         TRecord[] rows = [];
         try
         {
-            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _source.Rows.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 int count = Fill(batch, binding, ref rows);
                 for (int i = 0; i < count; i++)
@@ -234,7 +234,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.CountAsync(Query(LogicalShape.Count).Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return (await _source.Rows.AnswerAsync(Query(LogicalShape.Count).Spec().Reading([]), LogicalShape.Count, _counters, cancellationToken).ConfigureAwait(false)).Rows;
         }
         finally
         {
@@ -250,7 +250,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.AnyAsync(Query(LogicalShape.Any).Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return (await _source.Rows.AnswerAsync(Query(LogicalShape.Any).Spec().Reading([]), LogicalShape.Any, _counters, cancellationToken).ConfigureAwait(false)).Rows > 0;
         }
         finally
         {
@@ -332,8 +332,8 @@ public sealed partial class Scan<TRecord>
         FilterLiteral value;
         try
         {
-            value = await _source.ExtremeAsync(
-                Query(new ExtremeShape(target.Field.Path, min)).Spec().Reading([target.Field]), target.Field, min, _counters, cancellationToken).ConfigureAwait(false);
+            ExtremeShape extreme = new ExtremeShape(target.Field, min);
+            value = (await _source.Rows.AnswerAsync(Query(extreme).Spec().Reading([target.Field]), extreme, _counters, cancellationToken).ConfigureAwait(false)).Value;
         }
         finally
         {

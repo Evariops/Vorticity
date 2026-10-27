@@ -82,38 +82,42 @@ internal sealed record ScanSpec
     internal bool PositionsUnread { get; init; }
 
     /// <summary>
-    /// Whether <see cref="Live"/> is the filter's mask of live blocks, refined already: the ranges of
-    /// one aggregation share one read of the structures instead of each reading them again.
+    /// What the analysis of the scan's structures found (spec B, 5), refined already: the ranges of one aggregation share one
+    /// read of the structures instead of each reading them again; null when the read analyses for itself.
     /// </summary>
-    internal bool Pruned { get; init; }
-
-    /// <summary>The mask of live blocks when <see cref="Pruned"/>, or null when no structure prunes anything.</summary>
-    internal BlockMask? Live { get; init; }
+    internal ScanAnalysis? Analysis { get; init; }
 
     /// <summary>
-    /// What an aggregation would take as states in place of rows, or null for rows alone: a source that
-    /// keeps states of some rows (<see cref="ScanSource.KeepsStates"/>) may answer those with batches of
-    /// states.
+    /// What an aggregation asks of a source that answers some of its units in place of rows (spec B, 8): what its states
+    /// capability reads, and its rows capability does not; null for rows alone.
     /// </summary>
-    internal Aggregating.StateRequest? States { get; init; }
-
-    /// <summary>
-    /// The aggregation whose blocks a source of several files, a dataset, settles by their zone maps as it reads each
-    /// file, in place of their rows (<see cref="Aggregating.ZoneSettling.PlanObjectAsync"/>): set when the zone maps answer
-    /// its every aggregate and key, a source that reads one file being settled by the aggregation itself. Null for rows.
-    /// </summary>
-    internal Aggregating.AggregationPlan? Settles { get; init; }
-
-    /// <summary>
-    /// The family of the aggregation a pass asks states for, whose partials a source that learns them (<see cref="ScanSource.LearnsPartials"/>)
-    /// keeps of the rows it reads and answers the family's questions from after (<see cref="Aggregating.LearnedFamily"/>); null for none.
-    /// </summary>
-    internal Aggregating.LearnedFamily? Family { get; init; }
+    internal StatesAsked? Answering { get; init; }
 }
 
+/// <summary>What the analysis of a scan's structures found (spec B, 5), shared by the ranges of one read.</summary>
+/// <param name="Live">The filter's mask of live blocks; null when no structure prunes anything.</param>
+internal sealed record ScanAnalysis(BlockMask? Live);
+
+/// <summary>What an aggregation asks of a source that answers some of its units in place of rows (spec B, 8).</summary>
+/// <param name="States">
+/// The states it would take in place of rows (<see cref="Aggregating.StateRequest"/>): a source with a states capability may
+/// answer those with batches of states; null for none.
+/// </param>
+/// <param name="Settles">
+/// The aggregation whose blocks a source of several files, a dataset, settles by their zone maps as it reads each file, in
+/// place of their rows (<see cref="Aggregating.ZoneSettling.PlanObjectAsync"/>): set when the zone maps answer its every
+/// aggregate and key, a source that reads one file being settled by the aggregation itself; null for none.
+/// </param>
+/// <param name="Family">
+/// The family whose partials a source that learns them (<see cref="IStatesCapability.LearnsPartials"/>) keeps of the rows it
+/// reads and answers the family's questions from after (<see cref="Aggregating.LearnedFamily"/>); null for none.
+/// </param>
+internal sealed record StatesAsked(Aggregating.StateRequest? States = null, Aggregating.AggregationPlan? Settles = null, Aggregating.LearnedFamily? Family = null);
+
 /// <summary>
-/// Where a scan's batches and answers come from: a file, or every object of a dataset's version.
-/// The typed and the tool scans compile to a <see cref="ScanSpec"/> and ask one of these.
+/// Where a scan's batches and answers come from: a file, a stream, or every object of a dataset's version. The engine sees a
+/// source through its capabilities alone (spec B, 8), each null where the source has none: the typed and the tool scans
+/// compile to a <see cref="ScanSpec"/> and a form of their question, which its rows answer.
 /// </summary>
 internal abstract class ScanSource
 {
@@ -123,158 +127,37 @@ internal abstract class ScanSource
     /// <summary>The session whose pool, cache and parallelism the scan uses.</summary>
     internal abstract VortexSession Session { get; }
 
-    /// <summary>The batches, borrowed: each is valid until the next is asked for.</summary>
-    internal abstract IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics);
-
-    internal abstract ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken);
-
-    internal abstract ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken);
-
-    /// <summary>The smallest or largest non-null value of a column among the rows the scan keeps, or a null literal.</summary>
-    internal abstract ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken);
-
-    internal abstract ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken);
-
     /// <summary>What the source is to a question: a file, a version of a dataset, a stream.</summary>
     internal abstract LogicalSource Logical { get; }
 
-    /// <summary>The plan of <paramref name="spec"/> (<see cref="ExplainAsync"/>), with the question it serves in words.</summary>
+    /// <summary>Its rows, which every source gives.</summary>
+    internal abstract IRowsCapability Rows { get; }
+
+    /// <summary>What it knows of its rows before reading them; null when it knows nothing.</summary>
+    internal virtual IStatisticsCapability? Statistics => null;
+
+    /// <summary>The walks of its columns' keys; null when it has none.</summary>
+    internal virtual IKeysCapability? Keys => null;
+
+    /// <summary>The states of an aggregation it gives in place of rows; null for a source of rows alone.</summary>
+    internal virtual IStatesCapability? States => null;
+
+    /// <summary>Its units as tasks read side by side; null when the engine cuts them.</summary>
+    internal virtual ITasksCapability? Tasks => null;
+
+    /// <summary>What reading it costs; null for a source that cannot say, priced as a remote store.</summary>
+    internal virtual ICostCapability? Cost => null;
+
+    /// <summary>The plan of <paramref name="spec"/> (<see cref="IRowsCapability.ExplainAsync"/>), with the question it serves in words.</summary>
     internal async ValueTask<ScanPlan> PlanAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
-        ScanPlan plan = await ExplainAsync(spec, cancellationToken).ConfigureAwait(false);
+        ScanPlan plan = await Rows.ExplainAsync(spec, cancellationToken).ConfigureAwait(false);
         return spec.Query is { } query ? plan with { Logical = query.Text } : plan;
     }
-
-    /// <summary>Whether the statistics alone rule the filter out; never false for a filter that may match.</summary>
-    internal abstract bool MayMatch(VortexExpr filter);
-
-    /// <summary>A walker over the keys of the column at <paramref name="path"/>, from the source's key structures.</summary>
-    internal abstract ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken);
-
-    /// <summary>What reading the source costs, which its paths are priced by: a remote store's unless it says otherwise.</summary>
-    internal virtual IO.CostProfile Profile => IO.CostProfile.Remote;
-
-    /// <summary>Which key source <see cref="OpenKeysAsync"/> would walk.</summary>
-    internal abstract ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken);
-
-    /// <summary>
-    /// The smallest and the largest value of the column at <paramref name="path"/> over the whole
-    /// source, whatever a scan keeps of it, when its statistics hold them.
-    /// </summary>
-    internal virtual bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
-    {
-        min = FilterLiteral.Null;
-        max = FilterLiteral.Null;
-        return false;
-    }
-
-    /// <summary>The rows of the whole source, whatever a scan keeps of them; -1 when they are not known before it is read.</summary>
-    internal virtual long RowBound => -1;
-
-    /// <summary>
-    /// Whether the source may answer some of its rows as states (<see cref="ScanSpec.States"/>): a
-    /// dataset whose objects carry synopses. An aggregation then groups apart from any order the rows
-    /// stream in, the states coming with their objects.
-    /// </summary>
-    internal virtual bool KeepsStates => false;
-
-    /// <summary>
-    /// Whether the source settles the blocks of its files by their zone maps itself, as it reads each, when a pass names
-    /// the aggregation (<see cref="ScanSpec.Settles"/>): a dataset, whose objects' marked rows only it knows.
-    /// </summary>
-    internal virtual bool SettlesBlocks => false;
-
-    /// <summary>
-    /// Whether the source learns the partials of an aggregation's family from the rows it reads, a pass that asks states
-    /// naming the family (<see cref="ScanSpec.Family"/>): a dataset, which knows its objects and keeps their partials.
-    /// </summary>
-    internal virtual bool LearnsPartials => false;
-
-    /// <summary>
-    /// Whether a pass of <paramref name="spec"/> asking <paramref name="states"/> would take states in place
-    /// of some of its rows: a dataset one of whose objects the scan covers has a synopsis that answers. Read
-    /// from what the version's entries hold, before any data.
-    /// </summary>
-    internal virtual ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
-        ValueTask.FromResult(false);
-
-    /// <summary>
-    /// The filter of <paramref name="spec"/> an aggregation asking <paramref name="states"/> answers under
-    /// <see cref="ScanOptions.AlignWindow"/>, and the range it applies: its range on the column the source is ordered by,
-    /// grown to the bounds of what it cuts that states would answer whole. Null when it grows nothing: a dataset's alone may.
-    /// </summary>
-    internal virtual ValueTask<(VortexExpr Filter, VortexExpr Window)?> AlignAsync(
-        ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
-        ValueTask.FromResult<(VortexExpr, VortexExpr)?>(null);
-
-    /// <summary>
-    /// The most bytes one split of <paramref name="spec"/> read ahead holds (<see cref="ScanSpec.ReadAhead"/>),
-    /// over a source that copies what it reads; 0 over one that reads in place, where a read is a view,
-    /// and for a source that reads nothing ahead.
-    /// </summary>
-    internal virtual long ReadAheadBytes(ScanSpec spec) => 0;
-
-    /// <summary>
-    /// Whether a read of the source is a round trip, to an object store rather than to memory or a local file: a
-    /// pass of one lane then reads its splits ahead as a wider pass's lanes do, its reads overlapping instead of
-    /// waiting one after another.
-    /// </summary>
-    internal virtual bool ReadsRoundTrips => false;
-
-    /// <summary>
-    /// The ranges of rows a pass of <paramref name="degree"/> lanes reads side by side, each a range
-    /// of <see cref="ScanSpec.Rows"/> the source reads alone: the objects of a dataset, or parts of a
-    /// large one. Null when the source has none of its own; a file's are cut by the engine, at its
-    /// chunks.
-    /// </summary>
-    internal virtual ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken) => default;
-
-    /// <summary>
-    /// The rows of <paramref name="pass"/> as the ranges an estimate draws from, a list for each file or object, in the
-    /// order of their rows: each cut where the chunks of every column the pass reads end together, a range holding
-    /// <paramref name="rangeBytes"/> of the narrowest of them at least (<see cref="Aggregating.EstimateStrata"/>). Null for
-    /// a source with no cut of its own, which takes no estimate.
-    /// </summary>
-    internal virtual ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken) => default;
-
-    /// <summary>
-    /// What reading <paramref name="spec"/> would cost, its requests and bytes as the source's planner prices its paths
-    /// before reading anything (<see cref="Profile"/>); null for a source that cannot say.
-    /// </summary>
-    internal virtual ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken) => default;
-
-    /// <summary>
-    /// How many of <paramref name="ranges"/>, the pieces <see cref="PiecesAsync"/> cut, read rows from the store, and so
-    /// read their splits ahead: every one by default; a dataset's pieces its synopses answer read a few tables instead,
-    /// whose lanes leave the splits they were granted to the lanes that read rows.
-    /// </summary>
-    internal virtual int RangesReadingRows(RowRange[] ranges) => ranges.Length;
-
-    /// <summary>
-    /// Whether a scan that asks for the order of <paramref name="column"/> (<see cref="ScanSpec.OrderPath"/>)
-    /// brings its rows in it at a cost a stream can bear: a Parquet file on a column it lies in; a dataset on the first
-    /// column of its clustering key when <paramref name="stopsEarly"/>, a take or a window stopping the read, whose objects
-    /// a key-ordered read opens as the order reaches them. A file whose statistics say a column is sorted needs no asking.
-    /// </summary>
-    internal virtual bool OrdersOnAsking(FieldExpr column, bool stopsEarly) => false;
-
-    /// <summary>
-    /// The smallest and the largest value of an integer column of a key, as the source's statistics
-    /// bound them without a read: what bounds a table of its groups by value (<see cref="Aggregating.FixedKeys{TValue}"/>);
-    /// null when nothing in hand bounds them.
-    /// </summary>
-    internal virtual Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => null;
-
-    /// <summary>
-    /// <see cref="Bounds"/> once the source read what its scan reads first anyway: a dataset's roots,
-    /// whose summaries bound its objects, and no request the scan would not make.
-    /// </summary>
-    internal virtual ValueTask<Aggregating.KeyBounds?> BoundsAsync(Aggregating.ColumnShape key, CancellationToken cancellationToken) =>
-        new ValueTask<Aggregating.KeyBounds?>(Bounds(key));
 }
 
 /// <summary>A scan over one open file, compiled to the engine's builder.</summary>
-internal sealed class FileScanSource : ScanSource
+internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsCapability, IKeysCapability, ITasksCapability, ICostCapability
 {
     private readonly VortexFile _file;
 
@@ -286,18 +169,31 @@ internal sealed class FileScanSource : ScanSource
 
     internal override VortexSchema Schema => _file.Schema;
 
+    internal override IRowsCapability Rows => this;
+
+    internal override IStatisticsCapability Statistics => this;
+
+    internal override IKeysCapability Keys => this;
+
+    internal override ITasksCapability Tasks => this;
+
+    internal override ICostCapability Cost => this;
+
     /// <summary>The file statistics' extremes of the column, when they hold them exactly.</summary>
-    internal override Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => Aggregating.AggregationEngine.FileBounds(_file, key);
+    public Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => Aggregating.AggregationEngine.FileBounds(_file, key);
 
     internal override VortexSession Session => _file.Session;
 
-    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
+    /// <summary>Its source's: a remote store's for a file read from an object store, a local disk's otherwise.</summary>
+    public IO.CostProfile Profile => SessionReader.Unwrap(_file.Source) is IO.ObjectStoreSource store ? store.Profile : IO.CostProfile.LocalDisk;
+
+    public IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
         spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>()
         : Refuted(spec) ? RefusedAsync(spec, metrics)
         : Builder(spec, metrics).ExecuteAsync();
 
     /// <summary>The file's rows the pass reads as the ranges of one list; none when its statistics refute the filter.</summary>
-    internal override ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken)
+    public ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken)
     {
         RowRange whole = new RowRange(0, _file.RowCount);
         RowRange rows = pass.Rows is { } asked ? asked.Intersect(whole) : whole;
@@ -310,7 +206,15 @@ internal sealed class FileScanSource : ScanSource
         return ValueTask.FromResult<RowRange[][]?>([[.. Aggregating.EstimateStrata.Clusters(_file.LayoutTree, _file.SegmentSpecs, rows, in mask, rangeBytes)]]);
     }
 
-    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    /// <summary>A form of the question, answered by the count, the proof of a row, or the extreme the source works out.</summary>
+    public async ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken) => form switch
+    {
+        ExtremeShape extreme => new FormAnswer(0, await ExtremeAsync(spec, extreme.Column, extreme.Min, metrics, cancellationToken).ConfigureAwait(false)),
+        _ when ReferenceEquals(form, LogicalShape.Any) => new FormAnswer(await AnyAsync(spec, metrics, cancellationToken).ConfigureAwait(false) ? 1 : 0, FilterLiteral.Null),
+        _ => new FormAnswer(await CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false), FilterLiteral.Null),
+    };
+
+    private async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
         {
@@ -320,12 +224,12 @@ internal sealed class FileScanSource : ScanSource
         return await Builder(spec, metrics).CountAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+    private async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         !spec.MatchesNothing
         && !await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false)
         && await Builder(spec, metrics).AnyAsync(cancellationToken).ConfigureAwait(false);
 
-    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
+    private async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
         {
@@ -369,7 +273,7 @@ internal sealed class FileScanSource : ScanSource
         ScanPlan.From(await Builder(spec with { Filter = null, OrderPath = null }, new ScanCounters())
             .ExplainAsync(cancellationToken).ConfigureAwait(false));
 
-    internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
+    public async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
         if (Refuted(spec) && !spec.MatchesNothing)
         {
@@ -402,10 +306,10 @@ internal sealed class FileScanSource : ScanSource
     /// </summary>
     private bool Refuted(ScanSpec spec) => spec.Filter is { } filter && !MayMatch(filter);
 
-    internal override bool MayMatch(VortexExpr filter) => Compute.FileStatisticsPruner.MayMatch(_file, filter);
+    public bool MayMatch(VortexExpr filter) => Compute.FileStatisticsPruner.MayMatch(_file, filter);
 
     /// <remarks>The file statistics are one entry per top-level column.</remarks>
-    internal override bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
+    public bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
     {
         min = FilterLiteral.Null;
         max = FilterLiteral.Null;
@@ -419,19 +323,19 @@ internal sealed class FileScanSource : ScanSource
             && FileStatisticsPruner.TryLiteral(statistics.Min, out min) && FileStatisticsPruner.TryLiteral(statistics.Max, out max);
     }
 
-    internal override long RowBound => _file.RowCount;
+    public long RowBound => _file.RowCount;
 
     /// <summary>A file read from an object store, a request a read; not one read from the local disk or memory.</summary>
-    internal override bool ReadsRoundTrips => SessionReader.Unwrap(_file.Source) is IO.ObjectStoreSource;
+    public bool ReadsRoundTrips => SessionReader.Unwrap(_file.Source) is IO.ObjectStoreSource;
 
     /// <summary>The segments the largest split of the scan asks for, over a source that copies them: the layout walked once, nothing read.</summary>
-    internal override long ReadAheadBytes(ScanSpec spec) =>
+    public long ReadAheadBytes(ScanSpec spec) =>
         _file.Source.ReadsInPlace || spec.MatchesNothing ? 0 : Builder(spec, new ScanCounters()).LargestSplitBytes();
 
-    internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         await KeysOf(path, distinct, indexes).OpenAsync(cancellationToken).ConfigureAwait(false);
 
-    internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         KeysOf(path, distinct, indexes).ExplainAsync(cancellationToken);
 
     private KeyCursorBuilder KeysOf(string path, bool distinct, bool indexes)
@@ -493,9 +397,9 @@ internal sealed class FileScanSource : ScanSource
             builder.WithReadAhead(spec.ReadAhead);
         }
 
-        if (spec.Pruned)
+        if (spec.Analysis is { } analysis)
         {
-            builder.WithPruned(spec.Live);
+            builder.WithPruned(analysis.Live);
         }
 
         return builder;

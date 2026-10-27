@@ -63,11 +63,11 @@ internal static class AggregationPartials
         Check(query.Plan);
         ScanSource source = query.Host.Source;
         ScanSpec spec = query.Host.Spec(query.RowFilter);
-        RowRange whole = spec.Rows ?? new RowRange(0, source.RowBound >= 0 ? source.RowBound : long.MaxValue);
+        RowRange whole = spec.Rows ?? new RowRange(0, source.Statistics?.RowBound is long bound and >= 0 ? bound : long.MaxValue);
         RowRange[]? pieces = count == 1 || spec.MatchesNothing
             ? null
             : AggregationEngine.Ranges(source, spec, count)
-                ?? (source is FileScanSource ? null : await source.PiecesAsync(spec, count, cancellationToken).ConfigureAwait(false));
+                ?? (source is FileScanSource || source.Tasks is not { } tasks ? null : await tasks.PiecesAsync(spec, count, cancellationToken).ConfigureAwait(false));
         return pieces is null || pieces.Length <= 1 ? [whole] : Gathered(whole, pieces, count);
     }
 
@@ -348,24 +348,34 @@ internal interface IStateOverlay
 /// batch of states each batch of their files, their keys as the functions gave them (<see cref="RecordBatch.OfPartial"/>).
 /// The source has no rows: it answers a count of them from the states, and nothing else but states.
 /// </summary>
-internal sealed class PartialsSource(ScanSource question, AggregationPartial[] partials, VortexSchema expected) : ScanSource
+internal sealed class PartialsSource(ScanSource question, AggregationPartial[] partials, VortexSchema expected)
+    : ScanSource, IRowsCapability, IStatisticsCapability, IKeysCapability, IStatesCapability, ICostCapability
 {
     /// <summary>The question's columns, which its plan reads by.</summary>
     internal override VortexSchema Schema => question.Schema;
 
     internal override VortexSession Session => question.Session;
 
-    internal override IO.CostProfile Profile => question.Profile;
+    /// <summary>Its question's.</summary>
+    public IO.CostProfile Profile => question.Cost?.Profile ?? IO.CostProfile.Remote;
 
     internal override LogicalSource Logical => question.Logical;
 
-    internal override bool KeepsStates => true;
+    internal override IRowsCapability Rows => this;
 
-    internal override ValueTask<bool> TakesStatesAsync(ScanSpec spec, StateRequest states, CancellationToken cancellationToken) =>
+    internal override IStatisticsCapability Statistics => this;
+
+    internal override IKeysCapability Keys => this;
+
+    internal override IStatesCapability States => this;
+
+    internal override ICostCapability Cost => this;
+
+    public ValueTask<bool> TakesStatesAsync(ScanSpec spec, StateRequest states, CancellationToken cancellationToken) =>
         ValueTask.FromResult(true);
 
-    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
-        spec.States is null
+    public IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
+        spec.Answering?.States is null
             ? throw new InvalidOperationException("A merge of partials reads them as states, which its pass did not ask for.")
             : StatesAsync(metrics);
 
@@ -378,7 +388,7 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
             VortexFile file = await OpenAsync(partial, cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in new FileScanSource(file).BatchesAsync(new ScanSpec(), metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+                await foreach (RecordBatch batch in new FileScanSource(file).Rows.BatchesAsync(new ScanSpec(), metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     yield return Canonical(batch, row);
                     row += batch.RowCount;
@@ -418,7 +428,15 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
     }
 
     /// <summary>The rows the partials' groups count, for a count of rows alone, which the engine asks of a source.</summary>
-    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    /// <summary>A form of the question, answered by the count, the proof of a row, or the extreme the source works out.</summary>
+    public async ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken) => form switch
+    {
+        ExtremeShape extreme => new FormAnswer(0, await ExtremeAsync(spec, extreme.Column, extreme.Min, metrics, cancellationToken).ConfigureAwait(false)),
+        _ when ReferenceEquals(form, LogicalShape.Any) => new FormAnswer(await AnyAsync(spec, metrics, cancellationToken).ConfigureAwait(false) ? 1 : 0, FilterLiteral.Null),
+        _ => new FormAnswer(await CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false), FilterLiteral.Null),
+    };
+
+    private async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         long rows = 0;
         await foreach (RecordBatch batch in StatesAsync(metrics, cancellationToken).ConfigureAwait(false))
@@ -433,22 +451,22 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
         return rows;
     }
 
-    internal override ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+    private ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         throw new NotSupportedException("A merge of partials holds states, not rows.");
 
-    internal override ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken) =>
+    private ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken) =>
         throw new NotSupportedException("A merge of partials holds states, not rows.");
 
     /// <summary>A plan of no block: the partials are in memory, and every row of them is read.</summary>
-    internal override ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken) =>
+    public ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken) =>
         ValueTask.FromResult(new ScanPlan(0, 0, 0, 0, 0, MayMatch: true, [], new CountPlan(false, 0, 0, 0, 0), null));
 
-    internal override bool MayMatch(VortexExpr filter) => true;
+    public bool MayMatch(VortexExpr filter) => true;
 
-    internal override ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         throw new NotSupportedException("A merge of partials holds states, not rows.");
 
-    internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
+    public ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         ValueTask.FromResult(new KeyPlan(path, KeySourceKind.None, 0, null, HasRows: false, [new KeySourceRejection(KeySourceKind.InMemory, "a merge of partials holds states, not rows")]));
 }
 
