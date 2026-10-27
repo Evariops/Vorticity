@@ -25,6 +25,9 @@ public sealed partial class IdentifierPostingsTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Request.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
+
+            // A request priced at nothing: every object that carries postings is looked up, however small its footer.
+            CostProfile = Vorticity.IO.CostProfile.Memory,
         }, Ct);
         Random random = new Random(37);
         List<Request> appended = [];

@@ -289,7 +289,9 @@ public sealed partial class DatasetNegativesTests
     }
 
     /// <summary>Marks rows of objects of any size, and keeps a table of contents, sheets and counts for every object.</summary>
-    private static DatasetOptions Options() => new DatasetOptions { ContentsObjectBytes = 1, SheetObjectBytes = 0, MarkedObjectBytes = 1 };
+    // Objects of 256 KiB, priced by their bytes alone: a request, which a gibibyte's bytes make small, would outweigh them.
+    private static DatasetOptions Options() =>
+        new DatasetOptions { ContentsObjectBytes = 1, SheetObjectBytes = 0, MarkedObjectBytes = 1, CostProfile = CostProfile.Memory };
 
     /// <summary>
     /// Four services, each 20 000 hits over two hours from noon, from three hosts of its own, keyed by the service then the

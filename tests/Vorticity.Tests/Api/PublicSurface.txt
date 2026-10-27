@@ -3315,7 +3315,7 @@ Vorticity.Dataset:     method ValueTask<ObjectRead> ReadAsync(string, long, Memo
 Vorticity.Dataset:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.Dataset:     method void Hold(string, bool)
-Vorticity.Dataset:     property CostProfile CostProfile { get; }
+Vorticity.Dataset:     property CostProfile CostProfile { get; set; }
 Vorticity.Dataset:     property Func<ObjectOperation, string, bool> Fails { get; set; }
 Vorticity.Dataset:     property Func<string, bool> CrashesAfterPut { get; set; }
 Vorticity.Dataset:     property Nullable<TimeSpan> RetainFor { get; set; }

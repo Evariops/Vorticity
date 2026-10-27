@@ -447,6 +447,7 @@ public sealed partial class IdentifierPostingsTests
         {
             Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Request.At))] },
             Identifiers = [nameof(Request.RequestId)],
+            CostProfile = Vorticity.IO.CostProfile.Memory,
         }, Ct);
         await using (ObjectDraft draft = dataset.StartObject())
         {

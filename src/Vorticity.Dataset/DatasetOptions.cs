@@ -222,7 +222,8 @@ public sealed record DatasetOptions
     /// <summary>
     /// What reading the dataset costs, which its planners price their paths by before reading anything: the store's own
     /// profile when null, the default (<see cref="IObjectStore.CostProfile"/>). An application that knows its store says so here,
-    /// a store behind a cache or on another link than its kind says.
+    /// a store behind a cache or on another link than its kind says. The reads of its objects join their ranges by the store's
+    /// own profile.
     /// </summary>
     public CostProfile? CostProfile { get; init; }
 
