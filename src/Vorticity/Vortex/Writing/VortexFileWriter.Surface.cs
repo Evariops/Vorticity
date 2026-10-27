@@ -107,7 +107,7 @@ public sealed partial class VortexFileWriter
     {
         ArgumentNullException.ThrowIfNull(builder);
         ThrowIfDone();
-        if (!ReferenceEquals(builder.Writer, this))
+        if (!ReferenceEquals(builder.Owner, this))
         {
             throw new ArgumentException(
                 "A builder is written by the writer that handed it out; this one is another writer's, or a nested struct's.", nameof(builder));

@@ -11,6 +11,7 @@ using Vorticity.Compute;
 using Vorticity.IO;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
+using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
@@ -341,16 +342,19 @@ internal static class DatasetRowChanges
             }
 
             // Written in the version's schema, which an object of an earlier one is read as. The rows
-            // kept are the object's own in its own order, and an object above level 0 is a
-            // compaction's, whose rows come in key order.
-            // They are some of its rows, which bound what the store sizes the parts of the object from.
-            ObjectDraft? draft = matched < held.Entry.Rows
+            // kept are the object's own in its own order, the key's, so that the object keeps a sparse
+            // index and blocks over them. They are some of its rows, which bound what the store sizes
+            // the parts of the object from.
+            SortKey? key = version.Schema.Layout is { Components.Count: > 0 } plan ? SortKey.Of(plan, partition: false, plan.Components.Count) : null;
+            ObjectOutput? draft = matched < held.Entry.Rows
                 ? dataset.StartObjectUnder(
-                    version.Schema, inKeyOrder: version.Levels.RowsInKeyOrder(held.Level), byteBound: ObjectBound.Of(held.Entry.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                    version.Schema, inKeyOrder: true, contents: key is not null,
+                    byteBound: ObjectBound.Of(held.Entry.Bytes, doublings, dataset.Options.BoundOutPerIn))
                 : null;
+            SortedRows? sorted = key is null || draft is null ? null : new SortedRows(key, Math.Min(version.Schema.Layout!.Layout.Prefix, key.Count), blocks: false);
             try
             {
-                long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, changed, cancellationToken).ConfigureAwait(false);
+                long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, key, sorted, changed, cancellationToken).ConfigureAwait(false);
                 if (draft is null)
                 {
                     return new Change(matched, null, null);
@@ -363,10 +367,11 @@ internal static class DatasetRowChanges
                         "a rewrite that loses or doubles rows is the one failure it must not have.");
                 }
 
-                ObjectDraft sealing = draft;
+                ObjectOutput sealing = draft;
                 draft = null;
                 await using (sealing.Writer.ConfigureAwait(false))
                 {
+                    sorted?.Finish(sealing.Writer);
                     await sealing.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
                 }
 
@@ -577,7 +582,8 @@ internal static class DatasetRowChanges
     /// <summary>
     /// One pass over an object's rows: the rows the filter is not true for go to
     /// <paramref name="writer"/> and the others to <paramref name="changed"/>, each batch selected
-    /// rather than copied.
+    /// rather than copied. The kept rows' keys under <paramref name="key"/> go to
+    /// <paramref name="sorted"/>, the object's sparse index and blocks, when there is one.
     /// </summary>
     /// <returns>The rows written to <paramref name="writer"/>.</returns>
     private static async ValueTask<long> SplitAsync(
@@ -586,6 +592,8 @@ internal static class DatasetRowChanges
         ObjectColumns? columns,
         VortexExpr? filter,
         VortexFileWriter? writer,
+        SortKey? key,
+        SortedRows? sorted,
         ChangedRows? changed,
         CancellationToken cancellationToken)
     {
@@ -615,6 +623,11 @@ internal static class DatasetRowChanges
                 (VortexBuffer keptWords, int keeping) = Words(batch.Arena, states.AsSpan(0, rows), matching: false);
                 if (keeping > 0 && writer is not null)
                 {
+                    if (sorted is not null)
+                    {
+                        Index(batch, keeping < rows ? keptWords.Span : default, keeping, key!, sorted, writer);
+                    }
+
                     if (keeping < rows)
                     {
                         batch.Select(keptWords, keeping);
@@ -638,6 +651,43 @@ internal static class DatasetRowChanges
         }
 
         return kept;
+    }
+
+    /// <summary>
+    /// Gives <paramref name="sorted"/> the keys of the rows of <paramref name="batch"/> it keeps, every one when
+    /// <paramref name="words"/> selects none, and declares the blocks they close before the rows are written.
+    /// </summary>
+    private static void Index(RecordBatch batch, ReadOnlySpan<byte> words, int keeping, SortKey key, SortedRows sorted, VortexFileWriter writer)
+    {
+        using RowKeys keys = key.Encode(batch);
+        if (words.IsEmpty)
+        {
+            sorted.Take(new OrderedRows(keys, null, 0), 0, keeping, writer.BlockRows);
+        }
+        else
+        {
+            int[] kept = ArrayPool<int>.Shared.Rent(keeping);
+            try
+            {
+                int at = 0;
+                ReadOnlySpan<ulong> bits = MemoryMarshal.Cast<byte, ulong>(words);
+                for (int word = 0; word < bits.Length && at < keeping; word++)
+                {
+                    for (ulong w = bits[word]; w != 0 && at < keeping; w &= w - 1)
+                    {
+                        kept[at++] = (word << 6) + BitOperations.TrailingZeroCount(w);
+                    }
+                }
+
+                sorted.Take(new OrderedRows(keys, kept, 0), 0, keeping, writer.BlockRows);
+            }
+            finally
+            {
+                ArrayPool<int>.Shared.Return(kept);
+            }
+        }
+
+        sorted.DeclareEnds(writer);
     }
 
     /// <summary>
@@ -734,9 +784,9 @@ internal abstract class ChangedRows
 }
 
 /// <summary>
-/// The rows an update selects, read out of each batch as records, changed, and written into new
-/// objects rolled at level 1's target size. A changed row may carry another key, which is why they
-/// go to level 0, as appended rows do.
+/// The rows an update selects, read out of each batch as records, changed, and written as an append
+/// writes its rows (<see cref="DatasetWriter"/>): by partition, sorted by the key. A changed row may
+/// carry another key or another partition, which is why they go to level 0, as appended rows do.
 /// </summary>
 /// <typeparam name="TRecord">The record the change is written against; its members cover every column.</typeparam>
 internal sealed class ChangedRecords<TRecord> : ChangedRows
@@ -746,12 +796,9 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
     private readonly DatasetSchema _schema;
     private readonly Func<TRecord, TRecord> _update;
     private readonly RecordBinding _binding;
-    private readonly long _target;
-    private readonly List<WrittenObject> _written = [];
+    private readonly long _firstRow;
     private TRecord[] _rows = [];
-    private ObjectDraft? _draft;
-    private long _draftRows;
-    private long _firstRow;
+    private DatasetWriter? _writer;
 
     /// <param name="dataset">The dataset the objects are written for.</param>
     /// <param name="schema">The schema the rows are read as and written in.</param>
@@ -764,9 +811,6 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
         _update = update;
         _binding = RecordBinding.For<TRecord>(schema.Columns, dataset.Session.Options.Extensions);
         _firstRow = firstRow;
-        // Rolled at what compaction writes at most: the changed rows land in level 0, where a
-        // large change in many small objects would put the level over its ceiling at once.
-        _target = Math.Min(CompactionOptions.DefaultMaxObjectBytes, Math.Max(dataset.Options.MaxObjectBytes / 2, 1));
     }
 
     internal override async ValueTask TakeAsync(RecordBatch batch, CancellationToken cancellationToken)
@@ -777,61 +821,30 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
             _rows[i] = _update(_rows[i]);
         }
 
-        _draft ??= _dataset.StartObjectUnder(_schema);
-        await _draft.Writer.WriteAsync<TRecord>(_rows.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
-        _draftRows += count;
-        if (_draft.Sink.Position + _draft.Writer.GatheredBytes >= _target)
-        {
-            await RollAsync(cancellationToken).ConfigureAwait(false);
-        }
+        _writer ??= new DatasetWriter(_dataset, _schema, shredded: null);
+        await _writer.WriteAsync<TRecord>(_rows.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
     }
 
     internal override async ValueTask<IReadOnlyList<WrittenObject>> FinishAsync(CancellationToken cancellationToken)
     {
-        await RollAsync(cancellationToken).ConfigureAwait(false);
         Release();
-        return _written;
+        if (_writer is not { } writer)
+        {
+            return [];
+        }
+
+        _writer = null;
+        return await writer.FinishAsync(_firstRow, cancellationToken).ConfigureAwait(false);
     }
 
     internal override async ValueTask AbandonAsync()
     {
         Release();
-        if (_draft is { } draft)
+        if (_writer is { } writer)
         {
-            _draft = null;
-            await draft.DisposeAsync().ConfigureAwait(false);
+            _writer = null;
+            await writer.AbandonAsync().ConfigureAwait(false);
         }
-    }
-
-    /// <summary>Seals the object being written, if there is one.</summary>
-    private async ValueTask RollAsync(CancellationToken cancellationToken)
-    {
-        if (_draft is not { } draft)
-        {
-            return;
-        }
-
-        _draft = null;
-        try
-        {
-            await using (draft.Writer.ConfigureAwait(false))
-            {
-                await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch
-        {
-            await draft.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-
-        if (await _dataset.SealAsync(draft, _draftRows, _firstRow, cancellationToken).ConfigureAwait(false) is { } written)
-        {
-            _written.Add(written);
-        }
-
-        _firstRow += _draftRows;
-        _draftRows = 0;
     }
 
     /// <summary>The selected rows of a batch as records, in order, at the front of the buffer.</summary>

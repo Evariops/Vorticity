@@ -430,25 +430,22 @@ internal static class DatasetCompactor
     }
 
     /// <summary>
-    /// An input's rows, in its own order or in key order along <paramref name="paths"/>, as
-    /// <paramref name="schema"/>'s columns, or those of them <paramref name="fields"/> names: its own scan, each batch
-    /// reshaped when it was written under another schema.
+    /// An input's rows in its own order, the key's, as <paramref name="schema"/>'s columns, or those of them
+    /// <paramref name="fields"/> names: its own scan, each batch reshaped when it was written under another schema.
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
-        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken, int[]? fields = null)
+        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null)
     {
         VortexFile file = lease.File;
         FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            return LiveRowsAsync(file, fields is null ? file.ScanBuilder : () => file.ScanBuilder().ProjectMask(projection), entry, paths, cancellationToken);
+            return LiveRowsAsync(fields is null ? file.ScanBuilder() : file.ScanBuilder().ProjectMask(projection), entry, cancellationToken);
         }
 
-        // The clustering key keeps its columns under every schema, so a key-ordered read of an
-        // earlier object names them as the dataset does.
         ObjectReadPlan read = columns.Read(null, projection);
         return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(file, () => file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, paths, cancellationToken),
+            LiveRowsAsync(file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, cancellationToken),
             read.Shape,
             null,
             0,
@@ -457,30 +454,13 @@ internal static class DatasetCompactor
     }
 
     /// <summary>
-    /// An input's rows through the scans <paramref name="scan"/> makes, in key order along
-    /// <paramref name="paths"/> or in its own, without the rows it deleted: a compaction is also where
-    /// a deletion vector ends, its outputs holding only the live rows.
+    /// An input's rows through <paramref name="scan"/>, in their order, without the rows it deleted: a compaction is also
+    /// where a deletion vector ends, its outputs holding only the live rows.
     /// </summary>
-    private static IAsyncEnumerable<RecordBatch> LiveRowsAsync(
-        VortexFile file, Func<ScanBuilder> scan, ObjectEntry entry, IReadOnlyList<string>? paths, CancellationToken cancellationToken)
-    {
-        if (!entry.HasDeletions)
-        {
-            return (paths is null ? scan() : scan().InKeyOrder(paths)).ExecuteAsync();
-        }
-
-        if (paths is null)
-        {
-            return LiveRows.WithoutDeletedAsync(
-                scan().WithCompaction(false).WithEncodings(false, false).ExecuteAsync(), entry.Deletions, compact: true, 0, cancellationToken);
-        }
-
-        ScanBuilder ordered = scan().InKeyOrder(paths);
-        ScanBuilder? nulls = paths.Count == 1 && ColumnPath.MayBeNull(file.DType, paths[0])
-            ? scan().Where(Vorticity.Expressions.Expr.IsNull(Vorticity.Expressions.Expr.Field(paths[0]))).WithEncodings(false, false)
-            : null;
-        return LiveRows.OrderedAsync(ordered, nulls, entry.Deletions, descending: false, cancellationToken);
-    }
+    private static IAsyncEnumerable<RecordBatch> LiveRowsAsync(ScanBuilder scan, ObjectEntry entry, CancellationToken cancellationToken) =>
+        entry.HasDeletions
+            ? LiveRows.WithoutDeletedAsync(scan.WithCompaction(false).WithEncodings(false, false).ExecuteAsync(), entry.Deletions, compact: true, 0, cancellationToken)
+            : scan.ExecuteAsync();
 
     /// <summary>
     /// Which outputs each input's rows went to, as a job writes them, an input by its key: an output whose every input sent it
@@ -532,7 +512,7 @@ internal static class DatasetCompactor
             ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in RowsOfAsync(lease, input.Entry, schema, null, cancellationToken)
+                await foreach (RecordBatch batch in RowsOfAsync(lease, input.Entry, schema, cancellationToken)
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     await outputs.RollIfFullAsync(cancellationToken).ConfigureAwait(false);
@@ -672,13 +652,12 @@ internal static class DatasetCompactor
         }
 
         inputs.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
-        IReadOnlyList<string> paths = key.Paths;
         return new KeyOrderedMerge(
             dataset.Snapshot,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             SortKey.OfColumns(schema.DType, key.Paths, descending: false),
             rankedTies: false,
-            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken, fields),
+            (lease, entry) => RowsOfAsync(lease, entry, schema, cancellationToken, fields),
             opened: null,
             cancellationToken);
     }
@@ -829,7 +808,8 @@ internal static class DatasetCompactor
         private readonly List<int> _levels = [];
         private byte[] _lastKey = [];
         private int _lastKeyLength = -1;
-        private ObjectDraft? _draft;
+        private ObjectOutput? _output;
+        private SortedRows? _sorted;
         private long _rows;
         private long _firstRow;
         private readonly int _level;
@@ -869,7 +849,7 @@ internal static class DatasetCompactor
         }
 
         /// <summary>Whether the object being written has reached the destination's size.</summary>
-        internal bool WantsRoll => _draft is not null && _draft.Sink.Position + _draft.Writer.GatheredBytes >= _target;
+        internal bool WantsRoll => _output is not null && _output.Sink.Position + _output.Writer.GatheredBytes >= _target;
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
@@ -881,7 +861,8 @@ internal static class DatasetCompactor
 
         /// <summary>
         /// The key the rows come in the order of, whose indexed prefix (<see cref="Prefix"/>) each object keeps the sparse
-        /// index of and cuts its blocks on; null for objects written without them, which keep no table of contents.
+        /// index of and cuts its blocks on (<see cref="SortedRows"/>); null for objects written without them, which keep no
+        /// table of contents.
         /// </summary>
         internal SortKey? Keys { get; init; }
 
@@ -900,20 +881,18 @@ internal static class DatasetCompactor
         /// <summary>
         /// Writes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
         /// key's order: the first starts the next clustering value's shredding when they start an object of another value,
-        /// those that start a granule give the object's sparse index their keys, and its blocks close where the prefix
-        /// calls for.
+        /// and the object's sparse index and blocks take them.
         /// </summary>
         internal async ValueTask WriteAsync(KeyOrderedMerge merge, int from, int to, CancellationToken cancellationToken)
         {
             Starts(merge.KeyAt(from));
-            ObjectDraft draft = Open();
+            ObjectOutput output = Open();
             if (Keys is { } keys)
             {
-                Index(merge, keys, from, to, draft.Writer.BlockRows);
-                Block(merge, keys, from, to);
+                (_sorted ??= new SortedRows(keys, Prefix)).Take(merge, from, to, output.Writer.BlockRows);
             }
 
-            Note(merge.KeyAt(to - 1));
+            _lastKeyLength = SortedRows.Keep(ref _lastKey, merge.KeyAt(to - 1));
             RecordBatch run = merge.Current;
             await WriteAsync(from == 0 && to == run.RowCount ? run : run.Window(from, to - from), cancellationToken).ConfigureAwait(false);
         }
@@ -921,16 +900,10 @@ internal static class DatasetCompactor
         /// <summary>Writes <paramref name="batch"/>'s rows after those written: in no key's order, they index nothing.</summary>
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
         {
-            ObjectDraft draft = Open();
+            ObjectOutput output = Open();
 
-            // The blocks the rows before these and these themselves closed, declared before their rows are written: the
-            // statistics of each column over them cut where they end.
-            for (; _declaredBlocks < _blockRows.Count; _declaredBlocks++)
-            {
-                _declaredEnd += _blockRows[_declaredBlocks];
-                draft.Writer.EndBlock(_declaredEnd);
-            }
-
+            // The blocks the rows before these and these themselves closed, declared before their rows are written.
+            _sorted?.DeclareEnds(output.Writer);
             _rows += batch.RowCount;
             if (_census is { } census)
             {
@@ -941,30 +914,27 @@ internal static class DatasetCompactor
                 }
             }
 
-            await draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+            await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
         }
-
-        /// <summary>Records the last key of a run, so the next roll does not split it.</summary>
-        private void Note(ReadOnlySpan<byte> key) => _lastKeyLength = Keep(ref _lastKey, key);
 
         /// <summary>
         /// The object being written, started when none is: one with a sparse index keeps a table of contents, and in a
         /// clustering value's rows shreds what they pay for, counting its paths as its rows come.
         /// </summary>
-        private ObjectDraft Open()
+        private ObjectOutput Open()
         {
-            if (_draft is { } draft)
+            if (_output is { } output)
             {
-                return draft;
+                return output;
             }
 
             ValueShredding? shredding = Shreddings is { } shreddings ? shreddings[Math.Clamp(_value, 0, shreddings.Count - 1)] : null;
-            draft = _dataset.StartObjectUnder(
-                _schema, _inKeyOrder, _rowBound, contents: Keys is not null, shredded: shredding?.Shredded,
+            output = _dataset.StartObjectUnder(
+                _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
                 variantChunks: shredding?.VariantChunks, byteBound: _byteBound);
-            _draft = draft;
-            _census = shredding is null ? null : Census(draft.Writer.BlockRows);
-            return draft;
+            _output = output;
+            _census = shredding is null ? null : Census(output.Writer.BlockRows);
+            return output;
         }
 
         /// <summary>
@@ -1003,188 +973,6 @@ internal static class DatasetCompactor
             }
         }
 
-        // The sparse index of the object being written: the indexed prefix of the key of each granule's first row, as the
-        // rows come.
-        private readonly List<byte[]> _granuleKeys = [];
-
-        /// <summary>
-        /// Keeps the key of each row from <paramref name="from"/> to <paramref name="to"/> of the merge's run that starts a
-        /// granule of <paramref name="granuleRows"/> rows of the object, cut to the indexed prefix: the rows written are the
-        /// object's before them.
-        /// </summary>
-        private void Index(KeyOrderedMerge merge, SortKey keys, int from, int to, int granuleRows)
-        {
-            long first = _rows;
-            for (long row = (first + granuleRows - 1) / granuleRows * granuleRows; row < first + (to - from); row += granuleRows)
-            {
-                _granuleKeys.Add(Prefixed(keys, merge.KeyAt(from + (int)(row - first))).ToArray());
-            }
-        }
-
-        /// <summary>The indexed prefix of the row-encoded key <paramref name="key"/>; the whole key when its width is not told.</summary>
-        private ReadOnlySpan<byte> Prefixed(SortKey keys, ReadOnlySpan<byte> key)
-        {
-            int length = keys.PrefixLength(key, Prefix);
-            return length < 0 ? key : key[..length];
-        }
-
-        // The blocks of the object being written: each closed block's rows, and the rows of those of one value of the prefix;
-        // then the rows of the one being written, its first key and the key of its last row, in buffers that grow and are kept.
-        private readonly List<long> _blockRows = [];
-        private long _pureRows;
-        private long _blockFilled;
-        private byte[] _blockLow = [];
-        private int _blockLowLength;
-        private byte[] _blockHigh = [];
-        private int _blockHighLength;
-
-        // The blocks of the object being written already declared to its writer, and the rows they end at.
-        private int _declaredBlocks;
-        private long _declaredEnd;
-
-        /// <summary>
-        /// Notes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
-        /// key's order: a block ends at a change of the indexed prefix once it holds <see cref="ColumnBlocks.LeastRows"/>
-        /// rows, at a change of the prefix's last component, when it has several, once it holds
-        /// <see cref="ColumnBlocks.FewestRows"/>, and at <see cref="ColumnBlocks.MostRows"/> rows. The keys of a run follow
-        /// one another, and so their prefixes, so a bisection finds each change.
-        /// </summary>
-        private void Block(KeyOrderedMerge merge, SortKey keys, int from, int to)
-        {
-            // The last component, the finest grain the prefix groups rows by, ends a block where it changes; the rows a block
-            // takes before any change may end it.
-            int last = Prefix > 1 ? Prefix - 1 : -1;
-            int open = last >= 0 ? ColumnBlocks.FewestRows : ColumnBlocks.LeastRows;
-            for (int at = from; at < to;)
-            {
-                if (_blockFilled == 0)
-                {
-                    _blockLowLength = Keep(ref _blockLow, merge.KeyAt(at));
-                }
-
-                // Past those rows, the first change of the prefix ends a block of the least rows, and under them the first
-                // that changes the last component, each change found in turn. Up to the most a block holds.
-                int limit = (int)Math.Min(to, at + (ColumnBlocks.MostRows - _blockFilled));
-                int end = limit;
-                int checkFrom = at + (int)Math.Clamp(open - _blockFilled, 0, limit - at);
-                ReadOnlySpan<byte> before = checkFrom > at ? merge.KeyAt(checkFrom - 1) : _blockHigh.AsSpan(0, _blockHighLength);
-                while (checkFrom < limit)
-                {
-                    int change = FirstChange(merge, keys, before, checkFrom, limit);
-                    if (change >= limit
-                        || _blockFilled + (change - at) >= ColumnBlocks.LeastRows
-                        || (last >= 0 && !keys.SameAt(before, merge.KeyAt(change), last)))
-                    {
-                        end = change;
-                        break;
-                    }
-
-                    before = merge.KeyAt(change);
-                    checkFrom = change + 1;
-                }
-
-                if (end > at)
-                {
-                    _blockHighLength = Keep(ref _blockHigh, merge.KeyAt(end - 1));
-                    _blockFilled += end - at;
-                    at = end;
-                }
-
-                if (end < limit || _blockFilled == ColumnBlocks.MostRows)
-                {
-                    CloseBlock();
-                }
-            }
-        }
-
-        /// <summary>Copies <paramref name="key"/> into <paramref name="buffer"/>, grown when short; its length.</summary>
-        private static int Keep(ref byte[] buffer, ReadOnlySpan<byte> key)
-        {
-            if (buffer.Length < key.Length)
-            {
-                buffer = new byte[Math.Max(key.Length, buffer.Length * 2)];
-            }
-
-            key.CopyTo(buffer);
-            return key.Length;
-        }
-
-        /// <summary>
-        /// The first row from <paramref name="from"/> to <paramref name="to"/> of the merge's run whose indexed prefix is not
-        /// <paramref name="before"/>'s, or <paramref name="to"/>.
-        /// </summary>
-        private int FirstChange(KeyOrderedMerge merge, SortKey keys, ReadOnlySpan<byte> before, int from, int to)
-        {
-            if (keys.SamePrefix(before, merge.KeyAt(to - 1), Prefix))
-            {
-                return to;
-            }
-
-            if (!keys.SamePrefix(before, merge.KeyAt(from), Prefix))
-            {
-                return from;
-            }
-
-            // Row `low` holds the prefix of `before`, row `high` another.
-            int low = from;
-            int high = to - 1;
-            while (high - low > 1)
-            {
-                int middle = low + ((high - low) >> 1);
-                if (keys.SamePrefix(before, merge.KeyAt(middle), Prefix))
-                {
-                    low = middle;
-                }
-                else
-                {
-                    high = middle;
-                }
-            }
-
-            return high;
-        }
-
-        /// <summary>
-        /// Closes the block being written at its last row; its rows are of one value of the prefix when its first and last
-        /// keys hold one, since the keys follow one another and every row between holds it too.
-        /// </summary>
-        private void CloseBlock()
-        {
-            if (_blockFilled == 0)
-            {
-                return;
-            }
-
-            if (Keys is { } keys && keys.SamePrefix(_blockLow.AsSpan(0, _blockLowLength), _blockHigh.AsSpan(0, _blockHighLength), Prefix))
-            {
-                _pureRows += _blockFilled;
-            }
-
-            _blockRows.Add(_blockFilled);
-            _blockFilled = 0;
-        }
-
-        /// <summary>
-        /// The count of the blocks of the object being written, its last one closed, and the rows of those of one value; null
-        /// when it was written without them, or when they do not cover its rows. The counts start over for the next object.
-        /// </summary>
-        private (int Count, long PureRows)? Blocks()
-        {
-            CloseBlock();
-            long covered = 0;
-            foreach (long rows in _blockRows)
-            {
-                covered += rows;
-            }
-
-            (int, long)? blocks = Keys is not null && _blockRows.Count > 0 && covered == _rows ? (_blockRows.Count, _pureRows) : null;
-            _declaredBlocks = 0;
-            _declaredEnd = 0;
-            _blockRows.Clear();
-            _pureRows = 0;
-            return blocks;
-        }
-
         // The place among the shreddings of the value being written and its first key; the paths of the object being
         // written, a census a variant column, the columns, and the rows of the groups its directory names.
         private int _value = -1;
@@ -1199,7 +987,7 @@ internal static class DatasetCompactor
         /// </summary>
         private void Starts(ReadOnlySpan<byte> key)
         {
-            if (Shreddings is not null && _draft is null && (_value < 0 || (Values is { } values && !values.Same(_valueKey, key))))
+            if (Shreddings is not null && _output is null && (_value < 0 || (Values is { } values && !values.Same(_valueKey, key))))
             {
                 _value++;
                 _valueKey = key.ToArray();
@@ -1212,59 +1000,42 @@ internal static class DatasetCompactor
         /// <summary>Seals the object being written and starts the next one.</summary>
         internal async ValueTask RollAsync(CancellationToken cancellationToken)
         {
-            if (_draft is not { } draft)
+            if (_output is not { } output)
             {
                 return;
             }
 
             // The object is this method's from here: whatever fails gives it up, its upload included when it streams, since
-            // nothing else holds the draft any more. Its sparse index closes at its last key.
-            (int Count, long PureRows)? blocks = Blocks();
-            byte[]? lastKey = Keys is { } keys && _granuleKeys.Count > 0 && _lastKeyLength >= 0
-                ? Prefixed(keys, _lastKey.AsSpan(0, _lastKeyLength)).ToArray()
-                : null;
-            _draft = null;
+            // nothing else holds it any more. Its sparse index closes at its last key.
+            _output = null;
             _lastKeyLength = -1;
             WrittenObject? written;
             try
             {
-                await using (draft.Writer.ConfigureAwait(false))
+                await using (output.Writer.ConfigureAwait(false))
                 {
-                    if (lastKey is not null)
-                    {
-                        draft.Writer.DeclareKeyIndex(Prefix, _granuleKeys, lastKey);
-                    }
-
-                    if (blocks is { } cut)
-                    {
-                        draft.Writer.DeclareBlocks(cut.Count, cut.PureRows);
-                    }
-
+                    _sorted?.Finish(output.Writer);
                     if (_census is { } census)
                     {
                         _census = null;
-                        DeclareDirectories(draft.Writer, census, Shreddings![Math.Clamp(_value, 0, Shreddings.Count - 1)].Shredded);
+                        DeclareDirectories(output.Writer, census, Shreddings![Math.Clamp(_value, 0, Shreddings.Count - 1)].Shredded);
                     }
 
-                    await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+                    await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
                 }
 
-                written = await _dataset.SealAsync(draft, _rows, _firstRow, cancellationToken).ConfigureAwait(false);
+                written = await _dataset.SealAsync(output, _rows, _firstRow, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
-                draft.Sink.Discard();
+                _sorted?.Clear();
+                output.Sink.Discard();
                 throw;
             }
-            finally
-            {
-                // The writer held the keys until it completed.
-                _granuleKeys.Clear();
-            }
 
-            if (written is { } output)
+            if (written is { } made)
             {
-                _written.Add(output);
+                _written.Add(made);
                 _levels.Add(_level);
             }
 
@@ -1278,14 +1049,14 @@ internal static class DatasetCompactor
         /// <summary>Drops the object being written: a failed compaction leaves no commit behind.</summary>
         internal async ValueTask AbandonAsync()
         {
-            if (_draft is not { } draft)
+            if (_output is not { } output)
             {
                 return;
             }
 
-            _draft = null;
-            await draft.Writer.DisposeAsync().ConfigureAwait(false);
-            draft.Sink.Discard();
+            _output = null;
+            _sorted?.Clear();
+            await output.DisposeAsync().ConfigureAwait(false);
         }
     }
 }

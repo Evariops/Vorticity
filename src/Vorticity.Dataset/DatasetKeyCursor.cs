@@ -1203,10 +1203,10 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             paths = named;
         }
 
-        // An object above level 0 is a merge's, its rows in the clustering key's order with null keys
-        // last, so on that key an entry's rank is its row and a deleted row's rank needs no read.
+        // Every object is written in the clustering key's order with null keys last, an append's as a merge's, so on that
+        // key an entry's rank is its row and a deleted row's rank needs no read.
         slot.Cursor = await _key.TryOpenAsync(
-                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded && _version.Levels.RowsInKeyOrder(slot.Level), cancellationToken)
+                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded, cancellationToken)
             .ConfigureAwait(false)
             ?? throw new VortexUnsupportedException(
                 slot.Entry.Key,

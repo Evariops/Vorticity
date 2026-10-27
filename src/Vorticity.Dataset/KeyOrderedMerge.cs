@@ -23,7 +23,7 @@ internal readonly record struct MergeObject(ObjectEntry Entry, ReadOnlyMemory<by
 /// rank, so a run's input is the top and the key that ends its run is the smaller of the top's two
 /// children: a run costs the logarithm of the inputs open rather than passes over all of them.
 /// </summary>
-internal sealed class KeyOrderedMerge : IAsyncDisposable
+internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 {
     private readonly DatasetSnapshot _version;
     private readonly IAsyncEnumerator<MergeObject> _objects;
@@ -88,7 +88,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     internal ReadOnlySpan<byte> LastKey => KeyAt(_count - 1);
 
     /// <summary>The key of the run's row <paramref name="row"/>, row-encoded.</summary>
-    internal ReadOnlySpan<byte> KeyAt(int row)
+    public ReadOnlySpan<byte> KeyAt(int row)
     {
         MergeInput input = Emitting();
         return input.KeyAt(input.Row + row);

@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
 using Vorticity.IO;
+using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
@@ -803,14 +804,14 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// Starts a data object: a fresh key in the store and a writer with the dataset's schema and write
-    /// options, plus the sorted run the clustering key requires.
+    /// Starts a draft: rows in the dataset's schema, held by partition and written as objects sorted by the dataset's key
+    /// (<see cref="DatasetWriter"/>).
     /// </summary>
     /// <returns>The draft; write its rows, then append it, or dispose it to abandon it.</returns>
     public ObjectDraft StartObject()
     {
         DatasetSchema schema = Snapshot.Schema;
-        return StartObjectUnder(schema, shredded: _options.ShredOnAppend ? DeclaredShredding(schema) : null);
+        return new ObjectDraft(this, new DatasetWriter(this, schema, _options.ShredOnAppend ? DeclaredShredding(schema) : null));
     }
 
     /// <summary>
@@ -852,13 +853,14 @@ public sealed class VortexDataset : IAsyncDisposable
     /// Starts a data object under <paramref name="schema"/>: what a rewrite uses, whose rows are read
     /// as the schema of the version it read, whatever the handle has moved to since. A caller whose
     /// rows come in key order says so with <paramref name="inKeyOrder"/>, and a key whose column then
-    /// orders the object by itself takes no run. A job's object keeps a table of contents with
-    /// <paramref name="contents"/>, its sparse index and its blocks declared as its rows come. A rewrite
-    /// announces with <paramref name="byteBound"/> the most bytes the object takes should it stream
-    /// (<see cref="ObjectBound"/>).
+    /// orders the object by itself takes no run. An object keeps a table of contents with
+    /// <paramref name="contents"/>, its sparse index declared as its rows come, and a job's the
+    /// synopses of its columns with <paramref name="synopses"/>: their sheets, counts and statistics
+    /// over its blocks. A rewrite announces with <paramref name="byteBound"/> the most bytes the object
+    /// takes should it stream (<see cref="ObjectBound"/>).
     /// </summary>
-    internal ObjectDraft StartObjectUnder(
-        DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false,
+    internal ObjectOutput StartObjectUnder(
+        DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false, bool synopses = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
         IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1)
     {
@@ -875,13 +877,14 @@ public sealed class VortexDataset : IAsyncDisposable
             GatheredChunkBytes = _options.ChunkBytes,
             GatheredGroupRows = _options.GroupRows,
 
-            // An object with a table of contents, which a job writes, keeps a sheet of each column it names, when it is
-            // large enough for a scan to read the sheets before it, and the counts of each column over its rows.
-            ColumnSheetBytes = contents ? _options.SheetObjectBytes : null,
-            Counted = contents,
+            // A job's object keeps a sheet of each column its table of contents names, when it is large enough for a scan
+            // to read the sheets before it, and the counts of each column over its rows; an append's, which a job merges
+            // soon, keeps none.
+            ColumnSheetBytes = contents && synopses ? _options.SheetObjectBytes : null,
+            Counted = contents && synopses,
 
             // Such an object, which a job writes in its key's order, in blocks, keeps each column's statistics over them.
-            Blocked = contents,
+            Blocked = contents && synopses,
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
@@ -947,30 +950,30 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         // The session's degree and its lanes, which every writer of the session shares.
-        return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session))
+        return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session))
         {
             BySortedColumn = bySortedColumn,
         };
     }
 
     /// <summary>
-    /// Completes a data object written through <see cref="StartObject"/>, puts it in the store and
-    /// adds it to the dataset in one commit.
+    /// Writes the rows of a draft from <see cref="StartObject"/> as objects, one a partition, puts them in the store and
+    /// adds them to the dataset in one commit.
     /// </summary>
-    /// <param name="draft">The object; its writer is completed here if the caller did not.</param>
+    /// <param name="draft">The draft; the rows its partitions hold are written here.</param>
     /// <param name="cancellationToken">Cancels the put and the commit.</param>
     /// <returns>
-    /// The version the commit created; the current one when the object holds no row and nothing was
+    /// The version the commit created; the current one when the draft holds no row and nothing was
     /// committed. The handle reads that version, or the later one a compaction of level 0 run after
     /// the commit created (<see cref="DatasetOptions.InlineCompactionBytes"/>), which
     /// <see cref="Version"/> then says.
     /// </returns>
     /// <remarks>
-    /// The object is created before the commit, so a crash between the two leaves an object no
-    /// commit references, which vacuum collects. Without a clustering key its rows follow every
+    /// The objects are created before the commit, so a crash between the two leaves objects no
+    /// commit references, which vacuum collects. Without a clustering key their rows follow every
     /// other object's.
     /// </remarks>
-    /// <exception cref="InvalidOperationException">The draft belongs to another handle, was already committed, or its writer was abandoned.</exception>
+    /// <exception cref="InvalidOperationException">The draft belongs to another handle, or was already committed or disposed.</exception>
     public async ValueTask<ulong> AppendAsync(ObjectDraft draft, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(draft);
@@ -1032,12 +1035,23 @@ public sealed class VortexDataset : IAsyncDisposable
         }
     }
 
-    /// <summary>The objects an append of <paramref name="draft"/> adds: the draft's own, completed and put.</summary>
+    /// <summary>The objects an append of <paramref name="draft"/> adds: the draft's own, written and put.</summary>
     private async ValueTask<List<WrittenObject>> WrittenAsync(ObjectDraft draft, CancellationToken cancellationToken)
     {
-        WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
-            .ConfigureAwait(false);
-        return written is { } produced ? [produced] : [];
+        Taken(draft);
+        return await draft.Writer.FinishAsync(await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Takes <paramref name="draft"/> for a commit, once.</summary>
+    /// <exception cref="InvalidOperationException">The draft belongs to another handle, or was already committed or disposed.</exception>
+    private void Taken(ObjectDraft draft)
+    {
+        if (!ReferenceEquals(draft.Owner, this))
+        {
+            throw new InvalidOperationException("The draft was started by another dataset handle.");
+        }
+
+        draft.Take();
     }
 
     /// <summary>The batches of an append, as one object.</summary>
@@ -1273,6 +1287,7 @@ public sealed class VortexDataset : IAsyncDisposable
                     }
                 }
 
+                await CheckLayoutAsync(file, schema, objectKey, cancellationToken).ConfigureAwait(false);
                 entry = new ObjectEntry(
                     objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file))
                     .WithFooterBytes(file.TailBytes);
@@ -1282,6 +1297,89 @@ public sealed class VortexDataset : IAsyncDisposable
 
         return await ApplyAsync(
             [new DatasetOperation.AddObject(treeKey, entry)], CommitKind.Import, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Refuses a file whose rows are not one partition's, sorted by the dataset's key with nulls last, as every object's
+    /// are: the columns the partition and the key read, read once as the dataset's, and each row's values worked out and
+    /// compared with the row's before. Its sparse index waits for its first merge, which writes one.
+    /// </summary>
+    /// <exception cref="ArgumentException">The file holds rows of several partitions, or rows out of the key's order.</exception>
+    private static async ValueTask CheckLayoutAsync(VortexFile file, DatasetSchema schema, string objectKey, CancellationToken cancellationToken)
+    {
+        if (schema.Layout is not { } plan || (plan.Partition is null && plan.Components.Count == 0))
+        {
+            return;
+        }
+
+        SortKey? partition = plan.Partition is null ? null : SortKey.Of(plan, partition: true, components: 0);
+        SortKey? key = plan.Components.Count == 0 ? null : SortKey.Of(plan, partition: false, plan.Components.Count);
+        SortedSet<int> fields = [];
+        foreach (LayoutColumn component in plan.Components)
+        {
+            fields.Add(component.Field);
+        }
+
+        if (plan.Partition is { } leading)
+        {
+            fields.Add(leading.Field);
+        }
+
+        Layouts.FieldMask projection = Layouts.FieldMasks.Of([.. fields]);
+        IAsyncEnumerable<RecordBatch> rows = file.ScanBuilder().ProjectMask(projection).ExecuteAsync();
+        if (schema.ColumnsOf(file.DType, objectKey) is { } columns)
+        {
+            ObjectReadPlan read = columns.Read(null, projection);
+            rows = ObjectColumns.ReshapeAsync(
+                file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false).ExecuteAsync(), read.Shape, null, 0, compact: true, cancellationToken);
+        }
+        byte[] first = [];
+        int firstLength = -1;
+        byte[] last = [];
+        int lastLength = -1;
+        long row = 0;
+        await foreach (RecordBatch batch in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            using (batch)
+            {
+                if (partition is not null)
+                {
+                    using RowKeys values = partition.Encode(batch);
+                    for (int i = 0; i < batch.RowCount; i++)
+                    {
+                        if (firstLength < 0)
+                        {
+                            firstLength = SortedRows.Keep(ref first, values.Row(i));
+                        }
+                        else if (!values.Row(i).SequenceEqual(first.AsSpan(0, firstLength)))
+                        {
+                            throw Unordered(objectKey, $"its row {row + i} lies in another partition than its first");
+                        }
+                    }
+                }
+
+                if (key is not null)
+                {
+                    using RowKeys keys = key.Encode(batch);
+                    for (int i = 0; i < batch.RowCount; i++)
+                    {
+                        if (lastLength >= 0 && keys.Row(i).SequenceCompareTo(last.AsSpan(0, lastLength)) < 0)
+                        {
+                            throw Unordered(objectKey, $"its row {row + i} comes before the row before it in the key's order");
+                        }
+
+                        lastLength = SortedRows.Keep(ref last, keys.Row(i));
+                    }
+                }
+
+                row += batch.RowCount;
+            }
+        }
+
+        static ArgumentException Unordered(string objectKey, string why) => new ArgumentException(
+            $"The object '{objectKey}' is not one partition's rows sorted by the dataset's key, as every object is: {why}. " +
+            "Append its rows instead, which sorts them.",
+            nameof(objectKey));
     }
 
     /// <summary>
@@ -1390,10 +1488,11 @@ public sealed class VortexDataset : IAsyncDisposable
         for (int i = 0; i < added.Count; i++)
         {
             ObjectDraft draft = added[i] ?? throw new ArgumentNullException(nameof(added));
-            WrittenObject? written;
+            List<WrittenObject> written;
             try
             {
-                written = await CompleteAsync(draft, position, cancellationToken).ConfigureAwait(false);
+                Taken(draft);
+                written = await draft.Writer.FinishAsync(position, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -1405,7 +1504,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 throw;
             }
 
-            if (written is { } produced)
+            foreach (WrittenObject produced in written)
             {
                 outputs.Add((0, produced.Key, produced.Entry));
                 position += produced.Entry.Rows;
@@ -3158,7 +3257,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// when it held no rows and nothing was put.
     /// </summary>
     internal async ValueTask<WrittenObject?> SealAsync(
-        ObjectDraft draft, long rows, long firstRow, CancellationToken cancellationToken)
+        ObjectOutput draft, long rows, long firstRow, CancellationToken cancellationToken)
     {
         if (rows == 0)
         {
@@ -3323,43 +3422,33 @@ public sealed class VortexDataset : IAsyncDisposable
     private SynopsisCache? PageDisk => _store is SealedObjectStore { Seals: true } ? null : Session.Options.SynopsisCache;
 
     /// <summary>
-    /// Completes a caller's draft and puts it in the store, keyed after <paramref name="firstRow"/>
-    /// when the dataset is ordered by arrival.
+    /// Completes an object's writer and puts the object in the store, keyed after <paramref name="firstRow"/> when the
+    /// dataset is ordered by arrival; null when it took no row and nothing was put.
     /// </summary>
-    private async ValueTask<WrittenObject?> CompleteAsync(ObjectDraft draft, long firstRow, CancellationToken cancellationToken)
+    internal async ValueTask<WrittenObject?> CompleteAsync(ObjectOutput output, long firstRow, CancellationToken cancellationToken)
     {
-        if (!ReferenceEquals(draft.Owner, this))
-        {
-            throw new InvalidOperationException($"The draft of '{draft.Key}' was started by another dataset handle.");
-        }
-
-        draft.Take();
-        if (draft.Writer.IsAbandoned)
-        {
-            draft.Sink.Discard();
-            throw new InvalidOperationException(
-                $"The writer of '{draft.Key}' did not complete a file, having been abandoned; nothing was put.");
-        }
-
         try
         {
-            // Completed here unless the caller already did; the rows it holds are known once the
-            // last chunk is out. A writer that took no row is not: an object of no row is not put,
-            // and the run a clustered dataset requires could not be built over nothing.
-            if (!draft.Writer.IsFinished && draft.Writer.RowCount > 0)
+            // A writer that took no row is not completed: an object of no row is not put, and the run a clustered
+            // dataset requires could not be built over nothing.
+            if (!output.Writer.IsFinished && output.Writer.RowCount > 0)
             {
-                await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+                await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            await draft.Writer.DisposeAsync().ConfigureAwait(false);
-            return await SealAsync(draft, draft.Writer.RowCount, firstRow, cancellationToken).ConfigureAwait(false);
+            await output.Writer.DisposeAsync().ConfigureAwait(false);
+            return await SealAsync(output, output.Writer.RowCount, firstRow, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
-            draft.Sink.Discard();
+            output.Sink.Discard();
             throw;
         }
     }
+
+    /// <summary>An object of a dataset without a key, its rows placed from <paramref name="firstRow"/> on: its key in the tree.</summary>
+    internal static WrittenObject Placed(WrittenObject written, long firstRow) =>
+        written with { Key = KeyOf(PositionOf(firstRow), written.Entry) };
 
     /// <summary>
     /// The bounds an entry carries, read out of a file's own statistics. The clustering key's
@@ -3410,7 +3499,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <param name="tailBytes">The bytes of its footer when they pass an open's first read, so that the open reads them at once; 0 otherwise.</param>
     private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix, byte[] Last)> DescribeAsync(
-        ISegmentReader source, long firstRow, ObjectDraft draft, CancellationToken cancellationToken, long tailBytes = 0)
+        ISegmentReader source, long firstRow, ObjectOutput draft, CancellationToken cancellationToken, long tailBytes = 0)
     {
         VortexOpenOptions options = tailBytes > ObjectEntry.FirstReadBytes
             ? ObjectCache.OpenOptions with { InitialReadBytes = (int)Math.Min(tailBytes, int.MaxValue) }

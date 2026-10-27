@@ -35,14 +35,6 @@ internal sealed class DatasetLevels
     public DatasetTree Rollups { get; }
 
     /// <summary>
-    /// Whether a level of a dataset with a clustering key holds objects each written in the key's
-    /// order, null keys last: every level above 0, which only a merge on the key writes into, since a
-    /// plan refuses tiered levels for such a dataset. Level 0 holds what appends wrote, in any order.
-    /// Off the key, a level's objects are in no order of it.
-    /// </summary>
-    public bool RowsInKeyOrder(int level) => level > 0;
-
-    /// <summary>
     /// Whether no two objects of a level overlap on the clustering key, so that its objects follow
     /// each other in the order of their entries: every level above 0. A read by key opens at most one
     /// object of such a level at a time.
