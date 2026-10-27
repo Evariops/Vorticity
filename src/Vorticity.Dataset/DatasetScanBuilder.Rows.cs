@@ -433,7 +433,8 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// The geometry of the chunks of the columns the scan reads of the object <paramref name="held"/>, open as
     /// <paramref name="file"/> (spec C, 2.1): what its scans of a part of its rows read the granules of that part by, its marks
-    /// read once per object and scan, before the first such scan. Null when the object keeps none, or when it is so small that
+    /// read once per object and scan, before the first such scan: those <paramref name="marks"/> brings, read beside the
+    /// open, or through the file, whose tail serves them. Null when the object keeps none, or when it is so small that
     /// a request reads it whole for what one costs at the store's profile (spec C, 6): its granules could spare no request.
     /// </summary>
     private async ValueTask GeometryAsync(
@@ -445,7 +446,7 @@ internal sealed partial class DatasetScanBuilder
         }
 
         int[] fields = FieldsRead();
-        Indexes.ColumnMarks?[] read = await (marks ?? _dataset.ReadMarksAsync(held.Entry, fields, cancellationToken).AsTask()).ConfigureAwait(false);
+        Indexes.ColumnMarks?[] read = await (marks ?? _dataset.ReadMarksAsync(held.Entry, fields, cancellationToken, file).AsTask()).ConfigureAwait(false);
         Indexes.ColumnMarks?[] byField = new Indexes.ColumnMarks?[_version.Schema.DType.IsDefault ? 0 : _version.Schema.DType.FieldCount];
         for (int i = 0; i < fields.Length; i++)
         {
@@ -454,6 +455,25 @@ internal sealed partial class DatasetScanBuilder
 
         LazyInitializer.EnsureInitialized(ref _geometries)[held.Entry.Uid] =
             ColumnsOfFile(file, held.Entry) ? Indexes.GranuleGeometry.Of(file.LayoutTree, byField, _version.Costs.Profile.RequestBytes) : null;
+    }
+
+    /// <summary>
+    /// Whether the marks of the columns the scan reads of the object <paramref name="held"/> lie in the tail an open of it
+    /// reads, from a 64-byte boundary (<see cref="IO.ObjectStoreSource.TailBytes"/>): the open's tail serves them.
+    /// </summary>
+    private bool MarksInOpenTail(in PositionedObject held)
+    {
+        IReadOnlyList<Indexes.IndexSegment> marks = held.Entry.Contents!.Marks;
+        long tail = Math.Max(0, held.Entry.Bytes - IO.ObjectStoreSource.TailBytes) & ~((long)VortexLimits.MaxAlignment - 1);
+        foreach (int field in FieldsRead())
+        {
+            if (field < marks.Count && (long)marks[field].Offset < tail)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -496,10 +516,12 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> RowsAsync(
         PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        // The marks of the columns read, beside the object's open, when a read of a part of it may ask them: under a filter,
-        // a take, the granules of the key's index or a range of the scan.
+        // The marks of the columns read, beside the object's open, when a read of a part of it may ask them (under a filter,
+        // a take, the granules of the key's index or a range of the scan) and the tail the open reads does not hold them all;
+        // that tail serves them otherwise, once the object is open.
         Task<Indexes.ColumnMarks?[]>? marks = WantsGeometry(held)
             && (_filter is not null || _take is not null || held.Granules is not null || Covered(held) < held.Entry.Rows)
+            && !MarksInOpenTail(held)
             ? _dataset.ReadMarksAsync(held.Entry, FieldsRead(), cancellationToken).AsTask()
             : null;
         try
@@ -849,7 +871,8 @@ internal sealed partial class DatasetScanBuilder
         }
 
         // The rows the filter is expected to keep, by the sheets of the columns it asks values of and by the object's summaries
-        // for a window on a number: in half its blocks or more, the object is read in one pass, its filter's columns once.
+        // for a window on a number: in half its blocks or more, or so many that the reads of the second pass join into the
+        // columns whole at the store's profile, the object is read in one pass, its filter's columns once.
         List<int> asked = [];
         Indexes.ColumnSheet?[] sheets = [];
         if (contents.Sheets.Count > 0 && SheetPruning.Asks(filter, schema))
@@ -862,7 +885,7 @@ internal sealed partial class DatasetScanBuilder
         if (TwoPhaseReads.ExpectedRows(
                 filter, schema, field => asked.IndexOf(field) is int at and >= 0 ? sheets[at] : null, held.Summaries(_version.Schema).Columns,
                 held.Entry.PhysicalRows) is long rows
-            && !TwoPhaseReads.ByPlaces(rows, blocks))
+            && !TwoPhaseReads.Spares(rows, blocks, WidestBesides(held, fields), _version.Costs.Profile.JoinedGap))
         {
             return null;
         }
@@ -900,7 +923,8 @@ internal sealed partial class DatasetScanBuilder
     /// half the object's (<see cref="TwoPhaseReads.ByPlaces"/>); otherwise the granules that hold one. Null, the first pass
     /// given up, once they are half its blocks or more and more than half its granules: the second pass would read most of
     /// the object again, which one pass reads once. With no granule granted, it reads a first part of the object, its first
-    /// thirty-second and 64 blocks at least, then the rest: a part that says so gives it up, its reads that part's alone.
+    /// thirty-second and 64 blocks at least, to where the chunks of the filter's columns next start, then the rest: a part
+    /// that says so gives it up, its reads that part's alone, and no chunk is read by both.
     /// </summary>
     private async ValueTask<FirstPass?> KeptAsync(
         VortexFile file, PositionedObject held, VortexExpr filter, FieldMask filtered, Compute.BlockMask? granted, long granuleRows,
@@ -925,10 +949,17 @@ internal sealed partial class DatasetScanBuilder
             (lower, upper) = (Math.Max(lower, part.Start), Math.Min(upper, part.End));
         }
 
+        // The widest column the second pass reads, which the gap between its kept rows is judged in at the store's profile.
+        int joined = _version.Costs.Profile.JoinedGap;
+        long widest = WidestBesides(held, Fields(filtered));
+
+        // The first part ends where a chunk of each of the filter's columns starts, the first past the sample, so that no
+        // chunk is read by both parts; with none before half the rows, the object is read in one part.
         long sample = Math.Max(64, blocks / 32) * TwoPhaseReads.BlockRows;
         sample = (sample + granuleRows - 1) / granuleRows * granuleRows;
-        RowRange[] parts = granted is null && upper - lower > 2 * sample
-            ? [new RowRange(lower, lower + sample), new RowRange(lower + sample, upper)]
+        long cut = granted is null && upper - lower > 2 * sample ? FirstStart(file, new RowRange(lower, upper), lower + sample, filtered) : -1;
+        RowRange[] parts = cut > 0 && cut - lower <= (upper - lower) / 2
+            ? [new RowRange(lower, cut), new RowRange(cut, upper)]
             : [new RowRange(lower, upper)];
         for (int p = 0; p < parts.Length; p++)
         {
@@ -951,7 +982,7 @@ internal sealed partial class DatasetScanBuilder
                     count = Append(words, batch.StartRow, batch.RowCount, places, count);
                 }
 
-                if (!TwoPhaseReads.ByPlaces(keptBlocks, blocks) && keptGranules * 2L > granules)
+                if (!TwoPhaseReads.Spares(keptBlocks, blocks, widest, joined) && (joined > 0 || keptGranules * 2L > granules))
                 {
                     return null;
                 }
@@ -959,7 +990,7 @@ internal sealed partial class DatasetScanBuilder
 
             // The first part, read whole, says what the rest would.
             if (p == 0 && parts.Length > 1
-                && !TwoPhaseReads.ByPlaces(keptBlocks, sample / TwoPhaseReads.BlockRows) && keptGranules * 2L > sample / granuleRows)
+                && !TwoPhaseReads.ByPlaces(keptBlocks, parts[0].Length / TwoPhaseReads.BlockRows) && keptGranules * 2L > parts[0].Length / granuleRows)
             {
                 return null;
             }
@@ -967,6 +998,46 @@ internal sealed partial class DatasetScanBuilder
 
         bool byPlaces = placed && TwoPhaseReads.ByPlaces(keptBlocks, blocks);
         return new FirstPass(kept, granuleBits, byPlaces, byPlaces ? places[..count] : []);
+    }
+
+    /// <summary>The bytes of the widest column the scan reads of the object <paramref name="held"/> besides <paramref name="fields"/>, as its table of contents says.</summary>
+    private long WidestBesides(in PositionedObject held, List<int> fields)
+    {
+        IReadOnlyList<long> bytes = held.Entry.Contents!.ColumnBytes;
+        long widest = 0;
+        foreach (int field in FieldsRead())
+        {
+            widest = !fields.Contains(field) && field < bytes.Count ? Math.Max(widest, bytes[field]) : widest;
+        }
+
+        return widest;
+    }
+
+    /// <summary>The top-level columns <paramref name="mask"/> names.</summary>
+    private List<int> Fields(in FieldMask mask)
+    {
+        int count = mask.SelectedCount(_version.Schema.DType.FieldCount);
+        List<int> fields = new List<int>(count);
+        for (int i = 0; i < count; i++)
+        {
+            fields.Add(mask.SelectedField(i));
+        }
+
+        return fields;
+    }
+
+    /// <summary>The first row at or past <paramref name="at"/> inside <paramref name="rows"/> where a chunk of each column of <paramref name="mask"/> starts; -1 for none.</summary>
+    private static long FirstStart(VortexFile file, RowRange rows, long at, FieldMask mask)
+    {
+        foreach (long start in Scanning.SplitPlan.CommonStarts(file.LayoutTree, rows, in mask))
+        {
+            if (start >= at)
+            {
+                return start;
+            }
+        }
+
+        return -1;
     }
 
     /// <summary>

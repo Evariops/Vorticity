@@ -14,8 +14,9 @@ namespace Vorticity.Dataset;
 /// places: the granules that hold one, where the object keeps their geometry (spec C, 3), and their blocks that do; otherwise
 /// the granules that hold one, whole. With <c>k</c> rows kept among <c>b</c> blocks, about <c>min(k, b)</c> blocks are read
 /// where every one was, at the price of a round trip more for those. The estimate of the rows kept, by the sheets or, for a
-/// window on a number, by the object's summaries, rules an object out before any pass when it says half its blocks or more:
-/// a first pass given up then would have read the filter's columns twice.
+/// window on a number, by the object's summaries, rules an object out before any pass when it says half its blocks or more,
+/// or rows so close in the widest column the second pass reads that the store's profile joins their reads into the column
+/// whole (<see cref="Spares"/>): a first pass given up then would have read the filter's columns twice.
 /// </summary>
 internal static class TwoPhaseReads
 {
@@ -27,6 +28,16 @@ internal static class TwoPhaseReads
 
     /// <summary>Whether a second pass reads the rows kept by their places: <paramref name="kept"/> blocks fewer than half of <paramref name="blocks"/>.</summary>
     internal static bool ByPlaces(long kept, long blocks) => kept * 2 < blocks;
+
+    /// <summary>
+    /// Whether a second pass over rows kept in <paramref name="kept"/> of an object's <paramref name="blocks"/> blocks spares
+    /// reads at the store's profile: it reads them by their places (<see cref="ByPlaces"/>), and they lie so few in the
+    /// widest column it reads, of <paramref name="widest"/> bytes, that two of them are more than the gap a read joins apart
+    /// (<paramref name="joinedGap"/>). Closer, the reader joins their ranges into the column read whole, as one pass reads
+    /// it, and the first pass is spent for nothing.
+    /// </summary>
+    internal static bool Spares(long kept, long blocks, long widest, int joinedGap) =>
+        ByPlaces(kept, blocks) && (joinedGap <= 0 || kept <= 1 || widest / kept > joinedGap);
 
     /// <summary>
     /// The rows an object of <paramref name="rows"/> rows holds that <paramref name="filter"/> keeps, as the sheets of its

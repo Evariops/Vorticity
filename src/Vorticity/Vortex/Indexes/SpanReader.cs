@@ -86,6 +86,9 @@ internal sealed class SpanReader : IDisposable
     /// <summary>The file's rows.</summary>
     internal long Rows => _rows;
 
+    /// <summary>Whether a read of a span reads the granules of its chunks that hold it alone: the file keeps their marks.</summary>
+    internal bool ReadsGranules => _markRegions is not null;
+
     /// <summary>Column <paramref name="field"/>'s object dictionary, or null when its chunks hold its values.</summary>
     private ColumnDictionary? DictionaryOf(int field) => field < _dictionaries.Count ? _dictionaries[field] : null;
 
@@ -609,7 +612,7 @@ internal sealed class SpanReader : IDisposable
     /// checked against its checksum in the table, and its chunks against the rows the table of contents places it at.
     /// </summary>
     /// <exception cref="VortexFormatException">A directory, a page table or a page does not decode, or does not cover the file's rows.</exception>
-    private async ValueTask LoadAsync(int[] fields, IReadOnlyList<RowRange> spans, CancellationToken cancellationToken)
+    internal async ValueTask LoadAsync(int[] fields, IReadOnlyList<RowRange> spans, CancellationToken cancellationToken)
     {
         foreach (int field in fields)
         {

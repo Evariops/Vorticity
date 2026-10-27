@@ -2572,7 +2572,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 i++;
             }
 
-            return await FoundRowsAsync(rowsOf, ranges, filter, schema, columns, cancellationToken).ConfigureAwait(false);
+            return await FoundRowsAsync(entry, rowsOf, ranges, filter, schema, columns, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -2582,12 +2582,15 @@ public sealed class VortexDataset : IAsyncDisposable
     /// granule or two are read whole. Wider ones, the units hashed postings place a value in (spec C, 4 and 5), are read in
     /// two steps: the filter's columns over them, then the columns at the rows the filter keeps alone, rows closer than two
     /// FastLanes blocks one span, which a granule of each column holds: about a chunk of the identifier and a granule of
-    /// every other column a value, where reading every column over its units would read a chunk of each. Spans that lie
-    /// within a chunk of every other column, whose chunks the rows kept would read whole again, are read whole in one. The
-    /// rows a span holds but the filter does not keep are the caller's to leave out. None when nothing is kept.
+    /// every other column a value, where reading every column over its units would read a chunk of each. In an object that
+    /// keeps the marks of its granules, the second step reads them alone, and pays when the other columns over the spans,
+    /// as its table of contents weighs them, weigh more than the request it costs at the store's profile; in one that keeps
+    /// none, spans that lie within a chunk of every other column, whose chunks the rows kept would read whole again, are read
+    /// whole in one. The rows a span holds but the filter does not keep are the caller's to leave out. None when nothing is
+    /// kept.
     /// </summary>
     private async ValueTask<List<RecordBatch>> FoundRowsAsync(
-        Indexes.SpanReader rowsOf, List<RowRange> ranges, VortexExpr filter, DType schema, int[]? columns, CancellationToken cancellationToken)
+        ObjectEntry entry, Indexes.SpanReader rowsOf, List<RowRange> ranges, VortexExpr filter, DType schema, int[]? columns, CancellationToken cancellationToken)
     {
         if (ranges.Count == 0)
         {
@@ -2602,14 +2605,28 @@ public sealed class VortexDataset : IAsyncDisposable
 
         long granuleRows = Math.Max(_options.Write.BlockRows, 1);
         if (rows <= 2 * granuleRows * ranges.Count || FilterFields(filter, schema, columns) is not { } filtered
-            || !await rowsOf.CutsAsync(Others(filtered, columns, schema), ranges, cancellationToken).ConfigureAwait(false))
+            || !(rowsOf.ReadsGranules
+                ? Spanned(entry, Others(filtered, columns, schema), rows) > Profile.RequestBytes
+                : await rowsOf.CutsAsync(Others(filtered, columns, schema), ranges, cancellationToken).ConfigureAwait(false)))
         {
             return [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
         }
 
-        // The first step: the filter's columns over the units, and the rows it keeps there.
+        // The first step: the filter's columns over the units, and the rows it keeps there; the other columns' directories
+        // beside it, which the second reads in hand.
         List<RowRange> kept = [];
-        RecordBatch[] first = await rowsOf.ReadSpansAsync(ranges, filtered, cancellationToken).ConfigureAwait(false);
+        Task others = rowsOf.LoadAsync(Others(filtered, columns, schema), ranges, cancellationToken).AsTask();
+        RecordBatch[] first;
+        try
+        {
+            first = await rowsOf.ReadSpansAsync(ranges, filtered, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await others.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        }
+
+        await others.ConfigureAwait(false);
         try
         {
             foreach (RecordBatch batch in first)
@@ -2697,6 +2714,19 @@ public sealed class VortexDataset : IAsyncDisposable
 
         fields.Sort();
         return fields.Count == 0 || fields.Count >= (columns?.Length ?? schema.FieldCount) ? null : [.. fields];
+    }
+
+    /// <summary>The bytes of columns <paramref name="fields"/> of the object <paramref name="entry"/> names over <paramref name="rows"/> of its rows, as its table of contents weighs them.</summary>
+    private static long Spanned(ObjectEntry entry, int[] fields, long rows)
+    {
+        IReadOnlyList<long> bytes = entry.Contents!.ColumnBytes;
+        long sum = 0;
+        foreach (int field in fields)
+        {
+            sum += field < bytes.Count ? bytes[field] : 0;
+        }
+
+        return entry.PhysicalRows <= 0 ? sum : (long)(sum * Math.Min(1.0, (double)rows / entry.PhysicalRows));
     }
 
     /// <summary>The columns a read keeps (<paramref name="columns"/>, or every one of <paramref name="schema"/>'s) but <paramref name="filtered"/>, ascending.</summary>
@@ -2834,7 +2864,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 ranges.Add(new RowRange(start, end));
             }
 
-            return await FoundRowsAsync(rowsOf, ranges, filter, schema, columns, cancellationToken).ConfigureAwait(false);
+            return await FoundRowsAsync(entry, rowsOf, ranges, filter, schema, columns, cancellationToken).ConfigureAwait(false);
 
             // The whole directory, its entries on the filter's columns kept.
             async Task<Indexes.IndexDirectory?> WholeAsync()
@@ -3149,10 +3179,12 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>
     /// The geometry of columns <paramref name="fields"/> of the object <paramref name="entry"/> names (spec C, 2.1), by their
     /// position in <paramref name="fields"/>: each chunk's encoding tree and marks, the regions its entry's table of contents
-    /// names, read with no open of the object in one round trip, none once this handle read them. A column the object keeps
+    /// names, read with no open of the object in one round trip, none once this handle read them; through the object
+    /// <paramref name="opened"/> once open, whose tail serves those lying in it with no request. A column the object keeps
     /// no marks of has none.
     /// </summary>
-    internal async ValueTask<Indexes.ColumnMarks?[]> ReadMarksAsync(ObjectEntry entry, IReadOnlyList<int> fields, CancellationToken cancellationToken)
+    internal async ValueTask<Indexes.ColumnMarks?[]> ReadMarksAsync(
+        ObjectEntry entry, IReadOnlyList<int> fields, CancellationToken cancellationToken, ISegmentReader? opened = null)
     {
         Indexes.ColumnMarks?[] marks = new Indexes.ColumnMarks?[fields.Count];
         if (entry.Contents is not { Marks.Count: > 0 } contents)
@@ -3167,7 +3199,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         object?[] read = new object?[fields.Count];
-        await ReadSynopsesAsync(entry, contents, regions, read, static (_, bytes) => (Indexes.ColumnMarks.From(bytes.ToArray())!, bytes.Length), cancellationToken)
+        await ReadSynopsesAsync(entry, contents, regions, read, static (_, bytes) => (Indexes.ColumnMarks.From(bytes.ToArray())!, bytes.Length), cancellationToken, opened)
             .ConfigureAwait(false);
         for (int i = 0; i < fields.Count; i++)
         {
@@ -3347,10 +3379,24 @@ public sealed class VortexDataset : IAsyncDisposable
     /// from its memo, the others with no open of the object, side by side in one round trip, none once the session's cache
     /// holds them, and kept. A region null, or whose bytes fail their checksum, reads none.
     /// </summary>
+    /// <param name="entry">The object's entry.</param>
+    /// <param name="contents">Its table of contents.</param>
+    /// <param name="regions">The regions to read.</param>
+    /// <param name="synopses">Receives what each region reads, by its position.</param>
+    /// <param name="reader">What a region's bytes read as.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <param name="opened">
+    /// The object, open, to read the regions through in place of a reader with no open: the tail its open read serves those
+    /// lying in it with no request.
+    /// </param>
     private ValueTask ReadSynopsesAsync(
         ObjectEntry entry, Indexes.ObjectContents contents, Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader,
-        CancellationToken cancellationToken) =>
-        Recalled(entry.Uid, regions, synopses) == 0 ? default : ReadUnheldAsync(entry, contents, regions, synopses, reader, cancellationToken);
+        CancellationToken cancellationToken, ISegmentReader? opened = null) =>
+        Recalled(entry.Uid, regions, synopses) == 0
+            ? default
+            : opened is null
+                ? ReadUnheldAsync(entry, contents, regions, synopses, reader, cancellationToken)
+                : ReadThroughAsync(entry.Uid, opened, regions, synopses, reader, cancellationToken);
 
     /// <summary>
     /// <see cref="ReadSynopsesAsync"/>'s regions its memo does not hold, apart so that a call that reads none builds no
@@ -3541,33 +3587,45 @@ public sealed class VortexDataset : IAsyncDisposable
         UInt128 uid, Func<CancellationToken, ValueTask<ISegmentReader>> open, Func<ISegmentReader, ISegmentReader> wrap,
         Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader, CancellationToken cancellationToken, ulong keyed = 0)
     {
+        ISegmentReader source = await open(cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            await ReadThroughAsync(uid, wrap(source), regions, synopses, reader, cancellationToken, keyed).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ReadRegionsAsync"/>'s read, through <paramref name="through"/>, which the caller keeps: the regions not null
+    /// side by side in one round trip, each as <paramref name="reader"/> reads its bytes, kept under their offsets with
+    /// <paramref name="keyed"/>.
+    /// </summary>
+    private async ValueTask ReadThroughAsync(
+        UInt128 uid, ISegmentReader through, Indexes.IndexSegment?[] regions, object?[] synopses, SynopsisReader reader, CancellationToken cancellationToken,
+        ulong keyed = 0)
+    {
         int asked = 0;
         foreach (Indexes.IndexSegment? region in regions)
         {
             asked += region is null ? 0 : 1;
         }
 
-        ISegmentReader source = await open(cancellationToken).ConfigureAwait(false);
-        await using (source.ConfigureAwait(false))
+        using SegmentRequestSet requests = new SegmentRequestSet(asked);
+        int[] slots = new int[regions.Length];
+        for (int i = 0; i < regions.Length; i++)
         {
-            using SegmentRequestSet requests = new SegmentRequestSet(asked);
-            int[] slots = new int[regions.Length];
-            for (int i = 0; i < regions.Length; i++)
-            {
-                slots[i] = regions[i] is { } region
-                    ? requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
-                    : -1;
-            }
+            slots[i] = regions[i] is { } region
+                ? requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
+                : -1;
+        }
 
-            await wrap(source).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-            for (int i = 0; i < regions.Length; i++)
+        await through.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+        for (int i = 0; i < regions.Length; i++)
+        {
+            if (slots[i] >= 0 && regions[i]!.Value.Holds(requests.GetBuffer(slots[i]).Span))
             {
-                if (slots[i] >= 0 && regions[i]!.Value.Holds(requests.GetBuffer(slots[i]).Span))
-                {
-                    (object synopsis, long bytes) = reader(i, requests.GetBuffer(slots[i]).Span);
-                    synopses[i] = synopsis;
-                    _synopses.Keep(uid, regions[i]!.Value.Offset | keyed, synopsis, bytes);
-                }
+                (object synopsis, long bytes) = reader(i, requests.GetBuffer(slots[i]).Span);
+                synopses[i] = synopsis;
+                _synopses.Keep(uid, regions[i]!.Value.Offset | keyed, synopsis, bytes);
             }
         }
     }

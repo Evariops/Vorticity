@@ -65,14 +65,14 @@ public sealed partial class DatasetJoinedRangesTests
         List<Total> answers = await question.As<Total>().ToRecordsAsync(Ct).ToListAsync(Ct);
         Assert.Equal(40, answers.Count);
 
-        // The other three tenants' objects, whose keys refute the filter, are not read. The tenant's: its sheet and the marks of
-        // its columns; its open, whose tail holds the narrow column after the wide one; its filter's column alone; then the
-        // columns before the wide one joined across gaps under 256 KiB: four reads. Its key index, whose one tenant the filter
-        // holds whole, weighs more than the chunks it may spare, and is not read. The wide column, some 700 KB, is not read: a bridge of
-        // a mebibyte read the whole object in one request.
+        // The other three tenants' objects, whose keys refute the filter, are not read. The tenant's: its open, whose tail holds
+        // the marks of its columns and the narrow column after the wide one; its filter's column alone; then the columns before
+        // the wide one joined across gaps under 256 KiB: three reads. Its key index, whose one tenant the filter holds whole,
+        // weighs more than the chunks it may spare, and is not read. The wide column, some 700 KB, is not read: a bridge of a
+        // mebibyte read the whole object in one request.
         long reads = store.CountOf(ObjectOperation.Read);
         Console.WriteLine($"JOINED: {objects} objects, {reads} reads, {store.BytesRead:N0} bytes of an object of {largest:N0}, {question.Metrics.BytesRequested:N0} requested");
-        Assert.Equal(4, reads);
+        Assert.Equal(3, reads);
         Assert.True(store.BytesRead < largest / 2, $"{store.BytesRead} bytes read of an object of {largest}: the wide column was bridged");
     }
 
