@@ -688,8 +688,7 @@ internal static class DatasetCompactor
         return new KeyOrderedMerge(
             dataset.Snapshot,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
-            key.Paths,
-            descending: false,
+            SortKey.OfColumns(schema.DType, key.Paths, descending: false),
             rankedTies: false,
             (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken, fields),
             opened: null,

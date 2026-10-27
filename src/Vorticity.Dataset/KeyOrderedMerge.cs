@@ -29,8 +29,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     private readonly IAsyncEnumerator<MergeObject> _objects;
     private readonly Func<ObjectLease, ObjectEntry, IAsyncEnumerable<RecordBatch>> _batches;
     private readonly Action<ObjectLease>? _opened;
-    private readonly string[] _paths;
-    private readonly RowSortField[] _fields;
+    private readonly SortKey _key;
     private readonly bool _rankedTies;
     private readonly CancellationToken _cancellationToken;
 
@@ -55,7 +54,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 
     /// <summary>
     /// A merge over <paramref name="objects"/>, which must arrive by ascending bound, and whose
-    /// batches, from <paramref name="batches"/>, must all deliver <paramref name="paths"/> in the same
+    /// batches, from <paramref name="batches"/>, must all deliver the sources of <paramref name="key"/> in its
     /// direction and gathered, a batch holding only the rows it delivers. With
     /// <paramref name="rankedTies"/>, equal keys come in rank order as a read promises; without it
     /// the emitting input runs through them, which keeps a compaction's runs longest.
@@ -63,8 +62,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     internal KeyOrderedMerge(
         DatasetSnapshot version,
         IAsyncEnumerable<MergeObject> objects,
-        IReadOnlyList<string> paths,
-        bool descending,
+        SortKey key,
         bool rankedTies,
         Func<ObjectLease, ObjectEntry, IAsyncEnumerable<RecordBatch>> batches,
         Action<ObjectLease>? opened,
@@ -74,9 +72,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         _objects = objects.GetAsyncEnumerator(cancellationToken);
         _batches = batches;
         _opened = opened;
-        _paths = [.. paths];
-        _fields = new RowSortField[_paths.Length];
-        Array.Fill(_fields, Field(descending));
+        _key = key;
         _rankedTies = rankedTies;
         _cancellationToken = cancellationToken;
     }
@@ -258,7 +254,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     {
         ObjectLease lease = await _version.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
         _opened?.Invoke(lease);
-        MergeInput input = new MergeInput(lease, next.Entry.Key, next.Rank, next.FirstRow, _paths, _fields);
+        MergeInput input = new MergeInput(lease, next.Entry.Key, next.Rank, next.FirstRow, _key);
         try
         {
             await input.StartAsync(_batches(lease, next.Entry), _cancellationToken).ConfigureAwait(false);
@@ -478,8 +474,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     private sealed class MergeInput : IAsyncDisposable
     {
         private readonly ObjectLease _lease;
-        private readonly string[] _paths;
-        private readonly RowSortField[] _fields;
+        private readonly SortKey _key;
         private IAsyncEnumerator<RecordBatch>? _batches;
         private RecordBatch? _batch;
         private RowKeys? _keys;
@@ -489,14 +484,13 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         // may dispose what it was given, and stepping past it must not read it again.
         private int _rows;
 
-        internal MergeInput(ObjectLease lease, string key, long rank, long firstRow, string[] paths, RowSortField[] fields)
+        internal MergeInput(ObjectLease lease, string key, long rank, long firstRow, SortKey sortKey)
         {
             _lease = lease;
             Object = key;
             Rank = rank;
             FirstRow = firstRow;
-            _paths = paths;
-            _fields = fields;
+            _key = sortKey;
         }
 
         /// <summary>The object's key in the store, for a message.</summary>
@@ -599,25 +593,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 
                 _batch = batch;
                 _rows = batch.RowCount;
-                _keys = RowEncoder.Encode(batch.Arena, Columns(batch, _paths), _fields);
+                _keys = _key.Encode(batch);
                 return;
             }
-        }
-
-        private static int[] Columns(RecordBatch batch, IReadOnlyList<string> paths)
-        {
-            int[] columns = new int[paths.Count];
-            for (int i = 0; i < paths.Count; i++)
-            {
-                // A key column that is an extension, an instant, is encoded as its storage, as the
-                // runs of the key and its seek keys are.
-                int node = ColumnPath.NodeOf(batch, paths[i]);
-                columns[i] = node >= 0
-                    ? RowEncoder.Storage(batch.Arena, node)
-                    : throw new ArgumentException($"'{paths[i]}' names no column of the batch's schema.", nameof(paths));
-            }
-
-            return columns;
         }
     }
 }

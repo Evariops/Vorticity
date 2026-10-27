@@ -2774,8 +2774,7 @@ internal sealed class DatasetScanBuilder
         KeyOrderedMerge merge = new KeyOrderedMerge(
             _version,
             MergeObjectsAsync(paths, cancellationToken),
-            paths,
-            _descending,
+            SortKey.OfColumns(_version.Schema.DType, paths, _descending),
             rankedTies: true,
             (lease, entry) => OrderedBatchesAsync(lease, entry, paths, drop, cancellationToken),
             lease => RecordOpen(lease),
