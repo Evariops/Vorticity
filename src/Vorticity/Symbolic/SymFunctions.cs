@@ -138,6 +138,27 @@ internal static class SymFunctions
         throw new NotSupportedException($"'{path}' is a column of {type}: a bucket is a number's, of an integer or a float column.");
     }
 
+    /// <summary>
+    /// A column's values through <paramref name="table"/>, a text each, a null where the table holds none (spec G, 5): a
+    /// text column through a table of texts, an integer column through a table of integers.
+    /// </summary>
+    /// <exception cref="ArgumentException">The column's values are not of the kind of the table's keys.</exception>
+    internal static Sym<string?> Map<T>(Sym<T> column, ValueTable table)
+    {
+        ColumnSym source = Source(column);
+        VortexType stored = source.Type.Kind == VortexTypeKind.Extension && source.Type.StorageType is { } storage ? storage : source.Type;
+        bool texts = stored.Kind == VortexTypeKind.Utf8;
+        bool integers = stored.Kind == VortexTypeKind.Primitive && (stored.PrimitiveType.IsSignedInteger() || stored.PrimitiveType.IsUnsignedInteger());
+        if (table.TextKeys ? !texts : !integers)
+        {
+            throw new ArgumentException(
+                $"'{source.Field.Path}' is a column of {source.Type}, and the table's keys are {(table.TextKeys ? "texts" : "integers")}.", nameof(table));
+        }
+
+        return new Sym<string?>(new ColumnSym(
+            new MappedFieldExpr(source.Field, table), VortexType.Utf8.Nullable, source.Extensions, source.Binding, source.Member, source.FieldPath));
+    }
+
     /// <summary>The column a function applies to: a column of the scan, or a function of one.</summary>
     private static ColumnSym Source<T>(Sym<T> column) =>
         column.Node is ColumnSym { Field: not Aggregating.ResultFieldExpr } source

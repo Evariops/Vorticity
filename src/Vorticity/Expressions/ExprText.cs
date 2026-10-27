@@ -211,10 +211,10 @@ internal static class ExprText
             }
         }
 
-        // A value expression shows its functions, which the grammar does not read back.
-        if (field is Compute.FunctionFieldExpr function)
+        // A value expression shows its functions and its table, which the grammar does not read back.
+        if (field is Compute.FunctionFieldExpr or Compute.MappedFieldExpr)
         {
-            text.Append(function.Key, function.Path.Length, function.Key.Length - function.Path.Length);
+            text.Append(field.Key, field.Path.Length, field.Key.Length - field.Path.Length);
         }
     }
 

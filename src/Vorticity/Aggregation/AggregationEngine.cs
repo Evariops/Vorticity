@@ -3531,6 +3531,9 @@ internal abstract class AggregationHost
     internal ScanSpec Spec(VortexExpr? rows)
     {
         ScanSpec spec = Spec();
+
+        // A conjunct on a key through a table, as one on its column (spec G, 5).
+        rows = TableFunctions.Preimages(rows);
         return rows is null ? spec : spec with { Filter = spec.Filter is { } filter ? Expr.Logical(true, filter, rows) : rows };
     }
 

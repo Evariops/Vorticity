@@ -162,7 +162,7 @@ public sealed partial class Scan<TRecord>
     {
         ArgumentNullException.ThrowIfNull(key);
         ColumnSym column = key(new Probe<TRecord>(Binding)).Column;
-        if (column.Field is Compute.FunctionFieldExpr)
+        if (column.Field is Compute.FunctionFieldExpr or Compute.MappedFieldExpr)
         {
             throw new ArgumentException(
                 $"'{column.Field.Key}' is a function of a column: a scan's order walks a column's key source, and a function of one has none. Order the groups of a GroupBy by it instead.",
@@ -332,7 +332,9 @@ public sealed partial class Scan<TRecord>
     internal LogicalQuery Query(LogicalShape shape) => new LogicalQuery(_source.Logical, _source.Schema, shape)
     {
         Reads = Binding.Mask,
-        Filter = _filter.Node,
+
+        // A predicate on a column through a table, as one on the column (spec G, 5).
+        Filter = Compute.TableFunctions.Preimages(_filter.Node),
         MatchesNothing = _filter.IsNone,
         Range = _rows,
         Positions = _take,

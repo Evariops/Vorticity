@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Vorticity.Expressions;
 
 namespace Vorticity;
@@ -29,6 +30,47 @@ public static class SymExtensions
         /// <param name="escape">The character that makes the next one literal.</param>
         /// <returns>The predicate.</returns>
         public Predicate Like(string pattern, char escape = '\\') => SymLowering.StringMatch(column.Column, StringMatchOp.Like, pattern, escape);
+
+        /// <summary>
+        /// The text <paramref name="table"/> gives each row's text, a null where it gives none: <c>r.Endpoint.Map(teams)</c>,
+        /// grouped by as a column, its distinct values mapped once a dictionary, and filtered as the texts whose image meets
+        /// the filter, which the column's structures prune by.
+        /// </summary>
+        /// <param name="table">The table, a small one read whole when the question is built.</param>
+        /// <returns>The images.</returns>
+        public Sym<string?> Map(IReadOnlyDictionary<string, string> table) => SymFunctions.Map(column, Compute.ValueTable.Of(table));
+    }
+
+    extension(Sym<long> column)
+    {
+        /// <summary>The text <paramref name="table"/> gives each row's integer, a null where it gives none: <c>r.Status.Map(classes)</c>.</summary>
+        /// <param name="table">The table, a small one read whole when the question is built.</param>
+        /// <returns>The images.</returns>
+        public Sym<string?> Map(IReadOnlyDictionary<long, string> table) => SymFunctions.Map(column, Compute.ValueTable.Of(table));
+    }
+
+    extension(Sym<long?> column)
+    {
+        /// <summary>The text <paramref name="table"/> gives each row's integer, a null where it gives none or the row has none.</summary>
+        /// <param name="table">The table, a small one read whole when the question is built.</param>
+        /// <returns>The images.</returns>
+        public Sym<string?> Map(IReadOnlyDictionary<long, string> table) => SymFunctions.Map(column, Compute.ValueTable.Of(table));
+    }
+
+    extension(Sym<int> column)
+    {
+        /// <summary>The text <paramref name="table"/> gives each row's integer, a null where it gives none: <c>r.Status.Map(classes)</c>.</summary>
+        /// <param name="table">The table, a small one read whole when the question is built.</param>
+        /// <returns>The images.</returns>
+        public Sym<string?> Map(IReadOnlyDictionary<int, string> table) => SymFunctions.Map(column, Compute.ValueTable.Of(table));
+    }
+
+    extension(Sym<int?> column)
+    {
+        /// <summary>The text <paramref name="table"/> gives each row's integer, a null where it gives none or the row has none.</summary>
+        /// <param name="table">The table, a small one read whole when the question is built.</param>
+        /// <returns>The images.</returns>
+        public Sym<string?> Map(IReadOnlyDictionary<int, string> table) => SymFunctions.Map(column, Compute.ValueTable.Of(table));
     }
 
     extension(Sym<DateTime> column)

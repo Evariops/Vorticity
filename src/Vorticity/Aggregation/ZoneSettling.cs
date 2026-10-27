@@ -259,7 +259,7 @@ internal sealed class ZoneSettling
         if (!plan.Grouped || pass.Take is not null || pass.MatchesNothing || !pass.Options.UseStatistics
             || plan.Filters.Filters.Length > 0 || plan.Chosen.Length > 0
             || !Array.Exists(plan.Keys, key => key.Field is FunctionFieldExpr)
-            || Array.Exists(plan.Keys, key => key.Field is VariantFieldExpr))
+            || Array.Exists(plan.Keys, key => key.Field is VariantFieldExpr or MappedFieldExpr))
         {
             return false;
         }

@@ -726,6 +726,7 @@ internal sealed class ObjectColumns
         return field switch
         {
             Compute.FunctionFieldExpr function => function.Over(new ColumnFieldExpr(renamed)),
+            Compute.MappedFieldExpr mapped => mapped.Over(new ColumnFieldExpr(renamed)),
             Compute.VariantFieldExpr path => path.Over(new ColumnFieldExpr(renamed)),
             _ => new ColumnFieldExpr(renamed),
         };

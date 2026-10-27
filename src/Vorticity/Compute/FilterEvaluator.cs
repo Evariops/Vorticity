@@ -940,6 +940,7 @@ internal sealed class FilterEvaluator
             return field switch
             {
                 FunctionFieldExpr alone => alone.Apply(arena, only),
+                MappedFieldExpr mapped => mapped.Apply(arena, only),
                 VariantFieldExpr path => path.Apply(arena, only),
                 _ => only,
             };
@@ -1007,6 +1008,7 @@ internal sealed class FilterEvaluator
         return field switch
         {
             FunctionFieldExpr function => function.Apply(arena, current),
+            MappedFieldExpr mapped => mapped.Apply(arena, current),
             VariantFieldExpr path => path.Apply(arena, current),
             _ => current,
         };
