@@ -112,17 +112,20 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             (string[] keys, string[] results, string? filter) = Draw(random, columns, rows);
             string asked = $"seed {seed}: by ({string.Join(", ", keys)}) {string.Join(", ", results)} where {filter ?? "true"}";
             List<string> read = await AskAsync(dataset, keys, results, filter, synopses: false);
+
+            // The plan of the question asked first, before an answer learned of it: what its objects' synopses give.
+            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(analyze: true, Ct);
+            answered += plan.Units.Any(Synopses) ? 1 : 0;
             List<string> counted = await AskAsync(dataset, keys, results, filter, synopses: true);
             Assert.True(read.SequenceEqual(counted), $"{asked}: {read.Count} groups as rows, {counted.Count} with the counts, " +
                 $"first apart: '{read.Except(counted).FirstOrDefault()}' against '{counted.Except(read).FirstOrDefault()}'");
-            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(analyze: true, Ct);
-            answered += plan.Units.Any(Synopses) ? 1 : 0;
         }
 
         // A window that cuts every object it reaches reads their rows, and so does a number column of many values, which no
-        // counts keep: the synopses answer a third of the questions at least.
+        // counts keep, and a measure of a number of few values, which the counts keep as a column of its own and carry as no
+        // measure: the synopses answer a fifth of the questions at least.
         Console.WriteLine($"PLANNER seed {seed}: the synopses answered {answered} questions of {Questions}");
-        Assert.True(answered >= Questions / 3, $"seed {seed}: the synopses answered {answered} questions of {Questions}");
+        Assert.True(answered >= Questions / 5, $"seed {seed}: the synopses answered {answered} questions of {Questions}");
     }
 
     // The same questions drawn at random under a key led by a drawn column, a code of a few values, the rows of each value
