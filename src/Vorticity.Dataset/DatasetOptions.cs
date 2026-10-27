@@ -84,12 +84,6 @@ public sealed record DatasetOptions
     /// </summary>
     internal long StreamedObjectBytes { get; init; } = ObjectSegmentSink.DefaultStreamedFromBytes;
 
-    /// <summary>
-    /// The bytes of an object's footer from which a scan for an identifier's value finds the object's rows by its index
-    /// rather than open it: a mebibyte, unless a test asks for less. A lookup reads a few kilobytes a column, each column
-    /// asked for apart, where an open reads the footer whole: under a mebibyte the open asks the store for less.
-    /// </summary>
-    internal long LookupFooterBytes { get; init; } = 1 << 20;
 
     /// <summary>
     /// The bytes a rewrite announces to the store for each byte it reads, as the bound of an object it
@@ -222,9 +216,9 @@ public sealed record DatasetOptions
     internal long GroupRows { get; init; } = 1L << 22;
 
     /// <summary>
-    /// The bytes from which an object's column sheets are read before it, for a filter that asks a column for values
-    /// its sheet may prove absent: 2^20 by default, under which an open reads the object's footer, and often all of it,
-    /// in the request the sheets would take.
+    /// The bytes from which a job's object keeps its column sheets: 2^20 by default, under which an open reads the object's
+    /// footer, and often all of it, in the request the sheets would take. Whether a scan reads them, its rule of
+    /// consultation says, by what they cost against the rows they may spare.
     /// </summary>
     internal long SheetObjectBytes { get; init; } = 1L << 20;
 

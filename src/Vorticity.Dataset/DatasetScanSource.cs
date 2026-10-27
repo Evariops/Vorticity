@@ -330,6 +330,7 @@ internal sealed class DatasetScanSource : ScanSource
         SummaryPruner? pruner = spec.Options.UseStatistics && spec.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
         long from = spec.Rows?.Start ?? 0;
         long to = spec.Rows?.End ?? long.MaxValue;
+        DatasetScanBuilder planner = Builder(spec, null);
         List<(PositionedObject Held, RowRange Rows)> objects = [];
         long total = 0;
         KeyPruning? pruning = spec.Options.UseStatistics && spec.Options.UseIndexes ? KeyPruning.Of(_version.Schema, spec.Filter) : null;
@@ -364,7 +365,7 @@ internal sealed class DatasetScanSource : ScanSource
 
             // An object reads the granules the key's pruning keeps alone, by its sparse index: those are the rows its lanes
             // share, where pieces cut over every row of it would leave most lanes reading nothing.
-            foreach (RowRange kept in await KeptAsync(held, pruning, new RowRange(start, end), cancellationToken).ConfigureAwait(false))
+            foreach (RowRange kept in await KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken).ConfigureAwait(false))
             {
                 objects.Add((held, kept));
                 total += kept.Length;
@@ -374,12 +375,13 @@ internal sealed class DatasetScanSource : ScanSource
         // An object whose column sheets prove a value the filter asks for absent is no range: the sheets of the objects
         // read side by side, and the ranges' own walks find them read. An object its counts answer reads none: they say
         // which values it holds.
-        if (spec.Options.UseStatistics && spec.Filter is { } asked && SheetPruning.Asks(asked, _version.Schema.DType) && ReadsSheets(objects))
+        if (spec.Options.UseStatistics && spec.Filter is { } asked && SheetPruning.Asks(asked, _version.Schema.DType)
+            && objects.Exists(o => planner.ReadsSheets(o.Held)))
         {
             List<PositionedObject> held = objects.ConvertAll(static o => o.Held);
             List<int> columns = SheetPruning.Columns(asked, _version.Schema.DType);
             List<PositionedObject> kept = await SheetPruning.KeptAsync(
-                _dataset, _version.Schema, held, asked, columns, null, answered.Count == 0 ? null : o => answered.Contains(o.FirstRow), cancellationToken)
+                _dataset, _version.Schema, held, asked, columns, null, o => !answered.Contains(o.FirstRow) && planner.ReadsSheets(o), cancellationToken)
                 .ConfigureAwait(false);
             if (kept.Count < held.Count)
             {
@@ -404,7 +406,7 @@ internal sealed class DatasetScanSource : ScanSource
         for (int o = 0; o < objects.Count; o++)
         {
             if (objects[o].Rows.Length >= 2 * share && !answered.Contains(objects[o].Held.FirstRow)
-                && !(lookingUp && DatasetScanBuilder.LooksUp(objects[o].Held.Entry, _dataset.Options)))
+                && !(lookingUp && planner.LooksUp(objects[o].Held)))
             {
                 cuts[o] = CutAsync(objects[o].Held, objects[o].Rows, share, spec.Projection, cancellationToken);
                 cutting.Add(cuts[o]!);
@@ -451,6 +453,7 @@ internal sealed class DatasetScanSource : ScanSource
         long from = pass.Rows?.Start ?? 0;
         long to = pass.Rows?.End ?? long.MaxValue;
         KeyPruning? pruning = pass.Options.UseStatistics && pass.Options.UseIndexes ? KeyPruning.Of(_version.Schema, pass.Filter) : null;
+        DatasetScanBuilder planner = Builder(pass, null);
         List<Task<RowRange[]>> objects = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
@@ -458,7 +461,7 @@ internal sealed class DatasetScanSource : ScanSource
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
 
             // An object reads the granules the key's pruning keeps alone, by its sparse index.
-            foreach (RowRange kept in await KeptAsync(held, pruning, new RowRange(start, end), cancellationToken).ConfigureAwait(false))
+            foreach (RowRange kept in await KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken).ConfigureAwait(false))
             {
                 objects.Add(ClustersAsync(held, kept, pass.Projection, rangeBytes, cancellationToken));
             }
@@ -470,10 +473,10 @@ internal sealed class DatasetScanSource : ScanSource
     /// <summary>
     /// The parts of <paramref name="rows"/>, rows of the dataset inside an object's, that the key's pruning keeps of it
     /// (<see cref="KeyPruning"/>): none when the filter refutes its key range, the ranges of the granules it may keep a row of
-    /// by its sparse index, and the rows whole otherwise, or for an object with marked rows, whose index counts the rows
-    /// before the marks.
+    /// by its sparse index when <paramref name="planner"/>'s rule reads it, and the rows whole otherwise, or for an object
+    /// with marked rows, whose index counts the rows before the marks.
     /// </summary>
-    private async ValueTask<List<RowRange>> KeptAsync(PositionedObject held, KeyPruning? pruning, RowRange rows, CancellationToken cancellationToken)
+    private async ValueTask<List<RowRange>> KeptAsync(PositionedObject held, KeyPruning? pruning, DatasetScanBuilder planner, RowRange rows, CancellationToken cancellationToken)
     {
         List<RowRange> kept = [];
         if (rows.IsEmpty)
@@ -493,7 +496,7 @@ internal sealed class DatasetScanSource : ScanSource
             return kept;
         }
 
-        if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: not null } contents
+        if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: not null } contents || !planner.ReadsKeyIndex(held)
             || await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false) is not { } keys
             || keys.Rows != held.Entry.PhysicalRows)
         {
@@ -542,20 +545,6 @@ internal sealed class DatasetScanSource : ScanSource
         }
     }
 
-    /// <summary>Whether a scan reads the sheets of one of <paramref name="objects"/> before it (<see cref="SheetPruning.Reads"/>).</summary>
-    private bool ReadsSheets(List<(PositionedObject Held, RowRange Rows)> objects)
-    {
-        foreach ((PositionedObject held, RowRange _) in objects)
-        {
-            if (SheetPruning.Reads(held.Entry, _dataset.Options, _version.Schema))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     /// <summary>
     /// The rows <paramref name="rows"/> of an object cut between its chunks, as a file's are, into
     /// ranges of <paramref name="share"/> rows or more: a cut inside a chunk would have both ranges
@@ -596,7 +585,7 @@ internal sealed class DatasetScanSource : ScanSource
     internal DatasetScanBuilder Builder(ScanSpec spec, ScanCounters? counters)
     {
         DatasetScanBuilder builder = new DatasetScanBuilder(_dataset, _version)
-            .WithVariantKeys(spec.VariantKeys).WithReadAhead(spec.ReadAhead);
+            .WithVariantKeys(spec.VariantKeys).WithReadAhead(spec.ReadAhead).WithShape(spec.Query?.Shape);
         if (spec.Projection is { } mask)
         {
             builder.Project(in mask);

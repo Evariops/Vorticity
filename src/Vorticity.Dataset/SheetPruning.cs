@@ -40,22 +40,19 @@ internal static class SheetPruning
         };
 
     /// <summary>
-    /// Whether a scan reads the sheets of the object <paramref name="entry"/> names before it: an object of
-    /// <see cref="DatasetOptions.SheetObjectBytes"/> or more whose table of contents names sheets, and which holds the
-    /// columns of <paramref name="schema"/> in their places (<see cref="DatasetSchema.Holds"/>). A smaller one costs no
-    /// more to read than its sheets, and keeps none.
+    /// Whether the object <paramref name="entry"/> names keeps sheets a scan may read before it: its table of contents names
+    /// sheets, and it holds the columns of <paramref name="schema"/> in their places (<see cref="DatasetSchema.Holds"/>).
+    /// Whether reading them pays, the scan's rule of consultation says (<see cref="DatasetScanBuilder.ReadsSheets"/>).
     /// </summary>
-    internal static bool Reads(ObjectEntry entry, DatasetOptions options, DatasetSchema schema) =>
-        entry.Bytes >= options.SheetObjectBytes && entry.Contents is { Sheets.Count: > 0 } && schema.Holds(entry);
+    internal static bool Keeps(ObjectEntry entry, DatasetSchema schema) => entry.Contents is { Sheets.Count: > 0 } && schema.Holds(entry);
 
     /// <summary>
     /// What a scan reads of the object <paramref name="entry"/> names before it, under a filter that asks
-    /// <paramref name="columns"/> for values: where their values live when each keeps that index, else their sheets; nothing
-    /// for an object whose sheets it does not read (<see cref="Reads"/>).
+    /// <paramref name="columns"/> for values: where their values live when each keeps that index, else their sheets.
     /// </summary>
-    internal static PathCosts.Cost Cost(ObjectEntry entry, DatasetOptions options, DatasetSchema schema, List<int> columns, PathCosts costs)
+    internal static PathCosts.Cost Cost(ObjectEntry entry, List<int> columns, PathCosts costs)
     {
-        if (!Reads(entry, options, schema) || columns.Count == 0)
+        if (entry.Contents is null || columns.Count == 0)
         {
             return default;
         }
@@ -88,20 +85,20 @@ internal static class SheetPruning
 
     /// <summary>
     /// The objects of <paramref name="batch"/> whose sheets do not refute <paramref name="filter"/>, over <paramref name="schema"/>, in its order: those
-    /// whose sheets a scan reads (<see cref="Reads"/>), but those <paramref name="unread"/> leaves, have their sheets of
-    /// <paramref name="columns"/> read side by side with no open of them; or, for an object that keeps where each value of
-    /// every column of <paramref name="columns"/> lives, those indexes, which <paramref name="narrowed"/> is told the
-    /// ranges of the object's rows a selected row may lie in by, when they leave some out.
+    /// <paramref name="consulted"/> says the scan reads the sheets of have their sheets of <paramref name="columns"/> read
+    /// side by side with no open of them; or, for an object that keeps where each value of every column of
+    /// <paramref name="columns"/> lives, those indexes, which <paramref name="narrowed"/> is told the ranges of the object's
+    /// rows a selected row may lie in by, when they leave some out.
     /// </summary>
     internal static async Task<List<PositionedObject>> KeptAsync(
         VortexDataset dataset, DatasetSchema schema, List<PositionedObject> batch, VortexExpr filter, List<int> columns, DatasetScanCounters? metrics,
-        Func<PositionedObject, bool>? unread, CancellationToken cancellationToken, Action<PositionedObject, RowRange[]>? narrowed = null)
+        Func<PositionedObject, bool> consulted, CancellationToken cancellationToken, Action<PositionedObject, RowRange[]>? narrowed = null)
     {
         Task<ColumnSheet?[]>?[] reads = new Task<ColumnSheet?[]>?[batch.Count];
         Task<(ColumnWhere? Where, ColumnBlocks? Blocks)[]>?[]? placed = null;
         for (int i = 0; i < batch.Count; i++)
         {
-            if (Reads(batch[i].Entry, dataset.Options, schema) && unread?.Invoke(batch[i]) != true)
+            if (consulted(batch[i]))
             {
                 if (Places(batch[i].Entry, columns))
                 {

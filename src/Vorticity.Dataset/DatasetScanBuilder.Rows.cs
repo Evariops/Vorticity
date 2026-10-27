@@ -182,12 +182,22 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// Whether an object's rows are found by its identifier's index rather than its open, when a scan looks a value up: one
-    /// with no row marked, whose footer an open would read is large (<see cref="DatasetOptions.LookupFooterBytes"/>), and
-    /// whose entry carries a table of contents that names its index directory.
+    /// Whether the rows of the object <paramref name="held"/> are found by its identifier's index rather than by its open, when
+    /// the scan looks a value up (spec B, 5): an object with no row marked whose entry carries a table of contents that names
+    /// its index directory, where a lookup, which asks for each column it reads apart, a request more for each past the
+    /// first, weighs less than the footer an open reads whole before the same reads.
     /// </summary>
-    internal static bool LooksUp(ObjectEntry entry, DatasetOptions options) =>
-        !entry.HasDeletions && entry.FooterBytes >= options.LookupFooterBytes && entry.Contents is { DirectoryRegion: not null };
+    internal bool LooksUp(in PositionedObject held)
+    {
+        ObjectEntry entry = held.Entry;
+        if (entry.HasDeletions || entry.Contents is not { DirectoryRegion: not null })
+        {
+            return false;
+        }
+
+        int columns = LookupColumns(out int[]? read) && read is not null ? read.Length : FieldsRead().Length;
+        return Math.Max(columns - 1, 0) * (double)_version.Costs.Profile.RequestBytes < PathCosts.OpenBytes(entry);
+    }
 
     /// <summary>Whether <paramref name="held"/> holds the version's own columns, whose rows a read of its chunks gives as they are.</summary>
     private bool OwnColumns(in PositionedObject held)
@@ -203,13 +213,12 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The filter's lookup when <paramref name="held"/> takes it: an object the scan covers whole, with no row marked, of the
-    /// version's own columns, whose footer an open would read is large (<see cref="DatasetOptions.LookupFooterBytes"/>), and
-    /// whose entry carries a table of contents that names its index directory; null otherwise.
+    /// The filter's lookup when <paramref name="held"/> takes it: an object the scan covers whole, of the version's own
+    /// columns, whose rows a lookup finds for less than an open (<see cref="LooksUp"/>); null otherwise.
     /// </summary>
     private VortexExpr? LookupFor(in PositionedObject held)
     {
-        if (Lookup is not { } lookup || Covered(held) != held.Entry.Rows || !LooksUp(held.Entry, _dataset.Options)
+        if (Lookup is not { } lookup || Covered(held) != held.Entry.Rows || !LooksUp(held)
             || held.Entry.Contents is not { } contents)
         {
             return null;

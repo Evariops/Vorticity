@@ -298,6 +298,19 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
+    /// Says the shape of the question the scan answers (<see cref="LogicalQuery.Shape"/>), which the entry alternative
+    /// answers some objects of from their entries alone: a count, whether a row is, an extreme.
+    /// </summary>
+    internal DatasetScanBuilder WithShape(LogicalShape? shape)
+    {
+        _shape = shape;
+        return this;
+    }
+
+    // The shape of the question the scan answers, from its logical plan; null for a read of rows the engine asks itself.
+    private LogicalShape? _shape;
+
+    /// <summary>
     /// Answers what the objects' counts can of <paramref name="states"/> as batches of states, and the rest as rows;
     /// null for rows alone.
     /// </summary>
@@ -771,7 +784,7 @@ internal sealed partial class DatasetScanBuilder
                 continue;
             }
 
-            if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: not null } contents
+            if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: not null } contents || !ReadsKeyIndex(held)
                 || await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false) is not { } keys
                 || keys.Rows != held.Entry.PhysicalRows)
             {
@@ -809,12 +822,15 @@ internal sealed partial class DatasetScanBuilder
         }
     }
 
+    // The rule that says whose sheets the walk reads, as a delegate made once.
+    private Func<PositionedObject, bool>? _consulted;
+
     /// <summary>The objects a sheet read at once may pass over, in the walk's order.</summary>
     private const int SheetBatch = 16;
 
     /// <summary>
     /// The objects of <paramref name="walk"/> their column sheets do not refute <paramref name="filter"/> by: an object
-    /// whose sheets are to be read (<see cref="SheetPruning.Reads"/>) has them read with no open of it, the objects of a
+    /// whose sheets are to be read (<see cref="ReadsSheets"/>) has them read with no open of it, the objects of a
     /// batch side by side, and one that lacks every value an equality or a set asks for there is passed over. An object
     /// with none passes at once while no batch waits, so that a walk of small objects holds and allocates nothing.
     /// </summary>
@@ -827,7 +843,7 @@ internal sealed partial class DatasetScanBuilder
         DatasetScanCounters? metrics = _considers ? _metrics : null;
         await foreach (PositionedObject held in walk.ConfigureAwait(false))
         {
-            if (batch is not { Count: > 0 } && !SheetPruning.Reads(held.Entry, _dataset.Options, _version.Schema))
+            if (batch is not { Count: > 0 } && !ReadsSheets(held))
             {
                 yield return held;
                 continue;
@@ -838,7 +854,7 @@ internal sealed partial class DatasetScanBuilder
             {
                 columns ??= SheetPruning.Columns(filter, schema);
                 foreach (PositionedObject kept in await SheetPruning.KeptAsync(
-                    _dataset, _version.Schema, batch, filter, columns, metrics, null, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
+                    _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
                 {
                     yield return kept;
                 }
@@ -851,7 +867,7 @@ internal sealed partial class DatasetScanBuilder
         {
             columns ??= SheetPruning.Columns(filter, schema);
             foreach (PositionedObject kept in await SheetPruning.KeptAsync(
-                _dataset, _version.Schema, batch, filter, columns, metrics, null, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
+                _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
             {
                 yield return kept;
             }

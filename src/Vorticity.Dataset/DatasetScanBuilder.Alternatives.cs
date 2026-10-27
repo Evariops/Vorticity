@@ -162,6 +162,36 @@ internal sealed partial class DatasetScanBuilder
         internal abstract string Describe(Planned unit, PathCosts.Cost cost);
     }
 
+    /// <summary>
+    /// The entry the walk holds (spec B, 6.2): the count of an object whose rows the filter keeps all, known from its
+    /// summaries, or the extreme its exact summaries give, under a question of that shape (<see cref="WithShape"/>); weighs
+    /// nothing. Count, any and extremes take it object by object (<see cref="EntryAnswers"/>).
+    /// </summary>
+    private sealed class EntryAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Entry, UnitLevel.Object)
+    {
+        internal override Coverage Covers(Planned unit) => Scan.EntryAnswers(unit.Held) ? Coverage.Whole : Coverage.None;
+
+        internal override PathCosts.Cost Cost(Planned unit) => default;
+
+        internal override string Describe(Planned unit, PathCosts.Cost cost) =>
+            Scan._shape is ExtremeShape extreme ? $"the {(extreme.Min ? "least" : "greatest")} value of {extreme.Path} its summaries give" : "the rows its entry counts";
+    }
+
+    /// <summary>
+    /// Whether the entry of the object <paramref name="held"/> answers the question's shape: a count, or whether a row is,
+    /// when the filter keeps every row the scan covers in it (<see cref="Settled"/>); an extreme of a column when the scan
+    /// covers it whole with no filter and its summaries hold the column's exact extreme.
+    /// </summary>
+    private bool EntryAnswers(in PositionedObject held) => _shape switch
+    {
+        ExtremeShape extreme => _summaries && _filter is null && Whole(held) && Exact(held.Entry.Summaries, extreme.Path, extreme.Min, out _),
+        { ReadsColumns: false } and not AggregateShape and not KeysShape => Settled(held, _countRange ??= CountRange()),
+        _ => false,
+    };
+
+    // The range on the clustering key the filter asks, for the entries that count their rows; found once.
+    private KeyRange? _countRange;
+
     /// <summary>A rollup's totals, or its counts by bucket, for the objects it covers (<see cref="RollupChoice"/>).</summary>
     private sealed class RollupAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Rollup, UnitLevel.Run)
     {
@@ -345,8 +375,8 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>The alternatives of a unit, in the order that breaks a tie: today's cascade (spec B, 6.3).</summary>
     private Alternative[] Alternatives => _alternatives ??=
     [
-        new RollupAlternative(this), new CountsAlternative(this), new PartialAlternative(this), new BlocksAlternative(this),
-        new ZonesAlternative(this), new RowsAlternative(this),
+        new EntryAlternative(this), new RollupAlternative(this), new CountsAlternative(this), new PartialAlternative(this),
+        new BlocksAlternative(this), new ZonesAlternative(this), new RowsAlternative(this),
     ];
 
     private Alternative[]? _alternatives;
@@ -434,9 +464,26 @@ internal sealed partial class DatasetScanBuilder
         return rows with { Nanoseconds = rows.Nanoseconds + processing } + SheetsCost(held);
     }
 
-    /// <summary>What reading the sheets of the object <paramref name="held"/> costs, when the filter asks values of a column; nothing otherwise.</summary>
+    /// <summary>What reading the sheets of the object <paramref name="held"/> costs, when the scan reads them (<see cref="ReadsSheets"/>); nothing otherwise.</summary>
     private PathCosts.Cost SheetsCost(in PositionedObject held) =>
-        SheetColumns() is { } columns ? SheetPruning.Cost(held.Entry, _dataset.Options, _version.Schema, columns, _version.Costs) : default;
+        ReadsSheets(held) ? SheetPruning.Cost(held.Entry, _sheetColumns!, _version.Costs) : default;
+
+    /// <summary>
+    /// Whether the scan reads the sheets of the object <paramref name="held"/> before it (spec B, 5, the rule of
+    /// consultation): the filter asks values of a column, the object keeps sheets, and reading them weighs less than the
+    /// rows of the question's columns they may spare.
+    /// </summary>
+    internal bool ReadsSheets(in PositionedObject held) =>
+        SheetColumns() is { } columns && SheetPruning.Keeps(held.Entry, _version.Schema)
+        && _version.Costs.Weight(SheetPruning.Cost(held.Entry, columns, _version.Costs)) < _version.Costs.Weight(_version.Costs.Rows(held.Entry, FieldsRead()));
+
+    /// <summary>
+    /// Whether the scan reads the sparse index of the object <paramref name="held"/> to pass over the granules its filter
+    /// refutes (spec B, 5): it keeps one, and reading it weighs less than the rows of the question's columns it may spare.
+    /// </summary>
+    internal bool ReadsKeyIndex(in PositionedObject held) =>
+        held.Entry.Contents is { KeyIndex: { } index }
+        && _version.Costs.Weight(_version.Costs.Regions(held.Entry.Uid, [index])) < _version.Costs.Weight(_version.Costs.Rows(held.Entry, FieldsRead()));
 
     /// <summary>The columns whose sheets the walk reads, when the filter asks values of a column; null otherwise. Found once.</summary>
     private List<int>? SheetColumns()
@@ -526,7 +573,7 @@ internal sealed partial class DatasetScanBuilder
         HashSet<long> answered = [];
         foreach (Planned unit in units)
         {
-            if (unit.Run is null && unit.Chosen.Path is AnswerPath.Counts or AnswerPath.Partial)
+            if (unit.Run is null && unit.Chosen.Path is AnswerPath.Counts or AnswerPath.Partial or AnswerPath.Entry)
             {
                 answered.Add(unit.Held.FirstRow);
             }
@@ -541,7 +588,7 @@ internal sealed partial class DatasetScanBuilder
 
         List<PositionedObject> batch = new List<PositionedObject>(SheetBatch);
         DatasetScanCounters? metrics = _considers ? _metrics : null;
-        Func<PositionedObject, bool>? unread = answered.Count == 0 ? null : held => answered.Contains(held.FirstRow);
+        Func<PositionedObject, bool> consulted = held => !answered.Contains(held.FirstRow) && ReadsSheets(held);
         for (int from = first; from < units.Count; from += SheetBatch)
         {
             int to = Math.Min(units.Count, from + SheetBatch);
@@ -552,7 +599,7 @@ internal sealed partial class DatasetScanBuilder
             }
 
             List<PositionedObject> passed = await SheetPruning.KeptAsync(
-                _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false);
+                _dataset, _version.Schema, batch, filter, columns, metrics, consulted, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false);
             for (int u = from, p = 0; u < to; u++)
             {
                 if (p < passed.Count && passed[p].FirstRow == units[u].Held.FirstRow)
