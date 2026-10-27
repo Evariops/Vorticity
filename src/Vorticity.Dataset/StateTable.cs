@@ -47,8 +47,21 @@ internal abstract class StateTable
     /// <summary>The bytes of row <paramref name="row"/>'s key <paramref name="key"/>, as its column stores them; null for a null.</summary>
     protected abstract byte[]? KeyOf(int row, int key);
 
-    /// <summary>The sketch of row <paramref name="row"/>'s measure <paramref name="measure"/>; null for none.</summary>
-    protected abstract byte[]? SketchOf(int row, int measure);
+    /// <summary>The sketch of row <paramref name="row"/>'s measure <paramref name="measure"/>, as it encodes; false for none.</summary>
+    protected abstract bool SketchOf(int row, int measure, out ReadOnlySpan<byte> sketch);
+
+    /// <summary>Row <paramref name="row"/>'s key <paramref name="column"/>, or the sketch of its measure <paramref name="column"/>; false for a null.</summary>
+    private bool ValueOf(int row, int column, bool key, out ReadOnlySpan<byte> value)
+    {
+        if (!key)
+        {
+            return SketchOf(row, column, out value);
+        }
+
+        byte[]? bytes = KeyOf(row, column);
+        value = bytes;
+        return bytes is not null;
+    }
 
     /// <summary>The batch of states of rows <c>[start, start + count)</c>, built in <paramref name="arena"/>, its rows counted from <paramref name="firstRow"/>.</summary>
     internal RecordBatch Batch(CanonicalArena arena, int start, int count, long firstRow)
@@ -106,9 +119,9 @@ internal abstract class StateTable
         int data = 0;
         for (int row = start; row < start + count; row++)
         {
-            byte[]? value = key ? KeyOf(row, column) : SketchOf(row, column);
-            nulls |= value is null;
-            data += value is { Length: > CanonicalSupport.MaxInlineViewLength } ? value.Length : 0;
+            bool held = ValueOf(row, column, key, out ReadOnlySpan<byte> value);
+            nulls |= !held;
+            data += value.Length > CanonicalSupport.MaxInlineViewLength ? value.Length : 0;
         }
 
         Validity validity = Valid(storage);
@@ -117,7 +130,7 @@ internal abstract class StateTable
             VortexBuffer bits = arena.Allocate((count + 7) / 8, 1, out Span<byte> set);
             for (int i = 0; i < count; i++)
             {
-                set[i >> 3] |= (key ? KeyOf(start + i, column) : SketchOf(start + i, column)) is null ? (byte)0 : (byte)(1 << (i & 7));
+                set[i >> 3] |= ValueOf(start + i, column, key, out _) ? (byte)(1 << (i & 7)) : (byte)0;
             }
 
             validity = Validity.Bitmap(arena.AddBool(_bool, count, Validity.NonNullable, bits, 0));
@@ -130,9 +143,9 @@ internal abstract class StateTable
             VortexBuffer buffer = arena.Allocate(count * width, Math.Max(width, 1), out Span<byte> bytes);
             for (int i = 0; i < count; i++)
             {
-                if ((key ? KeyOf(start + i, column) : SketchOf(start + i, column)) is { } value)
+                if (ValueOf(start + i, column, key, out ReadOnlySpan<byte> value))
                 {
-                    value.AsSpan(0, Math.Min(width, value.Length)).CopyTo(bytes[(i * width)..]);
+                    value[..Math.Min(width, value.Length)].CopyTo(bytes[(i * width)..]);
                 }
             }
 
@@ -145,7 +158,7 @@ internal abstract class StateTable
             int offset = 0;
             for (int i = 0; i < count; i++)
             {
-                byte[] value = (key ? KeyOf(start + i, column) : SketchOf(start + i, column)) ?? [];
+                ValueOf(start + i, column, key, out ReadOnlySpan<byte> value);
                 if (CanonicalSupport.WriteView(view.Slice(i * 16, 16), value, value.Length, 0, offset))
                 {
                     value.CopyTo(into[offset..]);
@@ -186,16 +199,21 @@ internal abstract class StateTable
 }
 
 /// <summary>
-/// The rows of states the blocks of an object give (<see cref="GranuleAnswer"/>): each one's keys' values, its rows and
-/// its measures' states, added block by block; a block that turns out not to answer takes its rows back.
+/// The rows of states the granules of an object give (<see cref="GranuleAnswer"/>): each one's keys' values, its rows, its
+/// measures' states and the histograms a quantile asks, added granule by granule; a granule that turns out not to answer
+/// takes its rows back.
 /// </summary>
 internal sealed class GranuleStateRows(GranuleAnswer answer)
     : StateTable(answer.KeyFields.Length, answer.Measures, answer.Type, answer.Bool)
 {
     private readonly int _keys = answer.KeyFields.Length;
     private readonly int _width = answer.Width;
+    private readonly int _measures = answer.Measures.Length;
     private byte[]?[] _values = new byte[]?[16 * answer.KeyFields.Length];
     private long[] _words = new long[16 * answer.Width];
+
+    // Each row's histogram of each measure, a granule's statistics' own bytes; empty for none.
+    private ReadOnlyMemory<byte>[] _sketches = new ReadOnlyMemory<byte>[16 * answer.Measures.Length];
     private int _count;
 
     /// <inheritdoc/>
@@ -208,6 +226,7 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
         {
             Array.Resize(ref _words, _words.Length * 2);
             Array.Resize(ref _values, Math.Max(_values.Length * 2, 16));
+            Array.Resize(ref _sketches, Math.Max(_sketches.Length * 2, 16));
         }
 
         int row = _count++;
@@ -215,11 +234,15 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
         words.Clear();
         words[0] = rows;
         _values.AsSpan(row * _keys, _keys).Clear();
+        _sketches.AsSpan(row * _measures, _measures).Clear();
         return row;
     }
 
     /// <summary>Sets row <paramref name="row"/>'s key <paramref name="key"/> to <paramref name="value"/>, as its column stores it.</summary>
     internal void SetKey(int row, int key, byte[]? value) => _values[(row * _keys) + key] = value;
+
+    /// <summary>Sets row <paramref name="row"/>'s sketch of measure <paramref name="measure"/> to <paramref name="sketch"/>, a histogram as it encodes.</summary>
+    internal void SetSketch(int row, int measure, ReadOnlyMemory<byte> sketch) => _sketches[(row * _measures) + measure] = sketch;
 
     /// <summary>Row <paramref name="row"/>'s words: its rows, then each measure's states.</summary>
     internal Span<long> Words(int row) => _words.AsSpan(row * _width, _width);
@@ -240,5 +263,9 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
     protected override byte[]? KeyOf(int row, int key) => _values[(row * _keys) + key];
 
     /// <inheritdoc/>
-    protected override byte[]? SketchOf(int row, int measure) => null;
+    protected override bool SketchOf(int row, int measure, out ReadOnlySpan<byte> sketch)
+    {
+        sketch = _sketches[(row * _measures) + measure].Span;
+        return !sketch.IsEmpty;
+    }
 }

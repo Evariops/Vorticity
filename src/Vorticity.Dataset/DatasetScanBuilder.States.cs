@@ -331,14 +331,14 @@ internal sealed partial class DatasetScanBuilder
 
                 if (path == AnswerPath.Granules)
                 {
-                    // An object whose blocks answer: the states of the blocks its statistics answer, then the rows of the
-                    // others, each run of them a part of the scan. The blocks that hold a row a delete marked are read as rows
-                    // too.
-                    Task<Indexes.GranuleStats?[]> statistics = unit.Blocks!;
-                    unit.Blocks = null;
-                    Indexes.GranuleStats?[] blockColumns = await statistics.ConfigureAwait(false);
+                    // An object whose granules answer: the states of the granules its statistics answer, then the rows of the
+                    // others, each run of them a part of the scan. The granules that hold a row a delete marked are read as
+                    // rows too.
+                    Task<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms)> statistics = unit.Statistics!;
+                    unit.Statistics = null;
+                    (Indexes.GranuleStats?[] stats, Indexes.GranuleHistograms?[] histograms) = await statistics.ConfigureAwait(false);
                     await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
-                    (GranuleStateRows? settled, List<RowRange> unsettled, int answered) = GranuleAnswer()!.Settle(held, blockColumns, held.Entry.Deletions);
+                    (GranuleStateRows? settled, List<RowRange> unsettled, int answered) = GranuleAnswer()!.Settle(held, stats, histograms, held.Entry.Deletions);
                     if (_metrics is { } counted)
                     {
                         counted.GranulesAnswered += answered;
@@ -420,7 +420,7 @@ internal sealed partial class DatasetScanBuilder
             List<Task> begun = [];
             foreach (Planned left in units)
             {
-                foreach (Task? task in (ReadOnlySpan<Task?>)[left.Opened, left.Learning, left.Blocks, left.Counts])
+                foreach (Task? task in (ReadOnlySpan<Task?>)[left.Opened, left.Learning, left.Statistics, left.Counts])
                 {
                     if (task is not null)
                     {
@@ -469,7 +469,7 @@ internal sealed partial class DatasetScanBuilder
                     : _dataset.ReadCountsAsync(entry, field, answer.AsksSketches, cancellationToken).AsTask();
                 break;
             case AnswerPath.Granules:
-                unit.Blocks = _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, cancellationToken).AsTask();
+                unit.Statistics = _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, GranuleAnswer()!.Histogrammed, cancellationToken).AsTask();
                 break;
         }
     }

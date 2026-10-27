@@ -3187,39 +3187,65 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// The statistics of columns <paramref name="fields"/> of the object <paramref name="entry"/> names over its granules
-    /// (<see cref="Indexes.GranuleStats"/>), by their position in <paramref name="fields"/>, read with no open of the object:
-    /// the regions its entry's table of contents names, side by side in one round trip, none once this handle read them. A
-    /// column the object keeps none of has none.
+    /// (<see cref="Indexes.GranuleStats"/>), and the histograms of those of them <paramref name="histogrammed"/> names
+    /// (<see cref="Indexes.GranuleHistograms"/>), by their position in <paramref name="fields"/>, read with no open of the
+    /// object: the regions its entry's table of contents names, side by side in one round trip, none once this handle read
+    /// them. A column the object keeps none of has none.
     /// </summary>
-    internal async ValueTask<Indexes.GranuleStats?[]> ReadGranuleStatsAsync(
-        ObjectEntry entry, IReadOnlyList<int> fields, CancellationToken cancellationToken)
+    internal async ValueTask<(Indexes.GranuleStats?[] Stats, Indexes.GranuleHistograms?[] Histograms)> ReadGranuleStatsAsync(
+        ObjectEntry entry, IReadOnlyList<int> fields, IReadOnlyList<int> histogrammed, CancellationToken cancellationToken)
     {
         Indexes.GranuleStats?[] columns = new Indexes.GranuleStats?[fields.Count];
+        Indexes.GranuleHistograms?[] histograms = new Indexes.GranuleHistograms?[fields.Count];
         if (entry.Contents is not { GranuleStats.Count: > 0 } contents)
         {
-            return columns;
+            return (columns, histograms);
         }
 
-        object?[] read = new object?[fields.Count];
+        // A column's statistics at an even position, its histograms at the odd one after.
+        object?[] read = new object?[2 * fields.Count];
         Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[read.Length];
         for (int i = 0; i < fields.Count; i++)
         {
-            regions[i] = contents.GranuleStatsOf(fields[i]);
+            regions[2 * i] = contents.GranuleStatsOf(fields[i]);
+            regions[(2 * i) + 1] = Contains(histogrammed, fields[i]) ? contents.GranuleHistogramsOf(fields[i]) : null;
         }
 
-        await ReadSynopsesAsync(entry, contents, regions, read, static (_, bytes) => Granules(bytes), cancellationToken).ConfigureAwait(false);
+        await ReadSynopsesAsync(entry, contents, regions, read, static (position, bytes) => (position & 1) == 0 ? Granules(bytes) : Histograms(bytes), cancellationToken)
+            .ConfigureAwait(false);
         for (int i = 0; i < fields.Count; i++)
         {
-            columns[i] = read[i] as Indexes.GranuleStats;
+            columns[i] = read[2 * i] as Indexes.GranuleStats;
+            histograms[i] = read[(2 * i) + 1] as Indexes.GranuleHistograms;
         }
 
-        return columns;
+        return (columns, histograms);
 
         static (object Synopsis, long Bytes) Granules(ReadOnlySpan<byte> bytes)
         {
             Indexes.GranuleStats stats = Indexes.GranuleStats.From(bytes)
                 ?? throw new VortexFormatException("A column's statistics over an object's granules do not decode as statistics.");
             return (stats, stats.Bytes);
+        }
+
+        static (object Synopsis, long Bytes) Histograms(ReadOnlySpan<byte> bytes)
+        {
+            Indexes.GranuleHistograms histograms = Indexes.GranuleHistograms.From(bytes)
+                ?? throw new VortexFormatException("A measure's histograms over an object's granules do not decode as histograms.");
+            return (histograms, histograms.Bytes);
+        }
+
+        static bool Contains(IReadOnlyList<int> fields, int field)
+        {
+            for (int i = 0; i < fields.Count; i++)
+            {
+                if (fields[i] == field)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 

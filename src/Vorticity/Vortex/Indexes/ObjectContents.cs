@@ -123,6 +123,15 @@ internal sealed class ObjectContents(
     internal IndexSegment? GranuleStatsOf(int field) => RegionOf(GranuleStats, field);
 
     /// <summary>
+    /// Each measure's histograms over the object's granules (<see cref="Indexes.GranuleHistograms"/>) and their regions: what a
+    /// quantile reads beside the statistics to answer a granule without its rows. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, IndexSegment Region)> GranuleHistograms { get; init; } = [];
+
+    /// <summary>The region of measure <paramref name="field"/>'s histograms over the granules, or null when the object keeps none of it.</summary>
+    internal IndexSegment? GranuleHistogramsOf(int field) => RegionOf(GranuleHistograms, field);
+
+    /// <summary>
     /// Where each value of each column lies, granule by granule (<see cref="ColumnLocate"/>), and their regions: what a filter
     /// on a value reads to read the granules of its rows alone. Empty when the object keeps none.
     /// </summary>
@@ -238,6 +247,7 @@ internal sealed class ObjectContents(
             Counts = Counts,
             Sketches = Sketches,
             GranuleStats = GranuleStats,
+            GranuleHistograms = GranuleHistograms,
             Locates = Locates,
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
@@ -339,7 +349,8 @@ internal sealed class ObjectContents(
     // What each top-level column's values cost the processor, packed: a count, then its entries, a column after the other.
     private const int TagColumnClasses = 28;
 
-    // 29 is the measures' histograms and exact sums by granule (spec D, 2.2).
+    // A measure's histograms over the granules: its field and its region, as a path directory's.
+    private const int TagGranuleHistograms = 29;
 
     // Where a column's values lie, granule by granule: its field and its region, as a path directory's.
     private const int TagLocate = 30;
@@ -451,6 +462,11 @@ internal sealed class ObjectContents(
         }
 
         foreach ((int _, IndexSegment region) in GranuleStats)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, IndexSegment region) in GranuleHistograms)
         {
             Declare(region);
         }
@@ -574,6 +590,13 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
+            foreach ((int field, IndexSegment region) in GranuleHistograms)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagGranuleHistograms);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
             foreach ((int field, IndexSegment region) in Locates)
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagLocate);
@@ -663,6 +686,7 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> counts = [];
             List<(int, IndexSegment)> sketches = [];
             List<(int, IndexSegment)> granuleStats = [];
+            List<(int, IndexSegment)> granuleHistograms = [];
             List<(int, IndexSegment)> locates = [];
             List<long> columnBytes = [];
             List<long> columnChunks = [];
@@ -758,6 +782,14 @@ internal sealed class ObjectContents(
 
                         granuleStats.Add(stated);
                         break;
+                    case (TagGranuleHistograms, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } histogrammed)
+                        {
+                            return null;
+                        }
+
+                        granuleHistograms.Add(histogrammed);
+                        break;
                     case (TagColumnBytes, ProtoWireType.LengthDelimited):
                         ProtoReader packed = reader.ReadMessage();
                         while (!packed.End)
@@ -834,6 +866,7 @@ internal sealed class ObjectContents(
                     Counts = counts,
                     Sketches = sketches,
                     GranuleStats = granuleStats,
+                    GranuleHistograms = granuleHistograms,
                     Locates = locates,
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,

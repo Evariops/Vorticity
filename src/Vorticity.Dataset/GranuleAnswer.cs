@@ -17,7 +17,8 @@ namespace Vorticity.Dataset;
 /// rows, and whose keys each hold one group through their functions, gives its rows and its measures' states: no column of
 /// the question varies in it. A granule where one column of the question varies, under a question of counts alone, gives
 /// the rows of each of its values, the filter judged value by value. Any other granule is read as rows: two columns varying,
-/// a filter its statistics neither prove nor refute, or a measure its statistics do not hold.
+/// a filter its statistics neither prove nor refute, or a measure its statistics do not hold. A quantile or a distribution
+/// takes each granule's histogram of its measure (<see cref="GranuleHistograms"/>), when the error it asks allows their grid.
 /// </summary>
 /// <remarks>
 /// A granule is judged by the summaries its statistics make of each column: one value, or the least and the greatest of
@@ -43,6 +44,9 @@ internal sealed class GranuleAnswer
     // The rows of a granule, which a window on the key's first column cuts at most two of.
     private readonly int _granuleRows;
 
+    // The mantissa bits of the grid of the sketches a quantile of the request asks; 0 for none.
+    private readonly int _sketchBits;
+
     // The filter, judged by summaries, and the columns it reads, top-level ones by their place; the columns whose statistics
     // a granule is judged by. Worked out at the first object whose keys may hold one group in a granule, which most questions
     // the counts answer never meet.
@@ -57,9 +61,10 @@ internal sealed class GranuleAnswer
 
     private GranuleAnswer(
         CountsAnswer counts, DatasetSchema version, PathCosts costs, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, int[] measured, int leading,
-        int[] prefixed, int granuleRows)
+        int[] prefixed, int granuleRows, int sketchBits)
     {
         _prefixed = prefixed;
+        _sketchBits = sketchBits;
         _granuleRows = Math.Max(granuleRows, 1);
         _schema = version;
         _costs = costs;
@@ -76,7 +81,20 @@ internal sealed class GranuleAnswer
 
         Width = width;
         CountsOnly = Measures.Length == 0;
+        List<int> histogrammed = [];
+        foreach ((_, int field, _, bool sketch) in Measures)
+        {
+            if (sketch)
+            {
+                Add(histogrammed, field);
+            }
+        }
+
+        Histogrammed = [.. histogrammed];
     }
+
+    /// <summary>The columns of the measures whose histograms a quantile or a distribution asks, each once.</summary>
+    internal int[] Histogrammed { get; }
 
     /// <summary>The columns whose statistics a granule is judged by: those of the keys, the filter and the measures, each once.</summary>
     internal int[] Fields => _fields ??= Judged();
@@ -144,8 +162,8 @@ internal sealed class GranuleAnswer
     /// <summary>
     /// How the granules of the objects answer <paramref name="request"/> under <paramref name="filter"/> over the columns of
     /// <paramref name="version"/>, in the batches of states <paramref name="counts"/> lays out for the same request; null
-    /// when they answer no granule of any: a quantile or a distribution, whose sketches no granule keeps, a distinct count kept
-    /// as a sketch, or a key or a measure on a path.
+    /// when they answer no granule of any: a quantile or a distribution finer than the granules' histograms, a distinct count
+    /// kept as a sketch, or a key or a measure on a path.
     /// </summary>
     internal static GranuleAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version, CountsAnswer counts, int granuleRows)
     {
@@ -157,7 +175,7 @@ internal sealed class GranuleAnswer
 
         foreach (AggregateKind kind in request.Kinds)
         {
-            if (kind is AggregateKind.Distribution or AggregateKind.Quantile)
+            if (kind is AggregateKind.Distribution or AggregateKind.Quantile && request.SketchBits is <= 0 or > GranuleHistograms.WrittenBits)
             {
                 return null;
             }
@@ -204,7 +222,7 @@ internal sealed class GranuleAnswer
             }
         }
 
-        return new GranuleAnswer(counts, version.Schema, version.Costs, filter, keys, [.. measured], leading, [.. prefixed], granuleRows);
+        return new GranuleAnswer(counts, version.Schema, version.Costs, filter, keys, [.. measured], leading, [.. prefixed], granuleRows, request.SketchBits);
     }
 
     /// <summary>Whether column <paramref name="field"/> is one of the sort key's, read as it is: one whose values a granule holds in order.</summary>
@@ -315,6 +333,14 @@ internal sealed class GranuleAnswer
             }
         }
 
+        foreach (int field in Histogrammed)
+        {
+            if (contents.GranuleHistogramsOf(field) is null)
+            {
+                return false;
+            }
+        }
+
         // An object whose every granule holds several values that the question needs one of reads its rows, the statistics a
         // request for nothing.
         return Unanswered(held) < 1;
@@ -329,10 +355,15 @@ internal sealed class GranuleAnswer
     {
         ObjectContents contents = held.Entry.Contents!;
         int[] fields = Fields;
-        IndexSegment?[] regions = new IndexSegment?[fields.Length];
+        IndexSegment?[] regions = new IndexSegment?[fields.Length + Histogrammed.Length];
         for (int i = 0; i < fields.Length; i++)
         {
             regions[i] = contents.GranuleStatsOf(fields[i]);
+        }
+
+        for (int i = 0; i < Histogrammed.Length; i++)
+        {
+            regions[fields.Length + i] = contents.GranuleHistogramsOf(Histogrammed[i]);
         }
 
         return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, fields, Unanswered(held, edges: true)), _costs.Rows(held.Entry, fields));
@@ -407,12 +438,13 @@ internal sealed class GranuleAnswer
     /// The states the granules of the object <paramref name="held"/> give, from the statistics and the indexes of
     /// <see cref="Fields"/>, by their places in it, and the ranges of its live rows, from its first, that its granules do not
     /// answer, which are read as rows; every row when the statistics do not describe the object's granules alike. A granule
-    /// that holds a row of <paramref name="deletions"/> is not answered: its statistics count that row.
+    /// that holds a row of <paramref name="deletions"/> is not answered: its statistics count that row. A quantile takes the
+    /// histograms of <paramref name="histograms"/>, by the same places.
     /// </summary>
     internal (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) Settle(
-        in PositionedObject held, GranuleStats?[] columns, DeletionVector deletions)
+        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions)
     {
-        (GranuleStateRows? states, List<RowRange> unsettled, int settled) = SettlePhysical(held, columns, deletions);
+        (GranuleStateRows? states, List<RowRange> unsettled, int settled) = SettlePhysical(held, columns, histograms, deletions);
         if (deletions.IsEmpty)
         {
             return (states, unsettled, settled);
@@ -429,26 +461,26 @@ internal sealed class GranuleAnswer
 
     /// <summary><see cref="Settle"/>, its ranges the object's own row positions, deleted rows included.</summary>
     private (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) SettlePhysical(
-        in PositionedObject held, GranuleStats?[] columns, DeletionVector deletions)
+        in PositionedObject held, GranuleStats?[] columns, GranuleHistograms?[] histograms, DeletionVector deletions)
     {
         long objectRows = held.Entry.PhysicalRows;
         GranuleStats? any = null;
-        foreach (GranuleStats? blocks in columns)
+        foreach (GranuleStats? stats in columns)
         {
-            if (blocks is null)
+            if (stats is null)
             {
                 continue;
             }
 
-            if ((any is not null && (blocks.Count != any.Count || !blocks.Rows.AsSpan().SequenceEqual(any.Rows))) || blocks.TotalRows != objectRows)
+            if ((any is not null && (stats.Count != any.Count || !stats.Rows.AsSpan().SequenceEqual(any.Rows))) || stats.TotalRows != objectRows)
             {
                 return (null, [new RowRange(0, objectRows)], 0);
             }
 
-            any = blocks;
+            any = stats;
         }
 
-        if (any is null)
+        if (any is null || !Alike(histograms, any.Count))
         {
             return (null, [new RowRange(0, objectRows)], 0);
         }
@@ -457,7 +489,7 @@ internal sealed class GranuleAnswer
         GranuleColumn[] described = new GranuleColumn[Fields.Length];
         for (int i = 0; i < Fields.Length; i++)
         {
-            described[i] = new GranuleColumn(_schema.Columns[Fields[i]].Name, _schema.DType.GetField(Fields[i]), columns[i]);
+            described[i] = new GranuleColumn(_schema.Columns[Fields[i]].Name, _schema.DType.GetField(Fields[i]), columns[i], histograms[i]);
         }
 
         // Which granules their statistics answer, then those answered between two read as rows that cost less read as rows
@@ -499,11 +531,25 @@ internal sealed class GranuleAnswer
         return (states.Count > 0 ? states : null, unsettled, settled);
     }
 
+    /// <summary>Whether each of <paramref name="histograms"/> describes <paramref name="granules"/> granules, as the statistics do.</summary>
+    private static bool Alike(GranuleHistograms?[] histograms, int granules)
+    {
+        foreach (GranuleHistograms? held in histograms)
+        {
+            if (held is not null && held.Count != granules)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// Reads as rows each run of granules <paramref name="answers"/> answers between two it does not, when reading its rows of
     /// the question's columns costs less than a part of the scan more (<see cref="PathCosts.Bridges"/>).
     /// </summary>
-    private void Bridge(ObjectEntry entry, GranuleStats blocks, bool[] answers)
+    private void Bridge(ObjectEntry entry, GranuleStats stats, bool[] answers)
     {
         int b = 0;
         while (b < answers.Length && answers[b])
@@ -523,7 +569,7 @@ internal sealed class GranuleAnswer
             long rows = 0;
             while (b < answers.Length && answers[b])
             {
-                rows += blocks.Rows[b];
+                rows += stats.Rows[b];
                 b++;
             }
 
@@ -594,10 +640,10 @@ internal sealed class GranuleAnswer
         // Each of its values, and its nulls, judged apart: the column's summary replaced by the value's.
         GranuleColumn x = columns[varying];
         int at = IndexOf(judged, judged.Count, x.Path);
-        (ReadOnlyMemory<int> ids, ReadOnlyMemory<long> counted) = x.Blocks!.ValuesOf(granule);
+        (ReadOnlyMemory<int> ids, ReadOnlyMemory<long> counted) = x.Stats!.ValuesOf(granule);
         for (int v = 0; v <= ids.Length; v++)
         {
-            long taken = v < ids.Length ? counted.Span[v] : x.Blocks.Nulls[granule];
+            long taken = v < ids.Length ? counted.Span[v] : x.Stats.Nulls[granule];
             if (taken == 0)
             {
                 continue;
@@ -659,7 +705,10 @@ internal sealed class GranuleAnswer
         return true;
     }
 
-    /// <summary>A granule no column of the question varies in, the filter proven over its rows: its rows and each measure's states, a row of states.</summary>
+    /// <summary>
+    /// A granule no column of the question varies in, the filter proven over its rows: its rows, each measure's states and the
+    /// histograms a quantile asks, a row of states; false when its statistics lack one.
+    /// </summary>
     private bool AddWhole(int granule, long rows, GranuleColumn[] columns, GranuleStateRows states)
     {
         int row = states.Add(rows);
@@ -670,12 +719,23 @@ internal sealed class GranuleAnswer
         }
 
         int word = 1;
-        foreach ((_, int field, bool floats, _) in Measures)
+        for (int m = 0; m < Measures.Length; m++)
         {
-            int place = Array.IndexOf(Fields, field);
-            if (!columns[place].MeasureInto(granule, floats, states.Words(row).Slice(word, MeasureLayout.Words(floats))))
+            (_, int field, bool floats, bool sketch) = Measures[m];
+            GranuleColumn column = columns[Array.IndexOf(Fields, field)];
+            if (!column.MeasureInto(granule, floats, states.Words(row).Slice(word, MeasureLayout.Words(floats))))
             {
                 return false;
+            }
+
+            if (sketch)
+            {
+                if (column.Histograms is not { } histograms || histograms.Bits < _sketchBits)
+                {
+                    return false;
+                }
+
+                states.SetSketch(row, m, histograms.HistogramOf(granule));
             }
 
             word += MeasureLayout.Words(floats);
@@ -689,7 +749,7 @@ internal sealed class GranuleAnswer
 /// One column's statistics over an object's granules and where its values live, as a granule of a question reads them: the
 /// summary it makes of the column, whether the column holds one value or one group of a key there, and that value.
 /// </summary>
-internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? blocks)
+internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? stats, GranuleHistograms? histograms = null)
 {
     private readonly KeyLayout _layout = KeyLayout.TryOf(dtype, out KeyLayout layout) ? layout : default;
     private readonly bool _keyed = KeyLayout.TryOf(dtype, out _);
@@ -699,19 +759,22 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? bloc
     internal string Path { get; } = path;
 
     /// <summary>Its statistics over the granules; null when the object keeps none of it.</summary>
-    internal GranuleStats? Blocks { get; } = blocks;
+    internal GranuleStats? Stats { get; } = stats;
+
+    /// <summary>A measure's histograms over the granules, when a quantile asks them; null otherwise.</summary>
+    internal GranuleHistograms? Histograms { get; } = histograms;
 
     /// <summary>Whether granule <paramref name="granule"/> lists the column's values, each named in the index.</summary>
     internal bool Lists(int granule) =>
-        Blocks is { HoldsValueLists: true } stats && stats.Distinct![granule] <= GranuleStats.ListedValues;
+        Stats is { HoldsValueLists: true } held && held.Distinct![granule] <= GranuleStats.ListedValues;
 
     /// <summary>The value numbered <paramref name="id"/>, as the column stores it; null for a number the dictionary lacks.</summary>
-    internal byte[]? ValueOf(int id) => Blocks?.ValueOf(id);
+    internal byte[]? ValueOf(int id) => Stats?.ValueOf(id);
 
     /// <summary>The literal of the value numbered <paramref name="id"/>, decoded once; null for none.</summary>
     private FilterLiteral? LiteralOf(int id)
     {
-        if (Blocks is not { } stats || !_keyed || stats.ValueOf(id) is not { } value)
+        if (Stats is not { } stats || !_keyed || stats.ValueOf(id) is not { } value)
         {
             return null;
         }
@@ -726,7 +789,7 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? bloc
     /// </summary>
     internal ColumnSummary? SummaryOf(int granule)
     {
-        if (Blocks is not { } stats)
+        if (Stats is not { } stats)
         {
             return null;
         }
@@ -749,7 +812,7 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? bloc
     /// <summary>The least and the greatest value of granule <paramref name="granule"/>: of those it lists, else of its measure; null for none known.</summary>
     private (FilterLiteral? Least, FilterLiteral? Greatest) Bounds(int granule)
     {
-        GranuleStats stats = Blocks!;
+        GranuleStats stats = Stats!;
         if (Lists(granule))
         {
             FilterLiteral? least = null;
@@ -789,7 +852,7 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? bloc
     /// <summary>Whether granule <paramref name="granule"/> of <paramref name="rows"/> rows holds one value of the column, or nulls alone.</summary>
     internal bool HoldsOneValue(int granule, long rows)
     {
-        if (Blocks is not { } stats)
+        if (Stats is not { } stats)
         {
             return false;
         }
@@ -814,7 +877,7 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? bloc
             return true;
         }
 
-        return key is FunctionFieldExpr && Blocks is { } stats && stats.Nulls[granule] == 0 && Bounds(granule) is ({ } least, { } greatest)
+        return key is FunctionFieldExpr && Stats is { } stats && stats.Nulls[granule] == 0 && Bounds(granule) is ({ } least, { } greatest)
             && CountsAnswer.Image(key, least) is { } low && CountsAnswer.Image(key, greatest) is { } high && KeyCursor.Compare(low, high) == 0;
     }
 
@@ -825,7 +888,7 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? bloc
     /// </summary>
     internal byte[]? ConstantOf(int granule, long rows)
     {
-        GranuleStats stats = Blocks!;
+        GranuleStats stats = Stats!;
         if (stats.Nulls[granule] == rows)
         {
             return null;
@@ -845,7 +908,7 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? bloc
     /// </summary>
     internal bool MeasureInto(int granule, bool floats, Span<long> into)
     {
-        GranuleStats stats = Blocks!;
+        GranuleStats stats = Stats!;
         if (stats.Measure is { } kind && (kind == MeasureKind.Float) == floats)
         {
             stats.MeasureOf(granule).CopyTo(into);

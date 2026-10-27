@@ -116,6 +116,13 @@ internal static class IndexKinds
     public const string GranuleStats = "vorticity.granule.stats.v1";
 
     /// <summary>
+    /// A measure's histograms over the granules of a file whose rows follow a key: each granule's values in a log-linear
+    /// sketch, apart from its statistics so that a sum never reads them, in one payload region that a table of contents names
+    /// (<see cref="Indexes.GranuleHistograms"/>).
+    /// </summary>
+    public const string GranuleHistograms = "vorticity.granule.histograms.v1";
+
+    /// <summary>
     /// Where each value of a column lies, granule by granule: its values by their bytes, each with the granules it lies in,
     /// or none where it lies everywhere, in one payload region that a table of contents names (<see cref="Indexes.ColumnLocate"/>).
     /// </summary>
@@ -132,7 +139,7 @@ internal static class IndexKinds
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
                 or PostingsNgram3 or PostingsHashed or KeyIndex or SliceChunks or Marks or VariantPaths or VariantDirectory or VariantBlocks
-                or ColumnSheet or ColumnCounts or ColumnSketches or GranuleStats or ColumnLocate => true,
+                or ColumnSheet or ColumnCounts or ColumnSketches or GranuleStats or GranuleHistograms or ColumnLocate => true,
             _ => false,
         };
 

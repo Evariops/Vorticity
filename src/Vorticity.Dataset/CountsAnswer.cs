@@ -795,7 +795,12 @@ internal sealed class StateRows : StateTable
     protected override byte[]? KeyOf(int row, int key) => _constants[key] ?? ValueOf(_entries[row]);
 
     /// <inheritdoc/>
-    protected override byte[]? SketchOf(int row, int measure) => _sketches!.SketchOf(_entries[row], _places[measure]);
+    protected override bool SketchOf(int row, int measure, out ReadOnlySpan<byte> sketch)
+    {
+        byte[]? held = _sketches!.SketchOf(_entries[row], _places[measure]);
+        sketch = held;
+        return held is not null;
+    }
 
     /// <summary>The value of the group entry <paramref name="entry"/> belongs to; null for the nulls'.</summary>
     private byte[]? ValueOf(int entry)

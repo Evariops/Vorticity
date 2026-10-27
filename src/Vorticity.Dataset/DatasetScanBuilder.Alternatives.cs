@@ -127,8 +127,8 @@ internal sealed partial class DatasetScanBuilder
         /// <summary>The read of its counts, begun ahead; null before or after.</summary>
         internal Task<(ColumnCounts?, ColumnSketches?)>? Counts { get; set; }
 
-        /// <summary>The read of its columns' statistics over its blocks, begun ahead; null before or after.</summary>
-        internal Task<GranuleStats?[]>? Blocks { get; set; }
+        /// <summary>The read of its columns' statistics over its granules and its measures' histograms, begun ahead; null before or after.</summary>
+        internal Task<(GranuleStats?[] Stats, GranuleHistograms?[] Histograms)>? Statistics { get; set; }
 
         /// <summary>Its partial, being learned ahead; null before or after.</summary>
         internal Task<AggregationPartial>? Learning { get; set; }

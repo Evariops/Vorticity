@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Vorticity.Aggregating;
@@ -59,6 +60,12 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     private readonly long[] _state;
     private int[] _zeros = new int[1_024];
 
+    // The open granule's histogram of the measure the plan reads, a sketch of GranuleHistograms.WrittenBits, its encoding,
+    // and the histograms, written as granules close; null for a column the plan reads as no measure.
+    private readonly QuantileSketch? _histogram;
+    private readonly ArrayBufferWriter<byte> _encoded = new ArrayBufferWriter<byte>(256);
+    private ProtoWriter _histogramSection = new ProtoWriter(256);
+
     // The sections, written as granules close.
     private ProtoWriter _rowsSection = new ProtoWriter(256);
     private ProtoWriter _valuesSection = new ProtoWriter(256);
@@ -73,6 +80,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         _sheet = sheet;
         _plan = plan;
         _measure = plan.MeasureOf(field);
+        _histogram = _measure >= 0 ? new QuantileSketch(GranuleHistograms.WrittenBits) : null;
         _own = _measure < 0 ? OwnOf(dtype) : null;
         _measured = _measure >= 0 || _own is not null;
         _state = new long[_measured ? MeasureLayout.Words(Kind == MeasureKind.Float) : 0];
@@ -111,7 +119,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// <inheritdoc/>
     protected override long OpenBytes =>
         _rowsSection.WrittenSpan.Length + _valuesSection.WrittenSpan.Length + _measureSection.WrittenSpan.Length
-        + ((long)_rowsOf.Length * 2 * sizeof(int));
+        + _histogramSection.WrittenSpan.Length + ((long)_rowsOf.Length * 2 * sizeof(int));
 
     internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
@@ -251,6 +259,51 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 ColumnCountsBuilder.FoldUnsigned(ref state, entries, measure.Integers.AsSpan(start, count), valid);
                 break;
         }
+
+        if (_histogram is { } histogram)
+        {
+            Sketch(histogram, measure, start, count, valid);
+        }
+    }
+
+    /// <summary>
+    /// Adds the measure's values of the rows <c>[start, start + count)</c>, those <paramref name="valid"/> keeps, to the
+    /// granule's histogram, each run of valid rows in one call: every row at once when none is null.
+    /// </summary>
+    private static void Sketch(QuantileSketch histogram, CountedMeasure measure, int start, int count, ReadOnlySpan<byte> valid)
+    {
+        int from = 0;
+        while (from < count)
+        {
+            int to = count;
+            if (!valid.IsEmpty)
+            {
+                int skipped = valid[from..].IndexOfAnyExcept((byte)0);
+                if (skipped < 0)
+                {
+                    return;
+                }
+
+                from += skipped;
+                int run = valid[from..].IndexOf((byte)0);
+                to = run < 0 ? count : from + run;
+            }
+
+            switch (measure.Kind)
+            {
+                case MeasureKind.Float:
+                    histogram.AddAll<double>(measure.Floats.AsSpan(start + from, to - from));
+                    break;
+                case MeasureKind.Signed:
+                    histogram.AddAll<long>(measure.Integers.AsSpan(start + from, to - from));
+                    break;
+                default:
+                    histogram.AddAll<ulong>(MemoryMarshal.Cast<long, ulong>(measure.Integers.AsSpan(start + from, to - from)));
+                    break;
+            }
+
+            from = to;
+        }
     }
 
     /// <summary>
@@ -371,6 +424,14 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
             GranuleStats.WriteMeasure(ref _measureSection, Kind, _state);
             _state.AsSpan().Clear();
             ColumnCountsBuilder.OpenState(_state, Kind);
+            if (_histogram is { } histogram)
+            {
+                _encoded.Clear();
+                histogram.Encode(_encoded);
+                _histogramSection.WriteVarint((ulong)_encoded.WrittenCount);
+                _histogramSection.WriteRawBytes(_encoded.WrittenSpan);
+                histogram.Clear();
+            }
         }
 
         _metCount = 0;
@@ -380,11 +441,12 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     }
 
     /// <summary>
-    /// The statistics, once every one of the file's <paramref name="rows"/> is in: null for a column that keeps neither part.
+    /// The statistics, once every one of the file's <paramref name="rows"/> is in, and the measure's histograms over the
+    /// granules (<see cref="GranuleHistograms"/>) for a measure the plan reads: null for a column that keeps neither part.
     /// The values' part needs every value's bytes, which its dictionary keeps; the measure's is the plan's verdict, asked once
     /// every column's counts settled it.
     /// </summary>
-    internal byte[]? Finish(long rows)
+    internal (byte[] Statistics, byte[]? Histograms)? Finish(long rows)
     {
         End();
         _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
@@ -419,6 +481,22 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 GranuleStats.WriteDictionary(ref writer, values);
             }
 
+            return (writer.WrittenSpan.ToArray(), _measured && _histogram is not null ? Histograms() : null);
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>The measure's histograms over the granules, as <see cref="GranuleHistograms"/> encodes them.</summary>
+    private byte[] Histograms()
+    {
+        ProtoWriter writer = new ProtoWriter(_histogramSection.WrittenSpan.Length + 16);
+        try
+        {
+            GranuleHistograms.WriteHeader(ref writer, _granules);
+            writer.WriteRawBytes(_histogramSection.WrittenSpan);
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -432,5 +510,6 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         _rowsSection.Dispose();
         _valuesSection.Dispose();
         _measureSection.Dispose();
+        _histogramSection.Dispose();
     }
 }

@@ -225,7 +225,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private ObjectContents Contents(
         IndexSegment? keyIndex, IndexSegment? keyPages, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
-        List<(int Field, IndexSegment Region)> granuleStats, List<(int Field, IndexSegment Region)> locates,
+        List<(int Field, IndexSegment Region)> granuleStats, List<(int Field, IndexSegment Region)> granuleHistograms, List<(int Field, IndexSegment Region)> locates,
         long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, _rowCount, directories, pathDirectories)
         {
@@ -236,6 +236,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Counts = counts,
             Sketches = sketches,
             GranuleStats = granuleStats,
+            GranuleHistograms = granuleHistograms,
             Locates = locates,
             ColumnBytes = columnBytes,
             ColumnChunks = columnChunks,
@@ -2511,6 +2512,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             List<(int Field, IndexSegment Region)> counts = [];
             List<(int Field, IndexSegment Region)> sketches = [];
             List<(int Field, IndexSegment Region)> stated = [];
+            List<(int Field, IndexSegment Region)> histogrammed = [];
             List<(int Field, IndexSegment Region)> locates = [];
             bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
             for (int field = 0; keepsSheets && field < _fieldCount; field++)
@@ -2537,18 +2539,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
-            // Each column's statistics over the granules, which a question reads to answer them without their rows, and which a
-            // file's table of contents names beside the counts; as its sheets and counts, kept only by a file large enough for a
-            // reader to ask them before it, which a smaller one reads whole.
+            // Each column's statistics over the granules, which a question reads to answer them without their rows, side by side
+            // for a question of sums to read in one request, then the measures' histograms, which a quantile reads with them;
+            // which a file's table of contents names beside the counts; as its sheets and counts, kept only by a file large
+            // enough for a reader to ask them before it, which a smaller one reads whole.
             if (_carriesContents && keepsSheets)
             {
+                List<(int Field, byte[] Bytes)> histograms = [];
                 for (int field = 0; field < _fieldCount; field++)
                 {
-                    if (closed.GranuleStatsOf(field)?.Finish(_rowCount) is { } statistics)
+                    if (closed.GranuleStatsOf(field)?.Finish(_rowCount) is { } finished)
                     {
                         stated.Add((field, await closed.AddColumnRegionAsync(
-                            _sink, IndexKinds.GranuleStats, field, statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                            _sink, IndexKinds.GranuleStats, field, finished.Statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                        if (finished.Histograms is { } histogram)
+                        {
+                            histograms.Add((field, histogram));
+                        }
                     }
+                }
+
+                foreach ((int field, byte[] histogram) in histograms)
+                {
+                    histogrammed.Add((field, await closed.AddColumnRegionAsync(
+                        _sink, IndexKinds.GranuleHistograms, field, histogram, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
                 }
 
                 // Where each value of each column lies, granule by granule, which a filter on a value reads before its granules.
@@ -2645,7 +2659,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_carriesContents)
             {
                 _contents = Contents(
-                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, locates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
+                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, histogrammed, locates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.
