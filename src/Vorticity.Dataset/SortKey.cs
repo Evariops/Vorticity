@@ -143,6 +143,55 @@ internal sealed class SortKey
         return RowEncoder.EncodeKey(values, _types, _fields);
     }
 
+    /// <summary>
+    /// The bytes the first <paramref name="components"/> values of the row-encoded key <paramref name="key"/> take; -1
+    /// when one is a struct or a list whose width its bytes do not tell.
+    /// </summary>
+    internal int PrefixLength(ReadOnlySpan<byte> key, int components)
+    {
+        int at = 0;
+        for (int i = 0; i < components; i++)
+        {
+            int length = RowEncoder.ValueLength(key[at..], _types[i]);
+            if (length < 0)
+            {
+                return -1;
+            }
+
+            at += length;
+        }
+
+        return at;
+    }
+
+    /// <summary>
+    /// Whether two row-encoded keys hold the same first <paramref name="components"/> values: their bytes up to the end of
+    /// the last, which a value's encoding ends whatever follows it.
+    /// </summary>
+    internal bool SamePrefix(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, int components)
+    {
+        int length = PrefixLength(left, components);
+        return length >= 0 && right.Length >= length && left[..length].SequenceEqual(right[..length]);
+    }
+
+    /// <summary>
+    /// Whether two row-encoded keys hold the same value at component <paramref name="component"/>, whatever the components
+    /// before it hold: false when a width is not told.
+    /// </summary>
+    internal bool SameAt(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, int component)
+    {
+        int leftAt = PrefixLength(left, component);
+        int rightAt = PrefixLength(right, component);
+        if (leftAt < 0 || rightAt < 0)
+        {
+            return false;
+        }
+
+        int length = RowEncoder.ValueLength(left[leftAt..], _types[component]);
+        return length >= 0 && RowEncoder.ValueLength(right[rightAt..], _types[component]) == length
+            && left.Slice(leftAt, length).SequenceEqual(right.Slice(rightAt, length));
+    }
+
     /// <summary>Where a value comes from and what it applies: a column's path, a variant key's read, a function.</summary>
     private sealed class Source(string path, DType column, VariantFieldExpr? read, ValueFunction? function, VortexType? readType)
     {

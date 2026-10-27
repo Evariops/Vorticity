@@ -15,9 +15,10 @@ namespace Vorticity.Indexes;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A block is a run of rows of one value of the key's first column: it ends where that column changes once it holds
-/// <see cref="LeastRows"/> rows, and at <see cref="MostRows"/> rows whatever its rows hold, so that a first column whose
-/// runs are shorter, an identifier, gives blocks of several values rather than a block a row. A block is a range of rows,
+/// A block is a run of rows of one value of the key's indexed prefix: it ends where the prefix changes once it holds
+/// <see cref="LeastRows"/> rows, where its last component changes once it holds <see cref="FewestRows"/>, and at
+/// <see cref="MostRows"/> rows whatever its rows hold, so that a prefix whose runs are shorter, an identifier, gives
+/// blocks of several values rather than a block a row. A block is a range of rows,
 /// independent of the file's chunks and zones.
 /// </para>
 /// <para>
@@ -33,8 +34,15 @@ internal sealed class ColumnBlocks
     /// <summary>The rows a block holds at most.</summary>
     internal const int MostRows = 65_536;
 
-    /// <summary>The rows a block holds before a change of the key's first column ends it: a sixteenth of <see cref="MostRows"/>.</summary>
+    /// <summary>The rows a block holds before a change of the key's indexed prefix ends it: a sixteenth of <see cref="MostRows"/>.</summary>
     internal const int LeastRows = MostRows / 16;
+
+    /// <summary>
+    /// The rows a block holds before a change of the last component of the prefix, its finest grain, ends it: a sixteenth of
+    /// <see cref="LeastRows"/>, so that a grain finer than the rows of a block (a prefix that ends on an instant) cuts no
+    /// blocks of a few rows, whose statistics would outweigh what they spare.
+    /// </summary>
+    internal const int FewestRows = LeastRows / 16;
 
     /// <summary>The values a block lists at most, each with its rows; past them it gives their count alone.</summary>
     internal const int ListedValues = 256;

@@ -165,13 +165,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal long DataBytes => _reportBytes.Data;
 
     /// <summary>
-    /// Once a sliced file is completed, its table of contents (<see cref="Indexes.ObjectContents"/>), for
-    /// the entry a dataset keeps of it: what a reader of its slices needs with no open.
-    /// Null for a file without slices.
+    /// Once a file that carries a table of contents (<see cref="VortexWriteOptions.CarriesContents"/>) is
+    /// completed, its table (<see cref="Indexes.ObjectContents"/>), for the entry a dataset keeps of it: what a
+    /// reader of a few spans of its rows needs with no open. Null for a file without one.
     /// </summary>
     internal byte[]? TableOfContents { get; private set; }
 
-    // The table of contents of a sliced file, built once its regions are written, before the directory's.
+    // The table of contents of a file that carries one, built once its regions are written, before the directory's.
     private ObjectContents? _contents;
 
     /// <summary>The chunks of each top-level column's data, by its place: one a segment it wrote.</summary>
@@ -187,16 +187,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// The table of contents of a sliced file: its slices' table and chunk directories, its variant columns' path
+    /// The table of contents of a file: its rows, its key's sparse index, its chunk directories, its variant columns' path
     /// directories.
     /// </summary>
     private ObjectContents Contents(
-        SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
+        IndexSegment? keyIndex, IndexSegment? keyPages, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
         List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres,
         long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
-        new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
+        new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, _rowCount, directories, pathDirectories)
         {
+            KeyIndex = keyIndex,
+            KeyPages = keyPages,
             Paging = paging,
             Sheets = sheets,
             Counts = counts,
@@ -424,16 +426,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
     private readonly IndexWriter? _indexes;
 
-    // The geometry of each column's chunks, collected as their blobs are written, for a file that carries slices: what a
-    // reader of a few granules needs before their bytes (ColumnMarks); null for a file that carries none.
+    // The geometry of each column's chunks, collected as their blobs are written, for a file that carries a table of
+    // contents: what a reader of a few granules needs before their bytes (ColumnMarks); null for a file that carries none.
     private List<ChunkGeometry>[]? _geometry;
     private ChunkGeometryBuilder? _geometryBuilder;
 
-    // The slices the caller declared, written with the indexes at completion; null for none.
-    private (int Field, SliceTable Table)? _slices;
+    // Whether the file carries a table of contents (VortexWriteOptions.CarriesContents).
+    private bool _carriesContents;
 
-    // The blocks the caller cut on its key's first column, which every column's statistics over them are checked against at
-    // completion, and the rows of those of one value; null for none.
+    // The sparse index of the file's key the caller declared, the key of each granule's first row and the last row's, built
+    // and written at completion; null for none.
+    private (int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey)? _keyIndex;
+
+    // The blocks the caller cut on its key's indexed prefix, which every column's statistics over them are checked against
+    // at completion, and the rows of those of one value; null for none.
     private (int Count, long PureRows)? _blocks;
 
     // Where the blocks end, which the caller declares as it writes and every column's statistics over them read; null for
@@ -449,10 +455,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal void EndBlock(long rows) => _cuts?.Add(rows);
 
     /// <summary>
-    /// Declares that the file's rows lie in <paramref name="count"/> blocks of its key's first column, the ends of all but
-    /// the last declared by <see cref="EndBlock"/>, <paramref name="pureRows"/> of them in blocks of one value of it and of
-    /// the block value (<see cref="ObjectContents.PureBlockRows"/>): the caller, which writes its rows in the key's order,
-    /// knows where the column's values change. A column whose statistics did not cut that many blocks over the file's rows
+    /// Declares that the file's rows lie in <paramref name="count"/> blocks of its key's indexed prefix, the ends of all but
+    /// the last declared by <see cref="EndBlock"/>, <paramref name="pureRows"/> of them in blocks of one value of it
+    /// (<see cref="ObjectContents.PureBlockRows"/>): the caller, which writes its rows in the key's order, knows where the
+    /// prefix changes. A column whose statistics did not cut that many blocks over the file's rows
     /// keeps none.
     /// </summary>
     /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold the statistics.</exception>
@@ -467,29 +473,28 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// Declares the file's slices on its key's first column <paramref name="column"/>, top-level, which completion
-    /// writes into the index directory: the caller, which writes its rows in the key's order slice by slice, knows them. They must cover the file's rows once, in order, which completion checks.
+    /// Declares the sparse index of the file's key (<see cref="GranuleKeys"/>): the key of the first row of each granule of
+    /// <see cref="BlockRows"/> rows, row-encoded over <paramref name="components"/> components, and the last row's, which
+    /// completion builds the index of, writes and names in the table of contents. The caller, which writes its rows in the
+    /// key's order, knows them; the keys are the writer's until it completes.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold them.</exception>
-    /// <exception cref="ArgumentException"><paramref name="column"/> names no top-level column.</exception>
-    internal void DeclareSlices(string column, SliceTable table)
+    /// <exception cref="InvalidOperationException">The writer carries no table of contents, or cuts no granules.</exception>
+    internal void DeclareKeyIndex(int components, IReadOnlyList<byte[]> keys, byte[] lastKey)
     {
-        ArgumentNullException.ThrowIfNull(table);
-        if (_indexes is null)
+        ArgumentNullException.ThrowIfNull(keys);
+        ArgumentNullException.ThrowIfNull(lastKey);
+        if (!_carriesContents || _indexes is null || _blockRows <= 0)
         {
-            throw new InvalidOperationException("A file's slices ride in its index directory, which a writer that builds no index does not write.");
+            throw new InvalidOperationException("A file's key index rides in its table of contents, over granules, which this writer does not write.");
         }
 
-        int field = _isTabular ? _schema.IndexOfField(column) : -1;
-        _slices = field >= 0
-            ? (field, table)
-            : throw new ArgumentException($"'{column}' is no top-level column of the file.", nameof(column));
+        _keyIndex = (components, keys, lastKey);
     }
 
     /// <summary>
     /// Declares the path directory of the top-level variant column <paramref name="column"/> before the file completes,
     /// as <see cref="VortexWriteOptions.VariantDirectories"/> does before its first row: a caller that counts the paths as
-    /// it writes the rows, and the slices they fall in, declares it once the last is written.
+    /// it writes the rows, and the groups of rows they fall in, declares it once the last is written.
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="column"/> is no top-level variant column of the file.</exception>
     internal void DeclareDirectory(string column, VariantDirectory directory)
@@ -553,7 +558,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
         FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired,
-        bool sealScratch = false, bool carriesSlices = false,
+        bool sealScratch = false, bool carriesContents = false,
         IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null)
     {
         VortexRuntimeChecks.Require();
@@ -598,7 +603,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Pin(hints);
         }
 
-        _indexes = IndexWriter.Asks(indexes) || carriesSlices
+        _indexes = IndexWriter.Asks(indexes) || carriesContents
             ? new IndexWriter(
                 indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
                 scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch, variantKeys)
@@ -823,7 +828,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
             options.SealScratch,
-            options.CarriesSlices || options.ColumnSheetBytes is not null || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 },
+            options.CarriesContents || options.ColumnSheetBytes is not null || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 },
             IndexWriter.Asks(indexes) ? IndexedKeys(schema, options.ShreddedVariants) : null)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
@@ -834,8 +839,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _budget = session?.WriteLanes,
         };
         writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
-        if (options.CarriesSlices)
+        if (options.CarriesContents)
         {
+            writer._carriesContents = true;
             writer._geometry = new List<ChunkGeometry>[writer._fieldCount];
             for (int field = 0; field < writer._fieldCount; field++)
             {
@@ -2461,10 +2467,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _indexes?.SettleBudget(dataEnd - interleaved);
         await FlushIndexesAsync(cancellationToken, judged: true).ConfigureAwait(false);
         _indexes?.Close(_columns, _chunkRows, _blockRows, dataEnd - interleaved);
-        if (_slices is { } slices)
-        {
-            _indexes!.AddSlices(slices.Field, slices.Table, _rowCount, _blockRows);
-        }
 
         // Before any byte of the tail: a file missing an index its policy required is not completed.
         if (_indexes?.MissingRequired() is { } missing)
@@ -2474,7 +2476,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         // The columns' sheets and counts, then a long run's fence pages, which name the regions just written, then where the
-        // chunks of a sliced file lie, for a reader that opens no footer.
+        // chunks of a file with a table of contents lie, for a reader that opens no footer.
         if (_indexes is { } closed)
         {
             // What each column holds, for a question on a value the file lacks, which passes it unopened; and each column's
@@ -2511,11 +2513,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
-            // Each column's statistics over the blocks of the key's first column, right after where its values live, which a
-            // question on a value reads with them in one request, and which a sliced file's table of contents names beside the
+            // Each column's statistics over the blocks of the key's indexed prefix, right after where its values live, which a
+            // question on a value reads with them in one request, and which a file's table of contents names beside the
             // counts; as its sheets and counts, kept only by a file large enough for a reader to ask them before it, which a
             // smaller one reads whole.
-            if (_blocks is { } declared && _slices is not null && keepsSheets)
+            if (_blocks is { } declared && _carriesContents && keepsSheets)
             {
                 for (int field = 0; _cuts is not null && field < _fieldCount; field++)
                 {
@@ -2539,8 +2541,27 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             IndexSegment[] marks = [];
             ColumnDictionary?[] dictionaries = Dictionaries();
             ChunkPaging? paging = null;
-            if (_slices is not null)
+            IndexSegment? keyIndex = null;
+            IndexSegment? keyPages = null;
+            if (_carriesContents)
             {
+                // The key's sparse index over the file's granules: its pages, when they do not ride in its table, then the
+                // table, which the table of contents names and the directory's entry holds.
+                if (_keyIndex is { } declaredKeys && _rowCount > 0)
+                {
+                    (byte[] table, byte[] pages) = GranuleKeys.Build(
+                        _blockRows, _rowCount, declaredKeys.Components, declaredKeys.Keys, declaredKeys.LastKey);
+                    if (pages.Length > 0)
+                    {
+                        keyPages = IndexSegment.Of(_sink.Position, pages, 0);
+                        await _sink.WriteAsync(pages, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    keyIndex = IndexSegment.Of(_sink.Position, table, 0);
+                    await _sink.WriteAsync(table, cancellationToken).ConfigureAwait(false);
+                    closed.AddKeyIndex(table, keyPages, _rowCount, _blockRows);
+                }
+
                 // The columns of more than a page of chunks, which start at the same rows, lay their directories in pages,
                 // the first row of each page the table of contents' once.
                 chunks = ChunkDirectory();
@@ -2593,11 +2614,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
-            // A sliced file's table of contents, now that every region it names is written.
-            if (_slices is { } sliced)
+            // The file's table of contents, now that every region it names is written.
+            if (_carriesContents)
             {
                 _contents = Contents(
-                    sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
+                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.
@@ -2642,7 +2663,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             await _sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
         }
 
-        // A sliced file's table of contents names the directory too, now that it is written, and the entry of each index
+        // A file's table of contents names the directory too, now that it is written, and the entry of each index
         // that locates a column's values in it, which a lookup reads alone.
         if (_contents is { } contents)
         {

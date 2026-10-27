@@ -15,7 +15,7 @@ internal readonly record struct ChunkSpan(ulong Offset, uint Length, byte Alignm
 
 /// <summary>
 /// Where the chunks of every top-level column lie, and the array encodings their trees name: what a
-/// reader that opens no footer needs to read the rows of a slice. An entry of the index directory,
+/// reader that opens no footer needs to read a span of rows. An entry of the index directory,
 /// <see cref="IndexKinds.SliceChunks"/>, on the root: the encodings in its options, and one payload
 /// region per column, in column order, holding that column's chunks.
 /// </summary>
@@ -23,7 +23,7 @@ internal readonly record struct ChunkSpan(ulong Offset, uint Length, byte Alignm
 /// <para>
 /// A chunk's segment ends with its encoding tree, whose encodings are indices into the footer's table
 /// of array encodings: the entry carries that table, so a chunk decodes from its own bytes, the table
-/// and its column's dtype. A slice's rows are a range of rows, and the chunks of a column that overlap
+/// and its column's dtype. A span is a range of rows, and the chunks of a column that overlap
 /// it are found by halves on their ends.
 /// </para>
 /// <para>
@@ -40,8 +40,8 @@ internal sealed class SliceChunks
 
     /// <summary>
     /// The version of a column's region whose chunks lie in pages of fixed-width entries, behind a table that says how many
-    /// and holds each page's checksum (<see cref="PageTable"/>): a read of a slice reads the pages of its rows alone, where a
-    /// day's column held 44 000 chunks in half a megabyte that every read of a slice read and parsed whole.
+    /// and holds each page's checksum (<see cref="PageTable"/>): a read of a span reads the pages of its rows alone, where a
+    /// day's column held 44 000 chunks in half a megabyte that every read of a span read and parsed whole.
     /// </summary>
     internal const byte PagedVersion = 2;
 

@@ -267,10 +267,11 @@ public sealed record VortexWriteOptions
     internal long RowBound { get; init; }
 
     /// <summary>
-    /// Whether the writer will be given the file's slices, which ride in its index directory: it
-    /// then keeps that directory whatever its policy builds, which may be nothing.
+    /// Whether the writer writes the file's table of contents (<see cref="Indexes.ObjectContents"/>): where each column's
+    /// chunks lie and their geometry, which a reader of a span of rows reads without the footer, and the sparse index of
+    /// its key when one is declared. It then keeps its index directory whatever its policy builds, which may be nothing.
     /// </summary>
-    internal bool CarriesSlices { get; init; }
+    internal bool CarriesContents { get; init; }
 
     /// <summary>
     /// The encoded bytes the chunks of each top-level column without a target of its own
@@ -289,7 +290,7 @@ public sealed record VortexWriteOptions
 
     /// <summary>
     /// The bytes from which the file keeps a sheet of each top-level column (<see cref="Indexes.ColumnSheet"/>), which a
-    /// sliced file's table of contents names, counted before its sheets; null, the default, for none. A dataset's sealed
+    /// file's table of contents names, counted before its sheets; null, the default, for none. A dataset's sealed
     /// objects keep them from the size at which its scans read an object's sheets before the object, under which a
     /// question reads the object in the request its sheets would take.
     /// </summary>
@@ -297,7 +298,7 @@ public sealed record VortexWriteOptions
 
     /// <summary>
     /// Whether a file that keeps sheets also counts each of its columns over its rows (<see cref="Indexes.ColumnCounts"/>);
-    /// false, the default, for none. A dataset's sliced objects keep them.
+    /// false, the default, for none. A dataset's objects with a table of contents keep them.
     /// </summary>
     internal bool Counted { get; init; }
 
@@ -322,7 +323,7 @@ public sealed record VortexWriteOptions
     internal IReadOnlyDictionary<string, Indexes.VariantDirectory>? VariantDirectories { get; init; }
 
     /// <summary>
-    /// The chunks of a page of a sliced file's chunk directories, those that hold more than a page laid in pages
+    /// The chunks of a page of a file's chunk directories, those that hold more than a page laid in pages
     /// (<see cref="global::Vorticity.Indexes.SliceChunks.PagedVersion"/>): <see cref="global::Vorticity.Indexes.SliceChunks.DefaultPageEntries"/>. Lowered by tests,
     /// so that objects of a few chunks lay their directories in pages as a day's do.
     /// </summary>

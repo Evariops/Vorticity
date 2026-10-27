@@ -15,17 +15,18 @@ using Vorticity.Types;
 namespace Vorticity.Indexes;
 
 /// <summary>
-/// Reads the rows of a sliced file's slices without its footer: the postscript names the index
-/// directory, the directory the slice table and the regions of the chunk directory, and those the
-/// chunks that hold a slice's rows, decoded from their own bytes against the schema the caller knows.
+/// Reads spans of a file's rows without its footer: the postscript names the index directory, the
+/// directory the regions of the chunk directory, and those the chunks that hold a span's rows, decoded
+/// from their own bytes against the schema the caller knows; or the file's table of contents names them.
 /// </summary>
 /// <remarks>
 /// <para>
 /// An open reads the footer, a node per chunk and column, which for an object of a day's rows runs to
-/// megabytes. A question that needs the rows of a slice or two (the edges of a range of the key, an exact
+/// megabytes. A question that needs a few spans of rows (the granules a key's range keeps, an exact
 /// lookup, the rows to show) needs none of it. Opening this reader costs three small dependent
-/// requests (the EOF marker, the postscript, the index directory). The first read of a column adds
-/// one for that column's chunk directory, then each slice costs one request, its chunks read together.
+/// requests (the EOF marker, the postscript, the index directory), none from a table of contents. The
+/// first read of a column adds one for that column's chunk directory, then each span costs one request,
+/// its chunks read together.
 /// </para>
 /// <para>
 /// Like every index the directories are hints: a file without them, or with ones that do not decode or
@@ -38,7 +39,7 @@ namespace Vorticity.Indexes;
 /// directories into arrays of their own, a quarter of a megabyte a column of an hour of 180 M rows.
 /// </para>
 /// </remarks>
-internal sealed class SliceReader : IDisposable
+internal sealed class SpanReader : IDisposable
 {
     private readonly ISegmentReader _source;
     private readonly DType _schema;
@@ -63,8 +64,8 @@ internal sealed class SliceReader : IDisposable
     // Each column's object dictionary, whose codes its chunks hold: read with the chunks, and gathered through.
     private readonly IReadOnlyList<ColumnDictionary?> _dictionaries;
 
-    private SliceReader(
-        ISegmentReader source, DType schema, VortexReadOptions options, SliceTable slices, string[] encodings,
+    private SpanReader(
+        ISegmentReader source, DType schema, VortexReadOptions options, string[] encodings,
         IReadOnlyList<IndexSegment> regions, long rows, ObjectContents? contents = null, IReadOnlyList<ColumnDictionary?>? dictionaries = null)
     {
         _source = source;
@@ -80,8 +81,10 @@ internal sealed class SliceReader : IDisposable
         _marks = new ColumnMarks?[regions.Count];
         _marksRead = new bool[regions.Count];
         _dictionaries = contents?.Dictionaries is { Count: > 0 } named ? named : dictionaries ?? [];
-        Slices = slices;
     }
+
+    /// <summary>The file's rows.</summary>
+    internal long Rows => _rows;
 
     /// <summary>Column <paramref name="field"/>'s object dictionary, or null when its chunks hold its values.</summary>
     private ColumnDictionary? DictionaryOf(int field) => field < _dictionaries.Count ? _dictionaries[field] : null;
@@ -122,9 +125,6 @@ internal sealed class SliceReader : IDisposable
         }
     }
 
-    /// <summary>The file's slices.</summary>
-    internal SliceTable Slices { get; }
-
     /// <summary>The chunks of column <paramref name="field"/>, loaded first.</summary>
     private ReadOnlySpan<ChunkSpan> Chunks(int field) =>
         System.Threading.Volatile.Read(ref _columns[field]) is { } chunks ? chunks.AsSpan(0, _counts[field]) : throw new InvalidOperationException($"Column {field}'s chunks were not loaded.");
@@ -146,8 +146,8 @@ internal sealed class SliceReader : IDisposable
     }
 
     /// <summary>
-    /// A reader of the slices of the file <paramref name="source"/> holds, or null when it carries no
-    /// usable slice table and chunk directory.
+    /// A reader of the rows of the file <paramref name="source"/> holds, or null when it carries no
+    /// usable chunk directory.
     /// </summary>
     /// <param name="source">The file's bytes.</param>
     /// <param name="fileLength">The file's length.</param>
@@ -155,13 +155,13 @@ internal sealed class SliceReader : IDisposable
     /// <param name="options">What bounds the decodes; the defaults when null.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <exception cref="VortexFormatException">The file's end is not a Vortex file's.</exception>
-    internal static async ValueTask<SliceReader?> OpenAsync(
+    internal static async ValueTask<SpanReader?> OpenAsync(
         ISegmentReader source, long fileLength, DType schema, VortexReadOptions? options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
         if (schema.Kind != DTypeKind.Struct)
         {
-            throw new ArgumentException("A sliced file's schema is a struct of its columns.", nameof(schema));
+            throw new ArgumentException("A file read by spans has a schema that is a struct of its columns.", nameof(schema));
         }
 
         if (await VortexFile.ReadMetadataSpecAsync(source, fileLength, IndexDirectory.MetadataKey, cancellationToken)
@@ -180,17 +180,12 @@ internal sealed class SliceReader : IDisposable
             }
         }
 
-        SliceTable? slices = null;
         string[]? encodings = null;
         IReadOnlyList<IndexSegment>? regions = null;
         ColumnDictionary?[]? dictionaries = [];
         foreach (IndexEntry entry in directory!.Entries)
         {
-            if (entry.Kind == IndexKinds.Slices)
-            {
-                slices ??= SliceTable.FromBytes(entry.Options);
-            }
-            else if (entry.Kind == IndexKinds.SliceChunks && entry.Runs is [IndexRun run])
+            if (entry.Kind == IndexKinds.SliceChunks && entry.Runs is [IndexRun run])
             {
                 encodings = SliceChunks.EncodingsFrom(entry.Options);
                 regions = run.Payload;
@@ -203,49 +198,36 @@ internal sealed class SliceReader : IDisposable
         }
 
         long rows = (long)directory.RowCount;
-        return slices is not null && encodings is not null && regions is not null && dictionaries is not null
-            && slices.Rows == rows && regions.Count == schema.FieldCount
-            ? new SliceReader(source, schema, options ?? VortexReadOptions.Default, slices, encodings, regions, rows, dictionaries: dictionaries)
+        return encodings is not null && regions is not null && dictionaries is not null && regions.Count == schema.FieldCount
+            ? new SpanReader(source, schema, options ?? VortexReadOptions.Default, encodings, regions, rows, dictionaries: dictionaries)
             : null;
     }
 
     /// <summary>
-    /// A reader of the slices of a file its table of contents <paramref name="contents"/> describes, opened
-    /// with no read at all: the contents name the file's schema, its slice table and the chunk directories
+    /// A reader of the rows of a file its table of contents <paramref name="contents"/> describes, opened
+    /// with no read at all: the contents name the file's schema, its rows and the chunk directories
     /// the directory would, a paged column's page table, whose pages the contents' first rows place. Null when
     /// they do not cover the schema's columns.
     /// </summary>
     /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
-    internal static SliceReader? Open(ISegmentReader source, VortexReadOptions? options, ObjectContents contents)
+    internal static SpanReader? Open(ISegmentReader source, VortexReadOptions? options, ObjectContents contents)
     {
         ArgumentNullException.ThrowIfNull(source);
         DType schema = contents.SchemaType;
         return schema.Kind == DTypeKind.Struct && contents.ChunkDirectories.Count == schema.FieldCount
-            ? new SliceReader(
-                source, schema, options ?? VortexReadOptions.Default, contents.Slices, [.. contents.Encodings], contents.ChunkDirectories, contents.Slices.Rows,
+            ? new SpanReader(
+                source, schema, options ?? VortexReadOptions.Default, [.. contents.Encodings], contents.ChunkDirectories, contents.Rows,
                 contents)
             : null;
     }
 
     /// <summary>
-    /// The rows of slice <paramref name="slice"/>, as one batch whose first row is the slice's first row
-    /// in the file: of every column, or of <paramref name="columns"/>, top-level indices in schema
-    /// order. The chunks that hold them are read in one request set, after the chunk directories of the
-    /// columns not read before.
-    /// </summary>
-    /// <param name="slice">The slice's index in <see cref="Slices"/>.</param>
-    /// <param name="columns">The columns to read, in the order the batch holds them; every column when null.</param>
-    /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>A batch the caller disposes.</returns>
-    /// <exception cref="VortexFormatException">A column's chunk directory or a chunk does not decode.</exception>
-    internal ValueTask<RecordBatch> ReadSliceAsync(int slice, int[]? columns, CancellationToken cancellationToken) =>
-        ReadSpanAsync(Slices.Slices[slice], columns, cancellationToken);
-
-    /// <summary>
     /// The rows <paramref name="first"/> to <paramref name="first"/> + <paramref name="rows"/> of the file, as
-    /// one batch, read as a slice's are: the blocks a lookup found, say. The chunks that hold them are read in
-    /// one request set, after the chunk directories of the columns not read before.
+    /// one batch whose first row is the span's first row in the file: of every column, or of <paramref name="columns"/>,
+    /// top-level indices in schema order. The chunks that hold them are read in one request set, after the chunk
+    /// directories of the columns not read before: the granules a key's range keeps, the blocks a lookup found.
     /// </summary>
+    /// <exception cref="VortexFormatException">A column's chunk directory or a chunk does not decode.</exception>
     internal ValueTask<RecordBatch> ReadRowsAsync(long first, long rows, int[]? columns, CancellationToken cancellationToken) =>
         ReadSpanAsync(RowRange.FromLength(first, rows), columns, cancellationToken);
 

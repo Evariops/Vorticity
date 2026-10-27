@@ -197,7 +197,7 @@ internal static class DatasetTelemetry
 
     /// <summary>
     /// Starts the activity of one pass of a compaction job, a child of the job's, or returns null when nothing
-    /// listens: <c>plan</c>, the first pass of a job that writes key slices over a variant column, which counts the paths
+    /// listens: <c>plan</c>, the first pass of a job that writes indexed objects over a variant column, which counts the paths
     /// of each clustering value's rows,
     /// or <c>write</c>, the pass that reads the rows again and writes the outputs.
     /// </summary>

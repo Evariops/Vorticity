@@ -37,22 +37,24 @@ internal static class IndexKinds
     public const string PostingsHashed = "vorticity.postings.hashed.v1";
 
     /// <summary>
-    /// The slices of a file whose rows lie in the order of a key, on the key's first column: per slice its rows and its
-    /// first key, and the last key of the last slice, held in the entry's options with no payload (<see cref="SliceTable"/>).
+    /// The sparse index of a sorted object, on the root: the key of the first row of each granule, the prefix of the sort
+    /// key the object indexes, and the key of its last row, in its options a table of pages and their first keys, its pages in
+    /// the payload, none when the table keeps the one page (<see cref="Indexes.GranuleKeys"/>). It replaces the slices of
+    /// <c>vorticity.slices.v1</c>, retired.
     /// </summary>
-    public const string Slices = "vorticity.slices.v1";
+    public const string KeyIndex = "vorticity.key.index.v1";
 
     /// <summary>
     /// Where the chunks of every top-level column lie and the array encodings their trees name, on
-    /// the root, the encodings in its options and a payload region per column: what reads a slice's
+    /// the root, the encodings in its options and a payload region per column: what reads a span of
     /// rows without the footer (<see cref="Indexes.SliceChunks"/>).
     /// </summary>
     public const string SliceChunks = "vorticity.slices.chunks.v1";
 
     /// <summary>
     /// The geometry of every top-level column's chunks, on the root, a payload region per column: each chunk's encoding
-    /// tree, where each granule starts in its buffers of variable length, and the column's object dictionary, which a read
-    /// of a few granules needs before it reads their bytes alone (<see cref="Indexes.ColumnMarks"/>).
+    /// tree and where each granule starts in its buffers of variable length, which a read of a few granules needs before it
+    /// reads their bytes alone (<see cref="Indexes.ColumnMarks"/>).
     /// </summary>
     public const string Marks = "vorticity.marks.v1";
 
@@ -127,22 +129,22 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or PostingsHashed or Slices or SliceChunks or Marks or VariantPaths or VariantDirectory or VariantBlocks
+                or PostingsNgram3 or PostingsHashed or KeyIndex or SliceChunks or Marks or VariantPaths or VariantDirectory or VariantBlocks
                 or ColumnSheet or ColumnCounts or ColumnSketches or BlockStats or ColumnWhere => true,
             _ => false,
         };
 
     /// <summary>
     /// Whether the kind carries payload segments. <see cref="DictProbe"/> does not, its whole content
-    /// being the statement that the column's chunks are dictionary-encoded, and neither does
-    /// <see cref="Slices"/>, whose table fits in its options.
+    /// being the statement that the column's chunks are dictionary-encoded, and neither need
+    /// <see cref="KeyIndex"/>, whose table keeps an object's one page.
     /// </summary>
     /// <param name="kind">The name.</param>
     /// <returns>Whether a run of this kind must carry at least one payload segment.</returns>
     public static bool HasPayload(string kind) =>
         kind switch
         {
-            DictProbe or Slices => false,
+            DictProbe or KeyIndex => false,
             _ => true,
         };
 

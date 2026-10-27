@@ -101,7 +101,7 @@ internal static class ZonePruningPlan
         Scanning.ScanCounters.Note(metrics, segments, bytes);
 
         // The path directories first among the indexes: one small read refutes the whole file, or the
-        // slices that hold no path the filter asks for.
+        // groups of its rows that hold no path the filter asks for.
         List<RowRange>? pathRanges = null;
         int pathSegments = 0;
         long pathBytes = 0;
@@ -280,7 +280,7 @@ internal static class ZonePruningPlan
     /// <summary>
     /// Whether the path directories of <paramref name="columns"/> prove that no row of
     /// <paramref name="file"/> matches <paramref name="filter"/>; when they do not, the rows of the runs
-    /// of slices they prove hold none, or null; and the segments and bytes read for them.
+    /// of the groups they prove hold none, or null; and the segments and bytes read for them.
     /// </summary>
     private static async ValueTask<(bool Refuted, List<RowRange>? Ranges, int Segments, long Bytes)> RefutedByPathsAsync(
         VortexFile file, VortexExpr filter, List<string> columns, CancellationToken cancellationToken)
@@ -317,31 +317,33 @@ internal static class ZonePruningPlan
             return (true, null, segments, bytes);
         }
 
-        // Slice by slice, when every directory names the file's slices.
-        int slices = -1;
+        // Group by group of rows, when every directory names the same groups of the file's rows.
+        long groupRows = -1;
+        long rows = -1;
         foreach (Indexes.VariantDirectory directory in directories.Values)
         {
-            slices = slices < 0 || slices == directory.SliceCount ? directory.SliceCount : 0;
+            groupRows = groupRows < 0 || groupRows == directory.GroupRows ? directory.GroupRows : 0;
+            rows = directory.Rows;
         }
 
-        if (slices <= 0 || await Indexes.SliceTable.ReadAsync(file, cancellationToken).ConfigureAwait(false) is not { } table
-            || table.Slices.Count != slices)
+        if (groupRows <= 0)
         {
             return (false, null, segments, bytes);
         }
 
+        int groups = (int)((rows + groupRows - 1) / groupRows);
         List<RowRange>? ranges = null;
         long start = -1;
         long end = -1;
-        for (int slice = 0; slice < slices; slice++)
+        for (int group = 0; group < groups; group++)
         {
-            RowRange cut = table.Slices[slice];
-            if (Indexes.VariantDirectory.MayMatch(filter, directories, slice))
+            RowRange cut = new RowRange(group * groupRows, Math.Min((group + 1) * groupRows, rows));
+            if (Indexes.VariantDirectory.MayMatch(filter, directories, group))
             {
                 continue;
             }
 
-            // Neighbouring slices refuted make one run, so that a block astride them dies too.
+            // Neighbouring groups refuted make one run, so that a block astride them dies too.
             if (start >= 0 && end == cut.Start)
             {
                 end = cut.End;

@@ -8,10 +8,10 @@ using Vorticity.Types.Serialization;
 namespace Vorticity.Indexes;
 
 /// <summary>
-/// The table of contents of a sliced file, which a dataset's entry carries so that a reader of a few of its slices, of a
+/// The table of contents of a file, which a dataset's entry carries so that a reader of a few of its rows, of a
 /// key of its variant columns or of a value by its locating indexes needs no open of the file, not even its index
-/// directory: the file's schema and the encodings its array blobs name, its slice table and the region of each column's
-/// chunk directory, its variant columns' path directories, and the regions of its index directory and of the entries
+/// directory: the file's schema and the encodings its array blobs name, its rows, its key's sparse index and the region of
+/// each column's chunk directory, its variant columns' path directories, and the regions of its index directory and of the entries
 /// of its locating indexes.
 /// </summary>
 /// <remarks>
@@ -24,7 +24,7 @@ namespace Vorticity.Indexes;
 /// </remarks>
 /// <param name="schema">The file's schema, a struct of its columns, as <see cref="DTypeFlatBuffers"/> writes it.</param>
 /// <param name="encodings">The array encodings the file's blobs name, by their index.</param>
-/// <param name="slices">The file's slice table.</param>
+/// <param name="rows">The file's rows.</param>
 /// <param name="chunkDirectories">Each top-level column's chunk directory, the regions of its index entry.</param>
 /// <param name="pathDirectories">
 /// Each variant column's path directory, and its region: what a question on a path reads first, before that path's
@@ -33,7 +33,7 @@ namespace Vorticity.Indexes;
 internal sealed class ObjectContents(
     byte[] schema,
     IReadOnlyList<string> encodings,
-    SliceTable slices,
+    long rows,
     IReadOnlyList<IndexSegment> chunkDirectories,
     IReadOnlyList<(int Field, IndexSegment Region)>? pathDirectories = null)
 {
@@ -43,8 +43,26 @@ internal sealed class ObjectContents(
     /// <summary>The array encodings the file's blobs name, by their index.</summary>
     internal IReadOnlyList<string> Encodings { get; } = encodings;
 
-    /// <summary>The file's slice table.</summary>
-    internal SliceTable Slices { get; } = slices;
+    /// <summary>The file's rows.</summary>
+    internal long Rows { get; } = rows;
+
+    /// <summary>
+    /// The region of the table of the file's sparse index (<see cref="GranuleKeys"/>), which names its pages; null for a
+    /// file written without a key.
+    /// </summary>
+    internal IndexSegment? KeyIndex { get; init; }
+
+    /// <summary>The region of the pages of the file's sparse index; null when its table keeps its one page.</summary>
+    internal IndexSegment? KeyPages { get; init; }
+
+    // The file's sparse index once a read of it loaded its table, whose pages it then keeps as reads take them; null before.
+    private GranuleKeys? _keys;
+
+    /// <summary>The file's sparse index, once a read loaded its table (<see cref="KeepKeys"/>); null before.</summary>
+    internal GranuleKeys? Keys => System.Threading.Volatile.Read(ref _keys);
+
+    /// <summary>Keeps <paramref name="keys"/>, read and checked, as the file's sparse index; the first kept stays.</summary>
+    internal GranuleKeys KeepKeys(GranuleKeys keys) => System.Threading.Interlocked.CompareExchange(ref _keys, keys, null) ?? keys;
 
     /// <summary>Each top-level column's chunk directory, the regions of its index entry.</summary>
     internal IReadOnlyList<IndexSegment> ChunkDirectories { get; } = chunkDirectories;
@@ -126,8 +144,8 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<long> ColumnChunks { get; init; } = [];
 
     /// <summary>
-    /// The rows of the object's blocks (<see cref="BlockStats"/>) that hold one value of the key's first column, and of the block
-    /// value its writer declared: those a question grouped by both may answer from their statistics, where a block that holds
+    /// The rows of the object's blocks (<see cref="BlockStats"/>) that hold one value of the key's indexed prefix: those a
+    /// question grouped by its components may answer from their statistics, where a block that holds
     /// several reads its rows. -1 when the object does not say.
     /// </summary>
     internal long PureBlockRows { get; init; } = -1;
@@ -160,7 +178,7 @@ internal sealed class ObjectContents(
     /// <summary>
     /// How the paged columns' chunk directories lie (<see cref="SliceChunks.PagedVersion"/>): each such column names its page
     /// table in <see cref="ChunkDirectories"/>, and the first row of each page, which every paged column shares, says which
-    /// pages a slice's rows lie in, with no read. Null when no column's directory is paged.
+    /// pages a span's rows lie in, with no read. Null when no column's directory is paged.
     /// </summary>
     internal ChunkPaging? Paging { get; init; }
 
@@ -170,7 +188,7 @@ internal sealed class ObjectContents(
     /// reader of these loaded.
     /// </summary>
     internal ObjectContents Naming(IndexSegment directory, IReadOnlyList<LocatingEntry>? locating) =>
-        new ObjectContents(Schema, Encodings, Slices, ChunkDirectories, PathDirectories)
+        new ObjectContents(Schema, Encodings, Rows, ChunkDirectories, PathDirectories)
         {
             DirectoryRegion = directory,
             Locating = locating,
@@ -185,6 +203,8 @@ internal sealed class ObjectContents(
             PureBlockRows = PureBlockRows,
             Marks = Marks,
             Dictionaries = Dictionaries,
+            KeyIndex = KeyIndex,
+            KeyPages = KeyPages,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -211,7 +231,8 @@ internal sealed class ObjectContents(
     private const int Version = 2;
     private const int TagVersion = 1;
     private const int TagEncoding = 2;
-    private const int TagSlices = 3;
+
+    // 3 held the slice table, retired with it: never reused.
     private const int TagChunkDirectory = 4;
     private const int TagSchema = 9;
     private const int TagPathDirectory = 10;
@@ -256,7 +277,7 @@ internal sealed class ObjectContents(
     // The chunks of each top-level column's data, packed, by the column's place.
     private const int TagColumnChunks = 21;
 
-    // The rows of the blocks that hold one value of the key's first column and of the block value.
+    // The rows of the blocks that hold one value of the key's indexed prefix.
     private const int TagPureBlockRows = 22;
 
     // A column's geometry, its region, one a column in column order.
@@ -264,6 +285,15 @@ internal sealed class ObjectContents(
 
     // A column's object dictionary, a message a column that has one: its field, its segment, its values and codes.
     private const int TagDictionary = 24;
+
+    // The file's rows.
+    private const int TagRows = 25;
+
+    // The region of the table of the file's sparse index.
+    private const int TagKeyIndex = 26;
+
+    // The region of the pages of the file's sparse index.
+    private const int TagKeyPages = 27;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -339,6 +369,16 @@ internal sealed class ObjectContents(
         foreach (IndexSegment region in Marks)
         {
             Declare(region);
+        }
+
+        if (KeyIndex is { } keyIndex)
+        {
+            Declare(keyIndex);
+        }
+
+        if (KeyPages is { } keyPages)
+        {
+            Declare(keyPages);
         }
 
         foreach ((int _, IndexSegment region) in PathDirectories ?? [])
@@ -419,7 +459,17 @@ internal sealed class ObjectContents(
                 writer.WriteString(TagEncoding, encoding);
             }
 
-            writer.WriteBytes(TagSlices, Slices.ToBytes());
+            writer.WriteUInt64Always(TagRows, (ulong)Rows);
+            if (KeyIndex is { } keyIndex)
+            {
+                IndexDirectory.WriteSegment(ref writer, TagKeyIndex, keyIndex);
+            }
+
+            if (KeyPages is { } keyPages)
+            {
+                IndexDirectory.WriteSegment(ref writer, TagKeyPages, keyPages);
+            }
+
             foreach (IndexSegment directory in ChunkDirectories)
             {
                 IndexDirectory.WriteSegment(ref writer, TagChunkDirectory, directory);
@@ -546,7 +596,9 @@ internal sealed class ObjectContents(
             ProtoReader reader = new ProtoReader(bytes.Span);
             ulong version = 0;
             List<string> encodings = [];
-            SliceTable? slices = null;
+            long? rows = null;
+            IndexSegment? keyIndex = null;
+            IndexSegment? keyPages = null;
             List<IndexSegment> directories = [];
             List<(int, IndexSegment)> pathDirectories = [];
             List<(int, IndexSegment)> sheets = [];
@@ -578,8 +630,14 @@ internal sealed class ObjectContents(
                     case (TagEncoding, ProtoWireType.LengthDelimited):
                         encodings.Add(Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                         break;
-                    case (TagSlices, ProtoWireType.LengthDelimited):
-                        slices = SliceTable.FromBytes(reader.ReadLengthDelimited());
+                    case (TagRows, ProtoWireType.Varint):
+                        rows = checked((long)reader.ReadVarint());
+                        break;
+                    case (TagKeyPages, ProtoWireType.LengthDelimited):
+                        keyPages = IndexDirectory.ReadSegment(reader.ReadMessage());
+                        break;
+                    case (TagKeyIndex, ProtoWireType.LengthDelimited):
+                        keyIndex = IndexDirectory.ReadSegment(reader.ReadMessage());
                         break;
                     case (TagChunkDirectory, ProtoWireType.LengthDelimited):
                         directories.Add(IndexDirectory.ReadSegment(reader.ReadMessage()));
@@ -690,16 +748,18 @@ internal sealed class ObjectContents(
             }
 
             // The entries of a directory lie within it; a paged column's page table, whose length its pages give, is a chunk
-            // directory the contents name, and its pages cover the slices' rows.
+            // directory the contents name, and its pages cover the file's rows.
             // A dictionary names a column the directories name.
-            return version == Version && slices is not null && schema is not null
+            return version == Version && rows is { } held && schema is not null
                 && dictionaries.TrueForAll(d => d.Field < directories.Count)
                 && (locating is null || (indexDirectory is { } named && locating.TrueForAll(l => l.Region.Offset >= named.Offset
                     && l.Region.Offset + l.Region.Length <= named.Offset + named.Length)))
-                && (paging is null || (slices.Slices.Count > 0 && paging.PageRows[^1] < slices.Rows && Array.TrueForAll(paging.Columns, c =>
+                && (paging is null || (held > 0 && paging.PageRows[^1] < held && Array.TrueForAll(paging.Columns, c =>
                     c < directories.Count && directories[c].Length == SliceChunks.TableBytes(paging.PageRows.Length))))
-                ? new ObjectContents(schema, encodings, slices, directories, pathDirectories)
+                ? new ObjectContents(schema, encodings, held, directories, pathDirectories)
                 {
+                    KeyIndex = keyIndex,
+                    KeyPages = keyPages,
                     DirectoryRegion = indexDirectory,
                     Locating = locating,
                     Paging = paging,

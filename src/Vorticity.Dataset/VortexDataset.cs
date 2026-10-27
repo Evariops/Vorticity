@@ -852,13 +852,15 @@ public sealed class VortexDataset : IAsyncDisposable
     /// Starts a data object under <paramref name="schema"/>: what a rewrite uses, whose rows are read
     /// as the schema of the version it read, whatever the handle has moved to since. A caller whose
     /// rows come in key order says so with <paramref name="inKeyOrder"/>, and a key whose column then
-    /// orders the object by itself takes no run. A rewrite announces with <paramref name="byteBound"/>
-    /// the most bytes the object takes should it stream (<see cref="ObjectBound"/>).
+    /// orders the object by itself takes no run. A job's object keeps a table of contents with
+    /// <paramref name="contents"/>, its sparse index and its blocks declared as its rows come. A rewrite
+    /// announces with <paramref name="byteBound"/> the most bytes the object takes should it stream
+    /// (<see cref="ObjectBound"/>).
     /// </summary>
     internal ObjectDraft StartObjectUnder(
-        DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool sliced = false,
+        DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
-        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, bool blocked = false)
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
@@ -869,17 +871,17 @@ public sealed class VortexDataset : IAsyncDisposable
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with
         {
             RowBound = rowBound,
-            CarriesSlices = sliced,
+            CarriesContents = contents,
             GatheredChunkBytes = _options.ChunkBytes,
             GatheredGroupRows = _options.GroupRows,
 
-            // A sliced object, which a job writes, keeps a sheet of each column its table of contents names, when it is
+            // An object with a table of contents, which a job writes, keeps a sheet of each column it names, when it is
             // large enough for a scan to read the sheets before it, and the counts of each column over its rows.
-            ColumnSheetBytes = sliced ? _options.SheetObjectBytes : null,
-            Counted = sliced,
+            ColumnSheetBytes = contents ? _options.SheetObjectBytes : null,
+            Counted = contents,
 
-            // An object a job writes in its key's order, in blocks, keeps each column's statistics over them.
-            Blocked = sliced && blocked,
+            // Such an object, which a job writes in its key's order, in blocks, keeps each column's statistics over them.
+            Blocked = contents,
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
@@ -937,7 +939,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
 
-        // An object in key slices keeps its run, or its sorted column.
+        // An object keeps a sorted run on the key, unless its rows come in the order of a key whose column orders it alone.
         if (schema.Key is { } clustering && !bySortedColumn)
         {
             // The mandatory sorted run on the clustering key, added to the caller's own policy.
@@ -2319,7 +2321,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// Whether an index on the column of a field of <paramref name="schema"/>'s root is one <paramref name="filter"/> may
-    /// read, by the columns it names, their first field from the root; none on the root itself, the slices' chunks,
+    /// read, by the columns it names, their first field from the root; none on the root itself, the chunks' directory,
     /// whose runs a lookup parsed at every question for nothing; null, every one, when a name is none of the schema's or
     /// past the 64th field.
     /// </summary>
@@ -2370,12 +2372,12 @@ public sealed class VortexDataset : IAsyncDisposable
         await using (source.ConfigureAwait(false))
         {
             ISegmentReader reader = Footerless(source, entry, contents);
-            if (Indexes.SliceReader.Open(reader, null, contents) is not { } opened)
+            if (Indexes.SpanReader.Open(reader, null, contents) is not { } opened)
             {
                 return null;
             }
 
-            using Indexes.SliceReader slices = opened;
+            using Indexes.SpanReader rowsOf = opened;
 
             // The directory's entries on the columns the filter reads alone: its runs' segments were a list each, every
             // index of the object parsed at every lookup, three fifths of what a question that leaves an identifier out
@@ -2398,7 +2400,7 @@ public sealed class VortexDataset : IAsyncDisposable
             Task[] chunks = new Task[columns?.Length ?? schema.FieldCount];
             for (int c = 0; c < chunks.Length; c++)
             {
-                chunks[c] = slices.LoadDirectoryAsync(columns?[c] ?? c, cancellationToken).AsTask();
+                chunks[c] = rowsOf.LoadDirectoryAsync(columns?[c] ?? c, cancellationToken).AsTask();
             }
 
             Indexes.IndexDirectory? directory;
@@ -2408,7 +2410,7 @@ public sealed class VortexDataset : IAsyncDisposable
             }
             catch
             {
-                // The chunk directories are read into the slice reader the method lets go on its way out: they end first.
+                // The chunk directories are read into the span reader the method lets go on its way out: they end first.
                 await ((Task)Task.WhenAll(chunks)).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
                 throw;
             }
@@ -2464,7 +2466,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 ranges.Add(new RowRange(start, end));
             }
 
-            return [.. await slices.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
+            return [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
 
             // The whole directory, its entries on the filter's columns kept.
             async Task<Indexes.IndexDirectory?> WholeAsync()
@@ -2959,9 +2961,9 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// The variant column <paramref name="field"/> of the slices of the object <paramref name="entry"/> names
+    /// The variant column <paramref name="field"/> of the groups of rows of the object <paramref name="entry"/> names
     /// that may hold a value at <paramref name="key"/>, a top-level key, read with no open of the object: its
-    /// path directory and the column's chunk directory together, then those slices' chunks together, two
+    /// path directory and the column's chunk directory together, then those groups' chunks together, two
     /// round trips cold, none once the session's cache holds them. Null when the entry carries no table of
     /// contents this library reads; empty when the object holds no value there.
     /// </summary>
@@ -2976,16 +2978,16 @@ public sealed class VortexDataset : IAsyncDisposable
         await using (source.ConfigureAwait(false))
         {
             ISegmentReader reader = Footerless(source, entry, contents);
-            if (Indexes.SliceReader.Open(reader, null, contents) is not { } opened)
+            if (Indexes.SpanReader.Open(reader, null, contents) is not { } opened)
             {
                 return null;
             }
 
-            using Indexes.SliceReader slices = opened;
+            using Indexes.SpanReader rowsOf = opened;
 
             // The first round trip: the path directory beside the column's chunk directory.
             ValueTask<Indexes.VariantDirectory?> directory = ReadPathDirectoryAsync(entry, field, cancellationToken);
-            Task chunks = slices.LoadDirectoryAsync(field, cancellationToken).AsTask();
+            Task chunks = rowsOf.LoadDirectoryAsync(field, cancellationToken).AsTask();
             Indexes.VariantDirectory? paths;
             try
             {
@@ -2993,7 +2995,7 @@ public sealed class VortexDataset : IAsyncDisposable
             }
             catch
             {
-                // The chunk directory is read into the slice reader the method lets go on its way out: it ends first.
+                // The chunk directory is read into the span reader the method lets go on its way out: it ends first.
                 await ((Task)chunks).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
                 throw;
             }
@@ -3004,35 +3006,133 @@ public sealed class VortexDataset : IAsyncDisposable
                 return null;
             }
 
-            // The second: every slice the path may hold a value in, at once.
+            // The second: every group of rows the path may hold a value in, at once; the whole object when it counts none.
             ReadOnlySpan<Indexes.PathEntry> held = paths.Of([key]);
-            List<int> wanted = [];
-            for (int slice = 0; slice < slices.Slices.Slices.Count; slice++)
+            List<RowRange> spans = [];
+            long rows = rowsOf.Rows;
+            int groups = Math.Max(paths.GroupCount, 1);
+            long groupRows = paths.GroupCount > 0 ? paths.GroupRows : rows;
+            for (int group = 0; group < groups; group++)
             {
                 foreach (Indexes.PathEntry path in held)
                 {
-                    if (path.In(slice))
+                    if (path.In(paths.GroupCount > 0 ? group : -1))
                     {
-                        wanted.Add(slice);
+                        spans.Add(new RowRange(group * groupRows, Math.Min((group + 1) * groupRows, rows)));
                         break;
                     }
                 }
             }
 
-            RowRange[] spans = new RowRange[wanted.Count];
-            for (int i = 0; i < spans.Length; i++)
+            return [.. await rowsOf.ReadSpansAsync(spans, [field], cancellationToken).ConfigureAwait(false)];
+        }
+    }
+
+    /// <summary>
+    /// The sparse index of the object <paramref name="entry"/> names, with the pages that may hold a key from
+    /// <paramref name="low"/> to keys that start with <paramref name="high"/>, read with no open of the object and kept on its
+    /// table of contents: its table, then its pages in one request, none once they are held. Null when the object keeps
+    /// none, or what was read does not decode.
+    /// </summary>
+    internal async ValueTask<Indexes.GranuleKeys?> KeyIndexAsync(
+        ObjectEntry entry, Indexes.ObjectContents contents, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high, CancellationToken cancellationToken)
+    {
+        if (contents.KeyIndex is not { } table)
+        {
+            return null;
+        }
+
+        Indexes.GranuleKeys? keys = contents.Keys;
+        if (keys is not null && Held(keys, keys.PagesOf(low.Span, high.Span)))
+        {
+            return keys;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            ISegmentReader reader = Footerless(source, entry, contents);
+            if (keys is null)
             {
-                spans[i] = slices.Slices.Slices[wanted[i]];
+                using Buffers.SegmentOwner bytes = await reader.ReadAsync(SpecOf(table), cancellationToken).ConfigureAwait(false);
+                if (!table.Holds(bytes.Buffer.Span) || Indexes.GranuleKeys.From(bytes.Buffer.Span) is not { } read)
+                {
+                    return null;
+                }
+
+                keys = contents.KeepKeys(read);
             }
 
-            return [.. await slices.ReadSpansAsync(spans, [field], cancellationToken).ConfigureAwait(false)];
+            (int first, int end) = keys.PagesOf(low.Span, high.Span);
+            if (Held(keys, (first, end)))
+            {
+                return keys;
+            }
+
+            if (contents.KeyPages is not { } pages)
+            {
+                return null;
+            }
+
+            using Buffers.SegmentOwner held = await reader.ReadAsync(SpecOf(pages), cancellationToken).ConfigureAwait(false);
+            ReadOnlySpan<byte> all = held.Buffer.Span;
+            if (!pages.Holds(all))
+            {
+                return null;
+            }
+
+            for (int page = first; page < end; page++)
+            {
+                (long offset, int length, ulong _) = keys.PageAt(page);
+                if (!keys.HasPage(page) && (offset + length > all.Length || !keys.TakePage(page, all.Slice((int)offset, length))))
+                {
+                    return null;
+                }
+            }
+
+            return keys;
         }
+
+        static bool Held(Indexes.GranuleKeys keys, (int First, int End) pages)
+        {
+            for (int page = pages.First; page < pages.End; page++)
+            {
+                if (!keys.HasPage(page))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        static Serialization.Schemas.SegmentSpec SpecOf(Indexes.IndexSegment region) =>
+            new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0);
+    }
+
+    /// <summary>
+    /// The rows of the object <paramref name="entry"/> names whose keys may lie from <paramref name="low"/> to keys that start
+    /// with <paramref name="high"/>, by its sparse index: from the first granule that may hold one to the last; every row when
+    /// the object keeps no index.
+    /// </summary>
+    internal async ValueTask<RowRange> KeyRowsAsync(
+        ObjectEntry entry, Indexes.ObjectContents contents, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high, CancellationToken cancellationToken)
+    {
+        if (await KeyIndexAsync(entry, contents, low, high, cancellationToken).ConfigureAwait(false) is not { } keys)
+        {
+            return new RowRange(0, entry.PhysicalRows);
+        }
+
+        (int first, int end) = keys.GranulesOf(low.Span, high.Span);
+        return first < end
+            ? new RowRange((long)first * keys.GranuleRows, Math.Min((long)end * keys.GranuleRows, keys.Rows))
+            : RowRange.Empty;
     }
 
     /// <summary>
     /// The rows strictly inside <paramref name="first"/> to <paramref name="end"/> of the object <paramref name="entry"/>
     /// names at which a chunk of one of <paramref name="columns"/> starts, read from its chunk directories with no open of it
-    /// (<see cref="Indexes.SliceReader.ChunkStartsAsync"/>): where a span of its rows may be cut between lanes.
+    /// (<see cref="Indexes.SpanReader.ChunkStartsAsync"/>): where a span of its rows may be cut between lanes.
     /// </summary>
     internal async ValueTask<long[]> ChunkStartsAsync(
         ObjectEntry entry, Indexes.ObjectContents contents, int[] columns, long first, long end, CancellationToken cancellationToken)
@@ -3040,35 +3140,9 @@ public sealed class VortexDataset : IAsyncDisposable
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            using Indexes.SliceReader reader = Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents)
+            using Indexes.SpanReader reader = Indexes.SpanReader.Open(Footerless(source, entry, contents), null, contents)
                 ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
             return await reader.ChunkStartsAsync(columns, first, end, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// The rows of slice <paramref name="slice"/> of the object <paramref name="entry"/> names, of every column
-    /// or of <paramref name="columns"/>, read with no open of the object: the chunk directories its entry's
-    /// table of contents names, then the slice's chunks, in two round trips. Null when the entry carries no
-    /// table of contents this library reads.
-    /// </summary>
-    internal async ValueTask<RecordBatch?> ReadSliceAsync(ObjectEntry entry, int slice, int[]? columns, CancellationToken cancellationToken)
-    {
-        if (entry.Contents is not { } contents)
-        {
-            return null;
-        }
-
-        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-        await using (source.ConfigureAwait(false))
-        {
-            if (Indexes.SliceReader.Open(Footerless(source, entry, contents), null, contents) is not { } opened)
-            {
-                return null;
-            }
-
-            using Indexes.SliceReader reader = opened;
-            return await reader.ReadSliceAsync(slice, columns, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -3332,7 +3406,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     /// <param name="source">The object's bytes, held or in the store; the file opened over it owns it.</param>
     /// <param name="firstRow">The position of its first row, for a dataset without a clustering key.</param>
-    /// <param name="draft">The object's draft, which says what walks it by key without a run: its rows in key order, or its slices, which is checked.</param>
+    /// <param name="draft">The object's draft, which says what walks it by key without a run: its rows in key order, which is checked.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <param name="tailBytes">The bytes of its footer when they pass an open's first read, so that the open reads them at once; 0 otherwise.</param>
     private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix, byte[] Last)> DescribeAsync(

@@ -3192,16 +3192,6 @@ internal sealed class DatasetScanBuilder
         // The range is the dataset's; the file's is the part of it that falls inside this object.
         (long lower, long upper) = PhysicalRange(held);
 
-        // An object in slices bounded by its keys holds the rows of a range of the key's first column, of any type, in the
-        // slices that range reaches: the scan's plan, its zone maps and its walk then cover those alone.
-        if (held.Entry.Deletions.IsEmpty && filter is not null && _dataset.Key is { } keyed && held.Entry.Contents is { } sliced
-            && KeyBounds(filter, keyed) is { } bounds)
-        {
-            RowRange range = KeyRows(sliced.Slices, bounds.Low, bounds.High, keyed.LeadingType);
-            lower = Math.Max(lower, range.Start);
-            upper = Math.Min(upper, range.End);
-        }
-
         if (within is { } inside)
         {
             lower = Math.Max(lower, inside.Start);
@@ -3219,7 +3209,7 @@ internal sealed class DatasetScanBuilder
     /// <summary>
     /// The bounds the conjuncts of <paramref name="filter"/> that compare the key's first column with a value put on it,
     /// each row-encoded as the key encodes the column, inclusive, an empty array for a side none bounds; null when none
-    /// does. A strict comparison bounds as a loose one: the slices it reaches are among those, and the filter takes out
+    /// does. A strict comparison bounds as a loose one: the granules it reaches are among those, and the filter takes out
     /// the rest. A value the column's type does not take bounds nothing.
     /// </summary>
     internal static (byte[] Low, byte[] High)? KeyBounds(VortexExpr filter, ClusteringKey key)
@@ -3268,35 +3258,6 @@ internal sealed class DatasetScanBuilder
         }
     }
 
-    /// <summary>
-    /// The rows of the slices of <paramref name="table"/>, bounded by keys, whose first column of <paramref name="column"/>
-    /// reaches from <paramref name="low"/> to <paramref name="high"/>, inclusive, each row-encoded and empty for no bound:
-    /// from the first's first row to the last's last, empty when it reaches none.
-    /// </summary>
-    internal static RowRange KeyRows(Indexes.SliceTable table, ReadOnlySpan<byte> low, ReadOnlySpan<byte> high, Types.DType column)
-    {
-        IReadOnlyList<RowRange> slices = table.Slices;
-
-        // A slice reaches the range when the first value of the key above its keys is at its low or past, and the first
-        // value of its first key at its high or before.
-        int first = 0;
-        while (first < slices.Count && !low.IsEmpty && FirstValue(table.CeilingOf(first), column).SequenceCompareTo(low) < 0)
-        {
-            first++;
-        }
-
-        int last = slices.Count - 1;
-        while (last >= first && !high.IsEmpty && FirstValue(table.LowOf(last), column).SequenceCompareTo(high) > 0)
-        {
-            last--;
-        }
-
-        return last < first
-            ? RowRange.Empty
-            : new RowRange(slices[first].Start, slices[last].End);
-
-        static ReadOnlySpan<byte> FirstValue(ReadOnlySpan<byte> key, Types.DType column) => key[..RowEncoding.RowEncoder.FirstValueLength(key, column)];
-    }
 
     /// <summary>
     /// The part of the scan's range inside an object, at the object's own positions: the range

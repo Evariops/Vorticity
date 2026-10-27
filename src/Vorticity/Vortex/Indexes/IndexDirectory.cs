@@ -798,8 +798,8 @@ internal sealed record IndexDirectory(
     }
 
     /// <summary>
-    /// The column <c>TryParse</c> asks its predicate of for an entry on the root itself, a table of a synopsis or a slice's
-    /// chunks: a reader that asks only of some columns says whether it wants them too.
+    /// The column <c>TryParse</c> asks its predicate of for an entry on the root itself, a table of a synopsis or the
+    /// chunks' directory: a reader that asks only of some columns says whether it wants them too.
     /// </summary>
     internal const uint RootColumn = uint.MaxValue;
 

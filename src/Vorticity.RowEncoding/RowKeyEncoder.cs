@@ -333,6 +333,23 @@ public static partial class RowEncoder
     }
 
     /// <summary>
+    /// The bytes the first value of an ascending row-encoded key takes, a value of <paramref name="dtype"/>, nulls first or
+    /// last: the dtype's width when it is fixed, a text's or a binary's sentinel and blocks; -1 for a struct or a list whose
+    /// width depends on its data, which a caller encodes apart.
+    /// </summary>
+    internal static int ValueLength(ReadOnlySpan<byte> key, DType dtype)
+    {
+        dtype = Storage(dtype);
+        RowWidth width = RowWidths.For(dtype);
+        if (width.IsFixed)
+        {
+            return width.Width;
+        }
+
+        return dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary ? FirstValueLength(key, dtype) : -1;
+    }
+
+    /// <summary>
     /// The first value of an ascending row-encoded key, a value of <paramref name="dtype"/>, as the literal
     /// <see cref="WriteValue"/> writes it from: a fixed width's bits mapped back from their order, a text's or a binary's
     /// bytes out of their blocks, a null as a null.

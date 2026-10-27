@@ -16,13 +16,13 @@ namespace Vorticity.Types.Variants;
 /// directory holds: text bounds cut to <paramref name="stringBoundBytes"/>, as a text column's zones
 /// cut theirs, none at 0.
 /// <para>
-/// Given <paramref name="sliceTargetRows"/>, each path also keeps the spans of rows its values lie in,
-/// from which the directory says which slices of the object hold it. Two values of a path that many
-/// rows apart or fewer share a span, so a path keeps about a span per slice at most and the slices a
-/// span names are a superset of those that hold it.
+/// Given <paramref name="groupRows"/>, each path also keeps the spans of rows its values lie in, from
+/// which the directory says which groups of that many rows of the object hold it. Two values of a path
+/// that many rows apart or fewer share a span, so a path keeps about a span per group at most and the
+/// groups a span names are a superset of those that hold it.
 /// </para>
 /// </remarks>
-internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows = 0)
+internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 {
     private byte[] _metadata = [];
     private int _metadataLength = -1;
@@ -41,7 +41,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long sliceTargetRows 
     private const long MaxHeldIds = 1 << 18;
 
     // The rows within which two values of a path share a span; 0 when the paths keep no spans.
-    private readonly long _gap = sliceTargetRows;
+    private readonly long _gap = groupRows;
 
     /// <summary>
     /// The most keys the census counts, every depth of objects together: past them, the values of a key it has not met

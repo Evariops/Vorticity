@@ -348,12 +348,11 @@ internal sealed class DatasetScanSource : ScanSource
                 continue;
             }
 
-            // An object reads the slices the filter's range of the key's first column reaches alone, as its scan does
-            // (DatasetScanBuilder.Of): those are the rows its lanes share, where pieces cut over every row of it would leave
-            // most lanes reading nothing.
-            if (bounds is { } range && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } sliced)
+            // An object reads the granules the filter's range of the key's first column reaches alone, by its sparse index:
+            // those are the rows its lanes share, where pieces cut over every row of it would leave most lanes reading nothing.
+            if (bounds is { } range && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } contents)
             {
-                RowRange window = DatasetScanBuilder.KeyRows(sliced.Slices, range.Low, range.High, key!.LeadingType);
+                RowRange window = await _dataset.KeyRowsAsync(held.Entry, contents, range.Low, range.High, cancellationToken).ConfigureAwait(false);
                 start = System.Math.Max(start, held.FirstRow + window.Start);
                 end = System.Math.Min(end, held.FirstRow + window.End);
             }
@@ -430,7 +429,7 @@ internal sealed class DatasetScanSource : ScanSource
 
     /// <summary>
     /// The rows of the pass as each object's ranges an estimate draws from, the objects its filter keeps by their summaries and
-    /// their slices, in the order of their rows: each object cut where the chunks of the columns read end together, as a
+    /// their sparse indexes, in the order of their rows: each object cut where the chunks of the columns read end together, as a
     /// lane's piece is, into ranges of <paramref name="rangeBytes"/> of the narrowest column at least. The objects are opened
     /// side by side; the scans of the ranges find them open.
     /// </summary>
@@ -452,10 +451,10 @@ internal sealed class DatasetScanSource : ScanSource
             long start = System.Math.Max(from, held.FirstRow);
             long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
 
-            // An object reads the slices the filter's range of the key's first column reaches alone, as its scan does.
-            if (bounds is { } range && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } sliced)
+            // An object reads the granules the filter's range of the key's first column reaches alone, by its sparse index.
+            if (bounds is { } range && held.Entry.Deletions.IsEmpty && held.Entry.Contents is { } contents)
             {
-                RowRange window = DatasetScanBuilder.KeyRows(sliced.Slices, range.Low, range.High, key!.LeadingType);
+                RowRange window = await _dataset.KeyRowsAsync(held.Entry, contents, range.Low, range.High, cancellationToken).ConfigureAwait(false);
                 start = System.Math.Max(start, held.FirstRow + window.Start);
                 end = System.Math.Min(end, held.FirstRow + window.End);
             }

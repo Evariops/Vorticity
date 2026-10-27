@@ -676,9 +676,9 @@ internal sealed class IndexWriter : IDisposable
 
         foreach (IndexEntry entry in entries)
         {
-            // The slice kinds and the variant paths describe the file as its writer cut it, which an
+            // The key index, the chunks and the variant paths describe the file as its writer cut it, which an
             // append changes, and the path directory counts rows the append does not parse.
-            if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.Marks or IndexKinds.VariantPaths
+            if (entry.Kind is IndexKinds.DictProbe or IndexKinds.KeyIndex or IndexKinds.SliceChunks or IndexKinds.Marks or IndexKinds.VariantPaths
                     or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks
                 || Kept(entry, boundary) is not { } kept)
             {
@@ -1701,20 +1701,14 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Adds the file's slice table: an entry on the top-level instant column <paramref name="field"/>,
-    /// one run over every block of the file's <paramref name="rows"/>, the table in its options.
+    /// Adds the file's sparse index (<see cref="GranuleKeys"/>): an entry on the root, one run over every block of the file's
+    /// <paramref name="rows"/>, the table in its options and the pages, when they do not ride in it, the run's one region.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The table does not cover the file's rows.</exception>
-    internal void AddSlices(int field, SliceTable table, long rows, int blockRows)
+    internal void AddKeyIndex(byte[] table, IndexSegment? pages, long rows, int blockRows)
     {
-        if (table.Rows != rows)
-        {
-            throw new InvalidOperationException($"The slices cover {table.Rows} rows of a file of {rows}: they cover each row once.");
-        }
-
         int length = Math.Max(blockRows, 1);
         _entries.Add(new IndexEntry(
-            IndexKinds.Slices, [checked((uint)field)], (ulong)length, table.ToBytes(), [new IndexRun(0, Blocks(rows, length), [], [])]));
+            IndexKinds.KeyIndex, [], (ulong)length, table, [new IndexRun(0, Blocks(rows, length), pages is { } held ? [held] : [], [])]));
     }
 
     /// <summary>
@@ -2191,10 +2185,10 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null, List<(IndexEntry Entry, int Start, int Length)>? located = null)
     {
-        // A file's slices, its variant paths and its columns' sheets and counts ride in the directory whatever the policy
+        // A file's key index, its variant paths and its columns' sheets and counts ride in the directory whatever the policy
         // asks.
         if (!Enabled && _preserved is not { Count: > 0 }
-            && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.Marks or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
+            && !_entries.Exists(static entry => entry.Kind is IndexKinds.KeyIndex or IndexKinds.Marks or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
                 or IndexKinds.VariantBlocks or IndexKinds.ColumnSheet or IndexKinds.ColumnCounts or IndexKinds.ColumnSketches))
         {
             return null;

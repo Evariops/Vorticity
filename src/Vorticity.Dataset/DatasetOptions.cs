@@ -208,8 +208,8 @@ public sealed record DatasetOptions
     internal int ChunkBytes { get; init; } = 1 << 20;
 
     /// <summary>
-    /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default, besides the
-    /// end of each slice. A lane's range of the object is cut where they do, so that no chunk is read by two lanes.
+    /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default. A lane's
+    /// range of the object is cut where they do, so that no chunk is read by two lanes.
     /// </summary>
     internal long GroupRows { get; init; } = 1L << 22;
 
@@ -221,23 +221,11 @@ public sealed record DatasetOptions
     internal long SheetObjectBytes { get; init; } = 1L << 20;
 
     /// <summary>
-    /// The target from which the objects a job of a dataset with a key writes keep a table of contents and slices bounded
-    /// by their keys: 2^20 by default, the bytes under which an open reads an object's footer, and often all of it, in the
-    /// request a read without it would take. A test sets less to slice its small objects.
+    /// The target from which the objects a job of a dataset with a key writes keep a table of contents and the sparse index
+    /// of their keys: 2^20 by default, the bytes under which an open reads an object's footer, and often all of it, in the
+    /// request a read without it would take. A test sets less to index its small objects.
     /// </summary>
     internal long ContentsObjectBytes { get; init; } = 1L << 20;
-
-    /// <summary>
-    /// The rows a slice bounded by keys aims at: <see cref="DefaultSliceTargetRows"/>, past which the next key starts
-    /// another. Each writer's own, since an object's slices are its own; a test sets a few rows.
-    /// </summary>
-    internal long SliceTargetRows { get; init; } = DefaultSliceTargetRows;
-
-    /// <summary>
-    /// The rows a slice aims at by default: three million, a few megabytes a column, so that a read of one slice is one
-    /// request whose bytes the latency of a store does not dwarf.
-    /// </summary>
-    internal const long DefaultSliceTargetRows = 3_000_000;
 
     /// <summary>
     /// The share of an object's rows its marks may reach, as a divisor: past a

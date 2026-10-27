@@ -477,8 +477,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     }
 
     /// <summary>
-    /// The table of contents of the object's slices, as its writer gave it (<see cref="Indexes.ObjectContents"/>):
-    /// what a reader of a few slices, of a key of a variant column or of a value by its locating indexes needs
+    /// The object's table of contents, as its writer gave it (<see cref="Indexes.ObjectContents"/>):
+    /// what a reader of a few granules, of a key of a variant column or of a value by its locating indexes needs
     /// with no open of the object. Empty when the entry carries none.
     /// </summary>
     public ReadOnlyMemory<byte> TableOfContents { get; private set; }

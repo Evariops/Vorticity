@@ -213,32 +213,40 @@ own rows, a lane's part of an object its part's, and reads them together, 32 MiB
 chunk's values are looked up among the literals, sorted once, where they lie, nothing sorted per
 chunk, and a chunk that is not a dictionary claims nothing.
 
-### 4.4 `vorticity.slices.v1`: the slices of a file
+### 4.4 `vorticity.key.index.v1`: the first key of each granule
 
-A file a dataset's job writes in slices carries its slice table: per slice, its rows and its first key,
-in order, covering every row once. Like the dictionary probe it has no payload. The entry is on the
-key's first column, one run over every block, and its options hold the table behind a version byte
-(6): the slice count, then per slice its rows and its first key, row-encoded as the key orders it and
-kept as the bytes it shares with the first key before it and the rest, then the last key of the last
-slice the same way. A job writes it into each object of a mebibyte or more, and cuts a slice only at a
-change of key, so that a key lies in one slice. A table of another version, one that does not decode,
-or one whose rows are not the file's, is not read. The writer declares the slices before it completes
-the file, which checks that they cover its rows ([key
-slices](11-write-strategy.md#9-key-slices-and-shredded-variants)), and writes an index directory for
-them even when its policy asks for no index. A scan of an object's rows under a range of the key's
-first column covers the rows of the slices the range reaches, which the table of the object's entry
-names before any read: its plan, its zone maps and its walk then count those slices' blocks alone, and
-the pieces a scan is cut into between lanes cover those rows alone too.
+A sorted object a dataset's job writes carries the sparse index of its key: the key of the first row of
+each granule, cut to the layout's indexed prefix, and the key of its last row ([the sparse key
+index](23-query-architecture.md#52-the-sparse-key-index)). The entry is on the root, one run over every
+block. Its options hold, behind a version byte (1), the rows of a granule (the writer's block, 8 192 by
+default), the object's rows and the components a key holds, the granules a page holds (128) and the
+pages; then each page's first key, coded forward against the page before (the bytes they share as a
+varint, then the rest's length and bytes), where the page lies in the payload and its XXH3-64; then the
+last row's key whole. The payload holds the pages: in each, every granule's key coded forward against
+the one before, the first against the key the options give the page. An object of one page keeps it in
+the options and writes no payload. A key is the row encoding of the prefix's components, nulls last, the
+one the tree and the merges compare. A granule's rows hold keys from its key to the next granule's, both
+included, since granules are not cut where the key changes.
 
-A sliced file also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
+The object's table of contents names the entry and its payload, so a reader reads the options with no
+open of the object, then the pages a range of the key reaches, all in one request, and keeps the pages
+it read with the entry's table of contents. A scan of an object's rows under a range of the key's first
+column covers the granules the index keeps: from the first whose next key reaches the range's low end to
+the last whose key does not pass its high end, found by halves over the pages, then over their
+granules. About sixteen bytes a granule for a prefix of a few components: an object of a gibibyte, some
+3 300 granules, holds an index of some fifty kilobytes. The writer builds it at completion from the keys
+the job declares, over its own granules and rows. It replaces the slices of `vorticity.slices.v1`, cut
+at changes of key, retired with it; an append drops it, since it describes the file as its writer cut it.
+
+A file with a table of contents also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
 root. Its options hold the file's table of array encodings, and its one run has a payload region per
 top-level column, in column order. A column's region holds, behind a version byte, its chunks, each
 its offset, length, alignment and rows as varints. That is about ten bytes a chunk, 250 KB a column
 for a day of 10⁹ rows, so the regions are read when needed rather than kept in the options every open
-reads, and a read of one column fetches that column's region alone. With it a reader decodes the chunks that hold a slice from their own bytes, since a chunk's
+reads, and a read of one column fetches that column's region alone. With it a reader decodes the chunks that hold a span of rows from their own bytes, since a chunk's
 segment ends with its encoding tree, and never reads the footer ([the rows of a
-slice](12-index-reads.md#51-the-rows-of-a-slice-without-the-footer)). An append drops both slice
-kinds, since they describe the file as its writer cut it.
+slice](12-index-reads.md#51-the-rows-of-a-slice-without-the-footer)). An append drops it, since it
+describes the file as its writer cut it.
 
 A column of more chunks than a page lays its region out in pages instead (version 2,
 `Vortex/Indexes/SliceChunks.cs`): a page table, then pages of 128 entries, each 24 bytes, a chunk's
@@ -248,8 +256,8 @@ are those whose chunks start at the rows of the first one's and share one alignm
 of each page is the same for all of them, and the object's table of contents holds it once ([what a
 node carries](13-dataset.md#42-what-a-node-carries)). A column cut otherwise, a variant column's
 shapes, keeps version 1, as does a column of a page or fewer. A day's column held 43 946 chunks in a
-region of about half a megabyte, which every read of a slice and every lookup read and parsed whole:
-5.9 MB of directories an object. Paged, a read of a slice reads the column's page table and the pages
+region of about half a megabyte, which every read of a span and every lookup read and parsed whole:
+5.9 MB of directories an object. Paged, a read of a span reads the column's page table and the pages
 that hold its rows, in the round trips the whole region took, checks each page against its checksum,
 and reads the entries where they lie. A lookup learns its rows from the postings, so it reads the
 tables first and the pages then, one round trip more for far fewer bytes. A reader of the file alone
@@ -272,7 +280,7 @@ drops the entry.
 
 ### 4.6 `vorticity.variant.directory.v1`: every path a variant holds
 
-A job that writes an object in key slices counts the paths of each variant column as the object's rows
+A job that writes an object with a sparse index counts the paths of each variant column as the object's rows
 are written ([shredded variants](11-write-strategy.md#9-key-slices-and-shredded-variants)), and the
 object carries what it counted: for every path and class of value the rows hold there (a boolean, an
 integer, a number, a text, a timestamp, an object, a list, a null, anything else), how many values, where
@@ -280,11 +288,12 @@ they lie (the typed column a shredded path keeps, the values of other classes be
 residual), and their bounds. An integer or a timestamp keeps its least and greatest, a number its least
 and greatest and whether one was NaN, a boolean which of the two it saw, and a text its least and
 greatest cut to the bytes a text column's zones keep, the greatest one past its cut when a longer text
-shares it. Each path also names, a bit each, the slices of the object it may hold a value in, from the
-spans of rows its values lie in as the rows are written: two values closer than a slice is long share a
-span, so a path keeps about a span per slice at most, and the bits are a superset of the slices that hold
-it. The entry is on the variant column. Its one run holds one region, behind a version byte and the body's length, the
-body one zstd frame.
+shares it. Each path also names, a bit each, the groups of the object's rows it may hold a value in, a
+page of the sparse index each (128 granules, 2^20 rows at 8 192 a granule), from the spans of rows its
+values lie in as the rows are written: two values closer than a group is long share a span, so a path
+keeps about a span per group at most, and the bits are a superset of the groups that hold it. The entry
+is on the variant column. Its one run holds one region, behind a version byte (2; version 1 named the
+slices of the key) and the body's length, the body one zstd frame.
 
 The directory fits the file's index budget. Over it, the paths of the residual held least are left
 out first, and the directory says it is partial, after which a path's absence proves nothing.
@@ -296,8 +305,8 @@ parsing every entry made 4 MB of an hour of log records at every question. It re
 fenced predicate asks for a path the file never holds, for a class the path never holds there, or for
 values outside its bounds, under the filter's conjunctions and disjunctions. A presence asked absent, a
 conversion of any class, and a negation refute nothing. A refuted file reads no block (`ScanPlan.MayMatch` is false, and `Explain`
-names the step `path directory`). Otherwise it asks the same of each slice, and kills the blocks that
-lie wholly inside the runs of slices refuted. An append drops the entry, since it parses none of its
+names the step `path directory`). Otherwise it asks the same of each group, and kills the blocks that
+lie wholly inside the runs of groups refuted. An append drops the entry, since it parses none of its
 rows.
 
 ### 4.7 `vorticity.variant.blocks.v1`: a shredded key's zone map
@@ -336,7 +345,7 @@ path takes for now. An object that does not shred the key has no slot for it, an
 
 ### 4.8 `vorticity.column.sheet.v1`: what a column holds
 
-A dataset's object in slices, of a mebibyte or more, keeps a sheet of each top-level column an index
+A dataset's object with a table of contents, of a mebibyte or more, keeps a sheet of each top-level column an index
 keys, an integer, a float, a string or a binary through any extension: its rows and nulls, its distinct
 values, a sketch of them, its most frequent values, and a filter of its values when they repeat
 ([22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md#51-the-column-sheet)); a smaller object,
@@ -417,17 +426,16 @@ columns of few values raise their entries' registers once the whole batch is in.
 
 ### 4.11 `vorticity.block.stats.v1`: a column over the blocks
 
-An object a compaction job writes in slices bounded by keys cuts its rows in blocks on its key's first
-column. A block is a run of the object's rows in key order. It ends where the key's first column changes
-once it holds 4 096 rows, and at 65 536 rows whatever its rows hold. A first column whose runs are
-shorter, such as an identifier, gives blocks of several values rather than one block per row: the values
-of a block change only within its first 4 096 rows. Under a block value the application declares, a
-function of the key's second column, a block ends where that value changes too, past the same rows.
-Blocks are row ranges, independent of the file's chunks and zones. The writer finds the end of a block
-by halves in the runs it merges, one bisection per change of the first column *(computed: a few dozen
-comparisons per block)*, and counts the rows of the blocks that hold one value of the first column and
-of the block value, which the object's table of contents names: a question grouped by both answers
-those blocks from their statistics.
+An object a compaction job writes with a sparse index cuts its rows in blocks on its key's indexed
+prefix. A block is a run of the object's rows in key order. It ends where the prefix changes once it
+holds 4 096 rows, where the prefix's last component, its finest grain, changes once it holds 256 (a
+prefix of several components), and at 65 536 rows whatever its rows hold. A prefix whose runs are
+shorter, such as an identifier, gives blocks of several values rather than one block per row, and a last
+component finer than a block, an instant, blocks of 256 rows. Blocks are row ranges, independent of the
+file's chunks and zones. The writer finds the end of a block by halves in the runs it merges, one
+bisection per change of the prefix past a block's first 256 rows *(computed: a few dozen comparisons per
+block)*, and counts the rows of the blocks that hold one value of the prefix, which the object's table of
+contents names: a question grouped by its components answers those blocks from their statistics.
 
 As with its sheets and counts, only an object of 1 MiB or more keeps statistics over its blocks: a
 smaller one is read whole. It keeps, for each top-level column with a sheet, that column's statistics
