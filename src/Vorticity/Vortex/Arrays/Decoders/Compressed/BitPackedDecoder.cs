@@ -81,8 +81,8 @@ internal sealed class BitPackedDecoder : ArrayDecoder
 
             // Every selective read of the node reads the whole patch set: decoded once for all of them,
             // as a range's is, when there are enough patches for that to pay.
-            ReadOnlySpan<byte> values = ReadPatches(
-                context, in node, dtype, length, packing.Metadata, retained: patchCount >= Patches.RetainedFrom, out Patches patches);
+            ReadOnlySpan<byte> values = Patches.Read(
+                context, in node, 0, dtype, packing.Metadata.Patches, length, retained: patchCount >= Patches.RetainedFrom, Id, out Patches patches);
             Patches.ApplySelected(in patches, values, width, wanted, destination);
         }
 
@@ -149,7 +149,7 @@ internal sealed class BitPackedDecoder : ArrayDecoder
 
         if (packing.Metadata.HasPatches && question.Kind is Compute.QuestionKind.Range or Compute.QuestionKind.Members)
         {
-            ReadOnlySpan<byte> values = ReadPatches(context, in node, dtype, length, packing.Metadata, retained: false, out Patches patches);
+            ReadOnlySpan<byte> values = Patches.Read(context, in node, 0, dtype, packing.Metadata.Patches, length, retained: false, Id, out Patches patches);
             int width = packing.PType.ByteWidth();
             for (int i = 0; i < patches.Count; i++)
             {
@@ -690,72 +690,6 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             AddInPlace(copied, reference);
         }
     }
-
-    /// <summary>
-    /// The node's patch set, validated, and its values: the indices, the values and the per-chunk offsets decoded once
-    /// for every read of the node when <paramref name="retained"/>, for this read alone otherwise.
-    /// </summary>
-    /// <remarks>
-    /// The validation is the full decode's whatever reads the patches - a malformed patch set must be refused whether
-    /// or not a take or a range happens to skip the row it corrupts. The per-chunk offsets are read, validated and then
-    /// deliberately unused: a range's first patch is found by a binary search over the indices, which they would only
-    /// shorten.
-    /// </remarks>
-    private static ReadOnlySpan<byte> ReadPatches(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, BitPackedMetadata metadata, bool retained,
-        out Patches patches)
-    {
-        PatchesMetadata patchesMetadata = metadata.Patches;
-        int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
-        DType indicesType = context.Types.Primitive(patchesMetadata.IndicesPType, Nullability.NonNullable);
-        int indicesIndex = retained
-            ? context.DecodeWholeChild(in node, 0, indicesType, patchCount)
-            : context.DecodeChild(in node, 0, indicesType, patchCount);
-        int valuesIndex = retained
-            ? context.DecodeWholeChild(in node, 1, dtype, patchCount)
-            : context.DecodeChild(in node, 1, dtype, patchCount);
-
-        if (patchesMetadata.HasChunkOffsets)
-        {
-            int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
-                patchesMetadata.ChunkOffsetsLength, $"{Id} patch chunk_offsets_len");
-            DType chunkOffsetsType = context.Types.Primitive(patchesMetadata.ChunkOffsetsPType, Nullability.NonNullable);
-            int chunkOffsets = retained
-                ? context.DecodeWholeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength)
-                : context.DecodeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength);
-            CompressedValues.RequireIndexChild(
-                context, chunkOffsets, patchesMetadata.ChunkOffsetsPType, chunkOffsetsLength, Id, "patch_chunk_offsets");
-        }
-
-        bool walked = context.IsNodeChecked(in node);
-        patches = Patches.Create(context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
-        if (!walked)
-        {
-            context.MarkNodeChecked(in node);
-        }
-
-        // A span is read, so a constant child is expanded into one rather than refused.
-        CanonicalNode values = context.Canonical.GetNode(CanonicalSupport.ExpandIfConstant(context, valuesIndex));
-        if (values.Kind != CanonicalKind.Primitive)
-        {
-            CompressedThrow.ChildKind(Id, "patch_values", values.Kind, "a Primitive");
-        }
-
-        if (values.PType != dtype.PType)
-        {
-            CompressedThrow.Format(
-                $"{Id}'s patch values decoded as {values.PType.Name()}; " +
-                $"{dtype.PType.Name()} was required.");
-        }
-
-        if (!values.Validity.IsAllValid)
-        {
-            CompressedThrow.Format($"{Id} patch values must not contain nulls.");
-        }
-
-        return values.Values.Span;
-    }
-
     private static void ApplyPatches(
         ArrayDecodeContext context,
         in ArrayNode node,
@@ -770,7 +704,7 @@ internal sealed class BitPackedDecoder : ArrayDecoder
     {
         // A range reads the whole patch set, decoded once for every range of the node.
         bool whole = start == 0 && count == length;
-        ReadOnlySpan<byte> source = ReadPatches(context, in node, dtype, length, metadata, retained: !whole, out Patches patches);
+        ReadOnlySpan<byte> source = Patches.Read(context, in node, 0, dtype, metadata.Patches, length, retained: !whole, Id, out Patches patches);
         byte[]? added = null;
         if (reference != 0)
         {

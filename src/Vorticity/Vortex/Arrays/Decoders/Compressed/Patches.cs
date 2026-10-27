@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Numerics;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
@@ -352,6 +353,73 @@ internal readonly ref struct Patches
         }
 
         return ~low;
+    }
+
+    /// <summary>
+    /// The patch set of <paramref name="node"/>, validated, and its values: the indices at child <paramref name="first"/>,
+    /// the values next at <paramref name="valuesType"/>, then the per-chunk offsets when declared, each decoded once for
+    /// every read of the node when <paramref name="retained"/>, for this read alone otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The validation is the full decode's whatever reads the patches - a malformed patch set must be refused whether
+    /// or not a take or a range happens to skip the row it corrupts. The per-chunk offsets are read, validated and then
+    /// deliberately unused: a range's first patch is found by a binary search over the indices, which they would only
+    /// shorten.
+    /// </remarks>
+    /// <returns>The patch values, one a patch at the width of <paramref name="valuesType"/>.</returns>
+    /// <exception cref="VortexFormatException">A child does not decode to its shape, or a value is null.</exception>
+    internal static ReadOnlySpan<byte> Read(
+        ArrayDecodeContext context, in ArrayNode node, int first, DType valuesType, scoped in PatchesMetadata metadata,
+        int length, bool retained, string encodingId, out Patches patches)
+    {
+        int patchCount = ArrayDecodeContext.CheckedLength(metadata.Length, $"{encodingId} patch count");
+        DType indicesType = context.Types.Primitive(metadata.IndicesPType, Nullability.NonNullable);
+        int indicesIndex = retained
+            ? context.DecodeWholeChild(in node, first, indicesType, patchCount)
+            : context.DecodeChild(in node, first, indicesType, patchCount);
+        int valuesIndex = retained
+            ? context.DecodeWholeChild(in node, first + 1, valuesType, patchCount)
+            : context.DecodeChild(in node, first + 1, valuesType, patchCount);
+
+        if (metadata.HasChunkOffsets)
+        {
+            int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
+                metadata.ChunkOffsetsLength, $"{encodingId} patch chunk_offsets_len");
+            DType chunkOffsetsType = context.Types.Primitive(metadata.ChunkOffsetsPType, Nullability.NonNullable);
+            int chunkOffsets = retained
+                ? context.DecodeWholeChild(in node, first + 2, chunkOffsetsType, chunkOffsetsLength)
+                : context.DecodeChild(in node, first + 2, chunkOffsetsType, chunkOffsetsLength);
+            CompressedValues.RequireIndexChild(
+                context, chunkOffsets, metadata.ChunkOffsetsPType, chunkOffsetsLength, encodingId, "patch_chunk_offsets");
+        }
+
+        bool walked = context.IsNodeChecked(in node);
+        patches = Create(context, in metadata, length, indicesIndex, valuesIndex, encodingId, walked);
+        if (!walked)
+        {
+            context.MarkNodeChecked(in node);
+        }
+
+        // A span is read, so a constant child is expanded into one rather than refused.
+        CanonicalNode values = context.Canonical.GetNode(CanonicalSupport.ExpandIfConstant(context, valuesIndex));
+        if (values.Kind != CanonicalKind.Primitive)
+        {
+            CompressedThrow.ChildKind(encodingId, "patch_values", values.Kind, "a Primitive");
+        }
+
+        if (values.PType != valuesType.PType)
+        {
+            CompressedThrow.Format(
+                $"{encodingId}'s patch values decoded as {values.PType.Name()}; " +
+                $"{valuesType.PType.Name()} was required.");
+        }
+
+        if (!values.Validity.IsAllValid)
+        {
+            CompressedThrow.Format($"{encodingId} patch values must not contain nulls.");
+        }
+
+        return values.Values.Span;
     }
 
     /// <summary>
