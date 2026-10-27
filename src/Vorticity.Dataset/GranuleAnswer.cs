@@ -591,7 +591,7 @@ internal sealed class GranuleAnswer
         // Which granules their statistics answer, then those answered between two read as rows that cost less read as rows
         // too than a part of the scan more, which would read again the chunks the two parts share.
         GranuleStateRows states = new GranuleStateRows(this);
-        List<ColumnSummary> judged = [];
+        List<ColumnSummary> judged = new List<ColumnSummary>(Fields.Length + summaries.Columns.Count);
         bool[] answers = new bool[any.Count];
         for (int b = 0; b < any.Count; b++)
         {
@@ -624,7 +624,13 @@ internal sealed class GranuleAnswer
             }
         }
 
-        return (states.Count > 0 ? states : null, unsettled, settled);
+        if (states.Count == 0)
+        {
+            states.Release();
+            return (null, unsettled, settled);
+        }
+
+        return (states, unsettled, settled);
     }
 
     /// <summary>Whether each of <paramref name="histograms"/> describes <paramref name="granules"/> granules, as the statistics do.</summary>
@@ -692,12 +698,14 @@ internal sealed class GranuleAnswer
             }
         }
 
+        // By place rather than through the list's enumerator, which an interface boxes: a granule asks it of each column.
         int kept = judged.Count;
-        foreach (ColumnSummary column in summaries.Columns)
+        IReadOnlyList<ColumnSummary> held = summaries.Columns;
+        for (int c = 0; c < held.Count; c++)
         {
-            if (IndexOf(judged, kept, column.Path) < 0)
+            if (IndexOf(judged, kept, held[c].Path) < 0)
             {
-                judged.Add(column);
+                judged.Add(held[c]);
             }
         }
 
@@ -751,7 +759,7 @@ internal sealed class GranuleAnswer
                 return false;
             }
 
-            judged[at] = x.SummaryOfValue(value, taken);
+            judged[at] = x.SummaryOfValue(v < ids.Length ? x.LiteralOf(ids.Span[v]) : null, taken);
             if (_filter is { } each && !each.MayMatch(judged, taken))
             {
                 continue;
@@ -849,7 +857,6 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? stat
 {
     private readonly KeyLayout _layout = KeyLayout.TryOf(dtype, out KeyLayout layout) ? layout : default;
     private readonly bool _keyed = KeyLayout.TryOf(dtype, out _);
-    private FilterLiteral?[]? _literals;
 
     /// <summary>The column, as a filter names it.</summary>
     internal string Path { get; } = path;
@@ -867,17 +874,9 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? stat
     /// <summary>The value numbered <paramref name="id"/>, as the column stores it; null for a number the dictionary lacks.</summary>
     internal byte[]? ValueOf(int id) => Stats?.ValueOf(id);
 
-    /// <summary>The literal of the value numbered <paramref name="id"/>, decoded once; null for none.</summary>
-    private FilterLiteral? LiteralOf(int id)
-    {
-        if (Stats is not { } stats || !_keyed || stats.ValueOf(id) is not { } value)
-        {
-            return null;
-        }
-
-        _literals ??= new FilterLiteral?[stats.Named];
-        return _literals[id] ??= _layout.ToLiteral(value);
-    }
+    /// <summary>The literal of the value numbered <paramref name="id"/>, decoded once with the statistics; null for none.</summary>
+    internal FilterLiteral? LiteralOf(int id) =>
+        Stats is { } stats && _keyed && (uint)id < (uint)stats.Named ? stats.Literals(_layout)[id] : null;
 
     /// <summary>
     /// The summary granule <paramref name="granule"/> makes of the column: the least and the greatest of the values it lists
@@ -899,50 +898,35 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? stat
         return new ColumnSummary(Path, default, false, default, false, false, nulls, true);
     }
 
-    /// <summary>The summary of the column holding <paramref name="value"/> alone over <paramref name="rows"/> rows, or nothing but nulls for null.</summary>
-    internal ColumnSummary SummaryOfValue(byte[]? value, long rows) =>
-        value is null || !_keyed
-            ? new ColumnSummary(Path, default, false, default, false, false, rows, true)
-            : new ColumnSummary(Path, _layout.ToLiteral(value), true, _layout.ToLiteral(value), true, true, 0, true);
+    /// <summary>The summary of the column holding the value <paramref name="value"/> stands for alone over <paramref name="rows"/> rows, or nothing but nulls for null.</summary>
+    internal ColumnSummary SummaryOfValue(FilterLiteral? value, long rows) =>
+        value is { } literal
+            ? new ColumnSummary(Path, literal, true, literal, true, true, 0, true)
+            : new ColumnSummary(Path, default, false, default, false, false, rows, true);
 
     /// <summary>The least and the greatest value of granule <paramref name="granule"/>: of those it lists, else of its measure; null for none known.</summary>
     private (FilterLiteral? Least, FilterLiteral? Greatest) Bounds(int granule)
     {
         GranuleStats stats = Stats!;
-        if (Lists(granule))
+        if (!Lists(granule))
         {
-            FilterLiteral? least = null;
-            FilterLiteral? greatest = null;
-            foreach (int id in stats.ValuesOf(granule).Ids.Span)
-            {
-                if (LiteralOf(id) is not { } value)
-                {
-                    return (null, null);
-                }
+            return stats.MeasureBounds(granule);
+        }
 
-                least = least is { } low && KeyCursor.Compare(low, value) <= 0 ? low : value;
-                greatest = greatest is { } high && KeyCursor.Compare(high, value) >= 0 ? high : value;
+        FilterLiteral? least = null;
+        FilterLiteral? greatest = null;
+        foreach (int id in stats.ValuesOf(granule).Ids.Span)
+        {
+            if (LiteralOf(id) is not { } value)
+            {
+                return (null, null);
             }
 
-            return (least, greatest);
+            least = least is { } low && KeyCursor.Compare(low, value) <= 0 ? low : value;
+            greatest = greatest is { } high && KeyCursor.Compare(high, value) >= 0 ? high : value;
         }
 
-        if (stats.Measure is { } kind && stats.MeasureOf(granule) is { } words && words[MeasureLayout.Values] > 0)
-        {
-            bool floats = kind == MeasureKind.Float;
-            long least = words[MeasureLayout.Least(floats)];
-            long greatest = words[MeasureLayout.Greatest(floats)];
-            return kind switch
-            {
-                MeasureKind.Float when !double.IsNaN(BitConverter.Int64BitsToDouble(least)) =>
-                    (FilterLiteral.From(BitConverter.Int64BitsToDouble(least)), FilterLiteral.From(BitConverter.Int64BitsToDouble(greatest))),
-                MeasureKind.Float => (null, null),
-                MeasureKind.Signed => (FilterLiteral.From(least), FilterLiteral.From(greatest)),
-                _ => (FilterLiteral.From((ulong)least), FilterLiteral.From((ulong)greatest)),
-            };
-        }
-
-        return (null, null);
+        return (least, greatest);
     }
 
     /// <summary>Whether granule <paramref name="granule"/> of <paramref name="rows"/> rows holds one value of the column, or nulls alone.</summary>
@@ -990,12 +974,12 @@ internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? stat
             return null;
         }
 
-        if (Lists(granule) && stats.ValuesOf(granule).Ids.Span is [int id, ..])
+        if (Lists(granule))
         {
-            return ValueOf(id);
+            return stats.ValuesOf(granule).Ids.Span is [int id, ..] ? ValueOf(id) : null;
         }
 
-        return Bounds(granule).Least is { } least && CountsAnswer.ValuesOf([least], dtype) is [{ } bytes, ..] ? bytes : null;
+        return _keyed ? stats.MeasureLeast(granule, _layout) : null;
     }
 
     /// <summary>

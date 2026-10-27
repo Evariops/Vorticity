@@ -1,4 +1,6 @@
 using System;
+using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
@@ -201,7 +203,8 @@ internal abstract class StateTable
 /// <summary>
 /// The rows of states the granules of an object give (<see cref="GranuleAnswer"/>): each one's keys' values, its rows, its
 /// measures' states and the histograms a quantile asks, added granule by granule; a granule that turns out not to answer
-/// takes its rows back.
+/// takes its rows back. Its arrays are rented from the shared pools and given back once its batches are built
+/// (<see cref="Release"/>).
 /// </summary>
 internal sealed class GranuleStateRows(GranuleAnswer answer)
     : StateTable(answer.KeyFields.Length, answer.Measures, answer.Type, answer.Bool)
@@ -209,11 +212,11 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
     private readonly int _keys = answer.KeyFields.Length;
     private readonly int _width = answer.Width;
     private readonly int _measures = answer.Measures.Length;
-    private byte[]?[] _values = new byte[]?[16 * answer.KeyFields.Length];
-    private long[] _words = new long[16 * answer.Width];
+    private byte[]?[] _values = ArrayPool<byte[]?>.Shared.Rent(16 * answer.KeyFields.Length);
+    private long[] _words = ArrayPool<long>.Shared.Rent(16 * answer.Width);
 
     // Each row's histogram of each measure, a granule's statistics' own bytes; empty for none.
-    private ReadOnlyMemory<byte>[] _sketches = new ReadOnlyMemory<byte>[16 * answer.Measures.Length];
+    private ReadOnlyMemory<byte>[] _sketches = ArrayPool<ReadOnlyMemory<byte>>.Shared.Rent(16 * answer.Measures.Length);
     private int _count;
 
     /// <inheritdoc/>
@@ -222,13 +225,9 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
     /// <summary>Adds a row of states of <paramref name="rows"/> rows, its keys null and its measures cleared; its place.</summary>
     internal int Add(long rows)
     {
-        if ((_count + 1) * _width > _words.Length)
-        {
-            Array.Resize(ref _words, _words.Length * 2);
-            Array.Resize(ref _values, Math.Max(_values.Length * 2, 16));
-            Array.Resize(ref _sketches, Math.Max(_sketches.Length * 2, 16));
-        }
-
+        Grow(ref _words, (_count + 1) * _width);
+        Grow(ref _values, (_count + 1) * _keys);
+        Grow(ref _sketches, (_count + 1) * _measures);
         int row = _count++;
         Span<long> words = Words(row);
         words.Clear();
@@ -249,6 +248,29 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
 
     /// <summary>Takes back the rows added from <paramref name="count"/> on.</summary>
     internal void Truncate(int count) => _count = Math.Min(_count, count);
+
+    /// <summary>Gives the rows' arrays back to the pools they were rented from: no row is read after, and none is added.</summary>
+    internal void Release()
+    {
+        ArrayPool<long>.Shared.Return(_words);
+        ArrayPool<byte[]?>.Shared.Return(_values, clearArray: true);
+        ArrayPool<ReadOnlyMemory<byte>>.Shared.Return(_sketches, clearArray: true);
+        (_words, _values, _sketches, _count) = ([], [], [], 0);
+    }
+
+    /// <summary>Makes <paramref name="array"/>, rented, hold <paramref name="length"/> at least: a larger one rented, twice as large at least, its items copied.</summary>
+    private static void Grow<T>(ref T[] array, int length)
+    {
+        if (length <= array.Length)
+        {
+            return;
+        }
+
+        T[] grown = ArrayPool<T>.Shared.Rent(Math.Max(length, array.Length * 2));
+        array.CopyTo(grown, 0);
+        ArrayPool<T>.Shared.Return(array, RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+        array = grown;
+    }
 
     /// <inheritdoc/>
     protected override void FillWords(Span<long> into, int start, int word)

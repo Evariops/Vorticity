@@ -362,10 +362,18 @@ internal sealed partial class DatasetScanBuilder
                         counted.StateRows += settled?.Count ?? 0;
                     }
 
-                    for (int at = 0; settled is not null && at < settled.Count; at += StateTable.BatchRows)
+                    // Each batch copies its rows of states into the arena: their arrays go back to the pools after the last.
+                    try
                     {
-                        arena.Reset();
-                        yield return settled.Batch(arena, at, Math.Min(StateTable.BatchRows, settled.Count - at), held.FirstRow);
+                        for (int at = 0; settled is not null && at < settled.Count; at += StateTable.BatchRows)
+                        {
+                            arena.Reset();
+                            yield return settled.Batch(arena, at, Math.Min(StateTable.BatchRows, settled.Count - at), held.FirstRow);
+                        }
+                    }
+                    finally
+                    {
+                        settled?.Release();
                     }
 
                     foreach (RowRange range in unsettled)

@@ -1,5 +1,7 @@
 using System;
+using System.Threading;
 using Vorticity.Aggregating;
+using Vorticity.Expressions;
 using Vorticity.Serialization;
 using Vorticity.Serialization.Protobuf;
 
@@ -103,6 +105,77 @@ internal sealed class GranuleStats
     {
         int width = MeasureLayout.Words(Measure == MeasureKind.Float);
         return _words.AsSpan(granule * width, width);
+    }
+
+    /// <summary>The least and the greatest value of granule <paramref name="granule"/>'s measure; null for none, or a float's NaN.</summary>
+    internal (FilterLiteral? Least, FilterLiteral? Greatest) MeasureBounds(int granule)
+    {
+        if (Measure is not { } kind)
+        {
+            return (null, null);
+        }
+
+        bool floats = kind == MeasureKind.Float;
+        ReadOnlySpan<long> words = MeasureOf(granule);
+        if (words[MeasureLayout.Values] <= 0)
+        {
+            return (null, null);
+        }
+
+        long least = words[MeasureLayout.Least(floats)];
+        long greatest = words[MeasureLayout.Greatest(floats)];
+        return kind switch
+        {
+            MeasureKind.Float when !double.IsNaN(BitConverter.Int64BitsToDouble(least)) =>
+                (FilterLiteral.From(BitConverter.Int64BitsToDouble(least)), FilterLiteral.From(BitConverter.Int64BitsToDouble(greatest))),
+            MeasureKind.Float => (null, null),
+            MeasureKind.Signed => (FilterLiteral.From(least), FilterLiteral.From(greatest)),
+            _ => (FilterLiteral.From((ulong)least), FilterLiteral.From((ulong)greatest)),
+        };
+    }
+
+    // What the readers of the statistics decode once and keep with them, the first to ask for every one after it: each
+    // named value as a literal, each granule's least value of its measure as the column stores it; null before.
+    private FilterLiteral?[]? _literals;
+    private byte[]?[]? _measureLeast;
+
+    /// <summary>Each named value as the literal <paramref name="layout"/>, the column's, makes of it, by its number.</summary>
+    internal FilterLiteral?[] Literals(in KeyLayout layout)
+    {
+        if (Volatile.Read(ref _literals) is { } decoded)
+        {
+            return decoded;
+        }
+
+        FilterLiteral?[] literals = new FilterLiteral?[_dictionary.Length];
+        for (int id = 0; id < literals.Length; id++)
+        {
+            literals[id] = layout.ToLiteral(_dictionary[id]);
+        }
+
+        return Interlocked.CompareExchange(ref _literals, literals, null) ?? literals;
+    }
+
+    /// <summary>
+    /// Granule <paramref name="granule"/>'s least value of its measure as the column stores it, through <paramref name="layout"/>,
+    /// the column's; null for none.
+    /// </summary>
+    internal byte[]? MeasureLeast(int granule, in KeyLayout layout) => (Volatile.Read(ref _measureLeast) ?? EncodeMeasureLeast(layout))[granule];
+
+    private byte[]?[] EncodeMeasureLeast(in KeyLayout layout)
+    {
+        byte[]?[] least = new byte[]?[Count];
+        Span<byte> scratch = stackalloc byte[sizeof(ulong)];
+        Span<byte> zero = stackalloc byte[sizeof(ulong)];
+        for (int granule = 0; granule < least.Length; granule++)
+        {
+            if (MeasureBounds(granule).Least is { } value && layout.TryEncode(value, scratch, out ReadOnlySpan<byte> key, zero, out _))
+            {
+                least[granule] = key.ToArray();
+            }
+        }
+
+        return Interlocked.CompareExchange(ref _measureLeast, least, null) ?? least;
     }
 
     /// <summary>The bytes the statistics hold in memory.</summary>
