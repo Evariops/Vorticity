@@ -372,7 +372,7 @@ internal readonly ref struct Patches
         ArrayDecodeContext context, in ArrayNode node, int first, DType valuesType, scoped in PatchesMetadata metadata,
         int length, bool retained, string encodingId, out Patches patches)
     {
-        int patchCount = ArrayDecodeContext.CheckedLength(metadata.Length, $"{encodingId} patch count");
+        int patchCount = ArrayDecodeContext.CheckedLength(metadata.Length, encodingId, "patch count");
         DType indicesType = context.Types.Primitive(metadata.IndicesPType, Nullability.NonNullable);
         int indicesIndex = retained
             ? context.DecodeWholeChild(in node, first, indicesType, patchCount)
@@ -383,8 +383,7 @@ internal readonly ref struct Patches
 
         if (metadata.HasChunkOffsets)
         {
-            int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
-                metadata.ChunkOffsetsLength, $"{encodingId} patch chunk_offsets_len");
+            int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(metadata.ChunkOffsetsLength, encodingId, "patch chunk_offsets_len");
             DType chunkOffsetsType = context.Types.Primitive(metadata.ChunkOffsetsPType, Nullability.NonNullable);
             int chunkOffsets = retained
                 ? context.DecodeWholeChild(in node, first + 2, chunkOffsetsType, chunkOffsetsLength)
