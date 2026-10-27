@@ -14,7 +14,7 @@
          distinct table and the Bloom filters, and the CRC-64/NVME and CRC-32C the object stores
          send, whose parameter sets arrived in 11.0. dotnet/runtime, MIT, not carried by the shared
          framework. It follows the SDK in global.json, a release candidate of .NET 11 until it ships. -->
-    <PackageVersion Include="System.IO.Hashing" Version="11.0.0-rc.1.26425.128" />
+    <PackageVersion Include="System.IO.Hashing" Version="11.0.0-rc.3.26522.148" />
     <!-- Zstandard and the LZ4 block format in managed C#, Evariops's own, from their own
          repository (github.com/Evariops/ManagedCompressions), released together at one version.
          0.2.0 makes public the prefix decode the reader uses to decode only the start of a frame. -->
