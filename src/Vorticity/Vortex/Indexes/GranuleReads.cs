@@ -269,50 +269,72 @@ internal sealed class GranulePlans(
 
     /// <summary>
     /// Whether the splits of the chunk of segment <paramref name="spec"/>, its rows from <paramref name="firstRow"/>, read
-    /// their parts of it apart: when the scan reads a part of the chunk alone; or, reading every row of it, when its live
-    /// granules make <c>r</c> runs and a share <c>s</c> of its rows such that <c>(r − 1)</c> requests more spare less than
-    /// the <c>(1 − s)</c> of its bytes they leave (spec D, 4.4). Otherwise its splits read it whole, once.
+    /// their parts of it apart (spec D, 4.4): when the <c>g</c> granules they read, those in the rows the scan reads that
+    /// hold a live block, a share <c>s</c> of its rows, are such that <c>(g − 1)</c> requests more spare less than the
+    /// <c>(1 − s)</c> of its bytes they leave. Each split reads its granule apart, a request each, where the chunk read
+    /// whole is one; otherwise its splits read it whole, once.
     /// </summary>
     private bool Apart(in SegmentSpec spec, long firstRow, int rows)
     {
-        RowRange chunk = new RowRange(firstRow, firstRow + rows);
-        if (scanned is { } range && chunk.Intersect(range).Length < rows)
-        {
-            return true;
-        }
-
-        if (live is null)
+        if (scanned is null && live is null)
         {
             return false;
         }
 
         if (!_sparse.TryGetValue(spec.Offset, out bool sparse))
         {
-            _sparse[spec.Offset] = sparse = Sparse(chunk, spec.Length);
+            int granuleRows = geometry.TryGet(spec.Offset, out _, out int known, out _) ? known : 0;
+            _sparse[spec.Offset] = sparse = Sparse(new RowRange(firstRow, firstRow + rows), spec.Length, granuleRows);
         }
 
         return sparse;
     }
 
-    /// <summary>Whether the live blocks of <paramref name="chunk"/>, of <paramref name="bytes"/>, pay their reads apart.</summary>
-    private bool Sparse(RowRange chunk, uint bytes)
+    /// <summary>
+    /// Whether the granules of <paramref name="granuleRows"/> rows of <paramref name="chunk"/>, of <paramref name="bytes"/>,
+    /// that the scan reads, pay their reads apart: those in the rows it scans that hold a live block, a request each, and
+    /// their live rows, against the chunk read whole in one.
+    /// </summary>
+    private bool Sparse(RowRange chunk, uint bytes, int granuleRows)
     {
-        long blockRows = live!.BlockRows;
-        int first = (int)(chunk.Start / blockRows);
-        int end = (int)Math.Min((chunk.End + blockRows - 1) / blockRows, live.BlockCount);
-        int lived = 0;
-        int runs = 0;
-        bool before = false;
-        for (int block = first; block < end; block++)
+        long unit = granuleRows > 0 ? granuleRows : live?.BlockRows ?? chunk.Length;
+        long read = 0;
+        long readRows = 0;
+        for (long at = chunk.Start; at < chunk.End; at += unit)
         {
-            bool on = live.IsLive(block);
-            lived += on ? 1 : 0;
-            runs += on && !before ? 1 : 0;
-            before = on;
+            RowRange granule = new RowRange(at, Math.Min(chunk.End, at + unit));
+            if (scanned is { } range)
+            {
+                granule = granule.Intersect(range);
+            }
+
+            long rows = granule.IsEmpty ? 0 : LiveRows(granule);
+            read += rows > 0 ? 1 : 0;
+            readRows += rows;
         }
 
-        int blocks = end - first;
-        return lived > 0 && lived < blocks && (runs - 1) * (double)geometry.RequestBytes < (1 - ((double)lived / blocks)) * bytes;
+        return read > 0 && readRows < chunk.Length && (read - 1) * (double)geometry.RequestBytes < (1 - ((double)readRows / chunk.Length)) * bytes;
+    }
+
+    /// <summary>The rows of <paramref name="rows"/> in live blocks: all of them with no mask.</summary>
+    private long LiveRows(RowRange rows)
+    {
+        if (live is null)
+        {
+            return rows.Length;
+        }
+
+        long blockRows = live.BlockRows;
+        long held = 0;
+        for (long block = rows.Start / blockRows; block * blockRows < rows.End && block < live.BlockCount; block++)
+        {
+            if (live.IsLive((int)block))
+            {
+                held += Math.Min(rows.End, (block + 1) * blockRows) - Math.Max(rows.Start, block * blockRows);
+            }
+        }
+
+        return held;
     }
 
     /// <summary>
