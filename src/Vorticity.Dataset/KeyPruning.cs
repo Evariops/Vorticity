@@ -145,7 +145,12 @@ internal sealed class KeyPruning
             Search(keys, partition, from, to, granules: true, kept);
         }
 
-        // Neighbouring ranges as one.
+        // Neighbouring ranges as one; none when the object's box meets the filter's and no granule's does.
+        if (kept.Count == 0)
+        {
+            return kept;
+        }
+
         int merged = 0;
         for (int i = 1; i < kept.Count; i++)
         {
