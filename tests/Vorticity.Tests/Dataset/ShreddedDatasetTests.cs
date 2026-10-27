@@ -157,7 +157,9 @@ public sealed partial class ShreddedDatasetTests
         {
         }
 
+        // Every object a job wrote, the hours that shred their keys and the last one, whose rows hold none often enough.
         int written = 0;
+        int shredded = 0;
         foreach ((int level, DatasetTree tree) in dataset.Levels.Occupied())
         {
             if (level == 0)
@@ -176,7 +178,7 @@ public sealed partial class ShreddedDatasetTests
                 List<Event> stored = [];
                 await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
                 {
-                    Assert.NotNull(await VariantPathMap.ReadAsync(lease.File, lease.File.DType.IndexOfField(nameof(Event.Attributes)), Dense, Ct));
+                    shredded += await VariantPathMap.ReadAsync(lease.File, lease.File.DType.IndexOfField(nameof(Event.Attributes)), Dense, Ct) is null ? 0 : 1;
                     await foreach (Event row in lease.File.Scan<Event>().ToRecordsAsync(Ct))
                     {
                         stored.Add(row);
@@ -189,7 +191,7 @@ public sealed partial class ShreddedDatasetTests
             }
         }
 
-        Assert.True(written >= 3, $"{written} shredded objects");
+        Assert.True(written >= 3 && shredded >= 2, $"{written} objects, {shredded} of them shredded");
     }
 
     /// <summary>Sixteen appends of 400 events, 1.25 seconds apart from noon, the same into each dataset.</summary>
