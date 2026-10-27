@@ -23,9 +23,10 @@ namespace Vorticity.Benchmarks.Queries;
 /// and <c>--partition off</c> by the key alone. Data time runs as fast as the machine writes, so the bench says what the
 /// policy writes, not whether a machine keeps up: the handles' clock follows the newest row appended, which a partition's
 /// calm (<see cref="DatasetLayout.CalmAfter"/>) is judged by. <c>--neighbours
-/// off</c> turns off the merges of small neighbours at a level's end, <c>--max-object-mib</c> sets the cap on an
-/// object, and <c>--trace-overlaps N</c> prints the first N jobs that rewrite rather than move, with what the
-/// other levels hold inside their range.
+/// off</c> turns off the merges of small neighbours at a level's end, <c>--max-object-mib</c> sets the size the layout's
+/// objects aim at (<see cref="DatasetLayout.ObjectBytes"/>, 1 GiB by default), <c>--fanout</c> the fan-out of the levels
+/// and of the tiers' merges (10 and 8 by default), and <c>--trace-overlaps N</c> prints the first N jobs that rewrite
+/// rather than move, with what the other levels hold inside their range.
 /// </remarks>
 internal static class LifecycleBench
 {
@@ -39,14 +40,17 @@ internal static class LifecycleBench
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(memory);
         DataClock clock = new DataClock { Now = QuestionBench.Start };
+        DatasetLayout layout = new DatasetLayout
+        {
+            Partition = partition == "off" ? null : LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(partition == "day" ? CalendarUnit.Day : CalendarUnit.Hour),
+            SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))],
+        };
+        layout = maxObjectBytes > 0 ? layout with { ObjectBytes = maxObjectBytes } : layout;
+        layout = fanout > 0 ? layout with { MergeFanout = fanout } : layout;
         DatasetOptions options = new DatasetOptions
         {
             TimeProvider = clock,
-            Layout = new DatasetLayout
-            {
-                Partition = partition == "off" ? null : LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(partition == "day" ? CalendarUnit.Day : CalendarUnit.Hour),
-                SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))],
-            },
+            Layout = layout,
             Identifiers = [nameof(GeneratedRequest.RequestId)],
         };
         VortexDataset[] handles = new VortexDataset[writers];
@@ -61,7 +65,6 @@ internal static class LifecycleBench
         CompactionOptions compaction = new CompactionOptions
         {
             Fanout = fanout > 0 ? fanout : CompactionOptions.DefaultFanout,
-            MaxObjectBytes = maxObjectBytes > 0 ? maxObjectBytes : CompactionOptions.DefaultMaxObjectBytes,
             MergeNeighbours = neighbours,
             Pick = pick switch { "largest" => CompactionPick.Largest, "roundrobin" => CompactionPick.RoundRobin, _ => CompactionPick.Auto },
         };
@@ -135,7 +138,7 @@ internal static class LifecycleBench
             }
         }
 
-        Print(hours, rate, writers, batchSeconds, partition, late, compaction, appended, store, ledger, Stopwatch.GetElapsedTime(begin));
+        Print(hours, rate, writers, batchSeconds, partition, late, layout, compaction, appended, store, ledger, Stopwatch.GetElapsedTime(begin));
         return 0;
     }
 
@@ -340,13 +343,16 @@ internal static class LifecycleBench
     }
 
     private static void Print(
-        int hours, double rate, int writers, int batchSeconds, string partition, bool late, CompactionOptions compaction, long appended,
-        CountingObjectStore store, Ledger ledger, TimeSpan elapsed)
+        int hours, double rate, int writers, int batchSeconds, string partition, bool late, DatasetLayout layout, CompactionOptions compaction,
+        long appended, CountingObjectStore store, Ledger ledger, TimeSpan elapsed)
     {
+        // What the dataset works to: the layout's object size, and the fan-out of its organization.
+        string organized = partition == "off"
+            ? $"no partition, levels of fan-out {compaction.Fanout}, neighbours {(compaction.MergeNeighbours ? "merged" : "left")}, pick {compaction.Pick}"
+            : $"partitioned by {(partition == "day" ? "day" : "hour")}, tiers merged {layout.MergeFanout} at a time";
         Console.WriteLine(
             $"{appended} rows over {hours} hours at {rate}/s{(late ? string.Empty : ", none late")}, {writers} writers appending {batchSeconds} s each, " +
-            $"{(partition == "off" ? "no partition" : partition == "day" ? "partitioned by day" : "partitioned by hour")}, fan-out {compaction.Fanout}, objects up to " +
-            $"{compaction.MaxObjectBytes >> 20} MiB, neighbours {(compaction.MergeNeighbours ? "merged" : "left")}, pick {compaction.Pick}; {elapsed.TotalSeconds:F1} s");
+            $"{organized}, objects up to {layout.ObjectBytes >> 20} MiB; {elapsed.TotalSeconds:F1} s");
         if (ledger.Tracing)
         {
             Console.WriteLine(
