@@ -458,7 +458,7 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
         throw new NotSupportedException("A merge of partials holds states, not rows.");
 
     /// <summary>A plan of no block: the partials are in memory, and every row of them is read.</summary>
-    public ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken) =>
+    public ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken) =>
         ValueTask.FromResult(new ScanPlan(0, 0, 0, 0, 0, MayMatch: true, [], new CountPlan(false, 0, 0, 0, 0), null));
 
     public bool MayMatch(VortexExpr filter) => true;

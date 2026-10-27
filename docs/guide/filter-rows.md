@@ -13,7 +13,7 @@ if (maxCelsius is double max)
     scan.Where(r => r.Celsius <= max);
 }
 
-ScanPlan plan = await scan.ExplainAsync();
+ScanPlan plan = await scan.ExplainAsync(analyze: true);
 long rows = 0;
 int earliest = int.MaxValue;
 await foreach (var (day, _, _) in scan)
@@ -139,8 +139,8 @@ predicate. Write the rows in the order of the column you filter on, or at least 
 
 ## Before and after
 
-`ExplainAsync` reads the statistics and zone maps, plus at most the few segments of a sorted column it
-searches, and returns a `ScanPlan`: the live blocks, the segments and bytes they need, and one
+`ExplainAsync(analyze: true)` reads the statistics and zone maps, plus at most the few segments of a sorted
+column it searches, and returns a `ScanPlan`: the live blocks, the segments and bytes they need, and one
 `PruningStep` per structure consulted, with what it pruned and what consulting it cost. Its `Logical`
 says the question in words, what it asks and never how: here `rows of a file, reading Day, City,
 Celsius, where …; exact, synopses`. An aggregation's says its aggregates, its keys and what follows on
@@ -149,7 +149,8 @@ what the scan actually did. Above, the plan counts 15 segments and 217 052 bytes
 8 172 bytes of zone maps it consulted. The scan that followed read the other 12 segments,
 208 880 bytes. The file keeps the zone maps a plan or a scan has read, and the
 scan reads each segment once, however many live blocks share it
-([statistics-and-pruning.md](statistics-and-pruning.md)).
+([statistics-and-pruning.md](statistics-and-pruning.md)). `ExplainAsync()`, without the analysis, reads
+nothing: from the footer alone, every block its statistics do not rule out counts as live.
 
 The cheapest questions need no scan at all. `CountAsync` and `AnyAsync` answer from the structures
 whenever they are enough, and `file.MayMatch<Reading>(r => r.Day >= 5000)` compares the predicate

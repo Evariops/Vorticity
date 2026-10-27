@@ -3510,7 +3510,7 @@ internal abstract class AggregationHost
     /// The plan of the pass the aggregation would run, before the statistics settle any of it, with the window it applies and
     /// the question it answers, <paramref name="operators"/> on its groups.
     /// </summary>
-    internal async ValueTask<ScanPlan> ExplainAsync(AggregationPlan plan, CancellationToken cancellationToken, VortexExpr? rows = null, GroupOperator[]? operators = null)
+    internal async ValueTask<ScanPlan> ExplainAsync(AggregationPlan plan, bool analyze, CancellationToken cancellationToken, VortexExpr? rows = null, GroupOperator[]? operators = null)
     {
         AggregateSlot?[] settled = new AggregateSlot?[plan.Aggregates.Length];
         (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, settled);
@@ -3523,7 +3523,7 @@ internal abstract class AggregationHost
             pass = pass with { Answering = new StatesAsked(states, Family: kept.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, Source) : null) };
         }
 
-        ScanPlan explained = await Source.PlanAsync(pass, cancellationToken).ConfigureAwait(false);
+        ScanPlan explained = await Source.PlanAsync(pass, analyze, cancellationToken).ConfigureAwait(false);
         return window is null ? explained : explained with { Window = window };
     }
 

@@ -235,9 +235,9 @@ internal sealed class AggregationQuery : ResultQuery
 
     internal override GroupMetrics? Grouping => Plan.Grouped ? Plan.Metrics() : null;
 
-    internal override async ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken)
     {
-        ScanPlan scan = await Host.ExplainAsync(Plan, cancellationToken, RowFilter, Operators).ConfigureAwait(false);
+        ScanPlan scan = await Host.ExplainAsync(Plan, analyze, cancellationToken, RowFilter, Operators).ConfigureAwait(false);
         return Plan.Grouped ? scan with { Grouping = GroupPlans.Of(this) } : scan;
     }
 

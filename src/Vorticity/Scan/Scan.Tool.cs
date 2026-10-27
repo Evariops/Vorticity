@@ -201,10 +201,16 @@ public sealed partial class Scan
         }
     }
 
-    /// <summary>What the scan will do, without reading a data segment.</summary>
+    /// <summary>What the scan will do, worked out from what the source holds in memory, reading nothing (spec B, 7).</summary>
+    /// <param name="cancellationToken">Cancels the explanation.</param>
+    /// <returns>The plan.</returns>
+    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _source.PlanAsync(Spec(), analyze: false, cancellationToken);
+
+    /// <summary>What the scan will do; with <paramref name="analyze"/>, the structures its read would consult read, and no data segment.</summary>
+    /// <param name="analyze">Whether to read the structures the read would consult.</param>
     /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
     /// <returns>The plan.</returns>
-    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _source.PlanAsync(Spec(), cancellationToken);
+    public ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken = default) => _source.PlanAsync(Spec(), analyze, cancellationToken);
 
     /// <summary>The spec the sinks of rows run.</summary>
     private ScanSpec Spec() => Query(RowsShape.All).Spec();

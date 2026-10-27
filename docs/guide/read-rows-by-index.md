@@ -55,7 +55,7 @@ The take reads the segments of the two chunks that hold the rows, for the record
 and decodes the two blocks that hold them. It never touches the 121 blocks in between. That is the
 shape of the cost: a take is priced in blocks, not in rows, and for each block it reads the chunk
 that contains it, one segment per column. Two rows in one block cost one block, two rows far apart
-cost two, and blocks hold 8 192 rows here. `ExplainAsync()` gives the same figures before the read
+cost two, and blocks hold 8 192 rows here. `ExplainAsync(analyze: true)` gives the same figures before the read
 (2 rows, 2 of 2 blocks live, 6 segments, 180 352 bytes to read), and a record with fewer members
 reads fewer segments.
 

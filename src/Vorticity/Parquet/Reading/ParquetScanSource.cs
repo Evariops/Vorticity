@@ -455,11 +455,11 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource, IR
             && !(max.Kind == FilterLiteralKind.Float && max.FloatValue == 0);
     }
 
-    public override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
+    public override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken)
     {
-        // Every row group the plan reads, its page index, its Bloom filters and its dictionaries read
-        // as the scan reads them, and every chunk of the columns read of a group they leave a batch
-        // of: a block is a batch.
+        // Every row group the plan reads, and with analyze its page index, its Bloom filters and its dictionaries read as the
+        // scan reads them, and every chunk of the columns read of a group they leave a batch of: a block is a batch. Without
+        // analyze, the footer alone: its statistics prune row groups, nothing else is read.
         ParquetFooter footer = file.Footer;
         RowGroupPlan plan = RowGroupPlan.For(file, spec);
         FilterColumns? filter = FilterColumns.For(file, spec);
@@ -497,18 +497,18 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource, IR
             int blocks = (int)((entry.RowCount + batchRows - 1) / batchRows);
             rows += entry.RowCount;
             Array.Clear(locations);
-            BlockMask? mask = filter is null ? null
+            BlockMask? mask = filter is null || !analyze ? null
                 : await PagePruning.LiveAsync(filter, group, entry.RowCount, batchRows, requests, indexes, cancellationToken, locations).ConfigureAwait(false);
             int liveBlocks = mask?.LiveCount ?? blocks;
             pagePruned += blocks - liveBlocks;
-            if (liveBlocks > 0 && bloom
+            if (liveBlocks > 0 && bloom && analyze
                 && await BloomPruning.RulesOutAsync(filter!, group, requests, blooms, cancellationToken).ConfigureAwait(false))
             {
                 bloomPruned += liveBlocks;
                 liveBlocks = 0;
             }
 
-            if (liveBlocks > 0 && dictionaries is not null
+            if (liveBlocks > 0 && dictionaries is not null && analyze
                 && await dictionaries.RulesOutAsync(group, dictionaryReads, cancellationToken).ConfigureAwait(false))
             {
                 dictionaryPruned += liveBlocks;
@@ -537,7 +537,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource, IR
             bool sparse = ChunkReads.Sparse(file, first, end, entry.RowCount, mask);
             bool windowed = false;
             windows.Clear();
-            if (sparse || ChunkReads.MayWindow(file, group, leaves))
+            if (analyze && (sparse || ChunkReads.MayWindow(file, group, leaves)))
             {
                 await ChunkReads.OffsetsAsync(file, group, leaves, locations, requests, offsets, cancellationToken).ConfigureAwait(false);
                 windowed = ChunkReads.Windows(file, group, leaves, locations, mask, first, end, batchRows, entry.RowCount, windows, maps);

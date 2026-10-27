@@ -821,9 +821,9 @@ internal sealed class EstimateQuery : ResultQuery
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new EstimateBatches(this, cancellationToken);
 
     /// <summary>The question's plan, the question an estimate.</summary>
-    internal override async ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken)
     {
-        ScanPlan plan = await _question.ExplainAsync(cancellationToken).ConfigureAwait(false);
+        ScanPlan plan = await _question.ExplainAsync(analyze, cancellationToken).ConfigureAwait(false);
         return _question.Logical is { } query ? plan with { Logical = (query with { Estimated = true }).Text } : plan;
     }
 

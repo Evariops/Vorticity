@@ -183,8 +183,8 @@ internal sealed class ProjectionQuery : ResultQuery
 
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new ProjectedBatches(this, cancellationToken);
 
-    internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) =>
-        Host.Source.PlanAsync(SourceSpec(keepEncodings: true, out _), cancellationToken);
+    internal override ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken) =>
+        Host.Source.PlanAsync(SourceSpec(keepEncodings: true, out _), analyze, cancellationToken);
 
     internal override ResultQuery As(VortexSchema record, Type type)
     {

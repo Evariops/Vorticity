@@ -538,11 +538,21 @@ public sealed class Aggregation<TResult>
         where TRecord : IVortexRecord<TRecord> =>
         Aggregation.Scan<TRecord>(_query);
 
-    /// <summary>What the pass will read, from statistics, zone maps and indexes, without reading a data segment.</summary>
-    /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
+    /// <summary>What the pass will read, worked out from what the source holds in memory, reading nothing (spec B, 7).</summary>
+    /// <param name="cancellationToken">Cancels the explanation.</param>
     /// <returns>The plan.</returns>
     public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) =>
-        _query.ExplainAsync(cancellationToken);
+        _query.ExplainAsync(analyze: false, cancellationToken);
+
+    /// <summary>
+    /// What the pass will read; with <paramref name="analyze"/>, the structures its read would consult read as it reads them,
+    /// zone maps, indexes, sheets, an object's own plan, which give what it prunes exactly, and no data segment.
+    /// </summary>
+    /// <param name="analyze">Whether to read the structures the read would consult.</param>
+    /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
+    /// <returns>The plan.</returns>
+    public ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken = default) =>
+        _query.ExplainAsync(analyze, cancellationToken);
 
     /// <summary>Runs the aggregation, then enumerates the groups' results.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary, with the token <see cref="WithCancellation"/> gave.</param>
@@ -678,11 +688,21 @@ public sealed class Aggregation
         where TRecord : IVortexRecord<TRecord> =>
         Scan<TRecord>(_query);
 
-    /// <summary>What the pass will read, from statistics, zone maps and indexes, without reading a data segment.</summary>
-    /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
+    /// <summary>What the pass will read, worked out from what the source holds in memory, reading nothing (spec B, 7).</summary>
+    /// <param name="cancellationToken">Cancels the explanation.</param>
     /// <returns>The plan.</returns>
     public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) =>
-        _query.ExplainAsync(cancellationToken);
+        _query.ExplainAsync(analyze: false, cancellationToken);
+
+    /// <summary>
+    /// What the pass will read; with <paramref name="analyze"/>, the structures its read would consult read as it reads them,
+    /// zone maps, indexes, sheets, an object's own plan, which give what it prunes exactly, and no data segment.
+    /// </summary>
+    /// <param name="analyze">Whether to read the structures the read would consult.</param>
+    /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
+    /// <returns>The plan.</returns>
+    public ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken = default) =>
+        _query.ExplainAsync(analyze, cancellationToken);
 
     /// <summary>A scan of a query's result, typed by <typeparamref name="TRecord"/>.</summary>
     internal static Scan<TRecord> Scan<TRecord>(ResultQuery query)

@@ -142,7 +142,8 @@ activity vortex.write [Error]: vortex.rows=1, vortex.bytes=0, vortex.completed=F
 A write that is abandoned, or disposed without `CompleteAsync`, ends its activity with
 `vortex.completed=False` and the status `Error`, described as `abandoned`. Activities are children of
 whatever activity is current when the scan or the writer starts, so a request's trace shows the
-scans it ran. `ExplainAsync` reads statistics and zone maps without starting one.
+scans it ran. `ExplainAsync(analyze: true)` reads statistics and zone maps without starting one, and
+`ExplainAsync()` reads nothing.
 
 A dataset's commit, compaction and vacuum get one activity each, `vortex.dataset.commit` over all of
 a commit's attempts, `vortex.dataset.compaction`, whose passes and commit are its children, and

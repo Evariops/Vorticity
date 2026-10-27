@@ -17,7 +17,7 @@ namespace Vorticity;
 /// <typeparam name="TRecord">The record whose members are the scan's columns.</typeparam>
 /// <remarks>
 /// A builder is single-use and not thread-safe: every composition call returns it, and a second
-/// sink throws. <see cref="ExplainAsync"/> may be asked before the sink.
+/// sink throws. <see cref="ExplainAsync(CancellationToken)"/> may be asked before the sink.
 /// </remarks>
 public sealed partial class Scan<TRecord>
     where TRecord : IVortexRecord<TRecord>
@@ -274,11 +274,21 @@ public sealed partial class Scan<TRecord>
     public ValueTask<T?> MaxAsync<T>(Func<Probe<TRecord>, Sym<T>> column, CancellationToken cancellationToken = default) =>
         ExtremeAsync(column, min: false, cancellationToken);
 
-    /// <summary>What the scan will do, from statistics, zone maps and indexes, without reading a data segment.</summary>
-    /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
+    /// <summary>What the scan will do, worked out from what the source holds in memory, reading nothing (spec B, 7).</summary>
+    /// <param name="cancellationToken">Cancels the explanation.</param>
     /// <returns>The plan.</returns>
     public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) =>
-        _source.PlanAsync(Spec(), cancellationToken);
+        _source.PlanAsync(Spec(), analyze: false, cancellationToken);
+
+    /// <summary>
+    /// What the scan will do; with <paramref name="analyze"/>, the structures its read would consult read as it reads them,
+    /// statistics, zone maps, indexes, which give what it prunes exactly, and no data segment.
+    /// </summary>
+    /// <param name="analyze">Whether to read the structures the read would consult.</param>
+    /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
+    /// <returns>The plan.</returns>
+    public ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken = default) =>
+        _source.PlanAsync(Spec(), analyze, cancellationToken);
 
     /// <summary>The spec the sinks of rows run: the rows of the question, in its order.</summary>
     internal ScanSpec Spec() => Query(_orderPath is null ? RowsShape.All : new RowsShape(_orderPath, _descending)).Spec();

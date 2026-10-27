@@ -148,10 +148,13 @@ internal abstract class ScanSource
     /// <summary>What reading it costs; null for a source that cannot say, priced as a remote store.</summary>
     internal virtual ICostCapability? Cost => null;
 
-    /// <summary>The plan of <paramref name="spec"/> (<see cref="IRowsCapability.ExplainAsync"/>), with the question it serves in words.</summary>
-    internal async ValueTask<ScanPlan> PlanAsync(ScanSpec spec, CancellationToken cancellationToken)
+    /// <summary>
+    /// The plan of <paramref name="spec"/> (<see cref="IRowsCapability.ExplainAsync"/>), reading the structures it would
+    /// consult with <paramref name="analyze"/>, with the question it serves in words.
+    /// </summary>
+    internal async ValueTask<ScanPlan> PlanAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken)
     {
-        ScanPlan plan = await Rows.ExplainAsync(spec, cancellationToken).ConfigureAwait(false);
+        ScanPlan plan = await Rows.ExplainAsync(spec, analyze, cancellationToken).ConfigureAwait(false);
         return spec.Query is { } query ? plan with { Logical = query.Text } : plan;
     }
 }
@@ -271,9 +274,9 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
     /// </summary>
     private async ValueTask<ScanPlan> WholeAsync(ScanSpec spec, CancellationToken cancellationToken) =>
         ScanPlan.From(await Builder(spec with { Filter = null, OrderPath = null }, new ScanCounters())
-            .ExplainAsync(cancellationToken).ConfigureAwait(false));
+            .ExplainAsync(analyze: false, cancellationToken).ConfigureAwait(false));
 
-    public async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
+    public async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken)
     {
         if (Refuted(spec) && !spec.MatchesNothing)
         {
@@ -291,7 +294,7 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
             };
         }
 
-        ScanExplanation plan = await Builder(spec, new ScanCounters()).ExplainAsync(cancellationToken).ConfigureAwait(false);
+        ScanExplanation plan = await Builder(spec, new ScanCounters()).ExplainAsync(analyze, cancellationToken).ConfigureAwait(false);
         ScanPlan result = ScanPlan.From(plan);
 
         // A filter known to match nothing runs no scan at all: it reads nothing and counts zero.

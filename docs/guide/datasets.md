@@ -157,7 +157,7 @@ version, and `dataset.Scan(columns)` is the tool scan. Everything in the guide's
 
 ```csharp
 Scan<Reading> recent = dataset.Scan<Reading>().Where(r => r.Day >= 100);
-ScanPlan plan = await dataset.Scan<Reading>().Where(r => r.Day >= 100).ExplainAsync();
+ScanPlan plan = await dataset.Scan<Reading>().Where(r => r.Day >= 100).ExplainAsync(analyze: true);
 ```
 
 ```

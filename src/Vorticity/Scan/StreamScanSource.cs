@@ -67,8 +67,8 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
 
     public IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) => new Batches(this, spec, metrics);
 
-    /// <summary>What a read of <paramref name="spec"/> will do: the stream's own plan.</summary>
-    public abstract ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken);
+    /// <summary>What a read of <paramref name="spec"/> will do: the stream's own plan, reading the structures it would consult with <paramref name="analyze"/>.</summary>
+    public abstract ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken);
 
     /// <summary>A form of the question, answered by the count, the proof of a row, or the extreme the source works out.</summary>
     public async ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken) => form switch

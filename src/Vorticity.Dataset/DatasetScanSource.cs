@@ -293,9 +293,9 @@ internal sealed class DatasetScanSource
             : await builder.MaxAsync(column.Path, cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
+    public async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken)
     {
-        ScanPlan plan = await Builder(spec, null).PlanAsync(cancellationToken).ConfigureAwait(false);
+        ScanPlan plan = await Builder(spec, null).PlanAsync(analyze, cancellationToken).ConfigureAwait(false);
         return spec.MatchesNothing ? plan with { MayMatch = false } : plan;
     }
 

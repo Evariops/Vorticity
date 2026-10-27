@@ -705,8 +705,11 @@ internal sealed class ScanBuilder
 
     /// <summary>
     /// The plan of this scan without executing it: splits and blocks, what each structure prunes,
-    /// the segments and bytes the live splits would read, against the file.
+    /// the segments and bytes the live splits would read, against the file; without
+    /// <paramref name="analyze"/>, from the layout and the file statistics alone, every block they
+    /// do not rule out taken as live, no structure read (spec B, 7).
     /// </summary>
+    /// <param name="analyze">Whether to read the structures the scan would consult: zone maps, indexes, a sorted column.</param>
     /// <param name="cancellationToken">Cancels the one read this makes.</param>
     /// <returns>The plan.</returns>
     /// <remarks>
@@ -720,7 +723,7 @@ internal sealed class ScanBuilder
     /// and what it did.
     /// </remarks>
     public async System.Threading.Tasks.ValueTask<ScanExplanation> ExplainAsync(
-        System.Threading.CancellationToken cancellationToken = default)
+        bool analyze, System.Threading.CancellationToken cancellationToken = default)
     {
         LayoutTree tree = _file.LayoutTree;
         ScanProjection keep = _fields is null ? ScanProjection.All : ScanProjection.Create(_fields.Build());
@@ -731,7 +734,7 @@ internal sealed class ScanBuilder
         // Each structure is credited with the blocks it pruned among those the scan's rows reach, so
         // that the blocks, the live ones and what each structure pruned add up.
         List<PruningStep> steps = [];
-        Compute.ZonePruningPlan.PruningPlan pruning = _filter is not null && _prune
+        Compute.ZonePruningPlan.PruningPlan pruning = analyze && _filter is not null && _prune
             ? await Compute.ZonePruningPlan
                 .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes, Scope(tree, rows, natural))
                 .ConfigureAwait(false)
@@ -744,8 +747,9 @@ internal sealed class ScanBuilder
         // What the scan's first step does after the pruning: ask the filter's exact source, when
         // it has one, for the rows it proves, unless the zone maps already show they cannot fit a
         // batch. When they fit, the scan reads the splits holding them and nothing else.
-        (RowSelection? proven, string? structure, ScanCounters? probe) =
-            await ProbeAsync(rows, natural, plan, pruning, cancellationToken).ConfigureAwait(false);
+        (RowSelection? proven, string? structure, ScanCounters? probe) = analyze
+            ? await ProbeAsync(rows, natural, plan, pruning, cancellationToken).ConfigureAwait(false)
+            : (null, null, null);
 
         // Counted over the splits the scan's rows touch, as the scan counts what it decodes and
         // prunes: a range or a take covers the blocks it reaches, not the file's, and a block is
@@ -769,7 +773,7 @@ internal sealed class ScanBuilder
         {
             walk = Union(read, [Expr.Field(_orderPath)]).RootMask;
             keyZones = pruning.Zones?.Column(_orderPath);
-            if (keyZones is null)
+            if (keyZones is null && analyze)
             {
                 orderCost = new ScanCounters();
                 keyZones = (await Compute.ZonePruningPlan
@@ -846,7 +850,7 @@ internal sealed class ScanBuilder
 
             // The whole file-level answer: the statistics, then the file filters when indexes are on.
             bool fileMayMatch = _filter is null
-                || (_indexes
+                || (_indexes && analyze
                     ? await _file.MayMatchAsync(_filter, cancellationToken).ConfigureAwait(false)
                     : Compute.FileStatisticsPruner.MayMatch(_file, _filter));
             // The exact cover, the first tier a count takes: a scan whose cover holds a batch or
@@ -854,11 +858,16 @@ internal sealed class ScanBuilder
             CountExplanation? count = null;
             if (_filter is not null)
             {
-                (bool exact, long covered) = await ExactAsync(pruning.Zones, cancellationToken).ConfigureAwait(false);
+                (bool exact, long covered) = analyze ? await ExactAsync(pruning.Zones, cancellationToken).ConfigureAwait(false) : (false, 0L);
                 count = new CountExplanation(exact, covered, splitsPruned, splitsProven, zoneLiveSplits - splitsProven);
             }
 
-            OrderExplanation? order = _orderPath is null ? null : await OrderAsync(keyZones, cancellationToken).ConfigureAwait(false);
+            OrderExplanation? order = _orderPath is null ? null
+                : analyze ? await OrderAsync(keyZones, cancellationToken).ConfigureAwait(false)
+                : new OrderExplanation(
+                    _orderComposite is null ? _orderPath : "(" + string.Join(", ", _orderComposite) + ")",
+                    _orderComposite is null && Keys.KeyCursorBuilder.StatedSorted(_file, _orderPath) ? KeySourceKind.SortedColumn : KeySourceKind.None,
+                    0, 0, null, 0, _descending);
             return new ScanExplanation(
                 _take?.Count ?? rows.Length, blockRows, checked((int)blocks), checked((int)liveBlocks), steps, splits, liveSplits,
                 proven?.Count ?? 0, toRead, bytes, _file.FileLength, fileMayMatch)

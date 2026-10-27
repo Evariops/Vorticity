@@ -87,15 +87,17 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// What the scan will do as the core's plan, summed over the objects it would open: each one's
-    /// own plan, worked out from its statistics, zone maps and indexes, and before them the rows the
-    /// summaries refute as one step. No data segment is read, but every kept object is opened.
+    /// What the scan will do (spec B, 7): each unit as its weight chooses it (<see cref="UnitsAsync"/>), explained, and the
+    /// rows the summaries refute as one step. Without <paramref name="analyze"/>, from the version's entries alone: an object
+    /// read as rows weighs what its table of contents says, its blocks all live, nothing read. With it, the units whose choice
+    /// reads rows pass through their sheets, and each object read as rows is opened for its own plan, worked out from its
+    /// statistics, zone maps and indexes: no data segment is read.
     /// </summary>
     /// <remarks>
     /// An object the summaries refute is never opened, so its blocks are counted at the block size
     /// of the objects that were, or at the dataset's own when none was.
     /// </remarks>
-    public async ValueTask<ScanPlan> PlanAsync(CancellationToken cancellationToken = default)
+    public async ValueTask<ScanPlan> PlanAsync(bool analyze = true, CancellationToken cancellationToken = default)
     {
         long keptRows = 0;
         long blockRows = 0;
@@ -116,7 +118,7 @@ internal sealed partial class DatasetScanBuilder
         long entries = 0;
         KeyRange? range = CountRange();
         CountsAnswer? answer = Answer() is { } asked && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false) ? asked : null;
-        (_, List<Planned> units) = await UnitsAsync(answer, explain: true, read: true, cancellationToken).ConfigureAwait(false);
+        (_, List<Planned> units) = await UnitsAsync(answer, explain: true, read: analyze, cancellationToken).ConfigureAwait(false);
         List<UnitStep> explained = new List<UnitStep>(units.Count);
         PathCosts.Cost total = default;
         foreach (Planned unit in units)
@@ -139,6 +141,23 @@ internal sealed partial class DatasetScanBuilder
 
             PositionedObject held = unit.Held;
             long covered = Covered(held);
+            if (!analyze)
+            {
+                // From the entry alone: its rows' blocks, every one live, and what its table of contents says they cost.
+                long perObject = Math.Max(_dataset.Options.Write.BlockRows, 1);
+                long touched = (covered + perObject - 1) / perObject;
+                keptRows += covered;
+                blocks += touched;
+                live += touched;
+                segments += unit.Cost.Requests;
+                bytes += unit.Cost.Bytes;
+                mayMatch |= covered > 0;
+                exact &= _filter is null;
+                exactRows += _filter is null ? covered : 0;
+                decoded += _filter is null ? 0 : touched;
+                continue;
+            }
+
             ScanExplanation plan;
             bool evaluated = false;
             ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
@@ -158,7 +177,7 @@ internal sealed partial class DatasetScanBuilder
                 ScanBuilder scan = _orderPaths is { } paths && part.Mapped is null
                     ? OrderedOf(lease.File, paths, withKey: false)
                     : ScanOf(lease.File, held, part);
-                plan = await scan.ExplainAsync(cancellationToken).ConfigureAwait(false);
+                plan = await scan.ExplainAsync(analyze: true, cancellationToken).ConfigureAwait(false);
             }
 
             keptRows += covered;

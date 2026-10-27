@@ -129,7 +129,7 @@ Scan<Reading> ordered = file.Scan<Reading>().OrderByDescending(r => r.Day);
 ```
 
 The batches then arrive in key order instead of file order, from the same sources a cursor uses.
-`ExplainAsync().Order` says which one:
+`ExplainAsync(analyze: true).Order` says which one:
 
 ```
 ordered scan: source SortedColumn, 1 run, 1000000 entries, descending True

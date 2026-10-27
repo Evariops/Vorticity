@@ -32,8 +32,12 @@ internal interface IRowsCapability
     /// </summary>
     ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken);
 
-    /// <summary>What a read of <paramref name="spec"/> will do, worked out before a data segment is read.</summary>
-    ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken);
+    /// <summary>
+    /// What a read of <paramref name="spec"/> will do (spec B, 7): from what the source holds in memory alone, reading
+    /// nothing; with <paramref name="analyze"/>, the structures the read would consult read as it reads them, and no data
+    /// segment.
+    /// </summary>
+    ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken);
 
     /// <summary>
     /// Whether a scan that asks for the order of <paramref name="column"/> (<see cref="ScanSpec.OrderPath"/>) brings its rows
