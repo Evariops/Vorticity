@@ -59,6 +59,11 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// instants, some 8 KB, and the summaries and walks a plan weighs each object by. The allocations of the paths that
     /// pass keep their ceilings.
     /// </para>
+    /// <para>
+    /// The rows of one id take 3 % above what they measured: 79,624 to 80,256 bytes in a process of their own, three runs,
+    /// and 79,624 to 81,568 beside the other classes of `tests/runs-alone.sh`, seven runs on 2026-10-27, two of them past
+    /// the 2 % the others keep.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
@@ -71,7 +76,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
         ["every row but one id"] = new(4, 174800, 0, 0, 52176),
         ["measures by region and hour"] = new(4, 174800, 0, 0, 51694),
         ["count by route, a shredded path"] = new(4, 174800, 0, 0, 55888),
-        ["the rows of one id"] = new(4, 174800, 0, 0, 81328),
+        ["the rows of one id"] = new(4, 174800, 0, 0, 82125),
     };
 
     private readonly Fixture _fixture;
