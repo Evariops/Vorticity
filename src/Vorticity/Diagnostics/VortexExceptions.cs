@@ -167,7 +167,4 @@ internal static class VortexComponentKind
     public const ComponentKind DType = ComponentKind.DType;
     public const ComponentKind Aggregate = ComponentKind.Aggregate;
     public const ComponentKind Compression = ComponentKind.Compression;
-    public const ComponentKind Encryption = ComponentKind.Encryption;
-    public const ComponentKind Index = ComponentKind.Index;
-    public const ComponentKind Feature = ComponentKind.Feature;
 }

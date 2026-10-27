@@ -161,24 +161,6 @@ internal sealed class ScanContext : IDisposable
         Decode = new ArrayDecodeContext(this);
     }
 
-    /// <summary>The encodings <paramref name="ids"/> name, resolved once, for the detached contexts that read several files written alike.</summary>
-    /// <exception cref="ArgumentNullException">An entry of <paramref name="ids"/> is null.</exception>
-    internal static ArrayEncodingId[] Resolve(IReadOnlyList<string> ids)
-    {
-        ArrayEncodingId[] resolved = ids.Count == 0 ? [] : new ArrayEncodingId[ids.Count];
-        Span<byte> scratch = stackalloc byte[64];
-        for (int i = 0; i < resolved.Length; i++)
-        {
-            string id = ids[i] ?? throw new ArgumentNullException(nameof(ids));
-            int byteCount = Encoding.UTF8.GetByteCount(id);
-            Span<byte> utf8 = byteCount <= scratch.Length ? scratch : new byte[byteCount];
-            int written = Encoding.UTF8.GetBytes(id, utf8);
-            resolved[i] = EncodingRegistry.ResolveArray(utf8[..written]);
-        }
-
-        return resolved;
-    }
-
     /// <summary><see langword="true"/> when this context was built over a <see cref="VortexFile"/>.</summary>
     public bool HasFile => _file is not null;
 
@@ -1647,23 +1629,6 @@ internal sealed class ScanContext : IDisposable
             _typesShape = types.Shape;
             _types = null;
         }
-    }
-
-    /// <summary>
-    /// As <see cref="RebindDetached(VortexReadOptions)"/>, over the encoding table <paramref name="encodings"/>, resolved
-    /// from <paramref name="ids"/>: a detached context that reads one file's regions after another's, files whose tables
-    /// may differ. The table is copied, and the ids are kept for the messages that name one.
-    /// </summary>
-    internal void RebindDetached(VortexReadOptions options, ReadOnlySpan<ArrayEncodingId> encodings, string[] ids)
-    {
-        RebindDetached(options);
-        if (_arrayEncodings.Length != encodings.Length)
-        {
-            _arrayEncodings = encodings.Length == 0 ? [] : new ArrayEncodingId[encodings.Length];
-        }
-
-        encodings.CopyTo(_arrayEncodings);
-        _arrayEncodingIds = ids;
     }
 
     /// <summary>

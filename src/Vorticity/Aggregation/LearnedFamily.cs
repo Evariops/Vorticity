@@ -365,8 +365,6 @@ internal sealed class LearnedFamily
 
         internal override ScanCounters Counters => _counters;
 
-        internal override ScanMetrics Metrics => ScanMetrics.From(_counters);
-
         internal override ScanSpec Spec() => spec;
 
         internal override void Begin()

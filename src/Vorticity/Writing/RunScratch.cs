@@ -132,11 +132,6 @@ internal sealed class RunScratch : IDisposable
         return offset;
     }
 
-    /// <summary>Appends values that <see cref="Fits"/> accepts, in the platform's byte order, and returns where they start.</summary>
-    internal long Append<T>(ReadOnlySpan<T> values)
-        where T : unmanaged =>
-        Append(MemoryMarshal.AsBytes(values));
-
     /// <summary>
     /// Appends the bytes and returns where they start: in memory while they fit, completing at
     /// once, and in the file past that, the store moving there first.
@@ -215,11 +210,6 @@ internal sealed class RunScratch : IDisposable
             offset += take;
         }
     }
-
-    /// <summary>Reads values of the store while it is in memory.</summary>
-    internal void Read<T>(long offset, Span<T> destination)
-        where T : unmanaged =>
-        Read(offset, MemoryMarshal.AsBytes(destination));
 
     /// <summary>Reads bytes of the store: from memory, completing at once, or from its file.</summary>
     internal ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken)

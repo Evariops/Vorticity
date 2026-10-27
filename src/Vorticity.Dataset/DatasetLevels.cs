@@ -92,9 +92,6 @@ internal sealed class DatasetLevels
         }
     }
 
-    /// <summary>Whether every level is empty.</summary>
-    public bool IsEmpty => Entries == 0;
-
     /// <summary>The levels a header names.</summary>
     /// <exception cref="ArgumentNullException"><paramref name="header"/> is null.</exception>
     public static DatasetLevels Of(CommitHeader header)

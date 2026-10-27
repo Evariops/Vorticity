@@ -55,9 +55,6 @@ internal sealed class ColumnLocate : IValueGranules
     /// <summary>The values, in the order of their bytes.</summary>
     internal IReadOnlyList<byte[]> Values => _values;
 
-    /// <summary>The bytes the index takes, which the memo of synopses counts.</summary>
-    internal int Bytes => _bytes.Length;
-
     /// <summary>The place of <paramref name="value"/> among <see cref="Values"/>; -1 when the column holds no such value.</summary>
     internal int Find(ReadOnlySpan<byte> value)
     {

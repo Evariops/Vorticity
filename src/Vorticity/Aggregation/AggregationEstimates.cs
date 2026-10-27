@@ -747,8 +747,6 @@ internal sealed class RangeHost(AggregationHost question, RowRange rows, ScanCou
 
     internal override ScanCounters Counters => counters;
 
-    internal override ScanMetrics Metrics => ScanMetrics.From(counters);
-
     internal override ScanSpec Spec()
     {
         ScanSpec spec = question.Spec();

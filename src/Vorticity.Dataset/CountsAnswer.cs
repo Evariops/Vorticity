@@ -804,7 +804,7 @@ internal sealed class StateRows : StateTable
     }
 
     /// <summary>The rows of states: an entry each.</summary>
-    internal override int Count => _count;
+    internal int Count => _count;
 
     /// <inheritdoc/>
     protected override void FillWords(Span<long> into, int start, int word)

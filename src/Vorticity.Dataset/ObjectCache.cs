@@ -43,9 +43,6 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// <summary>The entries the handle's walks parsed, shared by every version that holds their pages.</summary>
     internal EntryMemo Entries { get; } = new EntryMemo();
 
-    /// <summary>How many objects are open, leased or idle.</summary>
-    internal int Count => _open.Count;
-
     /// <summary>How many open objects a lease holds: none once every read has given its objects back.</summary>
     internal int Leased => _open.Count - _idle.Count;
 

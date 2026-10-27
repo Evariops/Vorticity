@@ -24,8 +24,6 @@ namespace Vorticity.Parquet.Reading;
 /// </remarks>
 internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource, IRowsCapability, IStatisticsCapability, ITasksCapability
 {
-    internal ParquetFile File => file;
-
     internal override VortexSchema Schema => file.Schema;
 
     internal override VortexSession Session => file.Session;

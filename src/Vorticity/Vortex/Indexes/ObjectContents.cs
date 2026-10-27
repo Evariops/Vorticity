@@ -430,27 +430,6 @@ internal sealed class ObjectContents(
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
     internal DType SchemaIn(DTypeArena types) => DTypeFlatBuffers.Read(Schema, types);
 
-    /// <summary>
-    /// The file's encoding table, resolved the first time a read of its regions asks for it: the table a context
-    /// that decodes them is rebound to, and the ids its messages name.
-    /// </summary>
-    internal (Arrays.ArrayEncodingId[] Resolved, string[] Ids) EncodingTable
-    {
-        get
-        {
-            if (System.Threading.Volatile.Read(ref _encodingTableBox) is { } known)
-            {
-                return known.Value;
-            }
-
-            string[] ids = [.. Encodings];
-            System.Runtime.CompilerServices.StrongBox<(Arrays.ArrayEncodingId[], string[])> resolved = new((Arrays.ScanContext.Resolve(ids), ids));
-            return (System.Threading.Interlocked.CompareExchange(ref _encodingTableBox, resolved, null) ?? resolved).Value;
-        }
-    }
-
-    private System.Runtime.CompilerServices.StrongBox<(Arrays.ArrayEncodingId[], string[])>? _encodingTableBox;
-
     /// <summary>The regions the contents declare with a checksum, by offset and length; null until asked.</summary>
     private IReadOnlyDictionary<(ulong Offset, uint Length), IndexSegment>? _declared;
 

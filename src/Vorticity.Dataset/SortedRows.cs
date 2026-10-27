@@ -39,9 +39,6 @@ internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
     private long _pureRows;
     private int _granuleRows;
 
-    /// <summary>The rows taken since the object started.</summary>
-    internal long Rows => _rows;
-
     /// <summary>The keys of the first and the last rows taken, whole; null before one.</summary>
     internal (byte[] First, byte[] Last)? Bounds => _firstKey is null || _lastKeyLength < 0 ? null : (_firstKey, _lastKey[.._lastKeyLength]);
 

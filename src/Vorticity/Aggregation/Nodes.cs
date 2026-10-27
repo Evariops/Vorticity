@@ -277,8 +277,6 @@ internal sealed class ChosenColumnNode<T> : ResultNode<T>, IChosenColumn
 /// <summary>A component of a group's key, delivered as a result.</summary>
 internal interface IKeyNode
 {
-    /// <summary>The component's position in the key.</summary>
-    int Component { get; }
 }
 
 internal sealed class KeyNode<T> : ResultNode<T>, IKeyNode

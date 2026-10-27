@@ -80,9 +80,6 @@ internal sealed class ExternalSort : IAsyncDisposable
         _batchRows = batchRows;
     }
 
-    /// <summary>The runs the sort wrote to its scratch.</summary>
-    internal int Runs => _runs.Count;
-
     /// <summary>
     /// The rows of <paramref name="batch"/>, a struct of the sort's columns, gathered; the rows gathered
     /// before written as a run first when the memory holds them no more.

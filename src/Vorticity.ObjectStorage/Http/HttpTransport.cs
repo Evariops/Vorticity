@@ -75,9 +75,6 @@ internal sealed class HttpTransport : IDisposable
         _rate = RequestBudget.ForStore(_requests.RequestsPerSecond, options.TimeProvider);
     }
 
-    /// <summary>The store's options.</summary>
-    internal StoreTransportOptions Options => _options;
-
     /// <summary>The budget's tokens left, for tests.</summary>
     internal int BudgetLeft => _budget.Tokens;
 

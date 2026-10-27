@@ -509,31 +509,6 @@ internal sealed class SpanReader : IDisposable
     }
 
     /// <summary>
-    /// The rows strictly inside <paramref name="first"/> to <paramref name="end"/> at which a chunk of one of
-    /// <paramref name="fields"/> starts, in order and once each: where the span may be cut so that each part reads chunks
-    /// of its own but those the cut falls in, as an open file's splits are cut. The directories of the columns not read
-    /// before are read first, the pages that span reaches of a paged one.
-    /// </summary>
-    internal async ValueTask<long[]> ChunkStartsAsync(int[] fields, long first, long end, CancellationToken cancellationToken)
-    {
-        RowRange span = new RowRange(first, end);
-        await LoadAsync(fields, [span], cancellationToken).ConfigureAwait(false);
-        SortedSet<long> starts = [];
-        foreach (int field in fields)
-        {
-            foreach (ChunkSpan chunk in Overlapping(field, first, end - first))
-            {
-                if (chunk.FirstRow > first && chunk.FirstRow < end)
-                {
-                    starts.Add(chunk.FirstRow);
-                }
-            }
-        }
-
-        return [.. starts];
-    }
-
-    /// <summary>
     /// Whether a chunk of one of <paramref name="fields"/> starts strictly inside one of <paramref name="spans"/>: whether a
     /// read of those columns at some rows of the spans alone may read fewer chunks than one over the spans whole. The
     /// directories of the columns not read before are read first, the pages the spans reach of a paged one.

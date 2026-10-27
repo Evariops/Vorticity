@@ -72,18 +72,6 @@ internal sealed class ProllyBoundaryRule : IBoundaryRule
         _hazard = ((double)(maxBytes - minBytes) / (targetBytes - minBytes)) - 1.0;
     }
 
-    /// <summary>The seed every boundary of this tree is decided under.</summary>
-    public ulong Seed => _seed;
-
-    /// <summary>The floor.</summary>
-    public int MinBytes => _min;
-
-    /// <summary>The mean page size the hazard is solved for.</summary>
-    public int TargetBytes => _target;
-
-    /// <summary>The cap.</summary>
-    public int MaxBytes => _max;
-
     /// <inheritdoc/>
     public void Reset() => _bytes = 0;
 

@@ -906,8 +906,6 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         DropTable();
     }
 
-    internal override int[] Order(bool sorted) => Identity(Count);
-
     internal override Func<int, T> Reader<T>(int component)
     {
         Func<int, T> part = _parts[component].Reader<T>(0);

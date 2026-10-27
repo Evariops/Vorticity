@@ -54,9 +54,6 @@ internal sealed class RollupBuilder
         _maxBuckets = maxBuckets;
     }
 
-    /// <summary>The children added.</summary>
-    internal int Children => _children;
-
     /// <summary>
     /// Adds the object <paramref name="held"/>, the next of the run, with <paramref name="counts"/> the counts of each column
     /// it keeps and their sketches.

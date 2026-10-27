@@ -637,7 +637,7 @@ internal static class ArrayBlobWriter
     /// <remarks>
     /// <para>
     /// In the element's own type throughout, which is the whole point. The transforms are the same
-    /// numbers there: <see cref="BitPackPlan.Encode"/> computes in 64 bits and masks to the element
+    /// numbers there: a plan's transform computed in 64 bits and masked to the element
     /// width, and an element's own subtraction wraps at that width, its zigzag's shifts drop the
     /// same bits. So there is no block of 64-bit words to widen into, compare in and narrow back
     /// out of one value at a time: a u8 column's transform is 64 values a 512-bit vector, not one a
@@ -2907,11 +2907,6 @@ internal static class ArrayBlobWriter
         private readonly byte[]? _bytes;
         private readonly VortexBuffer _view;
         private readonly bool _zeros;
-
-        internal PendingBuffer(byte[] bytes, int alignmentExponent)
-            : this(bytes, bytes.Length, alignmentExponent, rented: false)
-        {
-        }
 
         internal PendingBuffer(byte[] bytes, int length, int alignmentExponent, bool rented)
             : this(bytes, offset: 0, length, alignmentExponent, rented)

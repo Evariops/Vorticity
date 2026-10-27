@@ -309,12 +309,6 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>The current batch, valid until the next <see cref="MoveNextAsync"/>.</summary>
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
 
-    /// <summary>The result's columns.</summary>
-    internal VortexSchema Schema => _query.Schema;
-
-    /// <summary>The query's run: the merged states and keys, once the first batch has been asked for.</summary>
-    internal AggregationOutcome? Outcome => _outcome;
-
     /// <summary>Moves to the next batch: the first runs the query, the others are built from its groups without an await.</summary>
     /// <returns>Whether there is one.</returns>
     public ValueTask<bool> MoveNextAsync()

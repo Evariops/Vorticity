@@ -167,9 +167,6 @@ internal sealed class LayoutTree
     /// <exception cref="InvalidOperationException">The tree was parsed detached from a file.</exception>
     public VortexFile File => _source as VortexFile ?? DetachedFile();
 
-    /// <summary><see langword="true"/> when this tree is backed by an open file.</summary>
-    public bool HasFile => _source is VortexFile;
-
     /// <summary>How many nodes the flattened tree holds; the columns not yet parsed are parsed to count them.</summary>
     public int NodeCount
     {
@@ -1011,9 +1008,6 @@ internal readonly struct LayoutNode
 
     /// <summary>The resolved layout encoding, or <see cref="LayoutEncodingId.Unknown"/>.</summary>
     public LayoutEncodingId Encoding => _tree.RecordRef(_index).Encoding;
-
-    /// <summary>The raw <c>u16</c> index into the footer's <c>layout_specs</c>.</summary>
-    public ushort EncodingSpecIndex => _tree.RecordRef(_index).EncodingSpecIndex;
 
     /// <summary>The id text, for <see cref="VortexUnsupportedException"/>. Allocates.</summary>
     public string EncodingIdText => _tree.EncodingIdText(_tree.RecordRef(_index).EncodingSpecIndex);

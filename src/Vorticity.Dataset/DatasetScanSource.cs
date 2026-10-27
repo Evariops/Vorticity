@@ -61,9 +61,6 @@ internal sealed partial class DatasetScanSource
     /// <summary>It learns the partials of an aggregation's family from the objects it reads as rows (<see cref="StatesAsked.Family"/>).</summary>
     public bool LearnsPartials => true;
 
-    /// <summary>The version every sink of the scan reads.</summary>
-    internal ulong Version => _version.Version;
-
     public async ValueTask<bool> TakesStatesAsync(ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken) =>
         _version.MayKeepCounts && spec.Options.UseSynopses && !spec.MatchesNothing
         && await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false)
@@ -298,8 +295,6 @@ internal sealed partial class DatasetScanSource
         ScanPlan plan = await Builder(spec, null).PlanAsync(analyze, cancellationToken).ConfigureAwait(false);
         return spec.MatchesNothing ? plan with { MayMatch = false } : plan;
     }
-
-    public bool MayMatch(VortexExpr filter) => _version.MayMatch(filter);
 
     public async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         await DatasetKeyCursor.OpenAsync(_version, path, distinct, indexes, cancellationToken).ConfigureAwait(false);

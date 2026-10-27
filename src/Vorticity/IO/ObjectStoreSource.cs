@@ -65,9 +65,6 @@ internal sealed class ObjectStoreSource : ISegmentReader
         _ownsStore = ownsStore;
     }
 
-    /// <summary>The object's key.</summary>
-    internal string Key => _key;
-
     /// <summary>
     /// Whether <paramref name="obj"/> reads the same object: the same store, key and length, the length
     /// known to both. A session's cache keys segments by their source, so two readers of one object, as a
@@ -88,9 +85,6 @@ internal sealed class ObjectStoreSource : ISegmentReader
     // The length the caller gave, -1 for none: what equality reads, since the length learned later would
     // change the hash of a key already kept.
     private readonly long _givenLength;
-
-    /// <summary>The store the object lies in.</summary>
-    internal IObjectStore Store => _store;
 
     /// <summary>
     /// The object's token as of the first answer that gave it, or null before any. A caller holding a

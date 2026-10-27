@@ -146,9 +146,6 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The compaction settings its header carries, zero-valued when it states none.</summary>
     internal CompactionSettings Compaction => Snapshot.Header.Compaction;
 
-    /// <summary>What vacuum keeps, as the header carries it.</summary>
-    internal RetentionSettings Retention => Snapshot.Header.Retention;
-
     /// <summary>Whether the dataset lives on a store that locks what it keeps, as the header carries it.</summary>
     internal bool LockedStore => Snapshot.Header.LockedStore;
 
@@ -3844,23 +3841,6 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         return dictionaries;
-    }
-
-    /// <summary>
-    /// The rows strictly inside <paramref name="first"/> to <paramref name="end"/> of the object <paramref name="entry"/>
-    /// names at which a chunk of one of <paramref name="columns"/> starts, read from its chunk directories with no open of it
-    /// (<see cref="Indexes.SpanReader.ChunkStartsAsync"/>): where a span of its rows may be cut between lanes.
-    /// </summary>
-    internal async ValueTask<long[]> ChunkStartsAsync(
-        ObjectEntry entry, Indexes.ObjectContents contents, int[] columns, long first, long end, CancellationToken cancellationToken)
-    {
-        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
-        await using (source.ConfigureAwait(false))
-        {
-            using Indexes.SpanReader reader = Indexes.SpanReader.Open(Footerless(source, entry, contents), null, contents)
-                ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
-            return await reader.ChunkStartsAsync(columns, first, end, cancellationToken).ConfigureAwait(false);
-        }
     }
 
     /// <summary>

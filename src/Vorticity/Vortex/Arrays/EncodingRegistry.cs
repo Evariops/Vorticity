@@ -346,9 +346,4 @@ internal static class EncodingRegistry
     /// <param name="id">The candidate.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static bool IsDefined(ArrayEncodingId id) => (uint)id <= MaxArrayEncodingId;
-
-    /// <summary>Guards a value cast from a file-supplied index.</summary>
-    /// <param name="id">The candidate.</param>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static bool IsDefined(LayoutEncodingId id) => (uint)id <= MaxLayoutEncodingId;
 }

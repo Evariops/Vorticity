@@ -308,13 +308,6 @@ internal static class KeyRunOptions
     /// <summary>Parses an entry's options.</summary>
     /// <param name="bytes">The options.</param>
     /// <param name="segmentEntries">The segment size.</param>
-    /// <returns>Whether they are usable.</returns>
-    internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, out int segmentEntries) =>
-        TryParseEntry(bytes, out segmentEntries, out _, out _);
-
-    /// <summary>Parses an entry's options.</summary>
-    /// <param name="bytes">The options.</param>
-    /// <param name="segmentEntries">The segment size.</param>
     /// <param name="caseInsensitive">Whether trigrams were folded.</param>
     /// <returns>Whether they are usable.</returns>
     internal static bool TryParseEntry(ReadOnlySpan<byte> bytes, out int segmentEntries, out bool caseInsensitive) =>

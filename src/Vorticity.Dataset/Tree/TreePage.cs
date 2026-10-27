@@ -19,9 +19,6 @@ internal enum TreePageKind
 /// </summary>
 internal static class TreePage
 {
-    /// <summary>The kind byte and the entry count's largest varint.</summary>
-    internal const int HeaderBytes = 1 + 5;
-
     /// <summary>Writes a leaf page from its entries, in key order.</summary>
     public static byte[] WriteLeaf(IReadOnlyList<TreeEntry> entries)
     {

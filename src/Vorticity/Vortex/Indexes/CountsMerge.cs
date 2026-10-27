@@ -53,9 +53,6 @@ internal sealed class CountsMerge
     /// <param name="entryLimit">The entries the merge keeps at most, past which the values of fewest rows are left out.</param>
     internal CountsMerge(int entryLimit = ColumnCountsBuilder.EntryLimit) => _entryLimit = entryLimit;
 
-    /// <summary>The entries the merge holds.</summary>
-    internal int Entries => _entries.Count;
-
     /// <summary>Adds the entries of <paramref name="counts"/>, with <paramref name="sketches"/> their sketches when it keeps any.</summary>
     internal void Add(ColumnCounts counts, ColumnSketches? sketches)
     {

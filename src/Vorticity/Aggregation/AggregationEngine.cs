@@ -3414,8 +3414,6 @@ internal abstract class AggregationHost
 
     internal abstract ScanCounters Counters { get; }
 
-    internal abstract ScanMetrics Metrics { get; }
-
     internal abstract ScanSpec Spec();
 
     /// <summary>Claims the scan for its one sink.</summary>
@@ -4047,13 +4045,10 @@ internal static class AggregationEngine
     }
 
     /// <summary>
-    /// The groups' order as the merge gives it, or, under <see cref="AggregationPlan.ShuffledOrder"/>, a
-    /// copy shuffled by a draw the process's seed and the groups' count make: the same for two identical
-    /// queries of a process, and unlike the merge's.
+    /// The first <paramref name="count"/> groups of <paramref name="order"/>, as the merge gives them, or, under
+    /// <see cref="AggregationPlan.ShuffledOrder"/>, a copy of them alone shuffled by a draw the process's seed and the
+    /// groups' count make: the same for two identical queries of a process, and unlike the merge's.
     /// </summary>
-    internal static int[] Shuffled(int[] order) => Shuffled(order, order.Length);
-
-    /// <summary><see cref="Shuffled(int[])"/> of the first <paramref name="count"/> groups of an order a shelf lent, longer than they are: a copy of them alone.</summary>
     internal static int[] Shuffled(int[] order, int count)
     {
         if (!AggregationPlan.ShuffledOrder || count < 2)

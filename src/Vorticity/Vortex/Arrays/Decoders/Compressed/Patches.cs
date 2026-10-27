@@ -61,22 +61,10 @@ internal readonly ref struct Patches
     /// <summary>How many patches there are. Always at least one.</summary>
     public int Count => _count;
 
-    /// <summary>The length of the array being patched.</summary>
-    public int ArrayLength => _arrayLength;
-
-    /// <summary>The row offset the stored indices are relative to.</summary>
-    public int Offset => _offset;
-
-    /// <summary>The canonical node holding the patch values.</summary>
-    public int ValuesNodeIndex => _valuesNodeIndex;
-
-    /// <summary>Whether the descriptor declared a chunk-offsets child.</summary>
-    public bool HasChunkOffsets => _hasChunkOffsets;
-
     /// <summary>
     /// The position patch <paramref name="i"/> occupies in the parent array:
     /// <c>indices[i] - Offset</c>, validated at construction to lie in
-    /// <c>[0, <see cref="ArrayLength"/>)</c>.
+    /// <c>[0, the parent array's length)</c>.
     /// </summary>
     /// <param name="i">A patch, in <c>[0, <see cref="Count"/>)</c>.</param>
     /// <exception cref="VortexFormatException"><paramref name="i"/> is out of range.</exception>
@@ -95,7 +83,7 @@ internal readonly ref struct Patches
     /// </summary>
     /// <param name="values">The patch values, one per patch, at <paramref name="width"/> bytes.</param>
     /// <param name="width">Bytes per value.</param>
-    /// <param name="destination">The array being patched, <see cref="ArrayLength"/> rows.</param>
+    /// <param name="destination">The array being patched, every row of the parent array.</param>
     /// <remarks>
     /// The index type and the value width are properties of the node, so both are resolved once
     /// here rather than per patch: otherwise every patch pays `ReadUnsigned`'s switch and a

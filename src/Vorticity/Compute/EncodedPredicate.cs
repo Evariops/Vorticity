@@ -205,9 +205,6 @@ internal readonly record struct IntegerRange(Int128 Low, Int128 High, bool Negat
     /// <summary>Whether the range holds no value.</summary>
     internal bool IsEmpty => Low > High;
 
-    /// <summary>Whether <paramref name="value"/> is selected.</summary>
-    internal bool Holds(Int128 value) => (value >= Low && value <= High) != Negated;
-
     /// <summary>The range cut to the values from <paramref name="least"/> to <paramref name="greatest"/>, which select as it does.</summary>
     internal IntegerRange Within(Int128 least, Int128 greatest) =>
         new IntegerRange(Int128.Max(Low, least), Int128.Min(High, greatest), Negated);

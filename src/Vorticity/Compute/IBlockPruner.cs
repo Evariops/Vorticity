@@ -12,7 +12,4 @@ namespace Vorticity.Compute;
 /// </remarks>
 internal interface IBlockPruner
 {
-    /// <summary>Kills every block of <paramref name="live"/> this structure proves cannot match.</summary>
-    /// <param name="live">The scan's mask; only live blocks need looking at.</param>
-    void Refine(BlockMask live);
 }

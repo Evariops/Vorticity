@@ -254,30 +254,4 @@ internal sealed class FsstPlan
         int bits = maximum <= 0 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)maximum);
         return Math.Min(((count * bits) + 7) / 8, count * IndexPType(maximum).ByteWidth());
     }
-
-    /// <summary>
-    /// Whether row <paramref name="row"/> of a canonical varbinview node holds a value. This is for
-    /// callers asking about one row; a run of rows should resolve a <see cref="ValidityReader"/>
-    /// once per node instead of switching on the validity kind per row.
-    /// </summary>
-    internal static bool IsValid(CanonicalArena arena, CanonicalNode node, int row)
-    {
-        Validity validity = node.Validity;
-        switch (validity.Kind)
-        {
-            case ValidityKind.NonNullable:
-            case ValidityKind.AllValid:
-                return true;
-            case ValidityKind.AllInvalid:
-                return false;
-            default:
-            {
-                CanonicalNode bits = arena.GetNode(validity.CanonicalNodeIndex);
-                int bit = bits.BitOffset + row;
-                ReadOnlySpan<byte> span = bits.Bits.Span;
-                return (uint)(bit >> 3) < (uint)span.Length
-                    && (span[bit >> 3] & (1 << (bit & 7))) != 0;
-            }
-        }
-    }
 }

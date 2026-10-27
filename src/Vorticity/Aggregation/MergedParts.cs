@@ -39,9 +39,6 @@ internal abstract class PartSource
     /// <summary>The next part no one took; <see cref="Parts"/> past the last.</summary>
     internal int Take() => Math.Min(Interlocked.Increment(ref _taken), Parts);
 
-    /// <summary>An empty result's keys and slots: the first outcome of a merge delivered part by part, which holds no group.</summary>
-    internal abstract (GroupKeys Keys, AggregateSlot[] Slots) Empty();
-
     /// <summary>
     /// The part <paramref name="part"/> merged: its keys and slots, and what it reserved and measured of
     /// the query's memory.
@@ -103,7 +100,7 @@ internal sealed class PartMerge : PartSource
 
     internal override int Parts { get; }
 
-    internal override (GroupKeys Keys, AggregateSlot[] Slots) Empty() => (_keysOf[0].ForPart(), AggregationPartition.NewSlots(_plan, _settled, _source));
+    internal (GroupKeys Keys, AggregateSlot[] Slots) Empty() => (_keysOf[0].ForPart(), AggregationPartition.NewSlots(_plan, _settled, _source));
 
     /// <summary>The lanes' tables let go with what they held of the query's memory, their keys and the places of their groups.</summary>
     internal override void Release()

@@ -74,9 +74,6 @@ internal sealed class PartitionIndex
     /// <summary>The objects the index was written for, by rank.</summary>
     internal IReadOnlyList<Covered> Objects => _objects;
 
-    /// <summary>Its entries: identifiers' postings, then where located columns' values lie.</summary>
-    internal IReadOnlyList<Entry> Entries => _entries;
-
     /// <summary>The entry of kind <paramref name="kind"/> of the column named <paramref name="name"/>, or null when the index holds none.</summary>
     internal Entry? Of(string name, EntryKind kind)
     {
@@ -124,9 +121,6 @@ internal sealed class PartitionIndex
 
         /// <summary>The blocks of an object a place of its postings spans (<see cref="Indexes.KeyRunOptions.HashedUnitBlocks"/>).</summary>
         internal int UnitBlocks => unitBlocks;
-
-        /// <summary>The ranks it covers, a bit a rank.</summary>
-        internal ReadOnlySpan<ulong> Ranks => ranks;
 
         /// <summary>Its pages, by first hash.</summary>
         internal IReadOnlyList<Page> Pages => pages;
@@ -300,7 +294,7 @@ internal sealed class PartitionIndex
     }
 
     /// <summary>
-    /// Writes an index: each entry's postings in order, cut in pages that go to <see cref="Output"/> as they fill, then the
+    /// Writes an index: each entry's postings in order, cut in pages that go to <paramref name="output"/> as they fill, then the
     /// directory and the tail.
     /// </summary>
     internal sealed class Writer(ObjectSegmentSink output) : IDisposable
@@ -313,9 +307,6 @@ internal sealed class PartitionIndex
         private ulong _hash;
         private bool _grouping;
         private bool _paging;
-
-        /// <summary>The sink the index's bytes go to.</summary>
-        internal ObjectSegmentSink Output => output;
 
         /// <summary>Whether a page is full, to go out before the next posting.</summary>
         internal bool PageFull => _page.WrittenSpan.Length >= PageBytes;

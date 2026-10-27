@@ -89,9 +89,6 @@ internal sealed class ScanBuilder
         return this;
     }
 
-    /// <summary>Whether the decoders may deliver dictionary and run-end columns encoded.</summary>
-    internal bool KeepEncodings => _keepEncodings;
-
     /// <summary>Lets the decoders deliver dictionary and run-end columns in their encoded form.</summary>
     /// <param name="keep">Whether they may.</param>
     /// <param name="sinkDecodes">Whether the consumer reads the encoded forms itself, so that only the blocks it decodes count as decoded.</param>

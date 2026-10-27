@@ -256,11 +256,6 @@ internal sealed class LogicalExpr : VortexExpr
 
     private readonly int _joinHeight;
 
-    internal LogicalExpr(bool isAnd, VortexExpr left, VortexExpr right)
-        : this(isAnd, left, right, ExprDepth.Over(left, right), balanced: false)
-    {
-    }
-
     /// <param name="isAnd"><see langword="true"/> for <c>AND</c>.</param>
     /// <param name="left">The left operand.</param>
     /// <param name="right">The right operand.</param>

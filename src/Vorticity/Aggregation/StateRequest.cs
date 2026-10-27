@@ -148,23 +148,6 @@ internal sealed class StateRequest
     /// <summary>Per aggregate of the plan, what it is: which of a column's states it reads, its sum or one of its extremes.</summary>
     internal IReadOnlyList<AggregateKind> Kinds { get; }
 
-    /// <summary>Whether an aggregate reads <paramref name="column"/>'s sum (a sum or a mean), its least (a minimum), its greatest (a maximum).</summary>
-    internal (bool Sum, bool Least, bool Greatest) Reads(string column)
-    {
-        (bool sum, bool least, bool greatest) = (false, false, false);
-        for (int i = 0; i < Inputs.Count; i++)
-        {
-            if (string.Equals(Inputs[i], column, System.StringComparison.Ordinal))
-            {
-                sum |= Kinds[i] is AggregateKind.Sum or AggregateKind.Average;
-                least |= Kinds[i] == AggregateKind.Min;
-                greatest |= Kinds[i] == AggregateKind.Max;
-            }
-        }
-
-        return (sum, least, greatest);
-    }
-
     /// <summary>The column of how many values of <paramref name="column"/> a row of states folds.</summary>
     internal static string ValuesOf(string column) => column + "." + ValuesWord;
 

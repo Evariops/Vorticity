@@ -36,8 +36,6 @@ internal sealed class SessionReader : ISegmentReader, Indexes.IIndexRegionReader
         _key = inner is SynopsisCacheReader cached ? cached.Inner : inner;
     }
 
-    internal ISegmentReader Inner => _inner;
-
     /// <summary>Whether a read costs no round trip: the reader's under the session's, which a scan reads ahead or along by.</summary>
     bool ISegmentReader.CostsNoRoundTrip => _inner.CostsNoRoundTrip;
 

@@ -587,8 +587,6 @@ internal sealed class TupleKeys : GroupKeys
         Count = _tuples.Count;
     }
 
-    internal override int[] Order(bool sorted) => Identity(Count);
-
     internal override bool Orders(int component) => true;
 
     internal override int CompareKeys(int a, int b, int component) => Compare(ref TupleOf(a), ref TupleOf(b), component);

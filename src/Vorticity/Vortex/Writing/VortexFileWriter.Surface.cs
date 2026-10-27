@@ -731,9 +731,6 @@ public sealed partial class VortexFileWriter
     /// <summary>Whether the file was completed: its footer is with the sink.</summary>
     internal bool IsFinished => _finished;
 
-    /// <summary>Whether the file was given up, by <see cref="Abandon"/> or by a disposal before completion.</summary>
-    internal bool IsAbandoned => _abandoned;
-
     /// <summary>Truncates an append made over another sink back to the file's length before it.</summary>
     private void TruncateAppended()
     {

@@ -204,21 +204,13 @@ internal static class Upload
     }
 
     /// <summary>
-    /// A put read from a stream: spooled whole to disk first when the store has a spool directory, and
-    /// sent from there; otherwise held whole up to the part threshold, or, when the service takes the
-    /// condition only on a whole put, up to <see cref="UploadLimits.MaxHeldBytes"/>, and sent in parts as
-    /// they fill past it.
-    /// </summary>
-    internal static ValueTask<PutOutcome> PutAsync(
-        IUploadService service, HttpTransport transport, UploadLimits limits, string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>
-        PutAsync(service, transport, limits, key, content, length, -1, condition, cancellationToken);
-
-    /// <summary>
     /// A put read from a stream whose length is unknown but at most <paramref name="bound"/>, or -1 for no
     /// bound: held whole when the bound is under the part threshold, and otherwise sent in parts sized by
     /// the bound, of one size on a service that wants them so, rather than spooled; a bound past what the
-    /// service's parts reach goes to the spool, or is refused without one. Without a bound, as
-    /// <see cref="PutAsync(IUploadService, HttpTransport, UploadLimits, string, PipeReader, long, PutCondition, CancellationToken)"/>.
+    /// service's parts reach goes to the spool, or is refused without one. Without a bound, spooled whole to disk
+    /// first when the store has a spool directory, and sent from there; otherwise held whole up to the part threshold,
+    /// or, when the service takes the condition only on a whole put, up to <see cref="UploadLimits.MaxHeldBytes"/>, and
+    /// sent in parts as they fill past it.
     /// </summary>
     internal static async ValueTask<PutOutcome> PutAsync(
         IUploadService service, HttpTransport transport, UploadLimits limits, string key, PipeReader content, long length, long bound, PutCondition condition, CancellationToken cancellationToken)

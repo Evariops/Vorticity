@@ -28,20 +28,6 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
     public IReadOnlyList<ColumnSummary> Columns => _columns;
 
     /// <summary>
-    /// The summaries of an open file's columns, reading no data segment: the declared
-    /// <paramref name="paths"/>, or the first <paramref name="limit"/> columns when none is given.
-    /// </summary>
-    public static ObjectSummaries Of(
-        VortexFile file, IReadOnlyList<string>? paths = null, int limit = ColumnSummary.DefaultLimit)
-    {
-        ArgumentNullException.ThrowIfNull(file);
-        IReadOnlyList<ColumnSummary> summaries = paths is null
-            ? ColumnSummaries.Of(file, limit)
-            : ColumnSummaries.Of(file, paths);
-        return From(summaries);
-    }
-
-    /// <summary>
     /// The summaries of a list of columns, in any order, sorted into the canonical order. A column
     /// that says nothing is dropped: it has no encoding to have.
     /// </summary>

@@ -746,7 +746,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
                 ParsedPage child = await page.ChildAsync(i, _version.Pages, cancellationToken).ConfigureAwait(false);
                 rank += await RankUnderAsync(child, level, key, sought, cancellationToken).ConfigureAwait(false);
             }
-            else if (await CursorOfAsync(SlotOf(page, slots, i, level), cancellationToken).ConfigureAwait(false) is { } cursor)
+            else if (await CursorOfAsync(SlotOf(page, slots, i), cancellationToken).ConfigureAwait(false) is { } cursor)
             {
                 rank += await cursor.RankAsync(key, cancellationToken).ConfigureAwait(false);
             }
@@ -767,15 +767,15 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         return slots;
     }
 
-    /// <summary>The walk's state of entry <paramref name="index"/> of a leaf of <paramref name="level"/>, made the first time the walk reaches it.</summary>
-    private Slot SlotOf(ParsedPage leaf, Slot?[] slots, int index, int level)
+    /// <summary>The walk's state of entry <paramref name="index"/> of a leaf, made the first time the walk reaches it.</summary>
+    private Slot SlotOf(ParsedPage leaf, Slot?[] slots, int index)
     {
         if (slots[index] is { } slot)
         {
             return slot;
         }
 
-        slot = new Slot(leaf.ObjectAt(index), leaf.Key(index), level);
+        slot = new Slot(leaf.ObjectAt(index), leaf.Key(index));
         slots[index] = slot;
         _reached.Add(slot);
         return slot;
@@ -1255,15 +1255,12 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>The walk's state of one object of the version, made once the walk reaches it.</summary>
-    private sealed class Slot(ObjectEntry entry, ReadOnlyMemory<byte> treeKey, int level)
+    private sealed class Slot(ObjectEntry entry, ReadOnlyMemory<byte> treeKey)
     {
         internal ObjectEntry Entry { get; } = entry;
 
         /// <summary>The key its level's tree orders it by: its bound, then its uid.</summary>
         internal ReadOnlyMemory<byte> TreeKey { get; } = treeKey;
-
-        /// <summary>The level whose tree holds the object.</summary>
-        internal int Level { get; } = level;
 
         /// <summary>Where the object's rows start among the dataset's; negative until the walk first takes one of its entries.</summary>
         internal long FirstRow { get; set; } = -1;

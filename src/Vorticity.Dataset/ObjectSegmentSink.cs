@@ -118,9 +118,6 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// <inheritdoc/>
     public long Position => _written;
 
-    /// <summary>The key this sink creates.</summary>
-    public string Key => _key;
-
     /// <summary>Whether <see cref="CommitAsync"/> has run.</summary>
     public bool IsCommitted => _committed;
 

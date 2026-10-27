@@ -54,9 +54,6 @@ internal sealed class ArrayDecodeContext
     /// <summary>Read-time policy, copied from the file.</summary>
     public VortexReadOptions Options => _scan.Options;
 
-    /// <summary>Maps a wire <c>u16</c> encoding spec index to a resolved id.</summary>
-    public ReadOnlySpan<ArrayEncodingId> ArrayEncodings => _scan.ArrayEncodings;
-
     /// <summary>
     /// Loads an array blob into <see cref="Nodes"/>, using this scan's encoding table.
     /// Convenience for the layout readers, which would otherwise repeat the same three arguments.

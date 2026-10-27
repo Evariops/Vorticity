@@ -144,9 +144,6 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
         | ObjectStoreCapabilities.CreatesConditionally;
 
-    /// <summary>The transport, for tests.</summary>
-    internal HttpTransport Transport => _transport;
-
     /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {

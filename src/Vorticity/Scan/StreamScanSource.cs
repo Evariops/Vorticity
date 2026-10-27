@@ -143,8 +143,6 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
         return best;
     }
 
-    public bool MayMatch(VortexExpr filter) => true;
-
     /// <summary>
     /// The keys of a column, read whole as the source streams and sorted in memory unless they arrive
     /// in order, reserved under the session's memory budget until the cursor is disposed.

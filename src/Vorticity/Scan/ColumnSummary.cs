@@ -131,21 +131,6 @@ internal static class ColumnSummaries
         return summaries;
     }
 
-    /// <summary>
-    /// Whether a row <paramref name="filter"/> selects can lie behind these summaries.
-    /// </summary>
-    /// <param name="filter">The predicate.</param>
-    /// <param name="summaries">What is known about the columns, in any order.</param>
-    /// <param name="rows">How many rows the summaries cover.</param>
-    /// <returns><see langword="false"/> only when the summaries prove no row can match.</returns>
-    /// <exception cref="ArgumentNullException">An argument is null.</exception>
-    /// <remarks>
-    /// One call, one predicate. A caller asking the same predicate of many summaries -- which is
-    /// what a dataset's pruning walk is -- builds a <see cref="SummaryPruner"/> once instead.
-    /// </remarks>
-    public static bool MayMatch(VortexExpr filter, IReadOnlyList<ColumnSummary> summaries, long rows) =>
-        new SummaryPruner(filter).MayMatch(summaries, rows);
-
     /// <summary>One field's statistics as a summary, or an empty one when it records nothing usable.</summary>
     /// <param name="path">The column's path.</param>
     /// <param name="field">Its file-level statistics.</param>

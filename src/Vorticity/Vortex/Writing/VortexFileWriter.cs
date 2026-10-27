@@ -812,9 +812,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
-    /// <summary>The schema every batch must match.</summary>
-    internal DType DType => _schema;
-
     /// <summary>Starts a file over <paramref name="sink"/>.</summary>
     /// <param name="sink">Where the bytes go.</param>
     /// <param name="schema">The file's dtype. A struct makes it tabular; anything else is one column.</param>

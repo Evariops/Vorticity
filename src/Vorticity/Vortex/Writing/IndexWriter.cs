@@ -232,9 +232,6 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>The default memory the chunk runs may hold before they move to a file.</summary>
     internal const long DefaultScratchMemoryBytes = 64L << 20;
 
-    /// <summary>The scratch the locating builders lay their chunk runs in, when there is one.</summary>
-    internal RunScratch? Scratch => _scratch;
-
     /// <summary>The builder a policy names for a column, or why there is none.</summary>
     /// <summary>Why an index of <paramref name="column"/> cannot be built on a column of <paramref name="dtype"/>, or null when it can.</summary>
     /// <param name="column">The index asked for.</param>

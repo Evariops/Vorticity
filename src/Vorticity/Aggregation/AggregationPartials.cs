@@ -532,8 +532,6 @@ internal sealed class PartialsSource(ScanSource question, IAsyncEnumerable<Aggre
     public ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, bool analyze, CancellationToken cancellationToken) =>
         ValueTask.FromResult(new ScanPlan(0, 0, 0, 0, 0, MayMatch: true, [], new CountPlan(false, 0, 0, 0, 0), null));
 
-    public bool MayMatch(VortexExpr filter) => true;
-
     public ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         throw new NotSupportedException("A merge of partials holds states, not rows.");
 
@@ -553,8 +551,6 @@ internal sealed class PartialsHost(AggregationHost question, PartialsSource sour
     internal override ScanSource Source => source;
 
     internal override ScanCounters Counters => _counters;
-
-    internal override ScanMetrics Metrics => ScanMetrics.From(_counters);
 
     internal override ScanSpec Spec()
     {

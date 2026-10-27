@@ -34,9 +34,6 @@ internal readonly struct DecimalBytePartsMetadata : IEquatable<DecimalBytePartsM
     /// <summary>Physical type of child 0 (tag 1).</summary>
     public PType ZerothChildPType { get; }
 
-    /// <summary>Always zero (tag 2): the only value this encoding id admits.</summary>
-    public uint LowerPartCount => 0;
-
     /// <summary>Reads a <c>vortex.decimal_byte_parts</c> metadata payload.</summary>
     /// <param name="metadata">The raw metadata bytes.</param>
     /// <exception cref="VortexFormatException">

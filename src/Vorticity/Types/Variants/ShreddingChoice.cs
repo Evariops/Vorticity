@@ -40,9 +40,6 @@ internal static class ShreddingChoice
     /// </summary>
     internal const int TableBudget = VortexLimits.MaxFlatBufferTables / 2;
 
-    /// <summary>The chunks a shredded variant column of <paramref name="rows"/> rows is written in.</summary>
-    internal static long ChunksOf(long rows) => Math.Max(1, (rows + ChunkRows - 1) / ChunkRows);
-
     /// <summary>
     /// The chunk target, in bytes, that gives the variant column of <paramref name="census"/>'s rows
     /// chunks of about <see cref="ChunkRows"/> rows.

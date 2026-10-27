@@ -203,9 +203,6 @@ internal sealed class DeletionVector : IRowExclusion, IEquatable<DeletionVector>
     }
 
     /// <inheritdoc/>
-    long IRowExclusion.ExcludedCount => Count;
-
-    /// <inheritdoc/>
     bool IRowExclusion.Excludes(long row) => Contains(row);
 
     /// <inheritdoc/>

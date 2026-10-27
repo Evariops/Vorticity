@@ -273,8 +273,6 @@ public sealed partial class Scan
             }
         }
 
-        internal VortexSession Session => _session;
-
         /// <summary>Moves to the next batch, releasing the current one.</summary>
         /// <returns>Whether there is one.</returns>
         [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]

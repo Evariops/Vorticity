@@ -144,10 +144,6 @@ internal readonly ref struct IntegerQuestion
     internal static IntegerQuestion Settled(int width, bool selected) =>
         new IntegerQuestion(selected ? QuestionKind.All : QuestionKind.None, width, 0, 0, false, default, false, 0, false);
 
-    /// <summary>The range of patterns from <paramref name="low"/>, <paramref name="span"/> past it, or the others.</summary>
-    internal static IntegerQuestion OfPatterns(int width, ulong low, ulong span, bool negated) =>
-        new IntegerQuestion(QuestionKind.Range, width, low, span, negated, default, false, 0, false);
-
     /// <summary>
     /// The question on a child whose patterns are this node's less <paramref name="reference"/>, wrapping: a frame of
     /// reference's. False for a set already zigzagged, whose child would be shifted before the zigzag.

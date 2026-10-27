@@ -145,18 +145,6 @@ internal sealed class SortKey
         return RowEncoder.EncodeKey(values, _types.AsSpan(0, values.Length), _fields.AsSpan(0, values.Length));
     }
 
-    /// <summary>The key of row <paramref name="row"/> of the nodes <see cref="Components"/> gave, row-encoded.</summary>
-    internal byte[] EncodeRow(CanonicalArena arena, ReadOnlySpan<int> nodes, int row)
-    {
-        FilterLiteral[] values = new FilterLiteral[nodes.Length];
-        for (int i = 0; i < nodes.Length; i++)
-        {
-            values[i] = LiteralReader.TryRead(arena, nodes[i], row, out FilterLiteral value) ? value : FilterLiteral.Null;
-        }
-
-        return RowEncoder.EncodeKey(values, _types, _fields);
-    }
-
     /// <summary>
     /// The bytes the first <paramref name="components"/> values of the row-encoded key <paramref name="key"/> take; -1
     /// when one is a struct or a list whose width its bytes do not tell.

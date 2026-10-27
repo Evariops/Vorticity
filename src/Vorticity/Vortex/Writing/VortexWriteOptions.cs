@@ -455,13 +455,6 @@ public sealed record VortexWriteOptions
         return this with { WritePolicy = indexes };
     }
 
-    /// <summary>These options with a composite-key encoder.</summary>
-    internal VortexWriteOptions WithKeyEncoder(IKeyEncoder keyEncoder)
-    {
-        ArgumentNullException.ThrowIfNull(keyEncoder);
-        return this with { KeyEncoder = keyEncoder };
-    }
-
     /// <summary>A copy with the four things an append decides from the file.</summary>
     internal VortexWriteOptions ForAppend(int rowBlockSize, WritePolicy indexes, bool fileStatistics, int budgetPerMille) =>
         this with

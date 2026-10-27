@@ -23,7 +23,7 @@ internal sealed class ChunkBlockBounds
         _keys = new KeyBlocks[keys.Count];
         for (int i = 0; i < _keys.Length; i++)
         {
-            _keys[i] = new KeyBlocks(keys[i].Index, keys[i].Key, keys[i].Class, blockRows, stringBoundBytes);
+            _keys[i] = new KeyBlocks(keys[i].Index, keys[i].Class, blockRows, stringBoundBytes);
         }
     }
 
@@ -65,7 +65,7 @@ internal sealed class ChunkBlockBounds
     /// One key and class over a chunk: its blocks that hold a value, each its count and bounds, a block counted at a time
     /// as the rows come in order.
     /// </summary>
-    internal sealed class KeyBlocks(int index, string key, PathClass @class, int blockRows, int stringBoundBytes)
+    internal sealed class KeyBlocks(int index, PathClass @class, int blockRows, int stringBoundBytes)
     {
         private readonly List<BlockBounds> _blocks = [];
 
@@ -84,10 +84,6 @@ internal sealed class ChunkBlockBounds
 
         /// <summary>The key's index among the shredding's keys.</summary>
         internal int Index => index;
-
-        internal string Key => key;
-
-        internal PathClass Class => @class;
 
         /// <summary>The blocks of the chunk that hold a value, in order, each counted from the chunk's first, once its rows are all noted.</summary>
         internal IReadOnlyList<BlockBounds> Blocks

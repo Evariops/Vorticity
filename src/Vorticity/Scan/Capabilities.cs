@@ -76,9 +76,6 @@ internal interface IStatisticsCapability
     /// <summary>The rows of the whole source, whatever a scan keeps of them; -1 when they are not known before it is read.</summary>
     long RowBound => -1;
 
-    /// <summary>Whether the statistics alone rule the filter out; never false for a filter that may match.</summary>
-    bool MayMatch(VortexExpr filter) => true;
-
     /// <summary>
     /// The smallest and the largest value of the column at <paramref name="path"/> over the whole source, whatever a scan
     /// keeps of it, when its statistics hold them.

@@ -310,9 +310,6 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>Regions whose file did not hold their checksum, dropped.</summary>
     internal long Corrupt => Count(ref _corrupt);
 
-    /// <summary>Regions larger than the capacity, never kept.</summary>
-    internal long Refused => Count(ref _refused);
-
     /// <summary>
     /// Told of each region a reader asks of the cache, held or not, once per ask, in the order asked: the trace a
     /// replay of eviction policies reads (<c>vortex-queries --micro cachetrace</c>). Null, the default, tells nobody.

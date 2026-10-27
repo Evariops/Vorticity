@@ -90,12 +90,6 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     /// <exception cref="InvalidOperationException">The merge is not on a run.</exception>
     internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
 
-    /// <summary>The run's first key, row-encoded.</summary>
-    internal ReadOnlySpan<byte> FirstKey => KeyAt(0);
-
-    /// <summary>The run's last key, row-encoded.</summary>
-    internal ReadOnlySpan<byte> LastKey => KeyAt(_count - 1);
-
     /// <summary>The key of the run's row <paramref name="row"/>, row-encoded.</summary>
     public ReadOnlySpan<byte> KeyAt(int row)
     {

@@ -37,9 +37,6 @@ internal abstract class StateTable
         _bool = validity;
     }
 
-    /// <summary>The rows of states.</summary>
-    internal abstract int Count { get; }
-
     /// <summary>
     /// Fills <paramref name="into"/> with the word <paramref name="word"/> of rows <c>[start, start + into.Length)</c>:
     /// 0 their rows, then each measure's words in <see cref="MeasureLayout"/>'s order, the measures one after another.
@@ -219,8 +216,8 @@ internal sealed class GranuleStateRows(GranuleAnswer answer)
     private ReadOnlyMemory<byte>[] _sketches = ArrayPool<ReadOnlyMemory<byte>>.Shared.Rent(16 * answer.Measures.Length);
     private int _count;
 
-    /// <inheritdoc/>
-    internal override int Count => _count;
+    /// <summary>The rows of states it holds.</summary>
+    internal int Count => _count;
 
     /// <summary>Adds a row of states of <paramref name="rows"/> rows, its keys null and its measures cleared; its place.</summary>
     internal int Add(long rows)

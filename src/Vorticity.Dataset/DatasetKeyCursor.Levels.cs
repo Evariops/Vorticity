@@ -132,7 +132,7 @@ internal sealed partial class DatasetKeyCursor
             Frame leaf = _path[_deepest];
             _path[_deepest].At = leaf.At + 1;
             Moved();
-            return _owner.SlotOf(leaf.Page, leaf.Slots!, leaf.At, Number);
+            return _owner.SlotOf(leaf.Page, leaf.Slots!, leaf.At);
         }
 
         /// <summary>Moves the place before the object just before it, and returns that object's state.</summary>
@@ -163,7 +163,7 @@ internal sealed partial class DatasetKeyCursor
             Frame leaf = _path[_deepest];
             _path[_deepest].At = leaf.At - 1;
             Moved();
-            return _owner.SlotOf(leaf.Page, leaf.Slots!, leaf.At - 1, Number);
+            return _owner.SlotOf(leaf.Page, leaf.Slots!, leaf.At - 1);
         }
 
         /// <summary>

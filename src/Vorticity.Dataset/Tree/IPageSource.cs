@@ -71,9 +71,6 @@ internal sealed class MemoryPageStore : IPageSource, IPageSink
     /// <summary>Forgets the read count, not the pages.</summary>
     public void ResetReads() => Interlocked.Exchange(ref _reads, 0);
 
-    /// <summary>Takes a page already known, under the reference that names it.</summary>
-    public void Add(PageReference reference, ReadOnlyMemory<byte> page) => _pages[reference] = page;
-
     /// <inheritdoc/>
     public PageReference WritePage(ReadOnlySpan<byte> page)
     {
