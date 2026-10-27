@@ -141,6 +141,7 @@ internal static class ExprText
                 {
                     StringMatchOp.StartsWith => " starts with ",
                     StringMatchOp.Contains => " contains ",
+                    StringMatchOp.Token => " has token ",
                     _ => " like ",
                 });
                 AppendLiteral(text, match.Pattern);

@@ -72,6 +72,12 @@ internal enum StringMatchOp : byte
 
     /// <summary>The SQL wildcard match: <c>%</c> any run, <c>_</c> any one character (byte, in binary), the escape quotes either.</summary>
     Like = 2,
+
+    /// <summary>
+    /// The pattern, one word, is a whole word of the value: no letter, digit or non-ASCII byte just before it nor just after
+    /// it (spec G, 6), which the token index answers.
+    /// </summary>
+    Token = 3,
 }
 
 /// <summary>The comparison operators a filter admits.</summary>
@@ -715,6 +721,16 @@ internal static class Expr
     public static StringMatchExpr Like(
         FieldExpr field, FilterLiteral pattern, byte escape = (byte)'\\') =>
         Match(field, StringMatchOp.Like, pattern, escape);
+
+    /// <summary><paramref name="token"/>, one word, is a whole word of <c>field</c> (spec G, 6).</summary>
+    /// <param name="field">The column; utf8 or binary, or an extension over one.</param>
+    /// <param name="token">The word, as bytes.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="field"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="token"/> is not a bytes literal of one word.</exception>
+    public static StringMatchExpr HasToken(FieldExpr field, FilterLiteral token) =>
+        token.Kind == FilterLiteralKind.Bytes && Indexes.Tokens.IsWord(token.BytesValue)
+            ? Match(field, StringMatchOp.Token, token, (byte)'\\')
+            : throw new ArgumentException("A token is one word: letters, digits and non-ASCII characters, no separator.", nameof(token));
 
     /// <summary><c>list</c> holds an element equal to <paramref name="value"/>.</summary>
     /// <param name="list">A list or fixed-size list column of booleans, numbers or bytes, or an extension over one.</param>

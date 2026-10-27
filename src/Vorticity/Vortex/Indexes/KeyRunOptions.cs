@@ -198,7 +198,7 @@ internal static class KeyRunOptions
     /// <param name="kind">The kind name.</param>
     internal static int StrideOf(string kind) => kind switch
     {
-        IndexKinds.PostingsBlocks or IndexKinds.PostingsNgram3 => PostingsStride,
+        IndexKinds.PostingsBlocks or IndexKinds.PostingsNgram3 or IndexKinds.PostingsTokens => PostingsStride,
         IndexKinds.SortedRuns => SortedStride,
         IndexKinds.PostingsHashed => HashedStride,
         _ => 0,

@@ -30,6 +30,9 @@ internal enum IndexPolicyKind
 
     /// <summary>Value to blocks through the value's hash.</summary>
     HashedPostings = 7,
+
+    /// <summary>Token to blocks: the words of a text.</summary>
+    TokenPostings = 8,
 }
 
 /// <summary>The index policy of one column.</summary>
@@ -190,6 +193,12 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
     public static IndexSpec NgramPostings(bool caseInsensitive = false) => new IndexSpec(
         IndexPolicyKind.NgramPostings, 0, 0, 0, -1, BloomHash.XxHash3, caseInsensitive);
 
+    /// <summary>Token to blocks, for <c>HasToken</c> and the whole words of <c>Contains</c> and <c>Like</c> (spec G, 6).</summary>
+    /// <param name="caseInsensitive">Whether tokens are ASCII-lower-cased on both sides.</param>
+    /// <returns>The policy.</returns>
+    public static IndexSpec TokenPostings(bool caseInsensitive = false) => new IndexSpec(
+        IndexPolicyKind.TokenPostings, 0, 0, 0, -1, BloomHash.XxHash3, caseInsensitive);
+
     /// <summary>A split-block Bloom filter.</summary>
     /// <param name="falsePositivePpm">
     /// The target false-positive rate as parts per million, in <c>[1, 500 000]</c>. Default 1 %.
@@ -250,7 +259,7 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
         int kind, int fppPpm, int resolutions, int maxBlocks, int minDistinct, int hash,
         bool caseInsensitive, int segmentEntries = 0, bool required = false)
     {
-        IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.HashedPostings
+        IndexPolicyKind policy = kind is >= (int)IndexPolicyKind.None and <= (int)IndexPolicyKind.TokenPostings
             ? (IndexPolicyKind)kind
             : IndexPolicyKind.None;
         return new IndexSpec(

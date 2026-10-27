@@ -29,6 +29,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private readonly bool _utf8;
     private readonly int _segmentEntries;
     private readonly bool _trigrams;
+    private readonly bool _tokens;
     private readonly bool _fold;
 
     /// <summary>Whether the keys are the values' hashes, for hashed postings.</summary>
@@ -88,16 +89,24 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <c>binary</c> because a trigram may cut a UTF-8 code point in two.
     /// </summary>
     internal static KeyIndexBuilder ForTrigrams(bool fold, int segmentEntries) =>
-        new KeyIndexBuilder(fold, segmentEntries);
+        new KeyIndexBuilder(fold, segmentEntries, tokens: false);
 
-    private KeyIndexBuilder(bool fold, int segmentEntries)
+    /// <summary>
+    /// A token postings builder (spec G, 6): the keys are the words of every value (<see cref="Indexes.Tokens"/>), typed
+    /// <c>binary</c> as trigrams are, a word cut to its first bytes possibly cutting a code point.
+    /// </summary>
+    internal static KeyIndexBuilder ForTokens(bool fold, int segmentEntries) =>
+        new KeyIndexBuilder(fold, segmentEntries, tokens: true);
+
+    private KeyIndexBuilder(bool fold, int segmentEntries, bool tokens)
     {
         _table = new ChunkKeys();
         _rows = false;
         _layout = new KeyLayout(KeyShape.Bytes, 0, default);
         _utf8 = false;
         _segmentEntries = segmentEntries;
-        _trigrams = true;
+        _trigrams = !tokens;
+        _tokens = tokens;
         _fold = fold;
     }
 
@@ -107,11 +116,11 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The blocks a place spans: a unit of hashed postings' (<see cref="KeyRunOptions.HashedUnitBlocks"/>), one otherwise.</summary>
     internal int UnitBlocks => _unitBlocks;
 
-    internal string Kind => _trigrams
-        ? IndexKinds.PostingsNgram3
+    internal string Kind => _trigrams ? IndexKinds.PostingsNgram3
+        : _tokens ? IndexKinds.PostingsTokens
         : _hashed ? IndexKinds.PostingsHashed : _rows ? IndexKinds.SortedRuns : IndexKinds.PostingsBlocks;
 
-    /// <summary>Whether trigrams are ASCII-lower-cased.</summary>
+    /// <summary>Whether trigrams or tokens are ASCII-lower-cased.</summary>
     internal bool CaseInsensitive => _fold;
 
     /// <summary>The runs the merge produced when the data ended, in block order.</summary>
@@ -230,6 +239,32 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
         bool allValid = own.AllValid && wrapper.AllValid;
         int width = _valueWidth;
+        if (_tokens)
+        {
+            if (node.Kind != CanonicalKind.VarBinView)
+            {
+                Abandon($"a token index needs text, and this column is {node.Kind}");
+                return;
+            }
+
+            // Each word of each value, once a value: a word met twice in one value is one entry of its block anyway.
+            Span<byte> word = stackalloc byte[Tokens.Longest];
+            for (int row = start; row < start + count; row++)
+            {
+                if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
+                {
+                    ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
+                    int at = 0;
+                    while (Tokens.Next(value, ref at, _fold, word, out int length))
+                    {
+                        Note(word[..length], first + row - start);
+                    }
+                }
+            }
+
+            return;
+        }
+
         if (_trigrams)
         {
             if (node.Kind != CanonicalKind.VarBinView)

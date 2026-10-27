@@ -245,7 +245,7 @@ internal sealed class IndexWriter : IDisposable
         bool supported = column.Kind switch
         {
             IndexPolicyKind.Bloom => BloomBuilder.Supports(dtype, out reason),
-            IndexPolicyKind.NgramBloom or IndexPolicyKind.NgramPostings => BloomBuilder.Supports(dtype, trigrams: true, out reason),
+            IndexPolicyKind.NgramBloom or IndexPolicyKind.NgramPostings or IndexPolicyKind.TokenPostings => BloomBuilder.Supports(dtype, trigrams: true, out reason),
             IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns or IndexPolicyKind.HashedPostings => KeyIndexBuilder.Supports(dtype, out _, out _, out reason),
             _ => true,
         };
@@ -275,6 +275,13 @@ internal sealed class IndexWriter : IDisposable
                 if (BloomBuilder.Supports(dtype, trigrams: true, out reason))
                 {
                     builders.Add(KeyIndexBuilder.ForTrigrams(column.CaseInsensitive, column.SegmentEntries));
+                }
+
+                break;
+            case IndexPolicyKind.TokenPostings:
+                if (BloomBuilder.Supports(dtype, trigrams: true, out reason))
+                {
+                    builders.Add(KeyIndexBuilder.ForTokens(column.CaseInsensitive, column.SegmentEntries));
                 }
 
                 break;
@@ -1459,6 +1466,9 @@ internal sealed class IndexWriter : IDisposable
                     break;
                 case IndexPolicyKind.NgramPostings:
                     Locating(field, IndexKinds.PostingsNgram3, only as KeyIndexBuilder, blockRows);
+                    break;
+                case IndexPolicyKind.TokenPostings:
+                    Locating(field, IndexKinds.PostingsTokens, only as KeyIndexBuilder, blockRows);
                     break;
                 case IndexPolicyKind.HashedPostings:
                     Locating(field, IndexKinds.PostingsHashed, only as KeyIndexBuilder, blockRows);

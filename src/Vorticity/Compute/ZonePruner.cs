@@ -382,7 +382,7 @@ internal sealed class ZonePruner : IBlockPruner
     /// </remarks>
     private bool MayMatchStringMatch(StringMatchExpr match, RowRange rows, bool negated)
     {
-        if (negated || match.Op == StringMatchOp.Contains)
+        if (negated || match.Op is StringMatchOp.Contains or StringMatchOp.Token)
         {
             return true;
         }
@@ -627,8 +627,9 @@ internal sealed class ZonePruner : IBlockPruner
     private RangeVerdict StringMatchVerdict(StringMatchExpr match, RowRange rows)
     {
         ReadOnlySpan<byte> pattern = match.Pattern.BytesValue;
-        if (match.Op == StringMatchOp.Contains)
+        if (match.Op is StringMatchOp.Contains or StringMatchOp.Token)
         {
+            // A word lies anywhere in a value, as a substring does: no range to stand on.
             return Decide(match.Field, rows, ZoneQuestion.Contains(pattern.IsEmpty));
         }
 

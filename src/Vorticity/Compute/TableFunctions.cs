@@ -525,6 +525,7 @@ internal static class TableFunctions
     {
         StringMatchOp.StartsWith => BytePattern.StartsWith(image, match.Pattern.BytesValue),
         StringMatchOp.Contains => BytePattern.Contains(image, match.Pattern.BytesValue),
+        StringMatchOp.Token => BytePattern.HasToken(image, match.Pattern.BytesValue),
         _ => BytePattern.LikeText(image, match.Pattern.BytesValue, match.Escape),
     };
 }

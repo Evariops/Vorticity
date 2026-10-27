@@ -165,7 +165,8 @@ internal sealed class KeyIndexPruner
         foreach (IndexEntry entry in directory.Entries)
         {
             int stride = KeyRunOptions.StrideOf(entry.Kind);
-            bool trigrams = entry.Kind == IndexKinds.PostingsNgram3;
+            bool tokens = entry.Kind == IndexKinds.PostingsTokens;
+            bool trigrams = tokens || entry.Kind == IndexKinds.PostingsNgram3;
             bool hashed = entry.Kind == IndexKinds.PostingsHashed;
             ulong unit = hashed && entry.BlockLength > (ulong)blockRows && entry.BlockLength % (ulong)blockRows == 0
                 ? entry.BlockLength / (ulong)blockRows
@@ -182,13 +183,13 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
-            string key = trigrams ? TrigramKey(path) : path;
+            string key = tokens ? TokenKey(path) : trigrams ? TrigramKey(path) : path;
             List<StringMatchExpr>? predicates = null;
             KeyLayout layout;
             DType storage;
             if (trigrams)
             {
-                // The keys a text index holds are trigrams, typed binary.
+                // The keys a text index holds are trigrams or words, typed binary.
                 if (!matches.TryGetValue(path, out predicates))
                 {
                     continue;
@@ -519,6 +520,15 @@ internal sealed class KeyIndexPruner
 
     private static string TrigramKey(string path) => path + "\0ngram3";
 
+    private static string TokenKey(string path) => path + TokenMark;
+
+    /// <summary>What ends the key of a column's token index, which a column's path never holds.</summary>
+    private const string TokenMark = "\0tokens";
+
+    /// <summary>The literals a text index of <paramref name="key"/> is asked for by <paramref name="match"/>: its words, or its trigrams.</summary>
+    private static List<byte[]> GramsOf(string key, StringMatchExpr match, bool fold) =>
+        key.EndsWith(TokenMark, StringComparison.Ordinal) ? Tokens.Required(match, fold) : Trigrams.Required(match, fold);
+
     private static void CollectEqualities(
         VortexExpr expr,
         Dictionary<string, List<FilterLiteral>> into,
@@ -710,7 +720,7 @@ internal sealed class KeyIndexPruner
                 }
             }
 
-            Asked built = new Asked(_filter, key, layout, fold, predicates is null ? Equalities[key] : TrigramsOf(predicates, fold), hashed);
+            Asked built = new Asked(_filter, key, layout, fold, predicates is null ? Equalities[key] : GramsOf(key, predicates, fold), hashed);
             lock (_asked)
             {
                 return _asked.TryAdd(id, built) ? built : _asked[id];
@@ -718,16 +728,16 @@ internal sealed class KeyIndexPruner
         }
 
         /// <summary>
-        /// The trigrams the predicates require, folded as the index was, each once: the literals of a
-        /// text index, whose keys are trigrams typed binary.
+        /// The trigrams or the words the predicates require, folded as the index was, each once: the literals of a text
+        /// index, whose keys are trigrams or words typed binary.
         /// </summary>
-        private static List<FilterLiteral> TrigramsOf(List<StringMatchExpr> predicates, bool fold)
+        private static List<FilterLiteral> GramsOf(string key, List<StringMatchExpr> predicates, bool fold)
         {
             List<FilterLiteral> literals = [];
             HashSet<FilterLiteral> seen = [];
             foreach (StringMatchExpr predicate in predicates)
             {
-                foreach (byte[] trigram in Trigrams.Required(predicate, fold))
+                foreach (byte[] trigram in KeyIndexPruner.GramsOf(key, predicate, fold))
                 {
                     FilterLiteral literal = FilterLiteral.From(trigram);
                     if (seen.Add(literal))
@@ -877,12 +887,12 @@ internal sealed class KeyIndexPruner
                     Questions[expr] = (Ask(members.Values), 1);
                     break;
 
-                case StringMatchExpr match when TrigramKey(match.Field.Path) == key:
+                case StringMatchExpr match when TrigramKey(match.Field.Path) == key || TokenKey(match.Field.Path) == key:
                 {
-                    // Absent as soon as one required trigram is: a matching value holds them all.
+                    // Absent as soon as one required trigram or word is: a matching value holds them all.
                     int first = -1;
                     int count = 0;
-                    foreach (byte[] trigram in Trigrams.Required(match, Fold))
+                    foreach (byte[] trigram in GramsOf(key, match, Fold))
                     {
                         int set = Ask(FilterLiteral.From(trigram));
                         first = count++ == 0 ? set : first;

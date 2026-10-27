@@ -30,6 +30,13 @@ internal static class IndexKinds
     public const string PostingsNgram3 = "vorticity.postings.ngram3.v1";
 
     /// <summary>
+    /// Token to blocks: the words of a text column, each a maximal run of ASCII letters and digits and of non-ASCII bytes,
+    /// its first 64 bytes, folded to ASCII lower case when its options say so, in the postings' format
+    /// (<see cref="Indexes.Tokens"/>, spec G, 6).
+    /// </summary>
+    public const string PostingsTokens = "vorticity.postings.tokens.v1";
+
+    /// <summary>
     /// Value to blocks through the value's hash, a superset at block granularity: each run holds its
     /// (hash, block) pairs sorted by hash, the hashes cut to as many bits as its pairs need plus ten,
     /// per segment as gaps beside the blocks (<see cref="KeyRunOptions.HashShift"/>).
@@ -138,7 +145,7 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or PostingsHashed or KeyIndex or SliceChunks or Marks or VariantPaths or VariantDirectory or VariantBlocks
+                or PostingsNgram3 or PostingsTokens or PostingsHashed or KeyIndex or SliceChunks or Marks or VariantPaths or VariantDirectory or VariantBlocks
                 or ColumnSheet or ColumnCounts or ColumnSketches or GranuleStats or GranuleHistograms or ColumnLocate => true,
             _ => false,
         };
@@ -164,7 +171,7 @@ internal static class IndexKinds
     /// </summary>
     /// <param name="kind">The name.</param>
     /// <returns>Whether a lookup reads it.</returns>
-    internal static bool Locates(string kind) => kind is SortedRuns or PostingsBlocks or PostingsHashed or PostingsNgram3 or DictProbe;
+    internal static bool Locates(string kind) => kind is SortedRuns or PostingsBlocks or PostingsHashed or PostingsNgram3 or PostingsTokens or DictProbe;
 
     /// <summary>The kind a policy of <paramref name="policy"/> builds, or null for a policy that names none.</summary>
     /// <param name="policy">The policy's kind.</param>
@@ -177,6 +184,7 @@ internal static class IndexKinds
             IndexPolicyKind.Postings => PostingsBlocks,
             IndexPolicyKind.SortedRuns => SortedRuns,
             IndexPolicyKind.NgramPostings => PostingsNgram3,
+            IndexPolicyKind.TokenPostings => PostingsTokens,
             IndexPolicyKind.HashedPostings => PostingsHashed,
             _ => null,
         };

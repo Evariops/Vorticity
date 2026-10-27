@@ -166,6 +166,7 @@ internal static class SymLowering
         {
             StringMatchOp.StartsWith => Expr.StartsWith(column.Field, FilterLiteral.From(text)),
             StringMatchOp.Contains => Expr.Contains(column.Field, FilterLiteral.From(text)),
+            StringMatchOp.Token => Expr.HasToken(column.Field, FilterLiteral.From(text)),
             _ => Expr.Like(column.Field, FilterLiteral.From(text), (byte)escape),
         });
     }
