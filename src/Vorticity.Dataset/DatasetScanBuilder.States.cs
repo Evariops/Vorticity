@@ -111,19 +111,24 @@ internal sealed partial class DatasetScanBuilder
         }
     }
 
-    /// <summary>The partial of the object <paramref name="held"/> under the scan's family: from the handle or the session's cache, else learned now from its rows and kept.</summary>
+    /// <summary>
+    /// The partial of the object <paramref name="held"/> under the scan's family: from the handle, the session's cache or the
+    /// dataset's store, else learned now from its rows and kept in all three.
+    /// </summary>
     private async Task<AggregationPartial> PartialAsync(PositionedObject held, CancellationToken cancellationToken)
     {
         (LearnedFamily family, UInt128 key) = FamilyOf(held)!.Value;
         SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
-        if (!_dataset.Partials.TryGet(held.Entry.Uid, key, cache, out AggregationPartial partial))
+        IO.IObjectStore? store = _dataset.LearnedStore;
+        if (await _dataset.Partials.GetAsync(held.Entry.Uid, key, cache, store, cancellationToken).ConfigureAwait(false) is { } kept)
         {
-            partial = await InheritedAsync(held.Entry.Uid, family, key, 0, cancellationToken).ConfigureAwait(false)
-                ?? await family.LearnAsync(_familySource!, new RowRange(held.FirstRow, held.FirstRow + held.Entry.Rows), _options, cancellationToken)
-                    .ConfigureAwait(false);
-            _dataset.Partials.Keep(held.Entry.Uid, key, partial, cache);
+            return kept;
         }
 
+        AggregationPartial partial = await InheritedAsync(held.Entry.Uid, family, key, 0, cancellationToken).ConfigureAwait(false)
+            ?? await family.LearnAsync(_familySource!, new RowRange(held.FirstRow, held.FirstRow + held.Entry.Rows), _options, cancellationToken)
+                .ConfigureAwait(false);
+        _dataset.Partials.Keep(held.Entry.Uid, key, partial, cache, held.Entry.Bytes, store, family.Text);
         return partial;
     }
 
@@ -135,7 +140,7 @@ internal sealed partial class DatasetScanBuilder
     private async ValueTask<AggregationPartial?> InheritedAsync(UInt128 uid, LearnedFamily family, UInt128 key, int depth, CancellationToken cancellationToken)
     {
         SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
-        if (_dataset.Partials.TryGet(uid, key, cache, out AggregationPartial held))
+        if (await _dataset.Partials.GetAsync(uid, key, cache, _dataset.LearnedStore, cancellationToken).ConfigureAwait(false) is { } held)
         {
             return held;
         }

@@ -92,4 +92,49 @@ internal static class CommitKey
 
     /// <summary>The key of a rollup's object, of the form <c>rollups/&lt;uid&gt;.vxr</c>, the uid its 32 hex digits.</summary>
     public static string ForRollup(UInt128 uid) => RollupPrefix + uid.ToString("x32", CultureInfo.InvariantCulture) + RollupSuffix;
+
+    /// <summary>The prefix every learned partial's key starts with (spec H, 3.1).</summary>
+    public const string LearnedPrefix = "learned/";
+
+    /// <summary>The suffix every learned partial's key ends with.</summary>
+    public const string LearnedSuffix = ".vxp";
+
+    /// <summary>The name of a family's text among its partials.</summary>
+    public const string FamilyName = "family";
+
+    /// <summary>The prefix of the partials of <paramref name="family"/>: <c>learned/&lt;family&gt;/</c>.</summary>
+    public static string LearnedOf(UInt128 family) => LearnedPrefix + family.ToString("x32", CultureInfo.InvariantCulture) + "/";
+
+    /// <summary>The key of the partial of <paramref name="family"/> over the object <paramref name="uid"/>: <c>learned/&lt;family&gt;/&lt;uid&gt;.vxp</c>.</summary>
+    public static string ForLearned(UInt128 family, UInt128 uid) => LearnedOf(family) + uid.ToString("x32", CultureInfo.InvariantCulture) + LearnedSuffix;
+
+    /// <summary>The key of the text of <paramref name="family"/>, which says its keys, aggregates and filter.</summary>
+    public static string ForFamily(UInt128 family) => LearnedOf(family) + FamilyName;
+
+    /// <summary>The family and the object a learned partial's key names, and whether it names one; a family's text names its family alone.</summary>
+    public static bool TryParseLearned(string key, out UInt128 family, out UInt128? uid)
+    {
+        family = default;
+        uid = null;
+        if (!key.StartsWith(LearnedPrefix, StringComparison.Ordinal) || key.Length < LearnedPrefix.Length + 33 || key[LearnedPrefix.Length + 32] != '/'
+            || !UInt128.TryParse(key.AsSpan(LearnedPrefix.Length, 32), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out family))
+        {
+            return false;
+        }
+
+        ReadOnlySpan<char> name = key.AsSpan(LearnedPrefix.Length + 33);
+        if (name.SequenceEqual(FamilyName))
+        {
+            return true;
+        }
+
+        if (name.Length != 32 + LearnedSuffix.Length || !name.EndsWith(LearnedSuffix, StringComparison.Ordinal)
+            || !UInt128.TryParse(name[..32], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out UInt128 parsed))
+        {
+            return false;
+        }
+
+        uid = parsed;
+        return true;
+    }
 }

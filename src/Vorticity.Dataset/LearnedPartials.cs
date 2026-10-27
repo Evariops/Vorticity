@@ -1,36 +1,59 @@
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.IO.Hashing;
+using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Buffers;
+using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 
 /// <summary>
 /// The partials a dataset's handle learned of its objects, each of one family (<see cref="Aggregating.LearnedFamily"/>):
-/// kept in memory, under a budget of bytes, and in the session's synopsis cache when it has one, which keeps them for the
-/// handles and the processes after. An object never changes, so a partial of it stays exact as long as the object lives,
-/// under the identity its postscript carries.
+/// kept in memory, under a budget of bytes, in the session's synopsis cache when it has one, which keeps them for the
+/// handles and the processes after, and in the dataset's store, which keeps them for every node (spec H, 3). An object
+/// never changes, so a partial of it stays exact as long as the object lives, under the identity its postscript carries.
 /// </summary>
 /// <remarks>
-/// In the cache, a partial's bytes are followed by their XXH3-128, which a read checks: bytes torn on the disk are no
+/// In the cache and in the store, a partial's bytes are followed by their XXH3-128, which a read checks: bytes torn are no
 /// partial, and the object is read as rows again.
 /// </remarks>
 internal sealed class LearnedPartials
 {
-    /// <summary>The bytes the handle keeps in memory at most; past them, partials are kept in the cache alone.</summary>
+    /// <summary>The bytes the handle keeps in memory at most; past them, partials are kept in the cache and the store alone.</summary>
     internal const long Budget = 64L << 20;
 
     /// <summary>
-    /// The bytes of a partial kept at most: some 10⁴ groups of four measures. A family past them in an object, a column added
-    /// that holds too many values there, answers the question and is not kept.
+    /// The bytes of a partial kept at least, whatever its object's size: some 10⁴ groups of four measures. Past a sixty-fourth of
+    /// its object (<see cref="Cap"/>), a family's partial answers the question and is not kept.
     /// </summary>
     internal const int MaxBytes = 1 << 20;
 
+    /// <summary>The bytes of a partial read back at most, from the cache or the store: a sixty-fourth of an object of 16 GiB.</summary>
+    internal const int MostBytes = 256 << 20;
+
+    /// <summary>
+    /// The bytes a partial of an object of <paramref name="objectBytes"/> keeps at most (spec H, 3.3): a sixty-fourth of the
+    /// object, a mebibyte at least. Route by hour over an object of a day, ~70 MB of ~173 GB, is learned.
+    /// </summary>
+    internal static long Cap(long objectBytes) => Math.Min(Math.Max(MaxBytes, objectBytes / 64), MostBytes);
+
     private readonly ConcurrentDictionary<(UInt128 Object, UInt128 Family), AggregationPartial> _held = new();
     private long _bytes;
+
+    // Per family, the objects whose partial the store keeps and the bytes of each, from the one listing this handle made;
+    // and the listings on their way, shared by the questions that ask at once.
+    private readonly ConcurrentDictionary<UInt128, ConcurrentDictionary<UInt128, long>> _listed = new();
+    private readonly ConcurrentDictionary<UInt128, Task<ConcurrentDictionary<UInt128, long>>> _listing = new();
+
+    // The writes to the store on their way, which a flush waits for, and the families whose text this handle wrote.
+    private readonly List<Task> _writes = [];
+    private readonly ConcurrentDictionary<UInt128, bool> _described = new();
 
     // The families whose partial an object would hold past MaxBytes: their questions read its rows, learning nothing.
     private readonly ConcurrentDictionary<(UInt128 Object, UInt128 Family), bool> _tooLarge = new();
@@ -46,7 +69,7 @@ internal sealed class LearnedPartials
             return true;
         }
 
-        if (cache is null || !cache.TryReadSealed(NameOf(uid, family), MaxBytes + 16, out SegmentOwner owner))
+        if (cache is null || !cache.TryReadSealed(NameOf(uid, family), MostBytes + 16, out SegmentOwner owner))
         {
             return false;
         }
@@ -129,8 +152,11 @@ internal sealed class LearnedPartials
 
     private static string LineageName(UInt128 uid) => string.Create(CultureInfo.InvariantCulture, $"{uid:x32}-lineage");
 
-    /// <summary>The families the handle keeps up at most: those its questions asked last.</summary>
-    internal const int MaxLive = 16;
+    /// <summary>
+    /// The families the handle keeps up at most, those its questions asked last (spec H, 3.3): at some 1.5 ms of a core a
+    /// family for each object appended, about a tenth of a second an object.
+    /// </summary>
+    internal const int MaxLive = 64;
 
     // The families the handle's questions asked, by their identity, with when each was asked last: an object it appends learns
     // their partials as it is written (KeptUpAsync).
@@ -174,27 +200,172 @@ internal sealed class LearnedPartials
     /// <summary>Whether the handle holds the partial of family <paramref name="family"/> of the object <paramref name="uid"/> in memory.</summary>
     internal bool InMemory(UInt128 uid, UInt128 family) => _held.ContainsKey((uid, family));
 
-    /// <summary>Whether the handle or the cache holds the partial of family <paramref name="family"/> of the object <paramref name="uid"/>, with no read of it.</summary>
+    /// <summary>
+    /// Whether the handle, the cache or the store holds the partial of family <paramref name="family"/> of the object
+    /// <paramref name="uid"/>, with no read of it: the store as the family's listing said it (<see cref="ListAsync"/>).
+    /// </summary>
     internal bool Holds(UInt128 uid, UInt128 family, SynopsisCache? cache) =>
-        _held.ContainsKey((uid, family)) || cache?.HoldsSealed(NameOf(uid, family)) == true;
+        _held.ContainsKey((uid, family)) || cache?.HoldsSealed(NameOf(uid, family)) == true || Stored(uid, family);
 
-    /// <summary>Keeps <paramref name="partial"/>, of family <paramref name="family"/> of the object <paramref name="uid"/>, when it is no larger than <see cref="MaxBytes"/>.</summary>
-    internal void Keep(UInt128 uid, UInt128 family, AggregationPartial partial, SynopsisCache? cache)
+    /// <summary>
+    /// Reads, once for the handle, which objects' partials of <paramref name="family"/> <paramref name="store"/> keeps: a
+    /// listing of the family's prefix, which <see cref="Holds"/> and <see cref="GetAsync"/> read after (spec H, 3.2).
+    /// </summary>
+    internal async ValueTask ListAsync(IObjectStore store, UInt128 family, CancellationToken cancellationToken)
+    {
+        if (_listed.ContainsKey(family))
+        {
+            return;
+        }
+
+        // The listing this handle started, which every question of the family awaits.
+#pragma warning disable VSTHRD003
+        ConcurrentDictionary<UInt128, long> held = await _listing.GetOrAdd(family, f => ListedAsync(store, f)).WaitAsync(cancellationToken).ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+        _listed.TryAdd(family, held);
+    }
+
+    /// <summary>
+    /// The partial of family <paramref name="family"/> of the object <paramref name="uid"/>: from memory, the cache, or
+    /// <paramref name="store"/> as the family's listing names it, which the cache and the memory keep after; null when none
+    /// holds it.
+    /// </summary>
+    internal async ValueTask<AggregationPartial?> GetAsync(
+        UInt128 uid, UInt128 family, SynopsisCache? cache, IObjectStore? store, CancellationToken cancellationToken)
+    {
+        if (TryGet(uid, family, cache, out AggregationPartial held))
+        {
+            return held;
+        }
+
+        if (store is null || !_listed.TryGetValue(family, out ConcurrentDictionary<UInt128, long>? listed)
+            || !listed.TryGetValue(uid, out long length) || length is < 16 or > MostBytes + 16L)
+        {
+            return null;
+        }
+
+        byte[] bytes = GC.AllocateUninitializedArray<byte>((int)length);
+        try
+        {
+            ObjectRead read = await store.ReadAsync(CommitKey.ForLearned(family, uid), 0, bytes, null, cancellationToken).ConfigureAwait(false);
+            if (read.BytesRead != bytes.Length)
+            {
+                return null;
+            }
+        }
+        catch (ObjectNotFoundException)
+        {
+            // A vacuum took it since the listing.
+            listed.TryRemove(uid, out _);
+            return null;
+        }
+
+        ReadOnlySpan<byte> kept = bytes;
+        if (XxHash128.HashToUInt128(kept[..^16]) != ReadHash(kept[^16..]))
+        {
+            return null;
+        }
+
+        AggregationPartial partial = AggregationPartial.FromBytes(bytes.AsMemory(0, bytes.Length - 16));
+        Hold(uid, family, partial);
+        cache?.AdmitSealed(uid, NameOf(uid, family), bytes);
+        return partial;
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="partial"/>, of family <paramref name="family"/> of the object <paramref name="uid"/> of
+    /// <paramref name="objectBytes"/>, when it is no larger than <see cref="Cap"/>: in memory, in the cache, and in
+    /// <paramref name="store"/> under the family's <paramref name="text"/>, written in the background (spec H, 3.1).
+    /// </summary>
+    internal void Keep(UInt128 uid, UInt128 family, AggregationPartial partial, SynopsisCache? cache, long objectBytes, IObjectStore? store, string? text)
     {
         ReadOnlySpan<byte> bytes = partial.Bytes.Span;
-        if (bytes.Length > MaxBytes)
+        if (bytes.Length > Cap(objectBytes))
         {
             _tooLarge.TryAdd((uid, family), true);
             return;
         }
 
         Hold(uid, family, partial);
-        if (cache is not null)
+        if (cache is null && (store is null || text is null))
         {
-            byte[] kept = new byte[bytes.Length + 16];
-            bytes.CopyTo(kept);
-            WriteHash(kept.AsSpan(bytes.Length), XxHash128.HashToUInt128(bytes));
-            cache.AdmitSealed(uid, NameOf(uid, family), kept);
+            return;
+        }
+
+        byte[] kept = new byte[bytes.Length + 16];
+        bytes.CopyTo(kept);
+        WriteHash(kept.AsSpan(bytes.Length), XxHash128.HashToUInt128(bytes));
+        cache?.AdmitSealed(uid, NameOf(uid, family), kept);
+        if (store is not null && text is not null && !Stored(uid, family))
+        {
+            Task write = WriteAsync(store, uid, family, text, kept);
+            lock (_writes)
+            {
+                _writes.RemoveAll(static task => task.IsCompleted);
+                _writes.Add(write);
+            }
+        }
+    }
+
+    /// <summary>Waits for the partials on their way to the store: what a handle's disposal does, so that its learning outlives it.</summary>
+    internal async ValueTask FlushAsync()
+    {
+        Task[] writes;
+        lock (_writes)
+        {
+            writes = [.. _writes];
+            _writes.Clear();
+        }
+
+        await Task.WhenAll(writes).ConfigureAwait(false);
+    }
+
+    /// <summary>Whether the family's listing names the object's partial.</summary>
+    private bool Stored(UInt128 uid, UInt128 family) => _listed.TryGetValue(family, out ConcurrentDictionary<UInt128, long>? held) && held.ContainsKey(uid);
+
+    /// <summary>The objects whose partial of <paramref name="family"/> the store keeps, and their bytes; none when it lists none.</summary>
+    private static async Task<ConcurrentDictionary<UInt128, long>> ListedAsync(IObjectStore store, UInt128 family)
+    {
+        ConcurrentDictionary<UInt128, long> held = new();
+        try
+        {
+            await foreach (ObjectListing listing in store.ListAsync(CommitKey.LearnedOf(family), null, CancellationToken.None).ConfigureAwait(false))
+            {
+                if (CommitKey.TryParseLearned(listing.Key, out _, out UInt128? uid) && uid is { } stored)
+                {
+                    held[stored] = listing.Head.Length;
+                }
+            }
+        }
+        catch (ObjectStoreException)
+        {
+            // A store that lists nothing here: the questions answer from the rows, and learn.
+        }
+
+        return held;
+    }
+
+    /// <summary>Writes the partial to the store, the family's text first when this handle wrote none; a failure leaves it unkept there.</summary>
+    private async Task WriteAsync(IObjectStore store, UInt128 uid, UInt128 family, string text, byte[] kept)
+    {
+        try
+        {
+            if (_described.TryAdd(family, true))
+            {
+                await store.PutAsync(CommitKey.ForFamily(family), new ReadOnlySequence<byte>(Encoding.UTF8.GetBytes(text)), PutCondition.None, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
+            await store.PutAsync(CommitKey.ForLearned(family, uid), new ReadOnlySequence<byte>(kept), PutCondition.None, CancellationToken.None).ConfigureAwait(false);
+            if (_listed.TryGetValue(family, out ConcurrentDictionary<UInt128, long>? held))
+            {
+                held[uid] = kept.Length;
+            }
+        }
+        catch (Exception failure) when (failure is ObjectStoreException or IOException or NotSupportedException or UnauthorizedAccessException)
+        {
+            // The store keeps no partial: the next question of another node learns it again.
+            _described.TryRemove(family, out _);
         }
     }
 

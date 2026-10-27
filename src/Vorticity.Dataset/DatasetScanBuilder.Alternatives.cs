@@ -555,6 +555,12 @@ internal sealed partial class DatasetScanBuilder
         {
             if (Covered(held) > 0 && rollups?.CoverOf(held) is not >= 0)
             {
+                // The partials of the question's family the store keeps, listed once for the handle, which the choice weighs.
+                if (_family is not null && _dataset.LearnedStore is { } store && FamilyOf(held) is { } own)
+                {
+                    await _dataset.Partials.ListAsync(store, own.Key, cancellationToken).ConfigureAwait(false);
+                }
+
                 Planned unit = new Planned(held, answer is null ? null : AnsweredBy(answer, held));
                 Choose(unit, explain);
                 units.Add(unit);

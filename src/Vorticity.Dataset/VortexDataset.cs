@@ -1047,7 +1047,7 @@ public sealed class VortexDataset : IAsyncDisposable
                     lease ??= await RentAsync(entry, cancellationToken).ConfigureAwait(false);
                     AggregationPartial partial = await own.Family.LearnAsync(
                         new FileScanSource(lease.File), new RowRange(0, lease.File.RowCount), ScanOptions.Default, cancellationToken).ConfigureAwait(false);
-                    Partials.Keep(entry.Uid, own.Key, partial, cache);
+                    Partials.Keep(entry.Uid, own.Key, partial, cache, entry.Bytes, LearnedStore, own.Family.Text);
                 }
             }
             finally
@@ -2100,6 +2100,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>A task that completes when every object is closed.</returns>
     public async ValueTask DisposeAsync()
     {
+        // The partials learned and on their way to the store, which outlive the handle there.
+        await Partials.FlushAsync().ConfigureAwait(false);
         await LevelZero.DisposeAsync().ConfigureAwait(false);
         await _objects.DisposeAsync().ConfigureAwait(false);
         if (_store is SealedObjectStore sealedStore)
@@ -2864,8 +2866,14 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The synopses this handle read, its objects' column sheets, counts and sketches, by object and region (<see cref="ReadSynopsesAsync"/>).</summary>
     private readonly SynopsisMemo _synopses = new SynopsisMemo();
 
-    /// <summary>The partials this handle learned of its objects' families, kept in memory and in the session's cache (<see cref="LearnedPartials"/>).</summary>
+    /// <summary>The partials this handle learned of its objects' families, kept in memory, in the session's cache and in the store (<see cref="LearnedPartials"/>).</summary>
     internal LearnedPartials Partials { get; } = new LearnedPartials();
+
+    /// <summary>
+    /// The store the learned partials are kept in for every node (spec H, 3.1): the dataset's own, none for a store that
+    /// seals what it writes, as a rollup is not written there either.
+    /// </summary>
+    internal IObjectStore? LearnedStore => _store is SealedObjectStore { Seals: true } ? null : _store;
 
     /// <summary>The granules where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
     internal PredicatePages Predicates { get; } = new PredicatePages();

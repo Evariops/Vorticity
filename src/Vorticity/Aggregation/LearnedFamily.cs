@@ -37,7 +37,8 @@ internal sealed class LearnedFamily
         Conjuncts = conjuncts;
         Filter = GroupPredicates.And(null, [.. conjuncts]);
         Selection = selection;
-        Identity = IdentityOf(plan, Filter);
+        Text = TextOf(plan, Filter);
+        Identity = System.IO.Hashing.XxHash128.HashToUInt128(Encoding.UTF8.GetBytes(Text));
         Added = added;
     }
 
@@ -81,8 +82,15 @@ internal sealed class LearnedFamily
     /// <summary>The groups of the values the question asks, on a partial's keys by their places; null when the family adds no key.</summary>
     internal VortexExpr? Selection { get; }
 
-    /// <summary>What tells the family from every other: the XXH3-128 of its keys, aggregates and filter, written alike for alike.</summary>
+    /// <summary>What tells the family from every other: the XXH3-128 of its <see cref="Text"/>.</summary>
     internal UInt128 Identity { get; }
+
+    /// <summary>
+    /// The family's keys, aggregates and filter as a text, written alike for alike: a line a key, its path and type, a line an
+    /// aggregate, its kind and input, then the filter; what a store keeps beside its partials, for the families of other nodes
+    /// to be found by (spec H, 3.5).
+    /// </summary>
+    internal string Text { get; }
 
     /// <summary>The keys the family adds to the question's.</summary>
     internal int Added { get; }
@@ -149,8 +157,8 @@ internal sealed class LearnedFamily
         return new LearnedFamily(family, all, [.. rest], GroupPredicates.And(null, kept), all.Length - plan.Keys.Length);
     }
 
-    /// <summary>The XXH3-128 of the family's keys, its aggregates and its filter, each as its canonical text.</summary>
-    private static UInt128 IdentityOf(AggregationPlan plan, VortexExpr? filter)
+    /// <summary>The family's keys, its aggregates and its filter, each as its canonical text.</summary>
+    private static string TextOf(AggregationPlan plan, VortexExpr? filter)
     {
         StringBuilder text = new StringBuilder();
         foreach (ColumnShape key in plan.Keys)
@@ -164,7 +172,7 @@ internal sealed class LearnedFamily
         }
 
         text.Append("filter ").Append(filter is null ? string.Empty : ExprText.Format(filter));
-        return System.IO.Hashing.XxHash128.HashToUInt128(Encoding.UTF8.GetBytes(text.ToString()));
+        return text.ToString();
     }
 
     /// <summary>
