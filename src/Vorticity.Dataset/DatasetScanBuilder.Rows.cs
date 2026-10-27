@@ -436,16 +436,17 @@ internal sealed partial class DatasetScanBuilder
     /// read once per object and scan, before the first such scan: those <paramref name="marks"/> brings, read beside the
     /// open, or through the file, whose tail serves them. Null when the object keeps none, or when it is so small that
     /// a request reads it whole for what one costs at the store's profile (spec C, 6): its granules could spare no request.
+    /// A count reads the filter's columns alone, and their marks alone (<paramref name="judged"/>).
     /// </summary>
     private async ValueTask GeometryAsync(
-        VortexFile file, PositionedObject held, Task<Indexes.ColumnMarks?[]>? marks, CancellationToken cancellationToken)
+        VortexFile file, PositionedObject held, Task<Indexes.ColumnMarks?[]>? marks, CancellationToken cancellationToken, bool judged = false)
     {
         if (!WantsGeometry(held))
         {
             return;
         }
 
-        int[] fields = FieldsRead();
+        int[] fields = judged ? FieldsJudged() : FieldsRead();
         Indexes.ColumnMarks?[] read = await (marks ?? _dataset.ReadMarksAsync(held.Entry, fields, cancellationToken, file).AsTask()).ConfigureAwait(false);
         Indexes.ColumnMarks?[] byField = new Indexes.ColumnMarks?[_version.Schema.DType.IsDefault ? 0 : _version.Schema.DType.FieldCount];
         for (int i = 0; i < fields.Length; i++)
@@ -459,15 +460,14 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// Whether the marks of the columns the scan reads of the object <paramref name="held"/> lie in the tail an open of it
-    /// reads, from a 64-byte boundary (<see cref="IO.ObjectStoreSource.TailBytes"/>): the open's tail serves them.
+    /// reads (<see cref="PathCosts.InOpen"/>): the open's tail serves them.
     /// </summary>
     private bool MarksInOpenTail(in PositionedObject held)
     {
         IReadOnlyList<Indexes.IndexSegment> marks = held.Entry.Contents!.Marks;
-        long tail = Math.Max(0, held.Entry.Bytes - IO.ObjectStoreSource.TailBytes) & ~((long)VortexLimits.MaxAlignment - 1);
         foreach (int field in FieldsRead())
         {
-            if (field < marks.Count && (long)marks[field].Offset < tail)
+            if (field < marks.Count && !PathCosts.InOpen(held.Entry, marks[field]))
             {
                 return false;
             }

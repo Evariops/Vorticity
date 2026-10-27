@@ -49,8 +49,10 @@ public sealed partial class DatasetPlanAlternativesTests
     }
 
     /// <summary>
-    /// One question over one dataset of four tenants' objects, read through three profiles of the store (B1): the requests
-    /// the remote one joins across gaps under its 256 KiB, the local disk's across 4 KiB, memory's never; the answers equal.
+    /// One question over one dataset of four tenants, sorted by the tenant, read through three profiles of the store (B1):
+    /// the granules of one tenant read apart where a request costs less than the bytes it spares, memory's, and the chunks
+    /// they lie in read whole where it costs more, the remote one's and, for chunks this small, the local disk's: as
+    /// requests get cheaper, more of them and fewer bytes; the answers equal.
     /// </summary>
     [Fact]
     public async Task TheStoresProfileSetsTheRangesAReadJoins()
@@ -59,7 +61,7 @@ public sealed partial class DatasetPlanAlternativesTests
         Random random = new Random(0x0C3);
         await using (VortexDataset writing = await VortexDataset.CreateAsync(memory, Tenanted.Schema, new DatasetOptions
         {
-            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Tenanted.Tenant)), SortKey = [LayoutValue.Column(nameof(Tenanted.Tenant)), LayoutValue.Column(nameof(Tenanted.At))], IndexedPrefix = 1, Organization = LayoutOrganization.Leveled },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Tenanted.Tenant)), LayoutValue.Column(nameof(Tenanted.At))], IndexedPrefix = 1 },
         }, Ct))
         {
             for (int part = 0; part < 4; part++)
@@ -90,7 +92,8 @@ public sealed partial class DatasetPlanAlternativesTests
 
         Console.WriteLine($"PROFILES: {string.Join("; ", seen.Select(static s => $"{s.Reads} reads, {s.Bytes:N0} bytes, {s.Answer} rows"))}");
         Assert.All(seen, s => Assert.Equal(seen[0].Answer, s.Answer));
-        Assert.True(seen[0].Reads < seen[1].Reads && seen[1].Reads <= seen[2].Reads, "the joined ranges follow the profile");
+        Assert.True(seen[0].Reads <= seen[1].Reads && seen[1].Reads <= seen[2].Reads && seen[0].Reads < seen[2].Reads, "cheaper requests, more of them");
+        Assert.True(seen[0].Bytes >= seen[1].Bytes && seen[1].Bytes >= seen[2].Bytes && seen[0].Bytes > seen[2].Bytes, "and fewer bytes");
     }
 
     /// <summary>

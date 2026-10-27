@@ -2949,7 +2949,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal CostProfile Profile => _options.CostProfile ?? _store.CostProfile;
 
     /// <summary>What a path costs an object, at <see cref="Profile"/>: a region this handle's memo holds is in memory, one the session's cache holds on its disk.</summary>
-    internal PathCosts Costs => _costs ??= new PathCosts(Profile, _options.ChunkBytes, Resident);
+    internal PathCosts Costs => _costs ??= new PathCosts(Profile, _options.ChunkBytes, Resident, _options.Write.BlockRows);
 
     private PathCosts? _costs;
 
@@ -3741,67 +3741,79 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// The sparse index of the object <paramref name="entry"/> names, every page in hand, read with no open of the object and
-    /// kept on its table of contents: its table, then its pages in one request, some fifty kilobytes for an object of a
-    /// gibibyte; none once they are held. Null when the object keeps none, or what was read does not decode.
+    /// The sparse index of the object <paramref name="entry"/> names, every page in hand, kept on its table of contents: its
+    /// table, then its pages in one request, some fifty kilobytes for an object of a gibibyte; none once they are held. Read
+    /// through <paramref name="opened"/>, the object's open, whose tail serves what it holds; with no open of the object
+    /// otherwise. Null when the object keeps none, or what was read does not decode.
     /// </summary>
     internal async ValueTask<Indexes.GranuleKeys?> KeyIndexAsync(
-        ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken)
+        ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken, ISegmentReader? opened = null)
     {
         if (contents.KeyIndex is not { } table)
         {
             return null;
         }
 
-        Indexes.GranuleKeys? keys = contents.Keys;
-        if (keys is { HoldsEvery: true })
+        if (contents.Keys is { HoldsEvery: true } held)
         {
-            return keys;
+            return held;
+        }
+
+        if (opened is not null)
+        {
+            return await KeysThroughAsync(opened, contents, table, cancellationToken).ConfigureAwait(false);
         }
 
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))
         {
-            ISegmentReader reader = Footerless(source, entry, contents);
-            if (keys is null)
-            {
-                using Buffers.SegmentOwner bytes = await reader.ReadAsync(SpecOf(table), cancellationToken).ConfigureAwait(false);
-                if (!table.Holds(bytes.Buffer.Span) || Indexes.GranuleKeys.From(bytes.Buffer.Span) is not { } read)
-                {
-                    return null;
-                }
+            return await KeysThroughAsync(Footerless(source, entry, contents), contents, table, cancellationToken).ConfigureAwait(false);
+        }
+    }
 
-                keys = contents.KeepKeys(read);
-            }
-
-            if (keys.HoldsEvery)
-            {
-                return keys;
-            }
-
-            if (contents.KeyPages is not { } pages)
+    /// <summary><see cref="KeyIndexAsync"/>'s reads through <paramref name="reader"/>: the table of <paramref name="contents"/>'s sparse index, unless held, then its pages.</summary>
+    private static async ValueTask<Indexes.GranuleKeys?> KeysThroughAsync(
+        ISegmentReader reader, Indexes.ObjectContents contents, Indexes.IndexSegment table, CancellationToken cancellationToken)
+    {
+        Indexes.GranuleKeys? keys = contents.Keys;
+        if (keys is null)
+        {
+            using Buffers.SegmentOwner bytes = await reader.ReadAsync(SpecOf(table), cancellationToken).ConfigureAwait(false);
+            if (!table.Holds(bytes.Buffer.Span) || Indexes.GranuleKeys.From(bytes.Buffer.Span) is not { } read)
             {
                 return null;
             }
 
-            using Buffers.SegmentOwner held = await reader.ReadAsync(SpecOf(pages), cancellationToken).ConfigureAwait(false);
-            ReadOnlySpan<byte> all = held.Buffer.Span;
-            if (!pages.Holds(all))
-            {
-                return null;
-            }
+            keys = contents.KeepKeys(read);
+        }
 
-            for (int page = 0; page < keys.Pages; page++)
-            {
-                (long offset, int length, ulong _) = keys.PageAt(page);
-                if (!keys.HasPage(page) && (offset + length > all.Length || !keys.TakePage(page, all.Slice((int)offset, length))))
-                {
-                    return null;
-                }
-            }
-
+        if (keys.HoldsEvery)
+        {
             return keys;
         }
+
+        if (contents.KeyPages is not { } pages)
+        {
+            return null;
+        }
+
+        using Buffers.SegmentOwner held = await reader.ReadAsync(SpecOf(pages), cancellationToken).ConfigureAwait(false);
+        ReadOnlySpan<byte> all = held.Buffer.Span;
+        if (!pages.Holds(all))
+        {
+            return null;
+        }
+
+        for (int page = 0; page < keys.Pages; page++)
+        {
+            (long offset, int length, ulong _) = keys.PageAt(page);
+            if (!keys.HasPage(page) && (offset + length > all.Length || !keys.TakePage(page, all.Slice((int)offset, length))))
+            {
+                return null;
+            }
+        }
+
+        return keys;
 
         static Serialization.Schemas.SegmentSpec SpecOf(Indexes.IndexSegment region) =>
             new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0);

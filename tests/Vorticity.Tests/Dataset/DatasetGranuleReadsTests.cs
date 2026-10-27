@@ -120,6 +120,92 @@ public sealed partial class DatasetGranuleReadsTests
     }
 
     /// <summary>
+    /// A day of calls sorted by the service then the instant, merged and consolidated into one object whose instant is one
+    /// chunk: a count of one service over twelve hours, by a cold handle, reads the granules its key's sparse index keeps,
+    /// under a tenth of the object, its open's tail the most of it, where it read the instant's column whole, three quarters
+    /// of it; the plan, analyzed, prices the part of the object a read of those rows takes, within half and twice what a cold
+    /// read takes; every answer is LINQ's.
+    /// </summary>
+    [Fact]
+    public async Task ACountReadsTheGranulesItsKeyKeeps()
+    {
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        (VortexDataset dataset, Call[] calls) = await CallsAsync(store);
+        DateTime from = Start.AddHours(6);
+        DateTime to = Start.AddHours(18);
+        await using (dataset)
+        {
+            PositionedObject held = await dataset.ScanBuilder().ObjectsAsync(Ct).SingleAsync(Ct);
+            Assert.Equal(1, held.Entry.Contents!.ColumnChunks[0]);
+            Call[] expected = [.. calls.Where(c => c.Service == "svc-07" && c.At >= from && c.At < to).OrderBy(static c => c.At)];
+
+            await using (VortexDataset cold = await VortexDataset.OpenAsync(store, cancellationToken: Ct))
+            {
+                store.Reset();
+                Assert.Equal(expected.Length, await Asked(cold).CountAsync(Ct));
+                Console.WriteLine($"COUNT: {store.CountOf(ObjectOperation.Read)} reads, {store.BytesRead} bytes of an object of {held.Entry.Bytes}");
+                Assert.True(store.BytesRead < held.Entry.Bytes / 10, $"{store.BytesRead} bytes of {held.Entry.Bytes}");
+            }
+
+            ScanPlan plan = await Asked(dataset).ExplainAsync(analyze: true, Ct);
+            await using (VortexDataset cold = await VortexDataset.OpenAsync(store, cancellationToken: Ct))
+            {
+                store.Reset();
+                List<Call> read = await Asked(cold).ToRecordsAsync(Ct).ToListAsync(Ct);
+                Console.WriteLine($"ROWS: {plan.Units.Single().Detail}; {store.CountOf(ObjectOperation.Read)} reads, {store.BytesRead} bytes");
+                Assert.Equal(expected, read);
+                Assert.InRange(plan.Cost!.Bytes, store.BytesRead / 2, store.BytesRead * 2);
+            }
+        }
+
+        Scan<Call> Asked(VortexDataset handle) => handle.Scan<Call>().Where(c => c.Service == "svc-07" && c.At >= from && c.At < to);
+    }
+
+    /// <summary>
+    /// A day of 384 000 calls, one every 225 ms, of forty services, sorted by the service then the instant, its sparse index on
+    /// the service alone, appended in eight parts, merged and consolidated: one object.
+    /// </summary>
+    private static async Task<(VortexDataset Dataset, Call[] Calls)> CallsAsync(IObjectStore store)
+    {
+        Random random = new Random(11);
+        Call[] calls = [.. Enumerable.Range(0, 384_000).Select(i => new Call(
+            Start.AddMilliseconds(i * 225L), $"svc-{random.Next(40):D2}", random.Next(50) == 0 ? (short)500 : (short)200, Math.Round(random.NextDouble() * 200, 1)))];
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Day),
+                SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))],
+                IndexedPrefix = 1,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+        }, Ct);
+        try
+        {
+            for (int part = 0; part < 8; part++)
+            {
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Call>(calls[(part * 48_000)..((part + 1) * 48_000)], Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+
+            while (await dataset.CompactAsync(cancellationToken: Ct) is not null)
+            {
+            }
+
+            await dataset.ConsolidateAsync(Ct);
+            return (dataset, calls);
+        }
+        catch
+        {
+            await dataset.DisposeAsync();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// A day of 600 000 rows, a row every 37 ms, sorted by the service then the instant, appended in two halves, merged and
     /// consolidated: one object, and the index of its partition when <paramref name="identifiers"/> names one.
     /// </summary>
@@ -167,4 +253,7 @@ public sealed partial class DatasetGranuleReadsTests
 
     [VortexRecord]
     public partial record struct Row(int Day, string Service, DateTime At, long Sequence, double Value);
+
+    [VortexRecord]
+    public partial record struct Call(DateTime At, string Service, short Status, double LatencyMs);
 }

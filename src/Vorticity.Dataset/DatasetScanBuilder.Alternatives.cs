@@ -118,6 +118,9 @@ internal sealed partial class DatasetScanBuilder
         /// <summary>Its weight, at the dataset's cost profile.</summary>
         internal double Weight { get; set; }
 
+        /// <summary>The share of its rows its key's sparse index keeps, which a read of its rows takes alone; 1 when unknown.</summary>
+        internal double Kept { get; set; } = 1;
+
         /// <summary>Each other alternative and why it lost, for an explanation; null for a run.</summary>
         internal List<string>? Rejected { get; set; }
 
@@ -359,10 +362,10 @@ internal sealed partial class DatasetScanBuilder
                 ? Coverage.Part
                 : Coverage.None;
 
-        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held);
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
 
         internal override string Describe(Planned unit, PathCosts.Cost cost) =>
-            $"its rows, {cost.Bytes} bytes in {cost.Requests} requests, the blocks its zone maps settle taken from them";
+            $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests, the blocks its zone maps settle taken from them";
     }
 
     /// <summary>An object's rows: those of the question's columns, or, for an object that learns its family's partial, the family's.</summary>
@@ -370,13 +373,17 @@ internal sealed partial class DatasetScanBuilder
     {
         internal override Coverage Covers(Planned unit) => Coverage.Whole;
 
-        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held);
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held, unit.Kept);
 
         internal override string Describe(Planned unit, PathCosts.Cost cost) =>
             Scan.Learns(unit.Held)
                 ? $"its rows, {cost.Bytes} bytes in {cost.Requests} requests, the partial of the question's family learned from them"
-                : $"its rows, {cost.Bytes} bytes in {cost.Requests} requests";
+                : $"{RowsOf(unit)}, {cost.Bytes} bytes in {cost.Requests} requests";
     }
+
+    /// <summary>What a unit read as rows reads of them: all, or the granules its key's sparse index keeps.</summary>
+    private static string RowsOf(Planned unit) =>
+        unit.Kept < 1 ? string.Create(CultureInfo.InvariantCulture, $"the {unit.Kept:P1} of its rows its key's index keeps") : "its rows";
 
     /// <summary>The alternatives of a unit, in the order that breaks a tie: today's cascade (spec B, 6.3).</summary>
     private Alternative[] Alternatives => _alternatives ??=
@@ -458,15 +465,17 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// What reading the rows of the object <paramref name="held"/> costs the scan: the question's columns, or the family's for
     /// an object that learns its partial, each value decoded, the filter's columns judged, and, under an aggregation, each
-    /// value of the columns read folded; and its sheets, read first when the filter asks values of a column.
+    /// value of the columns read folded; and its sheets, read first when the filter asks values of a column. Of an object
+    /// that learns no partial, the <paramref name="kept"/> share of its rows its key's sparse index keeps alone.
     /// </summary>
-    private PathCosts.Cost RowsCost(in PositionedObject held)
+    private PathCosts.Cost RowsCost(in PositionedObject held, double kept = 1)
     {
         PathCosts costs = _version.Costs;
         bool learns = _states is not null && Learns(held);
         int[] fields = learns ? FamilyFields() : FieldsRead();
-        PathCosts.Cost rows = costs.Rows(held.Entry, fields);
-        double processing = costs.Processing(held.Entry, default, FieldsJudged(), _states is not null || _settles is not null ? fields.Length : 0);
+        double share = learns ? 1 : Math.Clamp(kept, 0, 1);
+        PathCosts.Cost rows = share < 1 ? costs.Share(held.Entry, fields, share) : costs.Rows(held.Entry, fields);
+        double processing = share * costs.Processing(held.Entry, default, FieldsJudged(), _states is not null || _settles is not null ? fields.Length : 0);
         return rows with { Nanoseconds = rows.Nanoseconds + processing } + SheetsCost(held);
     }
 
@@ -493,20 +502,23 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// Whether the scan reads the sparse index of the object <paramref name="held"/> to pass over the granules its filter
     /// refutes (spec B, 5): it keeps one, and reading it weighs less than the rows of the question's columns it may spare,
-    /// all but what a read of any of its granules pays, the object's open and a chunk of each column: nothing of an object
-    /// its open reads whole, or whose columns are a chunk each.
+    /// all but what a read of any of its granules pays, the object's open and a granule of each column, or a chunk where
+    /// the object keeps no marks: nothing of an object its open reads whole, nor of one of a granule. An index in the tail
+    /// the open reads costs nothing past that open, which the read of its granules pays.
     /// </summary>
     internal bool ReadsKeyIndex(in PositionedObject held)
     {
-        if (held.Entry.Contents is not { KeyIndex: { } index })
+        if (held.Entry.Contents is not { KeyIndex: { } index } || held.Entry.PhysicalRows <= _dataset.Options.Write.BlockRows)
         {
             return false;
         }
 
+        // What it may spare the store, the bytes and requests of the rows its granules leave out, their decoding aside.
         PathCosts costs = _version.Costs;
         int[] fields = FieldsRead();
-        double spared = costs.Weight(costs.Rows(held.Entry, fields)) - costs.Weight(costs.Share(held.Entry, fields, double.Epsilon));
-        return costs.Weight(costs.Regions(held.Entry.Uid, [index])) < spared;
+        double spared = costs.Weight(costs.Rows(held.Entry, fields) with { Nanoseconds = 0 })
+            - costs.Weight(costs.Share(held.Entry, fields, double.Epsilon) with { Nanoseconds = 0 });
+        return (PathCosts.InOpen(held.Entry, index) ? 0 : costs.Weight(costs.Regions(held.Entry.Uid, [index]))) < spared;
     }
 
     /// <summary>The columns whose sheets the walk reads, when the filter asks values of a column; null otherwise. Found once.</summary>
@@ -572,7 +584,8 @@ internal sealed partial class DatasetScanBuilder
         await foreach (PositionedObject held in _version.WalkAsync(
             Pruner(), _from, _to, read && _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers).ConfigureAwait(false))
         {
-            if (keys is not null && KeyRefutes(keys, held, out _))
+            ReadOnlyMemory<byte> first = default;
+            if (keys is not null && KeyRefutes(keys, held, out first))
             {
                 if (read && _considers && _metrics is { } skipped)
                 {
@@ -602,6 +615,22 @@ internal sealed partial class DatasetScanBuilder
 
                 Planned unit = new Planned(held, answer is null ? null : AnsweredBy(answer, held));
                 Choose(unit, explain);
+
+                // The share of its rows its key's sparse index keeps, which a read of them takes alone: found when so narrow
+                // a read could beat the choice, through the open an analysis makes anyway, or as the handle holds it.
+                if (keys is not null && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon))
+                    && await KeptGranulesAsync(held, keys, first, read, cancellationToken).ConfigureAwait(false) is ({ } ranges, { } kept))
+                {
+                    long rows = 0;
+                    foreach ((int from, int end) in ranges)
+                    {
+                        rows += Math.Min((long)end * kept.GranuleRows, kept.Rows) - ((long)from * kept.GranuleRows);
+                    }
+
+                    unit.Kept = (double)rows / Math.Max(kept.Rows, 1);
+                    Choose(unit, explain);
+                }
+
                 units.Add(unit);
             }
         }

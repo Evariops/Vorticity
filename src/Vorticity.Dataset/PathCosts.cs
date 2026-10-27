@@ -18,12 +18,15 @@ namespace Vorticity.Dataset;
 /// <param name="profile">The dataset's cost profile.</param>
 /// <param name="chunkBytes">The bytes of a column's chunk in an object whose contents count none.</param>
 /// <param name="residence">The tier a cache holds an object's region at, by the object's uid; null when none does.</param>
-internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt128, IndexSegment, CostTier?>? residence = null)
+/// <param name="granuleRows">The rows of a granule, the writer's block, which an object that keeps its marks is read a part of by.</param>
+internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt128, IndexSegment, CostTier?>? residence = null, int granuleRows = 8_192)
 {
     /// <summary>The bytes an open of an object reads first, from its end.</summary>
     private const long OpenTailBytes = ObjectStoreSource.TailBytes;
 
     private readonly long _chunkBytes = Math.Max(chunkBytes, 1);
+
+    private readonly long _granuleRows = Math.Max(granuleRows, 1);
 
     /// <summary>The profile the paths are priced at.</summary>
     internal CostProfile Profile => profile;
@@ -193,9 +196,10 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
 
     /// <summary>
     /// Reading the rows of <paramref name="fields"/> of the object <paramref name="entry"/> names in a run of
-    /// <paramref name="share"/> of its rows: its open and its columns' object dictionaries, then of each column the chunks the
-    /// run lies in, as many as the share of its chunks and one more that it starts inside, all of them at most; nothing for
-    /// no share.
+    /// <paramref name="share"/> of its rows: its open and its columns' object dictionaries, then of each column the units the
+    /// run lies in, as many as the share of its units and one more that it starts inside, all of them at most; nothing for
+    /// no share. A column's unit is its granule when the object keeps its marks and is worth more than a request, as a
+    /// scan reads a part of a chunk (spec C, 2), the chunk read whole past three quarters of it; its chunk otherwise.
     /// </summary>
     internal Cost Share(ObjectEntry entry, ReadOnlySpan<int> fields, double share)
     {
@@ -210,22 +214,27 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
             return Rows(entry, fields);
         }
 
-        // Of each column, the share of its chunks the run lies in, and one it starts inside: the reads past the open, so
+        // Of each column, the share of its units the run lies in, and one it starts inside: the reads past the open, so
         // weighted by the columns' bytes.
         IReadOnlyList<long>? chunks = entry.Contents?.ColumnChunks;
+        long granules = Granules(entry);
         double total = 0;
         double touched = 0;
+        int read = 0;
         foreach (int field in fields)
         {
             if (field < columns.Count)
             {
-                double count = ChunksOf(columns, chunks, field);
+                read++;
+                double count = granules > 0 ? granules : ChunksOf(columns, chunks, field);
+                double run = Math.Min(1, ((share * count) + 1) / count);
                 total += columns[field];
-                touched += columns[field] * Math.Min(1, ((share * count) + 1) / count);
+                touched += columns[field] * (granules > 0 && run > GranulePlans.WholeShare ? 1 : run);
             }
         }
 
-        // The columns' reads past the open at that share, and their dictionaries whole, apart.
+        // The columns' reads past the open at that share, a request a column at least when it reads granules, and their
+        // dictionaries whole, apart.
         double part = total > 0 ? touched / total : 1;
         Cost whole = Read(entry, fields, dictionaries: false);
         Span<int> sorted = fields.Length <= 64 ? stackalloc int[fields.Length] : new int[fields.Length];
@@ -233,8 +242,17 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         sorted.Sort();
         Cost dictionaries = Dictionaries(entry, sorted);
         long open = OpenBytes(entry);
-        return new Cost(1 + (int)Math.Ceiling((whole.Requests - 1) * part), open + (long)((whole.Bytes - open) * part), 0, whole.Nanoseconds * share) + dictionaries;
+        int requests = 1 + (int)Math.Ceiling((whole.Requests - 1) * part);
+        return new Cost(granules > 0 ? Math.Max(requests, 1 + read) : requests, open + (long)((whole.Bytes - open) * part), 0, whole.Nanoseconds * share) + dictionaries;
     }
+
+    /// <summary>
+    /// The granules a part of each column of the object <paramref name="entry"/> names is read by: its rows over a granule's,
+    /// when it keeps the marks of its columns and is larger than what a request is worth, as a scan reads the geometry of no
+    /// smaller one; 0 when its chunks are read whole.
+    /// </summary>
+    private long Granules(ObjectEntry entry) =>
+        entry.Contents is { Marks.Count: > 0 } && entry.Bytes > profile.RequestBytes ? (entry.PhysicalRows + _granuleRows - 1) / _granuleRows : 0;
 
     /// <summary>
     /// The bytes an open of the object <paramref name="entry"/> names reads from its end: the first read's, or its footer's
@@ -245,6 +263,9 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         long window = Math.Max(OpenTailBytes, entry.FooterBytes);
         return entry.Bytes <= window ? entry.Bytes : window + ((entry.Bytes - window) & (VortexLimits.MaxAlignment - 1));
     }
+
+    /// <summary>Whether <paramref name="region"/> of the object <paramref name="entry"/> names lies in the bytes its open reads (<see cref="OpenBytes"/>): the open serves it.</summary>
+    internal static bool InOpen(ObjectEntry entry, IndexSegment region) => (long)region.Offset >= entry.Bytes - OpenBytes(entry);
 
 
     /// <summary>

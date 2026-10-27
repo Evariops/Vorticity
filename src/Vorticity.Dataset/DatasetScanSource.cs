@@ -519,16 +519,13 @@ internal sealed partial class DatasetScanSource
             return kept;
         }
 
-        if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: not null } contents || !planner.ReadsKeyIndex(held)
-            || await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false) is not { } keys
-            || keys.Rows != held.Entry.PhysicalRows)
+        if (await planner.KeptGranulesAsync(held, pruning, first, read: true, cancellationToken).ConfigureAwait(false) is not ({ } ranges, { } keys))
         {
             kept.Add(rows);
             return kept;
         }
 
-        int prefix = _version.Schema.Partitioned ? _version.Schema.Tree!.PrefixLength(first.Span, 1) : 0;
-        foreach ((int from, int end) in pruning.Granules(keys, prefix > 0 ? first.Span[..prefix] : default))
+        foreach ((int from, int end) in ranges)
         {
             long start = System.Math.Max(rows.Start, held.FirstRow + ((long)from * keys.GranuleRows));
             long stop = System.Math.Min(rows.End, held.FirstRow + System.Math.Min((long)end * keys.GranuleRows, keys.Rows));

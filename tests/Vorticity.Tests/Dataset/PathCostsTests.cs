@@ -58,10 +58,34 @@ public sealed partial class PathCostsTests
         Assert.Equal((3, open + 105_000), Read(costs.Share(entry, [0], 0.1)));
     }
 
+    /// <summary>
+    /// A run of a share of the rows of an object that keeps its columns' marks reads, of each column, the granules it lies in
+    /// and one more it starts inside, a request a column at least, as a scan reads a part of a chunk: of 100 000 rows, 13
+    /// granules of 8 192, a hundredth reads 1.13 of them; past three quarters of a column, its chunk whole. An object that
+    /// keeps no marks reads its chunks whole.
+    /// </summary>
+    [Fact]
+    public void AShareOfAnObjectThatKeepsItsMarksReadsItsGranules()
+    {
+        PathCosts costs = new PathCosts(CostProfile.Remote, 1 << 20, granuleRows: 8_192);
+        ObjectEntry marked = Entry([100_000, 50_000, 30_000], [1, 1, 1], [0, 0, 0], marks: true);
+        long open = PathCosts.OpenBytes(marked);
+        Assert.Equal((2, open + 8_692), Read(costs.Share(marked, [0], 0.01)));
+        Assert.Equal((3, open + 15_646), Read(costs.Share(marked, [0, 2], 0.01)));
+        Assert.Equal((2, open + 100_000), Read(costs.Share(marked, [0], 0.9)));
+
+        ObjectEntry unmarked = Entry([100_000, 50_000, 30_000], [1, 1, 1], [0, 0, 0]);
+        Assert.Equal((2, open + 100_000), Read(costs.Share(unmarked, [0], 0.01)));
+    }
+
     private static (int Requests, long Bytes) Read(PathCosts.Cost cost) => (cost.Requests, cost.Bytes);
 
-    /// <summary>An object of three columns of <paramref name="columns"/> bytes in <paramref name="chunks"/> chunks, each written against a dictionary of the bytes <paramref name="dictionaries"/> says, none for 0.</summary>
-    private static ObjectEntry Entry(long[] columns, long[] chunks, long[] dictionaries)
+    /// <summary>
+    /// An object of three columns of <paramref name="columns"/> bytes in <paramref name="chunks"/> chunks, each written
+    /// against a dictionary of the bytes <paramref name="dictionaries"/> says, none for 0; with <paramref name="marks"/>,
+    /// the marks of its columns kept.
+    /// </summary>
+    private static ObjectEntry Entry(long[] columns, long[] chunks, long[] dictionaries, bool marks = false)
     {
         ColumnDictionary?[] held = new ColumnDictionary?[dictionaries.Length];
         for (int field = 0; field < held.Length; field++)
@@ -79,6 +103,7 @@ public sealed partial class PathCostsTests
             ColumnBytes = columns,
             ColumnChunks = chunks,
             Dictionaries = held,
+            Marks = marks ? [new IndexSegment(1_000, 100, 0), new IndexSegment(1_100, 100, 0), new IndexSegment(1_200, 100, 0)] : [],
         };
         return new ObjectEntry("data/a.vortex", 7, 100_000, 50_000_000, 11, (ObjectSummaries?)null).WithFooterBytes(8_000).WithTableOfContents(contents.ToBytes());
     }

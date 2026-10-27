@@ -806,7 +806,6 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<PositionedObject> KeyPrunedAsync(
         IAsyncEnumerable<PositionedObject> walk, KeyPruning pruning, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        DatasetSchema schema = _version.Schema;
         await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             if (KeyRefutes(pruning, held, out ReadOnlyMemory<byte> first))
@@ -819,16 +818,12 @@ internal sealed partial class DatasetScanBuilder
                 continue;
             }
 
-            if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: not null } contents || !ReadsKeyIndex(held)
-                || await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false) is not { } keys
-                || keys.Rows != held.Entry.PhysicalRows)
+            if (await KeptGranulesAsync(held, pruning, first, read: true, cancellationToken).ConfigureAwait(false) is not ({ } ranges, { } keys))
             {
                 yield return held;
                 continue;
             }
 
-            int prefix = schema.Partitioned && !first.IsEmpty ? schema.Tree!.PrefixLength(first.Span, 1) : 0;
-            List<(int First, int End)> ranges = pruning.Granules(keys, prefix > 0 ? first.Span[..prefix] : default);
             int kept = 0;
             foreach ((int from, int end) in ranges)
             {
@@ -854,6 +849,52 @@ internal sealed partial class DatasetScanBuilder
                     Granules = new RowRange((long)from * keys.GranuleRows, Math.Min((long)end * keys.GranuleRows, keys.Rows)),
                 };
             }
+        }
+    }
+
+    /// <summary>
+    /// The ranges of the granules of the object <paramref name="held"/>, <paramref name="first"/> its first key, that its key's
+    /// sparse index keeps under <paramref name="pruning"/>, with that index; null when the object has rows marked, keeps no
+    /// index, or reading it weighs more than it may spare (<see cref="ReadsKeyIndex"/>), and, unless <paramref name="read"/>,
+    /// when the handle does not hold it.
+    /// </summary>
+    internal async ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleKeys Keys)?> KeptGranulesAsync(
+        PositionedObject held, KeyPruning pruning, ReadOnlyMemory<byte> first, bool read, CancellationToken cancellationToken)
+    {
+        if (!held.Entry.Deletions.IsEmpty || held.Entry.Contents is not { KeyIndex: { } index } contents
+            || (!read && contents.Keys is not { HoldsEvery: true }) || !ReadsKeyIndex(held)
+            || await KeysAsync(held, contents, index, cancellationToken).ConfigureAwait(false) is not { } keys
+            || keys.Rows != held.Entry.PhysicalRows)
+        {
+            return null;
+        }
+
+        DatasetSchema schema = _version.Schema;
+        int prefix = schema.Partitioned && !first.IsEmpty ? schema.Tree!.PrefixLength(first.Span, 1) : 0;
+        return (pruning.Granules(keys, prefix > 0 ? first.Span[..prefix] : default), keys);
+    }
+
+    /// <summary>
+    /// The sparse index of the object <paramref name="held"/>: read through its open when it lies in the tail the open reads,
+    /// the object then kept open by the handle's cache for the read of its granules; with no open otherwise.
+    /// </summary>
+    private async ValueTask<Indexes.GranuleKeys?> KeysAsync(
+        PositionedObject held, Indexes.ObjectContents contents, Indexes.IndexSegment index, CancellationToken cancellationToken)
+    {
+        if (contents.Keys is { HoldsEvery: true } known)
+        {
+            return known;
+        }
+
+        if (!PathCosts.InOpen(held.Entry, index))
+        {
+            return await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken).ConfigureAwait(false);
+        }
+
+        ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
+        await using (lease.ConfigureAwait(false))
+        {
+            return await _dataset.KeyIndexAsync(held.Entry, contents, cancellationToken, lease.File).ConfigureAwait(false);
         }
     }
 
