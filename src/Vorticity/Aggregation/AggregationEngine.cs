@@ -3517,10 +3517,16 @@ internal abstract class AggregationHost
         (ScanSpec spec, VortexExpr? window) = await AlignAsync(plan, rows, operators, cancellationToken).ConfigureAwait(false);
         ScanSpec pass = AggregationEngine.PassSpec(spec, columns, plan, Source.Schema);
 
-        // The states the pass would ask for, so that a source that keeps them says per object what it reads.
+        // The states the pass would ask for, and the blocks a dataset would settle, as the run asks them, so that a source that
+        // keeps them says per object what it reads.
+        AggregationPlan? settles = Source.Rows.SettlesBlocks && ZoneSettling.Applies(pass, plan) ? plan : null;
         if (pass.Options.UseSynopses && Source.States is { } kept && StateRequest.Of(plan, settled, top: null) is { } states)
         {
-            pass = pass with { Answering = new StatesAsked(states, Family: kept.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, Source) : null) };
+            pass = pass with { Answering = new StatesAsked(states, Settles: settles, Family: kept.LearnsPartials ? LearnedFamily.Of(plan, pass.Filter, Source) : null) };
+        }
+        else if (settles is not null)
+        {
+            pass = pass with { Answering = new StatesAsked(Settles: settles) };
         }
 
         ScanPlan explained = await Source.PlanAsync(pass, analyze, cancellationToken).ConfigureAwait(false);
@@ -3632,7 +3638,7 @@ internal static class AggregationEngine
         // The blocks the zone maps answer are not read: the pass's mask has them dead, and each
         // partition folds them as its rows reach them.
         ZoneSettling? settling = await ZoneSettling.PlanAsync(source, pass, plan, metrics, cancellationToken).ConfigureAwait(false);
-        if (settling is null && source.States?.SettlesBlocks == true && ZoneSettling.Applies(pass, plan))
+        if (settling is null && source.Rows.SettlesBlocks && ZoneSettling.Applies(pass, plan))
         {
             // A dataset settles each object's blocks as it reads it, those no delete marked a row of, and the rows of the
             // others as before, states or rows: the pass names the aggregation, and its mask is the dataset's.
@@ -3646,10 +3652,15 @@ internal static class AggregationEngine
 
         // A source that keeps states of some of its rows, a dataset's synopses, answers those as states,
         // for a pass whose every aggregate and key a state answers whole: asked before the rows are cut, so
-        // that the cut leaves whole what states answer.
+        // that the cut leaves whole what states answer. The blocks a dataset settles stay asked beside them,
+        // for the objects it reads as rows.
         else if (pass.Options.UseSynopses && source.States is { } answering && StateRequest.Of(plan, settled, top) is { } states)
         {
-            pass = pass with { Answering = new StatesAsked(states, Family: answering.LearnsPartials && top is null ? LearnedFamily.Of(plan, pass.Filter, source) : null) };
+            pass = pass with
+            {
+                Answering = new StatesAsked(
+                    states, Settles: pass.Answering?.Settles, Family: answering.LearnsPartials && top is null ? LearnedFamily.Of(plan, pass.Filter, source) : null),
+            };
         }
 
         // On several lanes the structures are read once, before the rows are cut, so that the cut

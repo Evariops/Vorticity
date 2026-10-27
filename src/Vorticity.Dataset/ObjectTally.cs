@@ -28,6 +28,19 @@ internal readonly record struct ObjectTally(
     /// <summary>The share of an object's rows <see cref="MostMarked"/> counts as all of them.</summary>
     public const long Whole = 1L << 20;
 
+    /// <summary>Whether two tallies count alike, their size classes class by class: an inline array has no equality of its own.</summary>
+    public bool Equals(ObjectTally other)
+    {
+        SizeClasses mine = Classes;
+        SizeClasses theirs = other.Classes;
+        return Bytes == other.Bytes && Largest == other.Largest && DeletedRows == other.DeletedRows && MostFragments == other.MostFragments
+            && MostMarked == other.MostMarked && LargestVector == other.LargestVector && Latest == other.Latest
+            && ((ReadOnlySpan<uint>)mine).SequenceEqual(theirs);
+    }
+
+    /// <inheritdoc/>
+    public override int GetHashCode() => HashCode.Combine(Bytes, Largest, DeletedRows, MostFragments, MostMarked, LargestVector, Latest);
+
     /// <summary>
     /// The tally of one object, read from its entry's bytes without parsing the rest of them, its size class under objects
     /// of <paramref name="top"/> bytes merged <paramref name="fanout"/> at a time.

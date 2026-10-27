@@ -23,6 +23,13 @@ internal readonly record struct FormAnswer(long Rows, FilterLiteral Value);
 /// </summary>
 internal interface IRowsCapability
 {
+    /// <summary>
+    /// Whether the source settles the blocks of its files by their zone maps itself, as it reads each, when a pass names the
+    /// aggregation (<see cref="StatesAsked.Settles"/>): a dataset, whose objects' marked rows only it knows, whether its
+    /// objects keep counts or not.
+    /// </summary>
+    bool SettlesBlocks => false;
+
     /// <summary>The batches, borrowed: each is valid until the next is asked for.</summary>
     IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics);
 
@@ -113,12 +120,6 @@ internal interface IKeysCapability
 /// </summary>
 internal interface IStatesCapability
 {
-    /// <summary>
-    /// Whether the source settles the blocks of its files by their zone maps itself, as it reads each, when a pass names the
-    /// aggregation (<see cref="StatesAsked.Settles"/>): a dataset, whose objects' marked rows only it knows.
-    /// </summary>
-    bool SettlesBlocks => false;
-
     /// <summary>
     /// Whether the source learns the partials of an aggregation's family from the rows it reads, a pass that asks states
     /// naming the family (<see cref="StatesAsked.Family"/>): a dataset, which knows its objects and keeps their partials.

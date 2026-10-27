@@ -599,11 +599,13 @@ internal sealed partial class DatasetScanBuilder
 
         if (!_wholeKnown)
         {
+            // The key's first column as it is, which a partition may lead, under the version this scan reads.
             SummaryPruner pruner = new SummaryPruner(filter);
-            bool alone = _dataset.Key is not null && pruner.ReadsColumns;
+            string? leading = _version.Schema.KeyColumns is [{ } first, ..] ? first : null;
+            bool alone = leading is not null && pruner.ReadsColumns;
             foreach (string path in pruner.Paths)
             {
-                alone &= string.Equals(path, _dataset.Key!.InstantPath, StringComparison.Ordinal);
+                alone &= string.Equals(path, leading, StringComparison.Ordinal);
             }
 
             _whole = alone ? pruner : null;
