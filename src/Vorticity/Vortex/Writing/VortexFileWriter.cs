@@ -3327,6 +3327,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     values.Min = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Min));
                     values.Max = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Max));
                 }
+
+                if (stored.Kind == DTypeKind.Primitive && stored.PType.IsFloat() && !merged.NansUnknown)
+                {
+                    values.NanCount = (ulong)merged.NanCount;
+                }
             }
 
             entries[field] = ArrayWriter.WriteStats(builder, in values);

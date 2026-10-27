@@ -378,10 +378,14 @@ public sealed partial class VortexFileWriter
         BlockStats fresh = writer.Chunk(append.Boundary, writer.Blocks.Count - append.Boundary);
         DType column = Stored(_isTabular ? _schema.GetField(field) : _schema);
 
-        // Nulls: the old blocks' zones are exact, the new blocks' counts too.
+        // Nulls: the old blocks' zones are exact, the new blocks' counts too; a float's NaNs where every old zone stated its own.
         if (old.HasZones || append.Boundary == 0)
         {
             values.NullCount = (ulong)all.NullCount;
+            if (column.Kind == DTypeKind.Primitive && column.PType.IsFloat() && !all.NansUnknown)
+            {
+                values.NanCount = (ulong)all.NanCount;
+            }
         }
 
         // Bounds: the old statistics cover every old row, and every old row is in the file.
@@ -640,7 +644,7 @@ public sealed partial class VortexFileWriter
                     bool exact = bounds.IsExact && bounds.HasMin && bounds.HasMax;
                     blocks[z] = BlockStats.Summary(
                         zoneRows, bounds.NullCount, bounded,
-                        exact ? bounds.Min : null, exact ? bounds.Max : null, scheme);
+                        exact ? bounds.Min : null, exact ? bounds.Max : null, scheme, bounds.HasNanCount ? bounds.NanCount : null);
                     if (strings is not null)
                     {
                         strings[z] = OldString(bounds, zoneRows);
