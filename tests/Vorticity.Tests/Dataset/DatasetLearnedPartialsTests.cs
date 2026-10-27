@@ -178,9 +178,10 @@ public sealed partial class DatasetLearnedPartialsTests
 
     /// <summary>
     /// A monitor: the same question after each append of a minute's calls, over the hour so far. Once asked, the family is
-    /// kept up, and each object appended after learns its partial as it is written: the question answers every minute's
-    /// object but the first, appended before it asked, from its partial, however many minutes come, and answers as the rows
-    /// do. The append's cost of keeping it up is measured against a dataset no question asks.
+    /// kept up, and each object appended after learns its partial as it is written; the first, appended before it asked,
+    /// learns its own from its rows as it is asked, its table of contents naming its columns: the question answers every
+    /// minute's object from its partial, however many minutes come, and answers as the rows do. The append's cost of keeping
+    /// it up is measured against a dataset no question asks.
     /// </summary>
     [Theory]
     [InlineData(2_000)]
@@ -244,7 +245,7 @@ public sealed partial class DatasetLearnedPartialsTests
             Assert.Equal(answer, await DatasetPlannerTests.AskAsync(dataset, keys, results, filter, synopses: true));
             ScanPlan plan = await dataset.Scan<Call>().With(new ScanOptions { UseSynopses = true })
                 .Where(c => c.Status == 404 && c.At >= Noon.AddHours(2)).GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))).ExplainAsync(analyze: true, Ct);
-            Assert.Equal(minute, plan.Units.Count(step => step.Alternative == "partial" && step.Detail == "the partial of the question's family it learned"));
+            Assert.Equal(minute + 1, plan.Units.Count(step => step.Alternative == "partial" && step.Detail == "the partial of the question's family it learned"));
         }
 
         double nanoseconds = (kept - plain).TotalNanoseconds / ((Minutes - 1) * rowsAMinute);
