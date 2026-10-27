@@ -121,7 +121,8 @@ internal static class SheetPruning
 
         ObjectContents contents = entry.Contents!;
         bool lies = Locates(entry, columns);
-        IndexSegment?[] regions = new IndexSegment?[columns.Count + (paths?.Count ?? 0)];
+        int count = columns.Count + (paths?.Count ?? 0);
+        Span<IndexSegment?> regions = count <= 16 ? stackalloc IndexSegment?[count] : new IndexSegment?[count];
         for (int i = 0; i < columns.Count; i++)
         {
             regions[i] = lies ? contents.LocateOf(columns[i]) : contents.SheetOf(columns[i]);

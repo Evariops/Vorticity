@@ -251,7 +251,12 @@ internal sealed class DatasetSchema
 
             bounded ??= [.. summaries.Columns];
             ColumnSummary keyed = new ColumnSummary(path, low, true, high, true, exact, 0, true);
-            int at = bounded.FindIndex(column => string.Equals(column.Path, path, StringComparison.Ordinal));
+            int at = bounded.Count - 1;
+            while (at >= 0 && !string.Equals(bounded[at].Path, path, StringComparison.Ordinal))
+            {
+                at--;
+            }
+
             if (at < 0)
             {
                 bounded.Add(keyed);

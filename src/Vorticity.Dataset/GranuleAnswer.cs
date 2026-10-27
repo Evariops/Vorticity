@@ -355,7 +355,8 @@ internal sealed class GranuleAnswer
     {
         ObjectContents contents = held.Entry.Contents!;
         int[] fields = Fields;
-        IndexSegment?[] regions = new IndexSegment?[fields.Length + Histogrammed.Length];
+        int count = fields.Length + Histogrammed.Length;
+        Span<IndexSegment?> regions = count <= 16 ? stackalloc IndexSegment?[count] : new IndexSegment?[count];
         for (int i = 0; i < fields.Length; i++)
         {
             regions[i] = contents.GranuleStatsOf(fields[i]);

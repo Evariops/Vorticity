@@ -232,9 +232,11 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
     /// within the joined gap of each other in one request that reads the gap too; a region a cache holds at the cache's tier,
     /// its round trip and bytes there weighed in the store's bytes, nothing in memory.
     /// </summary>
-    internal Cost Regions(UInt128 uid, IEnumerable<IndexSegment?> regions)
+    internal Cost Regions(UInt128 uid, ReadOnlySpan<IndexSegment?> regions)
     {
-        List<(ulong Offset, uint Length)> held = [];
+        // The regions the store reads, on the stack for the few a synopsis takes.
+        Span<(ulong Offset, uint Length)> held = regions.Length <= 32 ? stackalloc (ulong, uint)[regions.Length] : new (ulong, uint)[regions.Length];
+        int count = 0;
         double cached = 0;
         foreach (IndexSegment? region in regions)
         {
@@ -250,9 +252,10 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
                 continue;
             }
 
-            held.Add((some.Offset, some.Length));
+            held[count++] = (some.Offset, some.Length);
         }
 
+        held = held[..count];
         held.Sort();
         int requests = 0;
         long bytes = 0;

@@ -117,13 +117,16 @@ internal sealed class LearnedPartials
     /// <summary>The objects whose rows the object <paramref name="uid"/> holds, which a compaction merged into it alone; null when none is known.</summary>
     internal UInt128[]? MergedInto(UInt128 uid, SynopsisCache? cache)
     {
+        // An object of no known lineage is held as one of none, which a plan would otherwise look for in the cache at every
+        // question: a compaction this handle commits says its own (Inherit).
         if (_merged.TryGetValue(uid, out UInt128[]? inputs))
         {
-            return inputs;
+            return inputs.Length == 0 ? null : inputs;
         }
 
         if (cache is null || !cache.TryReadSealed(LineageName(uid), MaxInputs * 16 + 16, out SegmentOwner owner))
         {
+            _merged.TryAdd(uid, []);
             return null;
         }
 
@@ -133,6 +136,7 @@ internal sealed class LearnedPartials
             if (bytes.Length < 32 || bytes.Length % 16 != 0 || XxHash128.HashToUInt128(bytes[..^16]) != ReadHash(bytes[^16..]))
             {
                 cache.DropSealed(LineageName(uid));
+                _merged.TryAdd(uid, []);
                 return null;
             }
 
@@ -228,7 +232,7 @@ internal sealed class LearnedPartials
 
     /// <summary>Whether the handle, the cache or the store holds the partial of family <paramref name="family"/> itself of the object <paramref name="uid"/>.</summary>
     internal bool HoldsOwn(UInt128 uid, UInt128 family, SynopsisCache? cache) =>
-        _held.ContainsKey((uid, family)) || cache?.HoldsSealed(NameOf(uid, family)) == true || Stored(uid, family);
+        _held.ContainsKey((uid, family)) || (cache is not null && cache.HoldsSealed(NameOf(uid, family, stackalloc char[NameLength]))) || Stored(uid, family);
 
     /// <summary>A family that serves another (<see cref="Aggregating.LearnedFamily.Covers"/>): the key of its partials, and the place of each key of the other among its own.</summary>
     internal readonly record struct Covering(UInt128 Key, int[] KeyOf);
@@ -538,6 +542,13 @@ internal sealed class LearnedPartials
     }
 
     private static string NameOf(UInt128 uid, UInt128 family) => string.Create(CultureInfo.InvariantCulture, $"{uid:x32}-{family:x32}-partial");
+
+    // The characters of a partial's name: two identities of 32 hexadecimal digits, a dash between, and "-partial".
+    private const int NameLength = 73;
+
+    /// <summary>The name <see cref="NameOf(UInt128, UInt128)"/> gives, written into <paramref name="name"/>, which a check that the cache holds it takes with no string.</summary>
+    private static ReadOnlySpan<char> NameOf(UInt128 uid, UInt128 family, Span<char> name) =>
+        name.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{family:x32}-partial", out int written) ? name[..written] : NameOf(uid, family);
 
     private static UInt128 ReadHash(ReadOnlySpan<byte> bytes) =>
         new UInt128(System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes[8..]), System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes));

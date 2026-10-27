@@ -832,17 +832,20 @@ public sealed class SynopsisCache : IDisposable
     /// Whether the cache holds the sealed bytes kept under <paramref name="name"/>, without reading them, or, when it
     /// shares a root, another cache of the root does: those it reads, and does not keep again.
     /// </summary>
-    internal bool HoldsSealed(string name)
+    internal bool HoldsSealed(string name) => HoldsSealed(name.AsSpan());
+
+    /// <summary>As <see cref="HoldsSealed(string)"/>, the name as characters a caller made where it liked.</summary>
+    internal bool HoldsSealed(ReadOnlySpan<char> name)
     {
         lock (_gate)
         {
-            if (_entries.ContainsKey(name))
+            if (_entries.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name))
             {
                 return true;
             }
         }
 
-        return _root is not null && PeersHold(name);
+        return _root is not null && PeersHold(name.ToString());
     }
 
     /// <summary>

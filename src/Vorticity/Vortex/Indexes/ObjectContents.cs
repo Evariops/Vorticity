@@ -150,8 +150,10 @@ internal sealed class ObjectContents(
     /// <summary>The region of where key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, lies; null for none.</summary>
     internal IndexSegment? PathLocateOf(int field, string key, PathClass @class)
     {
-        foreach ((int column, string named, PathClass held, IndexSegment region) in PathLocates)
+        // By place rather than through the list's enumerator, which an interface boxes: a plan asks it of every object.
+        for (int i = 0; i < PathLocates.Count; i++)
         {
+            (int column, string named, PathClass held, IndexSegment region) = PathLocates[i];
             if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
             {
                 return region;
@@ -241,8 +243,9 @@ internal sealed class ObjectContents(
     /// <summary>What the counts of column <paramref name="field"/> carry (<see cref="Carried"/>); null when the object does not say.</summary>
     internal (int[] Measures, bool LeavesOut)? CarriedOf(int field)
     {
-        foreach ((int at, int[] measures, bool leavesOut) in Carried)
+        for (int i = 0; i < Carried.Count; i++)
         {
+            (int at, int[] measures, bool leavesOut) = Carried[i];
             if (at == field)
             {
                 return (measures, leavesOut);
@@ -266,11 +269,11 @@ internal sealed class ObjectContents(
 
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
-        foreach ((int column, IndexSegment region) in regions)
+        for (int i = 0; i < regions.Count; i++)
         {
-            if (column == field)
+            if (regions[i].Field == field)
             {
-                return region;
+                return regions[i].Region;
             }
         }
 
