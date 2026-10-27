@@ -3069,6 +3069,37 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Where the values of columns <paramref name="fields"/> of the object <paramref name="entry"/> names lie, granule by
+    /// granule (spec D, 3), by their position in <paramref name="fields"/>: the regions its entry's table of contents names,
+    /// read with no open of the object in one round trip, none once this handle read them. A column the object keeps no
+    /// such index of has none.
+    /// </summary>
+    internal async ValueTask<Indexes.ColumnLocate?[]> ReadLocatesAsync(ObjectEntry entry, IReadOnlyList<int> fields, CancellationToken cancellationToken)
+    {
+        Indexes.ColumnLocate?[] located = new Indexes.ColumnLocate?[fields.Count];
+        if (entry.Contents is not { Locates.Count: > 0 } contents)
+        {
+            return located;
+        }
+
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[fields.Count];
+        for (int i = 0; i < fields.Count; i++)
+        {
+            regions[i] = contents.LocateOf(fields[i]);
+        }
+
+        object?[] read = new object?[fields.Count];
+        await ReadSynopsesAsync(entry, contents, regions, read, static (_, bytes) => (Indexes.ColumnLocate.From(bytes.ToArray())!, bytes.Length), cancellationToken)
+            .ConfigureAwait(false);
+        for (int i = 0; i < fields.Count; i++)
+        {
+            located[i] = read[i] as Indexes.ColumnLocate;
+        }
+
+        return located;
+    }
+
+    /// <summary>
     /// The geometry of columns <paramref name="fields"/> of the object <paramref name="entry"/> names (spec C, 2.1), by their
     /// position in <paramref name="fields"/>: each chunk's encoding tree and marks, the regions its entry's table of contents
     /// names, read with no open of the object in one round trip, none once this handle read them. A column the object keeps

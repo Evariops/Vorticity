@@ -1134,7 +1134,7 @@ internal sealed class IndexWriter : IDisposable
 
                 foreach (IndexBuilder builder in _builders[field])
                 {
-                    if (builder is ColumnSheetBuilder or ColumnCountsBuilder)
+                    if (builder is ColumnSheetBuilder or ColumnCountsBuilder or LocateBuilder)
                     {
                         continue;
                     }
@@ -1388,8 +1388,9 @@ internal sealed class IndexWriter : IDisposable
 
             foreach (IndexBuilder builder in _builders[field])
             {
-                // No budget weighs a sheet nor a column's counts: they are what a dataset's object says of every column it holds.
-                if (builder.WrittenBytes > 0 || builder is ColumnSheetBuilder or ColumnCountsBuilder)
+                // No budget weighs a sheet, a column's counts nor where its values lie: they are what a dataset's object says of every
+                // column it holds.
+                if (builder.WrittenBytes > 0 || builder is ColumnSheetBuilder or ColumnCountsBuilder or LocateBuilder)
                 {
                     continue;
                 }
@@ -1897,6 +1898,41 @@ internal sealed class IndexWriter : IDisposable
                 _builders[field].Add(new ColumnBlocksBuilder(sheet, plan, field, cuts, schema.GetField(field)));
             }
         }
+    }
+
+    /// <summary>
+    /// Gives every top-level column with a sheet, but a float's, where each of its values lies, granule by granule (spec D,
+    /// 3), fed right after its sheet's numbering of its rows' values.
+    /// </summary>
+    internal void AddLocates(DType schema)
+    {
+        for (int field = 0; _isTabular && field < _fieldCount; field++)
+        {
+            DType storage = schema.GetField(field);
+            while (storage.Kind == DTypeKind.Extension)
+            {
+                storage = storage.StorageType;
+            }
+
+            if (SheetOf(field) is { } sheet && !(storage.Kind == DTypeKind.Primitive && storage.PType.IsFloat()))
+            {
+                _builders[field].Add(new LocateBuilder(sheet));
+            }
+        }
+    }
+
+    /// <summary>The builder of where column <paramref name="field"/>'s values lie, or null when it has none.</summary>
+    internal LocateBuilder? LocateOf(int field)
+    {
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            if (builder is LocateBuilder locate)
+            {
+                return locate;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>The builder of column <paramref name="field"/>'s statistics over the blocks, or null when it has none.</summary>

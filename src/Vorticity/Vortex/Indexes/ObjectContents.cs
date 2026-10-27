@@ -132,6 +132,15 @@ internal sealed class ObjectContents(
     internal IndexSegment? WhereOf(int field) => RegionOf(Wheres, field);
 
     /// <summary>
+    /// Where each value of each column lies, granule by granule (<see cref="ColumnLocate"/>), and their regions: what a filter
+    /// on a value reads to read the granules of its rows alone. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, IndexSegment Region)> Locates { get; init; } = [];
+
+    /// <summary>The region of where column <paramref name="field"/>'s values lie, or null when the object keeps none of it.</summary>
+    internal IndexSegment? LocateOf(int field) => RegionOf(Locates, field);
+
+    /// <summary>
     /// The bytes of each top-level column's data in the object, by the column's place: what reading its rows costs, which a
     /// planner weighs against the synopses that would answer instead. Empty when the object does not say.
     /// </summary>
@@ -239,6 +248,7 @@ internal sealed class ObjectContents(
             Sketches = Sketches,
             BlockStats = BlockStats,
             Wheres = Wheres,
+            Locates = Locates,
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
             ColumnClasses = ColumnClasses,
@@ -339,6 +349,11 @@ internal sealed class ObjectContents(
 
     // What each top-level column's values cost the processor, packed: a count, then its entries, a column after the other.
     private const int TagColumnClasses = 28;
+
+    // 29 is the measures' histograms and exact sums by granule (spec D, 2.2).
+
+    // Where a column's values lie, granule by granule: its field and its region, as a path directory's.
+    private const int TagLocate = 30;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -452,6 +467,11 @@ internal sealed class ObjectContents(
         }
 
         foreach ((int _, IndexSegment region) in Wheres)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, IndexSegment region) in Locates)
         {
             Declare(region);
         }
@@ -577,6 +597,13 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
+            foreach ((int field, IndexSegment region) in Locates)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagLocate);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
             if (ColumnBytes.Count > 0)
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnBytes);
@@ -660,6 +687,7 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> sketches = [];
             List<(int, IndexSegment)> blockStats = [];
             List<(int, IndexSegment)> wheres = [];
+            List<(int, IndexSegment)> locates = [];
             List<long> columnBytes = [];
             List<long> columnChunks = [];
             List<uint> columnClasses = [];
@@ -789,6 +817,14 @@ internal sealed class ObjectContents(
 
                         wheres.Add(placed);
                         break;
+                    case (TagLocate, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } lying)
+                        {
+                            return null;
+                        }
+
+                        locates.Add(lying);
+                        break;
                     case (TagLocating, ProtoWireType.LengthDelimited):
                         if (Located(reader.ReadMessage()) is not { } located)
                         {
@@ -831,6 +867,7 @@ internal sealed class ObjectContents(
                     Sketches = sketches,
                     BlockStats = blockStats,
                     Wheres = wheres,
+                    Locates = locates,
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,
                     ColumnClasses = [.. columnClasses],

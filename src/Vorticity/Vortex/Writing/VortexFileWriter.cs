@@ -226,6 +226,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         IndexSegment? keyIndex, IndexSegment? keyPages, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
         List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres,
+        List<(int Field, IndexSegment Region)> locates,
         long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, _rowCount, directories, pathDirectories)
         {
@@ -237,6 +238,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Sketches = sketches,
             BlockStats = blockStats,
             Wheres = wheres,
+            Locates = locates,
             ColumnBytes = columnBytes,
             ColumnChunks = columnChunks,
             ColumnClasses = ColumnClasses(),
@@ -932,11 +934,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 writer._indexes?.AddCounts(plan);
 
-                // And each column's statistics over the blocks the caller declares, with where each value lives.
+                // And each column's statistics over the blocks the caller declares, with where each value lives; and where each
+                // value lies, granule by granule.
                 if (options.Blocked && writer._indexes is { } blocked)
                 {
                     writer._cuts = new BlockCuts();
                     blocked.AddBlockStats(schema, writer._cuts);
+                    blocked.AddLocates(schema);
                 }
             }
         }
@@ -2539,6 +2543,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             List<(int Field, IndexSegment Region)> sketches = [];
             List<(int Field, IndexSegment Region)> stated = [];
             List<(int Field, IndexSegment Region)> wheres = [];
+            List<(int Field, IndexSegment Region)> locates = [];
             bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
             for (int field = 0; keepsSheets && field < _fieldCount; field++)
             {
@@ -2582,6 +2587,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
                         stated.Add((field, await closed.AddColumnRegionAsync(
                             _sink, IndexKinds.BlockStats, field, statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    }
+                }
+
+                // Where each value of each column lies, granule by granule, which a filter on a value reads before its granules.
+                for (int field = 0; field < _fieldCount; field++)
+                {
+                    if (closed.LocateOf(field)?.Finish(_rowCount, _blockRows) is { } lying)
+                    {
+                        locates.Add((field, await closed.AddColumnRegionAsync(
+                            _sink, IndexKinds.ColumnLocate, field, lying, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
                     }
                 }
             }
@@ -2669,7 +2684,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_carriesContents)
             {
                 _contents = Contents(
-                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
+                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, wheres, locates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

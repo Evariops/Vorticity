@@ -120,6 +120,12 @@ internal static class IndexKinds
     public const string ColumnWhere = "vorticity.column.where.v1";
 
     /// <summary>
+    /// Where each value of a column lies, granule by granule: its values by their bytes, each with the granules it lies in,
+    /// or none where it lies everywhere, in one payload region that a table of contents names (<see cref="Indexes.ColumnLocate"/>).
+    /// </summary>
+    public const string ColumnLocate = "vorticity.locate.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -130,7 +136,7 @@ internal static class IndexKinds
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
                 or PostingsNgram3 or PostingsHashed or KeyIndex or SliceChunks or Marks or VariantPaths or VariantDirectory or VariantBlocks
-                or ColumnSheet or ColumnCounts or ColumnSketches or BlockStats or ColumnWhere => true,
+                or ColumnSheet or ColumnCounts or ColumnSketches or BlockStats or ColumnWhere or ColumnLocate => true,
             _ => false,
         };
 
