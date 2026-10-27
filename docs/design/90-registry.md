@@ -214,6 +214,7 @@ The kinds of the directory ([10-indexes.md](10-indexes.md)) carry their own vers
 | `vorticity.postings.blocks.v1`, `vorticity.sorted.runs.v1`, `vorticity.postings.ngram3.v1`, `vorticity.postings.hashed.v1` | 1, and 2 for a run laid out in pages | none |
 | `vorticity.slices.v1` | 6, bounded by keys | versions 4 and 5, bounded by a time; the three before them |
 | `vorticity.slices.chunks.v1` | 1, and 2 for a column laid out in pages | none |
+| `vorticity.marks.v1` | 1, a region a column: each chunk's encoding tree and where each granule starts in its buffers of variable length | none |
 | `vorticity.variant.paths.v1` | 1 | none |
 | `vorticity.variant.directory.v1` | 1 | none |
 | `vorticity.variant.blocks.v1` | 1 | none |
