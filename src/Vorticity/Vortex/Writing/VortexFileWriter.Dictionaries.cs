@@ -18,13 +18,13 @@ namespace Vorticity;
 public sealed partial class VortexFileWriter
 {
     // Per top-level column, its object dictionary, the type of its codes, the segment its values went to, and what the
-    // dictionary was priced at against what it wrote; null for a file that declares none.
+    // dictionary was priced at against what it wrote, and the arena of the codes' types; null for a file that declares none.
     private ObjectDictionary?[]? _dictionaries;
     private DType[]? _codesTypes;
     private int[]? _dictionarySegments;
     private long[]? _dictionaryPriced;
     private long[]? _dictionaryWritten;
-    private readonly DTypeArena _dictionaryTypes = new DTypeArena();
+    private DTypeArena? _dictionaryTypes;
 
     /// <summary>
     /// Writes column <paramref name="field"/> against <paramref name="dictionary"/>, its values once and a code a row,
@@ -86,7 +86,7 @@ public sealed partial class VortexFileWriter
         _dictionaryPriced ??= new long[_fieldCount];
         _dictionaryWritten ??= new long[_fieldCount];
         _dictionaries[field] = dictionary;
-        _codesTypes[field] = _dictionaryTypes.Primitive(dictionary.CodesPType, type.Nullability);
+        _codesTypes[field] = (_dictionaryTypes ??= new DTypeArena()).Primitive(dictionary.CodesPType, type.Nullability);
 
         // A nullable column's codes carry its validity too, a bit a row, as every plan of it would: no part of the choice.
         _dictionaryPriced[field] = priced + (type.IsNullable ? (rows + 7) / 8 : 0);
