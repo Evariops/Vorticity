@@ -1287,11 +1287,23 @@ public sealed class VortexDataset : IAsyncDisposable
                     }
                 }
 
-                await CheckLayoutAsync(file, schema, objectKey, cancellationToken).ConfigureAwait(false);
+                // Its tree key leads with its first row's key, or its partition and its position when the dataset has no key.
+                (byte[] First, byte[] Last)? keys = await CheckLayoutAsync(file, schema, objectKey, cancellationToken).ConfigureAwait(false);
                 entry = new ObjectEntry(
                     objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file))
-                    .WithFooterBytes(file.TailBytes);
-                treeKey = await TreeKeyAsync(file, entry, end, cancellationToken).ConfigureAwait(false);
+                    .WithFooterBytes(file.TailBytes)
+                    .WithArrival(Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
+                if (keys is { } bounds && schema.Keyed)
+                {
+                    entry = entry.WithLastKey(bounds.Last);
+                    treeKey = KeyOf(bounds.First, entry);
+                }
+                else
+                {
+                    treeKey = keys is { } partition
+                        ? KeyOf([.. partition.First, .. PositionOf(end)], entry)
+                        : await TreeKeyAsync(file, entry, end, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
 
@@ -1301,19 +1313,20 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// Refuses a file whose rows are not one partition's, sorted by the dataset's key with nulls last, as every object's
-    /// are: the columns the partition and the key read, read once as the dataset's, and each row's values worked out and
-    /// compared with the row's before. Its sparse index waits for its first merge, which writes one.
+    /// are: the columns the partition and the key read, read once as the dataset's, and each row's key of the tree worked
+    /// out and compared with the row's before. The keys of its first and last rows, or its partition alone when the dataset
+    /// has no key; null when the layout states neither, or the file holds no row. Its sparse index waits for its first
+    /// merge, which writes one.
     /// </summary>
     /// <exception cref="ArgumentException">The file holds rows of several partitions, or rows out of the key's order.</exception>
-    private static async ValueTask CheckLayoutAsync(VortexFile file, DatasetSchema schema, string objectKey, CancellationToken cancellationToken)
+    private static async ValueTask<(byte[] First, byte[] Last)?> CheckLayoutAsync(
+        VortexFile file, DatasetSchema schema, string objectKey, CancellationToken cancellationToken)
     {
-        if (schema.Layout is not { } plan || (plan.Partition is null && plan.Components.Count == 0))
+        if (schema.Tree is not { } tree || schema.Layout is not { } plan)
         {
-            return;
+            return null;
         }
 
-        SortKey? partition = plan.Partition is null ? null : SortKey.Of(plan, partition: true, components: 0);
-        SortKey? key = plan.Components.Count == 0 ? null : SortKey.Of(plan, partition: false, plan.Components.Count);
         SortedSet<int> fields = [];
         foreach (LayoutColumn component in plan.Components)
         {
@@ -1333,48 +1346,38 @@ public sealed class VortexDataset : IAsyncDisposable
             rows = ObjectColumns.ReshapeAsync(
                 file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false).ExecuteAsync(), read.Shape, null, 0, compact: true, cancellationToken);
         }
-        byte[] first = [];
-        int firstLength = -1;
+
+        byte[]? first = null;
         byte[] last = [];
-        int lastLength = -1;
+        int lastLength = 0;
         long row = 0;
         await foreach (RecordBatch batch in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             using (batch)
             {
-                if (partition is not null)
+                using RowKeys keys = tree.Encode(batch);
+                for (int i = 0; i < batch.RowCount; i++, row++)
                 {
-                    using RowKeys values = partition.Encode(batch);
-                    for (int i = 0; i < batch.RowCount; i++)
+                    ReadOnlySpan<byte> key = keys.Row(i);
+                    if (first is null)
                     {
-                        if (firstLength < 0)
-                        {
-                            firstLength = SortedRows.Keep(ref first, values.Row(i));
-                        }
-                        else if (!values.Row(i).SequenceEqual(first.AsSpan(0, firstLength)))
-                        {
-                            throw Unordered(objectKey, $"its row {row + i} lies in another partition than its first");
-                        }
+                        first = key.ToArray();
                     }
-                }
-
-                if (key is not null)
-                {
-                    using RowKeys keys = key.Encode(batch);
-                    for (int i = 0; i < batch.RowCount; i++)
+                    else if (schema.Partitioned && !tree.SamePrefix(first, key, 1))
                     {
-                        if (lastLength >= 0 && keys.Row(i).SequenceCompareTo(last.AsSpan(0, lastLength)) < 0)
-                        {
-                            throw Unordered(objectKey, $"its row {row + i} comes before the row before it in the key's order");
-                        }
-
-                        lastLength = SortedRows.Keep(ref last, keys.Row(i));
+                        throw Unordered(objectKey, $"its row {row} lies in another partition than its first");
                     }
-                }
+                    else if (schema.Keyed && key.SequenceCompareTo(last.AsSpan(0, lastLength)) < 0)
+                    {
+                        throw Unordered(objectKey, $"its row {row} comes before the row before it in the key's order");
+                    }
 
-                row += batch.RowCount;
+                    lastLength = SortedRows.Keep(ref last, key);
+                }
             }
         }
+
+        return first is null ? null : (first, last[..lastLength]);
 
         static ArgumentException Unordered(string objectKey, string why) => new ArgumentException(
             $"The object '{objectKey}' is not one partition's rows sorted by the dataset's key, as every object is: {why}. " +
@@ -2371,13 +2374,13 @@ public sealed class VortexDataset : IAsyncDisposable
         Snapshot.WalkAsync(pruner, from, to, metrics, cancellationToken);
 
     /// <summary>
-    /// What orders an object in its tree: its tree key without the uid that ends it, which is the
-    /// exact row-encoded minimum of the clustering key, or a position when the dataset declares none.
+    /// What orders an object in its tree: its tree key without the uid that ends it, the tree's key of its first row, its
+    /// partition leading it (<see cref="DatasetSchema.Tree"/>), or its partition and position when the dataset has no key.
     /// </summary>
     internal static ReadOnlyMemory<byte> OrderOf(ReadOnlyMemory<byte> treeKey) => treeKey[..^UidBytes];
 
-    /// <summary>The position an unclustered object's tree key orders it by.</summary>
-    internal static long PositionAt(ReadOnlySpan<byte> treeKey) => BinaryPrimitives.ReadInt64BigEndian(treeKey);
+    /// <summary>The position an object of a dataset without a key is ordered by in its partition: the eight bytes before the uid.</summary>
+    internal static long PositionAt(ReadOnlySpan<byte> treeKey) => BinaryPrimitives.ReadInt64BigEndian(treeKey[^(UidBytes + sizeof(long))..]);
 
     /// <summary>
     /// Borrows one of the dataset's data objects, open with the index fragments its entry names.
@@ -3310,7 +3313,8 @@ public sealed class VortexDataset : IAsyncDisposable
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
             .WithFooterBytes(draft.Writer.TailBytes)
             .WithTableOfContents(draft.Writer.TableOfContents)
-            .WithLastKey(last);
+            .WithLastKey(last)
+            .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes);
     }
 
@@ -3323,13 +3327,24 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         DatasetSnapshot version = Snapshot;
         long end = version.RowCount;
-        if (Key is not null)
+        if (version.Schema.Keyed)
         {
             return end;
         }
 
         foreach ((int _, DatasetTree tree) in version.Levels.Occupied())
         {
+            // The partitions lead the tree, and the positions of each run on from those of the others: every leaf's.
+            if (version.Schema.Partitioned)
+            {
+                await foreach (PositionedEntry held in tree.WalkAsync(version.Pages, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+                {
+                    end = Math.Max(end, PositionAt(held.Entry.Key.Span) + held.Entry.Rows);
+                }
+
+                continue;
+            }
+
             PageReference at = tree.Root;
             for (int depth = tree.Depth; depth > 1; depth--)
             {
@@ -3446,15 +3461,18 @@ public sealed class VortexDataset : IAsyncDisposable
         }
     }
 
-    /// <summary>An object of a dataset without a key, its rows placed from <paramref name="firstRow"/> on: its key in the tree.</summary>
-    internal static WrittenObject Placed(WrittenObject written, long firstRow) =>
-        written with { Key = KeyOf(PositionOf(firstRow), written.Entry) };
+    /// <summary>
+    /// An object of a dataset without a key, its rows placed from <paramref name="firstRow"/> on in
+    /// <paramref name="partition"/>, row-encoded, empty for none: its key in the tree.
+    /// </summary>
+    internal static WrittenObject Placed(WrittenObject written, ReadOnlySpan<byte> partition, long firstRow) =>
+        written with { Key = KeyOf([.. partition, .. PositionOf(firstRow)], written.Entry) };
 
     /// <summary>
-    /// The bounds an entry carries, read out of a file's own statistics. The clustering key's
-    /// columns are always among them, whatever the limit or the declared list says: without them
-    /// an object with no cursor has no minimum to fall back on, and a scan cannot prune on the
-    /// column a reader is most likely to filter by.
+    /// The bounds an entry carries, read out of a file's own statistics. The columns the layout's partition and key read
+    /// are always among them, whatever the limit or the declared list says: a scan prunes the partitions a filter on the
+    /// partition's column leaves out by them, whole subtrees at once since the partition leads the tree, and the key's are
+    /// the columns a reader is most likely to filter by.
     /// </summary>
     /// <param name="file">The object, open.</param>
     private ObjectSummaries Summaries(VortexFile file)
@@ -3462,9 +3480,19 @@ public sealed class VortexDataset : IAsyncDisposable
         IReadOnlyList<ColumnSummary> columns = _options.SummaryColumns is { } declared
             ? ColumnSummaries.Of(file, declared)
             : ColumnSummaries.Of(file, _options.SummaryColumnLimit);
-        if (Key is not { } clustering)
+        if (Snapshot.Schema.Layout is not { } plan)
         {
             return ObjectSummaries.From(columns);
+        }
+
+        // A variant column's own bounds bound nothing a component reads in one class.
+        List<string> sources = [];
+        foreach (LayoutColumn read in plan.Partition is { } partition ? [partition, .. plan.Components] : plan.Components)
+        {
+            if (read.Read is null && !sources.Contains(read.Value.SourcePath))
+            {
+                sources.Add(read.Value.SourcePath);
+            }
         }
 
         List<ColumnSummary> all = [];
@@ -3477,7 +3505,7 @@ public sealed class VortexDataset : IAsyncDisposable
             }
         }
 
-        foreach (ColumnSummary column in ColumnSummaries.Of(file, clustering.Paths))
+        foreach (ColumnSummary column in ColumnSummaries.Of(file, sources))
         {
             if (seen.Add(column.Path))
             {
@@ -3513,7 +3541,19 @@ public sealed class VortexDataset : IAsyncDisposable
                 await CheckSortedAsync(file, cancellationToken).ConfigureAwait(false);
             }
 
+            // The keys of its first and last rows when its writer took them in the key's order; its position after its
+            // partition's when the dataset has no key.
             ObjectSummaries summaries = Summaries(file);
+            if (draft.Keys is { } keys)
+            {
+                return (summaries, keys.First, keys.Last);
+            }
+
+            if (draft.Partition is { } partition)
+            {
+                return (summaries, [.. partition, .. PositionOf(firstRow)], []);
+            }
+
             (byte[] prefix, byte[] last) = await BoundsAsync(file, summaries, firstRow, cancellationToken).ConfigureAwait(false);
             return (summaries, prefix, last);
         }
@@ -3574,6 +3614,7 @@ public sealed class VortexDataset : IAsyncDisposable
             Rule = options.Rule ?? RuleOf(template.Chunker, seed),
             TimeProvider = options.TimeProvider,
             InlineVectorBytes = options.InlineVectorBytes,
+            Fold = ObjectSummaryFold.For(template.Layout),
         };
     }
 

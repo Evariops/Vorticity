@@ -24,7 +24,9 @@ internal sealed class ClusteringKey
         _dtypes = dtypes;
         MayHoldNull = mayHoldNull;
         _fields = new RowSortField[paths.Length];
-        Array.Fill(_fields, RowSortField.Ascending);
+
+        // Ascending, nulls last, as the tree, the merges and the sorted objects order every key.
+        Array.Fill(_fields, KeyOrderedMerge.Field(descending: false));
     }
 
     /// <summary>The key a dataset declares, in key order, or null when it declares none.</summary>
@@ -300,8 +302,7 @@ internal sealed class ClusteringKey
     /// <summary>
     /// The object's smallest and largest keys, row-encoded, from one key cursor: what orders its leaf, and what its entry
     /// bounds its keys by (<see cref="ObjectEntry.LastKey"/>). Without a key cursor the smallest falls back to the
-    /// summaries, as <see cref="MinimumAsync"/> says, and the largest is empty, which states nothing; so it is for a key
-    /// that may hold a null, which a cursor puts last and the encoding first.
+    /// summaries, as <see cref="MinimumAsync"/> says, and the largest is empty, which states nothing.
     /// </summary>
     public async ValueTask<(byte[] First, byte[] Last)> BoundsAsync(
         VortexFile file, ObjectSummaries summaries, CancellationToken cancellationToken)
@@ -318,7 +319,7 @@ internal sealed class ClusteringKey
 
                 // A composite cursor's keys are already the row encoding; a single column's are values.
                 byte[] first = Current(cursor);
-                return !MayHoldNull && await cursor.SeekLastAsync(cancellationToken).ConfigureAwait(false) ? (first, Current(cursor)) : (first, []);
+                return await cursor.SeekLastAsync(cancellationToken).ConfigureAwait(false) ? (first, Current(cursor)) : (first, []);
             }
         }
 

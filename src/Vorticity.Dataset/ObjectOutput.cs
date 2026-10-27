@@ -41,6 +41,19 @@ internal sealed class ObjectOutput : IAsyncDisposable
     /// </summary>
     internal bool BySortedColumn { get; init; }
 
+    /// <summary>
+    /// The tree's keys of the object's first and last rows (<see cref="DatasetSchema.Tree"/>), which its writer took them
+    /// in the order of: what its tree key leads with and its entry's last key; null when the dataset has no key, the
+    /// object's position leading its tree key then.
+    /// </summary>
+    internal (byte[] First, byte[] Last)? Keys { get; set; }
+
+    /// <summary>The partition the object's rows lie in, row-encoded, which leads its tree key before its position; null for none.</summary>
+    internal byte[]? Partition { get; set; }
+
+    /// <summary>When the object's rows arrived, in seconds since the Unix epoch; 0 for when it is sealed.</summary>
+    internal long Arrival { get; set; }
+
     /// <summary>Abandons the object: its writer's buffers released, nothing put.</summary>
     public async ValueTask DisposeAsync()
     {

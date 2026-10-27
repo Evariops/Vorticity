@@ -59,11 +59,17 @@ internal sealed class LevelRange
     /// <summary>
     /// The range <paramref name="sources"/> span once in <paramref name="level"/>: from the smallest
     /// first key to the largest last, or minimum to maximum, the holes between them included, since a merge writes one
-    /// sorted sequence across them. Unbounded when one of them states no bound on the key.
+    /// sorted sequence across them. Unbounded when one of them states no bound on the key; bounded by the summaries over
+    /// <paramref name="key"/>'s first column only, and by none without it.
     /// </summary>
-    internal static LevelRange Of(int level, IReadOnlyList<CompactionInput> sources, ClusteringKey key)
+    internal static LevelRange Of(int level, IReadOnlyList<CompactionInput> sources, ClusteringKey? key)
     {
         (byte[]? lowKey, byte[]? highKey) = KeysOf(sources);
+        if (key is null)
+        {
+            return new LevelRange(level, string.Empty, default, default, bounded: false, lowKey: lowKey, highKey: highKey);
+        }
+
         string path = key.InstantPath;
         FilterLiteral low = default;
         FilterLiteral high = default;

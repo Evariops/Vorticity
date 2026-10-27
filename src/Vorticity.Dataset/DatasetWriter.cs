@@ -44,8 +44,9 @@ public sealed class DatasetWriter
     private readonly DatasetSchema _schema;
     private readonly IReadOnlyDictionary<string, VariantShredding>? _shredded;
 
-    // The key the rows are sorted by and its indexed prefix, null to keep their order; the partition's value alone, null
-    // for one partition; the column the key's first component reads as it is, whose dictionary is priced as sorted.
+    // The tree's key the rows are sorted by, the partition leading it, and the indexed prefix of the key past it, null to
+    // keep their order; the partition's value alone, null for one partition; the column the key's first component reads as
+    // it is, whose dictionary is priced as sorted.
     private readonly SortKey? _key;
     private readonly int _prefix;
     private readonly SortKey? _partition;
@@ -59,6 +60,7 @@ public sealed class DatasetWriter
     private readonly List<Part> _parts = [];
     private Part? _lastPart;
     private readonly List<WrittenObject> _written = [];
+    private readonly List<byte[]> _writtenPartitions = [];
     private ObjectOutput? _direct;
     private SortedRows? _sorted;
 
@@ -89,7 +91,7 @@ public sealed class DatasetWriter
         {
             if (plan.Components.Count > 0)
             {
-                _key = SortKey.Of(plan, partition: false, plan.Components.Count);
+                _key = schema.Tree;
                 _prefix = Math.Min(plan.Layout.Prefix, plan.Components.Count);
                 LayoutColumn first = plan.Components[0];
                 _sortedColumn = first.Function is null && first.Read is null && !first.Value.SourcePath.Contains('.', StringComparison.Ordinal) ? first.Field : -1;
@@ -368,7 +370,7 @@ public sealed class DatasetWriter
             long at = firstRow;
             for (int i = 0; i < _written.Count; i++)
             {
-                _written[i] = VortexDataset.Placed(_written[i], at);
+                _written[i] = VortexDataset.Placed(_written[i], _writtenPartitions[i], at);
                 at += _written[i].Entry.Rows;
             }
         }
@@ -683,7 +685,7 @@ public sealed class DatasetWriter
             output = _dataset.StartObjectUnder(_schema, inKeyOrder: keys is not null, rowBound: rows, contents: true, shredded: _shredded);
             VortexFileWriter writer = output.Writer;
             DeclareDictionaries(writer, arena, root, rows);
-            SortedRows? sorted = keys is null ? null : _sorted ??= new SortedRows(_key!, _prefix, blocks: false);
+            SortedRows? sorted = keys is null ? null : _sorted ??= new SortedRows(_key!, _prefix, blocks: false, skip: _partition is null ? 0 : 1);
             RecordBatch? batch = null;
             try
             {
@@ -717,12 +719,16 @@ public sealed class DatasetWriter
                 throw;
             }
 
-            // Placed once the draft is committed, when the dataset has no key (FinishAsync).
+            // Keyed by its first row's key and bounded by its last's; placed in its partition once the draft is committed,
+            // when the dataset has no key (FinishAsync).
             ObjectOutput completed = output;
             output = null;
+            completed.Keys = keys is null ? null : (keys.Row(order![0]).ToArray(), keys.Row(order[rows - 1]).ToArray());
+            completed.Partition = keys is null && _partition is not null ? part.Partition : null;
             if (await _dataset.CompleteAsync(completed, 0, cancellationToken).ConfigureAwait(false) is { } written)
             {
                 _written.Add(written);
+                _writtenPartitions.Add(part.Partition);
             }
         }
         finally

@@ -328,7 +328,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             deletions.Count,
             PageReference.None,
             deletions.IsEmpty ? null : new Vector(deletions),
-            NegativesAt.Exists ? Fields(FooterBytes, MarkedAt, TableOfContents.Span, LastKey.Span, PageReference.None) : _fields,
+            NegativesAt.Exists ? Fields(FooterBytes, MarkedAt, TableOfContents.Span, LastKey.Span, PageReference.None, Arrival) : _fields,
             null);
     }
 
@@ -361,7 +361,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
 
         return new ObjectEntry(
             Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector,
-            Fields(FooterBytes, MarkedAt, TableOfContents.Span, LastKey.Span, PageReference.None), new Negatives(counts));
+            Fields(FooterBytes, MarkedAt, TableOfContents.Span, LastKey.Span, PageReference.None, Arrival), new Negatives(counts));
     }
 
     /// <summary>The entry with its counts of deleted rows at <paramref name="at"/>, where the commit writing it put their bytes; the counts stay at hand.</summary>
@@ -375,7 +375,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
 
         return new ObjectEntry(
             Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector,
-            Fields(FooterBytes, MarkedAt, TableOfContents.Span, LastKey.Span, at), _negatives);
+            Fields(FooterBytes, MarkedAt, TableOfContents.Span, LastKey.Span, at, Arrival), _negatives);
     }
 
     /// <summary>The bytes of the counts of the deleted rows, as their fragment holds them.</summary>
@@ -454,7 +454,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             return this;
         }
 
-        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(footerBytes, MarkedAt, TableOfContents.Span, LastKey.Span, NegativesAt), _negatives);
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(footerBytes, MarkedAt, TableOfContents.Span, LastKey.Span, NegativesAt, Arrival), _negatives);
     }
 
     /// <summary>
@@ -473,7 +473,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             return this;
         }
 
-        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, TableOfContents.Span, key, NegativesAt), _negatives);
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, TableOfContents.Span, key, NegativesAt, Arrival), _negatives);
     }
 
     /// <summary>
@@ -517,7 +517,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             return this;
         }
 
-        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, contents, LastKey.Span, NegativesAt), _negatives);
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, contents, LastKey.Span, NegativesAt, Arrival), _negatives);
     }
 
     /// <summary>
@@ -531,7 +531,24 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(seconds);
         return MarkedAt > 0
             ? this
-            : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, seconds, TableOfContents.Span, LastKey.Span, NegativesAt), _negatives);
+            : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, seconds, TableOfContents.Span, LastKey.Span, NegativesAt, Arrival), _negatives);
+    }
+
+    /// <summary>
+    /// When the object's rows arrived, in seconds since the Unix epoch: when an append put them, or the latest of a merge's
+    /// inputs. The clock of the commits, not of any column: what tells a partition that still receives rows from a calm
+    /// one. 0 when the entry does not say.
+    /// </summary>
+    public long Arrival { get; private set; }
+
+    /// <summary>The entry with <paramref name="seconds"/> as when its rows arrived; itself when it says so already.</summary>
+    /// <param name="seconds">A time in seconds since the Unix epoch, positive.</param>
+    public ObjectEntry WithArrival(long seconds)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(seconds);
+        return seconds == Arrival
+            ? this
+            : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, TableOfContents.Span, LastKey.Span, NegativesAt, seconds), _negatives);
     }
 
     /// <summary>What an open reads of an object's end before it knows its footer: past it, a second request.</summary>
@@ -541,10 +558,10 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// The tagged fields, in the order of their tags, those this library knows written
     /// afresh and those it does not carried as they were read; null when there are none.
     /// </summary>
-    private byte[]? Fields(long footerBytes, long markedAt, ReadOnlySpan<byte> contents, ReadOnlySpan<byte> lastKey, PageReference negativesAt)
+    private byte[]? Fields(long footerBytes, long markedAt, ReadOnlySpan<byte> contents, ReadOnlySpan<byte> lastKey, PageReference negativesAt, long arrival)
     {
         ReadOnlySpan<byte> unknown = UnknownFields(_fields);
-        if (footerBytes == 0 && markedAt == 0 && contents.IsEmpty && lastKey.IsEmpty && !negativesAt.Exists && unknown.IsEmpty)
+        if (footerBytes == 0 && markedAt == 0 && contents.IsEmpty && lastKey.IsEmpty && !negativesAt.Exists && arrival == 0 && unknown.IsEmpty)
         {
             return null;
         }
@@ -577,6 +594,11 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
                 Span<byte> reference = stackalloc byte[PageReference.Bytes];
                 negativesAt.Write(reference);
                 writer.WriteBytes(FieldTag.Negatives, reference);
+            }
+
+            if (arrival > 0)
+            {
+                writer.WriteUInt64(FieldTag.Arrival, (ulong)arrival);
             }
 
             byte[] fields = new byte[writer.WrittenSpan.Length + unknown.Length];
@@ -620,6 +642,9 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
                     case (FieldTag.Negatives, ProtoWireType.LengthDelimited):
                         NegativesAt = NegativesReference(reader.ReadLengthDelimited());
                         break;
+                    case (FieldTag.Arrival, ProtoWireType.Varint):
+                        Arrival = Count(reader.ReadVarint());
+                        break;
                     default:
                         reader.SkipField(wire);
                         break;
@@ -651,7 +676,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             }
 
             reader.SkipField(wire);
-            if (start < 0 && field is not (FieldTag.FooterBytes or FieldTag.MarkedAt or FieldTag.Contents or FieldTag.LastKey or FieldTag.Negatives))
+            if (start < 0 && field is not (FieldTag.FooterBytes or FieldTag.MarkedAt or FieldTag.Contents or FieldTag.LastKey or FieldTag.Negatives or FieldTag.Arrival))
             {
                 // Known fields come first, in the order of their tags, and a later library's after them.
                 start = at;
@@ -667,6 +692,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         internal const int Contents = 3;
         internal const int LastKey = 4;
         internal const int Negatives = 5;
+        internal const int Arrival = 6;
     }
 
     /// <summary>
@@ -977,7 +1003,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// tally folds, without an allocation.
     /// </summary>
     /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
-    public static (long Bytes, long Rows, long DeletedRows, long Fragments, long VectorBytes) TallyOf(ReadOnlySpan<byte> value)
+    public static (long Bytes, long Rows, long DeletedRows, long Fragments, long VectorBytes, long Arrival) TallyOf(ReadOnlySpan<byte> value)
     {
         int at = 0;
         Skip(value, ref at, (long)Read(value, ref at));
@@ -994,7 +1020,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         long fragments = (long)listed;
         Skip(value, ref at, fragments * PageReference.Bytes);
         Skip(value, ref at, (long)Read(value, ref at));
-        SkipFields(value, ref at);
+        int fields = at;
+        long arrival = SkipFields(value, ref at) ? ArrivalOf(value[fields..at]) : 0;
         long deleted = at < value.Length ? (long)Read(value, ref at) : 0;
         long vector = at < value.Length ? (long)Read(value, ref at) : 0;
         if (deleted > 0 && vector == 0 && value.Length - at == PageReference.Bytes)
@@ -1003,9 +1030,38 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             vector = PageReference.Read(value[at..]).Length;
         }
 
-        return bytes < 0 || rows < 0 || deleted < 0 || vector < 0
+        return bytes < 0 || rows < 0 || deleted < 0 || vector < 0 || arrival < 0
             ? throw new CommitFormatException("An object entry counts its bytes or its rows past a long.")
-            : (bytes, rows, deleted, fragments, vector);
+            : (bytes, rows, deleted, fragments, vector, arrival);
+    }
+
+    /// <summary>
+    /// When the object's rows arrived, read in place from the tagged fields, <paramref name="fields"/> from their leading
+    /// zero to their end; 0 when they do not say.
+    /// </summary>
+    private static long ArrivalOf(ReadOnlySpan<byte> fields)
+    {
+        int at = 1;
+        int length = Length(Read(fields, ref at), "fields");
+        try
+        {
+            ProtoReader reader = new ProtoReader(fields.Slice(at, length));
+            while (reader.TryReadTag(out int field, out ProtoWireType wire))
+            {
+                if (field == FieldTag.Arrival && wire == ProtoWireType.Varint)
+                {
+                    return Count(reader.ReadVarint());
+                }
+
+                reader.SkipField(wire);
+            }
+        }
+        catch (VortexFormatException cause)
+        {
+            throw new CommitFormatException($"An object entry's tagged fields do not decode: {cause.Message}", cause);
+        }
+
+        return 0;
     }
 
     /// <summary>

@@ -9,35 +9,40 @@ using Vorticity.Types;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// A dataset's partition resolved against its key's first column, when the partition is that column or a function of it:
-/// what tells two keys of one partition apart as a job writes its rows, and the one partition an object's summaries prove
-/// it holds.
+/// A dataset's partition, which leads the keys of its tree and of its merges: what tells two keys of one partition apart as
+/// a job writes its rows, their first value's bytes. When the partition is the key's first column or a function of it, also
+/// the one partition an object's summaries prove it holds, and where a part of a range of that column starts.
 /// </summary>
 internal sealed class ValueCut
 {
     private readonly ValueFunction? _function;
+    private readonly DType _partition;
     private readonly DType _column;
-    private readonly string _path;
+    private readonly string? _path;
     private readonly bool _mayHoldNull;
 
-    private ValueCut(LayoutColumn partition, ClusteringKey key)
+    private ValueCut(LayoutColumn partition, SortKey tree, ClusteringKey? key)
     {
         Partition = partition;
-        _column = key.LeadingType;
-        _path = key.InstantPath;
-        _mayHoldNull = key.MayHoldNull;
-        _function = partition.Function;
+        _partition = tree.TypeAt(0);
+        _column = key?.LeadingType ?? _partition;
+        _path = key?.InstantPath;
+        _mayHoldNull = key?.MayHoldNull ?? true;
+        _function = key is null ? null : partition.Function;
     }
 
     /// <summary>
-    /// The cut of <paramref name="plan"/>'s partition over the key's first column; null for no partition, or one of
-    /// another source.
+    /// The cut of <paramref name="plan"/>'s partition, which leads <paramref name="tree"/>; read over the key's first column
+    /// when the partition is that column or a function of it. Null for no partition.
     /// </summary>
-    internal static ValueCut? Of(LayoutPlan? plan, ClusteringKey? key) =>
-        plan?.Partition is { Read: null } partition && key is not null
-            && string.Equals(partition.Value.SourcePath, key.InstantPath, StringComparison.Ordinal)
-            ? new ValueCut(partition, key)
-            : null;
+    internal static ValueCut? Of(LayoutPlan? plan, ClusteringKey? key, SortKey? tree) =>
+        plan?.Partition is not { } partition || tree is null ? null
+        : new ValueCut(
+            partition,
+            tree,
+            partition.Read is null && key is not null && string.Equals(partition.Value.SourcePath, key.InstantPath, StringComparison.Ordinal)
+                ? key
+                : null);
 
     /// <summary>The partition.</summary>
     internal LayoutColumn Partition { get; }
@@ -45,12 +50,17 @@ internal sealed class ValueCut
     /// <summary>
     /// The integer storage of the key's first column, whose values a part of a range starts at, one partition
     /// after the other: an integer's, an instant's, a date's. Null for a text, a float or a binary, whose next value no
-    /// function tells.
+    /// function tells, and for a partition of another source.
     /// </summary>
     internal PType? Integers
     {
         get
         {
+            if (_path is null)
+            {
+                return null;
+            }
+
             DType storage = _column;
             while (storage.Kind == DTypeKind.Extension)
             {
@@ -84,17 +94,14 @@ internal sealed class ValueCut
     private Int128 ImageOf(Int128 value) =>
         _function!.TryMap(_function.Literal(value), out FilterLiteral image) && ValueFunction.TryInteger(image, out Int128 at) ? at : value;
 
-    /// <summary>Whether two row-encoded keys of the clustering key, in ascending order, hold one partition.</summary>
+    /// <summary>
+    /// Whether two row-encoded keys of the tree, the partition leading them, hold one partition: a value's bytes end where
+    /// they end whatever follows them, so the same bytes from the start are the same value.
+    /// </summary>
     internal bool Same(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right)
     {
-        if (_function is null)
-        {
-            // A value's bytes end where they end whatever follows them, so the same bytes from the start are the same value.
-            int length = RowEncoder.FirstValueLength(left, _column);
-            return right.Length >= length && left[..length].SequenceEqual(right[..length]);
-        }
-
-        return Equal(Image(left), Image(right));
+        int length = RowEncoder.FirstValueLength(left, _partition);
+        return right.Length >= length && left[..length].SequenceEqual(right[..length]);
     }
 
     /// <summary>
@@ -130,12 +137,12 @@ internal sealed class ValueCut
 
     /// <summary>
     /// The one value an object holds, when its summaries prove it: the images of its key's first column's bounds the same,
-    /// and no null. Bounds that are not exact lie outwards, which keeps the proof: a non-decreasing function sends every
+    /// and no null; none for a partition of another source. Bounds that are not exact lie outwards, which keeps the proof: a non-decreasing function sends every
     /// value between them between their images. Null when they prove none.
     /// </summary>
     internal FilterLiteral? Single(ObjectSummaries summaries)
     {
-        if (!summaries.TryGet(_path, out ColumnSummary column) || !column.HasMin || !column.HasMax
+        if (_path is null || !summaries.TryGet(_path, out ColumnSummary column) || !column.HasMin || !column.HasMax
             || (_mayHoldNull && !(column.HasNullCount && column.NullCount == 0)))
         {
             return null;
@@ -165,13 +172,6 @@ internal sealed class ValueCut
 
     /// <summary>The smallest key of the object an input names: its tree key without the uid that ends it.</summary>
     private static ReadOnlySpan<byte> FirstKey(CompactionInput input) => input.Key.Span[..^VortexDataset.UidBytes];
-
-    /// <summary>The partition of a row-encoded key: its first value through the function, a null as a null.</summary>
-    private FilterLiteral Image(ReadOnlySpan<byte> key)
-    {
-        FilterLiteral value = RowEncoder.ReadFirstValue(key, _column);
-        return value.Kind != FilterLiteralKind.Null && _function!.TryMap(value, out FilterLiteral mapped) ? mapped : value;
-    }
 
     /// <summary>A bound's partition; null when the function does not read it.</summary>
     private FilterLiteral? Map(FilterLiteral bound)

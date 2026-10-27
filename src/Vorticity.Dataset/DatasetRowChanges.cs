@@ -345,13 +345,16 @@ internal static class DatasetRowChanges
             // kept are the object's own in its own order, the key's, so that the object keeps a sparse
             // index and blocks over them. They are some of its rows, which bound what the store sizes
             // the parts of the object from.
-            SortKey? key = version.Schema.Layout is { Components.Count: > 0 } plan ? SortKey.Of(plan, partition: false, plan.Components.Count) : null;
+            DatasetSchema schema = version.Schema;
+            SortKey? key = schema.Keyed ? schema.Tree : null;
             ObjectOutput? draft = matched < held.Entry.Rows
                 ? dataset.StartObjectUnder(
-                    version.Schema, inKeyOrder: true, contents: key is not null,
+                    schema, inKeyOrder: true, contents: key is not null,
                     byteBound: ObjectBound.Of(held.Entry.Bytes, doublings, dataset.Options.BoundOutPerIn))
                 : null;
-            SortedRows? sorted = key is null || draft is null ? null : new SortedRows(key, Math.Min(version.Schema.Layout!.Layout.Prefix, key.Count), blocks: false);
+            SortedRows? sorted = key is null || draft is null
+                ? null
+                : new SortedRows(key, Math.Min(schema.Layout!.Layout.Prefix, schema.Layout.Components.Count), blocks: false, skip: schema.Partitioned ? 1 : 0);
             try
             {
                 long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, key, sorted, changed, cancellationToken).ConfigureAwait(false);
@@ -367,17 +370,20 @@ internal static class DatasetRowChanges
                         "a rewrite that loses or doubles rows is the one failure it must not have.");
                 }
 
+                // The object keeps the keys of its first and last kept rows, or, without a key, the old one's partition and
+                // position, so that it is read where the old one was; and when the old one's rows arrived.
                 ObjectOutput sealing = draft;
                 draft = null;
+                sealing.Keys = sorted?.Bounds;
+                sealing.Partition = !schema.Keyed && schema.Partitioned ? held.TreeKey.Span[..^(VortexDataset.UidBytes + sizeof(long))].ToArray() : null;
+                sealing.Arrival = held.Entry.Arrival;
                 await using (sealing.Writer.ConfigureAwait(false))
                 {
                     sorted?.Finish(sealing.Writer);
                     await sealing.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
                 }
 
-                // Without a clustering key the object keeps the old one's position, so that it is
-                // read where the old one was.
-                long position = dataset.Key is null ? VortexDataset.PositionAt(held.TreeKey.Span) : held.FirstRow;
+                long position = !schema.Keyed ? VortexDataset.PositionAt(held.TreeKey.Span) : held.FirstRow;
                 return new Change(matched, await dataset.SealAsync(sealing, kept, position, cancellationToken).ConfigureAwait(false), null);
             }
             catch

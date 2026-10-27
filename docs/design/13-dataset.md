@@ -154,10 +154,13 @@ costs one more read, once (see [objects and keys](#3-objects-and-keys)).
 
 A leaf entry describes one data object:
 
-- its key: the row encoding of the object's smallest clustering key followed by its first row
-  position, or the position alone without a clustering key, then the object's uid, which makes the key
-  a function of the object rather than of the tree it was committed into (see
-  [rebase](#82-rebase-by-re-applying-operations))
+- its key: the row encoding of the layout's partition and of its key's components over the object's
+  first row, each ascending with nulls last, which every object's rows are sorted by; without a key,
+  the partition and the object's first row position; then the object's uid, which makes the key a
+  function of the object rather than of the tree it was committed into (see
+  [rebase](#82-rebase-by-re-applying-operations)). The partition leads, so a level's tree holds each
+  partition's objects together, and a walk filtered on the partition's column passes the others'
+  subtrees over by their summaries
 - its size, row count and identity: the uid in its postscript, the store's token when the store
   provides one, and the XXH3-128 the writer computed ([identity](#7-identity-and-integrity))
 - summaries: per summarized column, its minimum, maximum and null count, taken from the object's own
@@ -171,15 +174,20 @@ A leaf entry describes one data object:
   rows](#12-deleting-and-updating-rows)). A vector takes at most 1 KiB, which reduces the fan-out of
   the page holding it until the object is next rewritten: a page of entries all at the cap holds
   about a hundred
+- under a key, the same encoding of its last row's partition and key (tagged field 4), which bounds
+  its keys from above as its tree key bounds them from below
+- when its rows arrived, in seconds since the Unix epoch (tagged field 6): the commit's clock for an
+  append, the latest of its inputs' for a merge, never a column's
 - the length of its footer, when it passes the 64 KiB an open reads first: the bytes from the
   object's statistics to its end, which the writer knows when it completes the object. An open then
   asks for that many and reads the footer in one request, where it would take two, which matters
   for objects of hundreds of megabytes and wide tables. This field and those like it come after the
   summaries, as a zero where a count of deleted rows would stand, which no earlier entry holds there,
   then their length and their tagged bytes, so an entry without them keeps its bytes
-- for an object in slices, its table of contents: the object's schema, the encodings its blobs
-  name, its slice table and the region of each column's chunk directory, or of its page table with the
-  first row of each page ([the slice kinds](10-indexes.md#44-vorticityslicesv1-the-slices-of-a-file)),
+- for an object with a table of contents, the table: the object's schema, the encodings its blobs
+  name, its rows, the regions of its sparse index ([the sparse
+  index](10-indexes.md#44-vorticitykeyindexv1-the-first-key-of-each-granule)) and the region of each
+  column's chunk directory, or of its page table with the first row of each page,
   each variant column's path directory, each column's sheet ([the column
   sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)), its columns' counts ([the
   counts](10-indexes.md#49-vorticitycolumncountsv1-a-columns-counts)) and their sketches ([the
@@ -201,9 +209,10 @@ A leaf entry describes one data object:
 
 An internal entry holds a page reference to a child, the sum of its rows, the union of its children's
 summaries, and the tally of the objects under it: their bytes, the largest of them, the rows marked
-deleted in them, the most index fragments any one of them carries, and the most any one of them has
-marked, both as a share of its rows and as the bytes of its vector, which a compaction plans by (see
-[what a compaction does](#53-what-a-compaction-does)). The union behaves like an intersection, which
+deleted in them, the most index fragments any one of them carries, the most any one of them has
+marked, both as a share of its rows and as the bytes of its vector, when the latest of their rows
+arrived, and how many of them each size class holds (twelve at most, as the layout's top and fan-out
+size them), which a compaction plans by (see [what a compaction does](#53-what-a-compaction-does)). The union behaves like an intersection, which
 is the one thing about it a reader must get right. A column only travels up when every child carries
 it, and a bound only when every child has one, since keeping a bound because another child was silent
 would prune a subtree that holds the answer. One inexact child makes the union inexact.

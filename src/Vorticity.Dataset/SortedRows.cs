@@ -26,11 +26,19 @@ internal interface IOrderedKeys
 /// <param name="keys">The key the rows come in the order of.</param>
 /// <param name="prefix">The components of the key the object indexes and cuts its blocks on.</param>
 /// <param name="blocks">Whether the object keeps statistics over blocks, a job's, which are cut then.</param>
-internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true)
+/// <param name="skip">
+/// The components that lead the keys before the key's own, the partition's, one value in an object, which its index
+/// leaves out.
+/// </param>
+internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true, int skip = 0)
 {
-    // The keys of the object's granules, as they come; the rows taken; the key of the last.
+    // The components the blocks are cut on, those skipped included: they hold one value in an object.
+    private readonly int _cut = skip + prefix;
+
+    // The keys of the object's granules, as they come; the rows taken; the keys of the first and the last.
     private readonly List<byte[]> _granuleKeys = [];
     private long _rows;
+    private byte[]? _firstKey;
     private byte[] _lastKey = [];
     private int _lastKeyLength = -1;
 
@@ -51,6 +59,9 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true)
     /// <summary>The rows taken since the object started.</summary>
     internal long Rows => _rows;
 
+    /// <summary>The keys of the first and the last rows taken, whole; null before one.</summary>
+    internal (byte[] First, byte[] Last)? Bounds => _firstKey is null || _lastKeyLength < 0 ? null : (_firstKey, _lastKey[.._lastKeyLength]);
+
     /// <summary>
     /// Takes rows <paramref name="from"/> to <paramref name="to"/> of <paramref name="source"/>, the object's next rows in the
     /// key's order: the keys of those that start a granule of <paramref name="granuleRows"/> rows, the blocks they close,
@@ -63,6 +74,8 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true)
         {
             return;
         }
+
+        _firstKey ??= source.KeyAt(from).ToArray();
 
         // The keys of the rows that start a granule: the object's rows before them are those taken.
         for (long row = (_rows + granuleRows - 1) / granuleRows * granuleRows; row < _rows + (to - from); row += granuleRows)
@@ -123,6 +136,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true)
     {
         _granuleKeys.Clear();
         _rows = 0;
+        _firstKey = null;
         _lastKeyLength = -1;
         _blockRows.Clear();
         _pureRows = 0;
@@ -131,11 +145,15 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true)
         _declaredEnd = 0;
     }
 
-    /// <summary>The indexed prefix of the row-encoded key <paramref name="key"/>; the whole key when its width is not told.</summary>
+    /// <summary>
+    /// The indexed prefix of the row-encoded key <paramref name="key"/>, past the components skipped; the whole key from
+    /// there when its width is not told.
+    /// </summary>
     private ReadOnlySpan<byte> Prefixed(ReadOnlySpan<byte> key)
     {
-        int length = keys.PrefixLength(key, prefix);
-        return length < 0 ? key : key[..length];
+        int start = skip == 0 ? 0 : keys.PrefixLength(key, skip);
+        int end = keys.PrefixLength(key, _cut);
+        return start < 0 ? key : end < 0 ? key[start..] : key[start..end];
     }
 
     /// <summary>Notes rows <paramref name="from"/> to <paramref name="to"/> of the source, the object's next, in its blocks.</summary>
@@ -144,7 +162,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true)
     {
         // The last component, the finest grain the prefix groups rows by, ends a block where it changes; the rows a block
         // takes before any change may end it.
-        int last = prefix > 1 ? prefix - 1 : -1;
+        int last = prefix > 1 ? _cut - 1 : -1;
         int open = last >= 0 ? ColumnBlocks.FewestRows : ColumnBlocks.LeastRows;
         for (int at = from; at < to;)
         {
@@ -195,12 +213,12 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true)
     private int FirstChange<TKeys>(TKeys source, ReadOnlySpan<byte> before, int from, int to)
         where TKeys : IOrderedKeys
     {
-        if (keys.SamePrefix(before, source.KeyAt(to - 1), prefix))
+        if (keys.SamePrefix(before, source.KeyAt(to - 1), _cut))
         {
             return to;
         }
 
-        if (!keys.SamePrefix(before, source.KeyAt(from), prefix))
+        if (!keys.SamePrefix(before, source.KeyAt(from), _cut))
         {
             return from;
         }
@@ -211,7 +229,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true)
         while (high - low > 1)
         {
             int middle = low + ((high - low) >> 1);
-            if (keys.SamePrefix(before, source.KeyAt(middle), prefix))
+            if (keys.SamePrefix(before, source.KeyAt(middle), _cut))
             {
                 low = middle;
             }
@@ -235,7 +253,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true)
             return;
         }
 
-        if (keys.SamePrefix(_blockLow.AsSpan(0, _blockLowLength), _blockHigh.AsSpan(0, _blockHighLength), prefix))
+        if (keys.SamePrefix(_blockLow.AsSpan(0, _blockLowLength), _blockHigh.AsSpan(0, _blockHighLength), _cut))
         {
             _pureRows += _blockFilled;
         }

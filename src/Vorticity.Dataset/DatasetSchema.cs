@@ -49,8 +49,11 @@ internal sealed class DatasetSchema
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
         Layout = DType.IsDefault ? null : LayoutPlan.Of(layout, DType);
-        Key = Layout?.ColumnPaths() is { } paths ? ClusteringKey.For(paths, DType) : null;
-        Cut = ValueCut.Of(Layout, Key);
+        Tree = Layout is { } plan && (plan.Partition is not null || plan.Components.Count > 0)
+            ? SortKey.Of(plan, partition: true, plan.Components.Count)
+            : null;
+        Key = Layout is { Partition: null } && Layout.ColumnPaths() is { } paths ? ClusteringKey.For(paths, DType) : null;
+        Cut = ValueCut.Of(Layout, Key, Tree);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);
@@ -77,12 +80,26 @@ internal sealed class DatasetSchema
     internal LayoutPlan? Layout { get; }
 
     /// <summary>
-    /// The key over the columns of the layout's components, when each is a column's own values; null when the dataset is
-    /// ordered by arrival.
+    /// The order of the dataset's rows and of its trees, row-encoded: the partition, then the key's components, each
+    /// ascending with nulls last; null when the layout states neither. What a tree key leads with, what an entry's last
+    /// key holds, and what a merge compares.
+    /// </summary>
+    internal SortKey? Tree { get; }
+
+    /// <summary>Whether the layout states a key, whose order every object's rows are in.</summary>
+    internal bool Keyed => Layout is { Components.Count: > 0 };
+
+    /// <summary>Whether the layout states a partition, which leads the tree and holds each object's rows.</summary>
+    internal bool Partitioned => Layout?.Partition is not null;
+
+    /// <summary>
+    /// The key over the columns of the layout's components, when each is a column's own values and no partition leads the
+    /// tree's keys: what the reads seek by until they seek by the sparse index. Null for a layout of no key, of a computed
+    /// component or of a partition, whose reads prune by summaries alone until then.
     /// </summary>
     internal ClusteringKey? Key { get; }
 
-    /// <summary>The partition the dataset's jobs cut their objects by, over <see cref="Key"/>; null when it declares none.</summary>
+    /// <summary>The partition the dataset's jobs cut their objects by, over the tree's keys; null when it declares none.</summary>
     internal ValueCut? Cut { get; }
 
     /// <summary>Every name a column of the dataset gave up, in the order they were given up.</summary>
@@ -254,7 +271,7 @@ internal sealed class DatasetSchema
 
             kept.Add(old);
             DType was = DType.GetField(DType.IndexOfField(old));
-            if (Keyed(old))
+            if (IsKeyed(old))
             {
                 if (!string.Equals(old, name, StringComparison.Ordinal) || was != type)
                 {
@@ -281,7 +298,7 @@ internal sealed class DatasetSchema
                 continue;
             }
 
-            if (Keyed(name))
+            if (IsKeyed(name))
             {
                 throw new ArgumentException($"'{name}' is read by the dataset's layout, which partitions and orders every object: it cannot be dropped.", nameof(next));
             }
@@ -298,9 +315,7 @@ internal sealed class DatasetSchema
     }
 
     /// <summary>Whether a top-level column is the source of the layout's partition or of a component of its key.</summary>
-    internal bool IsKeyed(string column) => Keyed(column);
-
-    private bool Keyed(string column) => Layout?.Reads(column) == true;
+    internal bool IsKeyed(string column) => Layout?.Reads(column) == true;
 
     /// <summary>Retires a name, the column's earlier names following it to its new name or out of the schema.</summary>
     private static void Retire(List<RetiredColumn> retired, string name, string current)

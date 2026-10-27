@@ -111,16 +111,17 @@ internal static class DatasetCompactor
             return moved;
         }
 
-        bool merge = job.Style is CompactionStyle.Leveled;
-        ClusteringKey? key = dataset.Key;
-        if (merge)
-        {
-            Check(key, job);
-        }
-
         // Every input is read as this schema and every output written in it: a compaction is also
         // how objects of an earlier schema come to hold the current one.
         DatasetSchema schema = dataset.Snapshot.Schema;
+        bool merge = job.Style is CompactionStyle.Leveled;
+        if (merge)
+        {
+            Check(schema);
+        }
+
+        // The key the reads seek by, whose first column's summaries bound a level's ranges and the late rows.
+        ClusteringKey? key = dataset.Key;
 
         // A job of a dataset with a key whose objects aim at a mebibyte or more writes them with a table of contents and the
         // sparse index of the key's indexed prefix, which it names: what a lookup of an identifier and a filter on the key
@@ -134,13 +135,13 @@ internal static class DatasetCompactor
         if (indexed && VariantColumns(schema.DType).Length > 0)
         {
             using Activity? planning = DatasetTelemetry.StartCompactionPass("plan");
-            shreddings = await PlanValuesAsync(dataset, schema, job, key!, cancellationToken).ConfigureAwait(false);
+            shreddings = await PlanValuesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
         }
 
         // A leveled exit of level 0 keeps the rows that came late apart, in an object of level 0, while they weigh little
         // against the objects of its destination they fall among (LateRows): it reads its sources alone, and those
         // objects stand. Past that weight, it runs again as the merge with them it was planned as.
-        LateRows? late = merge ? LateRows.Of(job, key!) : null;
+        LateRows? late = merge && key is not null && !schema.Partitioned ? LateRows.Of(job, key) : null;
         CompactionJob ran = late is null ? job : LateRows.Sources(job);
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job
@@ -156,21 +157,26 @@ internal static class DatasetCompactor
             {
                 lateOutputs = late is null ? null : new ObjectStream(
                     dataset, schema, ran.Bytes, ran.FirstRow, inKeyOrder: true, rowBound: ran.Rows,
-                    0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn));
+                    0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                {
+                    Arrival = Latest(ran),
+                };
                 outputs = new ObjectStream(
                     dataset, schema, ran.TargetBytes, ran.FirstRow, inKeyOrder: merge, rowBound: ran.Rows,
                     ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
                 {
-                    Keys = indexed ? SortKey.OfColumns(schema.DType, key!.Paths, descending: false) : null,
-                    Prefix = Math.Min(schema.Layout?.Layout.Prefix ?? key?.Paths.Count ?? 0, key?.Paths.Count ?? 0),
+                    Keys = indexed ? schema.Tree : null,
+                    Prefix = Math.Min(schema.Layout?.Layout.Prefix ?? 0, schema.Layout?.Components.Count ?? 0),
+                    Skip = schema.Partitioned ? 1 : 0,
                     Shreddings = shreddings,
                     Values = schema.Cut,
+                    Arrival = Latest(ran),
                 };
                 try
                 {
                     provenance = new Provenance();
                     rows = merge
-                        ? await MergeAsync(dataset, schema, ran, key!, outputs, provenance, late, lateOutputs, cancellationToken).ConfigureAwait(false)
+                        ? await MergeAsync(dataset, schema, ran, outputs, provenance, late, lateOutputs, cancellationToken).ConfigureAwait(false)
                         : await ConcatenateAsync(dataset, schema, ran, outputs, provenance, cancellationToken).ConfigureAwait(false);
                     await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                     if (lateOutputs is not null)
@@ -247,7 +253,7 @@ internal static class DatasetCompactor
             Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
 
             // Apart, the outputs take over the part of the destination they fill alone, which no object it holds may meet.
-            Range = late is null ? job.Range : filled.Count == 0 ? null : LevelRange.Of(job.ToLevel, filled, key!),
+            Range = late is null ? job.Range : filled.Count == 0 ? null : LevelRange.Of(job.ToLevel, filled, key),
         };
 
         CommitResult commit = await dataset
@@ -338,40 +344,31 @@ internal static class DatasetCompactor
         };
     }
 
-    private static void Check(ClusteringKey? key, CompactionJob job)
+    /// <summary>
+    /// Refuses a leveled compaction of a dataset whose layout states no key: it merges on the tree's order, every input's
+    /// rows read in their own, which is the key's, nulls last.
+    /// </summary>
+    private static void Check(DatasetSchema schema)
     {
-        if (key is null)
+        if (schema.Tree is null || !schema.Keyed)
         {
             throw new VortexUnsupportedException(
-                "clustering key",
+                "sort key",
                 ComponentKind.Feature,
-                "A leveled compaction merges on the clustering key, and this dataset declares none. " +
-                "Compact it tiered, which concatenates.");
+                "A leveled compaction merges on the layout's key, and this dataset declares none. Compact it tiered, which concatenates.");
         }
+    }
 
-        // A single column's null keys are read, last, where the encoding puts them; a composite
-        // key's run holds no tuple with a null, so a merge that went on would drop those rows. A new
-        // dataset declares no such key; one declared before that was refused is merged only where
-        // the summaries say no null is there, which a summary loosened by marks no longer says.
-        if (!key.IsComposite || !key.MayHoldNull)
-        {
-            return;
-        }
-
+    /// <summary>When the latest rows a job reads arrived: what its outputs say of theirs.</summary>
+    private static long Latest(CompactionJob job)
+    {
+        long latest = 0;
         foreach (CompactionInput input in job.Inputs)
         {
-            foreach (string path in key.Paths)
-            {
-                if (!input.Entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasNullCount || column.NullCount > 0)
-                {
-                    throw new VortexUnsupportedException(
-                        input.Entry.Key,
-                        ComponentKind.Feature,
-                        $"'{path}' may hold a null in this object, and a composite key's run holds no tuple with a null: " +
-                        "the merge would drop those rows. Declare the composite clustering key on non-nullable columns.");
-                }
-            }
+            latest = Math.Max(latest, input.Entry.Arrival);
         }
+
+        return latest;
     }
 
     /// <summary>
@@ -509,6 +506,19 @@ internal static class DatasetCompactor
         long rows = 0;
         foreach (CompactionInput input in job.Inputs)
         {
+            // An object holds one partition's rows, which lead its tree key before its position: one of another rolls the
+            // object, the inputs coming in the tree's order.
+            if (schema.Partitioned)
+            {
+                byte[] partition = input.Key.Span[..^(VortexDataset.UidBytes + sizeof(long))].ToArray();
+                if (outputs.Partition is { } held && !held.AsSpan().SequenceEqual(partition))
+                {
+                    await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                outputs.Partition = partition;
+            }
+
             ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
@@ -531,14 +541,13 @@ internal static class DatasetCompactor
         VortexDataset dataset,
         DatasetSchema schema,
         CompactionJob job,
-        ClusteringKey key,
         ObjectStream outputs,
         Provenance provenance,
         LateRows? late,
         ObjectStream? lateOutputs,
         CancellationToken cancellationToken)
     {
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, cancellationToken);
         ValueCut? values = schema.Cut;
         long rows = 0;
         await using (merge.ConfigureAwait(false))
@@ -633,16 +642,16 @@ internal static class DatasetCompactor
     }
 
     /// <summary>
-    /// The k-way merge of a job's inputs on the clustering key. Offered by leaf key, an exact lower bound,
-    /// so an input opens only once it could hold the next row; the job's own order breaks ties among
-    /// inputs holding the same key.
+    /// The k-way merge of a job's inputs on the tree's order, the partition leading the key (<see cref="DatasetSchema.Tree"/>).
+    /// Offered by leaf key, an exact lower bound, so an input opens only once it could hold the next row; the job's own
+    /// order breaks ties among inputs holding the same key.
     /// </summary>
     /// <remarks>
-    /// With <paramref name="fields"/>, each input reads those fields of <paramref name="schema"/> alone, the clustering
-    /// key's among them, and the rows merged hold them alone.
+    /// With <paramref name="fields"/>, each input reads those fields of <paramref name="schema"/> alone, the ones the
+    /// partition and the key read among them, and the rows merged hold them alone.
     /// </remarks>
     private static KeyOrderedMerge InputsMerged(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken, int[]? fields = null)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken, int[]? fields = null)
     {
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         for (int i = 0; i < job.Inputs.Count; i++)
@@ -655,7 +664,7 @@ internal static class DatasetCompactor
         return new KeyOrderedMerge(
             dataset.Snapshot,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
-            SortKey.OfColumns(schema.DType, key.Paths, descending: false),
+            schema.Tree!,
             rankedTies: false,
             (lease, entry) => RowsOfAsync(lease, entry, schema, cancellationToken, fields),
             opened: null,
@@ -670,16 +679,16 @@ internal static class DatasetCompactor
     /// clustering value, the job's rows are counted together.
     /// </summary>
     private static async ValueTask<IReadOnlyList<ValueShredding>> PlanValuesAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
     {
         int[] variants = VariantColumns(schema.DType);
-        int[]? counted = Counted(schema, key);
-        int[] read = counted is null ? variants : [.. variants.Select(field => Array.BinarySearch(counted, field))];
+        int[] counted = Counted(schema);
+        int[] read = [.. variants.Select(field => Array.BinarySearch(counted, field))];
         int textBound = dataset.Options.Write.StringBoundBytes;
         ValueCut? values = schema.Cut;
         List<PathCensus[]> censuses = [];
         byte[]? last = null;
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken, counted);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, cancellationToken, counted);
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
@@ -727,21 +736,23 @@ internal static class DatasetCompactor
     }
 
     /// <summary>
-    /// The fields of <paramref name="schema"/> a first pass counts, ascending: the clustering key's and the variant columns,
-    /// what it reads of its inputs; null, every field, for a key on a nested column.
+    /// The fields of <paramref name="schema"/> a first pass counts, ascending: those the partition and the key read and the
+    /// variant columns, what it reads of its inputs.
     /// </summary>
-    private static int[]? Counted(DatasetSchema schema, ClusteringKey key)
+    private static int[] Counted(DatasetSchema schema)
     {
         SortedSet<int> fields = [.. VariantColumns(schema.DType)];
-        foreach (string path in key.Paths)
+        if (schema.Layout is { } plan)
         {
-            int field = schema.DType.IndexOfField(path);
-            if (field < 0)
+            foreach (LayoutColumn read in plan.Components)
             {
-                return null;
+                fields.Add(read.Field);
             }
 
-            fields.Add(field);
+            if (plan.Partition is { } partition)
+            {
+                fields.Add(partition.Field);
+            }
         }
 
         return [.. fields];
@@ -809,6 +820,9 @@ internal static class DatasetCompactor
         private byte[] _lastKey = [];
         private int _lastKeyLength = -1;
         private ObjectOutput? _output;
+
+        // The tree's key of the first row of the object being written, which its tree key leads with; null before one.
+        private byte[]? _firstKey;
         private SortedRows? _sorted;
         private long _rows;
         private long _firstRow;
@@ -869,6 +883,18 @@ internal static class DatasetCompactor
         /// <summary>The components of <see cref="Keys"/> the objects index: the layout's indexed prefix.</summary>
         internal int Prefix { get; init; }
 
+        /// <summary>The components that lead <see cref="Keys"/> before the key's own: the partition's, which an object's index leaves out.</summary>
+        internal int Skip { get; init; }
+
+        /// <summary>When the latest rows the job reads arrived, which its objects say of theirs; 0 for when they are sealed.</summary>
+        internal long Arrival { get; init; }
+
+        /// <summary>
+        /// The partition the object being concatenated holds, row-encoded, which leads its tree key before its position;
+        /// null for none, or for objects in a key's order, whose keys lead with it.
+        /// </summary>
+        internal byte[]? Partition { get; set; }
+
         /// <summary>
         /// What the objects of each clustering value shred, in the order of the values, which the rows come in; null for
         /// objects that shred nothing, and list no path.
@@ -889,9 +915,10 @@ internal static class DatasetCompactor
             ObjectOutput output = Open();
             if (Keys is { } keys)
             {
-                (_sorted ??= new SortedRows(keys, Prefix)).Take(merge, from, to, output.Writer.BlockRows);
+                (_sorted ??= new SortedRows(keys, Prefix, skip: Skip)).Take(merge, from, to, output.Writer.BlockRows);
             }
 
+            _firstKey ??= merge.KeyAt(from).ToArray();
             _lastKeyLength = SortedRows.Keep(ref _lastKey, merge.KeyAt(to - 1));
             RecordBatch run = merge.Current;
             await WriteAsync(from == 0 && to == run.RowCount ? run : run.Window(from, to - from), cancellationToken).ConfigureAwait(false);
@@ -1006,8 +1033,17 @@ internal static class DatasetCompactor
             }
 
             // The object is this method's from here: whatever fails gives it up, its upload included when it streams, since
-            // nothing else holds it any more. Its sparse index closes at its last key.
+            // nothing else holds it any more. Its sparse index closes at its last key, and the keys of its first and last rows
+            // in the tree's order are its own when it took them in that order.
+            if (_inKeyOrder && _schema.Keyed && _firstKey is not null && _lastKeyLength >= 0)
+            {
+                output.Keys = (_firstKey, _lastKey[.._lastKeyLength]);
+            }
+
+            output.Arrival = Arrival;
+            output.Partition = _inKeyOrder ? null : Partition;
             _output = null;
+            _firstKey = null;
             _lastKeyLength = -1;
             WrittenObject? written;
             try
@@ -1055,6 +1091,7 @@ internal static class DatasetCompactor
             }
 
             _output = null;
+            _firstKey = null;
             _sorted?.Clear();
             await output.DisposeAsync().ConfigureAwait(false);
         }
