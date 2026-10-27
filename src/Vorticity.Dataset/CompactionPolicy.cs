@@ -184,7 +184,10 @@ internal static partial class CompactionPolicy
             return schema.Keyed ? order[..schema.Tree!.PrefixLength(order, 1)] : order[..^sizeof(long)];
         }
 
-        /// <summary>A partition's value as text, from its encoding; empty for a dataset of one.</summary>
+        /// <summary>
+        /// A partition's value as text, from its encoding: an instant or a date in ISO 8601, <c>2026-10-02T00:00:00Z</c>,
+        /// <c>2026-10-02</c>; empty for a dataset of one.
+        /// </summary>
         internal string Describe(ReadOnlySpan<byte> partition)
         {
             if (partition.IsEmpty)
@@ -192,16 +195,48 @@ internal static partial class CompactionPolicy
                 return string.Empty;
             }
 
-            Expressions.FilterLiteral value = RowEncoding.RowEncoder.ReadFirstValue(partition, _snapshot.Schema.Tree!.TypeAt(0));
+            Types.DType type = _snapshot.Schema.Tree!.TypeAt(0);
+            Expressions.FilterLiteral value = RowEncoding.RowEncoder.ReadFirstValue(partition, type);
             return value.Kind switch
             {
                 Expressions.FilterLiteralKind.Null => "null",
                 Expressions.FilterLiteralKind.Bool => value.BoolValue ? "true" : "false",
-                Expressions.FilterLiteralKind.Signed => value.SignedValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                Expressions.FilterLiteralKind.Signed => Temporal(type, value.SignedValue)
+                    ?? value.SignedValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 Expressions.FilterLiteralKind.Unsigned => value.UnsignedValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 Expressions.FilterLiteralKind.Float => value.FloatValue.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
                 _ => System.Text.Encoding.UTF8.GetString(value.BytesValue),
             };
+        }
+
+        /// <summary>A timestamp's or a date's <paramref name="value"/> in ISO 8601, at UTC; null for another type, or one past the calendar.</summary>
+        private static string? Temporal(Types.DType type, long value)
+        {
+            if (type.Kind != Types.DTypeKind.Extension)
+            {
+                return null;
+            }
+
+            switch (Arrays.ExtensionDTypeRegistry.Resolve(type.ExtensionIdUtf8))
+            {
+                case Arrays.ExtensionKind.Timestamp:
+                    Arrays.VortexTimeUnit unit = Arrays.ExtensionDTypeRegistry.ReadTimestamp(type.ExtensionMetadata, type.StorageType).Unit;
+                    return Columns.TemporalConvert.TryToTicks(value, unit, out long ticks)
+                        && ticks >= -Columns.TemporalConvert.UnixEpochTicks && ticks <= DateTime.MaxValue.Ticks - Columns.TemporalConvert.UnixEpochTicks
+                        ? new DateTime(Columns.TemporalConvert.UnixEpochTicks + ticks, DateTimeKind.Utc)
+                            .ToString("yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'", System.Globalization.CultureInfo.InvariantCulture)
+                        : null;
+                case Arrays.ExtensionKind.Date:
+                    long days = Arrays.ExtensionDTypeRegistry.ReadDateUnit(type.ExtensionMetadata, type.StorageType) == Arrays.VortexTimeUnit.Milliseconds
+                        ? Columns.TemporalConvert.FloorDiv(value, Columns.TemporalConvert.MillisecondsPerDay)
+                        : value;
+                    long day = days + Columns.TemporalConvert.UnixEpochDayNumber;
+                    return day is >= 0 and <= Columns.TemporalConvert.MaxDayNumber
+                        ? DateOnly.FromDayNumber((int)day).ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
+                        : null;
+                default:
+                    return null;
+            }
         }
     }
 

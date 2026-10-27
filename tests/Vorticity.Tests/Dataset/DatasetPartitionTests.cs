@@ -428,6 +428,37 @@ public sealed partial class DatasetPartitionTests
         MaxObjectBytes = 1L << 30,
     };
 
+    /// <summary>
+    /// A tiered dataset partitioned by the day of an instant, and one by a date: the compaction plan names each partition
+    /// its level 0 holds in ISO 8601, the instant's day at UTC, the date's day, where it gave the stored integer.
+    /// </summary>
+    [Fact]
+    public async Task APartitionOfInstantsOrDatesIsNamedByItsDay()
+    {
+        Dated row = new Dated(new DateTimeOffset(2026, 10, 2, 13, 30, 0, TimeSpan.Zero), new DateOnly(2026, 10, 3));
+        Assert.Equal(["2026-10-02T00:00:00Z"], await PartitionsAsync(LayoutValue.Column(nameof(Dated.At)).Truncate(CalendarUnit.Day)));
+        Assert.Equal(["2026-10-03"], await PartitionsAsync(LayoutValue.Column(nameof(Dated.Day))));
+
+        async Task<List<string>> PartitionsAsync(LayoutValue partition)
+        {
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Dated.Schema, new DatasetOptions
+            {
+                Layout = new DatasetLayout { Partition = partition, SortKey = [LayoutValue.Column(nameof(Dated.At))], CalmAfter = null },
+            }, Ct);
+            await using (ObjectDraft draft = dataset.StartObject())
+            {
+                await draft.Writer.WriteAsync<Dated>([row], Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+
+            return [.. (await dataset.PlanCompactionAsync(cancellationToken: Ct)).Partitions.Select(static p => p.Partition)];
+        }
+    }
+
+    [VortexRecord]
+    public partial record struct Dated(DateTimeOffset At, DateOnly Day);
+
     [VortexRecord]
     public partial record struct Event(DateTimeOffset At, string Name);
 
