@@ -129,6 +129,98 @@ public sealed partial class DatasetTiersTests
     }
 
     /// <summary>
+    /// A day whose rows come in the key's order, appended in small parts and merged by class: its objects hold disjoint
+    /// keys, under the top's class 0, and its consolidation merges them into one object rather than move each whole, so that
+    /// the day reads from one object as a day whose keys came in any order does.
+    /// </summary>
+    [Fact]
+    public async Task APartitionWhoseKeysCameInOrderConsolidatesIntoOneObject()
+    {
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 10, 27, 8, 0, 0, TimeSpan.Zero));
+        Random random = new Random(47);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Row.Day)),
+                SortKey = [LayoutValue.Column(nameof(Row.Sequence))],
+                ObjectBytes = 1 << 20,
+                MergeFanout = 4,
+                CalmAfter = TimeSpan.FromHours(1),
+            },
+            TimeProvider = clock,
+            ContentsObjectBytes = 0,
+        }, Ct);
+        List<Row> all = [];
+        for (int a = 0; a < 10; a++)
+        {
+            clock.Advance(TimeSpan.FromMinutes(1));
+            await AppendAsync(dataset, all, Rows(random, 1_000, all.Count, day: 0));
+            await CompactAllAsync(dataset);
+        }
+
+        Assert.True(await LevelZeroAsync(dataset) > 1, "the day's merges left several objects");
+        clock.Advance(TimeSpan.FromHours(2));
+        long consolidated = await CompactAllAsync(dataset);
+        Assert.Equal(all.Count, consolidated);
+        Assert.Equal(0, await LevelZeroAsync(dataset));
+        Assert.Equal(1, await dataset.ScanBuilder().ObjectsAsync(Ct).CountAsync(Ct));
+        await HoldsAsync(dataset, all);
+    }
+
+    /// <summary>
+    /// Late rows on both sides of a consolidated day's keys, each object of its class 0, so no run of small ones: level 1
+    /// holds an object between them, which a move of the two would leave inside its range, a job the commit abandons each
+    /// time it is planned; their consolidation merges the three, and applies.
+    /// </summary>
+    [Fact]
+    public async Task LateObjectsAroundAConsolidatedOneMergeWithIt()
+    {
+        const int objectBytes = 64 << 10;
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 10, 27, 8, 0, 0, TimeSpan.Zero));
+        Random random = new Random(53);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Row.Day)),
+                SortKey = [LayoutValue.Column(nameof(Row.Sequence))],
+                ObjectBytes = objectBytes,
+                MergeFanout = 4,
+                CalmAfter = TimeSpan.FromHours(1),
+            },
+            TimeProvider = clock,
+            ContentsObjectBytes = 0,
+        }, Ct);
+        List<Row> all = [];
+        await AppendAsync(dataset, all, Rows(random, 4_000, 4_000, day: 0));
+        clock.Advance(TimeSpan.FromHours(2));
+        await CompactAllAsync(dataset);
+        Assert.Equal(0, await LevelZeroAsync(dataset));
+
+        await AppendAsync(dataset, all, Rows(random, 4_000, 0, day: 0));
+        await AppendAsync(dataset, all, Rows(random, 4_000, 8_000, day: 0));
+        foreach (PositionedObject held in await dataset.ScanBuilder().ObjectsAsync(Ct).Where(held => held.Level == 0).ToListAsync(Ct))
+        {
+            Assert.True(held.Entry.Bytes >= objectBytes / 4, $"a late object of {held.Entry.Bytes} bytes is under class 0");
+        }
+
+        clock.Advance(TimeSpan.FromHours(2));
+        int jobs = 0;
+        while (await dataset.CompactAsync(cancellationToken: Ct) is { } done)
+        {
+            Assert.Equal(OperationOutcome.Applied, done.Outcome);
+            Assert.True(++jobs < 10, "the jobs end");
+        }
+
+        Assert.Equal(0, await LevelZeroAsync(dataset));
+        all.Sort((left, right) => left.Sequence.CompareTo(right.Sequence));
+        await HoldsAsync(dataset, all);
+    }
+
+    /// <summary>
     /// A consolidation of a calm day held at its first object's put while another handle appends rows to that day and to
     /// another (spec A, 12): the consolidation still applies, the rows appended meanwhile stay at level 0, and every row
     /// reads back with the layout's invariants holding.

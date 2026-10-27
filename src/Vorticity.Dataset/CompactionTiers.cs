@@ -130,7 +130,7 @@ internal static partial class CompactionPolicy
                 continue;
             }
 
-            if (await ConsolidationAsync(dataset, partition, top, layout.LateShare, consolidateAll, cancellationToken).ConfigureAwait(false) is { } job)
+            if (await ConsolidationAsync(dataset, partition, top, fanout, layout.LateShare, consolidateAll, cancellationToken).ConfigureAwait(false) is { } job)
             {
                 busy.Add(index);
                 jobs.Add(job);
@@ -193,37 +193,72 @@ internal static partial class CompactionPolicy
 
     /// <summary>
     /// The consolidation of <paramref name="partition"/>: its level 0 merged with the objects of its level 1 that the span of
-    /// its keys meets, into level 1, disjoint, cut at the top; moved there whole when they are disjoint and meet none. Null
-    /// when its level 0 weighs less than a <paramref name="share"/>-th of what it meets, unless asked.
+    /// its keys meets, into level 1, disjoint, cut at the top. When the objects of level 0 are disjoint from one another, a
+    /// run of neighbours in the key's order under the class 0 of <paramref name="fanout"/> is merged first, with the objects
+    /// of level 1 its span holds, so that a partition whose keys came in order ends in objects of about the top all the
+    /// same; without such a run, they move there whole when level 1 holds nothing in their span. Null when what level 0
+    /// merges weighs less than a <paramref name="share"/>-th of what it meets, unless asked.
     /// </summary>
     private static async ValueTask<CompactionJob?> ConsolidationAsync(
-        PlannedVersion dataset, TierPartition partition, long top, int share, bool asked, CancellationToken cancellationToken)
+        PlannedVersion dataset, TierPartition partition, long top, int fanout, int share, bool asked, CancellationToken cancellationToken)
     {
-        // The span of the level 0's keys, from its least first key to its greatest last.
-        List<CompactionInput> fresh = partition.Objects;
-        ReadOnlySpan<byte> low = default;
-        ReadOnlySpan<byte> high = default;
-        for (int i = 0; i < fresh.Count; i++)
+        // Level 0's objects in the key's order; an object that states no last key bounds nothing, and waits.
+        List<CompactionInput> fresh = [.. partition.Objects];
+        fresh.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
+        byte[]? high = null;
+        foreach (CompactionInput input in fresh)
         {
-            ReadOnlySpan<byte> first = fresh[i].Key.Span[..^VortexDataset.UidBytes];
-            ReadOnlySpan<byte> last = fresh[i].Entry.LastKey.Span;
-            if (last.IsEmpty)
+            if (input.Entry.LastKey.IsEmpty)
             {
                 return null;
             }
 
-            low = i == 0 || first.SequenceCompareTo(low) < 0 ? first : low;
-            high = i == 0 || last.SequenceCompareTo(high) > 0 ? last : high;
+            high = high is null || Last(input).SequenceCompareTo(high) > 0 ? Last(input).ToArray() : high;
         }
 
-        // The consolidated objects that meet it: of its partition, which leads their keys, starting at or before its end and
-        // ending at or past its start. An object's last key lies past its tree key, so a subtree is passed over only when it
-        // ends before the partition or starts past the span.
-        byte[] spanLow = low.ToArray();
-        byte[] spanHigh = high.ToArray();
-        byte[] value = partition.Value;
+        List<CompactionInput> met = await ConsolidatedAsync(dataset, partition.Value, First(fresh[0]).ToArray(), high!, cancellationToken)
+            .ConfigureAwait(false);
+        if (Disjoint(fresh))
+        {
+            // A run of small neighbours first, with what of level 1 lies in its span; then the large objects, moved whole
+            // when level 1 holds nothing between them either: the commit abandons a job whose range, holes included, holds an
+            // object it does not take.
+            if (SmallRun(fresh, top / fanout) is { } run)
+            {
+                List<CompactionInput> held = met.FindAll(consolidated => Meets(consolidated, First(run[0]), Last(run[^1])));
+                return held.Count > 0 && !asked && (long)share * BytesOf(run) < BytesOf(held)
+                    ? null
+                    : Consolidation(dataset, [.. run, .. held], top, moves: false);
+            }
+
+            if (met.Count == 0)
+            {
+                return Consolidation(dataset, fresh, top, moves: true);
+            }
+        }
+
+        return met.Count > 0 && !asked && (long)share * partition.Bytes < BytesOf(met)
+            ? null
+            : Consolidation(dataset, [.. fresh, .. met], top, moves: false);
+    }
+
+    /// <summary>A consolidation of <paramref name="inputs"/> into level 1, cut at the top, or their move there whole.</summary>
+    private static CompactionJob Consolidation(PlannedVersion dataset, List<CompactionInput> inputs, long top, bool moves) =>
+        new CompactionJob(0, 1, CompactionStyle.Tiered, CompactionTrigger.Consolidation, inputs, top, 0)
+        {
+            Range = LevelRange.Of(1, inputs, dataset.Key),
+            Moves = moves,
+        };
+
+    /// <summary>
+    /// The objects of level 1 of the partition <paramref name="value"/> that the keys from <paramref name="low"/> to
+    /// <paramref name="high"/> meet: starting at or before its end and ending at or past its start. An object's last key lies
+    /// past its tree key, so a subtree is passed over only when it ends before the partition or starts past the span.
+    /// </summary>
+    private static async ValueTask<List<CompactionInput>> ConsolidatedAsync(
+        PlannedVersion dataset, byte[] value, byte[] low, byte[] high, CancellationToken cancellationToken)
+    {
         List<CompactionInput> met = [];
-        long metBytes = 0;
         if (dataset.Levels.Count > 1)
         {
             await foreach (PositionedEntry held in dataset.Levels[1].WalkAsync(
@@ -231,42 +266,70 @@ internal static partial class CompactionPolicy
                     0,
                     long.MaxValue,
                     node => TreePage.Compare(node.MaxKey.Span[..Math.Min(node.MaxKey.Length, value.Length)], value) >= 0
-                        && TreePage.Compare(node.MinKey.Span[..^VortexDataset.UidBytes], spanHigh) <= 0,
+                        && TreePage.Compare(node.MinKey.Span[..^VortexDataset.UidBytes], high) <= 0,
                     cancellationToken)
                 .ConfigureAwait(false))
             {
-                ObjectEntry entry = ObjectEntry.FromBytes(held.Entry.Value);
-                if (held.Entry.Key.Span[..^VortexDataset.UidBytes].SequenceCompareTo(spanHigh) <= 0
-                    && (entry.LastKey.IsEmpty || entry.LastKey.Span.SequenceCompareTo(spanLow) >= 0))
+                CompactionInput consolidated = new CompactionInput(1, held.Entry.Key, ObjectEntry.FromBytes(held.Entry.Value));
+                if (Meets(consolidated, low, high))
                 {
-                    met.Add(new CompactionInput(1, held.Entry.Key, entry));
-                    metBytes += entry.Bytes;
+                    met.Add(consolidated);
                 }
             }
         }
 
-        if (!asked && met.Count > 0 && (long)share * partition.Bytes < metBytes)
-        {
-            return null;
-        }
-
-        List<CompactionInput> inputs = [.. fresh, .. met];
-        LevelRange range = LevelRange.Of(1, inputs, dataset.Key);
-        return new CompactionJob(0, 1, CompactionStyle.Tiered, CompactionTrigger.Consolidation, inputs, top, 0)
-        {
-            Range = range,
-            Moves = met.Count == 0 && Disjoint(fresh),
-        };
+        return met;
     }
 
-    /// <summary>Whether objects hold keys no two of which meet: each one's first key past the last key of the one before.</summary>
-    private static bool Disjoint(List<CompactionInput> inputs)
+    /// <summary>The first run of two or more neighbours of <paramref name="ordered"/> each under <paramref name="below"/> bytes; null for none.</summary>
+    private static List<CompactionInput>? SmallRun(List<CompactionInput> ordered, long below)
     {
-        List<CompactionInput> ordered = [.. inputs];
-        ordered.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
+        for (int start = 0; start < ordered.Count; start++)
+        {
+            int end = start;
+            while (end < ordered.Count && ordered[end].Entry.Bytes < below)
+            {
+                end++;
+            }
+
+            if (end - start >= 2)
+            {
+                return ordered.GetRange(start, end - start);
+            }
+
+            start = end;
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether the keys of <paramref name="input"/> meet those from <paramref name="low"/> to <paramref name="high"/>.</summary>
+    private static bool Meets(CompactionInput input, ReadOnlySpan<byte> low, ReadOnlySpan<byte> high) =>
+        First(input).SequenceCompareTo(high) <= 0 && (input.Entry.LastKey.IsEmpty || Last(input).SequenceCompareTo(low) >= 0);
+
+    /// <summary>The first key of <paramref name="input"/>, its tree key without the uid.</summary>
+    private static ReadOnlySpan<byte> First(CompactionInput input) => input.Key.Span[..^VortexDataset.UidBytes];
+
+    /// <summary>The last key of <paramref name="input"/>.</summary>
+    private static ReadOnlySpan<byte> Last(CompactionInput input) => input.Entry.LastKey.Span;
+
+    private static long BytesOf(List<CompactionInput> inputs)
+    {
+        long bytes = 0;
+        foreach (CompactionInput input in inputs)
+        {
+            bytes += input.Entry.Bytes;
+        }
+
+        return bytes;
+    }
+
+    /// <summary>Whether objects in the key's order hold keys no two of which meet: each one's first key past the last key of the one before.</summary>
+    private static bool Disjoint(List<CompactionInput> ordered)
+    {
         for (int i = 1; i < ordered.Count; i++)
         {
-            if (ordered[i].Key.Span[..^VortexDataset.UidBytes].SequenceCompareTo(ordered[i - 1].Entry.LastKey.Span) <= 0)
+            if (First(ordered[i]).SequenceCompareTo(Last(ordered[i - 1])) <= 0)
             {
                 return false;
             }
