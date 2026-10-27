@@ -10,8 +10,8 @@ using Vorticity.IO;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// A dataset of requests at the time-window design's own scale, for <c>--micro paths --design</c>: hours at
-/// 5 × 10⁴ requests a second, an object an hour in key slices of 3 × 10⁶ rows, a terabyte and more on the disk.
+/// A dataset of requests at the design's own scale, for <c>--micro paths --design</c>: hours at 5 × 10⁴ requests
+/// a second, partitioned by hour and sorted by the instant, a terabyte and more on the disk.
 /// Each hour is drawn by a generator of its own, seeded by the hour, several hours at once, each written into
 /// objects of <c>partMinutes</c> minutes while the hours before it are appended in the order of their instants,
 /// each followed by the compaction it made due; the objects the compactions replaced are then vacuumed.

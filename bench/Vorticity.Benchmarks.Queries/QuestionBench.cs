@@ -185,14 +185,14 @@ internal static class QuestionBench
         }
 
         int objects = 0;
-        int sliced = 0;
+        int listed = 0;
         await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, default))
         {
             objects++;
-            sliced += held.Entry.Contents is not null ? 1 : 0;
+            listed += held.Entry.Contents is not null ? 1 : 0;
         }
 
-        Console.WriteLine($"{objects} objects, {sliced} in time slices with a table of contents");
+        Console.WriteLine($"{objects} objects, {listed} with a table of contents");
     }
 
     /// <summary>

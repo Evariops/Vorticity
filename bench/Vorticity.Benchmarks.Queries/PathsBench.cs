@@ -341,7 +341,7 @@ internal static partial class PathsBench
     /// <summary>
     /// <c>--entries</c>, <c>--micro entries</c>: each object's entry in the tree of the dataset at
     /// <paramref name="directory"/>, which a walk reads for every object it plans and the handle's page cache keeps, and
-    /// what its table of contents holds: its slices and its schema.
+    /// what its table of contents holds: its rows, its columns of granule statistics and its schema.
     /// </summary>
     internal static async Task EntriesAsync(string directory)
     {
