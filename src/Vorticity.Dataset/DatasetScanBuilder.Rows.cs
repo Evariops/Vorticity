@@ -433,11 +433,13 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// The geometry of the chunks of the columns the scan reads of the object <paramref name="held"/>, open as
     /// <paramref name="file"/> (spec C, 2.1): what its scans of a part of its rows read the granules of that part by, its marks
-    /// read once per object and scan, before the first such scan. Null when the object keeps none.
+    /// read once per object and scan, before the first such scan. Null when the object keeps none, or when it is so small that
+    /// a request reads it whole for what one costs at the store's profile (spec C, 6): its granules could spare no request.
     /// </summary>
     private async ValueTask GeometryAsync(VortexFile file, PositionedObject held, CancellationToken cancellationToken)
     {
-        if (held.Entry.Contents is not { Marks.Count: > 0 } || (_geometries?.ContainsKey(held.Entry.Uid) ?? false))
+        if (held.Entry.Contents is not { Marks.Count: > 0 } || (_geometries?.ContainsKey(held.Entry.Uid) ?? false)
+            || held.Entry.Bytes <= _version.Costs.Profile.RequestBytes)
         {
             return;
         }
