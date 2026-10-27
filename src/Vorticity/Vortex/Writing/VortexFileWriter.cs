@@ -359,6 +359,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The rows after which every column that gathers writes what it holds, or 0 (<see cref="VortexWriteOptions.GatheredGroupRows"/>).</summary>
     private long _groupRows;
 
+    /// <summary>The encoded bytes the columns that gather aim their chunks at, or 0 (<see cref="VortexWriteOptions.GatheredChunkBytes"/>).</summary>
+    private long _gatheredBytes;
+
     /// <summary>The rows the columns that gather took since their chunks last ended together.</summary>
     private long _groupTaken;
 
@@ -900,6 +903,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 gathering[field] ??= Gathering.Encoded(options.GatheredChunkBytes);
             }
+
+            writer._gatheredBytes = options.GatheredChunkBytes;
         }
 
         writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
@@ -1243,9 +1248,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The writer's own builder hands its chunks over already cut, whole blocks with nothing in
         // transit, and those go out as they are, like any sealed batch.
-        if (_automaticChunks && !(seal && _pending.Count == 0 && rows % _rowBlock == 0))
+        // Under columns that gather, rows written at once are taken a few blocks at a time, the widest column's bytes those a
+        // gathered chunk aims at: a column cuts its chunks where the file's end, and a merge that hands over long runs would
+        // leave chunks of a whole run, which a read of a few rows fetches whole.
+        long gathered = _gatheredBytes > 0 && rows > _rowBlock ? GatheredChunkRows(arena, root, rows) : long.MaxValue;
+        if ((_automaticChunks && !(seal && _pending.Count == 0 && rows % _rowBlock == 0)) || gathered < rows)
         {
-            await WriteInChunksAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
+            (long widest, long total) = _automaticChunks ? ColumnBytes(arena, root) : (0, 0);
+            long chunk = _automaticChunks ? Math.Min(AutomaticChunkRows(widest, total, rows), gathered) : gathered;
+            await WriteInChunksAsync(arena, root, rows, chunk, cancellationToken).ConfigureAwait(false);
             while (seal && _pendingRows >= _rowBlock)
             {
                 await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
@@ -1276,7 +1287,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// Takes a batch into chunks the writer sizes, cutting it where its chunks end before anything
+    /// Takes a batch into chunks of <paramref name="chunk"/> rows, cutting it where its chunks end before anything
     /// reads it: every chunk it holds whole is written where it lies, and the rest waits in transit
     /// for the rows that complete its chunk, which then goes out whole with nothing carried.
     /// </summary>
@@ -1287,10 +1298,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// width -- its widest column and all of them, per row -- and the rows already in transit keep
     /// theirs until their chunk goes out.
     /// </remarks>
-    private async ValueTask WriteInChunksAsync(CanonicalArena arena, int root, int rows, CancellationToken cancellationToken)
+    private async ValueTask WriteInChunksAsync(CanonicalArena arena, int root, int rows, long chunk, CancellationToken cancellationToken)
     {
-        (long widest, long total) = ColumnBytes(arena, root);
-        long chunk = AutomaticChunkRows(widest, total, rows);
         int offset = 0;
         while (offset < rows)
         {
@@ -1330,6 +1339,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The rows a batch of <paramref name="rows"/> rows is taken in under columns that gather: whole blocks whose widest
+    /// column's canonical bytes are those a gathered chunk aims at, a block at least.
+    /// </summary>
+    private long GatheredChunkRows(CanonicalArena arena, int root, int rows)
+    {
+        (long widest, _) = ColumnBytes(arena, root);
+        long perBlock = Math.Max(1, widest * _rowBlock / rows);
+        return Math.Max(1, _gatheredBytes / perBlock) * _rowBlock;
     }
 
     /// <summary>
