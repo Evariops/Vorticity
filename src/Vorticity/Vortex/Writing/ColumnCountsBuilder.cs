@@ -79,8 +79,8 @@ internal sealed class CountsPlan
     internal CountedMeasure[] Measures { get; }
 
     /// <summary>
-    /// The text columns whose distinct values the counts of the columns of at most <see cref="ColumnCountsBuilder.AttachValues"/>
-    /// values keep, an entry each: every text column with a sheet at first, then those of more than
+    /// The text columns whose distinct values the counts of the columns whose values hold <see cref="ColumnCountsBuilder.AttachRows"/>
+    /// rows each on average keep, an entry each: every text column with a sheet at first, then those of more than
     /// <see cref="ColumnCountsBuilder.WideValues"/> values whose values repeat (<see cref="SettleWide"/>).
     /// </summary>
     internal List<WideColumn> Wide { get; } = [];
@@ -343,10 +343,20 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     internal const int FewValues = 64;
 
     /// <summary>
-    /// The most values a column holds and keeps, for each entry, a quantile sketch of each measure, the distribution of its
-    /// values: past them, the sketches would weigh more than the column's rows give.
+    /// The valid rows each of a column's values holds on average, at least, for its entries to keep a quantile sketch of
+    /// each measure, the distribution of its values (spec H, 2): a sketch of about a kibibyte then costs some four bytes a
+    /// row of the column at most, whatever the object's size. Decided once the object is written.
     /// </summary>
-    internal const int SketchValues = 1_000;
+    internal const int SketchRows = 256;
+
+    /// <summary>
+    /// The bytes a column's sketches take at most while the object is written, about a kibibyte each (<see cref="SketchBytes"/>):
+    /// past as many values as fit, the column keeps none.
+    /// </summary>
+    internal const long SketchBudget = 64L << 20;
+
+    /// <summary>What a sketch of a measure of a value is reckoned to take while it is built.</summary>
+    private const int SketchSize = 1 << 10;
 
     /// <summary>The valid rows at which a number shows whether it is counted or carried, and a text column whether it is wide.</summary>
     internal const long FirstCheck = 1 << 16;
@@ -354,8 +364,14 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// <summary>The fewest values a text column holds past which it is wide: the columns of few values keep its distinct values.</summary>
     internal const int WideValues = 1_000;
 
-    /// <summary>The most values a column holds and keeps, for each entry, the distinct values of every wide column.</summary>
-    internal const int AttachValues = 100;
+    /// <summary>
+    /// The valid rows each of a column's values holds on average, at least, for its entries to keep the distinct values of
+    /// every wide column (spec H, 2): registers of some two kibibytes a wide column then cost about a byte a row.
+    /// </summary>
+    internal const int AttachRows = 2_048;
+
+    /// <summary>The most values a column's entries keep registers of while the object is written: past them, none.</summary>
+    internal const int AttachCeiling = 8_192;
 
     /// <summary>The bits of the sketches' grid: a relative error of 1 %, the engine's for a quantile asked with none.</summary>
     internal static readonly int SketchBits = QuantileSketch.BitsFor(0.01);
@@ -397,11 +413,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private int[] _rowIndexes = new int[1_024];
 
     // For each measure the records hold, the quantile sketch of each entry, made at its first value, encoded at the end;
-    // null once the column holds more than SketchValues values.
+    // null once they would pass SketchBudget.
     private QuantileSketch?[][]? _sketches;
 
     // Each row's entry by its row in the batch being fed, which the distinct values read once the batch is in; and for each
-    // wide column of the plan, the registers of each entry, null once the column holds more than AttachValues values.
+    // wide column of the plan, the registers of each entry, null once the column holds more than AttachCeiling values.
     private readonly int _field;
     private int[] _batchEntries = new int[1_024];
     private byte[]?[][]? _distinct;
@@ -576,7 +592,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         if (_sketches is not null)
         {
-            if (_sheet.Distinct > SketchValues)
+            if ((long)_sheet.Distinct * _sketches.Length * SketchSize > SketchBudget)
             {
                 _sketches = null;
             }
@@ -608,7 +624,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             return;
         }
 
-        if (_sheet.Distinct > AttachValues || !_sheet.Counting)
+        if (_sheet.Distinct > AttachCeiling || !_sheet.Counting)
         {
             _distinct = null;
             return;
@@ -882,12 +898,14 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         int width = StateWords.Count(kinds);
         long[] words = new long[_entries * width];
-        byte[]?[]? sketchBytes = _sketches is null ? null : new byte[]?[_entries * carried.Count];
+
+        // The sketches and the registers, kept where the values hold enough rows each to pay for them.
+        byte[]?[]? sketchBytes = _sketches is null || valid < (long)SketchRows * distinct ? null : new byte[]?[_entries * carried.Count];
 
         // The wide columns whose distinct values every entry keeps.
         _plan.SettleWide(end: true);
         List<int> attached = [];
-        for (int w = 0; _distinct is not null && distinct <= AttachValues && w < _distinct.Length; w++)
+        for (int w = 0; _distinct is not null && valid >= (long)AttachRows * distinct && w < _distinct.Length; w++)
         {
             if (_plan.Wide[w].Live && _plan.Wide[w].Field != _field)
             {
@@ -1158,7 +1176,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// <summary>Merges the entries of every value left out into the entry of the values left out, and renumbers the entries.</summary>
     private void Merge()
     {
-        // Entries renumbered, the registers would follow them; a column of at most AttachValues values reaches the budget
+        // Entries renumbered, the registers would follow them; a column of at most AttachCeiling values reaches the budget
         // only with the values left out, and lets them go.
         _distinct = null;
 

@@ -127,7 +127,7 @@ internal sealed class ColumnCounts
 
     /// <summary>
     /// Whether the column's sketches (<see cref="ColumnSketches"/>) keep a quantile sketch of each measure over each entry's
-    /// rows: a column of at most <see cref="Writing.ColumnCountsBuilder.SketchValues"/> values.
+    /// rows: a column whose values hold <see cref="Writing.ColumnCountsBuilder.SketchRows"/> rows each on average.
     /// </summary>
     internal bool Sketched { get; init; }
 
