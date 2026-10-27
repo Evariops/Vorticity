@@ -22,11 +22,14 @@ public sealed partial class DatasetEstimateTests
     private static readonly DateTimeOffset Start = new(2026, 10, 25, 0, 0, 0, TimeSpan.Zero);
     private static readonly string[] Regions = ["eu-west", "eu-north", "us-east", "us-west", "ap-south", "sa-east", "af-south"];
 
-    /// <summary>Objects whose columns end their chunks together every 4 096 rows, so that each holds a dozen ranges of 1 KiB of its narrowest column.</summary>
+    /// <summary>
+    /// Objects whose columns end their chunks together every 4 096 rows, a group, short of the bytes a column's chunk aims
+    /// at, so that each holds a dozen ranges of 1 KiB of its narrowest column.
+    /// </summary>
     private static readonly DatasetOptions Chunked = new DatasetOptions
     {
         Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Hit.At))] },
-        ChunkBytes = 4 << 10,
+        ChunkBytes = 64 << 10,
         GroupRows = 4_096,
         Write = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 16 << 10 },
     };
