@@ -6,20 +6,24 @@ using Vorticity.Types;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// When an object is read in two passes, the columns of its filter first, then the others for the rows that filter keeps
-/// alone (<see cref="DatasetScanBuilder"/>): when its sheets say the filter keeps so few rows that most units of the
-/// widest column read would hold none of them. The second pass reads the granules that hold a kept row alone, where the
-/// object keeps their geometry (spec C, 3), and decodes their blocks of 1 024 that do; whole chunks otherwise. With
-/// <c>k</c> rows kept among <c>u</c> units, about <c>min(k, u)</c> are read where every one was, at the price of a round
-/// trip more for those.
+/// How an object is read in two passes, the columns of its filter first, then the others for the rows that filter keeps
+/// (<see cref="DatasetScanBuilder"/>, spec D, 5): decided after the first, by the rows it kept. When the blocks of
+/// <see cref="BlockRows"/> rows that hold one are fewer than half the object's, the second pass reads the rows by their
+/// places: the granules that hold one, where the object keeps their geometry (spec C, 3), and their blocks that do; otherwise
+/// the granules that hold one, whole. With <c>k</c> rows kept among <c>b</c> blocks, about <c>min(k, b)</c> blocks are read
+/// where every one was, at the price of a round trip more for those. The sheets' estimate of the rows kept rules an object
+/// out before any pass, when it says half its blocks or more.
 /// </summary>
 internal static class TwoPhaseReads
 {
-    /// <summary>The units of the widest column read under which an object is read in one pass: too few to spare.</summary>
-    internal const long LeastUnits = 4;
+    /// <summary>The granules under which an object is read in one pass: too few to spare.</summary>
+    internal const long LeastGranules = 4;
 
-    /// <summary>Whether <paramref name="kept"/> rows among <paramref name="units"/> units leave half of them empty or more.</summary>
-    internal static bool Pays(long kept, long units) => units >= LeastUnits && kept * 2 <= units;
+    /// <summary>The rows of a block a second pass reads and decodes of a kept row: a FastLanes block (spec C, 3).</summary>
+    internal const int BlockRows = 1_024;
+
+    /// <summary>Whether a second pass reads the rows kept by their places: <paramref name="kept"/> blocks fewer than half of <paramref name="blocks"/>.</summary>
+    internal static bool ByPlaces(long kept, long blocks) => kept * 2 < blocks;
 
     /// <summary>
     /// The rows an object holds that <paramref name="filter"/> keeps, as the sheets of its columns, by place

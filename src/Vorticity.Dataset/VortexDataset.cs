@@ -2866,7 +2866,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The partials this handle learned of its objects' families, kept in memory and in the session's cache (<see cref="LearnedPartials"/>).</summary>
     internal LearnedPartials Partials { get; } = new LearnedPartials();
 
-    /// <summary>The batches where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
+    /// <summary>The granules where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
     internal PredicatePages Predicates { get; } = new PredicatePages();
 
     /// <summary>

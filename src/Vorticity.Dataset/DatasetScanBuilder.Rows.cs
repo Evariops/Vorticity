@@ -540,43 +540,13 @@ internal sealed partial class DatasetScanBuilder
                 yield break;
             }
 
-            if (columns is null && !held.Entry.HasDeletions && Volatile.Read(ref _narrowed) is { } narrowed
-                && narrowed.TryGetValue(held.Entry.Uid, out ulong[]? granules)
-                && Masked(lease.File, granules) is { } granted)
+            if (columns is null && !held.Entry.HasDeletions && _take is null && _filter is { } asked)
             {
-                // The granules of the object where the values its filter asks lie (spec D, 4.3), its scan's pruning starting
-                // from them: one scan, which reads the live granules alone where the store's profile says it pays.
-                await GeometryAsync(lease.File, held, marks, cancellationToken).ConfigureAwait(false);
-                RecordBatch? view = null;
-                ScanBuilder scan = Of(lease.File, held).WithGranuleMask(granted).WithGranules(GeometryOf(held));
-                using QueryMemory? ahead = ReadsAhead(scan, lease.File);
-                await foreach (RecordBatch batch in scan.ExecuteAsync()
-                    .WithCancellation(cancellationToken).ConfigureAwait(false))
+                // Under a filter, an object of the version's columns with no row marked: its rows from the granules a kept row
+                // may lie in, in one pass or two (spec D, 4 and 5).
+                await foreach (RecordBatch batch in FilteredAsync(lease.File, held, asked, marks, cancellationToken).ConfigureAwait(false))
                 {
-                    yield return InDataset(batch, held.FirstRow, ref view);
-                }
-
-                yield break;
-            }
-
-            if (columns is null && !held.Entry.HasDeletions && _take is null && _filter is { } asked
-                && await TwoPhaseAsync(held, asked, cancellationToken).ConfigureAwait(false) is { } filtered)
-            {
-                // A filter its sheets say keeps so few rows that most granules of the widest column read hold none: its own
-                // columns first, then the rest for the rows it keeps alone, which read only the granules that hold them and
-                // decode only their blocks of 1 024 that do (spec C, 3).
-                await GeometryAsync(lease.File, held, marks, cancellationToken).ConfigureAwait(false);
-                long[] kept = await KeptAsync(lease.File, held, asked, filtered, cancellationToken).ConfigureAwait(false);
-                if (kept.Length > 0)
-                {
-                    RecordBatch? view = null;
-                    ScanBuilder scan = Configure(lease.File.ScanBuilder(), null, _mask, canonical: false).Take(kept).WithGranules(GeometryOf(held));
-                    using QueryMemory? ahead = ReadsAhead(scan, lease.File);
-                    await foreach (RecordBatch batch in scan.ExecuteAsync()
-                        .WithCancellation(cancellationToken).ConfigureAwait(false))
-                    {
-                        yield return InDataset(batch, held.FirstRow, ref view);
-                    }
+                    yield return batch;
                 }
 
                 yield break;
@@ -591,69 +561,15 @@ internal sealed partial class DatasetScanBuilder
 
             if (columns is null && !held.Entry.HasDeletions)
             {
-                // A filter evaluated on the object's rows before reads the batches where it kept a row alone, each its own
-                // scan; one evaluated for the first time notes them, from batches whole, whose rows are where they lie.
-                SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
-                UInt128 predicate = _filter is not null && !_options.Compact && Covered(held) == held.Entry.Rows ? PredicateKey : default;
-                if (predicate != default && _dataset.Predicates.Of(held.Entry.Uid, predicate, cache) is { } pages)
-                {
-                    await GeometryAsync(lease.File, held, marks, cancellationToken).ConfigureAwait(false);
-                    RecordBatch? found = null;
-                    foreach (RowRange range in pages)
-                    {
-                        ScanBuilder part = Of(lease.File, held, _filter, _mask, canonical: false, within: range);
-                        using QueryMemory? reads = ReadsAhead(part, lease.File);
-                        await foreach (RecordBatch batch in part.ExecuteAsync()
-                            .WithCancellation(cancellationToken).ConfigureAwait(false))
-                        {
-                            yield return InDataset(batch, held.FirstRow, ref found);
-                        }
-                    }
-
-                    yield break;
-                }
-
-                // The object's own scan, which every object of the version's schema with no row
-                // marked is read by, rebased into one view for the whole object; under a filter, the granules its zone maps
-                // leave read alone where the store's profile says it pays (spec D, 4.4).
-                List<RowRange>? kept = predicate != default && !_dataset.Predicates.Wide(held.Entry.Uid, predicate) ? [] : null;
-                long selected = 0;
+                // The object's own scan, which every object of the version's schema with no row marked is read by, rebased
+                // into one view for the whole object.
                 RecordBatch? view = null;
-                if (_filter is not null)
-                {
-                    await GeometryAsync(lease.File, held, marks, cancellationToken).ConfigureAwait(false);
-                }
-
                 ScanBuilder scan = Of(lease.File, held).WithGranules(GeometryOf(held));
                 using QueryMemory? ahead = ReadsAhead(scan, lease.File);
                 await foreach (RecordBatch batch in scan.ExecuteAsync()
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
-                    if (kept is not null && batch.SelectedRows > 0)
-                    {
-                        if (kept.Count > 0 && kept[^1].End == batch.StartRow)
-                        {
-                            kept[^1] = new RowRange(kept[^1].Start, batch.StartRow + batch.RowCount);
-                        }
-                        else
-                        {
-                            kept.Add(new RowRange(batch.StartRow, batch.StartRow + batch.RowCount));
-                        }
-                    }
-
-                    selected += batch.SelectedRows;
                     yield return InDataset(batch, held.FirstRow, ref view);
-                }
-
-                if (kept is not null)
-                {
-                    _dataset.Predicates.Keep(held.Entry.Uid, predicate, kept, held.Entry.Rows, cache);
-                }
-
-                // What a clustering by each column of the filter would have spared the object, read whole as rows.
-                if (_filter is not null && Covered(held) == held.Entry.Rows && FilterColumns() is { Count: > 0 } credited)
-                {
-                    _dataset.Advisor.Read(credited, _version.Costs.Rows(held.Entry, FieldsRead()).Bytes, selected, held.Entry.Rows);
                 }
 
                 yield break;
@@ -800,18 +716,120 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The columns of <paramref name="filter"/> when the object <paramref name="held"/> is read in two passes
-    /// (<see cref="TwoPhaseReads"/>): a filter on top-level columns alone, whose sheets say it keeps rows fewer than half the
-    /// chunks of the widest other column read, as the object's contents count them; null to read it in
-    /// one. Its sheets are those the walk read, which the handle keeps.
+    /// The rows of the object <paramref name="held"/> that <paramref name="filter"/> keeps, an object of the version's columns
+    /// with no row marked, as the dataset's (spec D, 4 and 5). Its scan's pruning starts from the granules a kept row may lie
+    /// in: those where the filter's values lie, as the walk found them, and those where it kept one before, its pages. When the
+    /// filter's columns are a part of those read, they are read first (<see cref="TwoPassesAsync"/>), then, as the rows they
+    /// kept say, the rest for those rows by their places, or the granules that hold them, whole (<see cref="KeptAsync"/>);
+    /// otherwise every column at once, from those granules, read alone where the store's profile says it pays (spec D, 4.4).
+    /// A filter evaluated over every row of the object notes its pages.
     /// </summary>
-    private async ValueTask<FieldMask?> TwoPhaseAsync(PositionedObject held, VortexExpr filter, CancellationToken cancellationToken)
+    private async IAsyncEnumerable<RecordBatch> FilteredAsync(
+        VortexFile file, PositionedObject held, VortexExpr filter, Task<Indexes.ColumnMarks?[]>? marks, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
+        long rows = held.Entry.PhysicalRows;
+        long granuleRows = Scanning.SplitPlan.NaturalBatchRows(file.LayoutTree);
+        int granules = granuleRows <= 0 ? 0 : (int)((rows + granuleRows - 1) / granuleRows);
+        long blocks = (rows + TwoPhaseReads.BlockRows - 1) / TwoPhaseReads.BlockRows;
+        bool whole = Covered(held) == held.Entry.Rows;
+        UInt128 predicate = granules > 0 ? PredicateKey : default;
+
+        // The granules a kept row may lie in: where the filter's values lie, and where it kept one before.
+        ulong[]? may = Volatile.Read(ref _narrowed) is { } narrowed && narrowed.TryGetValue(held.Entry.Uid, out ulong[]? located) ? located : null;
+        if (predicate != default && _dataset.Predicates.Of(held.Entry.Uid, predicate, granules, cache) is { } pages)
+        {
+            may = may is null || may.Length != pages.Length ? pages : Both(may, pages);
+        }
+
+        Compute.BlockMask? granted = may is null ? null : Masked(file, may);
+        await GeometryAsync(file, held, marks, cancellationToken).ConfigureAwait(false);
+        RecordBatch? view = null;
+        if (granules >= TwoPhaseReads.LeastGranules && await TwoPassesAsync(held, filter, predicate, cancellationToken).ConfigureAwait(false) is { } filtered
+            && await KeptAsync(file, held, filter, filtered, granted, granuleRows, cancellationToken).ConfigureAwait(false) is { } first)
+        {
+            if (whole)
+            {
+                _dataset.Predicates.Keep(held.Entry.Uid, predicate, first.Granules, granules, first.ByPlaces, cache);
+            }
+
+            if (first.Kept == 0)
+            {
+                yield break;
+            }
+
+            // The rest for the rows kept by their places, which reads the granules that hold them alone and decodes only their
+            // blocks of 1 024 that do (spec C, 3); or the granules that hold them, whole, the filter judged again.
+            ScanBuilder second = first.ByPlaces
+                ? Configure(file.ScanBuilder(), null, _mask, canonical: false).Take(first.Rows).WithGranules(GeometryOf(held))
+                : Of(file, held).WithGranuleMask(Masked(file, first.Granules)).WithGranules(GeometryOf(held));
+            using QueryMemory? reads = ReadsAhead(second, file);
+            await foreach (RecordBatch batch in second.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                yield return InDataset(batch, held.FirstRow, ref view);
+            }
+
+            yield break;
+        }
+
+        // Every column at once, from the granules a kept row may lie in.
+        ScanBuilder scan = Of(file, held).WithGranuleMask(granted).WithGranules(GeometryOf(held));
+        bool notes = whole && predicate != default && !_options.Compact && !_dataset.Predicates.Wide(held.Entry.Uid, predicate);
+        ulong[]? noted = notes ? new ulong[(granules + 63) / 64] : null;
+        ulong[]? blocked = notes ? new ulong[(blocks + 63) / 64] : null;
+        long keptBlocks = 0;
+        long selected = 0;
+        using QueryMemory? ahead = ReadsAhead(scan, file);
+        await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            if (noted is not null)
+            {
+                PredicatePages.Note(batch.SelectionWords, batch.StartRow, batch.RowCount, granuleRows, noted);
+                keptBlocks += PredicatePages.Note(batch.SelectionWords, batch.StartRow, batch.RowCount, TwoPhaseReads.BlockRows, blocked!);
+            }
+
+            selected += batch.SelectedRows;
+            yield return InDataset(batch, held.FirstRow, ref view);
+        }
+
+        if (noted is not null)
+        {
+            _dataset.Predicates.Keep(held.Entry.Uid, predicate, noted, granules, TwoPhaseReads.ByPlaces(keptBlocks, blocks), cache);
+        }
+
+        // What a clustering by each column of the filter would have spared the object, read whole as rows.
+        if (whole && granted is null && FilterColumns() is { Count: > 0 } credited)
+        {
+            _dataset.Advisor.Read(credited, _version.Costs.Rows(held.Entry, FieldsRead()).Bytes, selected, held.Entry.Rows);
+        }
+    }
+
+    /// <summary>The granules both <paramref name="left"/> and <paramref name="right"/> keep, a bit a granule.</summary>
+    private static ulong[] Both(ulong[] left, ulong[] right)
+    {
+        ulong[] both = new ulong[left.Length];
+        for (int i = 0; i < both.Length; i++)
+        {
+            both[i] = left[i] & right[i];
+        }
+
+        return both;
+    }
+
+    /// <summary>
+    /// The columns of <paramref name="filter"/> when the object <paramref name="held"/> is read in two passes (spec D, 5): a
+    /// filter on top-level columns alone, which reads a part of the columns the scan reads, over an object that keeps the
+    /// geometry of its granules; null to read it in one. What its first pass keeps decides the second (<see cref="KeptAsync"/>).
+    /// The sheets of its columns, those the walk read, which the handle keeps, rule the object out when they say it keeps rows
+    /// in half its blocks or more (<see cref="TwoPhaseReads"/>), and so does the filter noted wide there before
+    /// (<see cref="PredicatePages"/>).
+    /// </summary>
+    private async ValueTask<FieldMask?> TwoPassesAsync(PositionedObject held, VortexExpr filter, UInt128 predicate, CancellationToken cancellationToken)
     {
         DType schema = _version.Schema.DType;
-        if (!_summaries || held.Entry.Contents is not { ColumnChunks.Count: > 0, Sheets.Count: > 0 } contents || schema.IsDefault
-            || !SheetPruning.Asks(filter, schema) || WidestUnits(held.Entry, contents, null) < TwoPhaseReads.LeastUnits)
+        if (!_summaries || held.Entry.Contents is not { Marks.Count: > 0 } contents || schema.IsDefault
+            || (predicate != default && _dataset.Predicates.Wide(held.Entry.Uid, predicate)))
         {
-            // Too few units in any column read to spare one, decided before the filter is looked into.
             return null;
         }
 
@@ -829,71 +847,152 @@ internal sealed partial class DatasetScanBuilder
             }
         }
 
-        // The widest column the rows read besides the filter's, in the units its second pass reads.
-        long units = WidestUnits(held.Entry, contents, fields);
-        if (units < TwoPhaseReads.LeastUnits)
+        if (fields.Count == 0 || !ReadsBesides(fields))
         {
             return null;
         }
 
-        List<int> asked = SheetPruning.Columns(filter, schema);
-        Indexes.ColumnSheet?[] sheets = await _dataset.ReadSheetsAsync(held.Entry, asked, cancellationToken).ConfigureAwait(false);
-        long? kept = TwoPhaseReads.ExpectedRows(filter, schema, field => asked.IndexOf(field) is int at and >= 0 ? sheets[at] : null);
-        return kept is long rows && TwoPhaseReads.Pays(rows, units) ? FieldMasks.Of(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(fields)) : null;
+        if (contents.Sheets.Count > 0 && SheetPruning.Asks(filter, schema))
+        {
+            List<int> asked = SheetPruning.Columns(filter, schema);
+            Indexes.ColumnSheet?[] sheets = await _dataset.ReadSheetsAsync(held.Entry, asked, cancellationToken).ConfigureAwait(false);
+            long blocks = (held.Entry.PhysicalRows + TwoPhaseReads.BlockRows - 1) / TwoPhaseReads.BlockRows;
+            if (TwoPhaseReads.ExpectedRows(filter, schema, field => asked.IndexOf(field) is int at and >= 0 ? sheets[at] : null) is long rows
+                && !TwoPhaseReads.ByPlaces(rows, blocks))
+            {
+                return null;
+            }
+        }
+
+        return FieldMasks.Of(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(fields));
     }
 
-    /// <summary>
-    /// The units the second pass of two reads of the widest column the scan reads in the object <paramref name="entry"/>
-    /// names, those of <paramref name="besides"/> aside: its granules, which it reads alone where the object keeps their
-    /// geometry (spec C, 3), every column holding as many; its chunks otherwise. None when no column is read besides.
-    /// </summary>
-    private long WidestUnits(ObjectEntry entry, Indexes.ObjectContents contents, List<int>? besides)
+    /// <summary>Whether the scan reads a column besides <paramref name="fields"/>.</summary>
+    private bool ReadsBesides(List<int> fields)
     {
         DType schema = _version.Schema.DType;
-        long chunks = -1;
         int read = _mask is { } mask ? mask.SelectedCount(schema.FieldCount) : schema.FieldCount;
         for (int i = 0; i < read; i++)
         {
-            int field = _mask is { } selected ? selected.SelectedField(i) : i;
-            if (besides?.Contains(field) != true && field < contents.ColumnChunks.Count)
+            if (!fields.Contains(_mask is { } selected ? selected.SelectedField(i) : i))
             {
-                chunks = Math.Max(chunks, contents.ColumnChunks[field]);
+                return true;
             }
         }
 
-        if (chunks < 0)
-        {
-            return 0;
-        }
-
-        long granuleRows = Math.Max(_dataset.Options.Write.BlockRows, 1);
-        return contents.Marks.Count > 0 ? (entry.PhysicalRows + granuleRows - 1) / granuleRows : chunks;
+        return false;
     }
 
     /// <summary>
-    /// The rows of the object <paramref name="held"/> <paramref name="filter"/> keeps, by their place in its file, read from
-    /// its columns <paramref name="filtered"/> alone, its batches whole with the rows kept marked.
+    /// What the first of two passes kept (<see cref="KeptAsync"/>): its rows, the granules that hold one, a bit a granule,
+    /// whether the second reads them by their places, and then their places in the file.
     /// </summary>
-    private async ValueTask<long[]> KeptAsync(VortexFile file, PositionedObject held, VortexExpr filter, FieldMask filtered, CancellationToken cancellationToken)
+    private readonly record struct FirstPass(long Kept, ulong[] Granules, bool ByPlaces, long[] Rows);
+
+    /// <summary>
+    /// The first of two passes over the object <paramref name="held"/> (spec D, 5): its columns <paramref name="filtered"/>
+    /// alone, from the granules <paramref name="granted"/> leaves, what <paramref name="filter"/> keeps: the granules of
+    /// <paramref name="granuleRows"/> rows that hold a row it kept, and, while the rows kept are no more than the object's
+    /// blocks of 1 024, their places. The second pass reads them by their places when the blocks that hold one are fewer than
+    /// half the object's (<see cref="TwoPhaseReads.ByPlaces"/>); otherwise the granules that hold one. Null, the first pass
+    /// given up, once they are half its blocks or more and more than half its granules: the second pass would read most of
+    /// the object again, which one pass reads once. With no granule granted, it reads a first part of the object, its first
+    /// thirty-second and 64 blocks at least, then the rest: a part that says so gives it up, its reads that part's alone.
+    /// </summary>
+    private async ValueTask<FirstPass?> KeptAsync(
+        VortexFile file, PositionedObject held, VortexExpr filter, FieldMask filtered, Compute.BlockMask? granted, long granuleRows,
+        CancellationToken cancellationToken)
     {
-        List<long> kept = [];
-        ScanBuilder scan = Of(file, held, filter, filtered, canonical: false).WithCompaction(false).WithGranules(GeometryOf(held));
-        await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+        long rows = held.Entry.PhysicalRows;
+        int granules = (int)((rows + granuleRows - 1) / granuleRows);
+        long blocks = (rows + TwoPhaseReads.BlockRows - 1) / TwoPhaseReads.BlockRows;
+        ulong[] granuleBits = new ulong[(granules + 63) / 64];
+        ulong[] blockBits = new ulong[(blocks + 63) / 64];
+        long[] places = new long[(int)Math.Min(blocks, 1_024)];
+        int count = 0;
+        bool placed = true;
+        long kept = 0;
+        int keptGranules = 0;
+        long keptBlocks = 0;
+
+        // The rows the scan reads of the object, and the first part, whole granules, read before the rest.
+        (long lower, long upper) = PhysicalRange(held);
+        if (held.Granules is { } part)
         {
-            using (batch)
+            (lower, upper) = (Math.Max(lower, part.Start), Math.Min(upper, part.End));
+        }
+
+        long sample = Math.Max(64, blocks / 32) * TwoPhaseReads.BlockRows;
+        sample = (sample + granuleRows - 1) / granuleRows * granuleRows;
+        RowRange[] parts = granted is null && upper - lower > 2 * sample
+            ? [new RowRange(lower, lower + sample), new RowRange(lower + sample, upper)]
+            : [new RowRange(lower, upper)];
+        for (int p = 0; p < parts.Length; p++)
+        {
+            ScanBuilder scan = Of(file, held, filter, filtered, canonical: false, within: parts[p])
+                .WithCompaction(false).WithGranuleMask(granted).WithGranules(GeometryOf(held));
+            await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 ReadOnlySpan<ulong> words = batch.SelectionWords;
-                for (int row = 0; row < batch.RowCount; row++)
+                keptGranules += PredicatePages.Note(words, batch.StartRow, batch.RowCount, granuleRows, granuleBits);
+                keptBlocks += PredicatePages.Note(words, batch.StartRow, batch.RowCount, TwoPhaseReads.BlockRows, blockBits);
+                kept += batch.SelectedRows;
+                placed &= kept <= blocks;
+                if (placed && batch.SelectedRows > 0)
                 {
-                    if (words.IsEmpty || ((words[row >> 6] >> (row & 63)) & 1) != 0)
+                    if (kept > places.Length)
                     {
-                        kept.Add(batch.StartRow + row);
+                        Array.Resize(ref places, (int)Math.Min(blocks, Math.Max(places.Length * 2L, kept)));
                     }
+
+                    count = Append(words, batch.StartRow, batch.RowCount, places, count);
                 }
+
+                if (!TwoPhaseReads.ByPlaces(keptBlocks, blocks) && keptGranules * 2L > granules)
+                {
+                    return null;
+                }
+            }
+
+            // The first part, read whole, says what the rest would.
+            if (p == 0 && parts.Length > 1
+                && !TwoPhaseReads.ByPlaces(keptBlocks, sample / TwoPhaseReads.BlockRows) && keptGranules * 2L > sample / granuleRows)
+            {
+                return null;
             }
         }
 
-        return [.. kept];
+        bool byPlaces = placed && TwoPhaseReads.ByPlaces(keptBlocks, blocks);
+        return new FirstPass(kept, granuleBits, byPlaces, byPlaces ? places[..count] : []);
+    }
+
+    /// <summary>
+    /// Appends to <paramref name="into"/> from <paramref name="at"/> the places of the rows <paramref name="selection"/> keeps of
+    /// the batch of <paramref name="rows"/> rows from row <paramref name="start"/>, every row when it is empty; where it ends.
+    /// </summary>
+    private static int Append(ReadOnlySpan<ulong> selection, long start, int rows, long[] into, int at)
+    {
+        if (selection.IsEmpty)
+        {
+            for (int row = 0; row < rows; row++)
+            {
+                into[at++] = start + row;
+            }
+
+            return at;
+        }
+
+        for (int w = 0; w < selection.Length; w++)
+        {
+            ulong bits = selection[w];
+            while (bits != 0)
+            {
+                into[at++] = start + (w << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+            }
+        }
+
+        return at;
     }
 
     private void RecordOpen(ObjectLease lease, int open = 1)
