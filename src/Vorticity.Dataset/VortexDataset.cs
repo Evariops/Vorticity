@@ -2570,8 +2570,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// granule or two are read whole. Wider ones, the units hashed postings place a value in (spec C, 4 and 5), are read in
     /// two steps: the filter's columns over them, then the columns at the rows the filter keeps alone, rows closer than two
     /// FastLanes blocks one span, which a granule of each column holds: about a chunk of the identifier and a granule of
-    /// every other column a value, where reading every column over its units would read a chunk of each. The rows a span
-    /// holds but the filter does not keep are the caller's to leave out. None when nothing is kept.
+    /// every other column a value, where reading every column over its units would read a chunk of each. Spans that lie
+    /// within a chunk of every other column, whose chunks the rows kept would read whole again, are read whole in one. The
+    /// rows a span holds but the filter does not keep are the caller's to leave out. None when nothing is kept.
     /// </summary>
     private async ValueTask<List<RecordBatch>> FoundRowsAsync(
         Indexes.SpanReader rowsOf, List<RowRange> ranges, VortexExpr filter, DType schema, int[]? columns, CancellationToken cancellationToken)
@@ -2588,7 +2589,8 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         long granuleRows = Math.Max(_options.Write.BlockRows, 1);
-        if (rows <= 2 * granuleRows * ranges.Count || FilterFields(filter, schema, columns) is not { } filtered)
+        if (rows <= 2 * granuleRows * ranges.Count || FilterFields(filter, schema, columns) is not { } filtered
+            || !await rowsOf.CutsAsync(Others(filtered, columns, schema), ranges, cancellationToken).ConfigureAwait(false))
         {
             return [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
         }
@@ -2683,6 +2685,23 @@ public sealed class VortexDataset : IAsyncDisposable
 
         fields.Sort();
         return fields.Count == 0 || fields.Count >= (columns?.Length ?? schema.FieldCount) ? null : [.. fields];
+    }
+
+    /// <summary>The columns a read keeps (<paramref name="columns"/>, or every one of <paramref name="schema"/>'s) but <paramref name="filtered"/>, ascending.</summary>
+    private static int[] Others(int[] filtered, int[]? columns, DType schema)
+    {
+        int count = columns?.Length ?? schema.FieldCount;
+        List<int> others = new List<int>(count);
+        for (int i = 0; i < count; i++)
+        {
+            int field = columns?[i] ?? i;
+            if (Array.BinarySearch(filtered, field) < 0)
+            {
+                others.Add(field);
+            }
+        }
+
+        return [.. others];
     }
 
     /// <summary>

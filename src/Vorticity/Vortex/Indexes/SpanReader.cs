@@ -531,6 +531,31 @@ internal sealed class SpanReader : IDisposable
     }
 
     /// <summary>
+    /// Whether a chunk of one of <paramref name="fields"/> starts strictly inside one of <paramref name="spans"/>: whether a
+    /// read of those columns at some rows of the spans alone may read fewer chunks than one over the spans whole. The
+    /// directories of the columns not read before are read first, the pages the spans reach of a paged one.
+    /// </summary>
+    internal async ValueTask<bool> CutsAsync(int[] fields, IReadOnlyList<RowRange> spans, CancellationToken cancellationToken)
+    {
+        await LoadAsync(fields, spans, cancellationToken).ConfigureAwait(false);
+        foreach (RowRange span in spans)
+        {
+            foreach (int field in fields)
+            {
+                foreach (ChunkSpan chunk in Overlapping(field, span.Start, span.Length))
+                {
+                    if (chunk.FirstRow > span.Start && chunk.FirstRow < span.End)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Reads, the first time it is asked for, what a read of column <paramref name="field"/>'s rows starts from: its chunk
     /// directory, or a paged column's page table, whose pages a read reads as its spans reach them. What a reader that learns
     /// late which rows it reads, a lookup after its postings, reads first, beside its other reads.
