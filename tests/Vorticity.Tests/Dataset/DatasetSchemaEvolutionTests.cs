@@ -266,9 +266,9 @@ public sealed class DatasetSchemaEvolutionTests
         await AssertRefusedAsync(dataset, "cannot become", [key, reading with { Type = VortexType.UInt64 }, site]);
         await AssertRefusedAsync(dataset, "cannot become", [key, reading, site with { Type = VortexType.Int32 }]);
         await AssertRefusedAsync(dataset, "cannot become", [key, reading with { Type = VortexType.Int64.Nullable }, site with { Type = VortexType.Binary }]);
-        await AssertRefusedAsync(dataset, "clustering key", [key with { Type = VortexType.Int64.Nullable }, reading, site]);
-        await AssertRefusedAsync(dataset, "clustering key", [reading, site]);
-        await AssertRefusedAsync(dataset, "clustering key", [key with { Name = "Id" }, reading, site], new Dictionary<string, string> { ["Id"] = "Key" });
+        await AssertRefusedAsync(dataset, "read by the dataset's layout", [key with { Type = VortexType.Int64.Nullable }, reading, site]);
+        await AssertRefusedAsync(dataset, "read by the dataset's layout", [reading, site]);
+        await AssertRefusedAsync(dataset, "read by the dataset's layout", [key with { Name = "Id" }, reading, site], new Dictionary<string, string> { ["Id"] = "Key" });
         await AssertRefusedAsync(dataset, "is a column already", [key, reading, site with { Name = "Reading" }], new Dictionary<string, string> { ["Reading"] = "Site" });
         await AssertRefusedAsync(dataset, "no column of that name", [key, reading, site with { Name = "City" }], new Dictionary<string, string> { ["City"] = "Town" });
 

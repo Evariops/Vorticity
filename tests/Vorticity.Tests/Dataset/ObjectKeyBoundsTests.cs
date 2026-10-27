@@ -52,11 +52,11 @@ public sealed partial class ObjectKeyBoundsTests
     }
 
     [Fact]
-    public async Task AKeyOfOneNumberStatesNoLastKeyWhichItsStatisticsBound()
+    public async Task EveryObjectStatesItsLastKeyWhateverItsKey()
     {
-        // A number's statistics bound a key of it alone; a composite key of numbers states its last key, since its leading
-        // column's bounds would take every object of a value of it.
-        foreach ((string[] key, bool states) in new[] { ((string[])[nameof(Numbered.Id)], false), ([nameof(Numbered.Group), nameof(Numbered.Id)], true) })
+        // Every object of a key states its last key, which its tree key and its sparse index end on: of one number, which its
+        // statistics would bound, as of a composite key, whose leading column's bounds would take every object of a value.
+        foreach ((string[] key, bool states) in new[] { ((string[])[nameof(Numbered.Id)], true), ([nameof(Numbered.Group), nameof(Numbered.Id)], true) })
         {
             await using MemoryObjectStore store = new MemoryObjectStore();
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Numbered.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [.. key.Select(LayoutValue.Column)] } }, Ct);

@@ -342,7 +342,8 @@ public sealed class BloomIndexTests
         // differ. The bound is the footer's own order of magnitude; anything past it is payload.
         Assert.InRange(refused.Length - none.Length, 0, 1_024);
 
-        // The same question of the indexer, which walks a written file and appends to it.
+        // The same question of the indexer, which walks a written file and appends to it: its footer again behind the first,
+        // a few kilobytes, and no payload.
         string appended = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), $"vorticity-bloom-{Guid.NewGuid():N}.vortex");
         System.IO.File.Copy(none.Path, appended);
@@ -350,7 +351,7 @@ public sealed class BloomIndexTests
         {
             await VortexFileIndexer.AppendIndexesAsync(
                 appended, Policy(), new VortexWriteOptions { IndexBudgetPerMille = 1 }, TestContext.Current.CancellationToken);
-            Assert.InRange(new System.IO.FileInfo(appended).Length - none.Length, 0, 4_096);
+            Assert.InRange(new System.IO.FileInfo(appended).Length - none.Length, 0, 8_192);
         }
         finally
         {

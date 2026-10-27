@@ -399,14 +399,16 @@ public sealed class SortedRunsCursorTests
         Assert.True(SameExtreme(decodedMax, max), $"max {Describe(max)} against {Describe(decodedMax)}");
 
         // The scan delivers exactly the proven rows, with the index and without; with it, a batch's
-        // worth of rows or fewer is a take, which decodes no more than the pruned scan does.
+        // worth of rows or fewer is a take, which decodes the rows it takes and the keys of the runs
+        // that name them, no more; without it, a comparison its packed values answer decodes the
+        // rows it keeps alone (spec N, 1).
         ScanCounters indexed = new ScanCounters();
         ScanCounters unindexed = new ScanCounters();
         List<long> on = await RowsOf(file.ScanBuilder().Where(filter).WithMetrics(indexed));
         List<long> off = await RowsOf(file.ScanBuilder().Where(filter).WithIndexes(false).WithMetrics(unindexed));
         Assert.True(
-            indexed.ValuesDecoded <= unindexed.ValuesDecoded,
-            $"{indexed.ValuesDecoded} values decoded with the index, {unindexed.ValuesDecoded} without");
+            indexed.ValuesDecoded <= 2L * oracle.Count,
+            $"{indexed.ValuesDecoded} values decoded with the index for {oracle.Count} rows, {unindexed.ValuesDecoded} without");
         List<long> expected = oracle.ConvertAll(e => e.Row);
         expected.Sort();
         Assert.Equal(expected, off);

@@ -64,11 +64,12 @@ public sealed class DatasetClusteringTests
     }
 
     [Fact]
-    public async Task EveryAppendedObjectCarriesTheMandatoryRun()
+    public async Task EveryAppendedObjectIsSortedByItsKey()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // The keys inside an object are shuffled, so nothing but the run can serve a cursor.
+        // The keys appended are shuffled, and the object holds them sorted (spec A, 4): its column says so, and a key cursor
+        // opens and seeks on it, with no run beside it.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -81,8 +82,7 @@ public sealed class DatasetClusteringTests
         await using ObjectStoreSource source = new ObjectStoreSource(store, entry.Key);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
 
-        // The column is not sorted, and yet a key cursor opens and seeks: that is the run.
-        Assert.False(IsSorted(file, "key"), "the keys were shuffled; a sorted column would void this test");
+        Assert.True(IsSorted(file, "key"), "an appended object holds its keys sorted");
         await using KeyCursor cursor = await file.Keys("key").OpenAsync(ct);
         Assert.True(await cursor.SeekAsync(FilterLiteral.From(4L * 7), SeekMode.Exact, ct));
         Assert.Equal(4L * 7, cursor.Key.SignedValue);
@@ -186,12 +186,12 @@ public sealed class DatasetClusteringTests
     }
 
     [Fact]
-    public async Task AKeyWalkRefusesAnObjectThatCannotServeIt()
+    public async Task AnImportOfAFileOutOfKeyOrderIsRefused()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // An imported file with no run on the key: leaving its rows out would be a wrong answer, so
-        // the walk refuses and names it.
+        // An imported file whose keys are not in order: a key walk would leave its rows out, so the import refuses it and
+        // names it, before anything is committed.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -202,17 +202,11 @@ public sealed class DatasetClusteringTests
         await store.PutIfAbsentAsync(key, unindexed, ct);
 
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
-        await dataset.ImportAsync(key, ct);
-
-        // Refused when the walk reaches it -- the first seek, since it is the only object -- which is
-        // the one moment its rows could have been left out.
-        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, ct);
-        VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-            async () => await cursor.SeekFirstAsync(ct));
+        ulong created = dataset.Version;
+        ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.ImportAsync(key, ct));
         Assert.Contains(key, refused.Message, StringComparison.Ordinal);
-
-        // The scan is unaffected: it reads objects, not keys.
-        Assert.Equal(PerObject, await dataset.ScanBuilder().CountAsync(ct));
+        Assert.Equal(created, dataset.Version);
+        Assert.Equal(0, await dataset.ScanBuilder().CountAsync(ct));
     }
 
     [Fact]

@@ -436,10 +436,10 @@ public sealed class DatasetKeyOrderTests
     }
 
     [Fact]
-    public async Task AnObjectWithNoSourceForTheKeyIsRefusedWhenTheMergeReachesIt()
+    public async Task AFileOfShuffledKeysIsRefusedWhenItIsImported()
     {
-        // An imported file with shuffled keys and no run: leaving its rows out would be a wrong
-        // answer, so the key-ordered read refuses, as the core refuses such a file.
+        // Every object of a keyed dataset holds its rows in the key's order, which a key-ordered read and every merge take
+        // it to: a file of shuffled keys is refused when it is imported, with what to do instead, and nothing is committed.
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -461,12 +461,12 @@ public sealed class DatasetKeyOrderTests
         string key = CommitKey.ForData("unindexed");
         await store.PutIfAbsentAsync(key, stream.ToArray(), ct);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
-        await dataset.ImportAsync(key, ct);
-
-        await Assert.ThrowsAsync<VortexUnsupportedException>(async () => await RowsAsync(dataset.ScanBuilder().InKeyOrder("key")));
-
-        // The scan in the tree's order is unaffected: it reads objects, not keys.
-        Assert.Equal(PerObject, await dataset.Scan().CountAsync(ct));
+        ulong created = dataset.Version;
+        ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.ImportAsync(key, ct));
+        Assert.Contains(key, refused.Message, StringComparison.Ordinal);
+        Assert.Contains("sorted by the dataset's key", refused.Message, StringComparison.Ordinal);
+        Assert.Equal(created, dataset.Version);
+        Assert.Equal(0, await dataset.Scan().CountAsync(ct));
     }
 
     /// <summary>
