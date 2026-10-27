@@ -52,9 +52,10 @@ A key is whole, dots included: `http.route` is one key, not `route` inside `http
 ## In a dataset
 
 Appends write variants as they come, and the jobs that rewrite rows anyway, the merges and the consolidations, choose
-for each object the keys that pay and write them as typed columns inside the variant, the format's shredded form: a
-key earns a column when what its values cost in the residual outweighs a column's overhead, some 200 bytes a chunk,
-and the rare keys stay in a binary residual. Each object keeps a directory of the keys its rows hold, with their
+for each object the keys to write as typed columns inside the variant, the format's shredded form: every key whose
+values of one class number 2 048 or more in the object becomes a column of its own, dense, or sparse where nine rows
+in ten lack it, and the rarer keys stay in a binary residual, the path directory saying which granules hold them. No
+saving in bytes decides: a question on a shredded key reads its values alone. Each object keeps a directory of the keys its rows hold, with their
 counts, and a map of where each shredded key's buffers lie, so that a question on one key reads that key's buffers
 alone. A key the object left in its residual is read from the residual of the chunks that hold it, never every row's.
 Until a job rewrites an appended object, the first question that reads its variants shreds a copy in memory, once per

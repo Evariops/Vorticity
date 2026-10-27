@@ -1,13 +1,11 @@
 # The query architecture: fast by construction
 
-This document describes the architecture that Vorticity datasets are moving to for answering questions: how rows are
-laid out, what each data object carries, how a question is planned and executed, and why. Its subject is the reference
-design, not today's code. It was adopted on 2026-10-27 against `main` at `94d3f5ec`, and it is being built in the phases
-of [section 13](#13-how-the-work-is-staged). Until a phase lands, the documents that describe the current dataset
-([13-dataset.md](13-dataset.md), [15-compaction.md](15-compaction.md), [16-queries.md](16-queries.md),
-[22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md)) and the code remain the reference for what exists. Each
-of those documents is rewritten as the phase that changes it lands. Names of types and members in this document are the
-planned API.
+This document describes how Vorticity datasets answer questions: how rows are laid out, what each data object carries,
+how a question is planned and executed, and why. It was adopted on 2026-10-27 against `main` at `94d3f5ec` and built in
+the phases of [section 13](#13-how-it-was-built), which also says where the code stops short of it. The documents that
+describe each part ([13-dataset.md](13-dataset.md), [15-compaction.md](15-compaction.md), [16-queries.md](16-queries.md),
+[22-on-the-fly-and-synopses.md](22-on-the-fly-and-synopses.md)) describe the same code in more detail. Names of types and
+members are the API's.
 
 The idea fits in one sentence: every question is made cheap by construction, through the order of the rows, the unit
 the data is addressed by, and the form in which it is executed, and precomputed views come on top of that, never in its
@@ -79,7 +77,7 @@ Every mechanism below attacks one term:
 | **decode block** | decoding without the rest | 1 024 values, a FastLanes block | the encoding |
 | **chunk** | the file format: one segment per column | about 1 MiB per column | the writer |
 | **request** | the network: one byte range read at once | from a few KiB to 8 MiB | the reader, from the store's cost profile |
-| **task** | parallelism: a range of granules of an object | sized by its cost | the planner |
+| **task** | parallelism: a part of a question, a range of the dataset's rows | four a node by default | the coordinator |
 | **owner** | the warm metadata and the index analysis of an object | one node per object | rendezvous hashing of the object's identity |
 | **property** | what a question reads: a column or a variant path | a stream of the object | the schema, and for a path, the objects that hold it |
 
@@ -124,9 +122,9 @@ columns become runs, about 65 to a granule *(computed)*:
 |---|---:|---:|
 | `Service`, `Version`, `Host` | 0.03 | ~0.003 |
 | `Status` | 0.65 | ~0.002 |
-| `Endpoint` | 1.22 | ~0.02 |
-| `Region`, `Method` | ~0.4 | ~0.005 |
-| all columns | 20.4 | ~18.2 |
+| `Endpoint` | 1.24 | ~0.02 |
+| `Region`, `Method` | 0.23 | ~0.005 |
+| all columns | 20.45 | ~18.2 |
 
 This is not precomputation; it is the order of the rows. Every question that filters or groups these columns reads
 about 60 times fewer bytes for them, and the engine folds a run as a weighted row
@@ -138,8 +136,10 @@ Every object a dataset writes holds one partition and is sorted by the sort key,
 splits its rows by partition, sorts each buffer in memory, and writes one sorted object per partition and per buffer,
 the way a database sorts an insert block. Encoding the key and sorting rows costs 51 to 99 ns a row on batches of
 4 096 rows *(measured, `RowEncodingBenchmarks`)*, about 0.25 to 0.5 s for a buffer of 256 MiB on one core
-*(computed)*: about 1 % of a core at the reference rate. An append that touches more partitions than a bound (100 by
-default) is refused before anything is written.
+*(computed)*: about 1 % of a core at the reference rate. Measured on whole appends, sorting costs 594 ns a row on
+appends of 6 250 rows, some 3.7 ms an append, a fixed cost that larger appends spread: 49 ns a row on one append of
+2 × 10⁶ rows *(measured, `vortex-queries --micro layout`; the second once, when the sort was built)*. An append that
+touches more partitions than a bound (100 by default) is refused before anything is written.
 
 Sorted objects make every other structure simpler: the sparse key index bounds a lookup in any object, fresh or not, and
 no sorted run has to be built beside an unsorted object.
@@ -155,14 +155,17 @@ Rows that arrive late for a consolidated partition land as small objects of that
 they are merged into the consolidated objects they overlap once they weigh an eighth of them, which bounds a late row at
 about nine writes. A partition that never becomes calm is reported rather than consolidated over and over.
 
-| | key-disjoint levels (today) | tiered merges and consolidation |
+| | key-disjoint levels | tiered merges and consolidation |
 |---|---|---|
 | writes a row, key led by the emitter, appends of 64 to 100 MB | ~20 to 25 *(computed)* | **2**, **3** once consolidated *(computed)* |
 | objects of the reference table | — | ~220 in an active day, ~161 in a consolidated day |
 | a lookup by key | at most one object a level | one object per consolidated partition, located by the tree of objects |
 
 Key-disjoint levels remain an option, and the default for a dataset with a sort key and no partition, whose single
-partition never becomes calm.
+partition never becomes calm. On 48 hours of requests at 20 a second appended every 30 seconds, partitioned by hour, a
+row is rewritten 2.92 times when the keys come in order, 1.94 times by the size classes and 0.98 times by the
+consolidation, and 2.89 times when four writers append and a row in fifty comes late *(measured, `vortex-queries --micro
+lifecycle`)*.
 
 ### 4.6 The declaration, and its defaults
 
@@ -187,18 +190,19 @@ DatasetOptions options = new()
 };
 ```
 
-| setting, as planned | default | what it governs |
+| setting | default | what it governs |
 |---|---|---|
-| object bytes | 1 GiB | the largest object a merge or a consolidation writes |
-| merge fan-out | 8 | objects of one size class merged at once |
-| calm after | 1 hour | when a partition is consolidated |
-| late share | 8 | late rows wait until they weigh an eighth of what they overlap |
-| append buffer bytes | 256 MiB | the in-memory sort buffer of an append |
-| maximum partitions per append | 100 | the partitions one append may touch |
-| organization | tiered with a partition; key-disjoint levels with a sort key and no partition | how objects are organized |
+| `DatasetLayout.ObjectBytes` | 1 GiB | the largest object a merge or a consolidation writes |
+| `DatasetLayout.MergeFanout` | 8 | objects of one size class merged at once |
+| `DatasetLayout.CalmAfter` | 1 hour | when a partition is consolidated |
+| `DatasetLayout.LateShare` | 8 | late rows wait until they weigh an eighth of what they overlap |
+| `DatasetLayout.Organization` | tiered with a partition; key-disjoint levels with a sort key and no partition | how objects are organized |
+| `DatasetOptions.AppendBufferBytes` | 256 MiB | the in-memory sort buffer of an append |
+| `DatasetOptions.MaxPartitionsPerAppend` | 100 | the partitions one append may touch |
 
-The partition, the sort key, its prefix and the organization are fixed when the dataset is created. The other settings
-are policy, and a commit may change them.
+The partition, the sort key, its prefix and the organization are fixed when the dataset is created. The object size,
+the fan-out, the calm and the share are policy, which a commit may change; the buffer and the partitions an append may
+touch are each handle's.
 
 ---
 
@@ -219,8 +223,9 @@ in the tree of commits names each structure, so a reader finds any of them witho
 
 ### 5.2 The sparse key index
 
-For each granule, the indexed prefix of its first row, front-coded against the granule before it, and paged so that a
-cold lookup reads a page rather than the whole index. A binary search finds the granules of a prefix. A filter on a
+For each granule, the indexed prefix of its first row, front-coded against the granule before it, in pages of 128
+granules (`vorticity.key.index.v1`). A reader finds it through the object's entry, without opening the object, and reads
+its pages in one request. A binary search finds the granules of a prefix. A filter on a
 component that is not leading is judged on ranges of granules: when the bounds of a range share their first `j`
 components, the component after them is bounded by theirs, and the filter is judged on that box; ranges the box refutes
 are skipped, the others split and judged again.
@@ -230,9 +235,8 @@ reference table *(computed)*.
 
 ### 5.3 Reading a granule, not a chunk
 
-A selective read used to fetch the whole chunk of every column it kept, about 1 MiB each, and then decode only the rows
-it needed. Decoding a selection is already supported by nearly every encoding. What this design adds is reading only the
-bytes of the granules a question keeps.
+A chunk holds about 1 MiB of a column. A selective read fetches only the bytes of the granules a question keeps, and
+decodes only the rows it needs, a selection nearly every encoding decodes on its own.
 
 The encodings say where those bytes are:
 
@@ -246,18 +250,20 @@ The encodings say where those bytes are:
 | zstd | its frame (one frame a block) | the frame sizes, in the encoding tree |
 | pco | its page of 8 192 values | the chunk's metadata |
 
-The **encoding tree** of a chunk, the format's own description of its encodings and buffers, is stored in the chunk
-directory, paged, together with the start of each granule in the chunk's variable-length buffers, the only offsets that
-cannot be computed. A reader plans the byte ranges of the granules it keeps, joins ranges closer than a request is worth
-(256 KiB on an object store, a few KiB on a local disk), and decodes them in place.
+The **encoding tree** of a chunk, the format's own description of its encodings and buffers, is stored in the object's
+marks (`vorticity.marks.v1`), together with the start of each granule in the chunk's variable-length buffers, the only
+offsets that cannot be computed; where each chunk lies is in the paged chunk directory. A reader plans the byte ranges of
+the granules it keeps, joins ranges closer than a request is worth (256 KiB on an object store, a few KiB on a local
+disk), reads a chunk whole past three quarters of its bytes, and decodes the ranges in place.
 
 A granule of a column of width `w` then costs about `w` KiB instead of about 1 MiB; a row found by an identifier costs
-about 0.3 to 0.4 MB for eleven columns *(computed)*. On an object store, where requests dominate below about 300 KB, the
-gain shows in memory and on local disks: a cache holds 10 to 100 times more granules than chunks.
+about 0.3 to 0.4 MB for eleven columns *(computed)*, 0.3 to 0.75 MB in four or five dependent steps *(measured,
+`DatasetGranuleReadsTests`)*. On an object store, where requests dominate below about 300 KB, the gain shows in memory
+and on local disks: a cache holds 10 to 100 times more granules than chunks.
 
 ### 5.4 Ordered object dictionaries
 
-A dictionary-encoded column keeps its values once per object, or once per run of chunks while they fit in 65 535 values
+A dictionary-encoded column of text, binary or integers keeps its values once per object while they fit in 65 535 values
 and 1 MiB, through the format's dictionary layout, and **its values are sorted**: a smaller code means a smaller value.
 Every writer of a dataset knows its values before it writes its codes: an append sorts its buffer, and a merge starts
 from the sorted dictionaries of its inputs. The format does not fix the order of a dictionary's values, so a Rust reader
@@ -267,9 +273,9 @@ reads these files unchanged.
 - A range, a prefix or a set of strings becomes a range or a set of codes, judged on the packed codes.
 - Minimum, maximum and order are read on the codes; a grouping keeps one table from code to group for the whole
   dictionary.
-- A merge does not decode text: it builds, for each input, a table from input codes to output codes by merging two sorted
-  lists, and translates each row's code. Decompressing and compressing a text column again costs more than 12 ns a row;
-  a translation costs about 1.
+- A merge reads its inputs' dictionaries from their tables of contents, without opening them, and declares their union,
+  sorted, to each object it writes. The writer codes a column that reaches it dictionary-encoded through a table from
+  its codes to the union's, built once by merging two sorted lists, and any other by looking its values up.
 - A locating index over a dictionary column stores codes, the dictionary itself being the sorted list of keys.
 
 The writer prices an object dictionary against a dictionary per chunk with the exact formulas it already uses, since an
@@ -285,11 +291,12 @@ the same request; the planner prices a column's reads with them.
 | zone map and presence per variant path | a filter on a path; skipping granules a rare path is absent from | proportional to where the path is present |
 | histogram of a measure per granule, on a log-linear grid (k = 3, ±5.9 %) | thresholds and quantiles per entity and fine grain | ~37 MB a measure |
 | locating index: each value of a repeating column or path, to its granules | equality, sets, prefixes, ranges, without visiting every granule | ~60 MB, 0.03 % |
-| identifier postings: the hash of each value, to the chunk of the identifier's stream that holds it | finding one row among billions | ~3.4 bytes a row of a unique identifier, ~8 % |
+| identifier postings: the hash of each value, to the granules of the identifier's stream that hold it | finding one row among billions | ~3.4 bytes a row of a unique identifier, ~8 % |
 
-Yield rules decide, per object, what is kept: a structure is kept where it prunes on the object's data, and a zone map
-whose granules all span the whole range is kept as a flag. Budgets apply to metadata, never to data. Without identifier
-postings, all of it weighs about 0.17 % of the data.
+Yield rules decide, per object, what is kept: a value present in more than three granules in four is marked everywhere
+rather than listed, a column whose values make more than 256 pairs of a value and a granule a granule on average keeps no
+locating index, and a granule lists its distinct values only when it holds 256 or fewer. Budgets apply to metadata,
+never to data. Without identifier postings, all of it weighs about 0.17 % of the data.
 
 ### 5.6 Index objects per partition
 
@@ -325,26 +332,31 @@ A comparison with a constant, a range, or a set is answered by the encoding itse
 
 | encoding | how | decode, then compare *(measured decode)* | in the encoded domain *(computed)* |
 |---|---|---:|---:|
-| bit-packing | compares each value as it is unpacked, in registers, one 1 024-bit mask a block | ~0.48 ns a row | ~0.1 to 0.15 |
+| bit-packing | compares each value as it is unpacked, in registers, one 1 024-bit mask a block | ~0.48 ns a row | 0.035 to 0.21 *(measured, 5 to 45 bits)* |
 | frame of reference | subtracts the reference from the constant, then as bit-packing; a constant outside the chunk's range settles every row | ~0.82 | ~0.15 |
 | ALP | encodes the constant with the chunk's exponents, compares the integers, handles exceptions apart | ~0.8 to 1.2 | ~0.2 |
 | sequence | intersects the progression with the range: two bounds a chunk | ~0.45 | constant |
-| sparse | judges the fill once and the present values only | 0.15 + 3.2 per present value | 3.2 per present value |
+| sparse | judges the fill once and the present values only | 0.15 + 3.2 per present value | 0.28 + ~7 per present value *(measured)* |
 | run-end, dictionary, constant | once per run, per value, per chunk | — | already so |
-| FSST | equality and prefixes on the compressed codes; containment by an automaton over the symbols, kept only if it beats decompression (12.1 ns a row) on a benchmark | — | — |
+| FSST | equality and prefixes on the compressed codes; containment by an automaton over the symbols | 14.7 to 17.6 for a containment | 10.4 to 11.5 when few rows hold the pattern *(measured)* |
 
 The decode costs are measured on one core ([benchmarks-x64.md](../guide/benchmarks-x64.md), decoding per encoding:
 0.14 ns a row for a constant, 0.20 for run-end, 0.28 for bit-packing, 0.62 for frame of reference, 0.60 to 0.97 for
 ALP, 0.91 to 1.34 for a dictionary, 12.1 for FSST); the FastLanes unpacking kernel alone runs at 0.07 to 0.13 ns a
 value. Each kernel answers exactly what decoding and comparing would, three-valued and row for row, and is checked so on
-the corpus of its encoding.
+the corpus of its encoding. The measured figures are the best of short runs on one core with AVX-512: the bit-packing
+kernel at 5 and 45 bits, a sparse column of two million integers at 0.1 % to 50 % present
+(`vortex-queries --micro sparsejudge`), and a containment on a million URLs of 51 bytes, which costs about what
+decompressing and searching does when a tenth of the rows hold the pattern or more.
 
 ### 6.3 Two passes, and late materialization
 
 Masks per block of 1 024 rows tell the second pass of a filtered read which blocks still hold a row, and only those are
 decoded, through the selective decoders the encodings already have. For scattered survivors at a selectivity of 10⁻⁴,
-that is 9.7 % of the blocks of 1 024 against 56 % of the granules *(computed)*. Under an order and a limit, the column of
-the order is read first, the positions kept, and the other columns read for those positions alone.
+that is 9.7 % of the blocks of 1 024 against 56 % of the granules *(computed)*. A second pass runs only when it spares
+what it costs: while the blocks kept lie farther apart than the profile's joined gap in the widest column it reads,
+which the summaries estimate before the first pass and the first pass follows. Under an order and a limit, the column
+of the order is read first, the positions kept, and the other columns read for those positions alone.
 
 ---
 
@@ -355,17 +367,18 @@ every path of an object is a stream of its own, of one of four kinds:
 
 | kind | for | form |
 |---|---|---|
-| dense | a path present in most rows | a typed column of the shredded variant |
-| sparse | a path present in a few rows | the present values and their positions |
-| rare | a path seldom present | the binary residual, located per granule |
+| dense | a path whose dominant class the object holds 2 048 values of or more | a typed column of the shredded variant |
+| sparse | such a path in rows nine in ten of which lack it | the present values and their positions |
+| rare | a path held fewer than 2 048 times | the binary residual, its granules in the path directory |
 | keys that are data | an attribute bag whose keys are themselves values | hash buckets |
 
 There is no budget of columns and no cap on paths; budgets apply to metadata alone. Each path has its presence, zone
 maps and locating index per granule, under the yield rules of [section 5.5](#55-metadata-per-granule-and-locating-indexes).
-Paths that questions filter and group on are promoted to dense streams with their indexes at the next merge, learned
-from the questions asked rather than declared. A declared path may be a component of the sort key. A filter on a sparse
-path costs its present values ([section 6.2](#62-predicates-evaluated-in-the-encoded-domain)), and a question on a path
-reads that path's streams and nothing else.
+Paths that questions filter and group on are promoted to typed streams with their indexes at the next merge, learned
+from the questions asked rather than declared: a path a handle's questions name three times. A declared path may be a
+component of the sort key. A filter on a sparse path costs its present values
+([section 6.2](#62-predicates-evaluated-in-the-encoded-domain)), and a question on a path reads that path's streams and
+nothing else.
 
 ---
 
@@ -401,8 +414,8 @@ store's profile, and what it **returns**: granules, states or rows.
 | rollup | run of objects | its totals answer the question for the whole run |
 | counts | object | the object's counts per value answer the aggregation |
 | learned partial | object | a partial of the question's family is held |
-| block statistics | part of an object | statistics answer some granules; the rest are rows |
-| zones | part of an object | the zone maps answer some granules |
+| granule statistics | object | the statistics of its columns over its granules answer some granules; the rest are rows |
+| zones | object | the zone maps settle some granules; the rest are rows |
 | rows | granule ranges | always |
 
 The choice is the exact optimum over the tree of units, since costs are additive: a unit takes the cheapest of the
@@ -444,16 +457,17 @@ Nodes are interchangeable: everything lives in the store, objects are immutable,
 - **Owners.** Each object has an owner, chosen by rendezvous hashing of its identity over the nodes present. The owner
   keeps the object's metadata in memory (sparse index, chunk directory, dictionaries, index pages) and performs its index
   analysis. An object's identity never changes, so ownership moves only when nodes come and go.
-- **Tasks.** A task is a range of granules of one object, sized by its cost and sent to the object's owner, whose local
-  disk is likely warm. Idle nodes steal work. A failed task runs again elsewhere.
-- **Exchanges.** Partial results gather on one node, shuffle by hash buckets for groupings of high cardinality, or
-  broadcast for small sets. Partials merge to the bit, whatever the split.
-- **Caches.** Owner memory for metadata, local disks for chunks and regions, the store for everything; a node that joins
-  warms the metadata of the objects it now owns before taking their tasks, and a new object is pushed to its owner by the
-  job that writes it.
+- **Tasks.** A question, named and the same on every node, is cut into parts, four a node by default, each a range of
+  the dataset's rows sent to the owner of the object of its first row, whose local disk is likely warm. A part a node
+  fails runs again on the object's next owner, twice at most by default.
+- **Exchanges.** Partials stream to the coordinator, which merges them as they arrive. Partials merge to the bit,
+  whatever the split.
+- **Caches.** Owner memory for metadata, local disks for chunks and regions, the store for everything. A handle's
+  `DatasetOptions.Moved` hook names each version that adds objects, and `ClusterExecutor.WarmAsync` has every node read
+  the metadata of the objects it now owns before their first part.
 
-The interface, the tasks and a local executor of several nodes live in the library; a transport lives in a satellite
-package, so the library runs no service of its own.
+The interface, the tasks and a local executor of several nodes live in the library; a transport over TCP lives in a
+satellite package (`Vorticity.Cluster.Tcp`), so the library runs no service of its own.
 
 ---
 
@@ -498,7 +512,8 @@ What the table says:
 - the price of objects of 1 GiB is in broad cold scans of narrow columns, which pay one request per object and column.
   Distributed execution spreads those requests over nodes.
 
-Writing costs 3 writes a row once consolidated: about 520 GB written a day for 173 GB of data, about 6 MB/s on average.
+Writing costs 3 writes a row once consolidated: about 520 GB written a day for 173 GB of data, about 6 MB/s on average
+*(computed; 2.89 to 2.92 rewrites a row measured on the lifecycle bench, section 4.5)*.
 
 ---
 
@@ -509,31 +524,47 @@ Writing costs 3 writes a row once consolidated: about 520 GB written a day for 1
   per-granule metadata and the locating indexes live in the index directory, which Rust ignores
   ([10-indexes.md](10-indexes.md)).
 - Index objects per partition are objects of the dataset's store, named by the dataset's commits.
-- The dataset's commit format takes a new version. During the beta, datasets written before it are refused with a clear
-  message, not read: there is no compatibility with earlier dataset formats.
+- The dataset's commit format is version 5, the only one read. During the beta, a dataset written before it is refused
+  with a message that says so: there is no compatibility with earlier dataset formats.
 
 ---
 
-## 13. How the work is staged
+## 13. How it was built
 
-Each phase starts with its specification and lands as commits that each build and pass the suite.
+Each phase started with its specification and landed as commits that each built; the suite, its three modes and the
+cross-check with the Rust reader ran once every phase had landed.
 
-| phase | content | depends on |
+| phase | content | state |
 |---|---|---|
-| 0 | the format break: earlier dataset formats and their compatibility removed, a new commit format version | — |
-| 1 | the encoded core: predicates in the encoded domain, ordered object dictionaries and code translation, chunk directories with encoding trees, reading a granule by its bytes | — |
-| 2 | the layout: partition, sort key, sorted appends, sparse key index, tiered merges and consolidation, index objects per partition, reads over the new layout | 0, 1 |
-| 3 | the planner: logical query, units, alternatives, cost profile, capabilities | 0 |
-| 4 | the granule end to end: two passes per block, identifier lookups, postings located at the identifier's chunk | 1, 2, 3 |
-| 5 | metadata per granule and locating indexes, combined per granule | 3, 4 |
-| 6 | variant properties as streams | 4, 5 |
-| 7 | distributed execution | 3 |
-| 8 | read tactics and automatic views | 2, 3, 4 |
-| 9 | design documents, guide and benchmarks | each phase |
+| 0 | the format break: earlier dataset formats and their compatibility removed, commit format version 5 | done |
+| 1 | the encoded core: predicates in the encoded domain, ordered object dictionaries, encoding trees and marks, reading a granule by its bytes | done |
+| 2 | the layout: partition, sort key, sorted appends, sparse key index, tiered merges and consolidation, index objects per partition, reads over the new layout | done |
+| 3 | the planner: logical query, units, alternatives, cost profile, capabilities | done |
+| 4 | the granule end to end: two passes per block, identifier lookups, postings located at the identifier's granules | done, two gaps below |
+| 5 | metadata per granule and locating indexes, combined per granule | done, one gap below |
+| 6 | variant properties as streams | done |
+| 7 | distributed execution | done, exchanges by gathering alone |
+| 8 | read tactics and automatic views | done; the optional views on demand |
+| 9 | design documents, guide and benchmarks | this document among them |
 
-Phases 0 and 1 run side by side; phase 2 uses the encoded core from its first version.
+Where the code stops short of this design, measured or known:
 
----
+- **Bytes of a filtered read.** The planner prices the rows of a filter that the sparse key index does not narrow from
+  their columns' whole bytes, and a second pass reads whole a chunk worth less than a request, as the profile prices it,
+  where the model counts its granules: a row found by an identifier takes 0.3 to 0.75 MB where the model says 0.3 to 0.4.
+- **Identifier postings.** The index object holds 9.9 bytes a row of a unique identifier, against about 3.4 in the
+  model: its pages keep the whole hash, its gaps coded as varints, where the model keeps about 13 bits.
+- **Exact sets.** The granules a filter keeps whole come from the zone maps' proofs and the granule statistics alone; the
+  locating indexes and the postings give the granules a row may lie in.
+- **A filtered count** decodes its columns and counts, where a scan pushes its predicates to the encodings.
+- **Sparse columns** cost about 7 ns a present value, against 3.2 in the model.
+- **Object dictionaries** are one per object, never one per run of chunks, and leave floats to ALP.
+- **Exchanges** gather partials on the coordinator; shuffles by hash buckets and broadcasts are specified, not built, and
+  an idle node takes no part from another.
+- **Top lists** under an order correlated with the key decode 8 blocks of about 30 for the top ten, against about 3 in
+  the model.
+- **Views** that an application chooses, a joint precomputation of several columns, a degraded history and derived
+  datasets, are specified and built when an application asks for them.
 
 ## 14. Decisions, and the alternatives weighed
 

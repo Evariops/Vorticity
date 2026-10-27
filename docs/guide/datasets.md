@@ -205,7 +205,7 @@ question that asks those columns for values reads these indexes in place of the 
 object that lacks the values, and reads only the granules of the others where the values live. That
 holds on any column, not only the key's: a filter on an endpoint, which only its service's rows hold,
 reads that service's granules, where the same filter written as a prefix, which no index answers, reads
-every row. A value that lives in more than half an object's granules is read with the whole object. A
+every row. A value that lives in more than three granules in four is read with the whole object. A
 value that is rare but scattered, which no index places, is read in two passes when the sheets say so:
 the filter's columns first, then the other columns only for the rows it kept, from the granules that
 hold them.
@@ -214,14 +214,14 @@ Three days of a request every five seconds, partitioned by day and sorted by the
 over the first two days, then over the last quarter of an hour of the second (the `time-windows` sample):
 
 ```
-51840 requests over three days in 12 objects
+51840 requests over three days in 3 objects
 two days by service: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 34560 rows read
 the last quarter of an hour of the second day: 180 requests; blocks decoded 1, pruned 0
 ```
 
-Its appends came in order, so each day's merged objects hold disjoint ranges of instants, and the day's
-consolidation moved them whole rather than rewrite them: four objects a day of a granule each, the last
-quarter of an hour read from the one that holds it.
+Its appends came in order, so each day's merged objects hold disjoint ranges of instants. The day's
+consolidation merges such neighbours, each far under the object size, into one object: three days in
+three objects of three granules each, the last quarter of an hour read from the granule that holds it.
 
 A key of a variant column is asked as a column is, read strictly as an integer, a double, a text or a
 boolean. An object that shreds the key reads its typed column, and one that leaves it in the residual

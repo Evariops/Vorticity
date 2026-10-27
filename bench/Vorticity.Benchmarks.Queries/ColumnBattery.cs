@@ -11,10 +11,10 @@ using Vorticity.Scanning;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// <c>--micro columns</c>: the battery "any column" of the design (22 §10.5). For each column of the reference requests, a
+/// <c>--micro columns</c>: the battery "any column" of the design (22 §8.3). For each column of the reference requests, a
 /// count by value and hour, then a filter on its most frequent value and on its rarest, grouped by each of the other
-/// columns, asked of the same rows in the order they arrive (a key on the instant, an object an hour) and sorted by
-/// service (a key on the service and the instant, blocks ending at each hour, objects of the same size). Each question
+/// columns, asked of the same rows in the order they arrive (partitioned by hour, sorted by the instant) and sorted by
+/// service (a key on the service, the hour and the instant, its first two indexed, objects of the same size). Each question
 /// says the path its plan takes object by object, the requests and bytes its planner prices the exact answer at, those
 /// a cold handle then reads, and those the rows take; its answer is held to the rows'. Then the frontier of the reads on
 /// the fly: at the design's rate, the longest window whose rows a question reads exactly within a second, cold.

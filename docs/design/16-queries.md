@@ -198,8 +198,8 @@ On such a key:
 
 A group by does not stream on a key with no such component, under an order by an aggregate, or on a
 sorted column that holds a NaN, which is not sorted at all (see [key order per
-dtype](12-index-reads.md#34-key-order-per-dtype)). On a dataset it only streams on the first column of
-the clustering key, or a function of it, under a take that stops the read early, where the dataset
+dtype](12-index-reads.md#34-key-order-per-dtype)). On a dataset it only streams on the first component of
+the sort key, or a function of it, under a take that stops the read early, where the dataset
 reads its rows in key order, merging the objects and opening each one once it may hold the next row;
 without a take, a read in key order would go one object at a time, and the objects are read side by
 side (see [order beyond the lookup](13-dataset.md#66-order-beyond-the-lookup)).
@@ -310,7 +310,7 @@ met and then kept (two a year where daylight saving applies), so a value takes i
 an integer truncation and the offset back, a lookup among the two or three intervals of its year. The
 repeated hour in autumn is two hours, with two offsets, and so two buckets.
 
-Other functions (date parts, text functions, a coalesce) will take the same path: a function on a
+Another function (date parts, text functions, a coalesce) would take the same path: a function on a
 symbol, evaluated where the block lies.
 
 ### 3.6 Variant paths
@@ -641,7 +641,7 @@ time, 1 % of a month would cost as many requests as blocks, some 10⁵.
 
 **The strata.** Objects that follow one another are gathered until a stratum holds the ranges the first
 tier draws two of: `⌈2 / s₁⌉` ranges, `s₁` the first share. Objects follow the order of the
-clustering, so a stratum holds neighbouring values. Each stratum draws its ranges in an order shuffled
+partition and the sort key, so a stratum holds neighbouring values. Each stratum draws its ranges in an order shuffled
 once, with the seed given or one of the process's choosing. A tier of share `s` reads the first
 `clamp(⌈s · M_h⌉, min(2, M_h), M_h)` of a stratum's `M_h` ranges, so the tiers are nested.
 
@@ -1036,10 +1036,10 @@ chosen row and a tie keep the earlier range's.
 
 On a dataset, a range is an object, and an object holding two shares of the rows or more is cut where
 a chunk of every column the pass reads starts, so no chunk is read by two ranges: the columns of a
-dataset's object are chunked apart, and their chunks end together at its slices and its groups of rows
-([key slices](11-write-strategy.md#9-key-slices-and-shredded-variants)). Under a range of the key's
-first column, an object in slices counts for the rows of the slices the range reaches, which its entry
-names, and is cut between their chunks alone. The objects that are cut are opened side by side to learn
+dataset's object are chunked apart, and their chunks end together at its groups of rows ([a dataset's
+objects](11-write-strategy.md#9-a-datasets-objects)). Under a filter on the sort key's first
+components, an object counts for the rows of the granules its sparse index keeps, and is cut between
+their chunks alone. The objects that are cut are opened side by side to learn
 where their chunks end, and the ranges then find them already open.
 An object's blocks settle as a file's do ([statistics and zone maps](#93-statistics-and-zone-maps)), but
 that the dataset settles each object as it reads it: a block that holds a row a delete marked, which its

@@ -412,7 +412,7 @@ wherever it appears. Rule 6 decides the `Async` suffix, and these rules decide t
    The exceptions are the extent of a file or a range (`Length`, `Offset`), a limit the Vortex format
    names (`MaxPostscriptSize`), and a member that comes from the BCL (`MaxBufferSize`).
 6. A switch in an options type is a verb (`UseIndexes`, `UseStatistics`, `WriteStatistics`,
-   `MapFiles`), and a fact is an adjective or starts with `Is` or `Has` (`Durable`, `IsClustered`,
+   `MapFiles`), and a fact is an adjective or starts with `Is` or `Has` (`Durable`, `IsKeyed`,
    `HasRows`).
 7. A unit that counts a quantity is plural, as in `TimeSpan.FromMilliseconds`:
    `TimeUnit.Milliseconds`, `TimeUnit.Days`. A period of the calendar is singular, since
@@ -435,4 +435,6 @@ The members these rules renamed, for a caller moving to the current names:
 | `MaxDecompressedSize`, `MaxBatchDecompressedSize` and `InitialReadSize` on `VortexOpenOptions`, `VortexLimits.DefaultMaxDecompressedSize` | `MaxDecompressedBytes`, `MaxBatchDecompressedBytes`, `InitialReadBytes`, `DefaultMaxDecompressedBytes` |
 | `SegmentCache.Capacity`, `SegmentCache.Size` | `CapacityBytes`, `HeldBytes` |
 | `ScanOptions.Pruning`, `VortexWriteOptions.Statistics` | `UseStatistics`, `WriteStatistics` |
-| `CompactionJob.Objects`, `GroupKeyPlan.Values`, `VortexDataset.ClusteringKeyPaths` | `ObjectKeys`, `ValueRange`, `ClusteringKey` |
+| `CompactionJob.Objects`, `GroupKeyPlan.Values` | `ObjectKeys`, `ValueRange` |
+| `DatasetOptions.ClusteringKey`, `DatasetOptions.Clustering` (`ClusteringOptions`, `ClusteringValue`), `VortexDataset.ClusteringKeyPaths` | `DatasetOptions.Layout` (`DatasetLayout`: `SortKey`, `Partition`, `IndexedPrefix`, `LayoutValue`), `VortexDataset.Layout` |
+| `CompactionPlan.IsClustered` | `CompactionPlan.IsKeyed` |
