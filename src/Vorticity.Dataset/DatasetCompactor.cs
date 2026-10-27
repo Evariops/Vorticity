@@ -151,7 +151,7 @@ internal static partial class DatasetCompactor
         // A leveled exit of level 0 keeps the rows that came late apart, in an object of level 0, while they weigh little
         // against the objects of its destination they fall among (LateRows): it reads its sources alone, and those
         // objects stand. Past that weight, it runs again as the merge with them it was planned as.
-        LateRows? late = job.Style is CompactionStyle.Leveled && key is not null && !schema.Partitioned ? LateRows.Of(job, key) : null;
+        LateRows? late = job.Style is CompactionStyle.Leveled && schema.Keyed ? LateRows.Of(job, key) : null;
         CompactionJob ran = late is null ? job : LateRows.Sources(job);
 
         // A consolidation hands its identifiers' postings and where its columns' values lie to the index of its partition

@@ -18,10 +18,10 @@ namespace Vorticity.Dataset;
 /// merge of neighbours takes in those its range holds whole.
 /// </summary>
 /// <remarks>
-/// The bound is the largest last key of those objects where every one states it (<see cref="ObjectEntry.LastKey"/>),
-/// else the greatest value of the key's first column their summaries state, which bounds it outwards: a row whose key or
-/// first value lies at or before it is late. The rows after it meet no object of the destination, which the exit's
-/// outputs then fill without overlap.
+/// The bound is the largest last key of those objects where every one states it (<see cref="ObjectEntry.LastKey"/>), in
+/// the tree's order, a partition leading it or not, else, under a key that no partition leads, the greatest value of the
+/// key's first column their summaries state, which bounds it outwards: a row whose key or first value lies at or before it
+/// is late. The rows after it meet no object of the destination, which the exit's outputs then fill without overlap.
 /// </remarks>
 internal sealed class LateRows
 {
@@ -53,10 +53,10 @@ internal sealed class LateRows
 
     /// <summary>
     /// The late rows of <paramref name="job"/>, a leveled exit of level 0 that meets objects of its destination, under the
-    /// clustering key <paramref name="key"/>; null for any other job, one the planner left no room in level 0, or one whose
-    /// met objects state no bound on the key.
+    /// clustering key <paramref name="key"/>, the summaries' fallback, none under a partition; null for any other job, one
+    /// the planner left no room in level 0, or one whose met objects state no bound on the key.
     /// </summary>
-    internal static LateRows? Of(CompactionJob job, ClusteringKey key)
+    internal static LateRows? Of(CompactionJob job, ClusteringKey? key)
     {
         if (job.Trigger != CompactionTrigger.LevelZeroCeiling || job.Style != CompactionStyle.Leveled || job.FromLevel != 0 || job.LateRoom <= 0)
         {
@@ -87,7 +87,7 @@ internal sealed class LateRows
                 last = lastKey.ToArray();
             }
 
-            if (summarized && input.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary column) && column.HasMax)
+            if (summarized && key is not null && input.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary column) && column.HasMax)
             {
                 greatest = !any || KeyCursor.Compare(column.Max, greatest) > 0 ? column.Max : greatest;
             }
@@ -109,7 +109,7 @@ internal sealed class LateRows
             return new LateRows(last, null, met / Share, job.LateRoom);
         }
 
-        if (!summarized || greatest.Kind == FilterLiteralKind.Null)
+        if (!summarized || key is null || greatest.Kind == FilterLiteralKind.Null)
         {
             return null;
         }
@@ -129,7 +129,7 @@ internal sealed class LateRows
     /// its first column's greatest value past <paramref name="greatest"/>: an exit whose every source lies at or before it
     /// merges them in, so that the late rows leave level 0 rather than come back to it at every exit.
     /// </summary>
-    private static bool Ahead(CompactionJob job, ClusteringKey key, byte[]? last, FilterLiteral greatest)
+    private static bool Ahead(CompactionJob job, ClusteringKey? key, byte[]? last, FilterLiteral greatest)
     {
         foreach (CompactionInput input in job.Inputs)
         {
@@ -145,7 +145,7 @@ internal sealed class LateRows
                     return true;
                 }
             }
-            else if (greatest.Kind != FilterLiteralKind.Null
+            else if (greatest.Kind != FilterLiteralKind.Null && key is not null
                 && input.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary column) && column.HasMax
                 && KeyCursor.Compare(column.Max, greatest) > 0)
             {
@@ -241,12 +241,12 @@ internal sealed class LateRows
     /// </summary>
     internal sealed class Frontier
     {
-        private readonly string _path;
+        private readonly string? _path;
         private readonly byte[]? _last;
         private readonly FilterLiteral _greatest;
         private readonly bool _summarized;
 
-        private Frontier(string path, byte[]? last, FilterLiteral greatest, bool summarized)
+        private Frontier(string? path, byte[]? last, FilterLiteral greatest, bool summarized)
         {
             _path = path;
             _last = last;
@@ -254,12 +254,15 @@ internal sealed class LateRows
             _summarized = summarized;
         }
 
-        /// <summary>The frontier of the last objects <paramref name="lasts"/> of the levels past 0; none for none.</summary>
-        internal static Frontier? Of(System.Collections.Generic.IEnumerable<ObjectEntry> lasts, ClusteringKey key)
+        /// <summary>
+        /// The frontier of the last objects <paramref name="lasts"/> of the levels past 0, by their summaries too under
+        /// <paramref name="key"/>, none under a partition; none for none.
+        /// </summary>
+        internal static Frontier? Of(System.Collections.Generic.IEnumerable<ObjectEntry> lasts, ClusteringKey? key)
         {
             byte[]? last = null;
             bool keyed = true;
-            bool summarized = true;
+            bool summarized = key is not null;
             bool any = false;
             FilterLiteral greatest = default;
             foreach (ObjectEntry entry in lasts)
@@ -273,7 +276,7 @@ internal sealed class LateRows
                     last = entry.LastKey.ToArray();
                 }
 
-                if (summarized && entry.Summaries.TryGet(key.InstantPath, out ColumnSummary column) && column.HasMax)
+                if (summarized && entry.Summaries.TryGet(key!.InstantPath, out ColumnSummary column) && column.HasMax)
                 {
                     greatest = !any || KeyCursor.Compare(column.Max, greatest) > 0 ? column.Max : greatest;
                 }
@@ -285,7 +288,7 @@ internal sealed class LateRows
                 any = true;
             }
 
-            return any && ((keyed && last is not null) || summarized) ? new Frontier(key.InstantPath, keyed ? last : null, greatest, summarized) : null;
+            return any && ((keyed && last is not null) || summarized) ? new Frontier(key?.InstantPath, keyed ? last : null, greatest, summarized) : null;
         }
 
         /// <summary>Whether every key of the object <paramref name="entry"/> describes lies at or before the frontier.</summary>
@@ -296,7 +299,7 @@ internal sealed class LateRows
                 return entry.LastKey.Span.SequenceCompareTo(_last) <= 0;
             }
 
-            return _summarized && entry.Summaries.TryGet(_path, out ColumnSummary column) && column.HasMax
+            return _summarized && _path is not null && entry.Summaries.TryGet(_path, out ColumnSummary column) && column.HasMax
                 && KeyCursor.Compare(column.Max, _greatest) <= 0;
         }
     }

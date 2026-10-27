@@ -141,10 +141,11 @@ internal static partial class CompactionPolicy
         internal bool Keyed => _snapshot.Schema.Keyed;
 
         /// <summary>
-        /// The key its late rows are bounded over, its first column's: none for a partitioned dataset, whose partition leads
-        /// the tree's keys before the key's first column.
+        /// The key its late rows are bounded over by their summaries where their objects state no last key, its first
+        /// column's: none for a partitioned dataset, whose partition leads the tree's keys before the key's first column,
+        /// and whose late rows are bounded by their last keys alone.
         /// </summary>
-        internal ClusteringKey? LateKey => _snapshot.Schema.Partitioned ? null : _snapshot.Schema.Key;
+        internal ClusteringKey? LateKey => _snapshot.Schema.Key;
 
         /// <summary>The clustering value its jobs cut their objects by; null for none.</summary>
         internal ValueCut? Cut => _snapshot.Schema.Cut;
@@ -289,9 +290,9 @@ internal static partial class CompactionPolicy
         if (levels.Count > 0 && objects[0] > settings.LevelZeroCeiling && !taken.Contains(0))
         {
             // Leveled under a key, the objects of level 0 that came late wait apart, within half the ceiling (LateRows).
-            if (style == CompactionStyle.Leveled && dataset.LateKey is { } lateKey)
+            if (style == CompactionStyle.Leveled && dataset.Keyed)
             {
-                LateRows.Frontier? frontier = LateRows.Frontier.Of(LastOfEach(levels), lateKey);
+                LateRows.Frontier? frontier = LateRows.Frontier.Of(LastOfEach(levels), dataset.LateKey);
                 if (LateRows.Exit(levels[0], frontier, settings.LevelZeroCeiling) is ({ } sources, int room)
                     && Build(dataset, levels, 0, sources, settings.PickFor(style), settings, style, CompactionTrigger.LevelZeroCeiling) is { } exit
                     && !taken.Contains(exit.ToLevel))
@@ -692,7 +693,7 @@ internal static partial class CompactionPolicy
                 }
             }
 
-            LateRows.Frontier? frontier = dataset.LateKey is { } lateKey ? LateRows.Frontier.Of(lasts, lateKey) : null;
+            LateRows.Frontier? frontier = dataset.Keyed ? LateRows.Frontier.Of(lasts, dataset.LateKey) : null;
             if (LateRows.Exit(level0, frontier, settings.LevelZeroCeiling) is ({ } sources, int room))
             {
                 long held = 0;
