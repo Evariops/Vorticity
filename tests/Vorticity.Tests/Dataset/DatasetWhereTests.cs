@@ -24,8 +24,9 @@ public sealed partial class DatasetWhereTests
     /// <summary>
     /// Sources of 30 000 rows each, each with four endpoints of its own, named so that every source's endpoints interleave
     /// with every other's in their order: a zone of a source spans the names of all, and its zone maps leave none out. A
-    /// filter on one endpoint reads the ranges of its source's rows alone: a third of the bytes and a quarter of the reads
-    /// the same filter takes as a prefix, which no index answers.
+    /// filter on one endpoint reads the ranges of its source's rows alone: under half the bytes and the reads the same filter
+    /// takes as a prefix, which no index answers, and which reads the filter's column of every object first, then the rows
+    /// it keeps.
     /// </summary>
     [Fact]
     public async Task AFilterOnAValueReadsItsRangesAlone()
@@ -41,8 +42,8 @@ public sealed partial class DatasetWhereTests
         Console.WriteLine($"WHERE: {expected} rows; equal {equalBytes:N0} bytes in {equalReads} reads, prefix {prefixBytes:N0} bytes in {prefixReads} reads");
         Assert.Equal(expected, equal);
         Assert.Equal(expected, prefix);
-        Assert.True(equalBytes * 3 < prefixBytes, $"{equalBytes} bytes read by the value's ranges, {prefixBytes} by the whole objects that may hold it");
-        Assert.True(equalReads * 4 < prefixReads, $"{equalReads} reads of the value's ranges, {prefixReads} of the whole objects");
+        Assert.True(equalBytes * 2 < prefixBytes, $"{equalBytes} bytes read by the value's ranges, {prefixBytes} by the objects that may hold it");
+        Assert.True(equalReads * 2 < prefixReads, $"{equalReads} reads of the value's ranges, {prefixReads} of the objects");
     }
 
     /// <summary>Conjunctions, disjunctions and sets of values, of the same rows: each answer is the rows' own.</summary>
