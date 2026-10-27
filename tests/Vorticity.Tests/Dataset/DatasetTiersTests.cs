@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -125,6 +126,82 @@ public sealed partial class DatasetTiersTests
         Assert.Equal((long)all.Count * classes, merged);
         Assert.Equal(all.Count, consolidated);
         await HoldsAsync(dataset, all);
+    }
+
+    /// <summary>
+    /// A consolidation of a calm day held at its first object's put while another handle appends rows to that day and to
+    /// another (spec A, 12): the consolidation still applies, the rows appended meanwhile stay at level 0, and every row
+    /// reads back with the layout's invariants holding.
+    /// </summary>
+    [Fact]
+    public async Task AnAppendDuringAConsolidationDoesNotAbandonIt()
+    {
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 10, 27, 8, 0, 0, TimeSpan.Zero));
+        Random random = new Random(45);
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        GatedStore store = new GatedStore(memory);
+        DatasetOptions options = new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Row.Day)),
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Status))],
+                ObjectBytes = 1 << 20,
+                MergeFanout = 4,
+                CalmAfter = TimeSpan.FromHours(1),
+            },
+            TimeProvider = clock,
+            ContentsObjectBytes = 0,
+        };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, options, Ct);
+        List<Row> all = [];
+        for (int a = 0; a < 6; a++)
+        {
+            clock.Advance(TimeSpan.FromMinutes(1));
+            await AppendAsync(dataset, all, Rows(random, 2_000, all.Count, day: 0));
+        }
+
+        clock.Advance(TimeSpan.FromHours(2));
+        store.Arm();
+        Task<IReadOnlyList<CompactionResult>> consolidating = dataset.ConsolidateAsync(Ct).AsTask();
+        await store.Reached.Task.WaitAsync(TimeSpan.FromSeconds(30), Ct);
+        await using (VortexDataset other = await VortexDataset.OpenAsync(memory, options, Ct))
+        {
+            await AppendAsync(other, all, Rows(random, 1_000, all.Count, day: 0));
+            await AppendAsync(other, all, Rows(random, 1_000, all.Count, day: 1));
+        }
+
+        store.Release.SetResult();
+        IReadOnlyList<CompactionResult> done = await consolidating;
+        Assert.NotEmpty(done);
+        Assert.All(done, result => Assert.Equal(OperationOutcome.Applied, result.Outcome));
+        await dataset.RefreshAsync(Ct);
+        Assert.Equal(2, await LevelZeroAsync(dataset));
+        await HoldsAsync(dataset, all);
+    }
+
+    /// <summary>A store that holds the first put of a data object once armed, until released.</summary>
+    private sealed class GatedStore(IObjectStore inner) : ForwardingStore(inner)
+    {
+        private int _armed;
+
+        internal TaskCompletionSource Reached { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal TaskCompletionSource Release { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal void Arm() => Volatile.Write(ref _armed, 1);
+
+        public override async ValueTask<PutOutcome> PutAsync(
+            string key, System.IO.Pipelines.PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
+        {
+            if (key.StartsWith("data/", StringComparison.Ordinal) && Interlocked.Exchange(ref _armed, 0) == 1)
+            {
+                Reached.TrySetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+
+            return await Inner.PutAsync(key, content, length, condition, cancellationToken);
+        }
     }
 
     /// <summary>The rows the due jobs rewrote, a job that moves objects rewriting none.</summary>
