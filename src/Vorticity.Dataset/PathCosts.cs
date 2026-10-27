@@ -94,16 +94,20 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
     /// <summary>
     /// Reading the rows of <paramref name="fields"/> of the object <paramref name="entry"/> names: its open, a request for the
     /// bytes it reads from the object's end, then each column's chunks, a request each, as its contents count them or a
-    /// chunk's bytes each, every column's bytes, the object's, when its contents say none; and each value decoded
-    /// (<see cref="Processing"/>).
+    /// chunk's bytes each, every column's bytes, the object's, when its contents say none, with the object dictionary of a
+    /// column written against one; and each value decoded (<see cref="Processing"/>).
     /// </summary>
     /// <remarks>
     /// A column's chunks but its last lie where its writer flushed them, each a read of its own. The last chunks of all the
     /// columns lie together at the end of the data, in the columns' order, so that a read joins two of them across the last
     /// chunks of the columns between when those take the joined gap at most, and reads those too: in an object of a few
-    /// mebibytes, where every column is one chunk, what a read of two columns costs past their own bytes.
+    /// mebibytes, where every column is one chunk, what a read of two columns costs past their own bytes. A column's object
+    /// dictionary lies right before its first chunk and is read with it: among the last chunks for a column of one chunk.
     /// </remarks>
-    internal Cost Rows(ObjectEntry entry, ReadOnlySpan<int> fields)
+    internal Cost Rows(ObjectEntry entry, ReadOnlySpan<int> fields) => Read(entry, fields, dictionaries: true);
+
+    /// <summary>What <see cref="Rows"/> says, but for the columns' object dictionaries unless <paramref name="dictionaries"/>.</summary>
+    private Cost Read(ObjectEntry entry, ReadOnlySpan<int> fields, bool dictionaries)
     {
         IReadOnlyList<long>? columns = entry.Contents?.ColumnBytes;
         double decoded = Processing(entry, fields, default, 0);
@@ -113,6 +117,7 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         }
 
         IReadOnlyList<long>? chunks = entry.Contents?.ColumnChunks;
+        IReadOnlyList<ColumnDictionary?> held = entry.Contents!.Dictionaries;
         Span<int> read = fields.Length <= 64 ? stackalloc int[fields.Length] : new int[fields.Length];
         fields.CopyTo(read);
         read.Sort();
@@ -127,14 +132,16 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
                 continue;
             }
 
-            bytes += columns[field];
+            bytes += columns[field] + (dictionaries ? DictionaryBytes(held, field) : 0);
             requests += ChunksOf(columns, chunks, field) - 1;
 
-            // Its last chunk, a read of its own, or joined to the one before with the last chunks between.
+            // Its last chunk, a read of its own, or joined to the one before with the last chunks between, each with the
+            // dictionary before it when it is its column's only one.
             long gap = 0;
             for (int between = previous + 1; previous >= 0 && between < field && gap <= joined; between++)
             {
-                gap += columns[between] / ChunksOf(columns, chunks, between);
+                long count = ChunksOf(columns, chunks, between);
+                gap += (columns[between] / count) + (count == 1 ? DictionaryBytes(held, between) : 0);
             }
 
             if (previous >= 0 && gap <= joined)
@@ -152,14 +159,43 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         return new Cost((int)Math.Min(int.MaxValue, requests), bytes, 0, decoded);
     }
 
+    /// <summary>The bytes of column <paramref name="field"/>'s object dictionary among <paramref name="held"/>, 0 for none.</summary>
+    private static long DictionaryBytes(IReadOnlyList<ColumnDictionary?> held, int field) =>
+        field < held.Count && held[field] is { } dictionary ? dictionary.Length : 0;
+
+    /// <summary>
+    /// Reading the object dictionaries of the columns of <paramref name="sorted"/> written against one apart from their
+    /// chunks, whatever share of their rows is read: a request each.
+    /// </summary>
+    private static Cost Dictionaries(ObjectEntry entry, ReadOnlySpan<int> sorted)
+    {
+        IReadOnlyList<ColumnDictionary?> held = entry.Contents?.Dictionaries ?? [];
+        int requests = 0;
+        long bytes = 0;
+        int previous = -1;
+        foreach (int field in sorted)
+        {
+            if (field != previous && DictionaryBytes(held, field) is > 0 and long length)
+            {
+                bytes += length;
+                requests++;
+            }
+
+            previous = field;
+        }
+
+        return new Cost(requests, bytes);
+    }
+
     /// <summary>The chunks of column <paramref name="field"/>, as the contents count them or a chunk's bytes each, one at least.</summary>
     private long ChunksOf(IReadOnlyList<long> columns, IReadOnlyList<long>? chunks, int field) =>
         Math.Max(1, Math.Min(int.MaxValue / 2, chunks is { } known && field < known.Count ? known[field] : (columns[field] + _chunkBytes - 1) / _chunkBytes));
 
     /// <summary>
     /// Reading the rows of <paramref name="fields"/> of the object <paramref name="entry"/> names in a run of
-    /// <paramref name="share"/> of its rows: its open, then of each column the chunks the run lies in, as many as the share of
-    /// its chunks and one more that it starts inside, all of them at most; nothing for no share.
+    /// <paramref name="share"/> of its rows: its open and its columns' object dictionaries, then of each column the chunks the
+    /// run lies in, as many as the share of its chunks and one more that it starts inside, all of them at most; nothing for
+    /// no share.
     /// </summary>
     internal Cost Share(ObjectEntry entry, ReadOnlySpan<int> fields, double share)
     {
@@ -168,11 +204,10 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
             return default;
         }
 
-        Cost whole = Rows(entry, fields);
         IReadOnlyList<long>? columns = entry.Contents?.ColumnBytes;
         if (share >= 1 || columns is not { Count: > 0 })
         {
-            return whole;
+            return Rows(entry, fields);
         }
 
         // Of each column, the share of its chunks the run lies in, and one it starts inside: the reads past the open, so
@@ -190,13 +225,20 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
             }
         }
 
+        // The columns' reads past the open at that share, and their dictionaries whole, apart.
         double part = total > 0 ? touched / total : 1;
+        Cost whole = Read(entry, fields, dictionaries: false);
+        Span<int> sorted = fields.Length <= 64 ? stackalloc int[fields.Length] : new int[fields.Length];
+        fields.CopyTo(sorted);
+        sorted.Sort();
+        Cost dictionaries = Dictionaries(entry, sorted);
         long open = OpenBytes(entry);
-        return new Cost(1 + (int)Math.Ceiling((whole.Requests - 1) * part), open + (long)((whole.Bytes - open) * part), 0, whole.Nanoseconds * share);
+        return new Cost(1 + (int)Math.Ceiling((whole.Requests - 1) * part), open + (long)((whole.Bytes - open) * part), 0, whole.Nanoseconds * share) + dictionaries;
     }
 
     /// <summary>The bytes an open of the object <paramref name="entry"/> names reads from its end: the first read's, or its footer's when they pass it.</summary>
     internal static long OpenBytes(ObjectEntry entry) => Math.Min(entry.Bytes, Math.Max(OpenTailBytes, entry.FooterBytes));
+
 
     /// <summary>
     /// Whether reading <paramref name="rows"/> rows of <paramref name="fields"/> of the object <paramref name="entry"/> names,

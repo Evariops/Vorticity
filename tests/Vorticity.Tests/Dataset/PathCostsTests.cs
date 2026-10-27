@@ -9,7 +9,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Dataset;
 
-public sealed class PathCostsTests
+public sealed partial class PathCostsTests
 {
     [Fact]
     public void RegionsWithinAGapReadAsOneRequestAndApartAsTwo()
@@ -26,4 +26,63 @@ public sealed class PathCostsTests
 
         Assert.Equal(new PathCosts.Cost(0, 0), costs.Regions(1, []));
     }
+
+    /// <summary>
+    /// A column written against an object dictionary costs its dictionary's bytes besides its chunks', in its first chunk's
+    /// request, the dictionary lying right before it; for a column of one chunk, among the last chunks, so that the gap
+    /// between two columns read across it counts it too. A run of a share of the rows reads the dictionary whole.
+    /// </summary>
+    [Fact]
+    public void AColumnsDictionaryIsReadWithItsFirstChunk()
+    {
+        CostProfile profile = CostProfile.Remote;
+        PathCosts costs = new PathCosts(profile, 1 << 20);
+        long gap = profile.JoinedGap;
+
+        // Three columns of one chunk each, the first and the second written against a dictionary; the second's chunk and
+        // dictionary pass the joined gap by a byte.
+        ObjectEntry entry = Entry([100_000, 50_000, 30_000], [1, 1, 1], [5_000, gap - 50_000 + 1, 0]);
+        long open = PathCosts.OpenBytes(entry);
+        Assert.Equal((2, open + 105_000), Read(costs.Rows(entry, [0])));
+        Assert.Equal((3, open + 135_000), Read(costs.Rows(entry, [2, 0])));
+
+        // A byte less, and the first and the last are read together, across the second.
+        ObjectEntry joined = Entry([100_000, 50_000, 30_000], [1, 1, 1], [5_000, gap - 50_000, 0]);
+        Assert.Equal((2, open + 135_000 + gap), Read(costs.Rows(joined, [0, 2])));
+
+        // The second of several chunks: its dictionary lies before its first, not among the last chunks.
+        ObjectEntry chunked = Entry([100_000, 4_000_000, 30_000], [1, 40, 1], [5_000, 400_000, 0]);
+        Assert.Equal((2, open + 135_000 + 100_000), Read(costs.Rows(chunked, [0, 2])));
+
+        // A tenth of the rows of the first column, of one chunk: the chunk, and the dictionary apart.
+        Assert.Equal((3, open + 105_000), Read(costs.Share(entry, [0], 0.1)));
+    }
+
+    private static (int Requests, long Bytes) Read(PathCosts.Cost cost) => (cost.Requests, cost.Bytes);
+
+    /// <summary>An object of three columns of <paramref name="columns"/> bytes in <paramref name="chunks"/> chunks, each written against a dictionary of the bytes <paramref name="dictionaries"/> says, none for 0.</summary>
+    private static ObjectEntry Entry(long[] columns, long[] chunks, long[] dictionaries)
+    {
+        ColumnDictionary?[] held = new ColumnDictionary?[dictionaries.Length];
+        for (int field = 0; field < held.Length; field++)
+        {
+            held[field] = dictionaries[field] == 0 ? null : new ColumnDictionary(0, (uint)dictionaries[field], 6, 100, Vorticity.Types.PType.U8, Ordered: true);
+        }
+
+        ObjectContents contents = new ObjectContents(
+            Vorticity.Types.Serialization.DTypeFlatBuffers.Serialize(VortexTypes.ToDType(Three.Schema, new Vorticity.Types.DTypeArena())),
+            ["vortex.primitive"],
+            100_000,
+            [new IndexSegment(0, 64, 0), new IndexSegment(64, 64, 0), new IndexSegment(128, 64, 0)],
+            [])
+        {
+            ColumnBytes = columns,
+            ColumnChunks = chunks,
+            Dictionaries = held,
+        };
+        return new ObjectEntry("data/a.vortex", 7, 100_000, 50_000_000, 11, (ObjectSummaries?)null).WithFooterBytes(8_000).WithTableOfContents(contents.ToBytes());
+    }
+
+    [VortexRecord]
+    public partial record struct Three(string A, string B, long C);
 }
