@@ -27,6 +27,8 @@ public sealed partial class DatasetLayoutAdviceTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled },
+            SheetObjectBytes = 0,
+            ContentsObjectBytes = 0,
         }, Ct);
         Random random = new Random(0xE5);
         for (int hour = 0; hour < 4; hour++)
@@ -39,6 +41,11 @@ public sealed partial class DatasetLayoutAdviceTests
             await using ObjectDraft draft = dataset.StartObject();
             await draft.Writer.WriteAsync<Call>(rows, Ct);
             await dataset.AppendAsync(draft, Ct);
+        }
+
+        // Compacted: a job's objects keep the sheets of their columns, whose registers count each column's values a partition.
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, Ct) is not null)
+        {
         }
 
         Assert.Empty((await dataset.RecommendLayoutAsync(Ct)).Components);
