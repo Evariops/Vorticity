@@ -2092,13 +2092,25 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// Checks this version's pages, objects and fragments against what its references and entries
-    /// promise, and names every problem rather than throwing.
+    /// promise, and names every problem rather than throwing; a full verification checks its objects against the layout's
+    /// invariants too: a partition an object, rows in the key's order, the sparse index, the entries' keys, the levels'
+    /// disjunction, the chunks' geometry and the order of the object dictionaries (spec A, 3.1).
     /// </summary>
-    /// <param name="since">A version already verified, whose shared pages and entries are not checked again; null verifies everything.</param>
+    /// <param name="since">A version already verified, whose shared pages and entries are not checked again, nor its layout; null verifies everything.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>What was checked and every problem found.</returns>
-    public ValueTask<DatasetVerification> VerifyAsync(ulong? since = null, CancellationToken cancellationToken = default) =>
-        DatasetVerifier.VerifyAsync(_store, new VerifyOptions { Version = Version, Since = since }, cancellationToken);
+    public async ValueTask<DatasetVerification> VerifyAsync(ulong? since = null, CancellationToken cancellationToken = default)
+    {
+        DatasetVerification verification = await DatasetVerifier.VerifyAsync(
+            _store, new VerifyOptions { Version = Version, Since = since }, cancellationToken).ConfigureAwait(false);
+        if (since is not null)
+        {
+            return verification;
+        }
+
+        List<string> layout = await DatasetLayoutVerifier.CheckAsync(this, cancellationToken).ConfigureAwait(false);
+        return layout.Count == 0 ? verification : verification with { Problems = [.. verification.Problems, .. layout] };
+    }
 
     /// <summary>Closes the data objects the handle keeps open, and wipes the keys of the commit objects it opened.</summary>
     /// <returns>A task that completes when every object is closed.</returns>
