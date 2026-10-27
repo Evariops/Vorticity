@@ -773,8 +773,7 @@ internal sealed partial class DatasetScanBuilder
     {
         await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            ReadOnlyMemory<byte> first = held.TreeKey.Length > VortexDataset.UidBytes ? VortexDataset.OrderOf(held.TreeKey) : default;
-            if (!first.IsEmpty && !pruning.MayHold(first.Span, held.Entry.LastKey.Span))
+            if (KeyRefutes(pruning, held, out _))
             {
                 if (_considers && _metrics is { } skipped)
                 {
@@ -789,6 +788,16 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
+    /// Whether <paramref name="pruning"/> refutes the keys of the object <paramref name="held"/>, from its tree key's to its last
+    /// key, with no read; <paramref name="first"/> its first key, empty for an object of no key.
+    /// </summary>
+    private static bool KeyRefutes(KeyPruning pruning, in PositionedObject held, out ReadOnlyMemory<byte> first)
+    {
+        first = held.TreeKey.Length > VortexDataset.UidBytes ? VortexDataset.OrderOf(held.TreeKey) : default;
+        return !first.IsEmpty && !pruning.MayHold(first.Span, held.Entry.LastKey.Span);
+    }
+
+    /// <summary>
     /// The objects of <paramref name="walk"/> as the key's pruning keeps them (<see cref="KeyPruning"/>): an object whose key
     /// range the filter refutes is passed over unopened, and one that keeps a sparse index is read by the ranges of its
     /// granules the filter may keep a row of, a part of it each. An object with marked rows, whose index counts its rows
@@ -800,8 +809,7 @@ internal sealed partial class DatasetScanBuilder
         DatasetSchema schema = _version.Schema;
         await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            ReadOnlyMemory<byte> first = held.TreeKey.Length > VortexDataset.UidBytes ? VortexDataset.OrderOf(held.TreeKey) : default;
-            if (!first.IsEmpty && !pruning.MayHold(first.Span, held.Entry.LastKey.Span))
+            if (KeyRefutes(pruning, held, out ReadOnlyMemory<byte> first))
             {
                 if (_considers && _metrics is { } skipped)
                 {

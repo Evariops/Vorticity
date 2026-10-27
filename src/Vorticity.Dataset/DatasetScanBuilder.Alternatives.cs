@@ -556,9 +556,21 @@ internal sealed partial class DatasetScanBuilder
             units.Add(unit);
         }
 
+        // The objects the walk keeps, less those whose keys the filter refutes, as a read of rows passes them over.
+        KeyPruning? keys = _summaries && _indexes && _take is null ? KeyPruning.Of(_version.Schema, _filter) : null;
         await foreach (PositionedObject held in _version.WalkAsync(
             Pruner(), _from, _to, read && _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers).ConfigureAwait(false))
         {
+            if (keys is not null && KeyRefutes(keys, held, out _))
+            {
+                if (read && _considers && _metrics is { } skipped)
+                {
+                    skipped.ObjectsPrunedByKey++;
+                }
+
+                continue;
+            }
+
             if (Covered(held) > 0 && rollups?.CoverOf(held) is not >= 0)
             {
                 // The partials of the question's family the store keeps, listed once for the handle, which the choice weighs;
