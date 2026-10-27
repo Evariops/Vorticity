@@ -14,10 +14,10 @@ namespace Vorticity.Indexes;
 /// <para>
 /// Each encoding says where a range of its rows lies by its geometry: a packing's rows lie in blocks of 1 024, each
 /// <c>128 × w</c> bytes; a plain column's rows <c>width</c> bytes each; a frame of reference, a zigzag, an extension, a
-/// decimal's or a timestamp's parts hold their rows in their children; a dictionary's codes hold the rows, and its values
-/// are read whole, as every row may name any of them; FSST's compressed bytes lie between the starts its marks give, and
-/// its lengths and offsets are columns of integers of their own. Patches, validities, symbol tables, a constant's value
-/// are small and read whole.
+/// decimal's or a timestamp's parts, the left and right parts of ALP-RD hold their rows in their children; a dictionary's
+/// codes hold the rows, and its values are read whole, as every row may name any of them; FSST's compressed bytes lie
+/// between the starts its marks give, and its lengths and offsets are columns of integers of their own. Patches,
+/// validities, symbol tables, a constant's value are small and read whole.
 /// </para>
 /// <para>
 /// An encoding whose geometry is not known here makes the chunk be read whole: the plan is a hint for the reads, and a
@@ -47,12 +47,8 @@ internal sealed class GranuleBytes
         in ArrayNode root, int width, int rows, int start, int count, (long Start, long Length)[] layout, ChunkGeometry geometry,
         int granuleRows)
     {
-        _ranges.Clear();
-        _layout = layout;
-        _geometry = geometry;
-        _granuleRows = granuleRows;
-        Bytes = 0;
-        if (count <= 0 || start < 0 || (long)start + count > rows || !Walk(in root, width, rows, start, count))
+        Begin(layout, geometry, granuleRows);
+        if (!Range(in root, width, rows, start, count))
         {
             return false;
         }
@@ -60,6 +56,53 @@ internal sealed class GranuleBytes
         Merge();
         return true;
     }
+
+    /// <summary>
+    /// Plans the read of the rows <paramref name="wanted"/>, ascending, as a decode of each cluster of them reads it: rows
+    /// closer than <paramref name="gap"/> one range, from the first to the last; false as <see cref="TryPlan(in ArrayNode,
+    /// int, int, int, int, ValueTuple{long, long}[], ChunkGeometry, int)"/> is.
+    /// </summary>
+    internal bool TryPlan(
+        in ArrayNode root, int width, int rows, ReadOnlySpan<int> wanted, int gap, (long Start, long Length)[] layout,
+        ChunkGeometry geometry, int granuleRows)
+    {
+        Begin(layout, geometry, granuleRows);
+        if (wanted.IsEmpty)
+        {
+            return false;
+        }
+
+        int first = 0;
+        for (int i = 1; i <= wanted.Length; i++)
+        {
+            if (i < wanted.Length && wanted[i] - wanted[i - 1] < gap)
+            {
+                continue;
+            }
+
+            if (!Range(in root, width, rows, wanted[first], wanted[i - 1] + 1 - wanted[first]))
+            {
+                return false;
+            }
+
+            first = i;
+        }
+
+        Merge();
+        return true;
+    }
+
+    private void Begin((long Start, long Length)[] layout, ChunkGeometry geometry, int granuleRows)
+    {
+        _ranges.Clear();
+        _layout = layout;
+        _geometry = geometry;
+        _granuleRows = granuleRows;
+        Bytes = 0;
+    }
+
+    private bool Range(in ArrayNode root, int width, int rows, int start, int count) =>
+        count > 0 && start >= 0 && (long)start + count <= rows && Walk(in root, width, rows, start, count);
 
     private bool Walk(in ArrayNode node, int width, int length, int start, int count)
     {
@@ -112,6 +155,24 @@ internal sealed class GranuleBytes
                 ArrayNode integers = node.GetChild(0);
                 WholeChildren(in node, 1);
                 return Walk(in integers, width, length, start, count);
+            }
+
+            case ArrayEncodingId.AlpRd:
+            {
+                // The codes of the left parts and the right parts hold the rows, each of its width; the patches whole.
+                int entries = AlpRdMetadata.CountDictionaryEntries(node.Metadata);
+                if (node.ChildCount < 2 || width <= 0 || entries > AlpRdMetadata.TypicalDictionaryLength)
+                {
+                    return false;
+                }
+
+                Span<uint> dictionary = stackalloc uint[AlpRdMetadata.TypicalDictionaryLength];
+                AlpRdMetadata metadata = AlpRdMetadata.Read(node.Metadata, dictionary[..entries]);
+                ArrayNode left = node.GetChild(0);
+                ArrayNode right = node.GetChild(1);
+                WholeChildren(in node, 2);
+                return Walk(in left, metadata.LeftPartsPType.ByteWidth(), length, start, count)
+                    && Walk(in right, width, length, start, count);
             }
 
             case ArrayEncodingId.Primitive:

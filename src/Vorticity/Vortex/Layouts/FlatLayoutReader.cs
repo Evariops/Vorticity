@@ -602,7 +602,7 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// blocks between them, the one range would decode more rows nobody asked for than a second
     /// range costs.
     /// </summary>
-    private const int ClusterGap = 2 * Arrays.Decoders.Compressed.FastLanes.BlockSize;
+    internal const int ClusterGap = 2 * Arrays.Decoders.Compressed.FastLanes.BlockSize;
 
     /// <summary>
     /// The selection's rows out of the range <c>[from, from + spanned)</c> it spans: that range

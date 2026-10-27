@@ -751,9 +751,9 @@ internal sealed partial class DatasetScanBuilder
     {
         DType schema = _version.Schema.DType;
         if (!_summaries || held.Entry.Contents is not { ColumnChunks.Count: > 0, Sheets.Count: > 0 } contents || schema.IsDefault
-            || !SheetPruning.Asks(filter, schema) || WidestChunks(contents, null) < TwoPhaseReads.LeastChunks)
+            || !SheetPruning.Asks(filter, schema) || WidestUnits(held.Entry, contents, null) < TwoPhaseReads.LeastUnits)
         {
-            // Too few chunks in any column read to spare one, decided before the filter is looked into.
+            // Too few units in any column read to spare one, decided before the filter is looked into.
             return null;
         }
 
@@ -765,12 +765,15 @@ internal sealed partial class DatasetScanBuilder
                 return null;
             }
 
-            fields.Add(field);
+            if (!fields.Contains(field))
+            {
+                fields.Add(field);
+            }
         }
 
-        // The widest column the rows read besides the filter's, in chunks.
-        long chunks = WidestChunks(contents, fields);
-        if (chunks < TwoPhaseReads.LeastChunks)
+        // The widest column the rows read besides the filter's, in the units its second pass reads.
+        long units = WidestUnits(held.Entry, contents, fields);
+        if (units < TwoPhaseReads.LeastUnits)
         {
             return null;
         }
@@ -778,14 +781,18 @@ internal sealed partial class DatasetScanBuilder
         List<int> asked = SheetPruning.Columns(filter, schema);
         Indexes.ColumnSheet?[] sheets = await _dataset.ReadSheetsAsync(held.Entry, asked, cancellationToken).ConfigureAwait(false);
         long? kept = TwoPhaseReads.ExpectedRows(filter, schema, field => asked.IndexOf(field) is int at and >= 0 ? sheets[at] : null);
-        return kept is long rows && TwoPhaseReads.Pays(rows, chunks) ? FieldMasks.Of(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(fields)) : null;
+        return kept is long rows && TwoPhaseReads.Pays(rows, units) ? FieldMasks.Of(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(fields)) : null;
     }
 
-    /// <summary>The chunks of the widest column the scan reads in an object of <paramref name="contents"/>, those of <paramref name="besides"/> aside.</summary>
-    private long WidestChunks(Indexes.ObjectContents contents, List<int>? besides)
+    /// <summary>
+    /// The units the second pass of two reads of the widest column the scan reads in the object <paramref name="entry"/>
+    /// names, those of <paramref name="besides"/> aside: its granules, which it reads alone where the object keeps their
+    /// geometry (spec C, 3), every column holding as many; its chunks otherwise. None when no column is read besides.
+    /// </summary>
+    private long WidestUnits(ObjectEntry entry, Indexes.ObjectContents contents, List<int>? besides)
     {
         DType schema = _version.Schema.DType;
-        long chunks = 0;
+        long chunks = -1;
         int read = _mask is { } mask ? mask.SelectedCount(schema.FieldCount) : schema.FieldCount;
         for (int i = 0; i < read; i++)
         {
@@ -796,7 +803,13 @@ internal sealed partial class DatasetScanBuilder
             }
         }
 
-        return chunks;
+        if (chunks < 0)
+        {
+            return 0;
+        }
+
+        long granuleRows = Math.Max(_dataset.Options.Write.BlockRows, 1);
+        return contents.Marks.Count > 0 ? (entry.PhysicalRows + granuleRows - 1) / granuleRows : chunks;
     }
 
     /// <summary>
