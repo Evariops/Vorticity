@@ -1212,10 +1212,10 @@ internal static partial class DatasetCompactor
         }
 
         /// <summary>
-        /// The rows of the groups an object's path directory names the paths of: a page of its sparse index, 128 granules,
-        /// 2^20 rows at 8 192 a granule, so that the groups that hold a path are read as whole granules.
+        /// The rows of the groups an object's path directory names the paths of: a granule, so that the directory says the
+        /// granules each path has a value in, its presence (spec E, 3.1), which a question on the path reads alone.
         /// </summary>
-        private static long GroupRows(int granuleRows) => (long)Math.Max(granuleRows, 1) * Indexes.GranuleKeys.DefaultPageEntries;
+        private static long GroupRows(int granuleRows) => Math.Max(granuleRows, 1);
 
         /// <summary>
         /// Declares to <paramref name="writer"/> each variant column's path directory, of what <paramref name="census"/>

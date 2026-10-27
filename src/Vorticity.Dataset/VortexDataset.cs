@@ -3573,7 +3573,8 @@ public sealed class VortexDataset : IAsyncDisposable
                 return null;
             }
 
-            // The second: every group of rows the path may hold a value in, at once; the whole object when it counts none.
+            // The second: every group of rows the path may hold a value in, at once, neighbours joined; the whole object when
+            // it counts none.
             ReadOnlySpan<Indexes.PathEntry> held = paths.Of([key]);
             List<RowRange> spans = [];
             long rows = rowsOf.Rows;
@@ -3585,7 +3586,16 @@ public sealed class VortexDataset : IAsyncDisposable
                 {
                     if (path.In(paths.GroupCount > 0 ? group : -1))
                     {
-                        spans.Add(new RowRange(group * groupRows, Math.Min((group + 1) * groupRows, rows)));
+                        RowRange span = new RowRange(group * groupRows, Math.Min((group + 1) * groupRows, rows));
+                        if (spans.Count > 0 && spans[^1].End == span.Start)
+                        {
+                            spans[^1] = new RowRange(spans[^1].Start, span.End);
+                        }
+                        else
+                        {
+                            spans.Add(span);
+                        }
+
                         break;
                     }
                 }

@@ -62,7 +62,7 @@ internal sealed record PathEntry(
 /// It is counted from the rows a job parses anyway as it writes an object, so an append,
 /// which parses nothing, writes none and drops the one it extends.
 /// Each path names the groups of rows it may hold a value in, each <see cref="GroupRows"/> rows from the object's first,
-/// which a question on it prunes the others by.
+/// which a question on it prunes the others by: a dataset's job names granules, the path's presence (spec E, 3.1).
 /// Under the index budget, the paths of the residual held least are left out first, and a directory
 /// that left one out refutes nothing by a path's absence. Like every index it is a hint: a region that
 /// does not decode refutes nothing.
