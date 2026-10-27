@@ -2259,7 +2259,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 // The column's values, right before its first chunk.
                 await WriteDictionaryAsync(field, cancellationToken).ConfigureAwait(false);
                 _written[field].Add(nameof(EncodingHint.Dictionary));
-                _dictionaryWritten![field] += blob.Length;
             }
             else
             {

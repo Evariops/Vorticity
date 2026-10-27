@@ -17,14 +17,11 @@ namespace Vorticity;
 /// <summary>The columns written against an object dictionary: their codes in the chunks, their values once.</summary>
 public sealed partial class VortexFileWriter
 {
-    // Per top-level column, its object dictionary, the type of its codes, the segment its values went to (-1 until they
-    // do), and what the dictionary was priced at against what it wrote; the arena of the codes' types, and the one the
-    // values are written from; null for a file that declares none.
+    // Per top-level column, its object dictionary, the type of its codes and the segment its values went to (-1 until they
+    // do); the arena of the codes' types, and the one the values are written from; null for a file that declares none.
     private ObjectDictionary?[]? _dictionaries;
     private DType[]? _codesTypes;
     private int[]? _dictionarySegments;
-    private long[]? _dictionaryPriced;
-    private long[]? _dictionaryWritten;
     private DTypeArena? _dictionaryTypes;
     private CanonicalArena? _dictionaryArena;
 
@@ -85,8 +82,6 @@ public sealed partial class VortexFileWriter
 
         _dictionaries ??= new ObjectDictionary?[_fieldCount];
         _codesTypes ??= new DType[_fieldCount];
-        _dictionaryPriced ??= new long[_fieldCount];
-        _dictionaryWritten ??= new long[_fieldCount];
         if (_dictionarySegments is null)
         {
             _dictionarySegments = new int[_fieldCount];
@@ -95,9 +90,6 @@ public sealed partial class VortexFileWriter
 
         _dictionaries[field] = dictionary;
         _codesTypes[field] = (_dictionaryTypes ??= new DTypeArena()).Primitive(dictionary.CodesPType, type.Nullability);
-
-        // A nullable column's codes carry its validity too, a bit a row, as every plan of it would: no part of the choice.
-        _dictionaryPriced[field] = priced + (type.IsNullable ? (rows + 7) / 8 : 0);
         _columns[field].Code();
         return true;
     }
@@ -198,7 +190,6 @@ public sealed partial class VortexFileWriter
         {
             using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(
                 Blobs, arena, dictionary.ValuesNode(arena, _schema.GetField(field)), _arrayEncodings, _compress);
-            _dictionaryWritten![field] += blob.Length;
             _dictionarySegments[field] = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -215,13 +206,6 @@ public sealed partial class VortexFileWriter
             await WriteDictionaryAsync(field, cancellationToken).ConfigureAwait(false);
         }
     }
-
-    /// <summary>
-    /// What column <paramref name="field"/>'s object dictionary was priced at and what it wrote, its values and its codes'
-    /// chunks; null for a column written without one.
-    /// </summary>
-    internal (long Priced, long Written)? DictionaryBytes(int field) =>
-        _dictionaries?[field] is not null ? (_dictionaryPriced![field], _dictionaryWritten![field]) : null;
 
     /// <summary>
     /// Where each column's object dictionary lies, by the column's place, null for a column without one, which a reader of
