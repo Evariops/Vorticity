@@ -184,6 +184,12 @@ internal sealed class CountsAnswer
         List<(int Field, string Path, FieldExpr Key)> constants = [];
         foreach (FieldExpr key in request.Keys)
         {
+            // A path's values are no column's: no object's counts hold them.
+            if (key is VariantFieldExpr)
+            {
+                return null;
+            }
+
             if (key is not ColumnFieldExpr)
             {
                 continue;

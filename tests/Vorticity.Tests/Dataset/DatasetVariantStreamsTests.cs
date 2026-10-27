@@ -151,6 +151,16 @@ public sealed partial class DatasetVariantStreamsTests
             rows.Where(static r => r.Attributes["tenant"]?.AsString() == "t-2").Select(static r => r.Attributes["status"]?.AsInt64() ?? -1).Order(),
             (await dataset.Scan<Row>().Where(r => r.Attributes["tenant"].AsString() == "t-2").Select(r => r.Attributes["status"].AsInt64()).ToListAsync(Ct)).Select(static v => v ?? -1).Order());
 
+        // Counts grouped by a typed path, and by a typed path and the day: the path's stream read as the key.
+        Assert.Equal(
+            rows.GroupBy(static r => r.Attributes["route"]?.AsString()).Select(static g => $"{g.Key}:{g.Count()}").Order(StringComparer.Ordinal),
+            (await dataset.Scan<Row>().GroupBy(r => r.Attributes["route"].AsString()).Select(g => (g.Key, g.Count())).As<RouteCount>().ToRecordsAsync(Ct).ToListAsync(Ct))
+                .Select(static c => $"{c.Route}:{c.Count}").Order(StringComparer.Ordinal));
+        Assert.Equal(
+            rows.GroupBy(static r => (r.Attributes["route"]?.AsString(), r.At.Date)).Select(static g => $"{g.Key.Item1}/{g.Key.Date:yyyy-MM-dd}:{g.Count()}").Order(StringComparer.Ordinal),
+            (await dataset.Scan<Row>().GroupBy(r => (r.Attributes["route"].AsString(), r.At.Truncate(CalendarUnit.Day))).Select(g => (g.Key.Item1, g.Key.Item2, g.Count())).As<RouteDayCount>().ToRecordsAsync(Ct).ToListAsync(Ct))
+                .Select(static c => $"{c.Route}/{c.Day:yyyy-MM-dd}:{c.Count}").Order(StringComparer.Ordinal));
+
         // Promotion: the debug text asked three times in all is typed by the next job that writes its rows.
         for (int time = 0; time < 2; time++)
         {
@@ -247,4 +257,10 @@ public sealed partial class DatasetVariantStreamsTests
 
     [VortexRecord]
     public partial record struct Row(DateTime At, string Service, long Sequence, Variant Attributes);
+
+    [VortexRecord]
+    public partial record struct RouteCount(string? Route, long Count);
+
+    [VortexRecord]
+    public partial record struct RouteDayCount(string? Route, DateTime Day, long Count);
 }
