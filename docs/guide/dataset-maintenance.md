@@ -6,7 +6,7 @@ Compact, vacuum, verify and index a dataset, and see what each operation costs i
 await using CountingObjectStore store = new CountingObjectStore(new MemoryObjectStore(), ownsInner: true);
 await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions
 {
-    ClusteringKey = [Reading.ColumnNames.Day],
+    Layout = new DatasetLayout { SortKey = [LayoutValue.Column(Reading.ColumnNames.Day)] },
 });
 
 const int Appends = 10;
@@ -23,8 +23,8 @@ CompactionPlan plan = await dataset.PlanCompactionAsync();
 
 ```
 after 10 appends: version 11, 50000 rows, 10 objects, lag 2
-plan: work True, style Leveled, clustered True, lag 2, objects by level [10], bytes by level [128862]
-  job: level 0 to 1, LevelZeroCeiling, 10 objects, 50000 rows, 128862 bytes, target 131072
+plan: work True, style Leveled, keyed True, lag 2, objects by level [10], bytes by level [137031]
+  job: level 0 to 1, LevelZeroCeiling, 10 objects, 50000 rows, 137031 bytes, target 131072
   cost: 0 requests (0 read, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
 ```
 
@@ -34,6 +34,11 @@ it indexes it was written without. None of them runs by itself. They are the cal
 it is. Like everything in `Vorticity.Dataset`, they are experimental (see [datasets.md](datasets.md)).
 
 ## Compaction
+
+This dataset has a sort key and no partition, so its jobs keep levels of objects disjoint by key. A
+partitioned dataset merges objects of one size class within each partition and consolidates a
+partition once it receives no more rows, as [dataset-layout.md](dataset-layout.md) shows; the calls
+on this page run both.
 
 Appends land in level 0, which can hold eight objects before compaction has work to do. `Lag` is how
 far past that ceiling it is. Here ten objects give a lag of 2, and every lookup by key touches the
@@ -50,29 +55,32 @@ CompactionResult? compacted = await dataset.CompactAsync();
 ```
 
 ```
-compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128862 bytes in and 79036 out, 50000 rows
-  cost: 12 requests (10 read, 0 head, 2 put, 0 delete, 0 list), 12 dependent steps, 128862 bytes read, 79432 written
-now: 1 objects, lag 0; again: nothing to do
+compacted: version 12, Applied, level 0 to 1, 10 objects in and 3 out, 137031 bytes in and 90644 out, 50000 rows
+  cost: 14 requests (10 read, 0 head, 4 put, 0 delete, 0 list), 14 dependent steps, 137031 bytes read, 91453 written
+now: 3 objects, lag 0; again: nothing to do
 ```
 
-Ten objects became one, and 128 862 bytes became 79 036. The same 50 000 rows take a third less
+Ten objects became three, and 137 031 bytes became 90 644. The same 50 000 rows take a third less
 space, because the column encoders do more with 50 000 rows at once than with 5 000. Small appends
 cost size, and compaction wins it back.
 
 `CompactAsync` runs one job and returns `null` when none is due. A caller that wants the dataset
-back within its bounds calls it in a loop, so no single call rewrites gigabytes. With a clustering
-key the style is `Leveled`: the levels above 0 hold objects with disjoint keys, so a lookup by key
-touches at most one object per level. Without a key it is `Tiered`, which rewrites each row less
-often but bounds lookups less. `CompactionOptions` sets the level 0 ceiling, the fan-out between
-levels, the size of a level 1 object and the cap on an output object. `Outcome` says whether the
-commit applied, or whether a concurrent writer had already done the work.
+back within its bounds calls it in a loop, so no single call rewrites gigabytes. With a sort key and
+no partition the style is `Leveled`: the levels above 0 hold objects with disjoint keys, so a lookup
+by key touches at most one object per level. Otherwise it is `Tiered`: objects of one size class
+merge within their partition, which rewrites each row less often, and a calm partition is
+consolidated into objects disjoint by key. `CompactionOptions` sets the level 0 ceiling, the fan-out
+between levels and the size of a level 1 object. `Outcome` says whether the commit applied, or
+whether a concurrent writer had already done the work.
 
-Level 0 goes to the first level large enough to hold it. The ten appends here, 126 KiB, fit in level
+Level 0 goes to the first level large enough to hold it. The ten appends here, 134 KiB, fit in level
 1, which holds ten objects of 128 KiB, while a load of gigabytes skips the levels it would only
 overflow and is written once. A dataset that takes many small commits therefore pays for each one a
 merge into a level a few times its size, never a merge into the levels that hold most of its rows.
-An output object is at most `MaxObjectBytes`, 64 MiB by default, reached at level 4 and above with the
-default target of level 1.
+An output object is at most the layout's `ObjectBytes`, 1 GiB by default, reached at level 5 and
+above with the default target of level 1. A job sizes its objects as it writes them, from the
+bytes its columns will encode to; until a column has written a chunk it guesses them, so objects of
+columns that compress well, as here, come out under their target.
 
 When a level above 0 grows past its size, it gives up one object, which is merged into the next
 level with the objects there whose keys it overlaps. By default it picks the largest object, the one
@@ -88,7 +96,7 @@ entry changes level, and no row is read or written. A merge of it alone would ha
 rows into one object of the same bounds. `CompactionResult.ObjectsMoved` says how many objects a job
 moved, and those count in neither `BytesIn` nor `BytesOut`. An object keeps being rewritten when it
 holds marks or fragments to fold, or a schema older than the dataset's, since a rewrite is what
-brings it to the current one. Keys that arrive in order, as when time leads the clustering key, never
+brings it to the current one. Keys that arrive in order, as when time leads the sort key, never
 overlap, so every row is rewritten once, by the merge that takes it out of level 0: on a stream of a
 thousand appends at the tail, compaction wrote half the bytes it wrote without the moves.
 
@@ -114,7 +122,7 @@ creates the dataset:
 ```csharp
 await using VortexDataset events = await VortexDataset.CreateAsync(store, Event.Schema, new DatasetOptions
 {
-    ClusteringKey = ["At"],
+    Layout = new DatasetLayout { SortKey = [LayoutValue.Column("At")] },
     ErasureDelay = TimeSpan.FromDays(30),
 });
 ```
@@ -134,8 +142,8 @@ DatasetVerification since = await dataset.VerifyAsync(since: checkedAt);
 ```
 
 ```
-verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 8 requests (6 read, 2 head, 0 put, 0 delete, 0 list), 8 dependent steps, 145615 bytes read, 0 written
-verify since 12: holds True, 1 objects, 1 pages; cost: 11 requests (9 read, 2 head, 0 put, 0 delete, 0 list), 11 dependent steps, 28187 bytes read, 0 written
+verify: holds True, 3 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 17 requests (13 read, 4 head, 0 put, 0 delete, 0 list), 17 dependent steps, 274130 bytes read, 0 written
+verify since 12: holds True, 1 objects, 1 pages; cost: 15 requests (13 read, 2 head, 0 put, 0 delete, 0 list), 15 dependent steps, 33153 bytes read, 0 written
 ```
 
 `VerifyAsync` checks the version's tree pages, objects and index fragments against what their
@@ -144,8 +152,8 @@ sentences, empty when `Holds` is true. Each object is hashed and compared with t
 records. `Unhashed` counts the imported objects whose entry records no hash, and for those only the
 length is checked. An object a delete marked has its counts of the deleted rows recounted from the
 rows its vector names, and every rollup's object is checked to be in the store at its length. `since`
-skips what an earlier, trusted version shares with this one: after one more append it read 28 187
-bytes, where a full verification read 145 615.
+skips what an earlier, trusted version shares with this one: after one more append it read 33 153
+bytes, where a full verification read 274 130.
 
 ## Vacuum
 
@@ -161,10 +169,10 @@ VacuumResult done = await dataset.VacuumAsync(later with { DryRun = false });
 ```
 
 ```
-vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 16 requests (13 read, 0 head, 0 put, 0 delete, 3 list), 16 dependent steps, 12688 bytes read, 0 written
-vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 5 requests (2 read, 0 head, 0 put, 0 delete, 3 list), 5 dependent steps, 675 bytes read, 0 written
-vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 7 requests (2 read, 0 head, 0 put, 2 delete, 3 list), 7 dependent steps, 675 bytes read, 0 written
-and the data: 55000 rows, 2 objects
+vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 18 requests (13 read, 0 head, 0 put, 0 delete, 5 list), 18 dependent steps, 42070 bytes read, 0 written
+vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 7 requests (2 read, 0 head, 0 put, 0 delete, 5 list), 7 dependent steps, 1592 bytes read, 0 written
+vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 9 requests (2 read, 0 head, 0 put, 2 delete, 5 list), 9 dependent steps, 1592 bytes read, 0 written
+and the data: 55000 rows, 4 objects
 ```
 
 Today nothing goes, because every version is younger than the window. The window is seven days
@@ -200,8 +208,8 @@ Task loop = dataset.RunCompactionAsync(
 ```
 
 ```
-10 more appends: 12 objects, lag 3
-stopped: 1 compactions, 2 objects, lag 0
+10 more appends: 14 objects, lag 3
+stopped: 1 compactions, 13 objects, lag 0
 ```
 
 Each turn refreshes the handle (one round trip), plans, and runs the job that is due. When nothing
@@ -248,9 +256,9 @@ long none = await dataset.Scan<Reading>().Where(r => r.Celsius == 25.15).CountAs
 ```
 
 ```
-indexed: 2 objects, 0 left, 2 walks, 2 commits, 9302 fragment bytes, version 26; cost: 20 requests (16 read, 2 head, 2 put, 0 delete, 0 list), 20 dependent steps, 399334 bytes read, 10629 written
-a temperature no row holds: 0 rows; cost: 0 requests (0 read, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
-the same without the indexes: 0 rows; cost: 2 requests (2 read, 0 head, 0 put, 0 delete, 0 list), 2 dependent steps, 121736 bytes read, 0 written
+indexed: 13 objects, 0 left, 2 walks, 2 commits, 53758 fragment bytes, version 26; cost: 90 requests (86 read, 2 head, 2 put, 0 delete, 0 list), 90 dependent steps, 2018162 bytes read, 60139 written
+a temperature no row holds: 0 rows; cost: 26 requests (26 read, 0 head, 0 put, 0 delete, 0 list), 26 dependent steps, 799498 bytes read, 0 written
+the same without the indexes and the objects' counts: 0 rows; cost: 35 requests (35 read, 0 head, 0 put, 0 delete, 0 list), 35 dependent steps, 1327150 bytes read, 0 written
 ```
 
 The first commit gives the index to the dataset, not to a handle. From that version on, every write
@@ -258,8 +266,11 @@ and every compaction builds it into the objects it writes, whatever its own opti
 say, so a compaction loop in another process, which never heard of the filter, does not drop it.
 Then each object written before takes an index fragment, kept in a commit, a batch of objects per
 commit (`IndexingOptions.ObjectsPerCommit`, 64 by default). The second walk found nothing more to
-index and ended the call. A temperature inside every object's bounds is then refused by the filters
-without reading a byte, where the scan without them reads the column of both objects.
+index and ended the call. A temperature inside every object's bounds is then refused by each object's
+filter, which comes with the object's open, before its column is read: a handle that holds none of
+the objects reads 799 KB in 26 requests, where without the filters, and without the counts the
+objects keep, which would answer it too, it reads 1.3 MB in 35. An object smaller than the tail an
+open reads, 64 KiB, is read whole either way.
 
 The indexing runs beside the writers and the compaction loop, and every version it commits answers as
 the dataset did before. A compaction that started before its first commit may still write an object
@@ -279,9 +290,9 @@ RowChangeResult expired = await dataset.ExpireAsync<Request>(r => r.At < cutoff,
 
 It is decided from the objects' summaries in the dataset's tree, with no data object read, and
 `expired.Rows` says how many rows went. An object that holds rows on both sides of the bound stays
-whole, so a row may outlive the bound. Under a clustering value every object above level 0 holds rows
-of one value, so a bound on the key's first column covers whole objects up to the value it falls in:
-under a clustering by day, a row outlives the bound by a day at most. To drop rows exactly, delete them
+whole, so a row may outlive the bound. Under a partition every object holds rows of one partition
+value, so a bound on the partition's column covers whole objects up to the value it falls in: under a
+partition by day, a row outlives the bound by a day at most. To drop rows exactly, delete them
 (`DeleteAsync`), which opens the objects that straddle the bound and marks their rows. A filter on a
 text covers no object, since an object's summaries bound numbers and times, not texts. Expiry, like a
 delete, leaves the bytes to vacuum.
@@ -293,12 +304,12 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 | | requests | what they are |
 |---|---|---|
 | `PlanCompactionAsync` | 0 | the header the handle holds |
-| `CompactAsync` | 12 | every input object read, one object written, one commit |
+| `CompactAsync` | 14 | every input object read, three objects written, one commit |
 | `CompactAsync`, a move | 1 to 2 | the object's tail, to know its schema, unless the handle holds it open, and one commit |
-| `VerifyAsync` | 8 | every object hashed, every page read |
-| `VerifyAsync(since)` | 11 | what the earlier version does not share |
-| `VacuumAsync` | 5 to 16 | the listings, the commit object of each retained version and the trees they name, the deletes in batches |
-| `IndexAsync` | 20, for two objects | per walk a refresh, then per object its tail and its index directory, its columns read for a fragment, and one commit per batch |
+| `VerifyAsync` | 17 | every object hashed, every page read |
+| `VerifyAsync(since)` | 15 | what the earlier version does not share |
+| `VacuumAsync` | 7 to 18 | the listings, the commit object of each retained version and the trees they name, the deletes in batches |
+| `IndexAsync` | 90, for thirteen objects | per walk a refresh, then per object its tail and its index directory, its columns read for a fragment, and one commit per batch |
 
 `DependentSteps` is the number that sets latency: the round trips that had to wait for the previous
 one. On a store where a request costs 30 ms, it is what a job takes. See
@@ -321,9 +332,9 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
 * A compaction that dies leaves what it wrote, which no version names, and vacuum deletes it like any
   other object. An upload in parts it had started is aborted when the job fails, and one the abort
   could not reach, because the process died, stays in the bucket as parts no object shows. Give the
-  bucket a lifecycle rule that aborts incomplete uploads after a day. A job of a dataset clustered by
-  day writes a day's object, gigabytes at a few thousand rows a second, in one upload, which makes the
-  rule worth its line.
+  bucket a lifecycle rule that aborts incomplete uploads after a day. A consolidation of a dataset
+  partitioned by day writes a day's objects, up to a gibibyte each, each in one upload, which makes
+  the rule worth its line.
 * None of this changes the data. After all three operations, the same rows read back.
 
 ## Run it

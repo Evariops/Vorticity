@@ -121,7 +121,7 @@ location is on the activities instead. The layout counter is tagged with `vortex
 a variant key's read a filter read, a set as small as a schema. It adds the bytes each object read as
 rows whole under that filter would have been spared had the dataset's rows been ordered by the value,
 the figure `VortexDataset.RecommendLayoutAsync` ranks for one handle (see
-[the key and the clustering](datasets.md#the-key-and-the-clustering)). Summed over the processes, it
+[the layout](datasets.md#the-layout)). Summed over the processes, it
 says which column the questions keep paying for. A dataset's compaction lag has no counter, since
 the library keeps no list of the handles a process holds, so export `VortexDataset.Lag` for the
 datasets you care about.
@@ -148,8 +148,8 @@ scans it ran. `ExplainAsync(analyze: true)` reads statistics and zone maps witho
 A dataset's commit, compaction and vacuum get one activity each, `vortex.dataset.commit` over all of
 a commit's attempts, `vortex.dataset.compaction`, whose passes and commit are its children, and
 `vortex.dataset.vacuum`. A compaction's passes are `vortex.dataset.compaction.write`, which reads the
-inputs' rows and writes the outputs, and before it, for a job that writes key slices over a variant
-column, `vortex.dataset.compaction.plan`, which counts each clustering value's paths. A handle opened
+inputs' rows and writes the outputs, and before it, for a job over a variant column,
+`vortex.dataset.compaction.plan`, which counts each partition value's paths. A handle opened
 at a location tags the others with it:
 
 ```

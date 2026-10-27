@@ -7,7 +7,7 @@ with the same scans as a single file.
 await using IObjectStore store = new FileObjectStore(Demo.Path("dataset"));
 await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions
 {
-    ClusteringKey = [Reading.ColumnNames.Day],
+    Layout = new DatasetLayout { SortKey = [LayoutValue.Column(Reading.ColumnNames.Day)] },
 });
 
 await using (ObjectDraft draft = dataset.StartObject())
@@ -18,8 +18,8 @@ await using (ObjectDraft draft = dataset.StartObject())
 ```
 
 ```
-created: version 1, 0 rows, clustered by Day
-appended data/3ee81023c25245108e5b2cfcf0978769.vortex: version 2, 50000 rows
+created: version 1, 0 rows, sorted by Day
+appended: version 2, 50000 rows in 1 object
 ```
 
 Datasets live in `Vorticity.Dataset`, a separate package, and it is experimental. The assembly is
@@ -42,72 +42,49 @@ version, so nothing is ever overwritten. A commit is a conditional create in the
 two writers need no lock. The one that loses the race applies its change again on top of the
 winner's version, up to `DatasetOptions.MaxAttempts` times (8 by default).
 
-### The key and the clustering
+### The layout
 
-`ClusteringKey` is the decision that matters most. Objects are ordered by the smallest key each
-holds, every object this handle writes carries a sorted-runs index on the key, and compaction keeps
-the levels above 0 free of overlap on it. That lets a scan skip whole objects, the same way ordered
-rows let a scan skip blocks. The key goes on columns that hold no null, such as `Day` here, and
-`CreateAsync` refuses a nullable one with an `ArgumentException`. Every null is the same key, so the
-objects of a level would overlap on it, and a read that reaches the nulls would open each of them. A
-row whose key is unknown takes a value of its own instead, the smallest or the largest its type has.
-`SummaryColumns` picks which other columns each object summarises for the same purpose, the first 32
-by default.
-
-`Clustering` decides how compaction groups the rows into objects. Its `Value` is the key's first
-column, `ClusteringValue.Column`, or a function of it that never decreases: `Truncate(CalendarUnit.Day)`
-for the start of an instant's day, `Bucket(width)` for an instant's or a number's bucket. Above level 0
-no object holds rows of two values, so the rows of a day, or of whatever the value is, lie in objects
-of their own. Its `ObjectBytes` is the size an object aims at, past which a job starts another without
-splitting a key; with none, compaction caps an object at 64 MiB. Either works alone. The library knows
-nothing of what a value means: to keep each tenant's rows apart, lead the key with the tenant's column
-and cluster by `Column`.
-
-The size counts at high rates. An object keeps a few hundred kilobytes of synopses whatever its rows,
-its columns' sheets and the sketches of its counts: at 50 000 rows a second, objects of 64 MiB make some
-2 600 objects a day and about 1.1 GB of synopses, where objects of an hour make 24 and about 240 MB. Set
-`ObjectBytes` to what a clustering value holds when its objects would otherwise be cut far smaller.
+`DatasetOptions.Layout` is the decision that matters most, and [dataset-layout.md](dataset-layout.md) is about it.
+Its `SortKey` orders the rows of every object, appended objects included, and each object indexes the first key of
+each of its granules, the runs of 8 192 rows its reads are cut in: a question bounded on the key's first components
+reads the granules that may hold its rows alone, the way ordered rows let a scan skip blocks. Its `Partition`, a
+column or a function of one, `Truncate(CalendarUnit.Day)` or `Bucket(width)`, keeps the rows of each value in objects
+of their own: a question bounded on it passes over the other partitions unopened, and an expiry by it drops whole
+objects. Within a partition, objects of one size class merge, and a partition that receives no more rows is
+consolidated into objects disjoint by key. The layout is fixed when the dataset is created, every commit carries it,
+and every writer follows it.
 
 ```csharp
 await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
 {
-    ClusteringKey = [nameof(Request.At)],
-    Clustering = new ClusteringOptions { Value = ClusteringValue.Truncate(CalendarUnit.Day) },
+    Layout = new DatasetLayout
+    {
+        Partition = LayoutValue.Column(nameof(Request.At)).Truncate(CalendarUnit.Day),
+        SortKey = [LayoutValue.Column(nameof(Request.At))],
+    },
     Identifiers = [nameof(Request.RequestId)],
 });
 ```
 
-Its `BlockValue` does the same inside an object, for the key's second column. A job's objects keep,
-for each column, statistics over runs of rows called blocks, which a question can answer from without
-reading the rows (see [Reading](#reading)); a block ends where the key's first column changes, and with a
-block value, where that value of the second column changes too. A function of the second column then
-holds one group in each block: with a key `[Service, At]` and a `BlockValue` of
-`Truncate(CalendarUnit.Hour)`, a question by service and hour answers from the blocks. As with `Value`,
-the library only compares the function's values: the hour is the application's choice.
+How to choose, from the questions the application asks:
 
-The clustering is fixed when the dataset is created, every commit carries it, and every writer
-follows it. A question bounded on the key's first column then reads whole objects but at its ends, an
-expiry by such a bound drops whole objects, and a long range can be asked a value at a time, as
-[Reading](#reading) shows.
-
-How to choose them, from the questions the application asks:
-
-| the questions mostly | lead the key with | cluster by |
+| the questions mostly | partition by | sort by |
 |---|---|---|
-| select one value of a column, a tenant, a service, a source | that column | `Column`, an object per value or several |
-| ask windows of time, last hour, last day | the instant | `Truncate` of the unit the windows and the expiry fall on |
-| ask a column's values within windows of time | the column, then the instant | `Column`, and a `BlockValue` of the time unit the questions group by |
+| select one value of a column: a tenant, a service, a source | nothing, or that column when its values close | that column, then the instant |
+| ask windows of time: the last hour, the last day | the unit the windows and the expiry fall on, a `Truncate` of the instant | the instant |
+| ask a column's values within windows of time | the time unit, a `Truncate` of the instant | the column, then the instant, the index on the column alone (`IndexedPrefix = 1`) |
 
-A filter on the key's first column reads the objects of its values alone; a group by a function of the
-key's second column answers from the blocks when the blocks follow that function. Any other column is
-still answered by its counts, its sheets and where its values live, at a cost the plan states.
+A filter on the sort key's first components reads the granules of their values alone; any other column is still
+answered by its counts, its sheets and where its values live, at a cost the plan states. `SummaryColumns` picks which
+columns each object summarises in its entry, the first 32 by default, so that a question passes over an object
+without opening it.
 
-Which values to key the rows by is the application's choice, and the questions it asks tell. A handle
-keeps count: `RecommendLayoutAsync()` takes the columns and variant keys its questions' filters read,
-each with the bytes an order by it would have spared the objects it read as rows, orders them as a key
-would take them, the fewest distinct values a partition first, and says where the sparse index would
-stop. The telemetry counts the same bytes (`vortex.dataset.layout.avoidable_bytes`). It is advice for the
-next dataset, never applied, and the partition stays the application's choice.
+Which values to order the rows by is the application's choice, and the questions it asks tell. A handle keeps count:
+`RecommendLayoutAsync()` takes the columns and variant keys its questions' filters read, each with the bytes an order
+by it would have spared the objects it read as rows, orders them as a key would take them, the fewest distinct values
+a partition first, and says where the indexed prefix would stop. The telemetry counts the same bytes
+(`vortex.dataset.layout.avoidable_bytes`). It is advice for the next dataset, never applied, and the partition stays
+the application's choice.
 
 ```csharp
 LayoutAdvice advice = await dataset.RecommendLayoutAsync();
@@ -140,9 +117,9 @@ ulong imported = await dataset.ImportAsync("imports/days-100-119.vortex");
 
 ```
 imported: version 4, 120000 rows, 3 objects, lag 0
-  data/3ee81023c25245108e5b2cfcf0978769.vortex: level 0, rows 0 to 50000, 80137 bytes
-  data/73531b788ee34599aa8fc9e7e167e372.vortex: level 0, rows 50000 to 100000, 80137 bytes
-  imports/days-100-119.vortex: level 0, rows 100000 to 120000, 37836 bytes
+  data/b6b4bdbd6ec244b4a134b5fa6e9472d2.vortex: level 0, rows 0 to 50000, 80510 bytes
+  data/6f3adc98a2c24449aa225245f3c30c3a.vortex: level 0, rows 50000 to 100000, 80510 bytes
+  imports/days-100-119.vortex: level 0, rows 100000 to 120000, 37948 bytes
 ```
 
 `ImportAsync` takes a key in the store, not a path on disk, so putting the bytes there is up to you.
@@ -161,7 +138,7 @@ ScanPlan plan = await dataset.Scan<Reading>().Where(r => r.Day >= 100).ExplainAs
 ```
 
 ```
-Day >= 100: 20000 rows; plan: 3 of 16 blocks, object summaries pruned 13; zone map pruned 0
+Day >= 100: 20000 rows; plan: 3 of 16 blocks, object summaries pruned 13
 may Day be 500? False; may Day be 75? True
 the first batch of day 110 starts at dataset row 108192
 key cursor: seek 75 found True, key 75 at row 75000; 1000 entries
@@ -172,7 +149,7 @@ walking down: last key 119 at row 119999; the key before it 118, its last entry 
 
 Row positions are the dataset's. A batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows object after object, in the order a scan delivers them. A key cursor over the
-clustering key merges the cursors of the objects, and its `CountAtKeyAsync` is the number of entries
+sort key merges the cursors of the objects, and its `CountAtKeyAsync` is the number of entries
 under the current key, here the thousand rows of day 75. It walks both ways like a file's cursor
 (`SeekLastAsync`, `PreviousAsync`, `PreviousKeyAsync`, `AtOrBefore`, `Before`), and a step against the
 direction of the previous one seeks every object again at the current entry. Walking down, an object
@@ -187,7 +164,7 @@ only when the scan reaches it.
 
 A group by at a degree above one reads the objects side by side, each one a range in the lanes'
 queue, with large objects cut where the chunks of the columns it reads start together. On the first
-column of the clustering key, or a function of it, a group by under a take streams: the dataset then
+component of the sort key, or a function of it, a group by under a take streams: the dataset then
 delivers its rows in key order, one object after the other, and the take stops the read early. Without
 a take, the objects are read side by side. See [aggregates.md](aggregates.md).
 
@@ -198,15 +175,23 @@ Before it reads an object, a question asks what the object says of itself, cheap
 | what the object keeps | what it spares | measured |
 |---|---|---|
 | summaries in its entry: each column's least, greatest and nulls | objects whose bounds refute the filter, never opened; `MayMatch` reads nothing | days 100 and on: two objects of three never opened, 13 blocks of 16 |
-| key slices, for an object a job writes of a mebibyte or more | a range of the key's first column reads the slices and blocks its keys hold | the last quarter of an hour of a day: one block decoded of three |
+| the index of its partition, once consolidated: where each declared identifier's rows lie | a needle finds its object and its granules in a few dependent steps, opening no other | one request id among 600 000 rows: 5 or 6 dependent steps, under 1.1 MB |
+| the first key of each granule, the sparse index of its sort key's prefix | a filter on the key's first components reads the granules of its values alone | one service of a day: 4.3 % of the object's rows, 299 KB read of 2.4 MB |
 | a sheet of each column: distinct values, frequent ones, a filter of them | an object that lacks every value a filter asks, for a few kilobytes | |
-| where each value lives: the ranges of rows of the blocks it appears in | of the others, the ranges of the values asked alone, on any column | one endpoint of thirty sources: 1.3 MB in 8 requests, against 14.4 MB in 131 |
-| nothing for a rare, scattered value | read in two passes: the filter's columns, then the other columns for the rows kept | thirty rows of 100 000: 4.8 MB in 36 requests, against 30.3 MB in 198 |
+| where each value lives: the granules it appears in | of the others, the granules of the values asked alone, on any column | one endpoint of thirty sources: 788 KB in 18 requests, against 2.9 MB in 51 |
+| nothing for a rare, scattered value | read in two passes: the filter's columns, then the other columns for the rows kept | thirty rows of 100 000: 4.4 MB in 52 requests, against 30.3 MB in 198 |
 
 Pruning starts with the object summaries. The two objects whose days all fall before 100 are never
 opened, and their 13 blocks are pruned without a read. `MayMatch` answers from the summaries the
 handle already holds (the version's header and the pages it kept from earlier versions), so it reads
 nothing, and `false` is a proof.
+
+An object reads its sort key's index from the last bytes of the object, which its open reads anyway, and a question
+bounded on the key's first components then reads the granules that may hold its rows: of each column it needs, a range
+of the column's chunk, or the chunk whole when those granules hold most of it or when a request at the store's profile
+costs more than the bytes it would spare. The [layout sample](dataset-layout.md) asks for one service of a day sorted by
+service: the plan, analyzed, says it will read the 4.3 % of the day's rows the index keeps, and a cold read takes
+299 KB of the day's 2.4 MB, its count 77 KB.
 
 An object a job writes, of a mebibyte or more, also keeps a sheet of each column: its distinct
 values, its most frequent ones, and, when its values repeat, a filter of them. A question that asks a
@@ -215,26 +200,28 @@ before the object, and passes over an object whose filter lacks every value aske
 kilobytes long instead of the object's reads. A smaller object is read in the request its sheets
 would take, and keeps none.
 
-Such an object also keeps, for each column whose values repeat, where each value lives. A question
-that asks those columns for values reads these indexes in place of the sheets, passes over an object
-that lacks the values, and reads only the ranges of the others where the values live. That holds on
-any column, not only the key's: a filter on an endpoint, which only its service's rows hold, reads that
-service's rows, where the same filter written as a prefix, which no index answers, reads every row. A
-value that lives in more than half an object's blocks is read with the whole object. A value that is
-rare but scattered, which no index places, is read in two passes when the sheets say so: the filter's
-columns first, then the other columns only for the rows it kept, from the chunks that hold them.
+Such an object also keeps, for each column whose values repeat, the granules each value lives in. A
+question that asks those columns for values reads these indexes in place of the sheets, passes over an
+object that lacks the values, and reads only the granules of the others where the values live. That
+holds on any column, not only the key's: a filter on an endpoint, which only its service's rows hold,
+reads that service's granules, where the same filter written as a prefix, which no index answers, reads
+every row. A value that lives in more than half an object's granules is read with the whole object. A
+value that is rare but scattered, which no index places, is read in two passes when the sheets say so:
+the filter's columns first, then the other columns only for the rows it kept, from the granules that
+hold them.
 
-An object a job writes is also cut into slices of the key that its table of contents lists, and a
-question under a range of the key's first column reads only what the range reaches: the objects whose
-keys it may hold, and in each the slices and blocks whose keys it holds. Three days of a request every
-five seconds, clustered by day, by service over the first two, then over the last quarter of an hour of
-the second (the `time-windows` sample):
+Three days of a request every five seconds, partitioned by day and sorted by the instant, by service
+over the first two days, then over the last quarter of an hour of the second (the `time-windows` sample):
 
 ```
-51840 requests over three days in 3 objects
+51840 requests over three days in 12 objects
 two days by service: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 34560 rows read
-the last quarter of an hour of the second day: 180 requests; blocks decoded 1, pruned 2
+the last quarter of an hour of the second day: 180 requests; blocks decoded 1, pruned 0
 ```
+
+Its appends came in order, so each day's merged objects hold disjoint ranges of instants, and the day's
+consolidation moved them whole rather than rewrite them: four objects a day of a granule each, the last
+quarter of an hour read from the one that holds it.
 
 A key of a variant column is asked as a column is, read strictly as an integer, a double, a text or a
 boolean. An object that shreds the key reads its typed column, and one that leaves it in the residual
@@ -248,7 +235,8 @@ var routes = dataset.Scan<LogRow>()
 ```
 
 `AsDouble()` reads floats as well as doubles, the floats from the field's value of the rows that hold
-one, and `ToInt64()` converts every kind of value.
+one, and `ToInt64()` converts every kind of value. [variants.md](variants.md) says how a dataset keeps
+a variant column's keys apart.
 
 ### How an aggregation is answered
 
@@ -263,10 +251,10 @@ and `ScanOptions.UseSynopses = false` reads every object's rows.
 | the column's counts | a question on one column and the numbers, its other keys constant over the object, its filter asking that column for values or proven over every row | a count by service: a request an object, a few kilobytes |
 | the counts less one value | a filter that leaves one value of a declared identifier out, `r.RequestId != id` | no object holding it: 127 KB where the rows take 791 KB |
 | the counts less the deleted rows | an object a delete marked, under counts, sums, means or distinct values | 332 bytes where the rows take 540 KB |
-| the blocks' statistics | a question the counts do not answer, block by block, the blocks that hold one group | errors by service: 86.8 KB where the rows take 480.7 KB |
+| the granules' statistics | a question the counts do not answer, granule by granule, the granules that hold one group | errors by service: 247 KB where the rows take 898 KB |
 | a learned partial | the question, or its family, asked before over the object | nothing read |
-| a rollup's totals | every object under a rollup, over a long range | 4 requests where the objects' counts take 30 |
-| the filter's pages | a filter evaluated on rows, asked before | 5.3 MB where the first ask read 23.2 MB |
+| a rollup's totals | every object under a rollup, over a long range | a count by service: 17 requests where the objects' counts take 26 |
+| the filter's pages | a filter evaluated on rows, asked before | 3.4 MB where the first ask read 23.2 MB |
 | the rows | any other object | |
 
 **Counts.** An object a job writes, of a mebibyte or more, keeps for each column whose values repeat
@@ -274,7 +262,7 @@ its counts: the rows of each value, each number column's exact sum, least and gr
 column of at most 1 000 values a quantile sketch of each number column. A question on one column and
 the numbers reads an object's counts in one request instead of its rows when its other keys are values
 the object holds constant and its filter asks that column for values or is true for every row of the
-object, as its summaries prove. Under a clustering by hour each object holds one hour, so a question by
+object, as its summaries prove. Under a partition by hour each object holds one hour, so a question by
 service and hour is such a question, and only the objects at the window's ends, which hold rows outside
 it, are read as rows. The objects still in their appends keep no counts and are read as rows.
 
@@ -292,20 +280,19 @@ the postings alone. That holds for counts, sums, means and distinct values, when
 holds no null; a minimum, a maximum or a quantile reads the rows. Rows a delete marked are taken out the
 same way (see [Deleting and updating rows](#deleting-and-updating-rows)).
 
-**Blocks.** An object whose counts do not answer may still be answered block by block. Such an object
-keeps, for each column, its statistics over the object's blocks, the runs of rows of one value of the
-key's first column: each block's values and their rows, and each number's count, sum and extremes. A
-block whose columns of the question hold one value each, its filter proven over its rows, gives its
-counts and measures; a block where one column varies gives the count of each of its values, under a
-question of counts alone. The other blocks are read as rows, those a delete marked a row of among them.
-Under a key that leads with the service, errors by service read the statistics of the service and the
-status, `r.Status >= 500` judged value by value. By the hour as well, a block answers when its instants
-fall in one hour, which takes blocks short in time: here each held some fifty minutes, and the question
-read 2.7 MB where the rows took 3.4 MB. With a `BlockValue` of the hour, its blocks end at each hour,
-and it read 438 KB where the rows took 3.4 MB. A window whose edges cut blocks reads those blocks as
-rows, and never more than the rows take. `ScanOptions.AlignWindow` widens the window to the bounds of
-the objects its ends fall in, so that they are answered from their counts too: the answer is then the
-exact answer of the window applied, which `ScanMetrics.Window` gives.
+**Granules.** An object whose counts do not answer may still be answered granule by granule. Such an
+object keeps, for each column, its statistics over its granules: each granule's values and their rows,
+and each number's count, sum and extremes. A granule whose columns of the question hold one value each,
+its filter proven over its rows, gives its counts and measures; a granule where one column varies gives
+the count of each of its values, under a question of counts alone. The other granules are read as rows,
+those a delete marked a row of among them. Under a key that leads with the service, errors by service
+read the statistics of the service and the status, `r.Status >= 500` judged value by value: 247 KB where
+the rows take 898 KB. By the hour as well, a granule answers when its instants fall in one hour, which a
+key with the hour after the service, `At.Truncate(CalendarUnit.Hour)`, makes so: measures by service and
+hour read 2.4 MB where the rows take 6.2 MB. A window whose edges cut granules reads those granules as
+rows, and never more than the rows take. `ScanOptions.AlignWindow` widens the window to the bounds of the
+objects its ends fall in, so that they are answered from their counts too: the answer is then the exact
+answer of the window applied, which `ScanMetrics.Window` gives.
 
 **Learned partials.** An object read as rows leaves what it gave the question, so that the question
 asked again reads nothing of it. What it keeps is the question's family: the same keys and aggregates,
@@ -317,19 +304,20 @@ sums the partials of the objects it replaces. A question whose aggregates a stat
 them: counts, sums, means, extremes, quantiles and approximate distinct counts. A value of the key's
 first column is not made a key where an object holds it with others, since learning would read every
 value's rows. A window on the key's first column that moves, `r.At >= now - 15 minutes`, keeps the
-partials of the objects it holds whole, and reads the one its edge cuts. The handle keeps up the
-families its questions asked in the last hour: each object it appends learns their partials as it is
-written, which costs the append some 1.5 ms an object and family, so that a monitor asking the same
-question after each append reads none of the objects appended since it first asked.
+partials of the objects it holds whole, and reads the one its edge cuts: 125 KB the first time, 45 KB
+once it moved. The handle keeps up the families its questions asked in the last hour: each object it
+appends learns their partials as it is written, which costs the append some 2 to 3 µs a row and family,
+so that a monitor asking the same question after each append reads none of the objects appended since
+it first asked.
 
 **Rollups.** Over a long range, an object's counts still cost a request an object. `RollUpAsync` sums
 the counts of runs of about `DatasetOptions.RollupFanout` consecutive objects (64 by default) into
 rollups, then as many rollups into one of the rank above, with no row read, and `RunCompactionAsync`
 calls it once no job is due. A question whose every object under a rollup would answer from its counts
-reads the rollup instead. On thirty days of 2 000 routes, an object a day and rollups of four, a count
-of every route reads 4 requests and 261 698 bytes, where the objects' counts take 30 requests and
-1 930 456 bytes. A commit that adds or takes away an object takes away the rollups over it, which the
-next call sums again.
+reads the rollup instead. On thirty days of 2 000 routes, an object a day, a count of every route reads
+two rollups and the counts of the three objects no rollup covers yet: 7 requests and 324 254 bytes, where
+the objects' counts take a request each. A commit that adds or takes away an object takes away the
+rollups over it, which the next call sums again.
 
 **Pages.** An aggregation whose filter is evaluated on an object's rows, a range no sheet or index
 answers, also notes where in the object the filter kept rows; asked again, from the handle or one
@@ -339,9 +327,8 @@ designed in [22-on-the-fly-and-synopses.md](../design/22-on-the-fly-and-synopses
 ### Long ranges, expiry and late rows
 
 A page that shows a long window can show its newest part first. `AskByValuesAsync` cuts a range of the
-key's first column where the clustering value changes, asks your question over each part, several
-parts at once, and delivers each part's answer, the last part first by default, once it and every part
-before it are in:
+partition's column a part a partition, asks your question over each part, several parts at once, and
+delivers each part's answer, the last part first by default, once it and every part before it are in:
 
 ```csharp
 await foreach (ValuePart<DateTimeOffset, List<ServiceTotals>> part in dataset.AskByValuesAsync(from, to, async (start, end, ct) =>
@@ -378,7 +365,7 @@ await info.ExpireAsync<Logged>(r => r.At < quarter);
 ```
 
 An expiry drops, in one commit, the objects its filter covers whole, by their summaries, and opens
-none. Under a clustering by day, a bound on the instant covers every day before the one it falls in,
+none. Under a partition by day, a bound on the instant covers every day before the one it falls in,
 so a row outlives the bound by a day at most. To drop rows exactly, delete them: `DeleteAsync` opens
 the objects that straddle the bound. The sample keeps three days of debug lines, an hour an object,
 and drops the first two:
@@ -387,13 +374,13 @@ and drops the first two:
 debug lines expired before 10-03: 2880 then 960, 1920 dropped; info lines untouched: 1440
 ```
 
-A row that comes late, after rows of later keys, is appended as any other, into level 0. The job that
-takes level 0 down leaves such rows there, an object a clustering value, rather than rewrite the
-objects of the level below that their keys reach, as long as they stay few; a later job takes them in.
-On 48 hours of requests at 20 a second from four writers, clustered by hour, one row in fifty a few
-seconds late and one in ten thousand up to an hour late, a row is rewritten 5.0 times on its way down,
-against 2.8 when none comes late (`vortex-queries --micro lifecycle`). A writer that can hold its rows until the late
-ones are in, and append them in key order, pays the second figure.
+A row that comes late for a partition already consolidated is appended as any other, as a small object
+of that partition. It waits in the partition's size classes, and is merged into the consolidated objects
+it overlaps once the late rows weigh an eighth of them (`DatasetLayout.LateShare`), which bounds what a
+late row costs at some nine writes. On 24 hours of requests at 20 a second from four writers, partitioned
+by hour, a row in fifty a few seconds late and one in ten thousand up to an hour late, the size classes
+rewrote a row 1.93 times and the consolidations 0.92 times (`vortex-queries --micro lifecycle`), and a
+window of a day covers 40 objects.
 
 ### The local cache
 
@@ -467,8 +454,10 @@ which takes a single round trip to the store when no commit or one came in since
 version that was the latest at some moment during the call. A scan is pinned to the version its
 handle held when the scan was built, so a commit in the middle of a query does not change the
 answer. `Version`, `RowCount`, `ObjectCount` and `Lag` describe the
-version the handle holds. `Lag` is how many objects level 0 holds beyond its ceiling of eight, and
-compaction brings it back to 0 ([dataset-maintenance.md](dataset-maintenance.md)).
+version the handle holds. `Lag` is how many objects level 0 holds beyond eight: under levels, what
+compaction owes, which it brings back to 0; under tiers, where level 0 holds the size classes of every
+partition still receiving rows, `PlanCompactionAsync()` says what each partition's merges owe
+([dataset-maintenance.md](dataset-maintenance.md)).
 
 `OpenAsync(store, version)` opens a version whose number you know, in one request, where opening the
 latest takes a listing and a read. A writer can hand the number of the version it committed to its
@@ -595,10 +584,12 @@ evolved: version 10, columns Day, Celsius, Town, Humidity
 allowed changes are these:
 
 * add a nullable column, under a name no column has ever had
-* drop a column, unless the clustering key uses it
+* drop a column
 * rename a column, mapping the new name to the old one
 * widen a number within its kind: `int` to `long`, `uint` to `ulong`, `float` to `double`
-* make a column nullable, unless the clustering key uses it
+* make a column nullable
+
+A column the layout reads, which partitions and orders every object, keeps its name and its type.
 
 Anything else could lose a value already written, and is refused before anything is committed, with
 the column and the reason.
@@ -652,9 +643,10 @@ never lend its values to an unrelated column.
 dotnet run -c Release --project samples/Vorticity.Samples -- datasets
 ```
 
-The dataset clustered by day, the window asked a day at a time, the cache and the retentions are
-the `time-windows` sample, and the variant columns the `variants` sample:
+The dataset partitioned by day, the window asked a day at a time, the cache and the retentions are
+the `time-windows` sample, the variant columns the `variants` sample, and the layout the
+`dataset-layout` sample:
 
 ```
-dotnet run -c Release --project samples/Vorticity.Samples -- time-windows variants
+dotnet run -c Release --project samples/Vorticity.Samples -- time-windows variants dataset-layout
 ```

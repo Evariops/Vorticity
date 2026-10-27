@@ -20,6 +20,12 @@ internal static class Program
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
         CultureInfo.CurrentUICulture = CultureInfo.InvariantCulture;
 
+        // The distributed execution page starts this program again as a cluster's second node.
+        if (args.Length == 2 && args[0] == DistributedExecution.WorkerArgument)
+        {
+            return await DistributedExecution.ServeAsync(args[1]);
+        }
+
         Dictionary<string, Func<Task>> samples = new(StringComparer.Ordinal);
         ReadCases.Register(samples);
         AccessCases.Register(samples);

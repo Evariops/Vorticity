@@ -83,11 +83,12 @@ internal static class DatasetMaintenance
 
         Console.WriteLine($"and the data: {await dataset.Scan<Reading>().CountAsync()} rows, {dataset.ObjectCount} objects");
 
-        // In the background: a loop any host runs, which drains what is due, then sleeps and asks again.
+        // In the background: a loop any host runs, which drains what is due, then sleeps and asks again. Appends ten times
+        // larger, whose objects pass the tail an open reads, which the index after the fact then spares the rest of.
         for (int i = 0; i < Appends; i++)
         {
             await using ObjectDraft draft = dataset.StartObject();
-            await draft.Writer.WriteAsync<Reading>(Rows(55_000 + (i * 5_000), 5_000));
+            await draft.Writer.WriteAsync<Reading>(Rows(55_000 + (i * 50_000), 50_000));
             await dataset.AppendAsync(draft);
         }
 
@@ -119,13 +120,21 @@ internal static class DatasetMaintenance
         IndexingResult indexed = await dataset.IndexAsync(IndexPolicy.None.Bloom(Reading.ColumnNames.Celsius));
         Console.WriteLine($"indexed: {indexed.ObjectsIndexed} objects, {indexed.ObjectsLeft} left, {indexed.Walks} walks, " +
             $"{indexed.Commits} commits, {indexed.FragmentBytes} fragment bytes, version {indexed.Version}; cost: {Cost(store)}");
-        // Inside every object's bounds, so only the filters can say no row holds it.
-        store.Reset();
-        long none = await dataset.Scan<Reading>().Where(r => r.Celsius == 25.15).CountAsync();
-        Console.WriteLine($"a temperature no row holds: {none} rows; cost: {Cost(store)}");
-        store.Reset();
-        long without = await dataset.Scan<Reading>().Where(r => r.Celsius == 25.15).With(new ScanOptions { UseIndexes = false }).CountAsync();
-        Console.WriteLine($"the same without the indexes: {without} rows; cost: {Cost(store)}");
+        // Inside every object's bounds, so only the filters can say no row holds it: each question asked by a handle of its
+        // own, which holds none of the objects the indexing opened.
+        await using (VortexDataset cold = await VortexDataset.OpenAsync(store))
+        {
+            store.Reset();
+            long none = await cold.Scan<Reading>().Where(r => r.Celsius == 25.15).CountAsync();
+            Console.WriteLine($"a temperature no row holds: {none} rows; cost: {Cost(store)}");
+        }
+
+        await using (VortexDataset cold = await VortexDataset.OpenAsync(store))
+        {
+            store.Reset();
+            long without = await cold.Scan<Reading>().Where(r => r.Celsius == 25.15).With(new ScanOptions { UseIndexes = false, UseSynopses = false }).CountAsync();
+            Console.WriteLine($"the same without the indexes and the objects' counts: {without} rows; cost: {Cost(store)}");
+        }
     }
 
     private static string Cost(CountingObjectStore store) =>

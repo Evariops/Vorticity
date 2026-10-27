@@ -40,7 +40,8 @@ internal static class TimeWindows
             Identifiers = [nameof(Request.RequestId)],
         }))
         {
-            // Three days of a request every five seconds, appended ten minutes at a time, then compacted.
+            // Three days of a request every five seconds, appended ten minutes at a time and merged as they come; the days,
+            // written here in seconds, are consolidated at once rather than an hour after their last append.
             Random random = new Random(7);
             for (int part = 0; part < 3 * 24 * 6; part++)
             {
@@ -60,6 +61,7 @@ internal static class TimeWindows
             {
             }
 
+            await dataset.ConsolidateAsync();
             needle = "req-200-7";
             Console.WriteLine($"{dataset.RowCount} requests over three days in {dataset.ObjectCount} objects");
 
