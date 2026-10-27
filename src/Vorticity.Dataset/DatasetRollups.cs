@@ -174,7 +174,7 @@ internal static class DatasetRollups
     }
 
     /// <summary>
-    /// The runs of <paramref name="keys"/>, tree keys: each ends after a key whose clustering key, without the uid that ends
+    /// The runs of <paramref name="keys"/>, tree keys: each ends after a key whose sort key, without the uid that ends
     /// it, hashes under the rank's seed below 2^64 / fanout, or where <paramref name="ends"/> says. An object rewritten with
     /// the same rows keeps its run's end.
     /// </summary>
@@ -255,7 +255,7 @@ internal static class DatasetRollups
     /// has rows a delete marked, or columns of an earlier schema.
     /// </summary>
     private static async ValueTask<RollupEntry?> FromObjectsAsync(
-        VortexDataset dataset, DatasetSnapshot version, ClusteringKey key, int level, List<PositionedObject> objects, Run run, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSnapshot version, DatasetKey key, int level, List<PositionedObject> objects, Run run, CancellationToken cancellationToken)
     {
         RollupBuilder builder = new RollupBuilder(level, 1, key, version.Schema.Cut);
         for (int i = run.First; i < run.First + run.Count; i++)
@@ -286,7 +286,7 @@ internal static class DatasetRollups
     /// objects, its own written; null when one of them has no rollup the version holds.
     /// </summary>
     private static async ValueTask<RollupEntry?> FromRollupsAsync(
-        VortexDataset dataset, DatasetSnapshot version, ClusteringKey key, int level, int rank, List<PositionedObject> objects, List<List<Run>> ranks, Run run,
+        VortexDataset dataset, DatasetSnapshot version, DatasetKey key, int level, int rank, List<PositionedObject> objects, List<List<Run>> ranks, Run run,
         Dictionary<string, RollupEntry> below, CancellationToken cancellationToken)
     {
         RollupBuilder builder = new RollupBuilder(level, rank, key, version.Schema.Cut);

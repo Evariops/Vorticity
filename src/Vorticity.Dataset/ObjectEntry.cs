@@ -458,7 +458,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     }
 
     /// <summary>
-    /// The object's largest key on the dataset's clustering key, row-encoded as the key orders it: with its smallest, which
+    /// The object's largest key on the dataset's sort key, row-encoded as the key orders it: with its smallest, which
     /// its tree key leads with, the bounds of its keys whatever their type, where its summaries bound a number and not a
     /// text. At or above every key it holds, a delete leaving it as it was. Empty when the entry does not say.
     /// </summary>

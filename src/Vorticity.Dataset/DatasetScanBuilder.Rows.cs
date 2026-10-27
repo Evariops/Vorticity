@@ -815,7 +815,7 @@ internal sealed partial class DatasetScanBuilder
             _dataset.Predicates.Keep(held.Entry.Uid, predicate, noted, granules, TwoPhaseReads.ByPlaces(keptBlocks, blocks), cache);
         }
 
-        // What a clustering by each column of the filter would have spared the object, read whole as rows.
+        // What a sort key led by each column of the filter would have spared the object, read whole as rows.
         if (whole && granted is null && FilterColumns() is { Count: > 0 } credited)
         {
             _dataset.Advisor.Read(credited, _version.Costs.Rows(held.Entry, FieldsRead()).Bytes, selected, held.Entry.Rows);

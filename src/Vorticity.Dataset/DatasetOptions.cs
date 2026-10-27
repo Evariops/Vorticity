@@ -92,7 +92,7 @@ public sealed record DatasetOptions
     internal double BoundOutPerIn { get; init; } = ObjectBound.OutPerIn;
 
     /// <summary>The columns an object's entry summarises, or null for the first <see cref="SummaryColumnLimit"/>.</summary>
-    /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the clustering key's columns are always among them.</remarks>
+    /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the sort key's columns are always among them.</remarks>
     public IReadOnlyList<string>? SummaryColumns { get; init; }
 
     /// <summary>How many columns an entry summarises when none are declared; 32 by default.</summary>

@@ -147,7 +147,7 @@ internal sealed class ObjectColumns
             if (changes[column] != ColumnChange.None && schema.IsKeyed(dataset.GetFieldName(column)))
             {
                 throw new VortexSchemaException(
-                    $"'{objectKey}' holds '{dataset.GetFieldName(column)}' as {was}; it is a column of the clustering key, which orders " +
+                    $"'{objectKey}' holds '{dataset.GetFieldName(column)}' as {was}; it is a column of the sort key, which orders " +
                     $"every object, and every object holds it as the dataset's {type}.");
             }
         }

@@ -13,7 +13,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// <summary>
 /// <c>--micro columns</c>: the battery "any column" of the design (22 §10.5). For each column of the reference requests, a
 /// count by value and hour, then a filter on its most frequent value and on its rarest, grouped by each of the other
-/// columns, asked of the same rows in the order they arrive (a key on the instant, an object an hour) and clustered by
+/// columns, asked of the same rows in the order they arrive (a key on the instant, an object an hour) and sorted by
 /// service (a key on the service and the instant, blocks ending at each hour, objects of the same size). Each question
 /// says the path its plan takes object by object, the requests and bytes its planner prices the exact answer at, those
 /// a cold handle then reads, and those the rows take; its answer is held to the rows'. Then the frontier of the reads on
@@ -57,7 +57,7 @@ internal static class ColumnBattery
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(EmitterRequest.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(EmitterRequest.At))], Organization = LayoutOrganization.Leveled },
         });
 
-        // Clustered by service into objects of the arrival's size, so that the two differ by the order of their rows alone.
+        // Sorted by service into objects of the arrival's size, so that the two differ by the order of their rows alone.
         await using LatencyObjectStore serviceReads = new LatencyObjectStore(new MemoryObjectStore());
         await using CountingObjectStore service = new CountingObjectStore(serviceReads);
         Layout serviceLayout = await FillAsync("service", service, batches, new DatasetOptions
@@ -375,7 +375,7 @@ internal static class ColumnBattery
     /// <summary>
     /// The frontier of the reads on the fly: at the design's rate, with an object an hour, the longest window whose rows a
     /// question reads within a second, cold, at the price of a request and a byte (<see cref="Vorticity.IO.CostProfile.Remote"/>): requests of a
-    /// mebibyte of a column's chunks and an open an object. A filter on a service reads its share of the rows clustered by
+    /// mebibyte of a column's chunks and an open an object. A filter on a service reads its share of the rows sorted by
     /// service, and every row in the order they arrive, where each block holds every service.
     /// </summary>
     private static void Frontier(Layout arrival, Layout service, Dictionary<string, long> services, long rows)

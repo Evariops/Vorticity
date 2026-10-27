@@ -76,7 +76,7 @@ internal sealed partial class DatasetScanSource
     /// such objects moves out to the furthest of their own bounds on the column, compared row-encoded as the key orders the
     /// column, whatever its type. A bound stays where it was when another such object would hold values on both sides of
     /// the new one, which growing on would cut in turn: objects cut by size that share a value of a composite key's first
-    /// column, which a clustering value never leaves. Two walks of the version's entries. Null when the range cuts no such
+    /// column, which a partition value never leaves. Two walks of the version's entries. Null when the range cuts no such
     /// object or stays, the filter bounds no range of the column, or the counts answer no object of the question.
     /// </summary>
     public async ValueTask<(VortexExpr Filter, VortexExpr Window)?> AlignAsync(
@@ -102,7 +102,7 @@ internal sealed partial class DatasetScanSource
         {
             if (conjunct is not ComparisonExpr { Field: ColumnFieldExpr field } comparison
                 || comparison.Op is not (ComparisonOp.Greater or ComparisonOp.GreaterOrEqual or ComparisonOp.Less or ComparisonOp.LessOrEqual)
-                || !string.Equals(field.Path, key.InstantPath, System.StringComparison.Ordinal) || Encoded(key, comparison.Value) is not { } bound)
+                || !string.Equals(field.Path, key.LeadingPath, System.StringComparison.Ordinal) || Encoded(key, comparison.Value) is not { } bound)
             {
                 rest.Add(conjunct);
                 continue;
@@ -230,23 +230,23 @@ internal sealed partial class DatasetScanSource
     /// The column a window is aligned on, as a key of it alone: the layout key's first column, or the column the partition
     /// reads when the layout has a partition; null for neither.
     /// </summary>
-    private ClusteringKey? AlignedOn() =>
-        _version.Schema.Key ?? (_version.Schema.Cut is { Path: { } path } ? ClusteringKey.For([path], _version.Schema.DType) : null);
+    private DatasetKey? AlignedOn() =>
+        _version.Schema.Key ?? (_version.Schema.Cut is { Path: { } path } ? DatasetKey.For([path], _version.Schema.DType) : null);
 
     /// <summary>
     /// The least and the greatest value of the aligned column in the object <paramref name="held"/>, each with its bytes
     /// row-encoded as the key orders the column: by its summaries, its keys bounding a text when the column leads the
-    /// layout's key (<paramref name="ownKey"/>, <see cref="PositionedObject.Summaries(ClusteringKey)"/>); null when they do not bound it, or
+    /// layout's key (<paramref name="ownKey"/>, <see cref="PositionedObject.Summaries(DatasetKey)"/>); null when they do not bound it, or
     /// prove it holds no null.
     /// </summary>
-    private static ((byte[] Bytes, FilterLiteral Value) Low, (byte[] Bytes, FilterLiteral Value) High)? Bounds(in PositionedObject held, ClusteringKey key, bool ownKey) =>
-        (ownKey ? held.Summaries(key) : held.Entry.Summaries).TryGet(key.InstantPath, out ColumnSummary column) && column.HasMin && column.HasMax
+    private static ((byte[] Bytes, FilterLiteral Value) Low, (byte[] Bytes, FilterLiteral Value) High)? Bounds(in PositionedObject held, DatasetKey key, bool ownKey) =>
+        (ownKey ? held.Summaries(key) : held.Entry.Summaries).TryGet(key.LeadingPath, out ColumnSummary column) && column.HasMin && column.HasMax
         && column.HasNullCount && column.NullCount == 0 && Encoded(key, column.Min) is { } low && Encoded(key, column.Max) is { } high
             ? ((low, column.Min), (high, column.Max))
             : null;
 
     /// <summary><paramref name="value"/> row-encoded as the key's first column, as a key of it alone; null for a value the column's type does not take.</summary>
-    private static byte[]? Encoded(ClusteringKey key, FilterLiteral value)
+    private static byte[]? Encoded(DatasetKey key, FilterLiteral value)
     {
         if (value.Kind == FilterLiteralKind.Null)
         {
@@ -308,7 +308,7 @@ internal sealed partial class DatasetScanSource
         DatasetKeyCursor.ExplainAsync(_version, path, indexes, cancellationToken);
 
     /// <summary>
-    /// On the first column of the clustering key, or a function of it: the key-ordered read opens an
+    /// On the first column of the sort key, or a function of it: the key-ordered read opens an
     /// object once it could hold the next row, so a group of it is final once a greater key is read.
     /// Only when <paramref name="stopsEarly"/>, a take or a window stopping the read, which reading in order is for: the read opens
     /// the objects one after the other, each through its own key-ordered scan, on one lane, where the pass that holds the

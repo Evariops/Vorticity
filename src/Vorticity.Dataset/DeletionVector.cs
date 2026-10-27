@@ -11,7 +11,7 @@ namespace Vorticity.Dataset;
 /// object, a compaction's or that of a delete finding too many, drops them with the object.
 /// </summary>
 /// <remarks>
-/// Runs rather than positions, because the rows a filter on the clustering key takes out of a sorted
+/// Runs rather than positions, because the rows a filter on the sort key takes out of a sorted
 /// object are contiguous: ten of them are one run, two varints. Every query is a binary search over
 /// the runs, and none allocates.
 /// </remarks>

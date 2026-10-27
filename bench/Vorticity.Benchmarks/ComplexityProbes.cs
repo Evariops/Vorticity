@@ -133,7 +133,7 @@ public class ComplexityProbes
             FilterLiteral[] needles = new FilterLiteral[count];
             for (int i = 0; i < count; i++)
             {
-                // Spread over the whole column rather than clustered, so no zone could prune them
+                // Spread over the whole column rather than grouped, so no zone could prune them
                 // even if pruning were left on, and every one of them is a value the column holds.
                 needles[i] = FilterLiteral.From((i + 1L) * (FilterRows / (count + 1L)));
             }

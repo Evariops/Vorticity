@@ -77,7 +77,7 @@ internal readonly record struct CountsChunk(int Offset, int Length, int FirstGro
 /// header and the chunk that holds it alone.
 /// </para>
 /// <para>
-/// Counts kept by bucket, a rollup's by clustering value, give each group an entry for each bucket its value has rows in,
+/// Counts kept by bucket, a rollup's by partition value, give each group an entry for each bucket its value has rows in,
 /// the buckets ascending, each entry its bucket's number before its words: a reader of one value finds all its buckets'
 /// entries in the chunk that holds it.
 /// </para>
@@ -138,7 +138,7 @@ internal sealed class ColumnCounts
     internal int[] AttachedFields { get; init; } = [];
 
     /// <summary>
-    /// The buckets the counts keep apart, a rollup's clustering values: 0 for an entry a group; past 0, a group holds an
+    /// The buckets the counts keep apart, a rollup's partition values: 0 for an entry a group; past 0, a group holds an
     /// entry for each bucket its value has rows in, <see cref="EntryBuckets"/> numbering each entry's.
     /// </summary>
     internal int Buckets { get; init; }

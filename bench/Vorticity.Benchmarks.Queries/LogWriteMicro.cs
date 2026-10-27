@@ -11,7 +11,7 @@ namespace Vorticity.Benchmarks.Queries;
 /// What building the client's log records costs (<c>--micro logwrite</c>): <c>--hours</c> hours of them at <c>--rate</c> a
 /// second (<see cref="LogGeneratorV2"/>), built as <c>--micro paths --qp</c> builds them, the way a client's ingestion does:
 /// written in objects of <c>--part-minutes</c> minutes, four hours at once, appended and compacted hour after hour,
-/// clustered by day, each job shredding their attributes. The time, the processors' time, and what each row cost them.
+/// partitioned by day, each job shredding their attributes. The time, the processors' time, and what each row cost them.
 /// The store and its scratch lie in a directory of their own under <c>--store</c>, removed after.
 /// </summary>
 internal static class LogWriteMicro

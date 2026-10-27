@@ -135,7 +135,7 @@ public sealed partial class DatasetKeyOrderReadTests
             }
 
             Assert.Equal(all.Count, entries);
-            ClusteringKey composite = dataset.Snapshot.Schema.Key!;
+            DatasetKey composite = dataset.Snapshot.Schema.Key!;
             for (int probe = 0; probe < 60; probe++)
             {
                 string service = $"svc-{random.Next(0, 300):D3}";

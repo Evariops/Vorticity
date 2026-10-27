@@ -10,7 +10,7 @@ using Vorticity.Dataset;
 
 namespace Vorticity.Bench.Churn;
 
-/// <summary>The rows the dataset holds: a clustering key, and columns of each common kind.</summary>
+/// <summary>The rows the dataset holds: a sort key, and columns of each common kind.</summary>
 [VortexRecord]
 public partial record struct ChurnRow(long Key, long Stamp, double Value, int Group, string Label);
 

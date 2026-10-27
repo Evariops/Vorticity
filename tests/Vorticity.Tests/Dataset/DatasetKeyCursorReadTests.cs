@@ -336,7 +336,7 @@ public sealed class DatasetKeyCursorReadTests
     }
 
     /// <summary>Object <paramref name="i"/>'s entry alone, with bounds enough to make it about 200 bytes.</summary>
-    private static DatasetOperation Unwritten(ClusteringKey clustering, int i)
+    private static DatasetOperation Unwritten(DatasetKey clustering, int i)
     {
         long low = 10L * i;
         UInt128 uid = (UInt128)(ulong)i + 1;

@@ -1,4 +1,4 @@
-// What a walk of a dataset's clustering key pays per entry, as the objects it merges grow.
+// What a walk of a dataset's sort key pays per entry, as the objects it merges grow.
 //
 // A dataset's key cursor merges the key cursors of its objects. `Original` (DatasetKeyCursorBefore.cs)
 // finds the next entry by a pass over every object, twice, and while an object waits to be opened
@@ -21,7 +21,7 @@ using Vorticity.Types;
 
 namespace Vorticity.Benchmarks.Complexity;
 
-/// <summary>A walk of every entry of a dataset's clustering key, against the objects it merges.</summary>
+/// <summary>A walk of every entry of a dataset's sort key, against the objects it merges.</summary>
 [Config(typeof(BenchmarkConfig))]
 [BenchmarkCategory(BenchmarkConfig.Explore)]
 public class DatasetKeyWalkBenchmarks

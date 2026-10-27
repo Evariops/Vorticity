@@ -12,13 +12,13 @@ using Vorticity.Types;
 namespace Vorticity.Dataset;
 
 /// <summary>The columns a dataset is ordered by, and what they impose on a data object.</summary>
-internal sealed class ClusteringKey
+internal sealed class DatasetKey
 {
     private readonly string[] _paths;
     private readonly DType[] _dtypes;
     private readonly RowSortField[] _fields;
 
-    private ClusteringKey(string[] paths, DType[] dtypes, bool mayHoldNull, bool inRowOrder)
+    private DatasetKey(string[] paths, DType[] dtypes, bool mayHoldNull, bool inRowOrder)
     {
         _paths = paths;
         _dtypes = dtypes;
@@ -36,14 +36,14 @@ internal sealed class ClusteringKey
     /// </summary>
     /// <param name="paths">The key's columns, in key order.</param>
     /// <param name="schema">The dataset's schema.</param>
-    public static ClusteringKey? OfLayout(IReadOnlyList<string>? paths, DType schema) => Of(paths, schema, inRowOrder: true);
+    public static DatasetKey? OfLayout(IReadOnlyList<string>? paths, DType schema) => Of(paths, schema, inRowOrder: true);
 
     /// <summary>A key over <paramref name="paths"/>, in key order, which the objects' rows need not follow; null for none.</summary>
     /// <param name="paths">The key's columns, in key order.</param>
     /// <param name="schema">The dataset's schema.</param>
-    public static ClusteringKey? For(IReadOnlyList<string>? paths, DType schema) => Of(paths, schema, inRowOrder: false);
+    public static DatasetKey? For(IReadOnlyList<string>? paths, DType schema) => Of(paths, schema, inRowOrder: false);
 
-    private static ClusteringKey? Of(IReadOnlyList<string>? paths, DType schema, bool inRowOrder)
+    private static DatasetKey? Of(IReadOnlyList<string>? paths, DType schema, bool inRowOrder)
     {
         if (paths is null || paths.Count == 0)
         {
@@ -59,7 +59,7 @@ internal sealed class ClusteringKey
             mayHoldNull |= ColumnPath.MayBeNull(schema, kept[i]);
         }
 
-        return new ClusteringKey(kept, dtypes, mayHoldNull, inRowOrder);
+        return new DatasetKey(kept, dtypes, mayHoldNull, inRowOrder);
     }
 
     /// <summary>
@@ -68,8 +68,8 @@ internal sealed class ClusteringKey
     /// </summary>
     public bool InRowOrder { get; }
 
-    /// <summary>The key's first column: the one a clustering value is a function of, and the one a level's ranges are judged on.</summary>
-    public string InstantPath => _paths[0];
+    /// <summary>The key's first column: the one a partition value is a function of, and the one a level's ranges are judged on.</summary>
+    public string LeadingPath => _paths[0];
 
     /// <summary>Whether a column of the key, or a struct on its path, is nullable.</summary>
     public bool MayHoldNull { get; }
@@ -139,7 +139,7 @@ internal sealed class ClusteringKey
 
     /// <summary>
     /// <paramref name="summaries"/> with the key's first column bounded by <paramref name="low"/> and <paramref name="high"/>,
-    /// those of a part of the rows they summarize, a rollup's bucket of one clustering value, a function of that column:
+    /// those of a part of the rows they summarize, a rollup's bucket of one partition value, a function of that column:
     /// what a filter or a key on the column is then proven by over the part. The other columns keep the whole's bounds,
     /// which hold over any part of it.
     /// </summary>

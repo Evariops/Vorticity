@@ -62,7 +62,7 @@ public sealed record CompactionResult
     public OperationOutcome Outcome { get; init; }
 }
 
-/// <summary>Runs one compaction: a k-way merge of the inputs on the clustering key when there is
+/// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
 /// one, a concatenation otherwise.</summary>
 internal static partial class DatasetCompactor
 {
@@ -71,7 +71,7 @@ internal static partial class DatasetCompactor
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     /// <exception cref="ArgumentException">The job has no input.</exception>
     /// <exception cref="VortexUnsupportedException">
-    /// The clustering key is composite and one of its columns holds nulls in an input: its run holds
+    /// The sort key is composite and one of its columns holds nulls in an input: its run holds
     /// no such tuple, so no permuted read keeps every row.
     /// </exception>
     /// <exception cref="DatasetIntegrityException">The outputs do not hold the inputs' rows.</exception>
@@ -125,14 +125,14 @@ internal static partial class DatasetCompactor
         }
 
         // The key the reads seek by, whose first column's summaries bound a level's ranges and the late rows.
-        ClusteringKey? key = dataset.Key;
+        DatasetKey? key = dataset.Key;
 
         // A job of a dataset with a key whose objects aim at a mebibyte or more writes them with a table of contents and the
         // sparse index of the key's indexed prefix, which it names: what a lookup of an identifier and a filter on the key
         // read without an open of the object's footer. Appends write neither, nor shredded variants.
         bool indexed = merge && job.TargetBytes >= dataset.Options.ContentsObjectBytes;
 
-        // Such a job over a schema with a variant column counts, in a first pass, the paths of each clustering value's
+        // Such a job over a schema with a variant column counts, in a first pass, the paths of each partition value's
         // rows, and its objects of a value shred what those rows pay for; each object then lists its paths and the groups
         // of its rows that hold them, counted as its rows are written.
         IReadOnlyList<ValueShredding>? shreddings = null;
@@ -746,7 +746,7 @@ internal static partial class DatasetCompactor
                 RecordBatch run = merge.Current;
 
                 // The rows that came late lead the merge, keys ascending: those of the run go to level 0, kept apart.
-                // An object a clustering value, so that each lies within the rows of its value, which a merge of neighbours
+                // An object a partition value, so that each lies within the rows of its value, which a merge of neighbours
                 // there takes in with them.
                 int start = late?.End(merge, 0, run.RowCount) ?? 0;
                 if (start > 0)
@@ -766,7 +766,7 @@ internal static partial class DatasetCompactor
                     }
                 }
 
-                // An object holds the rows of one clustering value: a run of several is written in parts, one a value,
+                // An object holds the rows of one partition value: a run of several is written in parts, one a value,
                 // and a part of another value than the object's seals it. A key has one value, so no part splits a key.
                 for (int at = start, end; at < run.RowCount; at = end)
                 {
@@ -884,10 +884,10 @@ internal static partial class DatasetCompactor
 
     /// <summary>
     /// The first pass of a job whose objects carry a sparse index of their keys, over a schema with a variant column: its rows
-    /// merged once, through a projection of the key and the variant columns, the paths of each clustering value's rows
+    /// merged once, through a projection of the key and the variant columns, the paths of each partition value's rows
     /// counted, in the order of the values, and what each variant column shreds in the objects of each chosen from them
     /// (<see cref="ShreddingChoice"/>), the keys the dataset declares shredded wherever a row holds one. Without a
-    /// clustering value, the job's rows are counted together.
+    /// partition value, the job's rows are counted together.
     /// </summary>
     private static async ValueTask<IReadOnlyList<ValueShredding>> PlanValuesAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
@@ -970,7 +970,7 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
-    /// What the objects of one clustering value of a job shred (<see cref="PlanValuesAsync"/>): each variant column's
+    /// What the objects of one partition value of a job shred (<see cref="PlanValuesAsync"/>): each variant column's
     /// shredding, with its chunk target.
     /// </summary>
     internal sealed record ValueShredding(ImmutableDictionary<string, VariantShredding> Shredded, ImmutableDictionary<string, int> VariantChunks);
@@ -1080,7 +1080,7 @@ internal static partial class DatasetCompactor
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
             _lastKeyLength >= 0 && key.SequenceEqual(_lastKey.AsSpan(0, _lastKeyLength));
 
-        /// <summary>Whether the object being written holds rows of another clustering value than this key's.</summary>
+        /// <summary>Whether the object being written holds rows of another partition value than this key's.</summary>
         internal bool HoldsOtherValue(ValueCut values, ReadOnlySpan<byte> key) =>
             _lastKeyLength >= 0 && !values.Same(_lastKey.AsSpan(0, _lastKeyLength), key);
 
@@ -1107,12 +1107,12 @@ internal static partial class DatasetCompactor
         internal byte[]? Partition { get; set; }
 
         /// <summary>
-        /// What the objects of each clustering value shred, in the order of the values, which the rows come in; null for
+        /// What the objects of each partition value shred, in the order of the values, which the rows come in; null for
         /// objects that shred nothing, and list no path.
         /// </summary>
         internal IReadOnlyList<ValueShredding>? Shreddings { get; init; }
 
-        /// <summary>The clustering value the objects are cut by, which tells <see cref="Shreddings"/> apart; null for one.</summary>
+        /// <summary>The partition value the objects are cut by, which tells <see cref="Shreddings"/> apart; null for one.</summary>
         internal ValueCut? Values { get; init; }
 
         /// <summary>
@@ -1132,7 +1132,7 @@ internal static partial class DatasetCompactor
 
         /// <summary>
         /// Writes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
-        /// key's order: the first starts the next clustering value's shredding when they start an object of another value,
+        /// key's order: the first starts the next partition value's shredding when they start an object of another value,
         /// and the object's sparse index and blocks take them.
         /// </summary>
         internal async ValueTask WriteAsync(KeyOrderedMerge merge, int from, int to, CancellationToken cancellationToken)
@@ -1171,7 +1171,7 @@ internal static partial class DatasetCompactor
 
         /// <summary>
         /// The object being written, started when none is: one with a sparse index keeps a table of contents, and in a
-        /// clustering value's rows shreds what they pay for, counting its paths as its rows come.
+        /// partition value's rows shreds what they pay for, counting its paths as its rows come.
         /// </summary>
         private ObjectOutput Open()
         {
@@ -1239,7 +1239,7 @@ internal static partial class DatasetCompactor
         private long _groupRows;
 
         /// <summary>
-        /// Records the first key of the rows written next, which starts the next clustering value's shredding when they
+        /// Records the first key of the rows written next, which starts the next partition value's shredding when they
         /// start an object of another value.
         /// </summary>
         private void Starts(ReadOnlySpan<byte> key)

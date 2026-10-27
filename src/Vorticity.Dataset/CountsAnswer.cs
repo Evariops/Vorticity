@@ -137,7 +137,7 @@ internal sealed class CountsAnswer
 
         // The filter: values of one column by equality or a set, which its counts answer; every other conjunct, which an
         // object's summaries prove true over its rows. Values of the key's first column, under a question keyed by another
-        // column, are proven so too: the clustering holds a value's rows together, so that each object holds the values
+        // column, are proven so too: the sort key holds a value's rows together, so that each object holds the values
         // asked alone, and the other column's counts answer it whatever that column holds.
         int? column = null;
         List<byte[]>? values = null;
@@ -395,11 +395,11 @@ internal sealed class CountsAnswer
     /// <summary>
     /// The column whose counts by bucket answer for the rollup <paramref name="rollup"/> bucket by bucket, where its totals
     /// do not (<see cref="FieldOf(RollupEntry)"/>), and the summaries of each bucket: the rollup's, the key's first column
-    /// bounded by the bucket's (<see cref="ClusteringKey.Within"/>), which prove every conjunct the counts do not hold true
+    /// bounded by the bucket's (<see cref="DatasetKey.Within"/>), which prove every conjunct the counts do not hold true
     /// over the bucket's rows and every other key constant; null for a bucket they refute the filter over
     /// (<paramref name="pruner"/>), which gives no row. Null when a bucket does neither, or the rollup keeps no buckets.
     /// </summary>
-    internal (int Field, ObjectSummaries?[] Buckets)? BucketsOf(RollupEntry rollup, ClusteringKey key, SummaryPruner? pruner)
+    internal (int Field, ObjectSummaries?[] Buckets)? BucketsOf(RollupEntry rollup, DatasetKey key, SummaryPruner? pruner)
     {
         if (rollup.Buckets.Count < 2 || Exclusion is not null)
         {

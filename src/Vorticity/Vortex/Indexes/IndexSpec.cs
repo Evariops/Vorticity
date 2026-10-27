@@ -103,9 +103,9 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
     /// a suggestion. A required index still counts toward the budget — it has first claim on it, not
     /// immunity from arithmetic — so the optional ones around it are abandoned first; if the required
     /// ones alone are over it, <c>CompleteAsync</c> throws and names them rather than write a file
-    /// without them. A dataset's clustering run is the exception: on a narrow table a run over one
-    /// column is as large as that column, so no object is ever big enough to bring it under the
-    /// budget, and the dataset writes it kept whatever the budget says.
+    /// without them. A dataset's declared identifiers are the exception: their hashed postings are
+    /// what a lookup reads in place of the object's rows, and the dataset writes them kept whatever
+    /// the budget says (<see cref="VortexWriteOptions.BudgetSparesRequired"/>).
     /// </remarks>
     public bool Required { get; }
 

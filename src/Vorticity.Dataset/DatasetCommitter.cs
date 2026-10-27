@@ -14,7 +14,7 @@ internal sealed record CommitOptions
     /// <summary>The dataset's chunking seed, fixed at creation and carried by every header.</summary>
     public required ulong Seed { get; init; }
 
-    /// <summary>The header a first commit starts from: schema, clustering key, settings. Ignored
+    /// <summary>The header a first commit starts from: schema, sort key, settings. Ignored
     /// once the dataset exists, the winner's header carrying on instead.</summary>
     public CommitHeader? Template { get; init; }
 

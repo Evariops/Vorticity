@@ -201,7 +201,7 @@ public sealed partial class DatasetPartitionTests
 
         // Objects of a few tenants each above level 0, by the bounds their keys give, none of a level sharing a tenant with
         // another.
-        ClusteringKey key = dataset.Snapshot.Schema.Key!;
+        DatasetKey key = dataset.Snapshot.Schema.Key!;
         List<(int Level, string First, string Last, long Bytes)> objects = [];
         await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, Ct))
         {

@@ -20,7 +20,7 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// The most objects the scan will hold open at once, stated before any is read: one in the
     /// tree's order, two with a prefetch, which opens the next object ahead; key-ordered on the
-    /// clustering key, level 0's objects, a late level's, and one per other level; on any other column
+    /// sort key, level 0's objects, a late level's, and one per other level; on any other column
     /// every object, the summaries giving no disjointness to lean on.
     /// </summary>
     private long CursorBound(long objects, List<long> keptByLevel)
@@ -52,12 +52,12 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// Whether a merge on those columns reads the key-disjoint objects of a level one after another:
-    /// on the clustering key, upward by the tree's exact minima, downward by summary maxima that the
+    /// on the sort key, upward by the tree's exact minima, downward by summary maxima that the
     /// key order respects, which a composite key has none of.
     /// </summary>
     private bool RidesDisjointLevels(string[] paths) =>
-        IsClusteringKey(paths)
-        && (!_descending || (paths.Length == 1 && HasKeyOrderBounds(ClusteringKey.Resolve(_version.Schema.DType, paths[0]))));
+        IsSortKey(paths)
+        && (!_descending || (paths.Length == 1 && HasKeyOrderBounds(DatasetKey.Resolve(_version.Schema.DType, paths[0]))));
 
     /// <summary>The key-ordered read: every kept object's own key-ordered scan, merged.</summary>
     private async IAsyncEnumerable<RecordBatch> MergedAsync(
@@ -115,7 +115,7 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// The objects the merge reads, in the order of a lower bound on their keys, each with the rank
-    /// its ties go by. On the clustering key upward the tree already is that order, and the walk is
+    /// its ties go by. On the sort key upward the tree already is that order, and the walk is
     /// lazy, so a consumer that stops early stops the walk; anywhere else the kept objects are
     /// collected and sorted by their summaries' bound, without being opened. A composite key is
     /// bounded upward by its first column, whose encoded minimum prefixes every tuple above it, and
@@ -125,7 +125,7 @@ internal sealed partial class DatasetScanBuilder
         string[] paths, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         string path = paths[0];
-        if (!_summaries || (!_descending && IsClusteringKey(paths)))
+        if (!_summaries || (!_descending && IsSortKey(paths)))
         {
             // Without summaries there is no bound to lean on: every object is opened before a row
             // goes out, and the lazy merge must answer the same as this eager one.
@@ -140,7 +140,7 @@ internal sealed partial class DatasetScanBuilder
             yield break;
         }
 
-        DType dtype = ClusteringKey.Resolve(_version.Schema.DType, path);
+        DType dtype = DatasetKey.Resolve(_version.Schema.DType, path);
         RowSortField field = KeyOrderedMerge.Field(_descending);
         List<MergeObject> objects = [];
         long position = 0;
@@ -164,8 +164,8 @@ internal sealed partial class DatasetScanBuilder
         }
     }
 
-    /// <summary>Whether the columns are the dataset's whole clustering key, in order.</summary>
-    private bool IsClusteringKey(string[] paths) =>
+    /// <summary>Whether the columns are the dataset's whole sort key, in order.</summary>
+    private bool IsSortKey(string[] paths) =>
         _version.Schema.Key is { } key && System.Linq.Enumerable.SequenceEqual(key.Paths, paths, StringComparer.Ordinal);
 
     /// <summary>

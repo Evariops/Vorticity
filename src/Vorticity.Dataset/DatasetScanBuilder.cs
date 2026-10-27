@@ -228,7 +228,7 @@ internal sealed partial class DatasetScanBuilder
     /// interleave give batches as short as one row.
     /// </summary>
     /// <remarks>
-    /// On the clustering key an object is opened only once it could hold the next row, so a consumer
+    /// On the sort key an object is opened only once it could hold the next row, so a consumer
     /// that stops after <c>k</c> rows never opens an object whose minimum lies past the k-th key; on
     /// any other column every object the summaries keep may be open at once. A row whose key is null
     /// comes last in both directions, and an object with no source for the column is refused when
@@ -252,7 +252,7 @@ internal sealed partial class DatasetScanBuilder
 
         foreach (string path in paths)
         {
-            _ = ClusteringKey.Resolve(_version.Schema.DType, path);
+            _ = DatasetKey.Resolve(_version.Schema.DType, path);
         }
 
         if (_rowsSet || _take is not null)
@@ -345,7 +345,7 @@ internal sealed partial class DatasetScanBuilder
     private LearnedFamily? _family;
     private ScanSource? _familySource;
 
-    /// <summary>The top-level columns the scan's filter reads but the key's first, by name, which a clustering by would narrow; found once.</summary>
+    /// <summary>The top-level columns the scan's filter reads but the key's first, by name, which a sort key led by it would narrow; found once.</summary>
     private List<string> FilterColumns()
     {
         if (_filterColumns is null)
@@ -693,12 +693,12 @@ internal sealed partial class DatasetScanBuilder
     public IAsyncEnumerable<PositionedObject> ObjectsAsync(CancellationToken cancellationToken = default) =>
         WalkAsync(cancellationToken);
 
-    /// <summary>The range on the clustering key the entries can count the filter by, or null.</summary>
+    /// <summary>The range on the sort key the entries can count the filter by, or null.</summary>
     private KeyRange? CountRange() => _filter is not null && _summaries ? KeyRange.Of(_dataset, _filter) : null;
 
     /// <summary>
     /// Whether every row the scan covers in an object is kept, known without opening it: there is
-    /// no filter, or the object lies wholly inside the scan and inside a range on the clustering key.
+    /// no filter, or the object lies wholly inside the scan and inside a range on the sort key.
     /// </summary>
     private bool Settled(in PositionedObject held, KeyRange? range) =>
         _filter is null || (range is { } key && Whole(held) && key.Holds(held.Entry.Summaries));
@@ -951,10 +951,10 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
 
     /// <summary>
     /// Its entry's summaries, the first column of <paramref name="key"/> bounded by its keys where they do not bound it, a
-    /// text's (<see cref="ClusteringKey.Bounded"/>): its smallest key, which its tree key leads with, and its largest, which
+    /// text's (<see cref="DatasetKey.Bounded"/>): its smallest key, which its tree key leads with, and its largest, which
     /// its entry states. The entry's own when the dataset has no key, or the object states no largest.
     /// </summary>
-    internal ObjectSummaries Summaries(ClusteringKey? key) =>
+    internal ObjectSummaries Summaries(DatasetKey? key) =>
         key is null || Entry.LastKey.IsEmpty || TreeKey.Length <= VortexDataset.UidBytes
             ? Entry.Summaries
             : key.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
@@ -977,8 +977,8 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
 /// The objects level 0 holds above its ceiling: the extra objects every key lookup has to touch
 /// until compaction catches up, and zero when it has.
 /// </param>
-/// <param name="IsClustered">
-/// Whether a clustering key is declared. Without one, levels are size tiers and a lookup touches
+/// <param name="IsKeyed">
+/// Whether a sort key is declared. Without one, levels are size tiers and a lookup touches
 /// every object the summaries cannot refute, which is output-sensitive and not bounded.
 /// </param>
 /// <param name="Objects">The objects the scan would open.</param>
@@ -988,14 +988,14 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
 /// <param name="Order">The column a key-ordered scan delivers its rows by, or null for the tree's order.</param>
 /// <param name="Cursors">
 /// The most objects the scan will hold open at once: one in the tree's order, two with a prefetch,
-/// which opens the next object ahead; key-ordered on the clustering key, level 0's objects and one
+/// which opens the next object ahead; key-ordered on the sort key, level 0's objects and one
 /// per level above it; on any other column, every object it would open.
 /// </param>
 internal sealed record DatasetPlan(
     ulong Version,
     IReadOnlyList<long> ObjectsByLevel,
     long Lag,
-    bool IsClustered,
+    bool IsKeyed,
     long Objects,
     long Rows,
     long ObjectsSkipped,

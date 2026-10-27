@@ -56,9 +56,9 @@ internal sealed class DatasetSchema
             ? SortKey.Of(plan, partition: true, plan.Components.Count)
             : null;
         KeyColumns = Layout?.ColumnPaths();
-        Key = Layout is { Partition: null } && KeyColumns is { } paths ? ClusteringKey.OfLayout(paths, DType) : null;
+        Key = Layout is { Partition: null } && KeyColumns is { } paths ? DatasetKey.OfLayout(paths, DType) : null;
         Cut = ValueCut.Of(Layout, Tree);
-        RollupKey = Key ?? (Cut is { Path: { } partitioned } ? ClusteringKey.For([partitioned], DType) : null);
+        RollupKey = Key ?? (Cut is { Path: { } partitioned } ? DatasetKey.For([partitioned], DType) : null);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);
@@ -109,14 +109,14 @@ internal sealed class DatasetSchema
     /// tree's keys: what the reads seek by until they seek by the sparse index. Null for a layout of no key, of a computed
     /// component or of a partition, whose reads prune by summaries alone until then.
     /// </summary>
-    internal ClusteringKey? Key { get; }
+    internal DatasetKey? Key { get; }
 
     /// <summary>
     /// The column a rollup bounds its buckets by, as a key of it alone: under a partition over a column, that column, a
     /// rollup of rank 1 holding one partition; otherwise the layout key's, with no buckets. Null when the dataset has
     /// neither, and so no rollup.
     /// </summary>
-    internal ClusteringKey? RollupKey { get; }
+    internal DatasetKey? RollupKey { get; }
 
     /// <summary>
     /// The columns the layout's key components read as they are, in key order, whose order every object's rows lie in

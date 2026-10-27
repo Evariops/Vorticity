@@ -258,7 +258,7 @@ internal sealed class LayoutPlan
     }
 
     /// <summary>
-    /// The paths of the key's components when each is a column's own values, as the clustering key over columns takes
+    /// The paths of the key's components when each is a column's own values, as the sort key over columns takes
     /// them; null when one applies a function or reads a variant key.
     /// </summary>
     internal string[]? ColumnPaths()

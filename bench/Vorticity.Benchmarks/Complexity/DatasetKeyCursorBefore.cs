@@ -18,11 +18,11 @@ using Vorticity.Types;
 
 namespace Vorticity.Benchmarks.Complexity;
 
-/// <summary>A forward walk of a dataset's clustering key, the smallest key found by a scan of every object.</summary>
+/// <summary>A forward walk of a dataset's sort key, the smallest key found by a scan of every object.</summary>
 internal sealed class DatasetKeyCursorBefore : IAsyncDisposable
 {
     private readonly DatasetSnapshot _version;
-    private readonly ClusteringKey _key;
+    private readonly DatasetKey _key;
     private readonly DType[] _dtypes;
     private readonly bool _bounded;
     private readonly bool _indexes;
@@ -35,7 +35,7 @@ internal sealed class DatasetKeyCursorBefore : IAsyncDisposable
     private bool _disposed;
 
     private DatasetKeyCursorBefore(
-        DatasetSnapshot version, ClusteringKey key, DType[] dtypes, bool bounded, bool indexes, Slot[] slots)
+        DatasetSnapshot version, DatasetKey key, DType[] dtypes, bool bounded, bool indexes, Slot[] slots)
     {
         _version = version;
         _key = key;
@@ -48,14 +48,14 @@ internal sealed class DatasetKeyCursorBefore : IAsyncDisposable
     /// <summary>Whether the cursor is positioned on an entry.</summary>
     public bool IsValid => !_disposed && _current >= 0;
 
-    /// <summary>A walk of the dataset's clustering key over its current version.</summary>
+    /// <summary>A walk of the dataset's sort key over its current version.</summary>
     public static async ValueTask<DatasetKeyCursorBefore> OpenAsync(VortexDataset dataset, CancellationToken cancellationToken = default)
     {
-        ClusteringKey key = dataset.Key!;
+        DatasetKey key = dataset.Key!;
         DType[] dtypes = new DType[key.Paths.Count];
         for (int i = 0; i < dtypes.Length; i++)
         {
-            dtypes[i] = ClusteringKey.Resolve(dataset.DType, key.Paths[i]);
+            dtypes[i] = DatasetKey.Resolve(dataset.DType, key.Paths[i]);
         }
 
         DatasetSnapshot version = dataset.Snapshot;

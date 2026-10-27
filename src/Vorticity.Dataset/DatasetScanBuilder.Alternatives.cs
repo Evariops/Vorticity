@@ -189,7 +189,7 @@ internal sealed partial class DatasetScanBuilder
         _ => false,
     };
 
-    // The range on the clustering key the filter asks, for the entries that count their rows; found once.
+    // The range on the sort key the filter asks, for the entries that count their rows; found once.
     private KeyRange? _countRange;
 
     /// <summary>A rollup's totals, or its counts by bucket, for the objects it covers (<see cref="RollupChoice"/>).</summary>

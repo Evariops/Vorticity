@@ -98,7 +98,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
     ["lifecycle"] = ("what a row costs from its append to its last rewrite, and the objects a window finds (LifecycleBench.cs)", () =>
         LifecycleBench.Run(
             (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
-            Text(args, "--clustering") ?? "hour", Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
+            Text(args, "--partition") ?? "hour", Text(args, "--deletes") == "off" ? 0 : (int)Option(args, "--deletes", 2), (int)Option(args, "--fanout", 0),
             Text(args, "--late") != "off", Text(args, "--neighbours") != "off", (long)Option(args, "--max-object-mib", 0) << 20,
             Text(args, "--pick"), (int)Option(args, "--trace-overlaps", 0))),
     ["qp-dashboard"] = ("the client's questions of a --qp run's TSV against the review's targets, a Markdown table (QpDashboard.cs)", () =>
@@ -131,15 +131,15 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Option(args, "--part-minutes", 10),
         Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
         Option(args, "--budget", 100))),
-    ["layout"] = ("the bytes a row of each column takes, the reference requests in arrival order and clustered by emitter (LayoutMicro.cs)", () =>
+    ["layout"] = ("the bytes a row of each column takes, the reference requests in arrival order and sorted by emitter (LayoutMicro.cs)", () =>
         LayoutMicro.Run(Text(args, "--store") ?? BenchStores.Of("layout"), Option(args, "--minutes", 20), Option(args, "--rate", 5_000))),
-    ["columns"] = ("the battery \"any column\": each column counted by hour, then filtered on a frequent and a rare value and grouped by each other, in arrival order and clustered by service, priced, read and held to the rows; and the frontier on the fly (ColumnBattery.cs)", () =>
+    ["columns"] = ("the battery \"any column\": each column counted by hour, then filtered on a frequent and a rare value and grouped by each other, in arrival order and sorted by service, priced, read and held to the rows; and the frontier on the fly (ColumnBattery.cs)", () =>
         ColumnBattery.Run(Option(args, "--hours", 4), Option(args, "--rate", 50), Text(args, "--only"), Text(args, "--trace"))),
     ["peercache"] = ("a question warm from the synopsis cache's own directory, and from another's of the same root (PeerCacheMicro.cs)", () =>
         PeerCacheMicro.Run(Text(args, "--store") ?? BenchStores.Of("peercache"), (int)Option(args, "--objects", 16), (int)Option(args, "--rows", 200_000), rounds)),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
-    ["paths"] = ("every query path of datasets clustered by hour or by day at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
+    ["paths"] = ("every query path of datasets partitioned by hour or by day at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
     {
         Store = Text(args, "--store") ?? new PathsBench.Settings().Store,
         Design = args.Contains("--design"),

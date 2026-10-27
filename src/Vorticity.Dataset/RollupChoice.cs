@@ -62,7 +62,7 @@ internal sealed class RollupChoice
             left.Rank != right.Rank ? right.Rank.CompareTo(left.Rank)
             : left.Level != right.Level ? left.Level.CompareTo(right.Level)
             : left.FirstKey.Span.SequenceCompareTo(right.FirstKey.Span));
-        ClusteringKey? key = version.Schema.RollupKey;
+        DatasetKey? key = version.Schema.RollupKey;
         List<(RollupEntry Rollup, int Field, ObjectSummaries?[]? Buckets)> chosen = [];
         foreach (RollupEntry rollup in candidates)
         {

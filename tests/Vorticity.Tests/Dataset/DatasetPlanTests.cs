@@ -741,7 +741,7 @@ public sealed class DatasetPlanTests
         string shape = $"seed {seed}";
         Assert.True(expected.ObjectsByLevel.SequenceEqual(actual.ObjectsByLevel), shape);
         Assert.True(expected.BytesByLevel.SequenceEqual(actual.BytesByLevel), shape);
-        Assert.Equal((expected.FragmentedObjects, expected.Lag, expected.Style, expected.IsClustered, expected.Version), (actual.FragmentedObjects, actual.Lag, actual.Style, actual.IsClustered, actual.Version));
+        Assert.Equal((expected.FragmentedObjects, expected.Lag, expected.Style, expected.IsKeyed, expected.Version), (actual.FragmentedObjects, actual.Lag, actual.Style, actual.IsKeyed, actual.Version));
         if (expected.Job is not { } job)
         {
             Assert.Null(actual.Job);

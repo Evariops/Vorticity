@@ -118,7 +118,7 @@ public sealed partial class DatasetAlignedWindowTests
     /// </summary>
     private static async Task<(string First, string Last)> ObjectOfTwoTenantsAsync(VortexDataset dataset, string? after = null)
     {
-        ClusteringKey key = dataset.Snapshot.Schema.Key!;
+        DatasetKey key = dataset.Snapshot.Schema.Key!;
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
             if (held.Entry.Contents is { Counts.Count: > 0 } && held.Summaries(key).TryGet(nameof(Ticket.Tenant), out ColumnSummary tenant)

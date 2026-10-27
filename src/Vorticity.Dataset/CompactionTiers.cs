@@ -160,7 +160,7 @@ internal static partial class CompactionPolicy
             ObjectsByLevel = [.. objects],
             BytesByLevel = [.. bytes],
             Lag = lag,
-            IsClustered = dataset.Keyed,
+            IsKeyed = dataset.Keyed,
             Style = CompactionStyle.Tiered,
             Job = jobs.Count > 0 ? jobs[0] : null,
             Jobs = [.. jobs],

@@ -19,8 +19,8 @@ namespace Vorticity.Benchmarks.Queries;
 /// hour of data.
 /// </summary>
 /// <remarks>
-/// <c>--clustering hour</c>, the default, cuts the objects at every hour, <c>--clustering day</c> at every midnight,
-/// and <c>--clustering off</c> by the key alone. Data time runs as fast as the machine writes, so the bench says what the
+/// <c>--partition hour</c>, the default, cuts the objects at every hour, <c>--partition day</c> at every midnight,
+/// and <c>--partition off</c> by the key alone. Data time runs as fast as the machine writes, so the bench says what the
 /// policy writes, not whether a machine keeps up: the handles' clock follows the newest row appended, which a partition's
 /// calm (<see cref="DatasetLayout.CalmAfter"/>) is judged by. <c>--neighbours
 /// off</c> turns off the merges of small neighbours at a level's end, <c>--max-object-mib</c> sets the cap on an
@@ -33,7 +33,7 @@ internal static class LifecycleBench
         [("15 min", TimeSpan.FromMinutes(15)), ("1 h", TimeSpan.FromHours(1)), ("1 day", TimeSpan.FromDays(1)), ("30 days", TimeSpan.FromDays(30))];
 
     internal static async Task<int> Run(
-        int hours, double rate, int writers, int batchSeconds, string clustering, int deletesPerHour, int fanout, bool late,
+        int hours, double rate, int writers, int batchSeconds, string partition, int deletesPerHour, int fanout, bool late,
         bool neighbours, long maxObjectBytes, string? pick, int traceOverlaps)
     {
         await using MemoryObjectStore memory = new MemoryObjectStore();
@@ -44,7 +44,7 @@ internal static class LifecycleBench
             TimeProvider = clock,
             Layout = new DatasetLayout
             {
-                Partition = clustering == "off" ? null : LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(clustering == "day" ? CalendarUnit.Day : CalendarUnit.Hour),
+                Partition = partition == "off" ? null : LayoutValue.Column(nameof(GeneratedRequest.At)).Truncate(partition == "day" ? CalendarUnit.Day : CalendarUnit.Hour),
                 SortKey = [LayoutValue.Column(nameof(GeneratedRequest.At))],
             },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
@@ -135,7 +135,7 @@ internal static class LifecycleBench
             }
         }
 
-        Print(hours, rate, writers, batchSeconds, clustering, late, compaction, appended, store, ledger, Stopwatch.GetElapsedTime(begin));
+        Print(hours, rate, writers, batchSeconds, partition, late, compaction, appended, store, ledger, Stopwatch.GetElapsedTime(begin));
         return 0;
     }
 
@@ -340,12 +340,12 @@ internal static class LifecycleBench
     }
 
     private static void Print(
-        int hours, double rate, int writers, int batchSeconds, string clustering, bool late, CompactionOptions compaction, long appended,
+        int hours, double rate, int writers, int batchSeconds, string partition, bool late, CompactionOptions compaction, long appended,
         CountingObjectStore store, Ledger ledger, TimeSpan elapsed)
     {
         Console.WriteLine(
             $"{appended} rows over {hours} hours at {rate}/s{(late ? string.Empty : ", none late")}, {writers} writers appending {batchSeconds} s each, " +
-            $"{(clustering == "off" ? "no clustering value" : clustering == "day" ? "clustered by day" : "clustered by hour")}, fan-out {compaction.Fanout}, objects up to " +
+            $"{(partition == "off" ? "no partition" : partition == "day" ? "partitioned by day" : "partitioned by hour")}, fan-out {compaction.Fanout}, objects up to " +
             $"{compaction.MaxObjectBytes >> 20} MiB, neighbours {(compaction.MergeNeighbours ? "merged" : "left")}, pick {compaction.Pick}; {elapsed.TotalSeconds:F1} s");
         if (ledger.Tracing)
         {

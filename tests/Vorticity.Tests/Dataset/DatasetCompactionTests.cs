@@ -574,7 +574,7 @@ public sealed class DatasetCompactionTests
         CompactionOptions options = Options(target: 1 << 20) with { LevelZeroCeiling = 3 };
         CompactionPlan plan = await dataset.PlanCompactionAsync(options, ct);
         Assert.Equal(CompactionStyle.Tiered, plan.Style);
-        Assert.False(plan.IsClustered);
+        Assert.False(plan.IsKeyed);
 
         CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options, ct));
         Assert.Equal(6, result.ObjectsIn);

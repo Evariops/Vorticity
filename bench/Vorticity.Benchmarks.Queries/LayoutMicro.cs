@@ -12,9 +12,9 @@ namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// <c>--micro layout</c>: the bytes a row of each column takes in a dataset's objects, the reference requests in the order
-/// they arrive against the same rows clustered by emitter (<c>service/version/host</c>, then the instant), each compacted
-/// to its last level: what the clustering changes, column by column, against the model of the design (22 §3.4); and what
-/// the appends cost a row, the clustered ones buffered and sorted by their key, the best of three runs each: the sort's
+/// they arrive against the same rows sorted by emitter (<c>service/version/host</c>, then the instant), each compacted
+/// to its last level: what the sort key changes, column by column, against the model of the design (22 §3.4); and what
+/// the appends cost a row, the keyed ones buffered and sorted by their key, the best of three runs each: the sort's
 /// price a row against the model of spec A (4.4, 90 to 185 ns).
 /// </summary>
 internal static class LayoutMicro
@@ -28,13 +28,13 @@ internal static class LayoutMicro
         long rows = batches.Sum(batch => (long)batch.Length);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"layout: {rows:N0} requests, {minutes:0.#} minutes at {rate:N0} a second, in {batches.Count} appends"));
 
-        DatasetOptions clustered = new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(EmitterRequest.Emitter)), LayoutValue.Column(nameof(EmitterRequest.At))] } };
+        DatasetOptions keyed = new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(EmitterRequest.Emitter)), LayoutValue.Column(nameof(EmitterRequest.At))] } };
         (Dictionary<string, double> arrival, double arrivalMs) = await BytesAsync(Path.Combine(root, "arrival"), batches, new DatasetOptions());
-        (Dictionary<string, double> emitter, double emitterMs) = await BytesAsync(Path.Combine(root, "emitter"), batches, clustered);
+        (Dictionary<string, double> emitter, double emitterMs) = await BytesAsync(Path.Combine(root, "emitter"), batches, keyed);
         for (int round = 1; round < 3; round++)
         {
             arrivalMs = Math.Min(arrivalMs, (await BytesAsync(Path.Combine(root, "arrival"), batches, new DatasetOptions(), compact: false)).AppendMs);
-            emitterMs = Math.Min(emitterMs, (await BytesAsync(Path.Combine(root, "emitter"), batches, clustered, compact: false)).AppendMs);
+            emitterMs = Math.Min(emitterMs, (await BytesAsync(Path.Combine(root, "emitter"), batches, keyed, compact: false)).AppendMs);
         }
 
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -124,7 +124,7 @@ internal static class LayoutMicro
     }
 }
 
-/// <summary>A reference request led by its emitter, <c>service/version/host</c>, which a dataset clustered by emitter keys on.</summary>
+/// <summary>A reference request led by its emitter, <c>service/version/host</c>, which a dataset sorted by emitter keys on.</summary>
 [VortexRecord]
 public partial record struct EmitterRequest(
     string Emitter,

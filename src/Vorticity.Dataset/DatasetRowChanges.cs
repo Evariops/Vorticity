@@ -69,11 +69,11 @@ public sealed record RowChangeResult
 /// is not true for -- false, or unknown under a null, since a delete takes only what the filter
 /// selects -- stay: in the marked object, whose entry takes its place under the same key, or in the
 /// rewritten one, which takes the old one's place in its level. Either way a level above 0 stays
-/// key-disjoint, and without a clustering key the order holds.
+/// key-disjoint, and without a sort key the order holds.
 /// </para>
 /// <para>
 /// An update reads the rows it selects as records, changes them and writes them into new objects
-/// of level 0, as an append would, since a changed row may carry another key: without a clustering
+/// of level 0, as an append would, since a changed row may carry another key: without a sort
 /// key they follow every other row. One commit replaces everything, so a reader sees all of the
 /// change or none of it; when a concurrent commit has taken one of the objects first, the change is
 /// worked out again on the version that won, and what the lost attempt wrote is left for vacuum.
@@ -820,7 +820,7 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
     /// <param name="dataset">The dataset the objects are written for.</param>
     /// <param name="schema">The schema the rows are read as and written in.</param>
     /// <param name="update">The change, applied to every row once.</param>
-    /// <param name="firstRow">Where the first object's rows go when the dataset has no clustering key: after every other row.</param>
+    /// <param name="firstRow">Where the first object's rows go when the dataset has no sort key: after every other row.</param>
     internal ChangedRecords(VortexDataset dataset, DatasetSchema schema, Func<TRecord, TRecord> update, long firstRow)
     {
         _dataset = dataset;

@@ -134,8 +134,8 @@ internal static partial class CompactionPolicy
         /// <summary>The objects its level 0 holds above its ceiling.</summary>
         internal long Lag => _snapshot.Levels.LagAtLevelZero();
 
-        /// <summary>Its clustering key over the layout's columns, what bounds a level's ranges by summaries; null without one.</summary>
-        internal ClusteringKey? Key => _snapshot.Schema.Key;
+        /// <summary>Its sort key over the layout's columns, what bounds a level's ranges by summaries; null without one.</summary>
+        internal DatasetKey? Key => _snapshot.Schema.Key;
 
         /// <summary>Whether its layout states a key, whose order every object's rows are in: what merges, and keeps levels disjoint.</summary>
         internal bool Keyed => _snapshot.Schema.Keyed;
@@ -145,9 +145,9 @@ internal static partial class CompactionPolicy
         /// column's: none for a partitioned dataset, whose partition leads the tree's keys before the key's first column,
         /// and whose late rows are bounded by their last keys alone.
         /// </summary>
-        internal ClusteringKey? LateKey => _snapshot.Schema.Key;
+        internal DatasetKey? LateKey => _snapshot.Schema.Key;
 
-        /// <summary>The clustering value its jobs cut their objects by; null for none.</summary>
+        /// <summary>The partition value its jobs cut their objects by; null for none.</summary>
         internal ValueCut? Cut => _snapshot.Schema.Cut;
 
         /// <summary>What its tree's nodes fold, which sizes its objects' classes by its layout.</summary>
@@ -225,7 +225,7 @@ internal static partial class CompactionPolicy
     private static async ValueTask<CompactionPlan> ReadEveryLeafAsync(
         PlannedVersion dataset, CompactionOptions settings, CompactionStyle style, int count, CancellationToken cancellationToken)
     {
-        bool clustered = dataset.Keyed;
+        bool keyed = dataset.Keyed;
         List<List<CompactionInput>> levels = await ReadAsync(dataset, cancellationToken).ConfigureAwait(false);
 
         long[] objects = new long[levels.Count];
@@ -258,7 +258,7 @@ internal static partial class CompactionPolicy
             ObjectsByLevel = [.. objects],
             BytesByLevel = [.. bytes],
             Lag = dataset.Lag,
-            IsClustered = clustered,
+            IsKeyed = keyed,
             Style = style,
             Job = jobs.Count > 0 ? jobs[0] : null,
             Jobs = [.. jobs],
@@ -330,8 +330,8 @@ internal static partial class CompactionPolicy
 
         // Small neighbours at a level's end, which keys in order leave there: under the leveled style
         // alone, since a tiered level's concatenations grow its objects already.
-        bool clustering = style == CompactionStyle.Leveled && dataset.Keyed;
-        for (int level = 1; level < levels.Count && settings.MergeNeighbours && clustering; level++)
+        bool keyed = style == CompactionStyle.Leveled && dataset.Keyed;
+        for (int level = 1; level < levels.Count && settings.MergeNeighbours && keyed; level++)
         {
             if (!taken.Contains(level)
                 && Neighbours(levels[level].GetRange(Math.Max(0, levels[level].Count - Window(settings)), Math.Min(levels[level].Count, Window(settings))), level, settings, dataset.Cut) is { } small
@@ -577,7 +577,7 @@ internal static partial class CompactionPolicy
     /// <summary>
     /// Where the outputs of a dataset ordered by arrival are keyed from: the position of a job's first
     /// input, the first of its run in the tree's order, which they take over, so that a removal before
-    /// them leaves them where the inputs were. A clustered dataset keys an output by its smallest key,
+    /// them leaves them where the inputs were. A keyed dataset keys an output by its smallest key,
     /// and reads none.
     /// </summary>
     private static long FirstRow(PlannedVersion dataset, CompactionInput first) =>
@@ -644,7 +644,7 @@ internal static partial class CompactionPolicy
             ObjectsByLevel = [.. objects],
             BytesByLevel = [.. bytes],
             Lag = dataset.Lag,
-            IsClustered = dataset.Keyed,
+            IsKeyed = dataset.Keyed,
             Style = style,
             Job = jobs.Count > 0 ? jobs[0] : null,
             Jobs = [.. jobs],
@@ -749,8 +749,8 @@ internal static partial class CompactionPolicy
             return Purge(marked, Marking.Of(dataset), settings, style, FirstRow(dataset, marked));
         }
 
-        bool clustering = leveled && dataset.Keyed;
-        for (int level = 1; level < levels && settings.MergeNeighbours && clustering; level++)
+        bool keyed = leveled && dataset.Keyed;
+        for (int level = 1; level < levels && settings.MergeNeighbours && keyed; level++)
         {
             if (taken.Contains(level) || objects[level] < Math.Max(settings.Fanout, 2))
             {
@@ -873,7 +873,7 @@ internal static partial class CompactionPolicy
     /// <summary>
     /// The job that merges <paramref name="sources"/> into level <paramref name="to"/>, with the
     /// objects there the union of their key range overlaps, found by a walk that skips every
-    /// subtree whose summary puts it outside the range. A clustered dataset's outputs are keyed by
+    /// subtree whose summary puts it outside the range. A keyed dataset's outputs are keyed by
     /// their smallest key, so the job's first row is not read.
     /// </summary>
     private static async ValueTask<CompactionJob> LeveledAsync(
@@ -1013,7 +1013,7 @@ internal static partial class CompactionPolicy
     /// random keys rewrite it once a level.
     /// </summary>
     /// <remarks>
-    /// Under a clustering value, a merge takes the objects of one value alone, whose rows a merge writes into one object:
+    /// Under a partition value, a merge takes the objects of one value alone, whose rows a merge writes into one object:
     /// the run at the end holds the last object's value. The value before it, once the last one's objects lie past it, gets
     /// no more rows from keys in order, and its small objects at its end, of any class, are merged into one within the
     /// target, where they would otherwise wait for a carry that keys in order never bring.
@@ -1099,7 +1099,7 @@ internal static partial class CompactionPolicy
     /// level, or this one's move into the object's, has to rewrite, and every such move after it again.
     /// </summary>
     private static List<CompactionInput>? Unspanned(
-        List<CompactionInput> run, List<CompactionInput> others, int level, ClusteringKey? key, CompactionOptions settings)
+        List<CompactionInput> run, List<CompactionInput> others, int level, DatasetKey? key, CompactionOptions settings)
     {
         if (others.Count == 0)
         {

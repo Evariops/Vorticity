@@ -152,15 +152,15 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>Whether the dataset lives on a store that locks what it keeps, as the header carries it.</summary>
     internal bool LockedStore => Snapshot.Header.LockedStore;
 
-    /// <summary>Its clustering key, or null when it is ordered by arrival.</summary>
-    internal ClusteringKey? Key => Snapshot.Schema.Key;
+    /// <summary>Its sort key, or null when it is ordered by arrival.</summary>
+    internal DatasetKey? Key => Snapshot.Schema.Key;
 
     /// <summary>
     /// Creates a dataset in a store that holds none, and returns a handle on its first version.
     /// </summary>
     /// <param name="store">The store; the dataset is everything under its <c>commit/</c> and <c>data/</c> keys.</param>
     /// <param name="schema">The columns every object of the dataset holds.</param>
-    /// <param name="options">The clustering key, the retention and how objects are written; null for the defaults.</param>
+    /// <param name="options">The sort key, the retention and how objects are written; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the requests.</param>
     /// <returns>The handle, on version 1; the caller disposes it.</returns>
     /// <remarks>
@@ -169,7 +169,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// other throws, rather than handing its caller a dataset of another's schema and settings.
     /// </remarks>
     /// <exception cref="ObjectStoreException">The store already holds a dataset, or another creation made it first.</exception>
-    /// <exception cref="ArgumentException">A clustering key column is not in the schema, or may hold a null.</exception>
+    /// <exception cref="ArgumentException">A sort key column is not in the schema, or may hold a null.</exception>
     /// <exception cref="NotSupportedException">
     /// The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>), the store does
     /// not create a key only while it is free (<see cref="ObjectStoreCapabilities.CreatesConditionally"/>), or the
@@ -191,7 +191,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     /// <param name="location">A location, whose keys the dataset's are relative to, or a local directory.</param>
     /// <param name="schema">The columns every object of the dataset holds.</param>
-    /// <param name="options">The clustering key, the retention, how objects are written and the session; null for the defaults.</param>
+    /// <param name="options">The sort key, the retention, how objects are written and the session; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the requests.</param>
     /// <returns>The handle, on version 1; the caller disposes it.</returns>
     /// <exception cref="InvalidOperationException">No store of the session serves the location.</exception>
@@ -956,8 +956,7 @@ public sealed class VortexDataset : IAsyncDisposable
             write = write.WithIndexes(write.WritePolicy.WithDefault(schema.IndexPolicy.Default));
         }
 
-        // Each declared identifier's hashed postings, required and spared by the budget as the clustering
-        // key's run is: a lookup of one value reads the objects that hold it and almost no other, one
+        // Each declared identifier's hashed postings, required and spared by the budget: a lookup of one value reads the objects that hold it and almost no other, one
         // segment of about 64 KiB an object, at about four bytes a (value, block) pair. A Bloom filter,
         // which a tree of them loses past what one filter holds, is never tried on it. The identifiers are
         // those of the version the write builds on, as its indexes are; one whose column a change of the
@@ -998,7 +997,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </returns>
     /// <remarks>
     /// The objects are created before the commit, so a crash between the two leaves objects no
-    /// commit references, which vacuum collects. Without a clustering key their rows follow every
+    /// commit references, which vacuum collects. Without a sort key their rows follow every
     /// other object's.
     /// </remarks>
     /// <exception cref="InvalidOperationException">The draft belongs to another handle, or was already committed or disposed.</exception>
@@ -1457,7 +1456,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// added objects are left for vacuum.
     /// </returns>
     /// <remarks>
-    /// The added objects land in level 0, from where compaction moves them. Without a clustering key
+    /// The added objects land in level 0, from where compaction moves them. Without a sort key
     /// their rows follow every other object's, as an append's do.
     /// </remarks>
     /// <exception cref="ArgumentException">An object does not come from this dataset's walk.</exception>
@@ -1683,7 +1682,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The version created and the rows changed; <see cref="OperationOutcome.AlreadyThere"/> and the version the handle held when no row matched.</returns>
     /// <remarks>
     /// A delete and an insert, applied together: the changed rows land in new objects of level 0, as
-    /// appended rows do, since a change may move a row's key, and without a clustering key they come
+    /// appended rows do, since a change may move a row's key, and without a sort key they come
     /// after every other row. Everything <see cref="DeleteAsync{TRecord}(Func{Probe{TRecord}, Predicate}, CancellationToken)"/>
     /// says of its cost and of concurrent writers holds here too; <paramref name="update"/> may be
     /// called again for a row when the change is worked out again.
@@ -1833,7 +1832,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <remarks>
     /// <para>
     /// A column is added, nullable, under a name no column of the dataset ever had; dropped, unless it
-    /// is part of the clustering key; renamed; its numbers widened within their kind, a signed
+    /// is part of the sort key; renamed; its numbers widened within their kind, a signed
     /// integer to a wider signed one, an unsigned to a wider unsigned, a float to a wider float; or
     /// made nullable. Nothing else: a change that some value already written would not survive is
     /// refused before anything is committed.
@@ -2413,22 +2412,22 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// How many rows hold a key below <paramref name="key"/> on the clustering key; a null key is
+    /// How many rows hold a key below <paramref name="key"/> on the sort key; a null key is
     /// below nothing. Answered by the objects' entries wherever an object lies wholly inside the
     /// range, and by an exact count only of the objects the key cuts.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The dataset has no clustering key, or a composite one.</exception>
+    /// <exception cref="InvalidOperationException">The dataset has no sort key, or a composite one.</exception>
     internal ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken = default)
     {
-        if (Key is not { IsComposite: false } clustering)
+        if (Key is not { IsComposite: false } sorted)
         {
             throw new InvalidOperationException(
-                "A rank is on the clustering key, and this dataset declares " +
+                "A rank is on the sort key, and this dataset declares " +
                 (Key is null ? "none." : "a composite one: rank a tuple's leading column with a count instead."));
         }
 
         return ScanBuilder()
-            .Where(Expr.Lt(Expr.Field(clustering.Paths[0]), Expr.Literal(key)))
+            .Where(Expr.Lt(Expr.Field(sorted.Paths[0]), Expr.Literal(key)))
             .CountAsync(cancellationToken);
     }
 
@@ -4049,8 +4048,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         try
         {
-            // A writer that took no row is not completed: an object of no row is not put, and the run a clustered
-            // dataset requires could not be built over nothing.
+            // A writer that took no row is not completed: an object of no row is not put.
             if (!output.Writer.IsFinished && output.Writer.RowCount > 0)
             {
                 await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
@@ -4127,7 +4125,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// open and the first key ask for are read, where they lie.
     /// </summary>
     /// <param name="source">The object's bytes, held or in the store; the file opened over it owns it.</param>
-    /// <param name="firstRow">The position of its first row, for a dataset without a clustering key.</param>
+    /// <param name="firstRow">The position of its first row, for a dataset without a sort key.</param>
     /// <param name="draft">The object's draft, which says what walks it by key without a run: its rows in key order, which is checked.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <param name="tailBytes">The bytes of its footer when they pass an open's first read, so that the open reads them at once; 0 otherwise.</param>
@@ -4161,20 +4159,20 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// What orders an object's leaf, its smallest key or its position, and its largest key, which its entry states when
-    /// its statistics do not bound the key (<see cref="ClusteringKey.StatesLastKey"/>): empty otherwise, without a key, or
+    /// its statistics do not bound the key (<see cref="DatasetKey.StatesLastKey"/>): empty otherwise, without a key, or
     /// without a cursor to say it.
     /// </summary>
     private async ValueTask<(byte[] Prefix, byte[] Last)> BoundsAsync(
         VortexFile file, ObjectSummaries summaries, long firstRow, CancellationToken cancellationToken) =>
-        Key is not { } clustering ? (PositionOf(firstRow), [])
-        : clustering.StatesLastKey ? await clustering.BoundsAsync(file, summaries, cancellationToken).ConfigureAwait(false)
-        : (await clustering.MinimumAsync(file, summaries, cancellationToken).ConfigureAwait(false), []);
+        Key is not { } sorted ? (PositionOf(firstRow), [])
+        : sorted.StatesLastKey ? await sorted.BoundsAsync(file, summaries, cancellationToken).ConfigureAwait(false)
+        : (await sorted.MinimumAsync(file, summaries, cancellationToken).ConfigureAwait(false), []);
 
     /// <summary>What orders an object's leaf: its smallest key, or its position.</summary>
     private async ValueTask<byte[]> PrefixAsync(
         VortexFile file, ObjectSummaries summaries, long firstRow, CancellationToken cancellationToken) =>
-        Key is { } clustering
-            ? await clustering.MinimumAsync(file, summaries, cancellationToken).ConfigureAwait(false)
+        Key is { } sorted
+            ? await sorted.MinimumAsync(file, summaries, cancellationToken).ConfigureAwait(false)
             : PositionOf(firstRow);
 
     /// <summary>The tree key of an object: what orders it, then what makes it unique.</summary>
@@ -4231,7 +4229,7 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// An object's order when the dataset declares no clustering key: a position. Big-endian, so
+    /// An object's order when the dataset declares no sort key: a position. Big-endian, so
     /// that the <c>memcmp</c> order the tree compares by is numeric order.
     /// </summary>
     private static byte[] PositionOf(long row)

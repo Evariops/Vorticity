@@ -42,7 +42,7 @@ internal sealed class DatasetLevels
     public DatasetTree PartitionIndexes { get; }
 
     /// <summary>
-    /// Whether no two objects of a level overlap on the clustering key, so that its objects follow
+    /// Whether no two objects of a level overlap on the sort key, so that its objects follow
     /// each other in the order of their entries: every level above 0. A read by key opens at most one
     /// object of such a level at a time.
     /// </summary>

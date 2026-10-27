@@ -28,7 +28,7 @@ internal static class DatasetMaintenance
 
         store.Reset();
         CompactionPlan plan = await dataset.PlanCompactionAsync();
-        Console.WriteLine($"plan: work {plan.HasWork}, style {plan.Style}, clustered {plan.IsClustered}, lag {plan.Lag}, " +
+        Console.WriteLine($"plan: work {plan.HasWork}, style {plan.Style}, keyed {plan.IsKeyed}, lag {plan.Lag}, " +
             $"objects by level [{string.Join(", ", plan.ObjectsByLevel)}], bytes by level [{string.Join(", ", plan.BytesByLevel)}]");
         if (plan.Job is { } job)
         {

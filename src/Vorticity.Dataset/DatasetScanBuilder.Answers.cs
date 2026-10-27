@@ -20,7 +20,7 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// The rows the scan selects, without materialising them, cheapest proof first: an object whose
     /// covered rows are all kept is counted from its entry without being opened, which is every
-    /// object when there is no filter and, under a range on the clustering key, an object whose
+    /// object when there is no filter and, under a range on the sort key, an object whose
     /// summary bounds lie wholly inside it and whose key holds no null; any other object is counted
     /// by its own file's count, from statistics, zone maps and indexes before any decode.
     /// </summary>
@@ -315,7 +315,7 @@ internal sealed partial class DatasetScanBuilder
                 : await ends.MaxAsync(named, cancellationToken).ConfigureAwait(false);
         }
 
-        DType column = ClusteringKey.Resolve(file.DType, named);
+        DType column = DatasetKey.Resolve(file.DType, named);
         if (column.Kind is DTypeKind.Utf8 or DTypeKind.Binary or DTypeKind.Bool or DTypeKind.Decimal
             || (column.Kind == DTypeKind.Primitive && !column.PType.IsFloat()))
         {

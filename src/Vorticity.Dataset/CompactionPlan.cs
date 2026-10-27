@@ -7,7 +7,7 @@ namespace Vorticity.Dataset;
 /// <summary>How a dataset merges its levels.</summary>
 public enum CompactionStyle
 {
-    /// <summary>Leveled when the dataset declares a clustering key, tiered otherwise.</summary>
+    /// <summary>Leveled when the dataset declares a sort key, tiered otherwise.</summary>
     Auto = 0,
 
     /// <summary>
@@ -19,7 +19,7 @@ public enum CompactionStyle
     /// <summary>
     /// Size tiers: a level holds up to <c>F</c> objects of its size and they may overlap. Rewrites
     /// each row about once per level, and a lookup is output-sensitive rather than bounded. Refused
-    /// for a dataset with a clustering key, whose reads by key take every level above 0 to be
+    /// for a dataset with a sort key, whose reads by key take every level above 0 to be
     /// key-disjoint.
     /// </summary>
     Tiered = 2,
@@ -153,8 +153,8 @@ public sealed record CompactionOptions
     public int MaxFragments { get; init; } = DefaultMaxFragments;
 
     /// <summary>
-    /// Leveled, tiered, or whichever the clustering key implies. A plan refuses tiered for a dataset
-    /// with a clustering key, which compacts leveled only.
+    /// Leveled, tiered, or whichever the sort key implies. A plan refuses tiered for a dataset
+    /// with a sort key, which compacts leveled only.
     /// </summary>
     public CompactionStyle Style { get; init; } = CompactionStyle.Auto;
 
@@ -295,12 +295,12 @@ public sealed record CompactionOptions
     internal bool MovesFirst(CompactionStyle style) => Pick == CompactionPick.Auto && style == CompactionStyle.Leveled;
 
     /// <summary>
-    /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: leveled with a clustering key,
+    /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: leveled with a sort key,
     /// whatever was asked, since a plan refuses the others there first.
     /// </summary>
-    internal CompactionStyle StyleFor(bool clustered) => Style switch
+    internal CompactionStyle StyleFor(bool keyed) => Style switch
     {
-        _ when clustered => CompactionStyle.Leveled,
+        _ when keyed => CompactionStyle.Leveled,
         CompactionStyle.Leveled => CompactionStyle.Leveled,
         _ => CompactionStyle.Tiered,
     };
@@ -359,7 +359,7 @@ public sealed record CompactionJob
     /// <summary>The level it writes into; the same level for a fragment compaction.</summary>
     public int ToLevel { get; init; }
 
-    /// <summary>Whether it merges on the clustering key or concatenates.</summary>
+    /// <summary>Whether it merges on the sort key or concatenates.</summary>
     public CompactionStyle Style { get; init; }
 
     /// <summary>Why it is due.</summary>
@@ -431,8 +431,8 @@ public sealed record CompactionPlan
     /// <summary>What level 0 holds above its ceiling: the extra objects every lookup touches until compaction catches up.</summary>
     public long Lag { get; init; }
 
-    /// <summary>Whether the dataset declares a clustering key.</summary>
-    public bool IsClustered { get; init; }
+    /// <summary>Whether the dataset declares a sort key.</summary>
+    public bool IsKeyed { get; init; }
 
     /// <summary>The style the dataset merges under.</summary>
     public CompactionStyle Style { get; init; }

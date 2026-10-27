@@ -9,7 +9,7 @@ namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
 /// The questions of the time-window and variant designs, asked of generated datasets (<c>--micro questions</c>):
-/// requests (<see cref="RequestGenerator"/>) and log records (<see cref="LogGenerator"/>) over hours clustered by hour,
+/// requests (<see cref="RequestGenerator"/>) and log records (<see cref="LogGenerator"/>) over hours partitioned by hour,
 /// in memory behind a store that counts and waits a round trip per request. Each question is asked cold, by a
 /// handle and a session opened for it with an empty synopsis cache on disk, then warm, by the same handle
 /// again, its cache filled, from its synopses and then from its rows. Each line says what the store saw
@@ -43,7 +43,7 @@ internal static class QuestionBench
         (long requestRows, string needle) = await FillRequestsAsync(requests, hours, rate, write, keyring);
         long logRows = await FillLogsAsync(logs, hours, rate / 2, write, keyring);
         Console.WriteLine(
-            $"{requestRows} requests and {logRows} log records over {hours} hours clustered by hour{(encrypted ? ", sealed" : string.Empty)}, written and compacted in " +
+            $"{requestRows} requests and {logRows} log records over {hours} hours partitioned by hour{(encrypted ? ", sealed" : string.Empty)}, written and compacted in " +
             $"{Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s; tables up to {budget} ‰ of the data; {latency} ms a round trip; warm is the best of {rounds}");
         requestBytes.Latency = TimeSpan.FromMilliseconds(latency);
         logBytes.Latency = TimeSpan.FromMilliseconds(latency);

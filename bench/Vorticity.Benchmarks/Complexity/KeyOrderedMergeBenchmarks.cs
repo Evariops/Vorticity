@@ -111,7 +111,7 @@ public class KeyOrderedMergeBenchmarks
         return rows;
     }
 
-    /// <summary>The version's objects in tree order, which on the clustering key is the order of their bounds.</summary>
+    /// <summary>The version's objects in tree order, which on the sort key is the order of their bounds.</summary>
     private async IAsyncEnumerable<MergeObject> ObjectsAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         long ordinal = 0;

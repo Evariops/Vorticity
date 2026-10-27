@@ -158,7 +158,7 @@ public sealed partial class ObjectKeyBoundsTests
     /// <summary>Holds every object's entry to its rows: its last key the largest key they hold, encoded as the key encodes it.</summary>
     private static async Task HoldTheirLastKeysAsync(VortexDataset dataset)
     {
-        ClusteringKey key = dataset.Snapshot.Schema.Key!;
+        DatasetKey key = dataset.Snapshot.Schema.Key!;
         await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, Ct))
         {
             await using ObjectLease lease = await dataset.RentAsync(held.Entry, Ct);

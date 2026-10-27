@@ -77,11 +77,11 @@ object would change the order a dataset without a clustering key answers in.
 Keys in order keep the merges' runs whole as long as each level holds one band of the key space, the
 oldest at the bottom, which the pick of the object a full level gives up decides
 ([the pointer](#the-pointer-and-the-tiered-plan)). On the lifecycle bench, 48 hours of requests in
-order (`vortex-queries --micro lifecycle --clustering off --late off --writers 1 --deletes off`), merges
+order (`vortex-queries --micro lifecycle --partition off --late off --writers 1 --deletes off`), merges
 across other levels' objects rewrote a row 5.9 times, every move into their range reading them again.
 With the bands kept and the merges held to them, a row is rewritten 1.85 times, once out of level 0
 and 0.85 times as its objects grow, every job out of a level above 0 is a move, and the dataset ends
-with 152 objects, its store having taken 297 bytes a row. Clustered by hour (`--clustering hour`), the
+with 152 objects, its store having taken 297 bytes a row. Partitioned by hour (`--partition hour`), the
 same rows are rewritten 1.83 times into 207 objects, since no object holds two hours. Without the
 merges a row is written once.
 

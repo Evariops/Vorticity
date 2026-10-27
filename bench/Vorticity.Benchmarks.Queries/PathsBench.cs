@@ -11,7 +11,7 @@ using Vorticity.IO;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// Every query path of datasets clustered by hour or by day, at scale, over a store that waits a round trip per request
+/// Every query path of datasets partitioned by hour or by day, at scale, over a store that waits a round trip per request
 /// (<c>--micro paths</c>): generated requests and log records written once into a directory that stands for the
 /// object store, then asked the questions of the time-window and variant designs, each from its synopses and from
 /// its rows, cold and warm, at each degree asked. The synopsis cache lives on the same disk, without the wait.
@@ -367,7 +367,7 @@ internal static partial class PathsBench
     private sealed record Question(string Set, string Name, bool Aggregates, Func<VortexDataset, ScanOptions, Asking> Ask)
     {
         /// <summary>
-        /// The window an asking by values cuts where the clustering value changes, and the question asked over a part of it; null
+        /// The window an asking by values cuts where the partition value changes, and the question asked over a part of it; null
         /// when the question has no first result to time (<see cref="FirstAsync"/>).
         /// </summary>
         internal (DateTimeOffset From, DateTimeOffset To, Func<VortexDataset, ScanOptions, DateTimeOffset, DateTimeOffset, Asking> Ask)? Window { get; init; }
@@ -650,7 +650,7 @@ internal static partial class PathsBench
 
     /// <summary>
     /// The first result of an aggregation, as the client's review defines it: cold, by a session and a handle opened for it with
-    /// an empty synopsis cache, the window asked a clustering value at a time, newest first
+    /// an empty synopsis cache, the window asked a partition value at a time, newest first
     /// (<see cref="VortexDataset.AskByValuesAsync{TValue, TAnswer}"/>), and
     /// the time its first part took to arrive. The other figures are the whole asking's, its groups the parts, its rows the
     /// answers' rows.
@@ -795,7 +795,7 @@ internal static partial class PathsBench
 
     /// <summary>
     /// The client's spans (<see cref="SpanGeneratorV2"/>) of <c>--qp-hours</c> at <c>--qp-rate</c>, appended and compacted
-    /// as a client's ingestion does, clustered by day, their trace and span ids declared identifiers; and the trace id of
+    /// as a client's ingestion does, partitioned by day, their trace and span ids declared identifiers; and the trace id of
     /// a span in the middle, a needle.
     /// </summary>
     /// <summary>The name of the client's spans' store under <see cref="Settings.Store"/>, as the settings build it.</summary>

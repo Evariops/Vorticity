@@ -148,7 +148,7 @@ public readonly record struct ScanMetrics(
     public GroupMetrics? Grouping { get; init; }
 
     /// <summary>
-    /// The range on the first column of a dataset's clustering key its aggregation answered under
+    /// The range on the first column of a dataset's sort key its aggregation answered under
     /// <see cref="ScanOptions.AlignWindow"/>, when it grew the one asked: the conjuncts on that column the answer applies,
     /// whose bounds lie at or outside those asked. Null for a scan that applied its filter as asked.
     /// </summary>

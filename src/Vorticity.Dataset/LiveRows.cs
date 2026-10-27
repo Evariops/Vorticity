@@ -282,7 +282,7 @@ internal static class LiveRows
     /// with the file when the handle closes it, and are read again for another vector.
     /// </remarks>
     internal static async ValueTask<ExcludedKey[]> ExcludedKeysAsync(
-        VortexFile file, DeletionVector deletions, IReadOnlyList<string> paths, ClusteringKey key, CancellationToken cancellationToken)
+        VortexFile file, DeletionVector deletions, IReadOnlyList<string> paths, DatasetKey key, CancellationToken cancellationToken)
     {
         ExcludedRead read = Excluded.GetValue(file, static _ => new ExcludedRead());
         if (read.TryGet(deletions, paths, out ExcludedKey[] known))

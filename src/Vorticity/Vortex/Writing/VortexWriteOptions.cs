@@ -372,8 +372,8 @@ public sealed record VortexWriteOptions
     /// Whether the budget spares the required indexes when they alone are over it: they keep
     /// their first claim on it and are written, and the report says what they cost, where the
     /// write would otherwise fail. What an index a structure cannot be read without asks for: a
-    /// dataset's run on its clustering key is as large as the column it orders on a narrow table,
-    /// so no object of one is ever big enough to bring it under a share of the data.
+    /// dataset's declared identifiers keep their hashed postings, which a lookup reads in place of
+    /// the object's rows, whatever share of the data they take.
     /// </summary>
     internal bool BudgetSparesRequired { get; init; }
 
