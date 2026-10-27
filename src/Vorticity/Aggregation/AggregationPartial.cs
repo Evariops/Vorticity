@@ -8,7 +8,7 @@ namespace Vorticity;
 /// <summary>
 /// The states of an aggregation's groups over a part of its rows: what a node that ran the part sends to the one that
 /// merges, which folds the partials of every part to the answer the whole question gives, to the same bits
-/// (<see cref="Aggregation.Merge"/>).
+/// (<see cref="Aggregation.Merge(System.Collections.Generic.IEnumerable{AggregationPartial})"/>).
 /// </summary>
 /// <remarks>
 /// <para>

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
@@ -186,7 +187,7 @@ internal sealed class LearnedFamily
     internal ValueTask<AggregationPartial> MergeAsync(AggregationPartial[] partials, ScanSource source, ScanOptions options, CancellationToken cancellationToken)
     {
         VortexSchema expected = AggregationQuery.StatesOf(new FamilyHost(source, new ScanSpec()), Plan, Keys).Schema;
-        PartialsSource merged = new PartialsSource(source, partials, expected);
+        PartialsSource merged = new PartialsSource(source, partials.ToAsyncEnumerable(), expected);
         ScanSpec spec = new ScanSpec { Options = options with { UseSynopses = true, AlignWindow = false } };
         return AggregationPartials.ExportAsync(AggregationQuery.StatesOf(new FamilyHost(merged, spec), Plan, Keys), cancellationToken);
     }

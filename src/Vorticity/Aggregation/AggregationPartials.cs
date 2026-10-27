@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipelines;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,7 +18,7 @@ namespace Vorticity.Aggregating;
 /// <summary>
 /// An aggregation cut into parts, run apart and merged: the parts of its rows (<see cref="PartsAsync"/>), the states of
 /// a part's groups as rows of states (<see cref="ExportAsync"/>), and the question answered from them
-/// (<see cref="Merged"/>), which folds them as it folds a synopsis's states, to the bits the rows would give.
+/// (<see cref="Merged(AggregationQuery, IEnumerable{AggregationPartial})"/>), which folds them as it folds a synopsis's states, to the bits the rows would give.
 /// </summary>
 /// <remarks>
 /// A part's states are those a dataset's counts keep: integer sums exact in 128 bits, float sums
@@ -137,8 +138,18 @@ internal static class AggregationPartials
     internal static AggregationQuery Merged(AggregationQuery query, IEnumerable<AggregationPartial> partials)
     {
         ArgumentNullException.ThrowIfNull(partials);
+        return Merged(query, ((AggregationPartial[])[.. partials]).ToAsyncEnumerable());
+    }
+
+    /// <summary>
+    /// <paramref name="query"/> answered from <paramref name="partials"/> as they arrive: each one folded when the merge
+    /// reads it, the next awaited, so that the merge goes on while the parts after it are read.
+    /// </summary>
+    internal static AggregationQuery Merged(AggregationQuery query, IAsyncEnumerable<AggregationPartial> partials)
+    {
+        ArgumentNullException.ThrowIfNull(partials);
         Check(query.Plan);
-        PartialsSource source = new PartialsSource(query.Host.Source, [.. partials], query.Partial().Schema);
+        PartialsSource source = new PartialsSource(query.Host.Source, partials, query.Partial().Schema);
         return query.Merged(new PartialsHost(query.Host, source));
     }
 
@@ -345,10 +356,11 @@ internal interface IStateOverlay
 
 /// <summary>
 /// The partials of an aggregation's parts, as the source of its merge: their rows of states, which the pass asks for, a
-/// batch of states each batch of their files, their keys as the functions gave them (<see cref="RecordBatch.OfPartial"/>).
-/// The source has no rows: it answers a count of them from the states, and nothing else but states.
+/// batch of states each batch of their files, their keys as the functions gave them (<see cref="RecordBatch.OfPartial"/>),
+/// each partial read as it arrives. The source has no rows: it answers a count of them from the states, and nothing else
+/// but states.
 /// </summary>
-internal sealed class PartialsSource(ScanSource question, AggregationPartial[] partials, VortexSchema expected)
+internal sealed class PartialsSource(ScanSource question, IAsyncEnumerable<AggregationPartial> partials, VortexSchema expected)
     : ScanSource, IRowsCapability, IStatisticsCapability, IKeysCapability, IStatesCapability, ICostCapability
 {
     /// <summary>The question's columns, which its plan reads by.</summary>
@@ -383,7 +395,7 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
     private async IAsyncEnumerable<RecordBatch> StatesAsync(ScanCounters metrics, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         long row = 0;
-        foreach (AggregationPartial partial in partials)
+        await foreach (AggregationPartial partial in partials.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             VortexFile file = await OpenAsync(partial, cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))

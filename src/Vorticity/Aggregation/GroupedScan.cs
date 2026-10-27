@@ -473,7 +473,7 @@ public sealed class Aggregation<TResult>
     /// The rows the aggregation reads cut into <paramref name="count"/> parts at most, which read apart: a dataset's at its
     /// objects and inside a large one at its chunks, a file's at its chunks, gathered into ranges of about as many rows. Each
     /// part runs as the same question over its range (<c>Scan.Rows(range)</c>), on any node, and gives its states
-    /// (<see cref="PartialAsync"/>), which <see cref="Merge"/> folds to the answer of the whole question.
+    /// (<see cref="PartialAsync"/>), which <see cref="Merge(IEnumerable{AggregationPartial})"/> folds to the answer of the whole question.
     /// </summary>
     /// <param name="count">The parts at most: one for a source with no cut of its own.</param>
     /// <param name="cancellationToken">Cancels the reads of the structures that cut the rows.</param>
@@ -484,7 +484,7 @@ public sealed class Aggregation<TResult>
 
     /// <summary>
     /// Runs the aggregation and gives its groups' states rather than their answers: a part's, whose partial
-    /// <see cref="Merge"/> folds with the other parts'. Its filters on groups, its order and its window wait for the merge.
+    /// <see cref="Merge(IEnumerable{AggregationPartial})"/> folds with the other parts'. Its filters on groups, its order and its window wait for the merge.
     /// </summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
     /// <returns>The partial, whose bytes another node reads (<see cref="AggregationPartial.FromBytes"/>).</returns>
@@ -501,6 +501,17 @@ public sealed class Aggregation<TResult>
     /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole.</exception>
     /// <remarks>A partial of another question, whose keys or measures differ, throws <see cref="System.IO.InvalidDataException"/> when the merge reads it.</remarks>
     public Aggregation<TResult> Merge(IEnumerable<AggregationPartial> partials) =>
+        new Aggregation<TResult>(AggregationPartials.Merged(AggregationPartials.Of(_query), partials));
+
+    /// <summary>
+    /// The aggregation answered from the partials of its parts as they arrive, to the bits the whole question gives: each
+    /// one folded when the merge reads it, the next awaited, so that the merge goes on while the parts after it are read.
+    /// </summary>
+    /// <param name="partials">The partials of the parts, in any order, read once.</param>
+    /// <returns>The merged aggregation, enumerated as any other, once; an error of the sequence ends its enumeration.</returns>
+    /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole.</exception>
+    /// <remarks>A partial of another question, whose keys or measures differ, throws <see cref="System.IO.InvalidDataException"/> when the merge reads it.</remarks>
+    public Aggregation<TResult> Merge(IAsyncEnumerable<AggregationPartial> partials) =>
         new Aggregation<TResult>(AggregationPartials.Merged(AggregationPartials.Of(_query), partials));
 
     /// <summary>
@@ -620,7 +631,7 @@ public sealed class Aggregation
     /// The rows the aggregation reads cut into <paramref name="count"/> parts at most, which read apart: a dataset's at its
     /// objects and inside a large one at its chunks, a file's at its chunks, gathered into ranges of about as many rows. Each
     /// part runs as the same question over its range (<c>Scan.Rows(range)</c>), on any node, and gives its states
-    /// (<see cref="PartialAsync"/>), which <see cref="Merge"/> folds to the answer of the whole question.
+    /// (<see cref="PartialAsync"/>), which <see cref="Merge(IEnumerable{AggregationPartial})"/> folds to the answer of the whole question.
     /// </summary>
     /// <param name="count">The parts at most: one for a source with no cut of its own.</param>
     /// <param name="cancellationToken">Cancels the reads of the structures that cut the rows.</param>
@@ -631,7 +642,7 @@ public sealed class Aggregation
 
     /// <summary>
     /// Runs the aggregation and gives its groups' states rather than their answers: a part's, whose partial
-    /// <see cref="Merge"/> folds with the other parts'. Its filters on groups, its order and its window wait for the merge.
+    /// <see cref="Merge(IEnumerable{AggregationPartial})"/> folds with the other parts'. Its filters on groups, its order and its window wait for the merge.
     /// </summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
     /// <returns>The partial, whose bytes another node reads (<see cref="AggregationPartial.FromBytes"/>).</returns>
@@ -648,6 +659,17 @@ public sealed class Aggregation
     /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole.</exception>
     /// <remarks>A partial of another question, whose keys or measures differ, throws <see cref="System.IO.InvalidDataException"/> when the merge reads it.</remarks>
     public Aggregation Merge(IEnumerable<AggregationPartial> partials) =>
+        new Aggregation(AggregationPartials.Merged(AggregationPartials.Of(_query), partials));
+
+    /// <summary>
+    /// The aggregation answered from the partials of its parts as they arrive, to the bits the whole question gives: each
+    /// one folded when the merge reads it, the next awaited, so that the merge goes on while the parts after it are read.
+    /// </summary>
+    /// <param name="partials">The partials of the parts, in any order, read once.</param>
+    /// <returns>The merged aggregation, read as any other through a record (<see cref="As{TRecord}"/>), once; an error of the sequence ends its reading.</returns>
+    /// <exception cref="NotSupportedException">A state does not answer one of the aggregates whole.</exception>
+    /// <remarks>A partial of another question, whose keys or measures differ, throws <see cref="System.IO.InvalidDataException"/> when the merge reads it.</remarks>
+    public Aggregation Merge(IAsyncEnumerable<AggregationPartial> partials) =>
         new Aggregation(AggregationPartials.Merged(AggregationPartials.Of(_query), partials));
 
     /// <summary>
