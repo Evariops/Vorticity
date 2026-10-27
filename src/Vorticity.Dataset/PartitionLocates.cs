@@ -166,7 +166,8 @@ internal sealed class PartitionLocates
         ISegmentReader reader = await SealedObjectStore.OpenDataAsync(_dataset.Store, entry.ObjectKey, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         await using (reader.ConfigureAwait(false))
         {
-            PartitionIndex index = await PartitionPostings.ReadAsync(reader, entry.Bytes, cancellationToken).ConfigureAwait(false);
+            using PartitionPostings.OpenedIndex opened = await PartitionPostings.OpenAsync(reader, entry.Bytes, cancellationToken).ConfigureAwait(false);
+            PartitionIndex index = opened.Index;
             Dictionary<UInt128, int> ranks = new Dictionary<UInt128, int>(index.Objects.Count);
             for (int rank = 0; rank < index.Objects.Count; rank++)
             {
@@ -183,53 +184,36 @@ internal sealed class PartitionLocates
                 }
 
                 Dictionary<int, Dictionary<ulong, List<uint>>> granules = [];
-                int read = -1;
-                Buffers.SegmentOwner? page = null;
-                try
+                foreach (ulong hash in _hashes[c])
                 {
-                    foreach (ulong hash in _hashes[c])
+                    int at = located.PageOf(hash);
+                    if (at < 0)
                     {
-                        int at = located.PageOf(hash);
-                        if (at < 0)
-                        {
-                            continue;
-                        }
-
-                        PartitionIndex.Page held = located.Pages[at];
-                        if (at != read)
-                        {
-                            page?.Dispose();
-                            page = await reader.ReadAsync(
-                                new Serialization.Schemas.SegmentSpec((ulong)held.Offset, (uint)held.Length, 0, 0, 0), cancellationToken).ConfigureAwait(false);
-                            if (XxHash3.HashToUInt64(page.Buffer.Span) != held.Checksum)
-                            {
-                                throw new VortexFormatException($"A page of where the values of '{located.Name}' lie in the index '{entry.ObjectKey}' fails its checksum.");
-                            }
-
-                            read = at;
-                        }
-
-                        found.Clear();
-                        PartitionIndex.Find(page!.Buffer.Span, held.FirstHash, hash, found);
-                        foreach ((int rank, uint granule) in found)
-                        {
-                            if (!granules.TryGetValue(rank, out Dictionary<ulong, List<uint>>? byHash))
-                            {
-                                granules[rank] = byHash = [];
-                            }
-
-                            if (!byHash.TryGetValue(hash, out List<uint>? of))
-                            {
-                                byHash[hash] = of = [];
-                            }
-
-                            of.Add(granule);
-                        }
+                        continue;
                     }
-                }
-                finally
-                {
-                    page?.Dispose();
+
+                    PartitionIndex.Page held = located.Pages[at];
+                    if (!await opened.LoadAsync(held, cancellationToken).ConfigureAwait(false))
+                    {
+                        throw new VortexFormatException($"A page of where the values of '{located.Name}' lie in the index '{entry.ObjectKey}' fails its checksum.");
+                    }
+
+                    found.Clear();
+                    PartitionIndex.Find(opened.Page, held.FirstHash, hash, found);
+                    foreach ((int rank, uint granule) in found)
+                    {
+                        if (!granules.TryGetValue(rank, out Dictionary<ulong, List<uint>>? byHash))
+                        {
+                            granules[rank] = byHash = [];
+                        }
+
+                        if (!byHash.TryGetValue(hash, out List<uint>? of))
+                        {
+                            byHash[hash] = of = [];
+                        }
+
+                        of.Add(granule);
+                    }
                 }
 
                 columns[c] = new Column(located, granules);

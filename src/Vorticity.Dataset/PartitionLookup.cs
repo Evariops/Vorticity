@@ -132,7 +132,8 @@ internal sealed class PartitionLookup
         ISegmentReader reader = await SealedObjectStore.OpenDataAsync(_dataset.Store, entry.ObjectKey, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         await using (reader.ConfigureAwait(false))
         {
-            PartitionIndex index = await PartitionPostings.ReadAsync(reader, entry.Bytes, cancellationToken).ConfigureAwait(false);
+            using PartitionPostings.OpenedIndex opened = await PartitionPostings.OpenAsync(reader, entry.Bytes, cancellationToken).ConfigureAwait(false);
+            PartitionIndex index = opened.Index;
             if (index.Of(_identifier, PartitionIndex.EntryKind.Postings) is not { } postings)
             {
                 return null;
@@ -146,48 +147,31 @@ internal sealed class PartitionLookup
 
             Dictionary<int, SortedSet<uint>> blocks = [];
             List<(int Rank, uint Block)> found = [];
-            int read = -1;
-            Buffers.SegmentOwner? page = null;
-            try
+            foreach (ulong hash in _hashes)
             {
-                foreach (ulong hash in _hashes)
+                int at = postings.PageOf(hash);
+                if (at < 0)
                 {
-                    int at = postings.PageOf(hash);
-                    if (at < 0)
-                    {
-                        continue;
-                    }
-
-                    PartitionIndex.Page held = postings.Pages[at];
-                    if (at != read)
-                    {
-                        page?.Dispose();
-                        page = await reader.ReadAsync(
-                            new Serialization.Schemas.SegmentSpec((ulong)held.Offset, (uint)held.Length, 0, 0, 0), cancellationToken).ConfigureAwait(false);
-                        if (XxHash3.HashToUInt64(page.Buffer.Span) != held.Checksum)
-                        {
-                            throw new VortexFormatException($"A page of the postings of '{_identifier}' in the index '{entry.ObjectKey}' fails its checksum.");
-                        }
-
-                        read = at;
-                    }
-
-                    found.Clear();
-                    PartitionIndex.Find(page!.Buffer.Span, held.FirstHash, hash, found);
-                    foreach ((int rank, uint block) in found)
-                    {
-                        if (!blocks.TryGetValue(rank, out SortedSet<uint>? of))
-                        {
-                            blocks[rank] = of = [];
-                        }
-
-                        of.Add(block);
-                    }
+                    continue;
                 }
-            }
-            finally
-            {
-                page?.Dispose();
+
+                PartitionIndex.Page held = postings.Pages[at];
+                if (!await opened.LoadAsync(held, cancellationToken).ConfigureAwait(false))
+                {
+                    throw new VortexFormatException($"A page of the postings of '{_identifier}' in the index '{entry.ObjectKey}' fails its checksum.");
+                }
+
+                found.Clear();
+                PartitionIndex.Find(opened.Page, held.FirstHash, hash, found);
+                foreach ((int rank, uint block) in found)
+                {
+                    if (!blocks.TryGetValue(rank, out SortedSet<uint>? of))
+                    {
+                        blocks[rank] = of = [];
+                    }
+
+                    of.Add(block);
+                }
             }
 
             return new Partition(entry, index, postings, ranks, blocks);

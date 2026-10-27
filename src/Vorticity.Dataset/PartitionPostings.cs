@@ -313,21 +313,104 @@ internal sealed class PartitionPostings : IDisposable
         return covered;
     }
 
-    /// <summary>The index an object holds: its tail, then its directory.</summary>
+    /// <summary>The index an object holds (<see cref="OpenAsync"/>), its last bytes let go.</summary>
     /// <exception cref="VortexFormatException">The object holds no index this version reads.</exception>
     internal static async ValueTask<PartitionIndex> ReadAsync(ISegmentReader reader, long length, CancellationToken cancellationToken)
     {
-        using Buffers.SegmentOwner tail = await reader.ReadAsync(
-            new Serialization.Schemas.SegmentSpec((ulong)(length - PartitionIndex.TailBytes), PartitionIndex.TailBytes, 0, 0, 0), cancellationToken).ConfigureAwait(false);
-        if (!PartitionIndex.TryTail(tail.Buffer.Span, out long offset, out int bytes, out ulong checksum) || offset + bytes > length)
+        using OpenedIndex opened = await OpenAsync(reader, length, cancellationToken).ConfigureAwait(false);
+        return opened.Index;
+    }
+
+    /// <summary>
+    /// The index an object of <paramref name="length"/> bytes holds, from its last bytes, an open's tail of them at most
+    /// (<see cref="ObjectStoreSource.TailBytes"/>), read in one request: its tail, then its directory, a request more when it
+    /// starts before them; the pages that lie in them are served from them (<see cref="OpenedIndex.LoadAsync"/>). An index of
+    /// a few pages is read whole in that request.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The object holds no index this version reads.</exception>
+    internal static async ValueTask<OpenedIndex> OpenAsync(ISegmentReader reader, long length, CancellationToken cancellationToken)
+    {
+        if (length < PartitionIndex.TailBytes)
         {
             throw new VortexFormatException("An index of a partition ends with no tail this version reads.");
         }
 
-        using Buffers.SegmentOwner directory = await reader.ReadAsync(
-            new Serialization.Schemas.SegmentSpec((ulong)offset, (uint)bytes, 0, 0, 0), cancellationToken).ConfigureAwait(false);
-        return PartitionIndex.Read(directory.Buffer.Span, checksum)
-            ?? throw new VortexFormatException("The directory of an index of a partition does not decode.");
+        int window = (int)Math.Min(length, ObjectStoreSource.TailBytes);
+        long start = length - window;
+        Buffers.SegmentOwner last = await reader.ReadAsync(
+            new Serialization.Schemas.SegmentSpec((ulong)start, (uint)window, 0, 0, 0), cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!PartitionIndex.TryTail(last.Buffer.Span[^PartitionIndex.TailBytes..], out long offset, out int bytes, out ulong checksum) || offset < 0 || offset + bytes > length)
+            {
+                throw new VortexFormatException("An index of a partition ends with no tail this version reads.");
+            }
+
+            PartitionIndex? index;
+            if (offset >= start)
+            {
+                index = PartitionIndex.Read(last.Buffer.Span.Slice((int)(offset - start), bytes), checksum);
+            }
+            else
+            {
+                using Buffers.SegmentOwner directory = await reader.ReadAsync(
+                    new Serialization.Schemas.SegmentSpec((ulong)offset, (uint)bytes, 0, 0, 0), cancellationToken).ConfigureAwait(false);
+                index = PartitionIndex.Read(directory.Buffer.Span, checksum);
+            }
+
+            return new OpenedIndex(reader, index ?? throw new VortexFormatException("The directory of an index of a partition does not decode."), last, start);
+        }
+        catch
+        {
+            last.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// An index of a partition as a lookup opened it (<see cref="OpenAsync"/>): its directory, and the object's last bytes,
+    /// which serve the pages lying in them; a page before them is read in one request.
+    /// </summary>
+    internal sealed class OpenedIndex(ISegmentReader reader, PartitionIndex index, Buffers.SegmentOwner last, long start) : IDisposable
+    {
+        // The page loaded last, when read before the last bytes; where it starts, -1 for none, and its length.
+        private Buffers.SegmentOwner? _read;
+        private long _offset = -1;
+        private int _length;
+
+        /// <summary>The index's directory.</summary>
+        internal PartitionIndex Index => index;
+
+        /// <summary>The bytes of the page loaded last (<see cref="LoadAsync"/>).</summary>
+        internal ReadOnlySpan<byte> Page => _read is { } read ? read.Buffer.Span : last.Buffer.Span.Slice((int)(_offset - start), _length);
+
+        /// <summary>
+        /// Loads <paramref name="page"/>, unless it is the one loaded: from the object's last bytes when it lies in them,
+        /// in one request otherwise. Whether its bytes hold its checksum.
+        /// </summary>
+        internal async ValueTask<bool> LoadAsync(PartitionIndex.Page page, CancellationToken cancellationToken)
+        {
+            if (page.Offset != _offset)
+            {
+                _read?.Dispose();
+                (_read, _offset) = (null, -1);
+                if (page.Offset < start || page.Offset + page.Length > start + last.Buffer.Span.Length)
+                {
+                    _read = await reader.ReadAsync(
+                        new Serialization.Schemas.SegmentSpec((ulong)page.Offset, (uint)page.Length, 0, 0, 0), cancellationToken).ConfigureAwait(false);
+                }
+
+                (_offset, _length) = (page.Offset, page.Length);
+            }
+
+            return System.IO.Hashing.XxHash3.HashToUInt64(Page) == page.Checksum;
+        }
+
+        public void Dispose()
+        {
+            _read?.Dispose();
+            last.Dispose();
+        }
     }
 
     /// <summary>
