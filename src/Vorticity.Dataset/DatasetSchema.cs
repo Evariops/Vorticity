@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using Vorticity.Expressions;
+using Vorticity.RowEncoding;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
 
@@ -192,6 +195,73 @@ internal sealed class DatasetSchema
     /// them. An object written before the schema last changed answers through its rows until a job rewrites it.
     /// </summary>
     internal bool Holds(ObjectEntry entry) => entry.Contents is { } contents && ColumnsOf(contents.SchemaType, entry.Key) is null;
+
+    /// <summary>
+    /// An object's <paramref name="summaries"/> with what its keys prove of its rows, its first key <paramref name="first"/>,
+    /// which its tree key leads with, and its last <paramref name="last"/>, as the tree orders them (<see cref="Tree"/>): the
+    /// partition's column, a column as it is, holding the one value they lead with; the key's first column, a column as it
+    /// is, between their first values past the partition's. A column the summaries bound already keeps its bounds, a
+    /// text's being bound by the keys alone; the bounds are the extremes when <paramref name="exact"/>.
+    /// </summary>
+    internal ObjectSummaries Bounded(ObjectSummaries summaries, ReadOnlySpan<byte> first, ReadOnlySpan<byte> last, bool exact)
+    {
+        if (Tree is not { } tree || Layout is not { } layout || first.IsEmpty)
+        {
+            return summaries;
+        }
+
+        List<ColumnSummary>? bounded = null;
+        int position = 0;
+        if (layout.Partition is { } partition)
+        {
+            int length = tree.PrefixLength(first, 1);
+            int lastLength = last.IsEmpty ? 0 : tree.PrefixLength(last, 1);
+            if (length < 0 || lastLength < 0)
+            {
+                return summaries;
+            }
+
+            if (partition.IsColumn)
+            {
+                FilterLiteral value = RowEncoder.ReadFirstValue(first, tree.TypeAt(0));
+                Bound(ref bounded, summaries, partition.Value.SourcePath, value, value, exact);
+            }
+
+            first = first[length..];
+            last = last.IsEmpty ? last : last[lastLength..];
+            position = 1;
+        }
+
+        if (layout.Components is [{ IsColumn: true } leading, ..] && !last.IsEmpty && position < tree.Count)
+        {
+            FilterLiteral low = RowEncoder.ReadFirstValue(first, tree.TypeAt(position));
+            FilterLiteral high = RowEncoder.ReadFirstValue(last, tree.TypeAt(position));
+            Bound(ref bounded, summaries, leading.Value.SourcePath, low, high, exact);
+        }
+
+        return bounded is null ? summaries : ObjectSummaries.From(bounded);
+
+        static void Bound(ref List<ColumnSummary>? bounded, ObjectSummaries summaries, string path, FilterLiteral low, FilterLiteral high, bool exact)
+        {
+            if (low.Kind == FilterLiteralKind.Null || high.Kind == FilterLiteralKind.Null
+                || (summaries.TryGet(path, out ColumnSummary held) && held.HasMin && held.HasMax))
+            {
+                return;
+            }
+
+            bounded ??= [.. summaries.Columns];
+            ColumnSummary keyed = new ColumnSummary(path, low, true, high, true, exact, 0, true);
+            int at = bounded.FindIndex(column => string.Equals(column.Path, path, StringComparison.Ordinal));
+            if (at < 0)
+            {
+                bounded.Add(keyed);
+            }
+            else if (!bounded[at].HasMin || !bounded[at].HasMax)
+            {
+                bounded[at] = keyed;
+            }
+        }
+    }
 
     /// <summary>What <see cref="ColumnsOf"/> found for one file's dtype, at its place in its arena.</summary>
     private sealed record Mapped(int Index, int Generation, string Key, ObjectColumns? Columns);

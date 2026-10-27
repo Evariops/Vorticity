@@ -236,7 +236,7 @@ internal sealed partial class DatasetScanSource
     /// <summary>
     /// The least and the greatest value of the aligned column in the object <paramref name="held"/>, each with its bytes
     /// row-encoded as the key orders the column: by its summaries, its keys bounding a text when the column leads the
-    /// layout's key (<paramref name="ownKey"/>, <see cref="PositionedObject.Summaries"/>); null when they do not bound it, or
+    /// layout's key (<paramref name="ownKey"/>, <see cref="PositionedObject.Summaries(ClusteringKey)"/>); null when they do not bound it, or
     /// prove it holds no null.
     /// </summary>
     private static ((byte[] Bytes, FilterLiteral Value) Low, (byte[] Bytes, FilterLiteral Value) High)? Bounds(in PositionedObject held, ClusteringKey key, bool ownKey) =>

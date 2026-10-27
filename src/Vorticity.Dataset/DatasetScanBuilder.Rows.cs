@@ -860,7 +860,7 @@ internal sealed partial class DatasetScanBuilder
 
         long blocks = (held.Entry.PhysicalRows + TwoPhaseReads.BlockRows - 1) / TwoPhaseReads.BlockRows;
         if (TwoPhaseReads.ExpectedRows(
-                filter, schema, field => asked.IndexOf(field) is int at and >= 0 ? sheets[at] : null, held.Summaries(_version.Schema.Key).Columns,
+                filter, schema, field => asked.IndexOf(field) is int at and >= 0 ? sheets[at] : null, held.Summaries(_version.Schema).Columns,
                 held.Entry.PhysicalRows) is long rows
             && !TwoPhaseReads.ByPlaces(rows, blocks))
         {

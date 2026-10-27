@@ -145,7 +145,7 @@ internal sealed class CountsAnswer
         (int Field, string Path, VortexExpr Found)? exclusion = null;
         if (filter is not null)
         {
-            int? leading = version.Schema.Key is { } clustering ? Top(Expr.Field(clustering.InstantPath), schema) : null;
+            int? leading = version.Schema.KeyColumns is [{ } first, ..] ? Top(Expr.Field(first), schema) : null;
             bool keyedElsewhere = false;
             foreach (FieldExpr key in request.Keys)
             {
@@ -280,9 +280,9 @@ internal sealed class CountsAnswer
 
     /// <summary>
     /// The summaries an object <paramref name="held"/> is judged by: its entry's, the key's first column bounded by its keys
-    /// where they do not bound it (<see cref="PositionedObject.Summaries"/>).
+    /// where they do not bound it, the partition's column held to its value (<see cref="PositionedObject.Summaries(DatasetSchema)"/>).
     /// </summary>
-    internal ObjectSummaries SummariesOf(in PositionedObject held) => held.Summaries(_schema.Key);
+    internal ObjectSummaries SummariesOf(in PositionedObject held) => held.Summaries(_schema);
 
     /// <summary>
     /// The column whose counts answer for the object <paramref name="held"/>: the column asked, or for a question of no

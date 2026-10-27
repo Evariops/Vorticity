@@ -38,10 +38,9 @@ internal sealed partial class DatasetScanBuilder
             return false;
         }
 
-        if (_version.Schema.Key is { } key)
+        if (_version.Schema.KeyColumns is [{ } leading, ..])
         {
-            string leading = key.InstantPath;
-            ObjectSummaries summaries = held.Summaries(key);
+            ObjectSummaries summaries = held.Summaries(_version.Schema);
             for (int i = family.Keys.Length - family.Added; i < family.Keys.Length; i++)
             {
                 if (string.Equals(family.Keys[i].Path, leading, StringComparison.Ordinal)
@@ -57,7 +56,7 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>The scan's family as the object <paramref name="held"/> makes it, and the key its partial is kept under (<see cref="FamilyProof"/>); null for an edge.</summary>
     private (LearnedFamily Family, UInt128 Key)? FamilyOf(in PositionedObject held) =>
-        (_proof ??= new FamilyProof(_family!, _version.Schema)).Of(held.Summaries(_version.Schema.Key), held.Entry.PhysicalRows);
+        (_proof ??= new FamilyProof(_family!, _version.Schema)).Of(held.Summaries(_version.Schema), held.Entry.PhysicalRows);
 
     private FamilyProof? _proof;
 

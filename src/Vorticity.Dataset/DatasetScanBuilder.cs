@@ -958,6 +958,16 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
         key is null || Entry.LastKey.IsEmpty || TreeKey.Length <= VortexDataset.UidBytes
             ? Entry.Summaries
             : key.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
+
+    /// <summary>
+    /// Its entry's summaries with what its keys prove under <paramref name="schema"/>'s layout, a partition leading them or
+    /// not (<see cref="DatasetSchema.Bounded"/>): the partition's column, and the key's first column between its smallest key,
+    /// which its tree key leads with, and its largest, which its entry states.
+    /// </summary>
+    internal ObjectSummaries Summaries(DatasetSchema schema) =>
+        TreeKey.Length <= VortexDataset.UidBytes
+            ? Entry.Summaries
+            : schema.Bounded(Entry.Summaries, VortexDataset.OrderOf(TreeKey).Span, Entry.LastKey.Span, exact: !Entry.HasDeletions);
 }
 
 /// <summary>What a dataset scan would read, and what it costs.</summary>

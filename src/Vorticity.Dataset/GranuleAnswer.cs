@@ -294,7 +294,7 @@ internal sealed class GranuleAnswer
         }
 
         // The keys first, which decide most questions with no look at the filter.
-        ObjectSummaries summaries = held.Summaries(_schema.Key);
+        ObjectSummaries summaries = held.Summaries(_schema);
         int free = 0;
         foreach ((int field, FieldExpr key) in _keys)
         {
@@ -388,7 +388,7 @@ internal sealed class GranuleAnswer
             return 0;
         }
 
-        ObjectSummaries summaries = held.Summaries(_schema.Key);
+        ObjectSummaries summaries = held.Summaries(_schema);
         _ = Fields;
         bool proven = _filter is not { } filter || filter.MustMatch(summaries.Columns, entry.PhysicalRows);
         double share = 0;
@@ -507,7 +507,7 @@ internal sealed class GranuleAnswer
             return (null, [new RowRange(0, objectRows)], 0);
         }
 
-        ObjectSummaries summaries = held.Summaries(_schema.Key);
+        ObjectSummaries summaries = held.Summaries(_schema);
         GranuleColumn[] described = new GranuleColumn[Fields.Length];
         for (int i = 0; i < Fields.Length; i++)
         {

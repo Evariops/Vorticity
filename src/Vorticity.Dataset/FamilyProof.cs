@@ -28,7 +28,7 @@ internal sealed class FamilyProof
     {
         _family = family;
         _schema = System.IO.Hashing.XxHash128.HashToUInt128(schema.Bytes.Span);
-        string? leading = schema.Key?.InstantPath;
+        string? leading = schema.KeyColumns is [{ } first, ..] ? first : null;
         VortexExpr[] conjuncts = family.Conjuncts;
         _conjuncts = new (SummaryPruner, bool)[conjuncts.Length];
         for (int i = 0; i < conjuncts.Length; i++)
