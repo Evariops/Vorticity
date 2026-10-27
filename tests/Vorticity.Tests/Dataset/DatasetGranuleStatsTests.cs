@@ -61,7 +61,7 @@ public sealed partial class DatasetGranuleStatsTests
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(memory);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, Event.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.Source)), LayoutValue.Column(nameof(Event.At))], ObjectBytes = 2 << 20 }, ContentsObjectBytes = 1 }, Ct);
+            store, Event.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.Source)), LayoutValue.Column(nameof(Event.At))], ObjectBytes = 2 << 20 }, ContentsObjectBytes = 1, SheetObjectBytes = 0 }, Ct);
         for (int from = 0; from < rows.Count; from += 100_000)
         {
             await using ObjectDraft draft = dataset.StartObject();

@@ -135,7 +135,7 @@ public sealed partial class DatasetAlignedWindowTests
 
     /// <summary>
     /// <paramref name="tenants"/> tenants' tickets, <paramref name="rowsPerTenant"/> each, appended in twelve parts that
-    /// mix them and compacted to the end, partitioned by <paramref name="partition"/> in levels, or cut at 16 KiB, over
+    /// mix them and compacted to the end, partitioned by <paramref name="partition"/> in levels, or cut at 32 KiB, over
     /// blocks of a few kilobytes; every object a job writes keeps its counts.
     /// </summary>
     private static async Task<VortexDataset> WriteAsync(
@@ -144,7 +144,7 @@ public sealed partial class DatasetAlignedWindowTests
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Ticket.Schema, new DatasetOptions
         {
             Layout = partition is null
-                ? new DatasetLayout { SortKey = [.. key.Select(LayoutValue.Column)], ObjectBytes = 16L << 10 }
+                ? new DatasetLayout { SortKey = [.. key.Select(LayoutValue.Column)], ObjectBytes = 32L << 10 }
                 : new DatasetLayout { Partition = partition, SortKey = [.. key.Select(LayoutValue.Column)], Organization = LayoutOrganization.Leveled },
             Write = new VortexWriteOptions { RowBlockSize = 512, DataBlockTargetBytes = 4 << 10 },
             SheetObjectBytes = 0,

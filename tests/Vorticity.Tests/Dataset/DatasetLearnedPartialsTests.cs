@@ -22,12 +22,13 @@ public sealed partial class DatasetLearnedPartialsTests
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    // Keys and results of a family, and the filters that ask it each a value of the same columns.
+    // Keys and results of a family, and the filters that ask it each a value of the same columns: past the first, of rows
+    // in the objects the first read, since an object its summaries refute is not read, and learns nothing.
     private static readonly (string[] Keys, string[] Results, string[] Filters)[] Families =
     [
         (["Route"], ["Route", "count()", "sum(Size)"], ["Status = 404", "Status = 500", "Status in (500, 503)"]),
         (["Host"], ["Host", "count()", "avg(Latency)", "max(Size)"], ["Status = 200", "Status = 503"]),
-        (["Service", "Route"], ["Service", "Route", "count()", "min(Latency)"], ["Status = 404 and Host = 'h-1-0'", "Status = 500 and Host = 'h-2-1'"]),
+        (["Service", "Route"], ["Service", "Route", "count()", "min(Latency)"], ["Status = 404 and Host = 'h-1-0'", "Status = 500 and Host = 'h-1-1'"]),
         ([], ["count()", "sum(Size)"], ["Status = 404", "Status = 200"]),
     ];
 

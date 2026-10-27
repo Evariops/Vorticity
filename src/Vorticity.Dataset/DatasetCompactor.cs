@@ -1074,7 +1074,7 @@ internal static partial class DatasetCompactor
         }
 
         /// <summary>Whether the object being written has reached the destination's size.</summary>
-        internal bool WantsRoll => _output is not null && _output.Sink.Position + _output.Writer.GatheredBytes >= _target;
+        internal bool WantsRoll => _output is not null && _output.Sink.Position + _output.Writer.HeldBytes >= _target;
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>

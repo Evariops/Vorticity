@@ -369,26 +369,35 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private long? _sheetBytes;
 
     /// <summary>
-    /// What the columns that gather hold and have not written, as the bytes it would encode to at each one's last rate:
-    /// what a caller sizing the file adds to the bytes its sink took.
+    /// What the writer holds and has not written, as the bytes it would encode to: what each column that gathers holds, at
+    /// its last rate, and the rows that wait for a chunk of the file, staged or in transit, at the rate of what the columns
+    /// hold, their mean rate when they hold nothing, a first guess with none: what a caller sizing the file adds to the
+    /// bytes its sink took.
     /// </summary>
-    internal long GatheredBytes
+    internal long HeldBytes
     {
         get
         {
-            long held = 0;
+            long canonical = 0;
+            double encoded = 0;
+            double rates = 0;
+            int columns = 0;
             if (_gathering is { } gathering)
             {
                 foreach (Gathering? column in gathering)
                 {
                     if (column is not null)
                     {
-                        held += (long)(column.Bytes * column.Rate);
+                        canonical += column.Bytes;
+                        encoded += column.Bytes * column.Rate;
+                        rates += column.Rate;
+                        columns++;
                     }
                 }
             }
 
-            return held;
+            double rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
+            return (long)(encoded + ((_pendingBytes + (_staging?.Bytes ?? 0)) * rate));
         }
     }
 
@@ -2399,7 +2408,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// The share of its canonical bytes a column's first chunk is guessed to encode to, before one has: a column of
         /// codes or of narrow integers takes less, and its next chunks gather more.
         /// </summary>
-        private const double FirstRate = 0.25;
+        internal const double FirstRate = 0.25;
 
         /// <summary>
         /// The least share a column is taken to encode to: past 16 times its target in canonical bytes, it holds no more,

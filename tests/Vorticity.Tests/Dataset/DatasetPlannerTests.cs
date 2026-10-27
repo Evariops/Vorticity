@@ -376,7 +376,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             {
                 if (part == Hours * 12)
                 {
-                    while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
+                    while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }) is not null)
                     {
                     }
                 }

@@ -57,6 +57,7 @@ public sealed partial class DatasetGranulesTests
                 ObjectBytes = 2 << 20,
             },
             ContentsObjectBytes = 1,
+            SheetObjectBytes = 0,
         }, Ct);
         for (int from = 0; from < rows.Count; from += 100_000)
         {

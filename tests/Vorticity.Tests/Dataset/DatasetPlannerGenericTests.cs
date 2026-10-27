@@ -88,8 +88,7 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
             LayoutValue at = LayoutValue.Column(nameof(DatasetPlannerTests.Call.At));
             await WriteAsync(ByHour, new DatasetLayout { Partition = at.Truncate(CalendarUnit.Hour), SortKey = [at], Organization = LayoutOrganization.Leveled }, VortexWriteOptions.Default);
 
-            // Blocks of a few kilobytes, so that an object's size moves as its rows are written and a cut at 96 KiB shows: an
-            // object goes past the size it aims at by a block at most.
+            // Blocks of a few kilobytes, so that an object's size moves as its rows are written and a cut at 96 KiB shows.
             await WriteAsync(BySize, new DatasetLayout { SortKey = [at], ObjectBytes = 96L << 10 }, new VortexWriteOptions { RowBlockSize = 512, DataBlockTargetBytes = 8 << 10 });
         }
 
@@ -108,7 +107,7 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
             {
                 if (part == 4 * 12)
                 {
-                    while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
+                    while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }) is not null)
                     {
                     }
                 }

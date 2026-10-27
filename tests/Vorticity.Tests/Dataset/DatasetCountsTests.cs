@@ -442,7 +442,10 @@ public sealed class DatasetCountsTests
             SheetObjectBytes = 0,
         });
 
-    /// <summary>A dataset of <paramref name="options"/> holding <paramref name="rows"/>, appended in parts of five minutes and compacted to the end.</summary>
+    /// <summary>
+    /// A dataset of <paramref name="options"/> holding <paramref name="rows"/>, appended in parts of five minutes and compacted
+    /// to the end, each object as large as its layout lets it: a period's rows, or the bytes the layout aims at.
+    /// </summary>
     internal static async Task<VortexDataset> WriteAsync(CountingObjectStore store, Drawn[] columns, object?[][] rows, DatasetOptions options)
     {
         List<VortexField> fields = [new VortexField("At", VortexType.Timestamp(TimeUnit.Microseconds, "UTC"))];
@@ -470,7 +473,7 @@ public sealed class DatasetCountsTests
             await dataset.AppendAsync(draft, Ct);
         }
 
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
         {
         }
 

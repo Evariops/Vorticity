@@ -308,7 +308,8 @@ public sealed partial class IdentifierPostingsTests
             await dataset.AppendAsync(draft, Ct);
         }
 
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        // An object an hour, whatever its bytes.
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
         {
         }
 

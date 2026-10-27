@@ -45,13 +45,7 @@ public sealed partial class ShreddedDatasetTests
         // An append writes the rows as they come: no path map.
         Assert.All(await MapsAsync(clustered), map => Assert.Equal((0, false), (map.Level, map.Keys is not null)));
 
-        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 2 };
-        foreach (VortexDataset dataset in new[] { clustered, levels })
-        {
-            while (await dataset.CompactAsync(compaction, Ct) is not null)
-            {
-            }
-        }
+        await CompactAsync(clustered, levels);
 
         // Every object a job wrote shreds the paths its rows hold 2,048 times or more (spec E, 2). A whole hour, 2 880 rows,
         // shreds the four keys its rows hold throughout; the last hour's 640 rows hold none so often, and leave every key in
@@ -99,12 +93,7 @@ public sealed partial class ShreddedDatasetTests
             Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))] },
         }, Ct);
         await AppendAsync(clustered, levels);
-        foreach (VortexDataset dataset in new[] { clustered, levels })
-        {
-            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
-            {
-            }
-        }
+        await CompactAsync(clustered, levels);
 
         Assert.Equal(await levels.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct), await clustered.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
         Assert.Equal(100, await clustered.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
@@ -132,6 +121,21 @@ public sealed partial class ShreddedDatasetTests
     }
 
     /// <summary>
+    /// Compacts both datasets to the end: the clustered one's jobs write an object an hour, whatever its bytes; the levels'
+    /// aim at their level's size, too small for a table of contents, so that they shred nothing.
+    /// </summary>
+    private static async Task CompactAsync(VortexDataset clustered, VortexDataset levels)
+    {
+        while (await clustered.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
+        {
+        }
+
+        while (await levels.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+    }
+
+    /// <summary>
     /// The .NET half of Rust reading the objects a job shreds: each object above level 0 of a clustered
     /// dataset written out as it is stored, beside its rows in the same order written whole, for
     /// `cargo run --example verify_shredded` to compare (`bench/crosscheck.sh`). It skips rather than
@@ -149,7 +153,7 @@ public sealed partial class ShreddedDatasetTests
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Event.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Event.At))], Organization = LayoutOrganization.Leveled }, ContentsObjectBytes = 0,
         }, Ct);
         await AppendAsync(dataset);
-        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }, Ct) is not null)
         {
         }
 

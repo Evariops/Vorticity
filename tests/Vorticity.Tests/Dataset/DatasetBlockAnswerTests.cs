@@ -63,9 +63,8 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
     /// statistics of the service and the status alone. By the hour as well, the blocks whose instants fall in one hour
     /// answer, and the others are read as rows: never more than the rows take. Granules do not end where a run does: an
     /// object that holds two services, and each hour of a service in the hourly layout, some three granules here, keeps a
-    /// granule of two runs, read as rows with its object's tail, which makes the blocks' bytes those of the rows less a
-    /// third to a quarter at this scale. Objects of 130,000 rows are priced by their bytes alone: at a remote request's
-    /// price, their rows read in three requests weigh less than the statistics and the granules they leave in four.
+    /// granule of two runs, read as rows with its object's tail, which leaves the blocks a quarter to three fifths of the
+    /// rows' bytes at this scale. The objects, of some 70,000 rows, are priced by their bytes alone.
     /// </summary>
     [Theory]
     [InlineData("5xx by service", false)]
@@ -109,10 +108,10 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
     }
 
     /// <summary>
-    /// Drops the partials the class's questions learned into <paramref name="store"/>, its fixture's, which a question then
-    /// answers from in place of the synopses its objects keep: a measure of those reads none.
+    /// Drops the partials questions learned into <paramref name="store"/>, which a question then answers from in place of
+    /// the synopses its objects keep: a measure of those reads none.
     /// </summary>
-    private static async Task ForgetLearnedAsync(MemoryObjectStore store)
+    internal static async Task ForgetLearnedAsync(MemoryObjectStore store)
     {
         List<string> learned = [];
         await foreach (Vorticity.IO.ObjectListing listed in store.ListAsync("learned/", null, Ct))
@@ -230,10 +229,10 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
 
     /// <summary>
     /// Four services, each 150 000 calls over two hours from noon, from three hosts of its own, on six routes, keyed by the
-    /// service then the instant, appended in parts and compacted into objects of 4 MiB: each service a run of blocks of
-    /// some 65 000 rows, about fifty minutes each. The same calls again in a dataset whose key holds the instant's hour
-    /// between the service and the instant, the prefix its objects index, the application's choice: its blocks end at each
-    /// hour too.
+    /// service then the instant, appended in parts and compacted into objects of some 70 000 rows, each keeping its
+    /// synopses whatever its size: each service a run of blocks over two or three objects. The same calls again in a
+    /// dataset whose key holds the instant's hour between the service and the instant, the prefix its objects index, the
+    /// application's choice: its blocks end at each hour too.
     /// </summary>
     public sealed class Fixture : IAsyncLifetime
     {
@@ -286,6 +285,7 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             {
                 Layout = layout,
                 ContentsObjectBytes = 1,
+                SheetObjectBytes = 0,
             };
             await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, options, Ct);
             for (int from = 0; from < rows.Count; from += 100_000)
