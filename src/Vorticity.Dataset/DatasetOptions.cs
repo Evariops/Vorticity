@@ -6,11 +6,14 @@ namespace Vorticity.Dataset;
 
 /// <summary>What a dataset handle needs beyond its store: how it writes, reads and commits.</summary>
 /// <remarks>
-/// The clustering key and the retention are fixed when the dataset is created and carried by every
+/// The layout and the retention are fixed when the dataset is created and carried by every
 /// commit; at an open they come from the dataset and these values are ignored.
 /// </remarks>
 public sealed record DatasetOptions
 {
+    private readonly int _maxPartitionsPerAppend = 100;
+    private readonly long _appendBufferBytes = 256L << 20;
+
     /// <summary>
     /// The session whose pool, cache, bound on reads in flight and parallelism the dataset's scans
     /// use; <see cref="VortexSession.Default"/> unless given.
@@ -21,15 +24,38 @@ public sealed record DatasetOptions
     public VortexWriteOptions Write { get; init; } = VortexWriteOptions.Default;
 
     /// <summary>
-    /// The columns the dataset is ordered by, or null for the order objects arrive in. Declaring one
-    /// orders the objects by the smallest key they hold, gives every object this handle writes a
-    /// sorted run on it so that a lookup inside one object is a seek, and makes compaction keep the
-    /// levels above 0 key-disjoint, so a lookup by key touches a bounded number of objects. The key
-    /// is declared on non-nullable columns: a null has no place in the order the levels are disjoint
-    /// on, and a run on several columns holds no tuple with one. A row whose key is unknown takes a
-    /// value of its own instead, the smallest or the largest its type has.
+    /// How the dataset lays out its rows: the partition no object holds two values of, the key every object is sorted by,
+    /// the prefix of it each object indexes, the size its objects aim at and how its jobs organize them. Null, the
+    /// default, keeps one partition and the order the rows arrive in. Fixed when the dataset is created and carried by
+    /// every commit; a handle opened on an existing dataset follows the dataset's, whatever this says.
     /// </summary>
-    public IReadOnlyList<string>? ClusteringKey { get; init; }
+    public DatasetLayout? Layout { get; init; }
+
+    /// <summary>
+    /// The most partitions one append may touch, past which it is refused before anything is written: each partition it
+    /// touches costs an object at least, and merges after. 100 by default; a load of history raises it.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The bound is under 1.</exception>
+    public int MaxPartitionsPerAppend
+    {
+        get => _maxPartitionsPerAppend;
+        init => _maxPartitionsPerAppend = value >= 1
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(value), value, "An append touches one partition at least.");
+    }
+
+    /// <summary>
+    /// The bytes an append holds in memory before it sorts the rows of its largest partition and writes them as an
+    /// object, taken from the session's memory budget: 256 MiB by default.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The bytes are not positive.</exception>
+    public long AppendBufferBytes
+    {
+        get => _appendBufferBytes;
+        init => _appendBufferBytes = value > 0
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(value), value, "An append holds a positive number of bytes.");
+    }
 
     /// <summary>How many times a commit re-applies its changes to a newer version before giving up; 8 by default.</summary>
     public int MaxAttempts { get; init; } = 8;
@@ -268,19 +294,11 @@ public sealed record DatasetOptions
 
     private readonly TimeSpan? _erasureDelay;
 
-    /// <summary>
-    /// How jobs group the rows into objects: cut where a value of the clustering key's first column changes, at the bytes
-    /// an object aims at, or both; the application chooses the value and the size, and the dataset knows nothing of what
-    /// the values mean. Null, the default, leaves objects at the compaction's sizes. Fixed when the dataset is created and
-    /// carried by every commit; a handle opened on an existing dataset follows the dataset's, whatever this says.
-    /// </summary>
-    public ClusteringOptions? Clustering { get; init; }
-
     private readonly int _rollupFanout = 64;
 
     /// <summary>
     /// The runs a rollup sums (<see cref="VortexDataset.RollUpAsync"/>): about this many consecutive objects of the deepest
-    /// level a rollup of rank 1, cut where the clustering value changes, and about this many rollups of the rank below one
+    /// level a rollup of rank 1, cut where the partition changes, and about this many rollups of the rank below one
     /// of a higher rank, so that a question over a long range of the key reads a rollup where it would read this many
     /// objects' counts, and this many again a rank up. 64 by default; 0 writes none. A setting of the handle that writes
     /// them; a reader takes the rollups whatever their fanout.
@@ -371,13 +389,6 @@ public sealed record DatasetOptions
     /// </summary>
     internal IBoundaryRule? Rule { get; init; }
 
-    /// <summary>
-    /// Whether a creation accepts a key of one column that may hold a null, as the library did before
-    /// it refused one. Only the tests of the datasets created then set it: such a dataset still
-    /// opens, reads and writes, and its nulls are read after every other key.
-    /// </summary>
-    internal bool AcceptsNullableKey { get; init; }
-
     /// <summary>What vacuum keeps, as a header records it.</summary>
     internal RetentionSettings Retention => new RetentionSettings(RetainedVersions, (long)RetentionWindow.TotalSeconds);
 
@@ -395,14 +406,14 @@ public sealed record DatasetOptions
             Seed = header.Seed,
             LockedStore = false,
             ErasureDelay = header.ErasureDelay,
-            Clustering = header.Clustering,
+            Layout = header.Layout,
         }
         : this with
         {
             Seed = header.Seed,
             LockedStore = true,
             ErasureDelay = null,
-            Clustering = header.Clustering,
+            Layout = header.Layout,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,

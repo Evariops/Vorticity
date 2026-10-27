@@ -52,36 +52,6 @@ internal sealed class ClusteringKey
     /// <summary>The key's first column: the one a clustering value is a function of, and the one a level's ranges are judged on.</summary>
     public string InstantPath => _paths[0];
 
-    /// <summary>
-    /// The key a new dataset declares, which may not be over a column that may hold a null. A
-    /// composite key's run holds no tuple with a null, so no merge could keep such a row. And a null
-    /// has no place in the order a level above 0 is disjoint on: every null is the same key, which no
-    /// merge cuts between two objects, so the nulls of every merge would stay in an object of their
-    /// own merge, each read only after every other key.
-    /// </summary>
-    /// <remarks>A dataset created with a key of one such column before it was refused still opens, reads and writes.</remarks>
-    /// <param name="paths">The key's columns, in key order.</param>
-    /// <param name="schema">The dataset's schema.</param>
-    /// <param name="acceptsNullable">Whether a key of one column that may hold a null is accepted, as it was before: the tests of such datasets.</param>
-    /// <exception cref="ArgumentException">A path names no column, or a column of the key, or a struct on its path, may hold a null.</exception>
-    public static ClusteringKey? Declared(IReadOnlyList<string>? paths, DType schema, bool acceptsNullable = false)
-    {
-        ClusteringKey? key = For(paths, schema);
-        if (key is { MayHoldNull: true } && (key.IsComposite || !acceptsNullable))
-        {
-            throw new ArgumentException(
-                key.IsComposite
-                    ? $"The clustering key ({string.Join(", ", key.Paths)}) is a tuple over a column that may hold a null, and a " +
-                      "tuple's run holds none: its rows could never be compacted. Declare a composite key on non-nullable columns."
-                    : $"The clustering key '{key.Paths[0]}' may hold a null, which has no place in the order the levels of a " +
-                      "dataset are disjoint on. Declare it on a non-nullable column, and give a row whose key is unknown a value " +
-                      "of its own, the smallest or the largest the type has.",
-                nameof(paths));
-        }
-
-        return key;
-    }
-
     /// <summary>Whether a column of the key, or a struct on its path, is nullable.</summary>
     public bool MayHoldNull { get; }
 

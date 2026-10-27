@@ -2094,7 +2094,7 @@ internal sealed class DatasetScanBuilder
             _version.Version,
             byLevel,
             levels.LagAtLevelZero(),
-            _version.Header.ClusteringKey.Count > 0,
+            _version.Schema.Layout?.Keyed == true,
             objects,
             rows,
             metrics.ObjectsSkipped,

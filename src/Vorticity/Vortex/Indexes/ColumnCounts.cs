@@ -67,7 +67,7 @@ internal readonly record struct CountsChunk(int Offset, int Length, int FirstGro
 /// <remarks>
 /// <para>
 /// The grain is the object, whatever its rows: the application cuts its objects by the values it chooses
-/// (<c>ClusteringOptions</c>), and the counts describe what each holds. The groups go the nulls first, then the values
+/// (its layout's partition), and the counts describe what each holds. The groups go the nulls first, then the values
 /// left out, then the values in the order of their bytes. Entries of the same value from two objects merge word for word.
 /// </para>
 /// <para>

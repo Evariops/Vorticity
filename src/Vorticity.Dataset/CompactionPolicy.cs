@@ -142,10 +142,10 @@ internal static partial class CompactionPolicy
 
         CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
 
-        // The size the dataset's objects aim at is every writer's, as its key is.
-        if (dataset.Header.Clustering is { ObjectBytes: > 0 } clustering)
+        // The size the dataset's objects aim at is every writer's, as its layout is.
+        if (dataset.Header.Layout is { } layout)
         {
-            settings = settings with { MaxObjectBytes = clustering.ObjectBytes };
+            settings = settings with { MaxObjectBytes = layout.ObjectBytes };
         }
 
         return dataset.LockedStore ? settings with { PurgeMarks = false } : settings;

@@ -101,8 +101,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     public long Lag => Snapshot.Levels.LagAtLevelZero();
 
-    /// <summary>The columns the dataset is ordered by, empty when objects are kept in the order they arrived.</summary>
-    public IReadOnlyList<string> ClusteringKey => Snapshot.Header.ClusteringKey;
+    /// <summary>How the dataset lays out its rows, as its commits carry it; null when it keeps the order they arrive in.</summary>
+    public DatasetLayout? Layout => Snapshot.Header.Layout;
 
     /// <summary>
     /// What the latest compaction run after a commit to fail on this handle raised
@@ -608,7 +608,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// Asks <paramref name="question"/> over the values of the clustering key's first column from <paramref name="from"/>
-    /// up to <paramref name="to"/> part by part, a part a clustering value (<see cref="ClusteringOptions.Value"/>), the last
+    /// up to <paramref name="to"/> part by part, a part a partition (<see cref="DatasetLayout.Partition"/>), the last
     /// part first unless <paramref name="descending"/> is false: each part's answer delivered once it and every part before
     /// it are in, with the share of the range they cover (<see cref="ValuePart{TValue, TAnswer}.Covered"/>).
     /// </summary>
@@ -1502,7 +1502,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <para>
     /// The rows of an object the filter does not cover whole stay, those of an object of level 0 that straddles its bound
     /// among them, until an expiry finds them in objects it covers; a delete takes them as well, at the price of the
-    /// objects it opens. Under a clustering value (<see cref="DatasetOptions.Clustering"/>), every object above level 0
+    /// objects it opens. Under a partition (<see cref="DatasetLayout.Partition"/>), every object above level 0
     /// holds rows of one value, so a filter that keeps the values from one on covers whole objects: <c>r =&gt; r.At &lt;
     /// day</c>, on objects cut at every midnight, drops every day before <c>day</c>, and a row outlives the filter by a
     /// value at most.
@@ -2057,14 +2057,8 @@ public sealed class VortexDataset : IAsyncDisposable
             await ((SealedObjectStore)store).StartSealedAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
-        if (options.Clustering is { } clustering)
-        {
-            // Resolved once here, so that a value the key's first column does not take is refused before anything is written.
-            _ = ValueCut.Of(clustering, key);
-            _ = ValueCut.OfBlocks(clustering, key);
-        }
-
+        // Resolved once here, so that a value the schema cannot make is refused before anything is written.
+        _ = LayoutPlan.Of(options.Layout, schema);
         string[] declared = [];
         if (options.Identifiers is { Count: > 0 } identifiers)
         {
@@ -2082,7 +2076,10 @@ public sealed class VortexDataset : IAsyncDisposable
             Version = 1,
             Seed = DatasetOptions.SeedOf(options),
             Schema = DTypeProtobuf.Serialize(schema),
-            ClusteringKey = [.. options.ClusteringKey ?? []],
+            // As every header carries it: the organization and the prefix resolved, never left to a later library's defaults.
+            Layout = options.Layout is not { } layout || layout is { Partition: null, SortKey.Count: 0 }
+                ? null
+                : layout with { Organization = layout.Organized, IndexedPrefix = layout.SortKey.Count == 0 ? null : layout.Prefix },
             Retention = options.Retention,
             Compaction = options.LockedStore && options.Compaction.Fanout == 0
                 ? options.Compaction with { Fanout = DatasetOptions.LockedFanout }
@@ -2091,7 +2088,6 @@ public sealed class VortexDataset : IAsyncDisposable
             ErasureDelay = options.ErasureDelay,
             Identifiers = declared,
             ShreddedPaths = shredded,
-            Clustering = options.Clustering,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,

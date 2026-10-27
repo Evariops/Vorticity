@@ -28,7 +28,7 @@ namespace Vorticity.Dataset;
 /// <remarks>
 /// Nothing here knows a time: a window on an instant is a conjunct like any, which an object's summaries prove true over
 /// its rows or not, and a truncation of an instant a function like any, constant over an object or not. The objects the
-/// application cuts by its values (<see cref="ClusteringOptions"/>) answer whole the questions that keep to those values.
+/// application partitions (<see cref="DatasetLayout.Partition"/>) answer whole the questions that keep to their partitions.
 /// </remarks>
 internal sealed class CountsAnswer
 {

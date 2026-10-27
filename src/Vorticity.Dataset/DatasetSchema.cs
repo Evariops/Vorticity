@@ -15,7 +15,7 @@ namespace Vorticity.Dataset;
 internal readonly record struct RetiredColumn(string Name, string Current);
 
 /// <summary>
-/// The dataset's columns at one version, the clustering key over them, and the names its columns
+/// The dataset's columns at one version, the layout over them, and the names its columns
 /// had before. An object written under an earlier schema still holds its columns under those
 /// names, with the types they had then, and reads as this schema through <see cref="ColumnsOf"/>.
 /// </summary>
@@ -36,8 +36,8 @@ internal sealed class DatasetSchema
     private readonly ConditionalWeakTable<DTypeArena, Mapped> _mapped = new ConditionalWeakTable<DTypeArena, Mapped>();
 
     private DatasetSchema(
-        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy,
-        IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths, ClusteringOptions? declared)
+        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, DatasetLayout? layout, ReadOnlyMemory<byte> policy,
+        IReadOnlyList<string> identifiers, IReadOnlyList<string> shreddedPaths)
     {
         Bytes = bytes;
         Retired = retired;
@@ -48,9 +48,9 @@ internal sealed class DatasetSchema
         IndexedColumns = new HashSet<string>(IndexPolicy.Columns.Keys, StringComparer.Ordinal);
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
-        Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType);
-        Cut = ValueCut.Of(declared, Key);
-        BlockCut = ValueCut.OfBlocks(declared, Key);
+        Layout = DType.IsDefault ? null : LayoutPlan.Of(layout, DType);
+        Key = Layout?.ColumnPaths() is { } paths ? ClusteringKey.For(paths, DType) : null;
+        Cut = ValueCut.Of(Layout, Key);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);
@@ -73,14 +73,17 @@ internal sealed class DatasetSchema
     /// <summary>The schema as a caller sees it, and binds a record to.</summary>
     internal VortexSchema Columns { get; }
 
-    /// <summary>The clustering key, or null when the dataset is ordered by arrival.</summary>
+    /// <summary>The dataset's layout resolved against these columns; null when it states neither a partition nor a key.</summary>
+    internal LayoutPlan? Layout { get; }
+
+    /// <summary>
+    /// The key over the columns of the layout's components, when each is a column's own values; null when the dataset is
+    /// ordered by arrival.
+    /// </summary>
     internal ClusteringKey? Key { get; }
 
-    /// <summary>The clustering value the dataset's jobs cut their objects by, over <see cref="Key"/>; null when it declares none.</summary>
+    /// <summary>The partition the dataset's jobs cut their objects by, over <see cref="Key"/>; null when it declares none.</summary>
     internal ValueCut? Cut { get; }
-
-    /// <summary>Where a job also ends a block, by the declared block value of the key's second column; null for none.</summary>
-    internal ValueCut? BlockCut { get; }
 
     /// <summary>Every name a column of the dataset gave up, in the order they were given up.</summary>
     internal IReadOnlyList<RetiredColumn> Retired { get; }
@@ -117,10 +120,9 @@ internal sealed class DatasetSchema
         previous is not null && previous.Bytes.Span.SequenceEqual(header.Schema.Span) && Same(previous.Retired, header.Retired)
             && previous.PolicyBytes.Span.SequenceEqual(header.WritePolicy.Span)
             && Same(previous.Identifiers, header.Identifiers) && Same(previous.ShreddedPaths, header.ShreddedPaths)
+            && Equals(previous.Layout?.Layout, header.Layout)
             ? previous
-            : new DatasetSchema(
-                header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.Identifiers, header.ShreddedPaths,
-                header.Clustering);
+            : new DatasetSchema(header.Schema, header.Retired, header.Layout, header.WritePolicy, header.Identifiers, header.ShreddedPaths);
 
     /// <summary>
     /// How an object of this dtype answers for these columns: null when it holds exactly them, the
@@ -174,7 +176,7 @@ internal sealed class DatasetSchema
     /// A column is kept under its name or a new one, and its type may widen a number within its kind
     /// or become nullable, which every value it holds survives. A new column is nullable, since the
     /// objects written before it hold no value for it, and takes a name no column ever had. A column
-    /// of the clustering key orders every object and keeps its name and its type.
+    /// the layout reads partitions and orders every object, and keeps its name and its type.
     /// </remarks>
     /// <exception cref="ArgumentException">The next schema is not one this one's objects read as, with the reason.</exception>
     internal IReadOnlyList<RetiredColumn> Evolve(DType next, IReadOnlyDictionary<string, string>? renamed)
@@ -257,7 +259,7 @@ internal sealed class DatasetSchema
                 if (!string.Equals(old, name, StringComparison.Ordinal) || was != type)
                 {
                     throw new ArgumentException(
-                        $"'{old}' is a column of the clustering key, which orders every object: it keeps its name and its type.",
+                        $"'{old}' is read by the dataset's layout, which partitions and orders every object: it keeps its name and its type.",
                         nameof(next));
                 }
             }
@@ -281,7 +283,7 @@ internal sealed class DatasetSchema
 
             if (Keyed(name))
             {
-                throw new ArgumentException($"'{name}' is a column of the clustering key, which orders every object: it cannot be dropped.", nameof(next));
+                throw new ArgumentException($"'{name}' is read by the dataset's layout, which partitions and orders every object: it cannot be dropped.", nameof(next));
             }
 
             Retire(retired, name, string.Empty);
@@ -295,27 +297,10 @@ internal sealed class DatasetSchema
         return retired;
     }
 
-    /// <summary>Whether a top-level column carries a column of the clustering key.</summary>
+    /// <summary>Whether a top-level column is the source of the layout's partition or of a component of its key.</summary>
     internal bool IsKeyed(string column) => Keyed(column);
 
-    private bool Keyed(string column)
-    {
-        if (Key is not { } key)
-        {
-            return false;
-        }
-
-        foreach (string path in key.Paths)
-        {
-            int dot = path.IndexOf('.', StringComparison.Ordinal);
-            if (string.Equals(dot < 0 ? path : path[..dot], column, StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    private bool Keyed(string column) => Layout?.Reads(column) == true;
 
     /// <summary>Retires a name, the column's earlier names following it to its new name or out of the schema.</summary>
     private static void Retire(List<RetiredColumn> retired, string name, string current)
