@@ -187,6 +187,38 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
+    /// What each top-level column's values cost the processor, as the table of contents keeps it
+    /// (<see cref="ObjectContents.ColumnClasses"/>): a column's count of classes, then for each its units over the file's
+    /// rows in 256ths, rounded up, shifted past the class.
+    /// </summary>
+    private uint[] ColumnClasses()
+    {
+        if (_classUnits is not { } units || _rowCount <= 0)
+        {
+            return [];
+        }
+
+        List<uint> classes = new List<uint>(units.Length);
+        for (int field = 0; field < units.Length / ChunkClasses.Count; field++)
+        {
+            int count = classes.Count;
+            classes.Add(0);
+            for (int kind = 0; kind < ChunkClasses.Count; kind++)
+            {
+                long held = units[(field * ChunkClasses.Count) + kind];
+                if (held > 0)
+                {
+                    ulong share = (((ulong)held * 256) + (ulong)_rowCount - 1) / (ulong)_rowCount;
+                    classes.Add((uint)Math.Min(share, uint.MaxValue >> 3) << 3 | (uint)kind);
+                    classes[count]++;
+                }
+            }
+        }
+
+        return [.. classes];
+    }
+
+    /// <summary>
     /// The table of contents of a file: its rows, its key's sparse index, its chunk directories, its variant columns' path
     /// directories.
     /// </summary>
@@ -207,6 +239,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Wheres = wheres,
             ColumnBytes = columnBytes,
             ColumnChunks = columnChunks,
+            ColumnClasses = ColumnClasses(),
             PureBlockRows = blockStats.Count > 0 && _blocks is { } declared ? declared.PureRows : -1,
             Marks = marks,
             Dictionaries = dictionaries,
@@ -430,6 +463,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // contents: what a reader of a few granules needs before their bytes (ColumnMarks); null for a file that carries none.
     private List<ChunkGeometry>[]? _geometry;
     private ChunkGeometryBuilder? _geometryBuilder;
+
+    // The units each column's values cost the processor, by class (ChunkClasses), a column's classes after the other's,
+    // added as their chunks' blobs are written, for a file that carries a table of contents; null for one that carries none.
+    private long[]? _classUnits;
 
     // Whether the file carries a table of contents (VortexWriteOptions.CarriesContents).
     private bool _carriesContents;
@@ -844,6 +881,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (options.CarriesContents)
         {
             writer._carriesContents = true;
+            writer._classUnits = new long[writer._fieldCount * ChunkClasses.Count];
             writer._geometry = new List<ChunkGeometry>[writer._fieldCount];
             for (int field = 0; field < writer._fieldCount; field++)
             {
@@ -2229,6 +2267,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 long rows = _columns[field].Chunk(firstBlock, blocks).Rows;
                 geometry[field].Add((_geometryBuilder ??= new ChunkGeometryBuilder()).Of(
                     blob.Memory.Span, _arrayEncodings.Ids, ChunkType(field), checked((int)rows), _blockRows));
+
+                // What its values cost the processor: a code a row gathered through the column's dictionary, or what its tree holds.
+                Span<long> units = _classUnits.AsSpan(field * ChunkClasses.Count, ChunkClasses.Count);
+                if (Codes(field))
+                {
+                    units[(int)IO.EncodingClass.Medium] += rows;
+                }
+                else
+                {
+                    ChunkClasses.Add(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema, rows, units);
+                }
             }
 
             int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);

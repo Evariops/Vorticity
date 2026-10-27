@@ -919,7 +919,7 @@ internal sealed class DatasetScanBuilder
             PathCosts.Cost cost;
             if (answer is not null && AnsweredBy(answer, held) is int field)
             {
-                cost = PathCosts.Regions([held.Entry.Contents!.CountsOf(field), answer.AsksSketches ? held.Entry.Contents.SketchesOf(field) : null]);
+                cost = _version.Costs.Regions(held.Entry.Uid, [held.Entry.Contents!.CountsOf(field), answer.AsksSketches ? held.Entry.Contents.SketchesOf(field) : null]);
             }
             else if (answer is not null && BlocksAnswer(held))
             {
@@ -931,18 +931,18 @@ internal sealed class DatasetScanBuilder
                 // A partial learned, or the partials of the objects a compaction merged into it, read nothing; else its rows.
                 cost = _dataset.Partials.Holds(held.Entry.Uid, FamilyOf(held)!.Value.Key, cache) || _dataset.Partials.MergedInto(held.Entry.Uid, cache) is not null
                     ? default
-                    : PathCosts.Rows(held.Entry, FieldsOf(_family!));
+                    : _version.Costs.Rows(held.Entry, FieldsOf(_family!));
             }
             else
             {
-                cost = PathCosts.Rows(held.Entry, fields);
+                cost = _version.Costs.Rows(held.Entry, fields);
             }
 
             // An object its counts do not answer is passed through its sheets first, or where the asked values live, when
             // the filter asks a column for values.
             if (answer is null || AnsweredBy(answer, held) is null)
             {
-                PathCosts.Cost sheets = sheetColumns is { } columns ? SheetPruning.Cost(held.Entry, _dataset.Options, _version.Schema, columns) : default;
+                PathCosts.Cost sheets = sheetColumns is { } columns ? SheetPruning.Cost(held.Entry, _dataset.Options, _version.Schema, columns, _version.Costs) : default;
                 cost = new PathCosts.Cost(cost.Requests + sheets.Requests, cost.Bytes + sheets.Bytes);
             }
 
@@ -1914,7 +1914,7 @@ internal sealed class DatasetScanBuilder
                 // What a clustering by each column of the filter would have spared the object, read whole as rows.
                 if (_filter is not null && Covered(held) == held.Entry.Rows && FilterColumns() is { Count: > 0 } credited)
                 {
-                    _dataset.Advisor.Read(credited, PathCosts.Rows(held.Entry, FieldsRead()).Bytes, selected, held.Entry.Rows);
+                    _dataset.Advisor.Read(credited, _version.Costs.Rows(held.Entry, FieldsRead()).Bytes, selected, held.Entry.Rows);
                 }
 
                 yield break;
@@ -2298,7 +2298,7 @@ internal sealed class DatasetScanBuilder
                 SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
                 bool learned = _dataset.Partials.Holds(held.Entry.Uid, FamilyOf(held)!.Value.Key, cache);
                 bool merged = !learned && _dataset.Partials.MergedInto(held.Entry.Uid, cache) is not null;
-                PathCosts.Cost rows = learned || merged ? default : PathCosts.Rows(held.Entry, FieldsOf(_family!));
+                PathCosts.Cost rows = learned || merged ? default : _version.Costs.Rows(held.Entry, FieldsOf(_family!));
                 states.Add(new StatesStep(
                     held.Entry.Key,
                     "partial",

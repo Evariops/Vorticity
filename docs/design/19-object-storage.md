@@ -30,7 +30,7 @@ Five requirements, each of which becomes a test or a ratchet once built:
 |---|---|
 | the same API | a file opens, scans and is written with the calls it has on a path, given a location instead, though an object takes no append. A dataset takes a store, or a location. Nothing else in the public API changes, whichever provider holds the bytes |
 | few round trips | every operation has a count of requests and of dependent steps, written in [the budget](#5-requests-per-operation), and counting tests hold it. Opening a file is one request on a store that reads suffixes, and opening an object of a dataset is one request on any store. Nothing that a response already said is asked again |
-| the bandwidth of the link | reads run in parallel on many connections, coalesced into ranges of up to 8 MiB across gaps of up to 256 KiB, and large objects go up in parts sent in parallel |
+| the bandwidth of the link | reads run in parallel on many connections, coalesced into ranges of up to 8 MiB across gaps of up to 256 KiB (a remote store's [cost profile](#4-the-store-interface-revised)), and large objects go up in parts sent in parallel |
 | bounded allocation, one copy | a request allocates a constant amount, never a buffer the size of its body, and this library's own code allocates nothing per batch. A response body reaches the block the scan decodes from with no copy but the one TLS makes |
 | secure by default | HTTPS only, credentials from the platform's identity where the platform offers one, no secret in a message, a log or a trace, and a conditional write whose outcome cannot be proven reported as unknown, never as lost |
 
@@ -209,6 +209,17 @@ a caller chooses the cheaper path without trying the other:
 
 A listing says on each entry whether it gave the object's lock: Azure's, Cloud Storage's and the
 memory store's do, the file store's does by saying none, and S3's never does, so a head tells there.
+
+A store says, too, what reading it costs: its cost profile (`IObjectStore.CostProfile`), a round
+trip's latency, the requests in flight and the bytes a second, a request worth the bytes the link
+carries during its share of the latency. A remote store's is the default, 30 ms among 128 requests
+over 1.25 GB/s, a request worth some 293 KB. The file store gives a local disk's, 0.1 ms among 64
+over 3 GB/s, some 4.7 KB, and the memory store memory's, nothing. The profile sets how a store's reads
+are coalesced, two ranges joined across a request's worth rounded down to a power of two (256 KiB,
+4 KiB on a disk, none in memory) up to 8 MiB a request, and it prices every path a dataset's planner
+weighs before reading anything, with the tiers its caches hold regions in and the processor's price of
+a value by encoding class ([16-queries.md](16-queries.md)). A dataset's options may give another
+(`DatasetOptions.CostProfile`), for a store behind a cache, or on another link than its kind's.
 
 A capability marked to check is taken as absent until the contract tests prove it against the
 service, so a store whose suffix reads are not proven opens a file with a head and a read, as today.

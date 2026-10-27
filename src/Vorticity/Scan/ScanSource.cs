@@ -135,6 +135,9 @@ internal abstract class ScanSource
     /// <summary>A walker over the keys of the column at <paramref name="path"/>, from the source's key structures.</summary>
     internal abstract ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken);
 
+    /// <summary>What reading the source costs, which its paths are priced by: a remote store's unless it says otherwise.</summary>
+    internal virtual IO.CostProfile Profile => IO.CostProfile.Remote;
+
     /// <summary>Which key source <see cref="OpenKeysAsync"/> would walk.</summary>
     internal abstract ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken);
 
@@ -220,7 +223,7 @@ internal abstract class ScanSource
 
     /// <summary>
     /// What reading <paramref name="spec"/> would cost, its requests and bytes as the source's planner prices its paths
-    /// before reading anything (<see cref="ReadCost"/>); null for a source that cannot say.
+    /// before reading anything (<see cref="Profile"/>); null for a source that cannot say.
     /// </summary>
     internal virtual ValueTask<(long Requests, long Bytes)?> CostAsync(ScanSpec spec, CancellationToken cancellationToken) => default;
 

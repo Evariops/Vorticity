@@ -23,6 +23,9 @@ internal sealed class SynopsisMemo
     private long _held;
 
     /// <summary>The synopsis of the region at <paramref name="offset"/> of object <paramref name="uid"/>, when the memo holds it.</summary>
+    /// <summary>Whether the memo holds the region at <paramref name="offset"/> of object <paramref name="uid"/>, whatever it holds it as.</summary>
+    internal bool Holds(UInt128 uid, ulong offset) => TryGet(uid, offset, out object? _);
+
     internal bool TryGet<T>(UInt128 uid, ulong offset, out T? synopsis)
         where T : class
     {

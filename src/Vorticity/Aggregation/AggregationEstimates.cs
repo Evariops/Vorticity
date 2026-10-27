@@ -103,12 +103,12 @@ internal sealed class EstimateRun
 
     /// <summary>
     /// What the exact answer to <paramref name="question"/> costs, its requests and bytes as its source's planner prices its
-    /// paths before reading anything, at the price of a request and a byte (<see cref="ReadCost"/>); null for a source that
-    /// cannot say.
+    /// paths before reading anything, at the price of a request and a byte its profile gives (<see cref="IO.CostProfile"/>);
+    /// null for a source that cannot say.
     /// </summary>
     internal static async ValueTask<TimeSpan?> CostOfAsync(AggregationQuery question, CancellationToken cancellationToken) =>
         await ReadsOfAsync(question, cancellationToken).ConfigureAwait(false) is (long requests, long bytes)
-            ? ReadCost.Time(requests, bytes)
+            ? question.Host.Source.Profile.Time(requests, bytes)
             : null;
 
     /// <summary>The requests and bytes the exact answer to <paramref name="question"/> reads, as its source's planner prices them; null for a source that cannot say.</summary>

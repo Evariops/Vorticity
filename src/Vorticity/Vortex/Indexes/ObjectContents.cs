@@ -144,6 +144,47 @@ internal sealed class ObjectContents(
     internal IReadOnlyList<long> ColumnChunks { get; init; } = [];
 
     /// <summary>
+    /// What each top-level column's values cost the processor (spec B, 2.1), by the column's place: for each encoding class
+    /// its values lie under (<see cref="IO.EncodingClass"/>), the units the class's price counts, values for most, runs for
+    /// run-end, present values for sparse, over the object's rows in 256ths, rounded up. Each column's entries follow their
+    /// count, each <c>units &lt;&lt; 3 | class</c>. Empty when the object does not say.
+    /// </summary>
+    internal uint[] ColumnClasses { get; init; } = [];
+
+    // Where each column's entries of ColumnClasses start, past their count; null until a read asks.
+    private int[]? _classStarts;
+
+    /// <summary>
+    /// Column <paramref name="field"/>'s entries of <see cref="ColumnClasses"/>, each <c>units &lt;&lt; 3 | class</c>, the
+    /// units in 256ths of the object's rows; empty when the object does not say.
+    /// </summary>
+    internal ReadOnlySpan<uint> ClassesOf(int field)
+    {
+        int[] starts = System.Threading.Volatile.Read(ref _classStarts) ?? StartClasses();
+        return field >= 0 && field + 1 < starts.Length
+            ? ColumnClasses.AsSpan(starts[field], starts[field + 1] - starts[field] - 1)
+            : default;
+    }
+
+    /// <summary>Where each column's entries start, and one past the last column's count; a span the entries fall short of ends the walk.</summary>
+    private int[] StartClasses()
+    {
+        List<int> starts = [];
+        int at = 0;
+        while (at < ColumnClasses.Length)
+        {
+            int count = (int)Math.Min(ColumnClasses[at], (uint)(ColumnClasses.Length - at - 1));
+            starts.Add(at + 1);
+            at += count + 1;
+        }
+
+        starts.Add(at + 1);
+        int[] built = [.. starts];
+        System.Threading.Volatile.Write(ref _classStarts, built);
+        return built;
+    }
+
+    /// <summary>
     /// The rows of the object's blocks (<see cref="BlockStats"/>) that hold one value of the key's indexed prefix: those a
     /// question grouped by its components may answer from their statistics, where a block that holds
     /// several reads its rows. -1 when the object does not say.
@@ -200,6 +241,7 @@ internal sealed class ObjectContents(
             Wheres = Wheres,
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
+            ColumnClasses = ColumnClasses,
             PureBlockRows = PureBlockRows,
             Marks = Marks,
             Dictionaries = Dictionaries,
@@ -294,6 +336,9 @@ internal sealed class ObjectContents(
 
     // The region of the pages of the file's sparse index.
     private const int TagKeyPages = 27;
+
+    // What each top-level column's values cost the processor, packed: a count, then its entries, a column after the other.
+    private const int TagColumnClasses = 28;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -550,6 +595,15 @@ internal sealed class ObjectContents(
                 }
             }
 
+            if (ColumnClasses.Length > 0)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnClasses);
+                foreach (uint entry in ColumnClasses)
+                {
+                    writer.WriteVarint(entry);
+                }
+            }
+
             if (PureBlockRows >= 0)
             {
                 writer.WriteUInt64Always(TagPureBlockRows, (ulong)PureBlockRows);
@@ -608,6 +662,7 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> wheres = [];
             List<long> columnBytes = [];
             List<long> columnChunks = [];
+            List<uint> columnClasses = [];
             long pureBlockRows = -1;
             List<IndexSegment> marks = [];
             List<(int Field, ColumnDictionary Dictionary)> dictionaries = [];
@@ -715,6 +770,14 @@ internal sealed class ObjectContents(
                         }
 
                         break;
+                    case (TagColumnClasses, ProtoWireType.LengthDelimited):
+                        ProtoReader classed = reader.ReadMessage();
+                        while (!classed.End)
+                        {
+                            columnClasses.Add(checked((uint)classed.ReadVarint()));
+                        }
+
+                        break;
                     case (TagPureBlockRows, ProtoWireType.Varint):
                         pureBlockRows = checked((long)reader.ReadVarint());
                         break;
@@ -770,6 +833,7 @@ internal sealed class ObjectContents(
                     Wheres = wheres,
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,
+                    ColumnClasses = [.. columnClasses],
                     PureBlockRows = pureBlockRows,
                     Marks = marks.Count == directories.Count ? marks : [],
                     Dictionaries = Placed(dictionaries, directories.Count),

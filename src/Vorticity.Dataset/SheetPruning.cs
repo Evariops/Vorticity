@@ -53,7 +53,7 @@ internal static class SheetPruning
     /// <paramref name="columns"/> for values: where their values live when each keeps that index, else their sheets; nothing
     /// for an object whose sheets it does not read (<see cref="Reads"/>).
     /// </summary>
-    internal static PathCosts.Cost Cost(ObjectEntry entry, DatasetOptions options, DatasetSchema schema, List<int> columns)
+    internal static PathCosts.Cost Cost(ObjectEntry entry, DatasetOptions options, DatasetSchema schema, List<int> columns, PathCosts costs)
     {
         if (!Reads(entry, options, schema) || columns.Count == 0)
         {
@@ -68,7 +68,7 @@ internal static class SheetPruning
             regions[i] = places ? contents.WhereOf(columns[i]) : contents.SheetOf(columns[i]);
         }
 
-        return PathCosts.Regions(regions);
+        return costs.Regions(entry.Uid, regions);
     }
 
     /// <summary>

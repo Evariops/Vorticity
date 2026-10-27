@@ -118,6 +118,9 @@ public sealed class MemoryObjectStore : IObjectStore
         | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
         | ObjectStoreCapabilities.CreatesConditionally;
 
+    /// <summary>Memory's: no round trip, a request worth nothing.</summary>
+    public CostProfile CostProfile => CostProfile.Memory;
+
     /// <inheritdoc/>
     public async ValueTask<ObjectRead> ReadAsync(
         string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)

@@ -355,6 +355,8 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
 
     internal override VortexSession Session => question.Session;
 
+    internal override IO.CostProfile Profile => question.Profile;
+
     internal override bool KeepsStates => true;
 
     internal override ValueTask<bool> TakesStatesAsync(ScanSpec spec, StateRequest states, CancellationToken cancellationToken) =>

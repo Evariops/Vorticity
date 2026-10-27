@@ -275,6 +275,8 @@ internal sealed class PrefixedObjectStore(IObjectStore inner, string prefix) : I
 
     public ObjectStoreCapabilities Capabilities => inner.Capabilities;
 
+    public CostProfile CostProfile => inner.CostProfile;
+
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken) =>
         inner.ReadAsync(prefix + key, offset, destination, ifToken, cancellationToken);
 

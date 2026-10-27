@@ -30,6 +30,9 @@ internal sealed class DatasetScanSource : ScanSource
 
     internal override VortexSession Session => _dataset.Session;
 
+    /// <summary>The dataset's: its options' profile, or its store's.</summary>
+    internal override IO.CostProfile Profile => _dataset.Profile;
+
     /// <summary>The rows of every object of the version, deleted ones counted, as its levels hold them: what bounds a table of a key's groups by value.</summary>
     internal override long RowBound => _version.RowCount;
 

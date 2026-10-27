@@ -22,8 +22,9 @@ internal sealed class DatasetSnapshot
     private ParsedPage?[]? _roots;
 
     internal DatasetSnapshot(
-        CommitObject commit, CommitPageSource pages, ObjectCache objects, DateTimeOffset knownAt, DatasetSchema? previous = null)
+        CommitObject commit, CommitPageSource pages, ObjectCache objects, DateTimeOffset knownAt, PathCosts costs, DatasetSchema? previous = null)
     {
+        Costs = costs;
         Commit = commit;
         Header = commit.Header;
         Levels = DatasetLevels.Of(Header);
@@ -32,6 +33,9 @@ internal sealed class DatasetSnapshot
         _objects = objects;
         _knownAt = knownAt.UtcTicks;
     }
+
+    /// <summary>What a path costs an object of the version, at the dataset's cost profile.</summary>
+    internal PathCosts Costs { get; }
 
     /// <summary>The version's commit object, as the handle read it or wrote it.</summary>
     internal CommitObject Commit { get; }

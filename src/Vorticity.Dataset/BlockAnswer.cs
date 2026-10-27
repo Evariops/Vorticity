@@ -28,6 +28,7 @@ namespace Vorticity.Dataset;
 internal sealed class BlockAnswer
 {
     private readonly DatasetSchema _schema;
+    private readonly PathCosts _costs;
     private readonly VortexExpr? _asked;
 
     // Each key of the request, its column and the key itself, a function of it or the column; the columns of the measures.
@@ -49,9 +50,10 @@ internal sealed class BlockAnswer
     // for the planner's count. A bound on another column, whose values a block holds in any order, varies like any.
     private int[] _ranged = [];
 
-    private BlockAnswer(CountsAnswer counts, DatasetSchema version, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, int[] measured, int leading)
+    private BlockAnswer(CountsAnswer counts, DatasetSchema version, PathCosts costs, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, int[] measured, int leading)
     {
         _schema = version;
+        _costs = costs;
         _asked = filter;
         _keys = keys;
         _measured = measured;
@@ -179,7 +181,7 @@ internal sealed class BlockAnswer
         }
 
         int leading = version.Schema.Key is { } clustering && schema.IndexOfField(clustering.InstantPath) is int first and >= 0 ? first : -1;
-        return new BlockAnswer(counts, version.Schema, filter, keys, [.. measured], leading);
+        return new BlockAnswer(counts, version.Schema, version.Costs, filter, keys, [.. measured], leading);
     }
 
     /// <summary>
@@ -278,7 +280,7 @@ internal sealed class BlockAnswer
         // And the statistics cost less than the rows they would spare, both by the formula; an object whose every block holds
         // several values that the question needs one of reads its rows, the statistics a request for nothing.
         (PathCosts.Cost statistics, _, PathCosts.Cost rows) = Costs(held);
-        return Unanswered(held) < 1 && statistics.Weight < rows.Weight;
+        return Unanswered(held) < 1 && _costs.Weight(statistics) < _costs.Weight(rows);
     }
 
     /// <summary>
@@ -296,7 +298,7 @@ internal sealed class BlockAnswer
             (regions[2 * i], regions[(2 * i) + 1]) = (contents.WhereOf(fields[i]), contents.BlockStatsOf(fields[i]));
         }
 
-        return (PathCosts.Regions(regions), PathCosts.Share(held.Entry, fields, Unanswered(held, edges: true)), PathCosts.Rows(held.Entry, fields));
+        return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, fields, Unanswered(held, edges: true)), _costs.Rows(held.Entry, fields));
     }
 
     /// <summary>
@@ -488,7 +490,7 @@ internal sealed class BlockAnswer
                 b++;
             }
 
-            if (b < answers.Length && PathCosts.Bridges(entry, Fields, rows))
+            if (b < answers.Length && _costs.Bridges(entry, Fields, rows))
             {
                 Array.Fill(answers, false, start, b - start);
             }

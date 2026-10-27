@@ -62,7 +62,7 @@ public sealed class VortexDataset : IAsyncDisposable
         _options = options;
         _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session);
         _pageCache = new PageCache(options.PageCacheBytes);
-        _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt);
+        _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
     }
 
     /// <summary>The version this handle reads; it moves only when this handle commits or refreshes.</summary>
@@ -2723,6 +2723,23 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The batches where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
     internal PredicatePages Predicates { get; } = new PredicatePages();
 
+    /// <summary>
+    /// What reading the dataset costs (spec B, 2.3): its options' profile when they give one, its store's otherwise, a remote
+    /// object store's unless the store says it is a disk or memory.
+    /// </summary>
+    internal CostProfile Profile => _options.CostProfile ?? _store.CostProfile;
+
+    /// <summary>What a path costs an object, at <see cref="Profile"/>: a region this handle's memo holds is in memory, one the session's cache holds on its disk.</summary>
+    internal PathCosts Costs => _costs ??= new PathCosts(Profile, _options.ChunkBytes, Resident);
+
+    private PathCosts? _costs;
+
+    /// <summary>The tier a cache holds the region of object <paramref name="uid"/> at: memory for this handle's memo, the disk for the session's cache; null when none holds it.</summary>
+    private CostTier? Resident(UInt128 uid, Indexes.IndexSegment region) =>
+        _synopses.Holds(uid, region.Offset) ? Profile.MemoryCache
+        : Session.Options.SynopsisCache?.Holds(uid, region) == true ? Profile.DiskCache
+        : null;
+
     /// <summary>What an order of the rows by each value the filters of this handle's questions read would have spared them (<see cref="LayoutAdvisor"/>).</summary>
     internal LayoutAdvisor Advisor { get; } = new LayoutAdvisor();
 
@@ -3619,7 +3636,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 return;
             }
 
-            next ??= new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, current.Schema);
+            next ??= new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs, current.Schema);
             if (ReferenceEquals(Interlocked.CompareExchange(ref _snapshot, next, current), current))
             {
                 return;

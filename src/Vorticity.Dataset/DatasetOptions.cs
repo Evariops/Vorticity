@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Vorticity.IO;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
@@ -198,6 +199,13 @@ public sealed record DatasetOptions
     /// allocated 4.7 MB, no faster. A test cuts its small objects with less.
     /// </summary>
     internal long LeastPieceRows { get; init; } = 1L << 20;
+
+    /// <summary>
+    /// What reading the dataset costs, which its planners price their paths by before reading anything: the store's own
+    /// profile when null, the default (<see cref="IObjectStore.CostProfile"/>). An application that knows its store says so here,
+    /// a store behind a cache or on another link than its kind says.
+    /// </summary>
+    public CostProfile? CostProfile { get; init; }
 
     /// <summary>
     /// The encoded bytes each column's chunks of an object aim at: 2^20 by default, about what a request to an object
