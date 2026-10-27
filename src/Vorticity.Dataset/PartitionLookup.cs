@@ -103,15 +103,18 @@ internal sealed class PartitionLookup
     }
 
     /// <summary>The partition <paramref name="held"/>'s rows hold, row-encoded as its tree key leads with it; empty for a dataset without one.</summary>
-    private byte[] PartitionOf(PositionedObject held)
+    private byte[] PartitionOf(PositionedObject held) => PartitionOf(_version, held);
+
+    /// <summary>The partition of <paramref name="version"/> that <paramref name="held"/>'s rows hold, row-encoded as its tree key leads with it; empty for a dataset without one.</summary>
+    internal static byte[] PartitionOf(DatasetSnapshot version, PositionedObject held)
     {
-        if (!_version.Schema.Partitioned || held.TreeKey.Length <= VortexDataset.UidBytes)
+        if (!version.Schema.Partitioned || held.TreeKey.Length <= VortexDataset.UidBytes)
         {
             return [];
         }
 
         ReadOnlySpan<byte> key = VortexDataset.OrderOf(held.TreeKey).Span;
-        return key[.._version.Schema.Tree!.PrefixLength(key, 1)].ToArray();
+        return key[..version.Schema.Tree!.PrefixLength(key, 1)].ToArray();
     }
 
     /// <summary>
@@ -130,7 +133,7 @@ internal sealed class PartitionLookup
         await using (reader.ConfigureAwait(false))
         {
             PartitionIndex index = await PartitionPostings.ReadAsync(reader, entry.Bytes, cancellationToken).ConfigureAwait(false);
-            if (index.Of(_identifier) is not { } postings)
+            if (index.Of(_identifier, PartitionIndex.EntryKind.Postings) is not { } postings)
             {
                 return null;
             }
@@ -195,7 +198,7 @@ internal sealed class PartitionLookup
     private sealed record Partition(
         PartitionIndexEntry Entry,
         PartitionIndex Index,
-        PartitionIndex.Identifier Postings,
+        PartitionIndex.Entry Postings,
         Dictionary<UInt128, int> Ranks,
         Dictionary<int, SortedSet<uint>> Blocks);
 }

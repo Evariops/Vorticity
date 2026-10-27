@@ -967,10 +967,11 @@ public sealed class VortexDataset : IAsyncDisposable
             }
         }
 
-        // The identifiers of an object the index of its partition covers hand their hashes to it, and the object keeps none.
+        // The identifiers of an object the index of its partition covers hand their hashes to it, and the object keeps none;
+        // where its columns' values lie, it hands too, and keeps.
         if (postings is not null)
         {
-            write = write with { HashTaps = postings.TapsOf(Uid(identity)) };
+            write = write with { HashTaps = postings.TapsOf(Uid(identity)), Located = postings.LocatesOf(Uid(identity)) };
         }
 
         // Their places, units of granules that hold about a chunk's bytes of each (spec C, 5).

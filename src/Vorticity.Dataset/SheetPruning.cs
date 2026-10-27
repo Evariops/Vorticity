@@ -12,8 +12,9 @@ namespace Vorticity.Dataset;
 /// What a filter asks of the sheets of an object's columns (<see cref="ColumnSheet"/>): an equality or a set of constants
 /// on a top-level column refuted when the column's filter lacks every constant, through <c>AND</c> and <c>OR</c>, so that
 /// an object whose sheets prove no row matches is passed unopened. An object that keeps where each value of the columns
-/// asked lies (<see cref="ColumnLocate"/>) is judged by those indexes in place of its sheets: exactly, and to the granules
-/// where a selected row may lie (<see cref="GranuleAlgebra"/>), which a scan reads alone.
+/// asked lies (<see cref="ColumnLocate"/>) is judged by those indexes in place of its sheets, or by the index of its
+/// partition for the values asked (<see cref="PartitionLocates"/>): exactly, and to the granules where a selected row may lie
+/// (<see cref="GranuleAlgebra"/>), which a scan reads alone.
 /// </summary>
 internal static class SheetPruning
 {
@@ -87,22 +88,24 @@ internal static class SheetPruning
     /// The objects of <paramref name="batch"/> whose sheets do not refute <paramref name="filter"/>, over <paramref name="schema"/>, in its order: those
     /// <paramref name="consulted"/> says the scan reads the sheets of have their sheets of <paramref name="columns"/> read
     /// side by side with no open of them; or, for an object that keeps where each value of every column of
-    /// <paramref name="columns"/> lies, those indexes, which <paramref name="narrowed"/> is told the granules a selected row
-    /// may lie in by, a bit a granule, when they leave some out.
+    /// <paramref name="columns"/> lies, those indexes, or the index of its partition for the values asked
+    /// (<paramref name="partitions"/>), which <paramref name="narrowed"/> is told the granules a selected row may lie in by, a
+    /// bit a granule, when they leave some out.
     /// </summary>
     internal static async Task<List<PositionedObject>> KeptAsync(
         VortexDataset dataset, DatasetSchema schema, List<PositionedObject> batch, VortexExpr filter, List<int> columns, DatasetScanCounters? metrics,
-        Func<PositionedObject, bool> consulted, CancellationToken cancellationToken, Action<PositionedObject, ulong[]>? narrowed = null)
+        Func<PositionedObject, bool> consulted, CancellationToken cancellationToken, Action<PositionedObject, ulong[]>? narrowed = null,
+        PartitionLocates? partitions = null)
     {
         Task<ColumnSheet?[]>?[] reads = new Task<ColumnSheet?[]>?[batch.Count];
-        Task<ColumnLocate?[]>?[]? located = null;
+        Task<IValueGranules?[]>?[]? located = null;
         for (int i = 0; i < batch.Count; i++)
         {
             if (consulted(batch[i]))
             {
                 if (Locates(batch[i].Entry, columns))
                 {
-                    (located ??= new Task<ColumnLocate?[]>?[batch.Count])[i] = dataset.ReadLocatesAsync(batch[i].Entry, columns, cancellationToken).AsTask();
+                    (located ??= new Task<IValueGranules?[]>?[batch.Count])[i] = LocatesAsync(dataset, partitions, batch[i], columns, cancellationToken);
                 }
                 else
                 {
@@ -126,7 +129,7 @@ internal static class SheetPruning
 
             if (located?[i] is { } lying)
             {
-                ColumnLocate?[] locates = await lying.ConfigureAwait(false);
+                IValueGranules?[] locates = await lying.ConfigureAwait(false);
                 ObjectEntry entry = batch[i].Entry;
                 int granules = locates.Length > 0 && locates[0] is { } first ? first.Granules : 0;
                 ulong[]? may = granules == 0 ? null : GranuleAlgebra.May(
@@ -147,6 +150,21 @@ internal static class SheetPruning
         }
 
         return kept;
+    }
+
+    /// <summary>
+    /// Where the values of <paramref name="columns"/> lie in the object <paramref name="held"/>: by the index of its partition
+    /// for the values asked when it covers the object for each, else by the object's own indexes.
+    /// </summary>
+    private static async Task<IValueGranules?[]> LocatesAsync(
+        VortexDataset dataset, PartitionLocates? partitions, PositionedObject held, List<int> columns, CancellationToken cancellationToken)
+    {
+        if (partitions is not null && await partitions.LocatesAsync(held, cancellationToken).ConfigureAwait(false) is { } found)
+        {
+            return found;
+        }
+
+        return await dataset.ReadLocatesAsync(held.Entry, columns, cancellationToken).ConfigureAwait(false);
     }
 
     private static void Refuted(DatasetScanCounters? metrics)

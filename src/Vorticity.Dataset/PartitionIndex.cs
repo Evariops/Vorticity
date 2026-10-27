@@ -11,30 +11,47 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// The index of a consolidated partition (D13), <c>vorticity.partition.index.v1</c>: an object of the store beside the
-/// partition's objects that holds, for the objects it covers, the postings of the dataset's identifiers, by value rather
-/// than by object: a lookup of a value reads one page of the partition's index where it read the postings of each object.
-/// The consolidation writes it, and the objects it covers keep no postings of their identifiers.
+/// partition's objects that holds, for the objects it covers, by value rather than by object, the postings of the dataset's
+/// identifiers and where the values of its located columns lie (spec D, 7): a lookup of a value reads one page of the
+/// partition's index where it read an index of each object. The consolidation writes it; the objects it covers keep no
+/// postings of their identifiers, and keep where their columns' values lie, which a prefix reads.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The object holds the pages of each identifier, one after another, then its directory, then a tail of
+/// The object holds the pages of each entry, one after another, then its directory, then a tail of
 /// <see cref="TailBytes"/>: where the directory starts, its length and its XXH3-64, and the magic <c>VXPI</c>. The
 /// directory names, behind a version, the objects the index was written for, each by uid, rows and rows a block, its
-/// rank being its place; then each identifier: its name, the blocks a place of its postings spans (a unit of hashed
-/// postings, spec C, 5), the ranks it covers, a bit a rank (an identifier declared after some objects were written covers
-/// those written since), and its pages, from the offset of the first, each by its first hash, its length and its XXH3-64.
+/// rank being its place; then each entry: its column's name, its kind (<see cref="EntryKind"/>), the blocks a place of it
+/// spans (a unit of hashed postings, spec C, 5; a granule where values lie), the ranks it covers, a bit a rank (an
+/// identifier declared after some objects were written covers those written since), and its pages, from the offset of the
+/// first, each by its first hash, its length and its XXH3-64.
 /// </para>
 /// <para>
-/// A page lists hashes ascending, each the XXH3-64 of a value's bytes as hashed postings key it, coded forward against
-/// the one before as a varint, the first against the page's first, which the directory gives; then how many places hold
-/// it, and each by rank and place, ascending: the rank coded forward against the posting before, the place against the
-/// one before when the rank is the same. A hash's postings lie in one page, which ends past <see cref="PageBytes"/>.
+/// A page lists hashes ascending, each the XXH3-64 of a value's bytes as hashed postings key it, or as the column's sheet
+/// keeps it for where values lie, coded forward against the one before as a varint, the first against the page's first,
+/// which the directory gives; then how many places hold it, and each by rank and place, ascending: the rank coded forward
+/// against the posting before, the place against the one before when the rank is the same. A value that lies in most of an
+/// object's granules holds the place <see cref="Everywhere"/> there. A hash's postings lie in one page, which ends past
+/// <see cref="PageBytes"/>.
 /// </para>
 /// </remarks>
 internal sealed class PartitionIndex
 {
-    /// <summary>The version of the directory: 2 since each identifier says the blocks of its places.</summary>
-    internal const ulong Version = 2;
+    /// <summary>The version of the directory: 3 since each entry says its kind.</summary>
+    internal const ulong Version = 3;
+
+    /// <summary>The place of a value that lies in most of an object's granules, everywhere.</summary>
+    internal const uint Everywhere = uint.MaxValue;
+
+    /// <summary>What an entry of the index holds of its column.</summary>
+    internal enum EntryKind
+    {
+        /// <summary>An identifier's postings: the units of granules its values lie at.</summary>
+        Postings = 0,
+
+        /// <summary>Where a located column's values lie, granule by granule (<see cref="Indexes.ColumnLocate"/>).</summary>
+        Locate = 1,
+    }
 
     /// <summary>The bytes of the tail: the directory's offset, length and XXH3-64, and the magic.</summary>
     internal const int TailBytes = 24;
@@ -46,28 +63,28 @@ internal sealed class PartitionIndex
     private const uint Magic = 0x49505856;
 
     private readonly Covered[] _objects;
-    private readonly Identifier[] _identifiers;
+    private readonly Entry[] _entries;
 
-    private PartitionIndex(Covered[] objects, Identifier[] identifiers)
+    private PartitionIndex(Covered[] objects, Entry[] entries)
     {
         _objects = objects;
-        _identifiers = identifiers;
+        _entries = entries;
     }
 
     /// <summary>The objects the index was written for, by rank.</summary>
     internal IReadOnlyList<Covered> Objects => _objects;
 
-    /// <summary>The identifiers it holds the postings of.</summary>
-    internal IReadOnlyList<Identifier> Identifiers => _identifiers;
+    /// <summary>Its entries: identifiers' postings, then where located columns' values lie.</summary>
+    internal IReadOnlyList<Entry> Entries => _entries;
 
-    /// <summary>The identifier named <paramref name="name"/>, or null when the index holds none of it.</summary>
-    internal Identifier? Of(string name)
+    /// <summary>The entry of kind <paramref name="kind"/> of the column named <paramref name="name"/>, or null when the index holds none.</summary>
+    internal Entry? Of(string name, EntryKind kind)
     {
-        foreach (Identifier identifier in _identifiers)
+        foreach (Entry entry in _entries)
         {
-            if (string.Equals(identifier.Name, name, StringComparison.Ordinal))
+            if (entry.Kind == kind && string.Equals(entry.Name, name, StringComparison.Ordinal))
             {
-                return identifier;
+                return entry;
             }
         }
 
@@ -96,11 +113,14 @@ internal sealed class PartitionIndex
         }
     }
 
-    /// <summary>An identifier's postings in the index: the blocks a place spans, the ranks it covers and its pages.</summary>
-    internal sealed class Identifier(string name, int unitBlocks, ulong[] ranks, Page[] pages)
+    /// <summary>An entry of the index: its column, its kind, the blocks a place spans, the ranks it covers and its pages.</summary>
+    internal sealed class Entry(string name, EntryKind kind, int unitBlocks, ulong[] ranks, Page[] pages)
     {
-        /// <summary>The identifier, as the dataset declares it.</summary>
+        /// <summary>The column, as the dataset names it.</summary>
         internal string Name => name;
+
+        /// <summary>What it holds of the column.</summary>
+        internal EntryKind Kind => kind;
 
         /// <summary>The blocks of an object a place of its postings spans (<see cref="Indexes.KeyRunOptions.HashedUnitBlocks"/>).</summary>
         internal int UnitBlocks => unitBlocks;
@@ -177,12 +197,13 @@ internal sealed class PartitionIndex
                 objects[rank] = new Covered(new UInt128(high, low), checked((long)reader.ReadVarint()), checked((int)reader.ReadVarint()));
             }
 
-            Identifier[] identifiers = new Identifier[checked((int)reader.ReadVarint())];
-            for (int i = 0; i < identifiers.Length; i++)
+            Entry[] entries = new Entry[checked((int)reader.ReadVarint())];
+            for (int i = 0; i < entries.Length; i++)
             {
                 string name = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                ulong kind = reader.ReadVarint();
                 int unitBlocks = checked((int)reader.ReadVarint());
-                if (unitBlocks is < 1 or > Indexes.KeyRunOptions.MostUnitBlocks)
+                if (kind > (ulong)EntryKind.Locate || unitBlocks is < 1 or > Indexes.KeyRunOptions.MostUnitBlocks)
                 {
                     return null;
                 }
@@ -203,10 +224,10 @@ internal sealed class PartitionIndex
                     offset += length;
                 }
 
-                identifiers[i] = new Identifier(name, unitBlocks, ranks, pages);
+                entries[i] = new Entry(name, (EntryKind)kind, unitBlocks, ranks, pages);
             }
 
-            return reader.End ? new PartitionIndex(objects, identifiers) : null;
+            return reader.End ? new PartitionIndex(objects, entries) : null;
         }
         catch (Exception e) when (e is VortexFormatException or OverflowException)
         {
@@ -279,12 +300,12 @@ internal sealed class PartitionIndex
     }
 
     /// <summary>
-    /// Writes an index: each identifier's postings in order, cut in pages that go to <see cref="Output"/> as they fill,
-    /// then the directory and the tail.
+    /// Writes an index: each entry's postings in order, cut in pages that go to <see cref="Output"/> as they fill, then the
+    /// directory and the tail.
     /// </summary>
     internal sealed class Writer(ObjectSegmentSink output) : IDisposable
     {
-        private readonly List<(string Name, int UnitBlocks, ulong[] Ranks, long Offset, List<Page> Pages)> _identifiers = [];
+        private readonly List<(string Name, EntryKind Kind, int UnitBlocks, ulong[] Ranks, long Offset, List<Page> Pages)> _entries = [];
         private ProtoWriter _page = new ProtoWriter(PageBytes + 1024);
         private readonly List<(int Rank, uint Block)> _group = [];
         private ulong _pageFirst;
@@ -300,12 +321,12 @@ internal sealed class PartitionIndex
         internal bool PageFull => _page.WrittenSpan.Length >= PageBytes;
 
         /// <summary>
-        /// Starts the postings of <paramref name="name"/>, a place <paramref name="unitBlocks"/> blocks, which cover the ranks
-        /// of <paramref name="ranks"/>.
+        /// Starts the entry of kind <paramref name="kind"/> of <paramref name="name"/>, a place <paramref name="unitBlocks"/>
+        /// blocks, which covers the ranks of <paramref name="ranks"/>.
         /// </summary>
-        internal void Begin(string name, int unitBlocks, ulong[] ranks) => _identifiers.Add((name, unitBlocks, ranks, output.Position, []));
+        internal void Begin(string name, EntryKind kind, int unitBlocks, ulong[] ranks) => _entries.Add((name, kind, unitBlocks, ranks, output.Position, []));
 
-        /// <summary>Adds a posting, past every one added to the identifier; one that repeats the last is left out.</summary>
+        /// <summary>Adds a posting, past every one added to the entry; one that repeats the last is left out.</summary>
         internal void Add(ulong hash, int rank, uint block)
         {
             if (_grouping && hash == _hash)
@@ -328,7 +349,7 @@ internal sealed class PartitionIndex
         internal ValueTask FlushIfFullAsync(CancellationToken cancellationToken) =>
             PageFull ? FlushAsync(cancellationToken) : ValueTask.CompletedTask;
 
-        /// <summary>Ends the identifier's postings: its last hash, its last page.</summary>
+        /// <summary>Ends the entry's postings: its last hash, its last page.</summary>
         internal async ValueTask EndAsync(CancellationToken cancellationToken)
         {
             CloseGroup();
@@ -352,12 +373,13 @@ internal sealed class PartitionIndex
                     directory.WriteVarint((ulong)held.BlockRows);
                 }
 
-                directory.WriteVarint((ulong)_identifiers.Count);
-                foreach ((string name, int unitBlocks, ulong[] ranks, long offset, List<Page> pages) in _identifiers)
+                directory.WriteVarint((ulong)_entries.Count);
+                foreach ((string name, EntryKind kind, int unitBlocks, ulong[] ranks, long offset, List<Page> pages) in _entries)
                 {
                     byte[] utf8 = Encoding.UTF8.GetBytes(name);
                     directory.WriteVarint((ulong)utf8.Length);
                     directory.WriteRawBytes(utf8);
+                    directory.WriteVarint((ulong)kind);
                     directory.WriteVarint((ulong)unitBlocks);
                     directory.WriteVarint((ulong)ranks.Length);
                     foreach (ulong word in ranks)
@@ -444,7 +466,7 @@ internal sealed class PartitionIndex
             _grouping = false;
         }
 
-        /// <summary>Sends the page out, past the identifier's pages before it.</summary>
+        /// <summary>Sends the page out, past the entry's pages before it.</summary>
         private async ValueTask FlushAsync(CancellationToken cancellationToken)
         {
             if (!_paging)
@@ -453,7 +475,7 @@ internal sealed class PartitionIndex
             }
 
             byte[] page = _page.WrittenSpan.ToArray();
-            _identifiers[^1].Pages.Add(new Page(_pageFirst, output.Position, page.Length, XxHash3.HashToUInt64(page)));
+            _entries[^1].Pages.Add(new Page(_pageFirst, output.Position, page.Length, XxHash3.HashToUInt64(page)));
             _page.Clear();
             _paging = false;
             await output.WriteAsync(page, cancellationToken).ConfigureAwait(false);

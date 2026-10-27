@@ -9,7 +9,8 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// The granules of an object where a row a filter selects may lie, by where the values of its columns lie
-/// (<see cref="ColumnLocate"/>, spec D, 4): an equality, a set or a prefix on a column the object locates gives the granules
+/// (<see cref="IValueGranules"/>: the object's own index or its partition's, spec D, 4 and 7): an equality, a set or a
+/// prefix on a column the object locates gives the granules
 /// of its values; <c>AND</c> intersects, <c>OR</c> unites; any other predicate, and a <c>NOT</c>, which an index of where
 /// values lie does not prove, leaves every granule. A set is a map of a bit a granule, a word of 64 at a time; null for every
 /// granule. The rows of the granules left are a superset of those the filter selects, which a scan judges again.
@@ -20,14 +21,14 @@ internal static class GranuleAlgebra
     /// The granules of an object of <paramref name="granules"/> granules where a row <paramref name="filter"/> selects may
     /// lie, by the indexes <paramref name="locateOf"/> gives by column of <paramref name="schema"/>; null for every one.
     /// </summary>
-    internal static ulong[]? May(VortexExpr filter, DType schema, Func<int, ColumnLocate?> locateOf, int granules) =>
+    internal static ulong[]? May(VortexExpr filter, DType schema, Func<int, IValueGranules?> locateOf, int granules) =>
         filter switch
         {
-            ComparisonExpr { Op: ComparisonOp.Equal } equal when Located(equal.Field, schema, locateOf, granules) is (int field, ColumnLocate locate) =>
+            ComparisonExpr { Op: ComparisonOp.Equal } equal when Located(equal.Field, schema, locateOf, granules) is (int field, IValueGranules locate) =>
                 Values([equal.Value], schema.GetField(field), locate),
-            InExpr set when Located(set.Field, schema, locateOf, granules) is (int field, ColumnLocate locate) =>
+            InExpr set when Located(set.Field, schema, locateOf, granules) is (int field, IValueGranules locate) =>
                 Values(set.Literals, schema.GetField(field), locate),
-            StringMatchExpr { Op: StringMatchOp.StartsWith } prefix when Located(prefix.Field, schema, locateOf, granules) is (_, ColumnLocate locate) =>
+            StringMatchExpr { Op: StringMatchOp.StartsWith } prefix when Located(prefix.Field, schema, locateOf, granules) is (_, IValueGranules locate) =>
                 Prefixed(prefix.Pattern.BytesValue, locate),
             LogicalExpr { IsAnd: true } and => Both(May(and.Left, schema, locateOf, granules), May(and.Right, schema, locateOf, granules)),
             LogicalExpr or => Either(May(or.Left, schema, locateOf, granules), May(or.Right, schema, locateOf, granules)),
@@ -61,14 +62,14 @@ internal static class GranuleAlgebra
     }
 
     /// <summary>The top-level column <paramref name="field"/> names and its index, when the object locates it over <paramref name="granules"/> granules.</summary>
-    private static (int Field, ColumnLocate Locate)? Located(FieldExpr field, DType schema, Func<int, ColumnLocate?> locateOf, int granules) =>
+    private static (int Field, IValueGranules Locate)? Located(FieldExpr field, DType schema, Func<int, IValueGranules?> locateOf, int granules) =>
         field is ColumnFieldExpr && schema.Kind == DTypeKind.Struct && field.Path.IndexOf('.') < 0
         && schema.IndexOfField(field.Path) is int index and >= 0 && locateOf(index) is { } locate && locate.Granules == granules
             ? (index, locate)
             : null;
 
     /// <summary>The granules of the values <paramref name="literals"/> of a column of <paramref name="dtype"/>; null when one cannot be told.</summary>
-    private static ulong[]? Values(FilterLiteral[] literals, DType dtype, ColumnLocate locate)
+    private static ulong[]? Values(FilterLiteral[] literals, DType dtype, IValueGranules locate)
     {
         if (CountsAnswer.ValuesOf(literals, dtype) is not { } values)
         {
@@ -78,26 +79,17 @@ internal static class GranuleAlgebra
         ulong[] granules = new ulong[(locate.Granules + 63) / 64];
         foreach (byte[] value in values)
         {
-            if (locate.Find(value) is int place and >= 0)
-            {
-                locate.Or(place, granules);
-            }
+            locate.OrValue(value, granules);
         }
 
         return granules;
     }
 
-    /// <summary>The granules of the values that start with <paramref name="prefix"/>.</summary>
-    private static ulong[] Prefixed(ReadOnlySpan<byte> prefix, ColumnLocate locate)
+    /// <summary>The granules of the values that start with <paramref name="prefix"/>; null when the index cannot tell.</summary>
+    private static ulong[]? Prefixed(ReadOnlySpan<byte> prefix, IValueGranules locate)
     {
         ulong[] granules = new ulong[(locate.Granules + 63) / 64];
-        (int first, int end) = locate.Prefixed(prefix);
-        for (int place = first; place < end; place++)
-        {
-            locate.Or(place, granules);
-        }
-
-        return granules;
+        return locate.TryOrPrefix(prefix, granules) ? granules : null;
     }
 
     /// <summary>The granules in both, null for every one.</summary>

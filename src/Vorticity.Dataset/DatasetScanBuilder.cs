@@ -840,6 +840,7 @@ internal sealed partial class DatasetScanBuilder
     {
         DType schema = _version.Schema.DType;
         List<int>? columns = null;
+        PartitionLocates? partitions = null;
         List<PositionedObject>? batch = null;
         DatasetScanCounters? metrics = _considers ? _metrics : null;
         await foreach (PositionedObject held in walk.ConfigureAwait(false))
@@ -853,9 +854,15 @@ internal sealed partial class DatasetScanBuilder
             (batch ??= new List<PositionedObject>(SheetBatch)).Add(held);
             if (batch.Count == SheetBatch)
             {
-                columns ??= SheetPruning.Columns(filter, schema);
+                if (columns is null)
+                {
+                    columns = SheetPruning.Columns(filter, schema);
+                    partitions = PartitionLocates.Of(_dataset, _version, filter, columns);
+                }
+
                 foreach (PositionedObject kept in await SheetPruning.KeptAsync(
-                    _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
+                    _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow,
+                    partitions).ConfigureAwait(false))
                 {
                     yield return kept;
                 }
@@ -866,9 +873,15 @@ internal sealed partial class DatasetScanBuilder
 
         if (batch is { Count: > 0 })
         {
-            columns ??= SheetPruning.Columns(filter, schema);
+            if (columns is null)
+            {
+                columns = SheetPruning.Columns(filter, schema);
+                partitions = PartitionLocates.Of(_dataset, _version, filter, columns);
+            }
+
             foreach (PositionedObject kept in await SheetPruning.KeptAsync(
-                _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
+                _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow,
+                partitions).ConfigureAwait(false))
             {
                 yield return kept;
             }

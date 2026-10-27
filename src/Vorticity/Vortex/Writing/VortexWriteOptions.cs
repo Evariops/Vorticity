@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Indexes;
 using Vorticity.Writing;
 
@@ -264,6 +266,13 @@ public sealed record VortexWriteOptions
     /// or a null tap, for postings written in the file.
     /// </summary>
     internal Func<string, IHashTap?>? HashTaps { get; init; }
+
+    /// <summary>
+    /// What each column's index of where its values lie (<see cref="Indexes.ColumnLocate"/>) is handed to once complete, by
+    /// the column's place, its bytes as the file keeps them: the index of the partition an object fills (spec D, 7). Null for
+    /// none; the file keeps the index all the same.
+    /// </summary>
+    internal Func<int, byte[], CancellationToken, ValueTask>? Located { get; init; }
 
     /// <summary>
     /// The bytes of an identifier's values the place of its hashed postings spans (spec C, 5): a value lies at a unit of

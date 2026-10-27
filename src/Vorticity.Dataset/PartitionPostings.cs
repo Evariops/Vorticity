@@ -12,15 +12,18 @@ using Vorticity.Writing;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// The postings of a consolidation's identifiers, gathered from the writers of its objects for the index of the partition
-/// (<see cref="PartitionIndex"/>, D13): each object's hashed postings hand their hashes here through a tap a column, sorted
-/// runs of them wait in a scratch, in memory up to a budget and on disk past it, and once the objects are sealed the runs
-/// are merged with the postings of the index before, for the objects it covers that the job left, into the new index.
+/// The postings of a consolidation's identifiers, and where the values of its objects' located columns lie, gathered from
+/// the writers of its objects for the index of the partition (<see cref="PartitionIndex"/>, D13, spec D, 7): each object's
+/// hashed postings hand their hashes here through a tap a column, and each index of where a column's values lie its values'
+/// hashes and granules once complete; sorted runs of them wait in a scratch, in memory up to a budget and on disk past it,
+/// and once the objects are sealed the runs are merged with the entries of the index before, for the objects it covers
+/// that the job left, into the new index.
 /// </summary>
 /// <remarks>
 /// A tap keeps its pairs of hash and block until a chunk of its object closes past <see cref="RunPairs"/> of them, then
 /// sorts them and lays them in the scratch as a run: what a tap holds stays near a run, whatever the object's size, and
-/// the merge reads each run a block of pairs at a time.
+/// the merge reads each run a block of pairs at a time. An index of where values lie is a run of its own, a pair a value
+/// and granule, one a value that lies everywhere.
 /// </remarks>
 internal sealed class PartitionPostings : IDisposable
 {
@@ -38,25 +41,28 @@ internal sealed class PartitionPostings : IDisposable
 
     private readonly string[] _identifiers;
     private readonly int[] _unitBlocks;
+    private readonly string[] _columns;
     private readonly RunScratch _scratch;
     private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
     private readonly List<Run> _runs = [];
     private readonly ConcurrentDictionary<UInt128, Tap[]> _taps = new();
     private readonly ConcurrentDictionary<UInt128, int> _blockRows = new();
 
+    // The columns each object handed where its values lie of, by its uid and the column's place.
+    private readonly ConcurrentDictionary<(UInt128 Uid, int Field), bool> _located = new();
+
     /// <summary>
     /// The postings of <paramref name="identifiers"/>, a place of each the blocks <paramref name="unitBlocks"/> gives in the
-    /// same order (spec C, 5), their runs sealed in the scratch when <paramref name="seal"/> asks.
+    /// same order (spec C, 5), and where the values of the columns <paramref name="columns"/> names by place lie, their runs
+    /// sealed in the scratch when <paramref name="seal"/> asks.
     /// </summary>
-    internal PartitionPostings(IReadOnlyList<string> identifiers, IReadOnlyList<int> unitBlocks, bool seal)
+    internal PartitionPostings(IReadOnlyList<string> identifiers, IReadOnlyList<int> unitBlocks, IReadOnlyList<string> columns, bool seal)
     {
         _identifiers = [.. identifiers];
         _unitBlocks = [.. unitBlocks];
+        _columns = [.. columns];
         _scratch = new RunScratch(ScratchMemoryBytes, null, seal);
     }
-
-    /// <summary>The identifiers the postings are of.</summary>
-    internal IReadOnlyList<string> Identifiers => _identifiers;
 
     /// <summary>The taps of the object of uid <paramref name="uid"/>, by identifier: what its writer hands its hashes to.</summary>
     internal Func<string, IHashTap?> TapsOf(UInt128 uid)
@@ -73,6 +79,68 @@ internal sealed class PartitionPostings : IDisposable
 
     /// <summary>Notes the rows of the blocks of the object of uid <paramref name="uid"/>, which its postings name.</summary>
     internal void BlocksOf(UInt128 uid, int blockRows) => _blockRows[uid] = blockRows;
+
+    /// <summary>
+    /// What the writer of the object of uid <paramref name="uid"/> hands each index of where a column's values lie to, by the
+    /// column's place, once complete (<see cref="VortexWriteOptions.Located"/>).
+    /// </summary>
+    internal Func<int, byte[], CancellationToken, ValueTask> LocatesOf(UInt128 uid) =>
+        (field, bytes, cancellationToken) => LocatedAsync(uid, field, bytes, cancellationToken);
+
+    /// <summary>
+    /// Lays the values of the index <paramref name="bytes"/> of where column <paramref name="field"/>'s values lie in the
+    /// object of uid <paramref name="uid"/> in the scratch as a run: a pair a value's hash and granule, sorted, one a value
+    /// that lies everywhere (<see cref="PartitionIndex.Everywhere"/>).
+    /// </summary>
+    private async ValueTask LocatedAsync(UInt128 uid, int field, byte[] bytes, CancellationToken cancellationToken)
+    {
+        if ((uint)field >= (uint)_columns.Length || Indexes.ColumnLocate.From(bytes) is not { } locate)
+        {
+            return;
+        }
+
+        int pairs = 0;
+        for (int place = 0; place < locate.Values.Count; place++)
+        {
+            pairs += locate.IsEverywhere(place) ? 1 : locate.GranulesOf(place);
+        }
+
+        int pairBytes = Unsafe.SizeOf<Pair>();
+        byte[] run = ArrayPool<byte>.Shared.Rent(Math.Max(pairs, 1) * pairBytes);
+        try
+        {
+            Span<Pair> laid = MemoryMarshal.Cast<byte, Pair>(run.AsSpan(0, pairs * pairBytes));
+            ulong[] granules = new ulong[(locate.Granules + 63) / 64];
+            int at = 0;
+            for (int place = 0; place < locate.Values.Count; place++)
+            {
+                ulong hash = System.IO.Hashing.XxHash3.HashToUInt64(locate.Values[place]);
+                if (locate.IsEverywhere(place))
+                {
+                    laid[at++] = new Pair(hash, PartitionIndex.Everywhere);
+                    continue;
+                }
+
+                Array.Clear(granules);
+                locate.Or(place, granules);
+                for (int w = 0; w < granules.Length && at < laid.Length; w++)
+                {
+                    for (ulong bits = granules[w]; bits != 0 && at < laid.Length; bits &= bits - 1)
+                    {
+                        laid[at++] = new Pair(hash, (uint)((w << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits)));
+                    }
+                }
+            }
+
+            laid[..at].Sort();
+            _located[(uid, field)] = true;
+            await AppendAsync(uid, -1 - field, run.AsMemory(0, at * pairBytes), at, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(run);
+        }
+    }
 
     /// <summary>Lays what the taps of the sealed object of uid <paramref name="uid"/> still hold in the scratch.</summary>
     internal async ValueTask CloseAsync(UInt128 uid, CancellationToken cancellationToken)
@@ -99,13 +167,19 @@ internal sealed class PartitionPostings : IDisposable
                 tap.Release();
             }
         }
+
+        for (int field = 0; field < _columns.Length; field++)
+        {
+            _located.TryRemove((uid, field), out _);
+        }
     }
 
     /// <summary>
     /// Writes the index of <paramref name="partition"/> for the consolidation that wrote <paramref name="outputs"/>: the
     /// objects the index <paramref name="previous"/> covers that <paramref name="consumed"/> leaves, by their rank there,
-    /// then the outputs, in order; each identifier's postings merged from the outputs' runs and the previous index's pages,
-    /// those of the objects it no longer covers left out. The entry's version is the commit's to stamp.
+    /// then the outputs, in order; each identifier's postings, then where each located column's values lie, merged from the
+    /// outputs' runs and the previous index's pages, those of the objects it no longer covers left out. The entry's version
+    /// is the commit's to stamp.
     /// </summary>
     internal async ValueTask<PartitionIndexEntry> WriteAsync(
         VortexDataset dataset,
@@ -157,24 +231,42 @@ internal sealed class PartitionPostings : IDisposable
                 {
                     // The previous index's postings of the identifier, unless their places span other blocks than its
                     // objects' now do: those objects are then no longer covered for it, and their rows read as any.
-                    PartitionIndex.Identifier? held = old?.Of(_identifiers[i]) is { } named && named.UnitBlocks == _unitBlocks[i] ? named : null;
-                    ulong[] covered = new ulong[(objects.Count + 63) / 64];
-                    for (int rank = 0; rank < renamed.Length; rank++)
-                    {
-                        if (renamed[rank] >= 0 && held is not null && held.Covers(rank))
-                        {
-                            covered[renamed[rank] >> 6] |= 1UL << (renamed[rank] & 63);
-                        }
-                    }
-
+                    PartitionIndex.Entry? held = old?.Of(_identifiers[i], PartitionIndex.EntryKind.Postings) is { } named && named.UnitBlocks == _unitBlocks[i]
+                        ? named
+                        : null;
+                    ulong[] covered = Covered(held, renamed, objects.Count);
                     for (int rank = kept; rank < objects.Count; rank++)
                     {
                         covered[rank >> 6] |= 1UL << (rank & 63);
                     }
 
-                    writer.Begin(_identifiers[i], _unitBlocks[i], covered);
+                    writer.Begin(_identifiers[i], PartitionIndex.EntryKind.Postings, _unitBlocks[i], covered);
                     await MergeAsync(writer, i, ranks, held, before, renamed, cancellationToken).ConfigureAwait(false);
                     await writer.EndAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                // Where each located column's values lie: the outputs that handed theirs, and the objects kept the index
+                // before covered for it.
+                for (int field = 0; field < _columns.Length; field++)
+                {
+                    PartitionIndex.Entry? held = old?.Of(_columns[field], PartitionIndex.EntryKind.Locate);
+                    ulong[] covered = Covered(held, renamed, objects.Count);
+                    bool any = Array.Exists(covered, static word => word != 0);
+                    for (int rank = kept; rank < objects.Count; rank++)
+                    {
+                        if (_located.ContainsKey((objects[rank].Uid, field)))
+                        {
+                            covered[rank >> 6] |= 1UL << (rank & 63);
+                            any = true;
+                        }
+                    }
+
+                    if (any)
+                    {
+                        writer.Begin(_columns[field], PartitionIndex.EntryKind.Locate, 1, covered);
+                        await MergeAsync(writer, -1 - field, ranks, held, before, renamed, cancellationToken).ConfigureAwait(false);
+                        await writer.EndAsync(cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
                 await writer.FinishAsync(objects, cancellationToken).ConfigureAwait(false);
@@ -206,6 +298,21 @@ internal sealed class PartitionPostings : IDisposable
         }
     }
 
+    /// <summary>The ranks of the new index the entry <paramref name="held"/> of the one before covers, renamed by <paramref name="renamed"/>, a bit a rank of <paramref name="objects"/>.</summary>
+    private static ulong[] Covered(PartitionIndex.Entry? held, int[] renamed, int objects)
+    {
+        ulong[] covered = new ulong[(objects + 63) / 64];
+        for (int rank = 0; rank < renamed.Length; rank++)
+        {
+            if (renamed[rank] >= 0 && held is not null && held.Covers(rank))
+            {
+                covered[renamed[rank] >> 6] |= 1UL << (renamed[rank] & 63);
+            }
+        }
+
+        return covered;
+    }
+
     /// <summary>The index an object holds: its tail, then its directory.</summary>
     /// <exception cref="VortexFormatException">The object holds no index this version reads.</exception>
     internal static async ValueTask<PartitionIndex> ReadAsync(ISegmentReader reader, long length, CancellationToken cancellationToken)
@@ -224,15 +331,15 @@ internal sealed class PartitionPostings : IDisposable
     }
 
     /// <summary>
-    /// Merges identifier <paramref name="identifier"/>'s postings into <paramref name="writer"/>: those of the outputs'
-    /// runs, an output's at its rank, and those of the previous index's pages, each at its object's new rank, the ones of
-    /// objects it no longer covers left out.
+    /// Merges entry <paramref name="entry"/>'s postings into <paramref name="writer"/>, an identifier's place or a located
+    /// column's, <c>-1 - field</c>: those of the outputs' runs, an output's at its rank, and those of the previous index's
+    /// pages, each at its object's new rank, the ones of objects it no longer covers left out.
     /// </summary>
     private async ValueTask MergeAsync(
         PartitionIndex.Writer writer,
-        int identifier,
+        int entry,
         Dictionary<UInt128, int> ranks,
-        PartitionIndex.Identifier? held,
+        PartitionIndex.Entry? held,
         ISegmentReader? before,
         int[] renamed,
         CancellationToken cancellationToken)
@@ -240,7 +347,7 @@ internal sealed class PartitionPostings : IDisposable
         List<Cursor> cursors = [];
         foreach (Run run in _runs)
         {
-            if (run.Identifier == identifier && ranks.TryGetValue(run.Uid, out int rank))
+            if (run.Entry == entry && ranks.TryGetValue(run.Uid, out int rank))
             {
                 cursors.Add(new RunCursor(_scratch, run, rank));
             }
@@ -271,14 +378,14 @@ internal sealed class PartitionPostings : IDisposable
         }
     }
 
-    /// <summary>Lays a run of sorted pairs in the scratch.</summary>
-    private async ValueTask AppendAsync(UInt128 uid, int identifier, ReadOnlyMemory<byte> pairs, int count, CancellationToken cancellationToken)
+    /// <summary>Lays a run of sorted pairs of entry <paramref name="entry"/> in the scratch.</summary>
+    private async ValueTask AppendAsync(UInt128 uid, int entry, ReadOnlyMemory<byte> pairs, int count, CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             long offset = await _scratch.AppendAsync(pairs, cancellationToken).ConfigureAwait(false);
-            _runs.Add(new Run(uid, identifier, offset, count));
+            _runs.Add(new Run(uid, entry, offset, count));
         }
         finally
         {
@@ -297,8 +404,8 @@ internal sealed class PartitionPostings : IDisposable
         _gate.Dispose();
     }
 
-    /// <summary>A sorted run of an object's pairs for an identifier, where it lies in the scratch.</summary>
-    private readonly record struct Run(UInt128 Uid, int Identifier, long Offset, int Pairs);
+    /// <summary>A sorted run of an object's pairs for an entry, an identifier's or a located column's, where it lies in the scratch.</summary>
+    private readonly record struct Run(UInt128 Uid, int Entry, long Offset, int Pairs);
 
     /// <summary>A value's hash and the block that holds it, twelve bytes as a run lays them.</summary>
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
@@ -450,10 +557,10 @@ internal sealed class PartitionPostings : IDisposable
     }
 
     /// <summary>
-    /// The pages of the previous index's postings of an identifier, read a few mebibytes at a time, each posting at its
-    /// object's new rank, those of an object no longer covered left out.
+    /// The pages of the previous index's postings of an entry, read a few mebibytes at a time, each posting at its object's
+    /// new rank, those of an object no longer covered left out.
     /// </summary>
-    private sealed class PageCursor(ISegmentReader reader, PartitionIndex.Identifier identifier, int[] renamed) : Cursor
+    private sealed class PageCursor(ISegmentReader reader, PartitionIndex.Entry identifier, int[] renamed) : Cursor
     {
         private readonly List<PartitionIndex.Posting> _postings = [];
         private int _page;

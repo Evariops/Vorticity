@@ -472,6 +472,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // Whether the file carries a table of contents (VortexWriteOptions.CarriesContents).
     private bool _carriesContents;
 
+    // What each column's index of where its values lie is handed to once complete (VortexWriteOptions.Located); null for none.
+    private Func<int, byte[], CancellationToken, ValueTask>? _located;
+
     // The sparse index of the file's key the caller declared, the key of each granule's first row and the last row's, built
     // and written at completion; null for none.
     private (int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey, long PureRows)? _keyIndex;
@@ -850,6 +853,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _automaticChunks = options.AutomaticChunks,
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
             _budget = session?.WriteLanes,
+            _located = options.Located,
         };
         writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
         if (options.CarriesContents)
@@ -2570,6 +2574,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     if (closed.LocateOf(field)?.Finish(_rowCount, _blockRows) is { } lying)
                     {
+                        if (_located is { } handed)
+                        {
+                            await handed(field, lying, cancellationToken).ConfigureAwait(false);
+                        }
+
                         locates.Add((field, await closed.AddColumnRegionAsync(
                             _sink, IndexKinds.ColumnLocate, field, lying, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
                     }

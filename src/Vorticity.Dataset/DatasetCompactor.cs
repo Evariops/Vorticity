@@ -154,10 +154,12 @@ internal static partial class DatasetCompactor
         LateRows? late = job.Style is CompactionStyle.Leveled && key is not null && !schema.Partitioned ? LateRows.Of(job, key) : null;
         CompactionJob ran = late is null ? job : LateRows.Sources(job);
 
-        // A consolidation of a dataset with identifiers hands their postings to the index of its partition (D13), which it
-        // writes over the one before for the objects that one covers still: its own objects keep none.
-        using PartitionPostings? postings = merge && indexed && job.Trigger == CompactionTrigger.Consolidation && schema.Identifiers.Count > 0
-            ? new PartitionPostings(schema.Identifiers, dataset.UnitBlocksOf(schema.DType, schema.Identifiers), dataset.Store is SealedObjectStore { Seals: true })
+        // A consolidation hands its identifiers' postings and where its columns' values lie to the index of its partition
+        // (D13, spec D, 7), which it writes over the one before for the objects that one covers still: its own objects keep
+        // no postings of their identifiers.
+        using PartitionPostings? postings = merge && indexed && job.Trigger == CompactionTrigger.Consolidation
+            ? new PartitionPostings(
+                schema.Identifiers, dataset.UnitBlocksOf(schema.DType, schema.Identifiers), ColumnNames(schema), dataset.Store is SealedObjectStore { Seals: true })
             : null;
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job
@@ -364,6 +366,18 @@ internal static partial class DatasetCompactor
 
         PartitionIndexEntry entry = await postings.WriteAsync(dataset, partition, outputs, previous, consumed, cancellationToken).ConfigureAwait(false);
         return new DatasetOperation.PartitionIndexChange(entry, previous?.ObjectKey);
+    }
+
+    /// <summary>The names of <paramref name="schema"/>'s top-level columns, by place: what the index of a partition names its located columns by.</summary>
+    private static string[] ColumnNames(DatasetSchema schema)
+    {
+        string[] names = new string[schema.Columns.Count];
+        for (int field = 0; field < names.Length; field++)
+        {
+            names[field] = schema.Columns[field].Name;
+        }
+
+        return names;
     }
 
     /// <summary>Abandons what a job's streams wrote: its outputs, and its late rows' when it kept them apart.</summary>

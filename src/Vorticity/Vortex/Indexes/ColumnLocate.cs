@@ -17,7 +17,7 @@ namespace Vorticity.Indexes;
 /// two bits that say how they are given: everywhere, a list of their gaps from the one before, or a map of a bit a granule.
 /// A granule is the writer's block, the zone of the zone maps and the place of the sparse index.
 /// </remarks>
-internal sealed class ColumnLocate
+internal sealed class ColumnLocate : IValueGranules
 {
     private const byte Version = 1;
 
@@ -149,6 +149,30 @@ internal sealed class ColumnLocate
                 return;
             }
         }
+    }
+
+    /// <inheritdoc/>
+    int IValueGranules.Granules => Granules;
+
+    /// <inheritdoc/>
+    void IValueGranules.OrValue(ReadOnlySpan<byte> value, Span<ulong> granules)
+    {
+        if (Find(value) is int place and >= 0)
+        {
+            Or(place, granules);
+        }
+    }
+
+    /// <inheritdoc/>
+    bool IValueGranules.TryOrPrefix(ReadOnlySpan<byte> prefix, Span<ulong> granules)
+    {
+        (int first, int end) = Prefixed(prefix);
+        for (int place = first; place < end; place++)
+        {
+            Or(place, granules);
+        }
+
+        return true;
     }
 
     /// <summary>The first place whose value does not come before <paramref name="value"/>.</summary>
