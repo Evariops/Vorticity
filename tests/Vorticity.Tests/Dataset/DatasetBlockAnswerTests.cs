@@ -74,7 +74,9 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
     [InlineData("measures by service and hour", true)]
     public async Task ErrorsByServiceReadTheirBlocksStatistics(string question, bool hourly)
     {
-        await using CountingObjectStore store = new CountingObjectStore(hourly ? _fixture.Hourly : _fixture.Store);
+        MemoryObjectStore shared = hourly ? _fixture.Hourly : _fixture.Store;
+        await ForgetLearnedAsync(shared);
+        await using CountingObjectStore store = new CountingObjectStore(shared);
         long rowBytes;
         long blockBytes;
         await using (VortexSession session = VortexSession.Create(_ => { }))
@@ -97,12 +99,31 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
         Assert.True(blockBytes < rowBytes, $"{question}: {blockBytes} bytes through the blocks, {rowBytes} through the rows");
 
         // The plan says so object by object: the blocks' path, its requests and bytes, and the rows' it was weighed against.
+        await ForgetLearnedAsync(shared);
         await using VortexDataset explained = await VortexDataset.OpenAsync(store, new DatasetOptions { CostProfile = Vorticity.IO.CostProfile.Memory }, Ct);
         ScanPlan plan = await Ask(explained, question, synopses: true).ExplainAsync(analyze: true, Ct);
         UnitStep[] blocks = [.. plan.Units.Where(step => step.Alternative == "granules")];
         Console.WriteLine($"BLOCK PLAN {question}: {blocks.Length} objects, {blocks.FirstOrDefault()?.Detail}");
         Assert.NotEmpty(blocks);
         Assert.All(blocks, step => Assert.True(step.Requests >= 1, step.Detail));
+    }
+
+    /// <summary>
+    /// Drops the partials the class's questions learned into <paramref name="store"/>, its fixture's, which a question then
+    /// answers from in place of the synopses its objects keep: a measure of those reads none.
+    /// </summary>
+    private static async Task ForgetLearnedAsync(MemoryObjectStore store)
+    {
+        List<string> learned = [];
+        await foreach (Vorticity.IO.ObjectListing listed in store.ListAsync("learned/", null, Ct))
+        {
+            learned.Add(listed.Key);
+        }
+
+        if (learned.Count > 0)
+        {
+            await store.DeleteAsync(learned, Ct);
+        }
     }
 
     /// <summary>
