@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -157,22 +158,148 @@ internal sealed class LearnedFamily
         return new LearnedFamily(family, all, [.. rest], GroupPredicates.And(null, kept), all.Length - plan.Keys.Length);
     }
 
-    /// <summary>The family's keys, its aggregates and its filter, each as its canonical text.</summary>
+    // What starts each line of a family's text, and what ends the line of a sketch's aggregate before its grid.
+    private const string KeyLine = "key ";
+    private const string AggregateLine = "aggregate ";
+    private const string FilterLine = "filter ";
+    private const string BitsMark = " bits=";
+
+    /// <summary>
+    /// The family's keys, its aggregates and its filter, each as its canonical text: a distribution's or a quantile's with the
+    /// bits of its grid, which its partial's sketches are made on.
+    /// </summary>
     private static string TextOf(AggregationPlan plan, VortexExpr? filter)
     {
         StringBuilder text = new StringBuilder();
         foreach (ColumnShape key in plan.Keys)
         {
-            text.Append("key ").Append(key.Key).Append(' ').Append(key.Type).Append('\n');
+            text.Append(KeyLine).Append(key.Key).Append(' ').Append(key.Type).Append('\n');
         }
 
         foreach (IAggregateNode aggregate in plan.Aggregates)
         {
-            text.Append("aggregate ").Append(aggregate.Kind).Append(' ').Append(aggregate.Input?.Key ?? "*").Append('\n');
+            text.Append(AggregateLine).Append(aggregate.Kind).Append(' ').Append(aggregate.Input?.Key ?? "*");
+            if (Aggregators.SketchBits(aggregate.Identity) is > 0 and int bits)
+            {
+                text.Append(BitsMark).Append(bits.ToString(CultureInfo.InvariantCulture));
+            }
+
+            text.Append('\n');
         }
 
-        text.Append("filter ").Append(filter is null ? string.Empty : ExprText.Format(filter));
+        text.Append(FilterLine).Append(filter is null ? string.Empty : ExprText.Format(filter));
         return text.ToString();
+    }
+
+    /// <summary>
+    /// How the family of text <paramref name="wider"/> serves the family of text <paramref name="narrower"/> (spec H, 3.5):
+    /// for each key of the narrower, the place of the same key among the wider's; null unless their filters are the same,
+    /// and each key and each aggregate of the narrower is among the wider's, a sketch on as fine a grid or finer. A partial of
+    /// the wider, its columns brought to the narrower's, its extra keys and measures left out, folds into one of the narrower.
+    /// </summary>
+    internal static int[]? Covers(string wider, string narrower)
+    {
+        List<Range> wideKeys = [];
+        List<Range> wideAggregates = [];
+        List<Range> keys = [];
+        List<Range> aggregates = [];
+        if (!Lines(wider, wideKeys, wideAggregates, out int wideFilter) || !Lines(narrower, keys, aggregates, out int filter)
+            || !wider.AsSpan(wideFilter).SequenceEqual(narrower.AsSpan(filter)))
+        {
+            return null;
+        }
+
+        foreach (Range aggregate in aggregates)
+        {
+            bool served = false;
+            for (int w = 0; w < wideAggregates.Count && !served; w++)
+            {
+                served = Serves(wider.AsSpan(wideAggregates[w]), narrower.AsSpan(aggregate));
+            }
+
+            if (!served)
+            {
+                return null;
+            }
+        }
+
+        int[] keyOf = new int[keys.Count];
+        for (int k = 0; k < keyOf.Length; k++)
+        {
+            keyOf[k] = -1;
+            for (int w = 0; w < wideKeys.Count && keyOf[k] < 0; w++)
+            {
+                if (wider.AsSpan(wideKeys[w]).SequenceEqual(narrower.AsSpan(keys[k])))
+                {
+                    keyOf[k] = w;
+                }
+            }
+
+            if (keyOf[k] < 0)
+            {
+                return null;
+            }
+        }
+
+        return keyOf;
+    }
+
+    /// <summary>
+    /// The lines of a family's <paramref name="text"/>: what follows the word of each key's and each aggregate's, and where its
+    /// filter starts, the rest of the text; false for a text of another form.
+    /// </summary>
+    private static bool Lines(string text, List<Range> keys, List<Range> aggregates, out int filter)
+    {
+        filter = -1;
+        int at = 0;
+        while (at < text.Length)
+        {
+            ReadOnlySpan<char> rest = text.AsSpan(at);
+            if (rest.StartsWith(FilterLine, StringComparison.Ordinal))
+            {
+                filter = at + FilterLine.Length;
+                return true;
+            }
+
+            int end = rest.IndexOf('\n');
+            if (end < 0)
+            {
+                return false;
+            }
+
+            if (rest.StartsWith(KeyLine, StringComparison.Ordinal))
+            {
+                keys.Add(new Range(at + KeyLine.Length, at + end));
+            }
+            else if (rest.StartsWith(AggregateLine, StringComparison.Ordinal))
+            {
+                aggregates.Add(new Range(at + AggregateLine.Length, at + end));
+            }
+            else
+            {
+                return false;
+            }
+
+            at += end + 1;
+        }
+
+        return false;
+    }
+
+    /// <summary>Whether the aggregate of line <paramref name="wide"/> serves the one of <paramref name="narrow"/>: the same, or a sketch of the same on a grid as fine or finer.</summary>
+    private static bool Serves(ReadOnlySpan<char> wide, ReadOnlySpan<char> narrow)
+    {
+        if (wide.SequenceEqual(narrow))
+        {
+            return true;
+        }
+
+        int w = wide.LastIndexOf(BitsMark, StringComparison.Ordinal);
+        int n = narrow.LastIndexOf(BitsMark, StringComparison.Ordinal);
+        return w > 0 && n > 0 && wide[..w].SequenceEqual(narrow[..n])
+            && int.TryParse(wide[(w + BitsMark.Length)..], NumberStyles.None, CultureInfo.InvariantCulture, out int fine)
+            && int.TryParse(narrow[(n + BitsMark.Length)..], NumberStyles.None, CultureInfo.InvariantCulture, out int coarse)
+            && fine >= coarse;
     }
 
     /// <summary>
@@ -190,12 +317,15 @@ internal sealed class LearnedFamily
     /// <summary>
     /// The family's partial of the rows of <paramref name="partials"/> together, partials of it over rows apart: their
     /// groups merged by the family's plan, as a merge of parts folds them, to the bits the rows together would give, with
-    /// no row read. <paramref name="source"/> is the source they were learned over.
+    /// no row read. With <paramref name="keyOf"/>, they are partials of a family that serves this one (<see cref="Covers"/>),
+    /// each key of this family at its place there, their other keys and measures left out, their groups of the same keys
+    /// folded. <paramref name="source"/> is the source they were learned over.
     /// </summary>
-    internal ValueTask<AggregationPartial> MergeAsync(AggregationPartial[] partials, ScanSource source, ScanOptions options, CancellationToken cancellationToken)
+    internal ValueTask<AggregationPartial> MergeAsync(
+        AggregationPartial[] partials, int[]? keyOf, ScanSource source, ScanOptions options, CancellationToken cancellationToken)
     {
         VortexSchema expected = AggregationQuery.StatesOf(new FamilyHost(source, new ScanSpec()), Plan, Keys).Schema;
-        PartialsSource merged = new PartialsSource(source, partials.ToAsyncEnumerable(), expected);
+        PartialsSource merged = new PartialsSource(source, partials.ToAsyncEnumerable(), expected, keyOf);
         ScanSpec spec = new ScanSpec { Options = options with { UseSynopses = true, AlignWindow = false } };
         return AggregationPartials.ExportAsync(AggregationQuery.StatesOf(new FamilyHost(merged, spec), Plan, Keys), cancellationToken);
     }

@@ -202,10 +202,164 @@ internal sealed class LearnedPartials
 
     /// <summary>
     /// Whether the handle, the cache or the store holds the partial of family <paramref name="family"/> of the object
-    /// <paramref name="uid"/>, with no read of it: the store as the family's listing said it (<see cref="ListAsync"/>).
+    /// <paramref name="uid"/>, or of a family that serves it (<see cref="CoveringAsync"/>), with no read of it: the store as
+    /// each family's listing said it (<see cref="ListAsync"/>).
     /// </summary>
-    internal bool Holds(UInt128 uid, UInt128 family, SynopsisCache? cache) =>
+    internal bool Holds(UInt128 uid, UInt128 family, SynopsisCache? cache)
+    {
+        if (HoldsOwn(uid, family, cache))
+        {
+            return true;
+        }
+
+        if (_covering.TryGetValue(family, out (int Known, Covering[] Families) covering))
+        {
+            foreach (Covering wider in covering.Families)
+            {
+                if (HoldsOwn(uid, wider.Key, cache))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Whether the handle, the cache or the store holds the partial of family <paramref name="family"/> itself of the object <paramref name="uid"/>.</summary>
+    internal bool HoldsOwn(UInt128 uid, UInt128 family, SynopsisCache? cache) =>
         _held.ContainsKey((uid, family)) || cache?.HoldsSealed(NameOf(uid, family)) == true || Stored(uid, family);
+
+    /// <summary>A family that serves another (<see cref="Aggregating.LearnedFamily.Covers"/>): the key of its partials, and the place of each key of the other among its own.</summary>
+    internal readonly record struct Covering(UInt128 Key, int[] KeyOf);
+
+    /// <summary>The families that serve one, at most: each one's partials listed once for the handle, and read where the family's own are missing.</summary>
+    internal const int MaxCovering = 4;
+
+    /// <summary>The bytes of a family's text read at most: its keys, aggregates and filter.</summary>
+    private const int MaxText = 64 << 10;
+
+    // The families' texts the handle knows, by the key of their partials, with the identity of each, and how many: those whose
+    // partials it kept, and those the store lists, read once (spec H, 3.5). Per family's key, the families that serve it,
+    // found while the handle knew as many texts.
+    private readonly ConcurrentDictionary<UInt128, (string Text, UInt128 Identity)> _texts = new();
+    private int _known;
+    private Task? _families;
+    private object? _familiesLock;
+    private readonly ConcurrentDictionary<UInt128, (int Known, Covering[] Families)> _covering = new();
+
+    /// <summary>
+    /// Finds which families serve <paramref name="family"/>, whose partials are kept under <paramref name="key"/>
+    /// (<see cref="Aggregating.LearnedFamily.Covers"/>), once for the handle while it knows as many: of the same columns,
+    /// among those whose partials it kept and those <paramref name="store"/> lists under <c>learned/families/</c>, each text
+    /// read once; the shortest texts first, of the fewest keys and aggregates, <see cref="MaxCovering"/> at most, each one's
+    /// partials listed (<see cref="ListAsync"/>).
+    /// </summary>
+    internal async ValueTask CoveringAsync(IObjectStore? store, Aggregating.LearnedFamily family, UInt128 key, CancellationToken cancellationToken)
+    {
+        if (store is not null)
+        {
+            // The listing of the families this handle started, which every question awaits.
+#pragma warning disable VSTHRD003
+            await LazyInitializer.EnsureInitialized(ref _families, ref _familiesLock, () => FamiliesAsync(store)).WaitAsync(cancellationToken).ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+        }
+
+        int known = Volatile.Read(ref _known);
+        if (_covering.TryGetValue(key, out (int Known, Covering[] Families) found) && found.Known == known)
+        {
+            return;
+        }
+
+        // A family's key is its identity and its columns' (FamilyProof): one of the same columns differs from it as its own.
+        UInt128 columns = key ^ family.Identity;
+        List<(Covering Family, int Length)> wider = [];
+        foreach (KeyValuePair<UInt128, (string Text, UInt128 Identity)> other in _texts)
+        {
+            if (other.Key != key && (other.Key ^ other.Value.Identity) == columns
+                && Aggregating.LearnedFamily.Covers(other.Value.Text, family.Text) is { } keyOf)
+            {
+                wider.Add((new Covering(other.Key, keyOf), other.Value.Text.Length));
+            }
+        }
+
+        wider.Sort(static (a, b) => a.Length.CompareTo(b.Length));
+        Covering[] covering = new Covering[Math.Min(wider.Count, MaxCovering)];
+        for (int i = 0; i < covering.Length; i++)
+        {
+            covering[i] = wider[i].Family;
+            if (store is not null)
+            {
+                await ListAsync(store, covering[i].Key, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        _covering[key] = (known, covering);
+    }
+
+    /// <summary>
+    /// The partial of a family that serves <paramref name="family"/> of the object <paramref name="uid"/> (<see cref="CoveringAsync"/>),
+    /// from memory, the cache or <paramref name="store"/>, and the place of each of <paramref name="family"/>'s keys among
+    /// that family's; null when none holds one.
+    /// </summary>
+    internal async ValueTask<(AggregationPartial Partial, int[] KeyOf)?> CoveredAsync(
+        UInt128 uid, UInt128 family, SynopsisCache? cache, IObjectStore? store, CancellationToken cancellationToken)
+    {
+        if (!_covering.TryGetValue(family, out (int Known, Covering[] Families) covering))
+        {
+            return null;
+        }
+
+        foreach (Covering wider in covering.Families)
+        {
+            if (HoldsOwn(uid, wider.Key, cache) && await GetAsync(uid, wider.Key, cache, store, cancellationToken).ConfigureAwait(false) is { } partial)
+            {
+                return (partial, wider.KeyOf);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Learns the text of the family whose partials are kept under <paramref name="key"/>.</summary>
+    private void Know(UInt128 key, string text)
+    {
+        if (_texts.TryAdd(key, (text, XxHash128.HashToUInt128(Encoding.UTF8.GetBytes(text)))))
+        {
+            Interlocked.Increment(ref _known);
+        }
+    }
+
+    /// <summary>Reads the texts of the families <paramref name="store"/> lists that the handle does not know, side by side; none when it lists or reads none.</summary>
+    private async Task FamiliesAsync(IObjectStore store)
+    {
+        List<(UInt128 Key, int Length)> unknown = [];
+        try
+        {
+            await foreach (ObjectListing listing in store.ListAsync(CommitKey.FamiliesPrefix, null, CancellationToken.None).ConfigureAwait(false))
+            {
+                if (CommitKey.TryParseLearned(listing.Key, out UInt128 family, out UInt128? uid) && uid is null && !_texts.ContainsKey(family)
+                    && listing.Head.Length is > 0 and <= MaxText)
+                {
+                    unknown.Add((family, (int)listing.Head.Length));
+                }
+            }
+
+            await Parallel.ForEachAsync(unknown, new ParallelOptions { MaxDegreeOfParallelism = 16 }, async (described, cancellationToken) =>
+            {
+                byte[] bytes = new byte[described.Length];
+                ObjectRead read = await store.ReadAsync(CommitKey.ForFamily(described.Key), 0, bytes, null, cancellationToken).ConfigureAwait(false);
+                if (read.BytesRead == bytes.Length)
+                {
+                    Know(described.Key, Encoding.UTF8.GetString(bytes));
+                }
+            }).ConfigureAwait(false);
+        }
+        catch (Exception failure) when (failure is ObjectStoreException or ObjectNotFoundException or IOException)
+        {
+            // A store that lists or reads no family, or a family a vacuum took since the listing: those known serve.
+        }
+    }
 
     /// <summary>
     /// Reads, once for the handle, which objects' partials of <paramref name="family"/> <paramref name="store"/> keeps: a
@@ -287,6 +441,11 @@ internal sealed class LearnedPartials
         }
 
         Hold(uid, family, partial);
+        if (text is not null && !_texts.ContainsKey(family))
+        {
+            Know(family, text);
+        }
+
         if (cache is null && (store is null || text is null))
         {
             return;

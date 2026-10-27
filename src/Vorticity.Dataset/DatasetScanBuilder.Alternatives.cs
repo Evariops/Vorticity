@@ -312,10 +312,16 @@ internal sealed partial class DatasetScanBuilder
             return summed;
         }
 
-        internal override string Describe(Planned unit, PathCosts.Cost cost) =>
-            Scan._dataset.Partials.Holds(unit.Held.Entry.Uid, Scan.FamilyOf(unit.Held)!.Value.Key, Scan._dataset.Session.Options.SynopsisCache)
-                ? "the partial of the question's family it learned"
+        internal override string Describe(Planned unit, PathCosts.Cost cost)
+        {
+            LearnedPartials partials = Scan._dataset.Partials;
+            UInt128 uid = unit.Held.Entry.Uid;
+            UInt128 key = Scan.FamilyOf(unit.Held)!.Value.Key;
+            SynopsisCache? cache = Scan._dataset.Session.Options.SynopsisCache;
+            return partials.HoldsOwn(uid, key, cache) ? "the partial of the question's family it learned"
+                : partials.Holds(uid, key, cache) ? "the partial of a family that serves the question's, its columns brought to the question's"
                 : "the partials of the question's family of the objects a compaction merged into it, summed";
+        }
     }
 
     /// <summary>The statistics of an object's columns over its granules, the granules they do not answer read as rows (<see cref="GranuleAnswer"/>).</summary>
@@ -555,10 +561,20 @@ internal sealed partial class DatasetScanBuilder
         {
             if (Covered(held) > 0 && rollups?.CoverOf(held) is not >= 0)
             {
-                // The partials of the question's family the store keeps, listed once for the handle, which the choice weighs.
-                if (_family is not null && _dataset.LearnedStore is { } store && FamilyOf(held) is { } own)
+                // The partials of the question's family the store keeps, listed once for the handle, which the choice weighs;
+                // for an object none holds, the families that serve it, found once while the handle knows as many.
+                if (_family is not null && FamilyOf(held) is { } own)
                 {
-                    await _dataset.Partials.ListAsync(store, own.Key, cancellationToken).ConfigureAwait(false);
+                    IO.IObjectStore? store = _dataset.LearnedStore;
+                    if (store is not null)
+                    {
+                        await _dataset.Partials.ListAsync(store, own.Key, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    if (!_dataset.Partials.Holds(held.Entry.Uid, own.Key, _dataset.Session.Options.SynopsisCache))
+                    {
+                        await _dataset.Partials.CoveringAsync(store, own.Family, own.Key, cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
                 Planned unit = new Planned(held, answer is null ? null : AnsweredBy(answer, held));

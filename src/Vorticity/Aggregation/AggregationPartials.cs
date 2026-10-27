@@ -360,9 +360,19 @@ internal interface IStateOverlay
 /// each partial read as it arrives. The source has no rows: it answers a count of them from the states, and nothing else
 /// but states.
 /// </summary>
-internal sealed class PartialsSource(ScanSource question, IAsyncEnumerable<AggregationPartial> partials, VortexSchema expected)
+/// <param name="question">The question's source, whose columns its plan reads by.</param>
+/// <param name="partials">The partials, read as they arrive.</param>
+/// <param name="expected">The columns of the question's partials.</param>
+/// <param name="keyOf">
+/// For partials of a family that serves the question's (<see cref="LearnedFamily.Covers"/>), each key of the question's at
+/// its place among theirs: each batch is brought to <paramref name="expected"/>, its other columns left out; null for
+/// partials of the question's own.
+/// </param>
+internal sealed class PartialsSource(ScanSource question, IAsyncEnumerable<AggregationPartial> partials, VortexSchema expected, int[]? keyOf = null)
     : ScanSource, IRowsCapability, IStatisticsCapability, IKeysCapability, IStatesCapability, ICostCapability
 {
+    private DType? _projected;
+
     /// <summary>The question's columns, which its plan reads by.</summary>
     internal override VortexSchema Schema => question.Schema;
 
@@ -397,12 +407,12 @@ internal sealed class PartialsSource(ScanSource question, IAsyncEnumerable<Aggre
         long row = 0;
         await foreach (AggregationPartial partial in partials.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            VortexFile file = await OpenAsync(partial, cancellationToken).ConfigureAwait(false);
+            (VortexFile file, int[]? fields) = await OpenAsync(partial, cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
                 await foreach (RecordBatch batch in new FileScanSource(file).Rows.BatchesAsync(new ScanSpec(), metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
-                    yield return Canonical(batch, row);
+                    yield return fields is null ? Canonical(batch, row) : Projected(batch, row, fields);
                     row += batch.RowCount;
                 }
             }
@@ -417,7 +427,8 @@ internal sealed class PartialsSource(ScanSource question, IAsyncEnumerable<Aggre
     {
         CanonicalArena arena = batch.Arena;
         CanonicalNode root = arena.GetNode(batch.RootIndex);
-        int[] columns = new int[root.DType.FieldCount];
+        int count = root.DType.FieldCount;
+        Span<int> columns = count <= 64 ? stackalloc int[count] : new int[count];
         for (int c = 0; c < columns.Length; c++)
         {
             columns[c] = EncodedForms.Canonical(arena, root.GetFieldIndex(c));
@@ -426,17 +437,65 @@ internal sealed class PartialsSource(ScanSource question, IAsyncEnumerable<Aggre
         return RecordBatch.OfPartial(arena, arena.AddStruct(root.DType, batch.RowCount, Validity.NonNullable, columns), row);
     }
 
-    /// <summary>A partial's file, refused when its columns are not those of this question's partials.</summary>
-    private async ValueTask<VortexFile> OpenAsync(AggregationPartial partial, CancellationToken cancellationToken)
+    /// <summary>A batch of a partial of a family that serves the question's as a batch of its states: the columns at <paramref name="fields"/>, under the question's names.</summary>
+    private RecordBatch Projected(RecordBatch batch, long row, int[] fields)
+    {
+        CanonicalArena arena = batch.Arena;
+        CanonicalNode root = arena.GetNode(batch.RootIndex);
+        Span<int> columns = fields.Length <= 64 ? stackalloc int[fields.Length] : new int[fields.Length];
+        for (int c = 0; c < columns.Length; c++)
+        {
+            columns[c] = EncodedForms.Canonical(arena, root.GetFieldIndex(fields[c]));
+        }
+
+        _projected ??= VortexTypes.ToDType(expected, new DTypeArena());
+        return RecordBatch.OfPartial(arena, arena.AddStruct(_projected.Value, batch.RowCount, Validity.NonNullable, columns), row);
+    }
+
+    /// <summary>
+    /// A partial's file, and for a partial of a family that serves the question's the place of each of the question's columns
+    /// among its own (<see cref="FieldsOf"/>); refused when its columns are not those of this question's partials, or hold
+    /// them not.
+    /// </summary>
+    private async ValueTask<(VortexFile File, int[]? Fields)> OpenAsync(AggregationPartial partial, CancellationToken cancellationToken)
     {
         VortexFile file = await partial.OpenAsync(Session, cancellationToken).ConfigureAwait(false);
-        if (!file.Schema.Equals(expected))
+        int[]? fields = keyOf is null ? null : FieldsOf(file.Schema);
+        if (keyOf is null ? !file.Schema.Equals(expected) : fields is null)
         {
             await file.DisposeAsync().ConfigureAwait(false);
             throw new InvalidDataException("A partial of another question: its keys or its measures are not this question's.");
         }
 
-        return file;
+        return (file, fields);
+    }
+
+    /// <summary>
+    /// For each column of the question's partials, its place among <paramref name="schema"/>'s, of the same type: a key's
+    /// under the name of its place there (<see cref="StateRequest.PartialKey"/>), another under its own; null when one is
+    /// missing.
+    /// </summary>
+    private int[]? FieldsOf(VortexSchema schema)
+    {
+        int[] fields = new int[expected.Count];
+        for (int i = 0; i < fields.Length; i++)
+        {
+            VortexField field = expected[i];
+            if (i < keyOf!.Length && !string.Equals(field.Name, StateRequest.PartialKey(i), StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            int at = schema.IndexOfName(i < keyOf.Length ? StateRequest.PartialKey(keyOf[i]) : field.Name);
+            if (at < 0 || schema[at].Type != field.Type)
+            {
+                return null;
+            }
+
+            fields[i] = at;
+        }
+
+        return fields;
     }
 
     /// <summary>The rows the partials' groups count, for a count of rows alone, which the engine asks of a source.</summary>

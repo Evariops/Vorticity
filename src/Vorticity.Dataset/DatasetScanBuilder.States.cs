@@ -134,7 +134,8 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// The partial of <paramref name="family"/> of the object <paramref name="uid"/> with no row read: the one learned of it,
-    /// or the sum of those of the objects a compaction merged into it alone (<see cref="LearnedPartials.Inherit"/>), each found
+    /// the one of a family that serves it brought to its columns and folded (<see cref="LearnedPartials.CoveredAsync"/>), or
+    /// the sum of those of the objects a compaction merged into it alone (<see cref="LearnedPartials.Inherit"/>), each found
     /// so in turn, a few merges deep; null when one of them has none.
     /// </summary>
     private async ValueTask<AggregationPartial?> InheritedAsync(UInt128 uid, LearnedFamily family, UInt128 key, int depth, CancellationToken cancellationToken)
@@ -143,6 +144,18 @@ internal sealed partial class DatasetScanBuilder
         if (await _dataset.Partials.GetAsync(uid, key, cache, _dataset.LearnedStore, cancellationToken).ConfigureAwait(false) is { } held)
         {
             return held;
+        }
+
+        if (await _dataset.Partials.CoveredAsync(uid, key, cache, _dataset.LearnedStore, cancellationToken).ConfigureAwait(false) is { } covered)
+        {
+            try
+            {
+                return await family.MergeAsync([covered.Partial], covered.KeyOf, _familySource!, _options, cancellationToken).ConfigureAwait(false);
+            }
+            catch (System.IO.InvalidDataException)
+            {
+                // A partial whose columns its family's text did not say: the object is summed or learned as if none served.
+            }
         }
 
         if (depth >= MergesDeep || _dataset.Partials.MergedInto(uid, cache) is not { } inputs)
@@ -161,7 +174,7 @@ internal sealed partial class DatasetScanBuilder
             parts[i] = part;
         }
 
-        return await family.MergeAsync(parts, _familySource!, _options, cancellationToken).ConfigureAwait(false);
+        return await family.MergeAsync(parts, null, _familySource!, _options, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The merges a partial is summed through at most, an object's of objects merged into it before.</summary>
