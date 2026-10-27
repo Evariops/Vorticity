@@ -113,7 +113,7 @@ internal static class AggregationPartials
     internal static async ValueTask<AggregationPartial> ExportAsync(AggregationQuery query, CancellationToken cancellationToken)
     {
         using MemoryStream stream = new MemoryStream();
-        VortexFileWriter writer = query.Session.CreateWriter(PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true)), query.Schema);
+        VortexFileWriter writer = query.Session.CreateWriter(PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true)), query.Schema, VortexWriteOptions.Partial);
         await using (writer.ConfigureAwait(false))
         {
             IAsyncEnumerator<RecordBatch> groups = query.Groups(cancellationToken);

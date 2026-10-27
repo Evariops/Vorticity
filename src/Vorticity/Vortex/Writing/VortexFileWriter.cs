@@ -472,6 +472,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private static readonly byte[] Magic = VortexFileFormat.MagicBytes.ToArray();
     private readonly bool _fileStatistics;
 
+    /// <summary>Whether the file keeps its columns' zone maps (<see cref="VortexWriteOptions.Zones"/>).</summary>
+    private bool _zones = true;
+
     /// <summary>The identity the options pinned, or null for a fresh one.</summary>
     private readonly Guid? _identity;
     // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
@@ -871,6 +874,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
             _budget = session?.WriteLanes,
             _located = options.Located,
+            _zones = options.Zones,
         };
         writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
         if (options.CarriesContents)
@@ -2914,6 +2918,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </remarks>
     private async ValueTask WriteZoneMapsAsync(CancellationToken cancellationToken)
     {
+        if (!_zones)
+        {
+            return;
+        }
+
         // An edition without `vortex.zoned` has nowhere to put a zone map. Omitted rather than
         // approximated with the legacy `vortex.stats`, which no reference release emits: pruning is
         // an optimization, so dropping it costs correctness nothing.

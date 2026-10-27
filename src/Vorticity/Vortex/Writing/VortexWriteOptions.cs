@@ -388,6 +388,18 @@ public sealed record VortexWriteOptions
     /// <summary>Whether the chooser reads a list's elements from their ingest blocks.</summary>
     internal bool ElementStatistics { get; init; } = true;
 
+    /// <summary>
+    /// Whether the file keeps a zone map of each column over its blocks, which a filter prunes by and an open parses: true
+    /// by default; false for a file always read whole, such as a partial's.
+    /// </summary>
+    internal bool Zones { get; init; } = true;
+
+    /// <summary>
+    /// What a partial's file is written with (<see cref="AggregationPartial"/>): read whole at each question it serves, it
+    /// keeps no zone map, no statistics and no index, which an open would parse for nothing.
+    /// </summary>
+    internal static VortexWriteOptions Partial { get; } = new VortexWriteOptions { WriteStatistics = false, Zones = false, WritePolicy = WritePolicy.None };
+
     /// <summary>Whether the writer may pick an encoding per column chunk.</summary>
     internal bool Compress
     {
