@@ -184,7 +184,7 @@ internal sealed class ProjectionQuery : ResultQuery
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new ProjectedBatches(this, cancellationToken);
 
     internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) =>
-        Host.Source.ExplainAsync(SourceSpec(keepEncodings: true, out _), cancellationToken);
+        Host.Source.PlanAsync(SourceSpec(keepEncodings: true, out _), cancellationToken);
 
     internal override ResultQuery As(VortexSchema record, Type type)
     {
@@ -234,12 +234,17 @@ internal sealed class ProjectionQuery : ResultQuery
             uses.Add(element.Source.Field);
         }
 
+        FieldMask projection = mask.Build();
+        IReadOnlyDictionary<string, string[]>? variantKeys = Indexes.VariantKeyReads.Of(uses, spec.Filter);
         spec = spec with
         {
-            Projection = mask.Build(),
+            Query = spec.Query is { Shape: RowsShape rowsShape } question
+                ? question with { Reads = projection, VariantKeys = variantKeys, Shape = rowsShape with { Skip = Skip, Take = Take } }
+                : spec.Query,
+            Projection = projection,
             KeepEncodings = keepEncodings,
             Options = spec.Options with { Compact = true },
-            VariantKeys = Indexes.VariantKeyReads.Of(uses, spec.Filter),
+            VariantKeys = variantKeys,
         };
         narrowed = false;
         if ((Skip > 0 || Take != long.MaxValue) && Host.Source is FileScanSource file

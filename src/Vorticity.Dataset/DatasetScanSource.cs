@@ -30,6 +30,8 @@ internal sealed class DatasetScanSource : ScanSource
 
     internal override VortexSession Session => _dataset.Session;
 
+    internal override LogicalSource Logical => new LogicalSource(LogicalSourceKind.Dataset, _version.Version);
+
     /// <summary>The dataset's: its options' profile, or its store's.</summary>
     internal override IO.CostProfile Profile => _dataset.Profile;
 

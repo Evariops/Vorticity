@@ -234,7 +234,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.CountAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.CountAsync(Query(LogicalShape.Count).Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -250,7 +250,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.AnyAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.AnyAsync(Query(LogicalShape.Any).Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -278,19 +278,20 @@ public sealed partial class Scan<TRecord>
     /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
     /// <returns>The plan.</returns>
     public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) =>
-        _source.ExplainAsync(Spec(), cancellationToken);
+        _source.PlanAsync(Spec(), cancellationToken);
 
-    /// <summary>The spec the sinks run.</summary>
-    internal ScanSpec Spec() => new ScanSpec
+    /// <summary>The spec the sinks of rows run: the rows of the question, in its order.</summary>
+    internal ScanSpec Spec() => Query(_orderPath is null ? RowsShape.All : new RowsShape(_orderPath, _descending)).Spec();
+
+    /// <summary>The question the scan asks, its answer of <paramref name="shape"/>.</summary>
+    internal LogicalQuery Query(LogicalShape shape) => new LogicalQuery(_source.Logical, _source.Schema, shape)
     {
-        Projection = Binding.Mask,
+        Reads = Binding.Mask,
         Filter = _filter.Node,
         MatchesNothing = _filter.IsNone,
-        Rows = _rows,
-        Take = _take,
-        OrderPath = _orderPath,
-        Descending = _descending,
-        Options = _take is not null && _filter.IsAll ? _options with { Compact = false } : _options,
+        Range = _rows,
+        Positions = _take,
+        Options = _options,
     };
 
     internal ScanCounters Counters => _counters;
@@ -331,7 +332,8 @@ public sealed partial class Scan<TRecord>
         FilterLiteral value;
         try
         {
-            value = await _source.ExtremeAsync(Spec().Reading([target.Field]), target.Field, min, _counters, cancellationToken).ConfigureAwait(false);
+            value = await _source.ExtremeAsync(
+                Query(new ExtremeShape(target.Field.Path, min)).Spec().Reading([target.Field]), target.Field, min, _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {

@@ -357,6 +357,8 @@ internal sealed class PartialsSource(ScanSource question, AggregationPartial[] p
 
     internal override IO.CostProfile Profile => question.Profile;
 
+    internal override LogicalSource Logical => question.Logical;
+
     internal override bool KeepsStates => true;
 
     internal override ValueTask<bool> TakesStatesAsync(ScanSpec spec, StateRequest states, CancellationToken cancellationToken) =>

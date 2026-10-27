@@ -46,7 +46,11 @@ public sealed record KeyPlan(
     int Runs,
     long? EntryCount,
     bool HasRows,
-    IReadOnlyList<KeySourceRejection> Rejected);
+    IReadOnlyList<KeySourceRejection> Rejected)
+{
+    /// <summary>The walk asked, in words: the column's keys or its distinct ones, and the source it walks.</summary>
+    public string Logical { get; init; } = string.Empty;
+}
 
 /// <summary>One source that was not chosen, and the reason.</summary>
 /// <param name="Source">The source.</param>

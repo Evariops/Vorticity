@@ -79,8 +79,16 @@ namespace Vorticity
         /// <summary>Which key source the cursor would walk, and why the others were refused.</summary>
         /// <param name="cancellationToken">Cancels the reads of the key sources.</param>
         /// <returns>The plan.</returns>
-        public ValueTask<KeyPlan> ExplainAsync(CancellationToken cancellationToken = default) =>
-            _source.ExplainKeysAsync(_column.Field.Path, _distinct, _indexes, cancellationToken);
+        public async ValueTask<KeyPlan> ExplainAsync(CancellationToken cancellationToken = default)
+        {
+            KeyPlan plan = await _source.ExplainKeysAsync(_column.Field.Path, _distinct, _indexes, cancellationToken).ConfigureAwait(false);
+            LogicalQuery query = new LogicalQuery(_source.Logical, _source.Schema, new KeysShape(_column.Field.Path, _distinct))
+            {
+                Options = _indexes ? ScanOptions.Default : ScanOptions.Default with { UseIndexes = false },
+            };
+
+            return plan with { Logical = query.Text };
+        }
     }
 
     /// <summary>

@@ -30,6 +30,8 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
 
     internal override VortexSession Session => file.Session;
 
+    internal override LogicalSource Logical => new LogicalSource(LogicalSourceKind.File);
+
     internal override long RowBound => file.RowCount;
 
     private protected override string Kind => "Parquet file";

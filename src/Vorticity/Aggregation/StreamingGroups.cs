@@ -374,7 +374,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _query.Plan.LastGroups = 0;
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
-        ScanSpec spec = await host.AlignedSpecAsync(plan, _query.RowFilter, _cancellationToken).ConfigureAwait(false);
+        ScanSpec spec = await host.AlignedSpecAsync(plan, _query.RowFilter, _cancellationToken, _query.Operators).ConfigureAwait(false);
         ScanSpec pass = AggregationEngine.PassSpec(spec, columns, plan, host.Source.Schema);
         int streaming = _zones is null ? Streaming(_query) : 0;
 

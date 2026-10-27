@@ -820,7 +820,12 @@ internal sealed class EstimateQuery : ResultQuery
 
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new EstimateBatches(this, cancellationToken);
 
-    internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => _question.ExplainAsync(cancellationToken);
+    /// <summary>The question's plan, the question an estimate.</summary>
+    internal override async ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken)
+    {
+        ScanPlan plan = await _question.ExplainAsync(cancellationToken).ConfigureAwait(false);
+        return _question.Logical is { } query ? plan with { Logical = (query with { Estimated = true }).Text } : plan;
+    }
 
     internal override ResultQuery As(VortexSchema record, Type type)
     {

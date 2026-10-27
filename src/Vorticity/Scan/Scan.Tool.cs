@@ -177,7 +177,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.CountAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.CountAsync(Query(LogicalShape.Count).Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -193,7 +193,7 @@ public sealed partial class Scan
         Begin();
         try
         {
-            return await _source.AnyAsync(Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
+            return await _source.AnyAsync(Query(LogicalShape.Any).Spec().Reading([]), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -204,15 +204,19 @@ public sealed partial class Scan
     /// <summary>What the scan will do, without reading a data segment.</summary>
     /// <param name="cancellationToken">Cancels the reads of the structures consulted.</param>
     /// <returns>The plan.</returns>
-    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _source.ExplainAsync(Spec(), cancellationToken);
+    public ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken = default) => _source.PlanAsync(Spec(), cancellationToken);
 
-    private ScanSpec Spec() => new ScanSpec
+    /// <summary>The spec the sinks of rows run.</summary>
+    private ScanSpec Spec() => Query(RowsShape.All).Spec();
+
+    /// <summary>The question the scan asks, its answer of <paramref name="shape"/>.</summary>
+    private LogicalQuery Query(LogicalShape shape) => new LogicalQuery(_source.Logical, _source.Schema, shape)
     {
-        Projection = _projection,
+        Reads = _projection,
         Filter = _filter,
-        Rows = _rows,
-        Take = _take,
-        Options = _take is not null && _filter is null ? _options with { Compact = false } : _options,
+        Range = _rows,
+        Positions = _take,
+        Options = _options,
     };
 
     private void Begin()

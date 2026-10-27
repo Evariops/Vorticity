@@ -56,6 +56,12 @@ public sealed record ScanPlan(
     long Rows, int Blocks, int LiveBlocks, int Segments, long BytesToRead, bool MayMatch,
     ImmutableArray<PruningStep> Pruning, CountPlan Count, OrderPlan? Order)
 {
+    /// <summary>
+    /// The question the scan answers, in words: the shape of its answer (rows, an aggregate, a count), its source, the columns
+    /// it reads, its filter, its options; what it asks, never how.
+    /// </summary>
+    public string Logical { get; init; } = string.Empty;
+
     /// <summary>What a group by will do with the rows; null without a group by.</summary>
     public GroupPlan? Grouping { get; init; }
 

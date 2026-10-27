@@ -10,9 +10,15 @@ using Vorticity.Scanning;
 
 namespace Vorticity;
 
-/// <summary>What one scan asks of its source: the columns, the filter, the rows, the order, the options.</summary>
+/// <summary>
+/// What one scan asks of its source: the columns, the filter, the rows, the order, the options; derived from the question it
+/// serves (<see cref="Query"/>), then narrowed by the engine for each of its passes and parts.
+/// </summary>
 internal sealed record ScanSpec
 {
+    /// <summary>The question the scan serves, as the caller asked it; null for a read of the engine's own.</summary>
+    internal LogicalQuery? Query { get; init; }
+
     /// <summary>The columns to deliver, or null for every column.</summary>
     internal FieldMask? Projection { get; init; }
 
@@ -128,6 +134,16 @@ internal abstract class ScanSource
     internal abstract ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken);
 
     internal abstract ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken);
+
+    /// <summary>What the source is to a question: a file, a version of a dataset, a stream.</summary>
+    internal abstract LogicalSource Logical { get; }
+
+    /// <summary>The plan of <paramref name="spec"/> (<see cref="ExplainAsync"/>), with the question it serves in words.</summary>
+    internal async ValueTask<ScanPlan> PlanAsync(ScanSpec spec, CancellationToken cancellationToken)
+    {
+        ScanPlan plan = await ExplainAsync(spec, cancellationToken).ConfigureAwait(false);
+        return spec.Query is { } query ? plan with { Logical = query.Text } : plan;
+    }
 
     /// <summary>Whether the statistics alone rule the filter out; never false for a filter that may match.</summary>
     internal abstract bool MayMatch(VortexExpr filter);
@@ -265,6 +281,8 @@ internal sealed class FileScanSource : ScanSource
     internal FileScanSource(VortexFile file) => _file = file;
 
     internal VortexFile File => _file;
+
+    internal override LogicalSource Logical => new LogicalSource(LogicalSourceKind.File);
 
     internal override VortexSchema Schema => _file.Schema;
 

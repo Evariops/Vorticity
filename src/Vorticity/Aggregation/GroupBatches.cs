@@ -52,6 +52,9 @@ internal sealed class AggregationQuery : ResultQuery
     /// <summary>The conjuncts of the filters on groups that name only the key: they filter the rows.</summary>
     internal VortexExpr? RowFilter { get; }
 
+    /// <summary>The question the query asks: an aggregate of its scan's rows by its keys, then its operators on its groups.</summary>
+    internal LogicalQuery? Logical => Host.Spec().Query?.Aggregating(Plan, Operators);
+
     /// <summary>
     /// Whether the query gives its groups' states rather than their answers: a part's (<see cref="Partial"/>), whose columns
     /// are those of rows of states (<see cref="AggregationPartials.Columns"/>), and which the file statistics settle nothing of.
@@ -234,7 +237,7 @@ internal sealed class AggregationQuery : ResultQuery
 
     internal override async ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken)
     {
-        ScanPlan scan = await Host.ExplainAsync(Plan, cancellationToken, RowFilter).ConfigureAwait(false);
+        ScanPlan scan = await Host.ExplainAsync(Plan, cancellationToken, RowFilter, Operators).ConfigureAwait(false);
         return Plan.Grouped ? scan with { Grouping = GroupPlans.Of(this) } : scan;
     }
 

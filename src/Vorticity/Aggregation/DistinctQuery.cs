@@ -106,7 +106,13 @@ internal sealed class DistinctQuery : ResultQuery
 
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new DistinctBatches(this, cancellationToken);
 
-    internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Projection.ExplainAsync(cancellationToken);
+    /// <summary>The projection's plan, and the question: the distinct values of its columns, an aggregate by them alone.</summary>
+    internal override async ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken)
+    {
+        ScanPlan plan = await Projection.ExplainAsync(cancellationToken).ConfigureAwait(false);
+        ScanSpec spec = Projection.SourceSpec(keepEncodings: true, out _);
+        return spec.Query is { } query ? plan with { Logical = query.Aggregating(Plan, null).Text } : plan;
+    }
 
     internal override ResultQuery As(VortexSchema record, Type type)
     {

@@ -21,6 +21,8 @@ namespace Vorticity;
 /// </summary>
 internal abstract class StreamScanSource : ScanSource
 {
+    internal override LogicalSource Logical => new LogicalSource(LogicalSourceKind.Stream);
+
     /// <summary>
     /// The source's batches, every row in its order, each borrowed until the next is asked for: the
     /// root a struct of the schema's columns that <paramref name="columns"/> names, in the schema's
