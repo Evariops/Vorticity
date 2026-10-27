@@ -492,11 +492,22 @@ internal sealed partial class DatasetScanBuilder
 
     /// <summary>
     /// Whether the scan reads the sparse index of the object <paramref name="held"/> to pass over the granules its filter
-    /// refutes (spec B, 5): it keeps one, and reading it weighs less than the rows of the question's columns it may spare.
+    /// refutes (spec B, 5): it keeps one, and reading it weighs less than the rows of the question's columns it may spare,
+    /// all but what a read of any of its granules pays, the object's open and a chunk of each column: nothing of an object
+    /// its open reads whole, or whose columns are a chunk each.
     /// </summary>
-    internal bool ReadsKeyIndex(in PositionedObject held) =>
-        held.Entry.Contents is { KeyIndex: { } index }
-        && _version.Costs.Weight(_version.Costs.Regions(held.Entry.Uid, [index])) < _version.Costs.Weight(_version.Costs.Rows(held.Entry, FieldsRead()));
+    internal bool ReadsKeyIndex(in PositionedObject held)
+    {
+        if (held.Entry.Contents is not { KeyIndex: { } index })
+        {
+            return false;
+        }
+
+        PathCosts costs = _version.Costs;
+        int[] fields = FieldsRead();
+        double spared = costs.Weight(costs.Rows(held.Entry, fields)) - costs.Weight(costs.Share(held.Entry, fields, double.Epsilon));
+        return costs.Weight(costs.Regions(held.Entry.Uid, [index])) < spared;
+    }
 
     /// <summary>The columns whose sheets the walk reads, when the filter asks values of a column; null otherwise. Found once.</summary>
     private List<int>? SheetColumns()
