@@ -492,12 +492,15 @@ public sealed class DatasetPlanTests
         return readRanked.Jobs.Length;
     }
 
-    /// <summary>Fails unless every trigger was met and some shape ranked three jobs.</summary>
+    /// <summary>
+    /// Fails unless every trigger was met and some shape ranked three jobs; <paramref name="never"/> is met by none, nor are the
+    /// tiers of a layout's partitions and their consolidation, which shapes of no layout never meet.
+    /// </summary>
     private static void Met(Dictionary<CompactionTrigger, int> met, int ranks, CompactionTrigger? never = null)
     {
         foreach (CompactionTrigger trigger in Enum.GetValues<CompactionTrigger>())
         {
-            if (trigger == never)
+            if (trigger == never || trigger is CompactionTrigger.Tier or CompactionTrigger.Consolidation)
             {
                 Assert.Equal(0, met.GetValueOrDefault(trigger));
                 continue;
