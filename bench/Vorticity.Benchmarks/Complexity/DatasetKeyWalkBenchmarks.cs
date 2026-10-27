@@ -1,9 +1,10 @@
 // What a walk of a dataset's sort key pays per entry, as the objects it merges grow.
 //
-// A dataset's key cursor merges the key cursors of its objects. `Original` (DatasetKeyCursorBefore.cs)
-// finds the next entry by a pass over every object, twice, and while an object waits to be opened
-// encodes the smallest key into a new array to compare it with that object's lower bound: every
-// entry costs a pass over the M objects and an allocation. `Library` is the cursor itself.
+// A dataset's key cursor merges the key cursors of its objects in a heap. The cursor it replaced
+// found the next entry by a pass over every object, twice, and while an object waited to be opened
+// encoded the smallest key into a new array to compare it with that object's lower bound: every
+// entry cost a pass over the M objects and an allocation, a walk over 256 interleaved objects 12
+// times what it costs now (a3c4b602, the measure against a checkout of the original).
 //
 // Two layouts, both of objects appended one by one: interleaved, each object holding every M-th
 // key, so that every object is open from the first entries on; and disjoint, each object holding a
@@ -66,29 +67,9 @@ public class DatasetKeyWalkBenchmarks
         _store.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
-    /// <summary>The walk that passes over every object for each entry.</summary>
-    [Benchmark(Baseline = true)]
-    public long Original() => OriginalAsync().GetAwaiter().GetResult();
-
     /// <summary>The cursor of the library.</summary>
     [Benchmark]
     public long Library() => LibraryAsync().GetAwaiter().GetResult();
-
-    private async Task<long> OriginalAsync()
-    {
-        long entries = 0;
-        await using DatasetKeyCursorBefore cursor = await DatasetKeyCursorBefore.OpenAsync(_dataset).ConfigureAwait(false);
-        if (await cursor.SeekFirstAsync().ConfigureAwait(false))
-        {
-            do
-            {
-                entries++;
-            }
-            while (await cursor.NextAsync().ConfigureAwait(false));
-        }
-
-        return entries;
-    }
 
     private async Task<long> LibraryAsync()
     {

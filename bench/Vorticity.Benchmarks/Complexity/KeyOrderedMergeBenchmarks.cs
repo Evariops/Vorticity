@@ -1,11 +1,12 @@
 // What the merge of a dataset's objects into key order pays per run, as the objects it holds open grow.
 //
-// The merge emits one run at a time: the rows of one input that go before any other's. `Original`
-// (KeyOrderedMergeBefore.cs) looks over every open input to choose the run and again to know where
-// it ends, and over them once more to know whether the next object must open first; when the
-// objects' keys interleave, every run is a row and the passes are paid for every row. `Library` is
-// the merge itself. Both are driven the same way, over the objects of one version in the order of
-// their bounds, each read in key order, as a key-ordered read of the dataset drives it.
+// The merge emits one run at a time: the rows of one input that go before any other's, its open
+// inputs in a heap past eight of them. The merge it replaced looked over every open input to choose
+// the run and again to know where it ends, and over them once more to know whether the next object
+// must open first; when the objects' keys interleave, every run is a row and the passes were paid
+// for every row, 3.2 times what the merge costs now over 256 interleaved objects (5fa8a85a, the
+// measure against a checkout of the original). It is driven over the objects of one version in the
+// order of their bounds, each read in key order, as a key-ordered read of the dataset drives it.
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -69,30 +70,9 @@ public class KeyOrderedMergeBenchmarks
         _store.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
-    /// <summary>The merge that looks over every open input for each run.</summary>
-    [Benchmark(Baseline = true)]
-    public long Original() => OriginalAsync().GetAwaiter().GetResult();
-
     /// <summary>The merge of the library.</summary>
     [Benchmark]
     public long Library() => LibraryAsync().GetAwaiter().GetResult();
-
-    private async Task<long> OriginalAsync()
-    {
-        long rows = 0;
-        KeyOrderedMergeBefore merge = new KeyOrderedMergeBefore(
-            _dataset.Snapshot, ObjectsAsync(), Paths, descending: false, rankedTies: true,
-            file => file.ScanBuilder().InKeyOrder(Paths, false), null, CancellationToken.None);
-        await using (merge.ConfigureAwait(false))
-        {
-            while (await merge.MoveNextAsync().ConfigureAwait(false))
-            {
-                rows += Vorticity.Bench.Scenarios.Consume.Batch(merge.Current);
-            }
-        }
-
-        return rows;
-    }
 
     private async Task<long> LibraryAsync()
     {

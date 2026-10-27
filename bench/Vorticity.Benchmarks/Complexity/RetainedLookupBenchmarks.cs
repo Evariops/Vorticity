@@ -1,10 +1,10 @@
 // What a scan pays to find the chunks it retains, as the columns it reads grow.
 //
 // A chunk larger than a batch is decoded once and every batch that reads it looks it up in the
-// scan's table of retained chunks, once per column. `Original` is the table that kept its entries
-// in a dense array searched in order (RetainedChunksBefore.cs), so a lookup costs the entries before
-// it and a batch of C columns costs C squared over two comparisons; `Library` is the table itself,
-// which hashes its entries by key past sixteen of them.
+// scan's table of retained chunks, once per column. The table hashes its entries by key past sixteen
+// of them; when it kept them in a dense array searched in order, a lookup cost the entries before it
+// and a batch of C columns C squared over two comparisons, 1.45 ms where it takes 89 µs at 1,024
+// columns (6dcd5e4a, the measure against a checkout of the original).
 //
 // Measure it with tiering off as well as on: in one process the cases share the JIT's profile, and
 // the path the small tables take first shapes the code the wide ones run next.
@@ -28,17 +28,15 @@ public class RetainedLookupBenchmarks
     private const int BatchesPerChunk = 4;
 
     private ScanContext _claimant = null!;
-    private RetainedChunksBefore _original = null!;
     private RetainedChunks _library = null!;
     private long _batch;
     private long _chunk;
 
-    /// <summary>One table of each kind, sized for the columns as a scan sizes its own.</summary>
+    /// <summary>The table, sized for the columns as a scan sizes its own.</summary>
     [GlobalSetup]
     public void Setup()
     {
         _claimant = new ScanContext(["vortex.primitive"]);
-        _original = new RetainedChunksBefore(Columns, lanes: 1);
         _library = RetainedChunks.Create(Columns, lanes: 1);
     }
 
@@ -46,36 +44,8 @@ public class RetainedLookupBenchmarks
     [GlobalCleanup]
     public void Cleanup()
     {
-        _original.Dispose();
         _library.Dispose();
         _claimant.Dispose();
-    }
-
-    /// <summary>The dense array, searched in order.</summary>
-    [Benchmark(Baseline = true)]
-    public int Original()
-    {
-        int found = 0;
-        long chunk = ++_chunk;
-        for (int b = 0; b < BatchesPerChunk; b++)
-        {
-            long batch = ++_batch;
-            for (int c = 0; c < Columns; c++)
-            {
-                if (_original.TryGet(Key(chunk, c), _claimant, batch, out RetainedChunk? claim, out _, out _))
-                {
-                    found++;
-                }
-                else
-                {
-                    _original.Publish(claim!, 0, batch);
-                }
-            }
-
-            _original.Release(batch);
-        }
-
-        return found;
     }
 
     /// <summary>The table of the library.</summary>
