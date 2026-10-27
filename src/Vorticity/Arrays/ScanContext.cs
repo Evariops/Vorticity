@@ -735,6 +735,13 @@ internal sealed class ScanContext : IDisposable
     internal bool PredicateAtNode { get; set; }
 
     /// <summary>
+    /// What the pushed predicate became on the codes of the dictionary layout read last: the file's layout and the node,
+    /// the predicate it came from, and the codes' predicate, or null where the verdicts are spread over the codes one by
+    /// one. Worked out once a context and dictionary from the verdicts on its values, which the scan retains.
+    /// </summary>
+    internal (Layouts.LayoutTree? Tree, int Layout, Compute.EncodedPredicate? Source, Compute.EncodedPredicate? Codes) DictionaryCodes { get; set; }
+
+    /// <summary>
     /// Whether an encoding answered <see cref="PushedField"/>'s comparison during this pass.
     /// </summary>
     /// <remarks>

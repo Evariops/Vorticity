@@ -1852,11 +1852,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                     : (null, null);
                 return low is null || high is null
                     ? NoPush
-                    : Numeric(left.Field, Compute.EncodedPredicate.Between(
+                    : Answerable(left.Field, Compute.EncodedPredicate.Between(
                         low.Value, low.Op == ComparisonOp.GreaterOrEqual, high.Value, high.Op == ComparisonOp.LessOrEqual));
 
             case InExpr set when set.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 } && set.Literals.Length <= MostPushedMembers:
-                return Numeric(set.Field, Compute.EncodedPredicate.In(set.Literals));
+                return Answerable(set.Field, Compute.EncodedPredicate.In(set.Literals));
 
             case StringMatchExpr { Op: StringMatchOp.StartsWith } match
                 when match.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 } && match.Pattern.Kind == FilterLiteralKind.Bytes:
@@ -1869,12 +1869,31 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         static bool IsLow(ComparisonOp op) => op is ComparisonOp.Greater or ComparisonOp.GreaterOrEqual;
         static bool IsHigh(ComparisonOp op) => op is ComparisonOp.Less or ComparisonOp.LessOrEqual;
 
-        // A range or a set of numbers: the encodings of integers answer them, and none answers one of bytes, whose
-        // first split would decode the column for nothing.
-        static PushPlan Numeric(FieldExpr field, Compute.EncodedPredicate predicate) =>
+        // A range or a set of numbers, which the encodings of integers answer, or of bytes, which a dictionary answers on
+        // its values: a column of text with none decodes its first split for nothing, once.
+        static PushPlan Answerable(FieldExpr field, Compute.EncodedPredicate predicate) =>
             predicate.Integers is null && predicate.Members is null && predicate.Decimals is null && predicate.DecimalMembers is null
+                && !Bytes(predicate)
                 ? NoPush
                 : new PushPlan(field, predicate);
+
+        static bool Bytes(Compute.EncodedPredicate predicate)
+        {
+            if (predicate.Kind == Compute.EncodedPredicateKind.Between)
+            {
+                return predicate.Literal.Kind == FilterLiteralKind.Bytes && predicate.High.Kind == FilterLiteralKind.Bytes;
+            }
+
+            foreach (FilterLiteral member in predicate.Values)
+            {
+                if (member.Kind != FilterLiteralKind.Bytes)
+                {
+                    return false;
+                }
+            }
+
+            return predicate.Values.Length > 0;
+        }
     }
 
     /// <summary>A predicate an encoding may answer, on a top-level field.</summary>

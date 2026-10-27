@@ -1059,7 +1059,7 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// The second bitmap only when a row is unknown: a comparison over a column with no null
     /// answers no unknown, and a validity bitmap nobody needs is a block allocated for nothing.
     /// </remarks>
-    private static int Answer(ScanContext context, ref Compute.PredicateBits bits)
+    internal static int Answer(ScanContext context, ref Compute.PredicateBits bits)
     {
         Arrays.CanonicalArena arena = context.Canonical;
         int total = bits.Rows;

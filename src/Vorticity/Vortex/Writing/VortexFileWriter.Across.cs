@@ -579,9 +579,15 @@ public sealed partial class VortexFileWriter
                 }
 
                 // A shredded variant's chunk is its residual and its typed columns, which the
-                // statistics of its rows as they came do not describe.
+                // statistics of its rows as they came do not describe; a column written against an
+                // object dictionary's, its codes.
                 ChunkStats stats = _stats[field];
-                if (writer._shredding?[field] is { } plan)
+                if (writer.Codes(field))
+                {
+                    local = writer.Coded(field, lane.Arena, local);
+                    stats = default;
+                }
+                else if (writer._shredding?[field] is { } plan)
                 {
                     Indexes.ChunkBlockBounds? bounds = writer.BoundsFor(field);
                     local = VariantShredder.Shred(lane.Arena, new Types.DTypeArena(), local, plan, bounds);

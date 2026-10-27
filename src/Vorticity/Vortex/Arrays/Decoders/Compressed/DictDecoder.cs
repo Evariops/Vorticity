@@ -65,17 +65,15 @@ internal sealed class DictDecoder : ArrayDecoder
     /// was read. The two compose, and share one decode of the values child.
     /// </para>
     /// <para>
-    /// A prefix match is answered as a comparison is: the distinct values matched once, the answers
-    /// spread over the rows by their codes.
+    /// A range, a set and a prefix match are answered as a comparison is: the distinct values judged
+    /// once, the answers spread over the rows by their codes.
     /// </para>
     /// </remarks>
     public override bool TryEvaluate(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
         ref Compute.PredicateBits bits)
     {
-        bool prefix = predicate.Kind == Compute.EncodedPredicateKind.Prefix;
-        if (!(predicate.Kind == Compute.EncodedPredicateKind.Compare
-            || (prefix && predicate.Literal.Kind == Expressions.FilterLiteralKind.Bytes && dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary)))
+        if (predicate.Kind == Compute.EncodedPredicateKind.Prefix && dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary))
         {
             return false;
         }
@@ -84,7 +82,7 @@ internal sealed class DictDecoder : ArrayDecoder
         try
         {
             Span<byte> states = rented.AsSpan(0, length);
-            if (!TryAnswer(context, in node, dtype, length, predicate.Op, predicate.Literal, prefix, states))
+            if (!TryAnswer(context, in node, dtype, length, predicate, states))
             {
                 return false;
             }
@@ -99,8 +97,8 @@ internal sealed class DictDecoder : ArrayDecoder
     }
 
     private static bool TryAnswer(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, bool prefix, Span<byte> destination)
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        Span<byte> destination)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
@@ -133,18 +131,13 @@ internal sealed class DictDecoder : ArrayDecoder
             CompressedThrow.ChildLength(Id, "values", values.Length, valuesLength);
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(valuesLength, 1));
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(2 * valuesLength, 1));
         try
         {
             Span<byte> answers = rented.AsSpan(0, valuesLength);
-            if (prefix)
+            if (!Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, answers, rented.AsSpan(valuesLength, valuesLength)))
             {
-                Compute.ComparisonKernels.StringMatch(
-                    context.Canonical, valuesIndex, Expressions.StringMatchOp.StartsWith, literal, escape: 0, answers);
-            }
-            else
-            {
-                Compute.ComparisonKernels.Compare(context.Canonical, valuesIndex, op, literal, answers);
+                return false;
             }
 
             DType codesType = context.Types.Primitive(metadata.CodesPType, codesNullability);

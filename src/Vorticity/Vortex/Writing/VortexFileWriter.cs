@@ -194,7 +194,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
         List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres,
-        long[] columnBytes, long[] columnChunks, IndexSegment[] marks) =>
+        long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories, pathDirectories)
         {
             Paging = paging,
@@ -207,6 +207,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             ColumnChunks = columnChunks,
             PureBlockRows = blockStats.Count > 0 && _blocks is { } declared ? declared.PureRows : -1,
             Marks = marks,
+            Dictionaries = dictionaries,
         };
 
     /// <summary>
@@ -2075,6 +2076,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             bounds = BoundsFor(field);
             node = VariantShredder.Shred(arena, new DTypeArena(), node, plan, bounds);
         }
+        else if (Codes(field))
+        {
+            // The chunk's codes, which the statistics of its values do not describe.
+            node = Coded(field, arena, node);
+        }
         else
         {
             stats = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
@@ -2139,6 +2145,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private ChunkStats ChunkStatsOf(int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks)
     {
+        if (Codes(field))
+        {
+            return default;
+        }
+
         // The chunk's statistics, computed at ingest over exactly these rows. The chooser checks the
         // row count against the node it is given and measures the column again when they disagree,
         // so a mismatch costs a pass and never a wrong plan.
@@ -2181,7 +2192,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         using (blob)
         {
-            _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
+            if (Codes(field))
+            {
+                _written[field].Add(nameof(EncodingHint.Dictionary));
+                _dictionaryWritten![field] += blob.Length;
+            }
+            else
+            {
+                _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
+            }
+
             // A tree that declares no buffer, a sequence's, is the chunk whole: inlined in the flat's
             // metadata as well, it spares a read of the chunk its segment, which keeps the blob for
             // a reader that ignores the field. A reader older than the editions of 2026 refuses a
@@ -2200,7 +2220,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 // The chunk's tree, and where its granules start in its buffers of variable length, while its blob is in hand.
                 long rows = _columns[field].Chunk(firstBlock, blocks).Rows;
                 geometry[field].Add((_geometryBuilder ??= new ChunkGeometryBuilder()).Of(
-                    blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema, checked((int)rows), _blockRows));
+                    blob.Memory.Span, _arrayEncodings.Ids, ChunkType(field), checked((int)rows), _blockRows));
             }
 
             int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
@@ -2423,6 +2443,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
 
+        // The values of the columns written against an object dictionary, once each, with the data.
+        await WriteDictionariesAsync(cancellationToken).ConfigureAwait(false);
+
         // The last runs, after the last data segment and before the zone maps: the generation the
         // end of the data left open, and the file-level filter.
         long dataEnd = _sink.Position;
@@ -2514,6 +2537,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             SliceChunks? chunks = null;
             IndexSegment[] chunkDirectories = [];
             IndexSegment[] marks = [];
+            ColumnDictionary?[] dictionaries = Dictionaries();
             ChunkPaging? paging = null;
             if (_slices is not null)
             {
@@ -2534,12 +2558,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     ColumnMarks[] columns = new ColumnMarks[geometry.Length];
                     for (int field = 0; field < columns.Length; field++)
                     {
-                        columns[field] = geometry[field].Count == chunks.Columns[field].Length
-                            ? new ColumnMarks(_blockRows, null, default, [.. geometry[field]])
-                            : new ColumnMarks(_blockRows, null, default, []);
+                        columns[field] = new ColumnMarks(
+                            _blockRows, geometry[field].Count == chunks.Columns[field].Length ? [.. geometry[field]] : []);
                     }
 
-                    marks = await closed.AddMarksAsync(_sink, columns, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                    marks = await closed.AddMarksAsync(_sink, columns, dictionaries, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
                 }
             }
 
@@ -2574,7 +2597,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_slices is { } sliced)
             {
                 _contents = Contents(
-                    sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks);
+                    sliced.Table, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, wheres, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.
@@ -2955,6 +2978,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
                 int data = LayoutWriter.Write(
                     builder, chunked, (ulong)_rowCount, chunkedMetadata[..metadataLength], chunks.AsSpan(0, segments.Count), []);
+
+                // A column written against an object dictionary: its chunks are the codes, beside its values.
+                if (Codes(field))
+                {
+                    data = DictLayout(builder, field, data, flat);
+                }
 
                 fieldLayouts[field] = Zone(builder, field, data, ref zoned);
             }

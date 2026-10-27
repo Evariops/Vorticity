@@ -138,6 +138,12 @@ internal sealed class ObjectContents(
     /// </summary>
     internal IReadOnlyList<IndexSegment> Marks { get; init; } = [];
 
+    /// <summary>
+    /// Each top-level column's object dictionary, by the column's place, null for a column whose chunks hold its values:
+    /// what a read of its chunks gathers their codes through. Empty when no column has one.
+    /// </summary>
+    internal IReadOnlyList<ColumnDictionary?> Dictionaries { get; init; } = [];
+
     private static IndexSegment? RegionOf(IReadOnlyList<(int Field, IndexSegment Region)> regions, int field)
     {
         foreach ((int column, IndexSegment region) in regions)
@@ -178,6 +184,7 @@ internal sealed class ObjectContents(
             ColumnChunks = ColumnChunks,
             PureBlockRows = PureBlockRows,
             Marks = Marks,
+            Dictionaries = Dictionaries,
         };
 
     // The page tables of the paged columns a read loaded, by column; null until one is.
@@ -254,6 +261,9 @@ internal sealed class ObjectContents(
 
     // A column's geometry, its region, one a column in column order.
     private const int TagMarks = 23;
+
+    // A column's object dictionary, a message a column that has one: its field, its segment, its values and codes.
+    private const int TagDictionary = 24;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -420,6 +430,15 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagMarks, marks);
             }
 
+            for (int field = 0; field < Dictionaries.Count; field++)
+            {
+                if (Dictionaries[field] is { } dictionary)
+                {
+                    using ProtoWriter.MessageScope message = writer.BeginMessage(TagDictionary);
+                    dictionary.Write(ref writer, field);
+                }
+            }
+
             writer.WriteBytes(TagSchema, Schema);
             foreach ((int field, IndexSegment region) in PathDirectories ?? [])
             {
@@ -539,6 +558,7 @@ internal sealed class ObjectContents(
             List<long> columnChunks = [];
             long pureBlockRows = -1;
             List<IndexSegment> marks = [];
+            List<(int Field, ColumnDictionary Dictionary)> dictionaries = [];
             IndexSegment? indexDirectory = null;
             List<LocatingEntry>? locating = null;
             ChunkPaging? paging = null;
@@ -566,6 +586,14 @@ internal sealed class ObjectContents(
                         break;
                     case (TagMarks, ProtoWireType.LengthDelimited):
                         marks.Add(IndexDirectory.ReadSegment(reader.ReadMessage()));
+                        break;
+                    case (TagDictionary, ProtoWireType.LengthDelimited):
+                        if (ColumnDictionary.Read(reader.ReadMessage()) is not { } column)
+                        {
+                            return null;
+                        }
+
+                        dictionaries.Add(column);
                         break;
                     case (TagSchema, ProtoWireType.LengthDelimited):
                         schema = reader.ReadLengthDelimited().ToArray();
@@ -663,7 +691,9 @@ internal sealed class ObjectContents(
 
             // The entries of a directory lie within it; a paged column's page table, whose length its pages give, is a chunk
             // directory the contents name, and its pages cover the slices' rows.
+            // A dictionary names a column the directories name.
             return version == Version && slices is not null && schema is not null
+                && dictionaries.TrueForAll(d => d.Field < directories.Count)
                 && (locating is null || (indexDirectory is { } named && locating.TrueForAll(l => l.Region.Offset >= named.Offset
                     && l.Region.Offset + l.Region.Length <= named.Offset + named.Length)))
                 && (paging is null || (slices.Slices.Count > 0 && paging.PageRows[^1] < slices.Rows && Array.TrueForAll(paging.Columns, c =>
@@ -682,6 +712,7 @@ internal sealed class ObjectContents(
                     ColumnChunks = columnChunks,
                     PureBlockRows = pureBlockRows,
                     Marks = marks.Count == directories.Count ? marks : [],
+                    Dictionaries = Placed(dictionaries, directories.Count),
                 }
                 : null;
         }
@@ -689,6 +720,23 @@ internal sealed class ObjectContents(
         {
             return null;
         }
+    }
+
+    /// <summary>The dictionaries by the place of their column among <paramref name="columns"/>; none when no column has one.</summary>
+    private static ColumnDictionary?[] Placed(List<(int Field, ColumnDictionary Dictionary)> named, int columns)
+    {
+        if (named.Count == 0)
+        {
+            return [];
+        }
+
+        ColumnDictionary?[] placed = new ColumnDictionary?[columns];
+        foreach ((int field, ColumnDictionary dictionary) in named)
+        {
+            placed[field] = dictionary;
+        }
+
+        return placed;
     }
 
     private static (int, IndexSegment)? Directory(ProtoReader reader)

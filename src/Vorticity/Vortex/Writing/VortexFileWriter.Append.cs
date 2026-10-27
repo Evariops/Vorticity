@@ -848,8 +848,12 @@ public sealed partial class VortexFileWriter
         /// <param name="tree">The file's layout.</param>
         /// <param name="field">The column.</param>
         /// <param name="refuse">What a shape this cannot continue throws; an append's refusal when null.</param>
+        /// <param name="codes">
+        /// Whether a column written against an object dictionary gives its codes' chunks, which hold its rows, as a reader of
+        /// its chunks takes them; an append, which would write rows the dictionary lacks, refuses it.
+        /// </param>
         internal static (LayoutNode Node, long ZoneLength) ColumnNode(
-            LayoutTree tree, int field, Func<string, VortexUnsupportedException>? refuse = null)
+            LayoutTree tree, int field, Func<string, VortexUnsupportedException>? refuse = null, bool codes = false)
         {
             refuse ??= Refused;
             LayoutNode root = tree.Root;
@@ -868,6 +872,11 @@ public sealed partial class VortexFileWriter
                 }
 
                 node = node.GetChild(0);
+            }
+
+            if (codes && node.Encoding == LayoutEncodingId.Dict && node.ChildCount == 2)
+            {
+                node = node.GetChild(1);
             }
 
             if (node.Encoding == LayoutEncodingId.Flat && node.Segments.Length == 1)

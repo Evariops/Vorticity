@@ -1756,10 +1756,13 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// Writes the geometry of every column's chunks, a region per column from the sink's position, and adds the entry that
-    /// names them: on the root, one run over every block of the file's <paramref name="rows"/>; the regions, in column order.
+    /// names them: on the root, one run over every block of the file's <paramref name="rows"/>; the regions, in column order;
+    /// the columns' object <paramref name="dictionaries"/>, which a reader of the directory gathers their codes through, its
+    /// options.
     /// </summary>
     internal async ValueTask<IndexSegment[]> AddMarksAsync(
-        ISegmentSink sink, IReadOnlyList<ColumnMarks> columns, long rows, int blockRows, CancellationToken cancellationToken)
+        ISegmentSink sink, IReadOnlyList<ColumnMarks> columns, IReadOnlyList<ColumnDictionary?> dictionaries, long rows, int blockRows,
+        CancellationToken cancellationToken)
     {
         IndexSegment[] regions = new IndexSegment[columns.Count];
         for (int column = 0; column < regions.Length; column++)
@@ -1770,7 +1773,8 @@ internal sealed class IndexWriter : IDisposable
         }
 
         int length = Math.Max(blockRows, 1);
-        _entries.Add(new IndexEntry(IndexKinds.Marks, [], (ulong)length, [], [new IndexRun(0, Blocks(rows, length), regions, [])]));
+        _entries.Add(new IndexEntry(
+            IndexKinds.Marks, [], (ulong)length, ColumnDictionary.ToBytes(dictionaries), [new IndexRun(0, Blocks(rows, length), regions, [])]));
         return regions;
     }
 

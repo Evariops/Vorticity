@@ -60,9 +60,12 @@ internal sealed class SliceReader : IDisposable
     private readonly ColumnMarks?[] _marks;
     private readonly bool[] _marksRead;
 
+    // Each column's object dictionary, whose codes its chunks hold: read with the chunks, and gathered through.
+    private readonly IReadOnlyList<ColumnDictionary?> _dictionaries;
+
     private SliceReader(
         ISegmentReader source, DType schema, VortexReadOptions options, SliceTable slices, string[] encodings,
-        IReadOnlyList<IndexSegment> regions, long rows, ObjectContents? contents = null)
+        IReadOnlyList<IndexSegment> regions, long rows, ObjectContents? contents = null, IReadOnlyList<ColumnDictionary?>? dictionaries = null)
     {
         _source = source;
         _schema = schema;
@@ -76,8 +79,12 @@ internal sealed class SliceReader : IDisposable
         _markRegions = contents?.Marks is { Count: > 0 } marks && marks.Count == regions.Count ? marks : null;
         _marks = new ColumnMarks?[regions.Count];
         _marksRead = new bool[regions.Count];
+        _dictionaries = contents?.Dictionaries is { Count: > 0 } named ? named : dictionaries ?? [];
         Slices = slices;
     }
+
+    /// <summary>Column <paramref name="field"/>'s object dictionary, or null when its chunks hold its values.</summary>
+    private ColumnDictionary? DictionaryOf(int field) => field < _dictionaries.Count ? _dictionaries[field] : null;
 
     /// <summary>Whether column <paramref name="field"/>'s directory lies in pages, which a read of a span reads those of alone.</summary>
     private bool Paged(int field) => _paged is { } paged && paged.Paging.Pages(field);
@@ -176,6 +183,7 @@ internal sealed class SliceReader : IDisposable
         SliceTable? slices = null;
         string[]? encodings = null;
         IReadOnlyList<IndexSegment>? regions = null;
+        ColumnDictionary?[]? dictionaries = [];
         foreach (IndexEntry entry in directory!.Entries)
         {
             if (entry.Kind == IndexKinds.Slices)
@@ -187,12 +195,17 @@ internal sealed class SliceReader : IDisposable
                 encodings = SliceChunks.EncodingsFrom(entry.Options);
                 regions = run.Payload;
             }
+            else if (entry.Kind == IndexKinds.Marks)
+            {
+                // The columns' object dictionaries, which their chunks cannot be read without.
+                dictionaries = ColumnDictionary.From(entry.Options, schema.FieldCount);
+            }
         }
 
         long rows = (long)directory.RowCount;
-        return slices is not null && encodings is not null && regions is not null
+        return slices is not null && encodings is not null && regions is not null && dictionaries is not null
             && slices.Rows == rows && regions.Count == schema.FieldCount
-            ? new SliceReader(source, schema, options ?? VortexReadOptions.Default, slices, encodings, regions, rows)
+            ? new SliceReader(source, schema, options ?? VortexReadOptions.Default, slices, encodings, regions, rows, dictionaries: dictionaries)
             : null;
     }
 
@@ -343,17 +356,26 @@ internal sealed class SliceReader : IDisposable
     /// <summary>
     /// Registers in <paramref name="requests"/> what reading the chunks of <paramref name="fields"/> that hold the span's rows
     /// takes, field by field: a chunk the span covers whole, or whose granules cannot be read alone, as its segment; a chunk
-    /// it covers in part, when the column's marks say where its granules lie, as the ranges of its region they hold.
+    /// it covers in part, when the column's marks say where its granules lie, as the ranges of its region they hold. A
+    /// column written against an object dictionary reads its values' segment first, which every span shares.
     /// </summary>
     private ChunkRead[] ChunksOf(SegmentRequestSet requests, ScanContext context, RowRange span, int[] fields, GranuleBytes granules)
     {
         List<ChunkRead> reads = [];
         foreach (int field in fields)
         {
+            int width = Width(_schema.GetField(field));
+            if (DictionaryOf(field) is { } dictionary)
+            {
+                ChunkSpan values = new ChunkSpan(dictionary.Offset, dictionary.Length, dictionary.AlignmentExponent, 0, dictionary.Values, -1);
+                reads.Add(new ChunkRead(values) { Whole = requests.Add(new SegmentSpec(values.Offset, values.Length, values.AlignmentExponent, 0, 0)) });
+                width = dictionary.Codes.ByteWidth();
+            }
+
             ColumnMarks? marks = System.Threading.Volatile.Read(ref _marks[field]);
             foreach (ChunkSpan chunk in Overlapping(field, span.Start, span.Length))
             {
-                if (marks is not null && Granules(requests, context, chunk, span, marks, _schema.GetField(field), granules) is { } ranged)
+                if (marks is not null && Granules(requests, context, chunk, span, marks, width, granules) is { } ranged)
                 {
                     reads.Add(ranged);
                     continue;
@@ -374,7 +396,7 @@ internal sealed class SliceReader : IDisposable
     /// null when the span covers the chunk whole, its geometry is not known, or its granules hold most of its bytes.
     /// </summary>
     private static ChunkRead? Granules(
-        SegmentRequestSet requests, ScanContext context, ChunkSpan chunk, RowRange span, ColumnMarks marks, DType type,
+        SegmentRequestSet requests, ScanContext context, ChunkSpan chunk, RowRange span, ColumnMarks marks, int width,
         GranuleBytes granules)
     {
         long from = Math.Max(span.Start, chunk.FirstRow);
@@ -397,7 +419,7 @@ internal sealed class SliceReader : IDisposable
         int start = (int)(from - chunk.FirstRow);
         int count = (int)(to - from);
         if (!context.Decode.DecodesRange(in root)
-            || !granules.TryPlan(in root, Width(type), checked((int)chunk.Rows), start, count, layout, geometry, marks.GranuleRows)
+            || !granules.TryPlan(in root, width, checked((int)chunk.Rows), start, count, layout, geometry, marks.GranuleRows)
             || granules.Bytes > WholeShare * chunk.Length)
         {
             return null;
@@ -470,7 +492,8 @@ internal sealed class SliceReader : IDisposable
         int next = 0;
         for (int i = 0; i < fields.Length; i++)
         {
-            decoded[i] = Column(context, schema.GetField(i), Overlapping(fields[i], span.Start, span.Length).Length, span, length, reads, ref next);
+            decoded[i] = Column(
+                context, schema.GetField(i), DictionaryOf(fields[i]), Overlapping(fields[i], span.Start, span.Length).Length, span, length, reads, ref next);
         }
 
         int root = context.Canonical.AddStruct(
@@ -849,11 +872,22 @@ internal sealed class SliceReader : IDisposable
 
     /// <summary>
     /// One column's rows of the span: its <paramref name="chunks"/> chunks that overlap it, each decoded whole and cut to the
-    /// span, or its granules decoded alone over the region they were read into, joined.
+    /// span, or its granules decoded alone over the region they were read into, joined. A column written against an object
+    /// dictionary reads its values first, its chunks as codes, and gathers the one through the other.
     /// </summary>
     private static int Column(
-        ScanContext context, DType type, int chunks, RowRange span, int length, ChunkRead[] reads, ref int next)
+        ScanContext context, DType type, ColumnDictionary? dictionary, int chunks, RowRange span, int length, ChunkRead[] reads, ref int next)
     {
+        int values = -1;
+        DType chunkType = type;
+        if (dictionary is { } named)
+        {
+            context.Decode.LoadBlob(context.Segments.GetBuffer(reads[next++].Whole));
+            ArrayNode valuesRoot = context.Nodes.Root;
+            values = context.Decode.DecodeRoot(in valuesRoot, type, checked((int)named.Values));
+            chunkType = context.Types.Primitive(named.Codes, type.Nullability);
+        }
+
         int[] parts = new int[chunks];
         for (int i = 0; i < chunks; i++)
         {
@@ -865,7 +899,7 @@ internal sealed class SliceReader : IDisposable
             {
                 context.Decode.LoadBlob(context.Segments.GetBuffer(read.Whole));
                 ArrayNode root = context.Nodes.Root;
-                int node = context.Decode.DecodeRoot(in root, type, checked((int)chunk.Rows));
+                int node = context.Decode.DecodeRoot(in root, chunkType, checked((int)chunk.Rows));
                 parts[i] = CanonicalSlice.Slice(context.Decode, node, (int)(from - chunk.FirstRow), (int)(to - from));
                 continue;
             }
@@ -873,9 +907,21 @@ internal sealed class SliceReader : IDisposable
             context.Decode.LoadBlob(read.Tree.Span, read.Region);
             ArrayNode ranged = context.Nodes.Root;
             parts[i] = context.Decode.DecodeRootRange(
-                in ranged, type, checked((int)chunk.Rows), (int)(from - chunk.FirstRow), (int)(to - from), keepEncoding: false);
+                in ranged, chunkType, checked((int)chunk.Rows), (int)(from - chunk.FirstRow), (int)(to - from), keepEncoding: false);
         }
 
-        return parts.Length == 1 ? parts[0] : CanonicalConcat.Concat(context.Decode, type, length, parts);
+        int joined = parts.Length == 1 ? parts[0] : CanonicalConcat.Concat(context.Decode, chunkType, length, parts);
+        if (values < 0)
+        {
+            return joined;
+        }
+
+        int codes = context.Canonical.Decoded(joined);
+        if (context.Canonical.GetNode(codes).Kind == CanonicalKind.Constant)
+        {
+            codes = context.Canonical.MaterializeConstant(codes);
+        }
+
+        return Layouts.DictLayoutReader.Gather(context, type, values, checked((int)dictionary!.Value.Values), codes, length);
     }
 }
