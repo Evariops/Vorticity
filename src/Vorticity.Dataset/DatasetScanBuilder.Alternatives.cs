@@ -612,8 +612,9 @@ internal sealed partial class DatasetScanBuilder
     /// <summary>
     /// <paramref name="units"/> less the objects whose column sheets refute the filter (<see cref="SheetPruning"/>), in their
     /// order: the sheets of the objects whose choice reads rows are read side by side, <see cref="SheetBatch"/> objects at a
-    /// time; an object its counts or a learned partial answer reads none, its synopses saying which values it holds, nor does
-    /// a rollup. Nothing is read when the filter asks no value of a column.
+    /// time, through their partitions' indexes as the walk reads them; an object its counts or a learned partial answer reads
+    /// none, its synopses saying which values it holds, nor does a rollup. Nothing is read when the filter asks no value of a
+    /// column.
     /// </summary>
     private async ValueTask<List<Planned>> SheetsKeptAsync(List<Planned> units, CancellationToken cancellationToken)
     {
@@ -640,6 +641,7 @@ internal sealed partial class DatasetScanBuilder
 
         List<PositionedObject> batch = new List<PositionedObject>(SheetBatch);
         DatasetScanCounters? metrics = _considers ? _metrics : null;
+        PartitionLocates? partitions = PartitionLocates.Of(_dataset, _version, filter, columns);
         Func<PositionedObject, bool> consulted = held => !answered.Contains(held.FirstRow) && ReadsSheets(held);
         for (int from = first; from < units.Count; from += SheetBatch)
         {
@@ -651,7 +653,7 @@ internal sealed partial class DatasetScanBuilder
             }
 
             List<PositionedObject> passed = await SheetPruning.KeptAsync(
-                _dataset, _version.Schema, batch, filter, columns, metrics, consulted, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false);
+                _dataset, _version.Schema, batch, filter, columns, metrics, consulted, cancellationToken, _narrowing ??= Narrow, partitions, SheetPaths()).ConfigureAwait(false);
             for (int u = from, p = 0; u < to; u++)
             {
                 if (p < passed.Count && passed[p].FirstRow == units[u].Held.FirstRow)
