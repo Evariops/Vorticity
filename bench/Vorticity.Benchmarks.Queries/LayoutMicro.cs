@@ -13,7 +13,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// <summary>
 /// <c>--micro layout</c>: the bytes a row of each column takes in a dataset's objects, the reference requests in the order
 /// they arrive against the same rows clustered by emitter (<c>service/version/host</c>, then the instant), each compacted
-/// to its last level: what the clustering changes, column by column, against the model of the design (22 §3.4).
+/// to its last level: what the clustering changes, column by column, against the model of the design (22 §3.4); and what
+/// the appends cost a row, the clustered ones buffered and sorted by their key, the best of three runs each: the sort's
+/// price a row against the model of spec A (4.4, 90 to 185 ns).
 /// </summary>
 internal static class LayoutMicro
 {
@@ -26,9 +28,17 @@ internal static class LayoutMicro
         long rows = batches.Sum(batch => (long)batch.Length);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"layout: {rows:N0} requests, {minutes:0.#} minutes at {rate:N0} a second, in {batches.Count} appends"));
 
-        Dictionary<string, double> arrival = await BytesAsync(Path.Combine(root, "arrival"), batches, new DatasetOptions());
-        Dictionary<string, double> emitter = await BytesAsync(
-            Path.Combine(root, "emitter"), batches, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(EmitterRequest.Emitter)), LayoutValue.Column(nameof(EmitterRequest.At))] } });
+        DatasetOptions clustered = new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(EmitterRequest.Emitter)), LayoutValue.Column(nameof(EmitterRequest.At))] } };
+        (Dictionary<string, double> arrival, double arrivalMs) = await BytesAsync(Path.Combine(root, "arrival"), batches, new DatasetOptions());
+        (Dictionary<string, double> emitter, double emitterMs) = await BytesAsync(Path.Combine(root, "emitter"), batches, clustered);
+        for (int round = 1; round < 3; round++)
+        {
+            arrivalMs = Math.Min(arrivalMs, (await BytesAsync(Path.Combine(root, "arrival"), batches, new DatasetOptions(), compact: false)).AppendMs);
+            emitterMs = Math.Min(emitterMs, (await BytesAsync(Path.Combine(root, "emitter"), batches, clustered, compact: false)).AppendMs);
+        }
+
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"appends: {arrivalMs * 1e6 / rows:F0} ns a row as they come, {emitterMs * 1e6 / rows:F0} sorted by emitter: the sort {(emitterMs - arrivalMs) * 1e6 / rows:F0} ns a row (model 90 to 185)"));
 
         Console.WriteLine($"{"column",-12} {"arrival B/row",14} {"by emitter B/row",17}");
         foreach (string column in arrival.Keys)
@@ -40,8 +50,11 @@ internal static class LayoutMicro
         return 0;
     }
 
-    /// <summary>The rows appended to a new dataset under <paramref name="directory"/>, compacted to its last level, and each column's bytes over its objects.</summary>
-    private static async Task<Dictionary<string, double>> BytesAsync(string directory, List<EmitterRequest[]> batches, DatasetOptions options)
+    /// <summary>
+    /// The rows appended to a new dataset under <paramref name="directory"/>, compacted to its last level unless
+    /// <paramref name="compact"/> says not, each column's bytes over its objects, and the time the appends took.
+    /// </summary>
+    private static async Task<(Dictionary<string, double> Bytes, double AppendMs)> BytesAsync(string directory, List<EmitterRequest[]> batches, DatasetOptions options, bool compact = true)
     {
         if (Directory.Exists(directory))
         {
@@ -50,14 +63,22 @@ internal static class LayoutMicro
 
         Directory.CreateDirectory(directory);
         List<string> live = [];
+        double appendMs;
         await using (FileObjectStore store = new FileObjectStore(directory))
         await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, EmitterRequest.Schema, options))
         {
+            System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
             foreach (EmitterRequest[] batch in batches)
             {
                 await using ObjectDraft draft = dataset.StartObject();
                 await draft.Writer.WriteAsync<EmitterRequest>(batch);
                 await dataset.AppendAsync(draft);
+            }
+
+            appendMs = clock.Elapsed.TotalMilliseconds;
+            if (!compact)
+            {
+                return ([], appendMs);
             }
 
             while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1 }) is not null)
@@ -82,7 +103,7 @@ internal static class LayoutMicro
             }
         }
 
-        return bytes;
+        return (bytes, appendMs);
     }
 
     /// <summary>The bytes of every segment under <paramref name="node"/>.</summary>
