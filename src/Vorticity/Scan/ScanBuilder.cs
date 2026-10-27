@@ -127,6 +127,19 @@ internal sealed class ScanBuilder
 
     private IReadOnlyDictionary<string, string[]>? _variantKeys;
 
+    /// <summary>
+    /// Reads a part of a chunk by its granules alone (spec C, 2), where <paramref name="geometry"/> knows the chunk's tree
+    /// and marks: what a dataset's object, whose table of contents names them, gives a read of a few of its granules. Null
+    /// reads every chunk whole.
+    /// </summary>
+    internal ScanBuilder WithGranules(Indexes.GranuleGeometry? geometry)
+    {
+        _granules = geometry;
+        return this;
+    }
+
+    private Indexes.GranuleGeometry? _granules;
+
     internal ScanBuilder(VortexFile file)
     {
         ArgumentNullException.ThrowIfNull(file);
@@ -567,6 +580,7 @@ internal sealed class ScanBuilder
     private IAsyncEnumerable<RecordBatch> BatchesAsync(IRowExclusion? excluded)
     {
         IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded, out BatchAsyncEnumerable batches);
+        batches.Granules = _granules;
         return _variantKeys is { } keys ? new KeyedBatches(scan, batches, _file, keys) : scan;
     }
 
@@ -1216,7 +1230,7 @@ internal sealed class ScanBuilder
             ? _variantKeys ?? Indexes.VariantKeyReads.Of([], _filter)
             : null;
         return new TerminalScan(
-            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys);
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys, _granules);
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>

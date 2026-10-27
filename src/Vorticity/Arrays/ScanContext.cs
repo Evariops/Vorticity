@@ -534,6 +534,12 @@ internal sealed class ScanContext : IDisposable
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
     /// <summary>
+    /// What the lane plans of the chunks it reads a part of by their granules (spec C, 2), per lane; null when it reads every
+    /// chunk whole.
+    /// </summary>
+    internal Indexes.GranulePlans? Granules { get; set; }
+
+    /// <summary>
     /// The small segments of the splits ahead the batch reads along with its own, which a scan over a source whose read is
     /// a round trip gives the batch; made at the first, and held with the context across the scans it serves.
     /// </summary>
@@ -1681,6 +1687,7 @@ internal sealed class ScanContext : IDisposable
         _building = null;
         _child = null;
         VariantKeys = null;
+        Granules = null;
         Along?.Clear();
         if (_memory is { } memory)
         {

@@ -683,6 +683,7 @@ internal sealed partial class DatasetScanBuilder
             _readAhead = _readAhead,
             _readAheadGranted = _readAheadGranted,
             _settles = _settles,
+            _geometries = LazyInitializer.EnsureInitialized(ref _geometries),
         };
 
     /// <summary>

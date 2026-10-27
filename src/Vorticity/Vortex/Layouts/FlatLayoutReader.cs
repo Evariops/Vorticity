@@ -66,6 +66,13 @@ internal sealed class FlatLayoutReader : LayoutReader
             }
         }
 
+        // A chunk the split reads a part of, whose geometry the scan knows: the ranges of the part's granules, not the
+        // segment (spec C, 2). The chunk is read whole when the part is all of it or most of its bytes.
+        if (segments.Granules is { } granules && granules.TryRegister(SpecOf(in node, 0), node.DType, NodeLength(in node), rows, segments))
+        {
+            return;
+        }
+
         // How much of the segment the decode touches: the fields a projection keeps of a struct
         // stored whole, and for a take a page or two of each of them per wanted row. The segment is
         // read once for every split of its node, so a take's rows are counted over the node, at
@@ -102,6 +109,12 @@ internal sealed class FlatLayoutReader : LayoutReader
 
         int total = NodeLength(in node);
         int length = BatchLength(rows);
+
+        // A chunk read by the granules of a part of it: decoded from them alone.
+        if (context.Granules is { } granules && !node.Bufferless && granules.Find(SpecOf(in node, 0).Offset, rows) is { } plan)
+        {
+            return ExecuteGranules(in node, rows, in fields, context, plan, total, length);
+        }
 
         // A chunk of a variant read through some shredded keys alone, each decoded from its range; one read for keys its
         // shredding does not hold, decoded as any chunk, its variant giving its residual alone.
@@ -244,6 +257,47 @@ internal sealed class FlatLayoutReader : LayoutReader
 
         int sliced = CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
         return Narrowed(sliced, in fields, context);
+    }
+
+    /// <summary>
+    /// The batch's rows of a chunk read by the granules of a part of it (spec C, 2.3): the ranges read laid at their places in
+    /// a region of the chunk's buffers, every other byte of which is cleared, the tree loaded over it, and the batch's rows
+    /// decoded from it, or its selection, a FastLanes block of 1 024 at a time where the encoding selects. Nothing that would
+    /// read the rest of the chunk runs: no answer of the whole node, no retention.
+    /// </summary>
+    private static int ExecuteGranules(
+        in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, Indexes.GranulePlans.Plan plan, int total, int length)
+    {
+        SegmentSpec spec = SpecOf(in node, 0);
+        SegmentRequestSet segments = context.Segments;
+        VortexBuffer region = context.Canonical.AllocateUninitialized(checked((int)plan.RegionLength), 1 << plan.Alignment, out Span<byte> bytes);
+        long at = 0;
+        foreach ((long start, long end) in plan.Ranges)
+        {
+            bytes[(int)at..(int)start].Clear();
+            int slot = segments.Add(new SegmentSpec(spec.Offset + (ulong)start, checked((uint)(end - start)), 0, 0, 0));
+            segments.GetBuffer(slot).Span[..(int)(end - start)].CopyTo(bytes[(int)start..]);
+            at = end;
+        }
+
+        bytes[(int)at..].Clear();
+        context.Decode.LoadBlob(plan.Tree.Span, region);
+        ArrayNode root = context.Nodes.Root;
+        Decoded(context, length);
+        if (context.HasSelection)
+        {
+            if (context.Decode.SelectsWithoutFullDecode(in root, node.DType))
+            {
+                return Push(in root, in node, in fields, context, total);
+            }
+
+            if (context.TryGetSelectionBounds(out int first, out int last))
+            {
+                return Narrowed(DecodedSelection(in root, in node, in fields, context, total, first, last + 1 - first), in fields, context);
+            }
+        }
+
+        return Narrowed(context.Decode.DecodeRootRange(in root, node.DType, total, (int)rows.Start, length, context.KeepEncodings), in fields, context);
     }
 
     /// <summary>

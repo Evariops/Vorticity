@@ -376,7 +376,7 @@ internal sealed class SpanReader : IDisposable
         List<ChunkRead> reads = [];
         foreach (int field in fields)
         {
-            int width = Width(_schema.GetField(field));
+            int width = GranulePlans.WidthOf(_schema.GetField(field));
             if (DictionaryOf(field) is { } dictionary)
             {
                 ChunkSpan values = new ChunkSpan(dictionary.Offset, dictionary.Length, dictionary.AlignmentExponent, 0, dictionary.Values, -1);
@@ -401,7 +401,7 @@ internal sealed class SpanReader : IDisposable
     }
 
     /// <summary>The share of a chunk's bytes past which its granules are read with the rest of it, in one request.</summary>
-    private const double WholeShare = 0.75;
+    private const double WholeShare = GranulePlans.WholeShare;
 
     /// <summary>
     /// The read of the span's granules of <paramref name="chunk"/>, their ranges registered in <paramref name="requests"/>;
@@ -447,14 +447,6 @@ internal sealed class SpanReader : IDisposable
 
         return new ChunkRead(chunk) { Tree = geometry.Tree, Region = region, FirstSlot = first, Ranges = ranges };
     }
-
-    /// <summary>The bytes of a value of <paramref name="type"/>, a number or the storage of one; 0 for another type.</summary>
-    private static int Width(DType type) => type.Kind switch
-    {
-        DTypeKind.Primitive => type.PType.ByteWidth(),
-        DTypeKind.Extension => Width(type.StorageType),
-        _ => 0,
-    };
 
     /// <summary>
     /// The reads of a span made the context's: a whole segment read into shared requests lent to the context, a chunk's

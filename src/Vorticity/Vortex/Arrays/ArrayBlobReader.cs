@@ -112,12 +112,32 @@ internal static class ArrayBlobReader
         LoadCore(arena, arrayTree, default, encodings, buffers: false);
     }
 
+    /// <summary>
+    /// The tree and where its nodes' buffers lie, for a caller that plans which of a chunk's bytes to read before it reads
+    /// any (<see cref="Indexes.GranuleBytes"/>): its nodes, their encodings, metadata and buffer references, each buffer bound
+    /// to nothing, so that a read of one finds it empty.
+    /// </summary>
+    /// <param name="arena">The arena to populate. It is <see cref="ArrayNodeArena.Reset"/> first.</param>
+    /// <param name="arrayTree">The <c>Array</c> FlatBuffer, copied into the arena.</param>
+    /// <param name="encodings">Spec index to resolved id, as for the other overloads.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="arena"/> is null.</exception>
+    /// <exception cref="VortexFormatException">The tree is malformed in any way.</exception>
+    public static void LoadLayout(
+        ArrayNodeArena arena,
+        ReadOnlySpan<byte> arrayTree,
+        ReadOnlySpan<ArrayEncodingId> encodings)
+    {
+        ArgumentNullException.ThrowIfNull(arena);
+        LoadCore(arena, arrayTree, default, encodings, buffers: true, bound: false);
+    }
+
     private static void LoadCore(
         ArrayNodeArena arena,
         ReadOnlySpan<byte> flatBuffer,
         VortexBuffer region,
         ReadOnlySpan<ArrayEncodingId> encodings,
-        bool buffers)
+        bool buffers,
+        bool bound = true)
     {
         arena.Reset();
 
@@ -141,9 +161,17 @@ internal static class ArrayBlobReader
         int tableBudget = VortexLimits.MaxFlatBufferTables;
         ArrayView view = ArrayView.Root(treeSpan, ref tableBudget);
 
-        if (buffers)
+        if (buffers && bound)
         {
             ResolveBuffers(arena, view, region);
+        }
+        else if (buffers)
+        {
+            // Each buffer referenced and bound to nothing: a plan reads where they lie, never their bytes.
+            for (int i = 0; i < view.Buffers.Length; i++)
+            {
+                arena.AddGlobalBuffer(default);
+            }
         }
 
         // Two more budgets, on the work the arena is made to do. The table budget bounds how many

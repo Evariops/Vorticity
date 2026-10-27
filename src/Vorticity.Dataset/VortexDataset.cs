@@ -2923,6 +2923,37 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The geometry of columns <paramref name="fields"/> of the object <paramref name="entry"/> names (spec C, 2.1), by their
+    /// position in <paramref name="fields"/>: each chunk's encoding tree and marks, the regions its entry's table of contents
+    /// names, read with no open of the object in one round trip, none once this handle read them. A column the object keeps
+    /// no marks of has none.
+    /// </summary>
+    internal async ValueTask<Indexes.ColumnMarks?[]> ReadMarksAsync(ObjectEntry entry, IReadOnlyList<int> fields, CancellationToken cancellationToken)
+    {
+        Indexes.ColumnMarks?[] marks = new Indexes.ColumnMarks?[fields.Count];
+        if (entry.Contents is not { Marks.Count: > 0 } contents)
+        {
+            return marks;
+        }
+
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[fields.Count];
+        for (int i = 0; i < fields.Count; i++)
+        {
+            regions[i] = fields[i] < contents.Marks.Count ? contents.Marks[fields[i]] : null;
+        }
+
+        object?[] read = new object?[fields.Count];
+        await ReadSynopsesAsync(entry, contents, regions, read, static (_, bytes) => (Indexes.ColumnMarks.From(bytes.ToArray())!, bytes.Length), cancellationToken)
+            .ConfigureAwait(false);
+        for (int i = 0; i < fields.Count; i++)
+        {
+            marks[i] = read[i] as Indexes.ColumnMarks;
+        }
+
+        return marks;
+    }
+
+    /// <summary>
     /// The counts of column <paramref name="field"/> of the object <paramref name="entry"/> names, and when
     /// <paramref name="sketches"/> asks their sketches, read with no open of the object: the regions its entry's table of
     /// contents names, side by side in one round trip, none once this handle read them. A column the object keeps no

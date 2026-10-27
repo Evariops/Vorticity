@@ -138,12 +138,23 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     internal Indexes.VariantKeyReads? VariantKeys { get; set; }
 
-    /// <summary>The enumerator, its lanes told which chunks of variants they read by keys.</summary>
+    /// <summary>
+    /// The geometry of the chunks the scan may read a part of by their granules, which each lane plans its reads by; null
+    /// when it reads every chunk whole. Set before the scan starts.
+    /// </summary>
+    internal Indexes.GranuleGeometry? Granules { get; set; }
+
+    /// <summary>The enumerator, its lanes told which chunks of variants they read by keys, and which chunks' geometry they know.</summary>
     private BatchAsyncEnumerator Keyed(BatchAsyncEnumerator enumerator)
     {
         if (VariantKeys is { } keys)
         {
             enumerator.VariantKeys = keys;
+        }
+
+        if (Granules is { } geometry)
+        {
+            enumerator.Granules = geometry;
         }
 
         return enumerator;
@@ -558,7 +569,27 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanContext first = _lanes[0]!.Context;
         Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
         lane.Context.VariantKeys = first.VariantKeys;
+        lane.Context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, first.File) : null;
         return lane;
+    }
+
+    // The geometry of the chunks the scan may read a part of, which each lane plans its granule reads by; null for none.
+    private Indexes.GranuleGeometry? _granules;
+
+    /// <summary>Tells the lanes the geometry of the chunks they may read a part of, each planning its own reads by it.</summary>
+    internal Indexes.GranuleGeometry? Granules
+    {
+        set
+        {
+            _granules = value;
+            foreach (Lane? lane in _lanes)
+            {
+                if (lane is not null)
+                {
+                    lane.Context.Granules = value is null ? null : new Indexes.GranulePlans(value, lane.Context.File);
+                }
+            }
+        }
     }
 
     /// <summary>Tells the lanes which chunks of variants they read through shredded keys alone.</summary>
@@ -1209,6 +1240,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             ahead.Release();
             ahead.VariantKeys = null;
+            ahead.Granules = null;
         }
 
         // In the order of the file, the segments ahead whose gaps to one another a read bridges, a chain of them read as
@@ -1264,6 +1296,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         ahead.Release();
         ahead.VariantKeys = lane.Context.VariantKeys;
+        ahead.Granules = lane.Context.Granules;
         LayoutReaderTable.Require(in root).RegisterSegments(in root, rows, in _mask, ahead);
         VortexFile.FillFromTail(_source, ahead);
     }

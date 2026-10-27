@@ -56,6 +56,9 @@ internal sealed class TerminalScan
     /// <summary>The variant columns a count's filter reads through top-level keys alone, with those keys; null for none.</summary>
     private readonly IReadOnlyDictionary<string, string[]>? _variantKeys;
 
+    /// <summary>The geometry of the chunks the count may read a part of by their granules; null for none.</summary>
+    private readonly Indexes.GranuleGeometry? _granules;
+
     internal TerminalScan(
         VortexFile file,
         LayoutTree tree,
@@ -70,10 +73,12 @@ internal sealed class TerminalScan
         ScanCounters? metrics,
         bool indexes = true,
         IRowExclusion? excluded = null,
-        IReadOnlyDictionary<string, string[]>? variantKeys = null)
+        IReadOnlyDictionary<string, string[]>? variantKeys = null,
+        Indexes.GranuleGeometry? granules = null)
     {
         _excluded = excluded;
         _variantKeys = variantKeys;
+        _granules = granules;
         _indexes = indexes;
         _file = file;
         _tree = tree;
@@ -133,6 +138,7 @@ internal sealed class TerminalScan
         using ScanContext context = new ScanContext(_file);
         context.LiveBlocks = live;
         context.Metrics = _metrics;
+        context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, _file) : null;
 
         // The filter's variant columns read as a scan reads them: through their shredded keys, or their residuals.
         if (_variantKeys is not null)
