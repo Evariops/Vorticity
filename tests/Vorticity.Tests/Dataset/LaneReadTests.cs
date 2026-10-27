@@ -81,7 +81,7 @@ public sealed partial class LaneReadTests : IClassFixture<LaneReadTests.Fixture>
 
         // Pieces of four blocks or more, so that eight lanes and thirty-two cut every hour into parts.
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, LeastPieceRows = 4_096 }, Ct);
-        long planned = (await Ask(dataset, question, lanes).ExplainAsync(Ct)).BytesToRead;
+        long planned = (await Ask(dataset, question, lanes).ExplainAsync(analyze: true, Ct)).BytesToRead;
         Vorticity.Aggregation asked = Ask(dataset, question, lanes);
         store.Reset();
         List<string> rows = [];

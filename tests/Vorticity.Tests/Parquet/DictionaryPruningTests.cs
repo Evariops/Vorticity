@@ -91,7 +91,7 @@ public sealed partial class DictionaryPruningTests : IDisposable
 
     private static async Task AssertPrunedAsync(ParquetFile file, Fruit[] rows, Func<Probe<Fruit>, Predicate> filter, Func<Fruit, bool> selects, int groups)
     {
-        ScanPlan plan = await file.Scan<Fruit>().Where(filter).ExplainAsync(Ct);
+        ScanPlan plan = await file.Scan<Fruit>().Where(filter).ExplainAsync(analyze: true, Ct);
         Assert.Equal(groups, plan.Pruning.Single(step => step.Structure == "dictionary").BlocksPruned);
         Assert.Equal(rows.Count(selects), await ReadCountAsync(file.Scan<Fruit>().Where(filter)));
         Assert.Equal(rows.Count(selects), await file.Scan<Fruit>().Where(filter).CountAsync(Ct));

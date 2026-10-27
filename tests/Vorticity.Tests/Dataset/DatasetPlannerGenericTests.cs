@@ -41,7 +41,7 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
         await using VortexDataset dataset = await VortexDataset.OpenAsync(byHour ? _fixture.ByHour : _fixture.BySize, Options(), Ct);
         List<string> rows = await DatasetPlannerTests.AskAsync(dataset, question, synopses: false);
         List<string> states = await DatasetPlannerTests.AskAsync(dataset, question, synopses: true);
-        ScanPlan plan = await DatasetPlannerTests.Ask(dataset, question, synopses: true).ExplainAsync(Ct);
+        ScanPlan plan = await DatasetPlannerTests.Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
         int answered = plan.Units.Count(step => step.Alternative == "counts");
         Console.WriteLine($"PLANNER {(byHour ? "BY HOUR" : "BY SIZE")} {question}: the counts of {answered} objects answered");
         Assert.NotEmpty(rows);
@@ -58,7 +58,7 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
         await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.ByHour, Options(), Ct);
         VortexExpr asked = VortexExpr.Parse("At >= '2026-10-19T12:37:30.0000000+00:00' and At < '2026-10-19T14:35:15.0000000+00:00'");
         Vorticity.Scan aligned = ByService(dataset, asked, new ScanOptions { AlignWindow = true });
-        ScanPlan plan = await aligned.ExplainAsync(Ct);
+        ScanPlan plan = await aligned.ExplainAsync(analyze: true, Ct);
         VortexExpr window = Assert.IsAssignableFrom<VortexExpr>(plan.Window);
         Console.WriteLine($"ALIGNED {asked} grows to {window}");
         Assert.Equal(3, plan.Units.Count(step => step.Alternative == "counts"));

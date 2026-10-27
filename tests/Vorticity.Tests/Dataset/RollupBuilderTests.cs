@@ -65,7 +65,7 @@ public sealed class RollupBuilderTests
             SheetObjectBytes = 0,
             ContentsObjectBytes = 0,
         });
-        ClusteringKey key = dataset.Snapshot.Schema.Key!;
+        ClusteringKey key = dataset.Snapshot.Schema.RollupKey!;
         ValueCut values = dataset.Snapshot.Schema.Cut!;
 
         // The counted objects of the deepest level, by hour, in the order of their tree keys.

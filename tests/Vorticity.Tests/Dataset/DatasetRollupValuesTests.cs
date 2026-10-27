@@ -47,7 +47,7 @@ public sealed partial class DatasetRollupValuesTests : IClassFixture<DatasetRoll
         await using CountingObjectStore store = new CountingObjectStore(_fixture.Store);
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(), Ct);
         List<string> rows = await AskAsync(dataset, question, synopses: false);
-        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
+        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
         store.Reset();
         List<string> states = await AskAsync(dataset, question, synopses: true);
         (long requests, long bytes) = (store.Requests, store.BytesRead);

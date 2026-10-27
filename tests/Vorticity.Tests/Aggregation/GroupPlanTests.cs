@@ -23,7 +23,7 @@ public sealed partial class GroupPlanTests
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
 
-            GroupPlan plan = (await file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value))).ExplainAsync(Ct)).Grouping!;
+            GroupPlan plan = (await file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value))).ExplainAsync(analyze: true, Ct)).Grouping!;
             GroupKeyPlan key = Assert.Single(plan.Keys);
             Assert.Equal("Key", key.Column);
             Assert.False(key.Sorted);
@@ -36,14 +36,14 @@ public sealed partial class GroupPlanTests
             Assert.Equal(4, plan.Degree);
             Assert.False(plan.Core);
 
-            GroupPlan top = (await file.Scan<Row>().GroupBy(r => r.Key).OrderByDescending(g => g.Count()).Take(10).Select(g => g.Key).ExplainAsync(Ct)).Grouping!;
+            GroupPlan top = (await file.Scan<Row>().GroupBy(r => r.Key).OrderByDescending(g => g.Count()).Take(10).Select(g => g.Key).ExplainAsync(analyze: true, Ct)).Grouping!;
             Assert.Equal(GroupOrdering.Top, top.Order);
             Assert.Equal(10, top.Kept);
-            GroupPlan sorted = (await file.Scan<Row>().GroupBy(r => r.Key).OrderBy(g => g.Sum(x => x.Value)).Select(g => g.Key).ExplainAsync(Ct)).Grouping!;
+            GroupPlan sorted = (await file.Scan<Row>().GroupBy(r => r.Key).OrderBy(g => g.Sum(x => x.Value)).Select(g => g.Key).ExplainAsync(analyze: true, Ct)).Grouping!;
             Assert.Equal(GroupOrdering.Sort, sorted.Order);
 
             // Without a group by, nothing to say.
-            Assert.Null((await file.Scan<Row>().Select(r => r.Value).Distinct().ExplainAsync(Ct)).Grouping);
+            Assert.Null((await file.Scan<Row>().Select(r => r.Value).Distinct().ExplainAsync(analyze: true, Ct)).Grouping);
         }
         finally
         {
@@ -58,7 +58,7 @@ public sealed partial class GroupPlanTests
         try
         {
             await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
-            GroupPlan plan = (await file.Scan<Row>().GroupBy(r => r.Key).OrderBy(g => g.Key).Select(g => g.Count()).ExplainAsync(Ct)).Grouping!;
+            GroupPlan plan = (await file.Scan<Row>().GroupBy(r => r.Key).OrderBy(g => g.Key).Select(g => g.Count()).ExplainAsync(analyze: true, Ct)).Grouping!;
             Assert.True(plan.Keys[0].Sorted);
             Assert.Equal(0, plan.Streaming);
             Assert.Null(plan.NotStreaming);
@@ -103,7 +103,7 @@ public sealed partial class GroupPlanTests
             held.Plan.Core = true;
             held.Plan.CoreLanes = 1;
             held.Plan.CoreCapacity = 256;
-            GroupPlan plan = (await held.ExplainAsync(Ct)).Grouping!;
+            GroupPlan plan = (await held.ExplainAsync(analyze: true, Ct)).Grouping!;
             Assert.True(plan.Core);
             Assert.Equal(256, plan.CacheCapacity);
             Assert.True(plan.Alpha >= 1);

@@ -22,7 +22,7 @@ public sealed partial class DatasetLearnedPartialsTests
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await using (VortexDataset created = await VortexDataset.CreateAsync(memory, Call.Schema, new DatasetOptions
         {
-            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.Service)), SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], Organization = LayoutOrganization.Leveled },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Call.Service)), SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], IndexedPrefix = 1, Organization = LayoutOrganization.Leveled },
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,
         }, Ct))

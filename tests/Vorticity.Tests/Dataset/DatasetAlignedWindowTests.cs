@@ -40,7 +40,7 @@ public sealed partial class DatasetAlignedWindowTests
         (string first, string last) = await ObjectOfTwoTenantsAsync(dataset, after: "t00");
         VortexExpr asked = Expr.Ge(Expr.Field(nameof(Ticket.Tenant)), Expr.Literal(FilterLiteral.From(last)));
         Vorticity.Scan aligned = Grouped(dataset, asked, new ScanOptions { AlignWindow = true });
-        ScanPlan plan = await aligned.ExplainAsync(Ct);
+        ScanPlan plan = await aligned.ExplainAsync(analyze: true, Ct);
         VortexExpr window = Assert.IsAssignableFrom<VortexExpr>(plan.Window);
         Console.WriteLine($"ALIGNED {asked} grows to {window}, the counts of {plan.Units.Count(step => step.Alternative == "counts")} objects answering");
 
@@ -51,7 +51,7 @@ public sealed partial class DatasetAlignedWindowTests
         Assert.Equal(await RowsAsync(Grouped(dataset, applied, new ScanOptions { UseSynopses = false })), answered);
         Assert.NotEqual(await RowsAsync(Grouped(dataset, asked, new ScanOptions())), answered);
         Assert.Contains(plan.Units, step => step.Alternative == "counts");
-        ScanPlan exact = await Grouped(dataset, asked, new ScanOptions()).ExplainAsync(Ct);
+        ScanPlan exact = await Grouped(dataset, asked, new ScanOptions()).ExplainAsync(analyze: true, Ct);
         Assert.Null(exact.Window);
         int answeredAligned = plan.Units.Count(step => step.Alternative == "counts");
         int answeredAsked = exact.Units.Count(step => step.Alternative == "counts");
@@ -69,7 +69,7 @@ public sealed partial class DatasetAlignedWindowTests
         (_, string last) = await ObjectOfTwoTenantsAsync(dataset, after: "t00");
         VortexExpr asked = Expr.Ge(Expr.Field(nameof(Ticket.Tenant)), Expr.Literal(FilterLiteral.From(last)));
         Vorticity.Scan aligned = Grouped(dataset, asked, new ScanOptions { AlignWindow = true });
-        Assert.Null((await aligned.ExplainAsync(Ct)).Window);
+        Assert.Null((await aligned.ExplainAsync(analyze: true, Ct)).Window);
         List<string> answered = await RowsAsync(aligned);
         Assert.Null(aligned.Metrics.Window);
         Assert.Equal(await RowsAsync(Grouped(dataset, asked, new ScanOptions { UseSynopses = false })), answered);
@@ -86,7 +86,7 @@ public sealed partial class DatasetAlignedWindowTests
         foreach (string filter in (string[])["Tenant = 't03'", "Tenant in ('t01', 't04')", "Tenant >= 't02' and Tenant < 't05'"])
         {
             VortexExpr asked = VortexExpr.Parse(filter);
-            ScanPlan plan = await Grouped(dataset, asked, new ScanOptions()).ExplainAsync(Ct);
+            ScanPlan plan = await Grouped(dataset, asked, new ScanOptions()).ExplainAsync(analyze: true, Ct);
             Console.WriteLine($"LEADING TEXT {filter}: the counts of {plan.Units.Count(step => step.Alternative == "counts")} objects answer");
             Assert.Contains(plan.Units, step => step.Alternative == "counts");
             Assert.Equal(

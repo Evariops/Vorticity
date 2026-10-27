@@ -29,7 +29,7 @@ public sealed partial class DatasetJoinedRangesTests
         await using CountingObjectStore store = new CountingObjectStore(memory);
         DatasetOptions options = new DatasetOptions
         {
-            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Tenanted.Tenant)), SortKey = [LayoutValue.Column(nameof(Tenanted.Tenant)), LayoutValue.Column(nameof(Tenanted.At))], Organization = LayoutOrganization.Leveled },
+            Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Tenanted.Tenant)), SortKey = [LayoutValue.Column(nameof(Tenanted.Tenant)), LayoutValue.Column(nameof(Tenanted.At))], IndexedPrefix = 1, Organization = LayoutOrganization.Leveled },
         };
         Random random = new Random(0x0C3);
         await using (VortexDataset writing = await VortexDataset.CreateAsync(store, Tenanted.Schema, options, Ct))

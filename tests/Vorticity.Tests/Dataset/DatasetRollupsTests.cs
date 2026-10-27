@@ -159,7 +159,7 @@ public sealed partial class DatasetRollupsTests
         await dataset.RollUpAsync(Ct);
         List<string> rows = await AskAsync(dataset, question, synopses: false);
         List<string> states = await AskAsync(dataset, question, synopses: true);
-        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
+        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
         int rollups = plan.Units.Count(step => step.Alternative == "rollup");
         int objects = plan.Units.Count(step => step.Alternative == "counts");
         int byBucket = plan.Units.Count(step => step.Alternative == "rollup" && step.Detail.Contains("by bucket", StringComparison.Ordinal));

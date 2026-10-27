@@ -112,7 +112,7 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
                 Assert.Equal(0, held.Entry.Contents!.PureGranuleRows);
             }
 
-            ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
+            ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
             Assert.Equal(answered, plan.Units.Any(step => step.Alternative == "granules"));
         }
 

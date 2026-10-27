@@ -43,7 +43,7 @@ public sealed partial class GroupByTests : IDisposable
         Vorticity.Aggregation byStore = file.Scan<Sale>().GroupBy(s => s.Store).Select(g => (g.Key, g.Count(), g.Sum(s => s.Units)));
 
         // The key's values, from the least to the greatest the row groups' statistics give.
-        ScanPlan plan = await byStore.ExplainAsync(Ct);
+        ScanPlan plan = await byStore.ExplainAsync(analyze: true, Ct);
         Assert.Equal(rows.Max(r => r.Store) - rows.Min(r => r.Store) + 1, plan.Grouping!.Keys[0].ValueRange);
 
         List<StoreUnits> groups = [];

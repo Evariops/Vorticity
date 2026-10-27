@@ -213,8 +213,8 @@ public sealed partial class ValueFunctionTests
 
             foreach ((Func<Probe<Reading>, Predicate> function, Func<Probe<Reading>, Predicate> range) in pairs)
             {
-                ScanPlan byFunction = await file.Scan<Reading>().Where(function).ExplainAsync(Ct);
-                ScanPlan byRange = await file.Scan<Reading>().Where(range).ExplainAsync(Ct);
+                ScanPlan byFunction = await file.Scan<Reading>().Where(function).ExplainAsync(analyze: true, Ct);
+                ScanPlan byRange = await file.Scan<Reading>().Where(range).ExplainAsync(analyze: true, Ct);
                 Assert.True(byFunction.LiveBlocks < byFunction.Blocks / 4, $"{byFunction.LiveBlocks} of {byFunction.Blocks} blocks live: {string.Join(", ", byFunction.Pruning)}");
                 Assert.Equal(byRange.LiveBlocks, byFunction.LiveBlocks);
                 Assert.Equal(byRange.Pruning.Select(s => (s.Structure, s.BlocksPruned)), byFunction.Pruning.Select(s => (s.Structure, s.BlocksPruned)));
@@ -222,7 +222,7 @@ public sealed partial class ValueFunctionTests
             }
 
             // A day is a block or two of the sorted instants, which the zone maps keep alone.
-            ScanPlan oneDay = await file.Scan<Reading>().Where(pairs[0].Function).ExplainAsync(Ct);
+            ScanPlan oneDay = await file.Scan<Reading>().Where(pairs[0].Function).ExplainAsync(analyze: true, Ct);
             Assert.True(oneDay.LiveBlocks <= 2, $"{oneDay.LiveBlocks} of {oneDay.Blocks} blocks live");
             Assert.Equal(oneDay.Blocks - oneDay.LiveBlocks, Assert.Single(oneDay.Pruning, step => step.Structure == "zone map").BlocksPruned);
 

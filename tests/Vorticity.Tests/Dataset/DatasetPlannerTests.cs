@@ -59,7 +59,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         store.Reset();
         List<string> states = await AskAsync(dataset, question, synopses: true);
         (long requests, long bytes) = (store.Requests, store.BytesRead);
-        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(Ct);
+        ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
         Console.WriteLine($"PLANNER {question}: {rowBytes} bytes read as rows, {bytes} in {requests} requests with the counts of " +
             $"{plan.Units.Count(step => step.Alternative == "counts")} objects");
         Assert.True(bytes < rowBytes, $"{question}: {bytes} bytes with the counts, against {rowBytes} as rows");
@@ -74,9 +74,9 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         // Cut at 37.5 and 155.25 minutes, the window holds the second hour's object whole, whose counts answer, and reads the
         // rows of the two it cuts; on the hours, it holds its two objects whole.
         await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.Store, Options(), Ct);
-        ScanPlan plan = await Ask(dataset, "measures by service, an unaligned window", synopses: true).ExplainAsync(Ct);
+        ScanPlan plan = await Ask(dataset, "measures by service, an unaligned window", synopses: true).ExplainAsync(analyze: true, Ct);
         Assert.Equal(1, plan.Units.Count(step => step.Alternative == "counts"));
-        ScanPlan aligned = await Ask(dataset, "count by service, an aligned window", synopses: true).ExplainAsync(Ct);
+        ScanPlan aligned = await Ask(dataset, "count by service, an aligned window", synopses: true).ExplainAsync(analyze: true, Ct);
         Assert.Equal(2, aligned.Units.Count(step => step.Alternative == "counts"));
     }
 
@@ -106,7 +106,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             List<string> counted = await AskAsync(dataset, keys, results, filter, synopses: true);
             Assert.True(read.SequenceEqual(counted), $"{asked}: {read.Count} groups as rows, {counted.Count} with the counts, " +
                 $"first apart: '{read.Except(counted).FirstOrDefault()}' against '{counted.Except(read).FirstOrDefault()}'");
-            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
+            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(analyze: true, Ct);
             answered += plan.Units.Any(step => step.Alternative == "counts") ? 1 : 0;
         }
 
@@ -149,7 +149,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             List<string> answers = await AskAsync(dataset, keys, results, filter, synopses: true);
             Assert.True(read.SequenceEqual(answers), $"{asked}: {read.Count} groups as rows, {answers.Count} with the synopses, " +
                 $"first apart: '{read.Except(answers).FirstOrDefault()}' against '{answers.Except(read).FirstOrDefault()}'");
-            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
+            ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(analyze: true, Ct);
             answered += plan.Units.Any(step => step.Alternative == "granules") ? 1 : 0;
         }
 

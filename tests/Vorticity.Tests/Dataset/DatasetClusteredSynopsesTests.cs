@@ -114,7 +114,7 @@ public sealed class DatasetClusteredSynopsesTests
                     $"first apart: '{read.Except(counted).FirstOrDefault()}' against '{counted.Except(read).FirstOrDefault()}'");
             }
 
-            ScanPlan plan = await DatasetPlannerTests.Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(Ct);
+            ScanPlan plan = await DatasetPlannerTests.Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(analyze: true, Ct);
             answered += plan.Units.Any(step => step.Alternative is "counts" or "rollup") ? 1 : 0;
             rollups += plan.Units.Any(step => step.Alternative == "rollup") ? 1 : 0;
         }

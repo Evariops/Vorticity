@@ -95,7 +95,7 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
 
         // The plan says so object by object: the blocks' path, its requests and bytes, and the rows' it was weighed against.
         await using VortexDataset explained = await VortexDataset.OpenAsync(store, new DatasetOptions(), Ct);
-        ScanPlan plan = await Ask(explained, question, synopses: true).ExplainAsync(Ct);
+        ScanPlan plan = await Ask(explained, question, synopses: true).ExplainAsync(analyze: true, Ct);
         UnitStep[] blocks = [.. plan.Units.Where(step => step.Alternative == "granules")];
         Console.WriteLine($"BLOCK PLAN {question}: {blocks.Length} objects, {blocks.FirstOrDefault()?.Detail}");
         Assert.NotEmpty(blocks);
@@ -222,7 +222,7 @@ public sealed partial class DatasetBlockAnswerTests : IClassFixture<DatasetBlock
             List<Call> rows = Draw();
             await FillAsync(Store, rows, new DatasetLayout
             {
-                SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))],
+                SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], IndexedPrefix = 1,
                 ObjectBytes = 4 << 20,
             });
             await FillAsync(Hourly, rows, new DatasetLayout

@@ -95,7 +95,7 @@ public sealed partial class VariantDiscoveryTests
         }
 
         Assert.Equal(100, await dataset.Scan<Event>().Where(r => r.Attributes.Has("deploy")).CountAsync(Ct));
-        ScanPlan plan = await dataset.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(Ct);
+        ScanPlan plan = await dataset.Scan<Event>().Where(r => r.Attributes.Has("deploy")).ExplainAsync(analyze: true, Ct);
         PruningStep step = Assert.Single(plan.Pruning, s => s.Structure == "path directory");
 
         // A slice holds about 500 rows, so its blocks and the two it shares with its neighbours.

@@ -58,7 +58,7 @@ public sealed partial class DatasetLearnedPartialsTests
 
         // The family is its columns, however the question is written: the typed question finds what the text one learned.
         ScanPlan plan = await dataset.Scan<Call>().With(new ScanOptions { UseSynopses = true }).Where(c => c.Status == 503)
-            .GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))).ExplainAsync(Ct);
+            .GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))).ExplainAsync(analyze: true, Ct);
         Assert.NotEmpty(plan.Units);
         Assert.All(plan.Units, step => Assert.Equal(("partial", "the partial of the question's family it learned"), (step.Alternative, step.Detail)));
     }
@@ -172,7 +172,7 @@ public sealed partial class DatasetLearnedPartialsTests
 
         // The objects past the edge answer from the partials they learned: three hours, the edge's own read as rows.
         ScanPlan plan = await dataset.Scan<Call>().With(new ScanOptions { UseSynopses = true }).Where(c => c.Status == 503 && c.At >= Noon.AddMinutes(50))
-            .GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))).ExplainAsync(Ct);
+            .GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))).ExplainAsync(analyze: true, Ct);
         Assert.Equal(3, plan.Units.Count(step => step.Alternative == "partial" && step.Detail == "the partial of the question's family it learned"));
     }
 
@@ -243,7 +243,7 @@ public sealed partial class DatasetLearnedPartialsTests
             List<string> answer = await DatasetPlannerTests.AskAsync(dataset, keys, results, filter, synopses: false);
             Assert.Equal(answer, await DatasetPlannerTests.AskAsync(dataset, keys, results, filter, synopses: true));
             ScanPlan plan = await dataset.Scan<Call>().With(new ScanOptions { UseSynopses = true })
-                .Where(c => c.Status == 404 && c.At >= Noon.AddHours(2)).GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))).ExplainAsync(Ct);
+                .Where(c => c.Status == 404 && c.At >= Noon.AddHours(2)).GroupBy(c => c.Route).Select(g => (g.Key, g.Count(), g.Sum(c => c.Size))).ExplainAsync(analyze: true, Ct);
             Assert.Equal(minute, plan.Units.Count(step => step.Alternative == "partial" && step.Detail == "the partial of the question's family it learned"));
         }
 
@@ -366,7 +366,7 @@ public sealed partial class DatasetLearnedPartialsTests
         random.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rows));
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
-            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], ObjectBytes = 256 << 10 },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Call.Service)), LayoutValue.Column(nameof(Call.At))], IndexedPrefix = 1, ObjectBytes = 256 << 10 },
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,
         }, Ct);

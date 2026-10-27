@@ -44,8 +44,7 @@ public sealed class DatasetCompactionTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // A compaction reading level 0 through its runs produces the same object as one reading
-        // inputs sorted beforehand.
+        // A compaction of level 0 produces the same object as one reading inputs sorted beforehand.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -57,8 +56,8 @@ public sealed class DatasetCompactionTests
             await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
-        // An append comes in any order, so it carries the run a merge reads it through.
-        Assert.True(await HasRunAsync(store, (await ObjectsAsync(dataset))[0], ct), "an append carries its run (§5.3)");
+        // An append comes in any order and is written sorted by the key, which keeps no run of it.
+        Assert.False(await HasRunAsync(store, (await ObjectsAsync(dataset))[0], ct), "an append is written in key order, and keeps no run");
 
         CompactionOptions options = Options(target: 1 << 20);
         CompactionPlan plan = await dataset.PlanCompactionAsync(options, ct);
@@ -118,12 +117,12 @@ public sealed class DatasetCompactionTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(objectBytes: 2 << 10), ct);
 
-        // A small target and a small cap on an object, so the merges roll into several objects per
+        // A small target and a small cap on an object, the layout's, so the merges roll into several objects per
         // level wherever level 0 lands, a fan-out of three so the levels go over their size and the
         // second trigger fires too, and a ceiling of two so level 0 is over its bound most of the time.
-        CompactionOptions options = Options(target: 1 << 10) with { Fanout = 3, MaxObjectBytes = 2 << 10 };
+        CompactionOptions options = Options(target: 1 << 10) with { Fanout = 3 };
         Random random = new Random(0x5A1AD);
         List<long> appended = [];
         int compactions = 0;
@@ -590,10 +589,10 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
-    public async Task AClusteredDatasetRefusesTieredLevels()
+    public async Task AKeyedDatasetCompactsInTheLevelsItsLayoutDeclares()
     {
-        // Tiered levels hold objects whose keys overlap, where the key cursor, a delete and a rank
-        // take every level above 0 to be key-disjoint: the plan refuses before anything is written.
+        // A key without a partition lays the dataset out in levels, key-disjoint above 0, which the key cursor, a delete and
+        // a rank take them to be: every writer compacts in them, whatever style its own options ask.
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -606,13 +605,9 @@ public sealed class DatasetCompactionTests
             await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
-        ulong version = dataset.Version;
+        Assert.Equal(LayoutOrganization.Leveled, dataset.Snapshot.Header.Layout!.Organized);
         CompactionOptions tiered = Options(target: 1 << 20) with { Style = CompactionStyle.Tiered };
-        Assert.Equal("options", (await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.PlanCompactionAsync(tiered, ct))).ParamName);
-        await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.CompactAsync(tiered, ct));
-        Assert.Equal(version, dataset.Version);
-
-        // Left to choose, or asked for leveled, the same dataset merges on its key.
+        Assert.Equal(CompactionStyle.Leveled, (await dataset.PlanCompactionAsync(tiered, ct)).Style);
         Assert.Equal(CompactionStyle.Leveled, (await dataset.PlanCompactionAsync(Options(target: 1 << 20), ct)).Style);
     }
 
@@ -660,21 +655,21 @@ public sealed class DatasetCompactionTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // The level-size trigger. Level 0 goes up first, into a level 1 that holds it, in objects
-        // capped at 4 KiB; then, under a level 1 of 4 KiB, level 1 is over its size, and the next
+        // The level-size trigger. Level 0 goes up first, into a level 1 that holds it, in objects the
+        // layout caps at 4 KiB; then, under a level 1 of 4 KiB, level 1 is over its size, and the next
         // step moves it to level 2 — the lowest level over its size first.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(objectBytes: 4 << 10), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
             await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
-        CompactionOptions roomy = Options(target: 1 << 20) with { MaxObjectBytes = 4 << 10 };
+        CompactionOptions roomy = Options(target: 1 << 20);
         CompactionPlan first = await dataset.PlanCompactionAsync(roomy, ct);
         Assert.Equal(CompactionTrigger.LevelZeroCeiling, first.Job!.Trigger);
         Assert.Equal(1, first.Job.ToLevel);
@@ -815,13 +810,12 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
-    public async Task ARunOnANarrowTableIsKeptPastAMebibyte()
+    public async Task AShuffledAppendIsWrittenInKeyOrderWithNoRun()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // On a narrow table a run on one column is as large as the column, so a budget of a tenth
-        // of the data would refuse it on every object past a mebibyte, and an object out of key
-        // order has no other way to be walked by key. The dataset keeps it whatever the budget says.
+        // An append of keys in any order is sorted as it is written (spec A, 4): its object holds them in the key's order,
+        // which a walk by key and a plain read both give, with no run beside them.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -832,11 +826,9 @@ public sealed class DatasetCompactionTests
         await dataset.AppendAsync(Shuffled(types, schema, 0, Keys, 11), ct);
 
         ObjectEntry appended = Assert.Single(await ObjectsAsync(dataset));
-        Assert.True(appended.Bytes > 1 << 20, $"the object must pass the budget's floor of a mebibyte; it holds {appended.Bytes} bytes");
-        Assert.True(await HasRunAsync(store, appended, ct), "the run is kept past the budget");
-
-        List<long> walked = await KeysAsync(dataset.ScanBuilder().InKeyOrder("key"));
-        Assert.Equal(Enumerable.Range(0, Keys).Select(key => (long)key), walked);
+        Assert.False(await HasRunAsync(store, appended, ct), "a sorted object keeps no run");
+        Assert.Equal(Enumerable.Range(0, Keys).Select(key => (long)key), await KeysAsync(dataset.ScanBuilder().InKeyOrder("key")));
+        Assert.Equal(Enumerable.Range(0, Keys).Select(key => (long)key), await KeysAsync(dataset.ScanBuilder()));
     }
 
     [Fact]
@@ -879,8 +871,9 @@ public sealed class DatasetCompactionTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
 
-        // Level 1 holds 20 KiB, level 2 200 KiB, level 3 2 MiB.
-        CompactionOptions options = Options(target: 2 << 10);
+        // Level 1 holds 5 KiB, level 2 50 KiB, level 3 500 KiB: appends are written sorted, which takes their keys a few
+        // bytes each.
+        CompactionOptions options = Options(target: 512);
         List<long> appended = [];
         for (int commit = 0; commit < 3; commit++)
         {
@@ -989,37 +982,13 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
-    public async Task ACompositeKeyOverANullableColumnIsRefusedWhenTheDatasetIsCreated()
+    public async Task AKeyOverColumnsThatMayHoldANullSortsItsNullsLast()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // A composite run holds no tuple with a null, so a merge through it would drop the row, and
-        // every compaction of an object holding one would be refused: such a key is refused before
-        // anything is written, as a key of one nullable column is now. The null keys of one column of
-        // a dataset created before are read last and merged (the test below,
-        // `TheNullKeysOfOneColumnAreMergedLast`); a tuple's never were.
-        Decoders.EnsureRegistered();
-        DTypeArena types = new DTypeArena();
-        DType schema = types.Struct(
-            ["key", "measure"],
-            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.Nullable)],
-            Nullability.NonNullable);
-
-        await using MemoryObjectStore store = new MemoryObjectStore();
-        ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(
-            async () => await VortexDataset.CreateAsync(store, schema, Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key"), LayoutValue.Column("measure")] } }, ct));
-        Assert.Contains("may hold a null", refused.Message, StringComparison.Ordinal);
-        Assert.Equal(0UL, await DatasetCommitter.NewestVersionAsync(store, ct));
-    }
-
-    [Fact]
-    public async Task AKeyThatMayHoldANullIsRefusedWhenTheDatasetIsCreated()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-
-        // A null has no place in the order the levels above 0 are disjoint on: every null is the
-        // same key, which no merge cuts between two objects. A key of one nullable column is refused
-        // before anything is written, and so is one under a struct that may be null.
+        // A null sorts after every value of its component (spec A, 2): a key of a nullable column, one under a struct that
+        // may be null and a composite one over a nullable column are taken when the dataset is created; the first takes rows
+        // from two handles and reads them back in its order, nulls last. The merge of such keys is the test below's.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType flat = types.Struct(
@@ -1030,18 +999,18 @@ public sealed class DatasetCompactionTests
             ["origin", "measure"],
             [types.Struct(["country"], [types.Utf8(Nullability.NonNullable)], Nullability.Nullable), types.Primitive(PType.F64, Nullability.Nullable)],
             Nullability.NonNullable);
-        foreach ((DType schema, string key) in ((DType, string)[])[(flat, "measure"), (nested, "origin.country")])
+        DType composite = types.Struct(
+            ["key", "measure"],
+            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.Nullable)],
+            Nullability.NonNullable);
+        foreach ((DType schema, string[] key) in ((DType, string[])[])[(nested, ["origin.country"]), (composite, ["key", "measure"])])
         {
             await using MemoryObjectStore store = new MemoryObjectStore();
-            ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(
-                async () => await VortexDataset.CreateAsync(store, schema, Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(key)] } }, ct));
-            Assert.Contains("may hold a null", refused.Message, StringComparison.Ordinal);
-            Assert.Contains("non-nullable column", refused.Message, StringComparison.Ordinal);
-            Assert.Equal(0UL, await DatasetCommitter.NewestVersionAsync(store, ct));
+            await using VortexDataset created = await VortexDataset.CreateAsync(
+                store, schema, Unclustered() with { Layout = new DatasetLayout { SortKey = [.. key.Select(LayoutValue.Column)] } }, ct);
+            Assert.Equal(1UL, await DatasetCommitter.NewestVersionAsync(store, ct));
         }
 
-        // A dataset created with such a key before it was refused still opens and takes rows: the
-        // refusal is the creation's, not the key's.
         await using MemoryObjectStore earlier = new MemoryObjectStore();
         await using (VortexDataset created = await VortexDataset.CreateAsync(
             earlier, flat, Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("measure")] } }, ct))
@@ -1063,8 +1032,7 @@ public sealed class DatasetCompactionTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // A dataset created before a nullable key was refused, its key column holding nulls,
-        // compacts. The core's key-ordered read delivers them last, which is where the merge's row
+        // A dataset of a nullable key, its key column holding nulls, compacts. The core's key-ordered read delivers them last, which is where the merge's row
         // encoding sorts them, so no row is dropped and the output reads back keyed rows first,
         // nulls after.
         Decoders.EnsureRegistered();
@@ -1363,7 +1331,8 @@ public sealed class DatasetCompactionTests
         [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
         Nullability.NonNullable);
 
-    private static DatasetOptions Clustered() => Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] } };
+    private static DatasetOptions Clustered(long objectBytes = 1L << 30) =>
+        Unclustered() with { Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")], ObjectBytes = objectBytes } };
 
     private static DatasetOptions Unclustered() => new DatasetOptions
     {

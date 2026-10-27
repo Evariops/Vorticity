@@ -109,7 +109,7 @@ public sealed class ReadContractTests
         SegmentRange[] asked = source.Ranges[opened..];
         await using VortexFile planned = await VortexSession.Default.OpenAsync(
             new CountingSource(new MemoryMappedSegmentSource(path)), cancellationToken: TestContext.Current.CancellationToken);
-        ScanPlan plan = await planned.Scan<Reading>().Where(r => r.City == "Lyon").ExplainAsync(TestContext.Current.CancellationToken);
+        ScanPlan plan = await planned.Scan<Reading>().Where(r => r.City == "Lyon").ExplainAsync(analyze: true, TestContext.Current.CancellationToken);
         long expected = 0;
         for (int row = 0; row < ContractFile.Rows; row++)
         {
@@ -179,7 +179,7 @@ public sealed class ReadContractTests
         Assert.Equal(0, count.Metrics.Requests);
 
         // A filter the file statistics refute: neither its plan nor its count reads a zone map.
-        ScanPlan refuted = await file.Scan<Reading>().Where(r => r.Day > 1_000_000).ExplainAsync(TestContext.Current.CancellationToken);
+        ScanPlan refuted = await file.Scan<Reading>().Where(r => r.Day > 1_000_000).ExplainAsync(analyze: true, TestContext.Current.CancellationToken);
         Assert.False(refuted.MayMatch);
         Assert.Equal(0, refuted.Segments);
         Assert.Equal(0, refuted.LiveBlocks);
@@ -254,7 +254,7 @@ public sealed class ReadContractTests
     {
         if (query == "projection")
         {
-            ScanPlan toolPlan = await planning.Scan("City").ExplainAsync(TestContext.Current.CancellationToken);
+            ScanPlan toolPlan = await planning.Scan("City").ExplainAsync(analyze: true, TestContext.Current.CancellationToken);
             planned?.Invoke();
             Vorticity.Scan tool = file.Scan("City");
             await foreach (BatchView batch in tool.WithCancellation(TestContext.Current.CancellationToken))
@@ -265,7 +265,7 @@ public sealed class ReadContractTests
             return (toolPlan, tool.Metrics);
         }
 
-        ScanPlan plan = await Query(planning, query).ExplainAsync(TestContext.Current.CancellationToken);
+        ScanPlan plan = await Query(planning, query).ExplainAsync(analyze: true, TestContext.Current.CancellationToken);
         planned?.Invoke();
         Scan<Reading> scan = Query(file, query);
         await foreach (Columns<Reading> columns in scan.WithCancellation(TestContext.Current.CancellationToken))
