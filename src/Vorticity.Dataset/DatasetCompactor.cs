@@ -932,9 +932,9 @@ internal static partial class DatasetCompactor
             ImmutableDictionary<string, int> chunks = ImmutableDictionary<string, int>.Empty;
             for (int v = 0; v < variants.Length; v++)
             {
-                if (ShreddingChoice.Choose(paths[v], required: IdentifierKeys(schema, variants[v])) is { } chosen)
+                string name = schema.DType.GetFieldName(variants[v]);
+                if (ShreddingChoice.Choose(paths[v], required: IdentifierKeys(schema, variants[v]), promoted: dataset.Promotions.Of(name)) is { } chosen)
                 {
-                    string name = schema.DType.GetFieldName(variants[v]);
                     shredded = shredded.SetItem(name, chosen);
                     chunks = chunks.SetItem(name, ShreddingChoice.ChunkTargetBytes(paths[v]));
                 }

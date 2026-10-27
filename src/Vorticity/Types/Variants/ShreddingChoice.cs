@@ -61,14 +61,18 @@ internal static class ShreddingChoice
     /// <param name="tableBudget">The tables a chunk's tree may give its paths.</param>
     /// <param name="required">
     /// First-level keys shredded in their class wherever a row holds one of that class, however few, and first to keep: a
-    /// dataset's identifiers among the attributes, whose index a key in the residual could not have, and the keys its
+    /// dataset's identifiers among the attributes, whose index a key in the residual could not have.
+    /// </param>
+    /// <param name="promoted">
+    /// First-level keys shredded in their dominant class however few values they hold, next to keep: the keys a dataset's
     /// questions ask (spec E, 5.1).
     /// </param>
-    internal static VariantShredding? Choose(PathCensus census, int tableBudget = TableBudget, IReadOnlyDictionary<string, VariantClass>? required = null)
+    internal static VariantShredding? Choose(
+        PathCensus census, int tableBudget = TableBudget, IReadOnlyDictionary<string, VariantClass>? required = null, IReadOnlySet<string>? promoted = null)
     {
         ArgumentNullException.ThrowIfNull(census);
         List<Candidate> candidates = [];
-        Collect(census.Root, [], candidates, required);
+        Collect(census.Root, [], candidates, required, promoted);
         if (candidates.Count == 0)
         {
             return null;
@@ -87,8 +91,12 @@ internal static class ShreddingChoice
         return Build(candidates, 0);
     }
 
-    /// <summary>The paths under <paramref name="node"/> that hold <see cref="LeastValues"/> values of their dominant class or more.</summary>
-    private static void Collect(PathCensus.PathCount node, string[] path, List<Candidate> into, IReadOnlyDictionary<string, VariantClass>? required)
+    /// <summary>
+    /// The paths under <paramref name="node"/> that hold <see cref="LeastValues"/> values of their dominant class or more,
+    /// and the first-level keys <paramref name="required"/> or <paramref name="promoted"/> name.
+    /// </summary>
+    private static void Collect(
+        PathCensus.PathCount node, string[] path, List<Candidate> into, IReadOnlyDictionary<string, VariantClass>? required, IReadOnlySet<string>? promoted)
     {
         // A required key is shredded in its class wherever a row holds one; a key that holds none of that class is judged
         // as any other.
@@ -103,15 +111,15 @@ internal static class ShreddingChoice
         {
             foreach ((string name, PathCensus.PathCount key) in node.Keys.OrderBy(static key => key.Key, StringComparer.Ordinal))
             {
-                Collect(key, [.. path, name], into, path.Length == 0 ? required : null);
+                Collect(key, [.. path, name], into, path.Length == 0 ? required : null, path.Length == 0 ? promoted : null);
             }
 
             return;
         }
 
-        if (count >= LeastValues)
+        if (count >= LeastValues || (count > 0 && path.Length == 1 && promoted?.Contains(path[0]) == true))
         {
-            into.Add(new Candidate(path, best, count));
+            into.Add(new Candidate(path, best, count >= LeastValues ? count : long.MaxValue - 1));
         }
     }
 
