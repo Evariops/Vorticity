@@ -45,6 +45,48 @@ internal sealed class ConstantDecoder : ArrayDecoder
     }
 
     /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <summary>A predicate on a constant of integers, the question it asks of the one value; anything else declines.</summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return dtype.Kind == DTypeKind.Primitive && dtype.PType.IsInteger()
+            && Compute.IntegerQuestion.TryOf(predicate, dtype.PType, out Compute.IntegerQuestion question)
+            && TryEvaluateIntegers(context, in node, dtype, length, in question, ref bits);
+    }
+
+    /// <summary>The one value judged once, its verdict every row's; a null one leaves every row unknown.</summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluateIntegers(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, in Compute.IntegerQuestion question,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (dtype.Kind != DTypeKind.Primitive || !dtype.PType.IsInteger())
+        {
+            return false;
+        }
+
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+        TypedScalar scalar = TypedScalarReader.Read(node.GetBuffer(0).Span, dtype, context.Scalars, context.Types);
+        if (scalar.IsNull)
+        {
+            bits.FillUnknown();
+            return true;
+        }
+
+        Span<byte> value = stackalloc byte[8];
+        value.Clear();
+        scalar.WriteTo(value[..dtype.PType.ByteWidth()], dtype.PType);
+        bits.Fill(question.Holds(System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(value)));
+        return true;
+    }
+
+    /// <inheritdoc/>
     public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => true;
 
     /// <summary>

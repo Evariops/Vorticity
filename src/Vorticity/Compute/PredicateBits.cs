@@ -49,6 +49,18 @@ internal ref struct PredicateBits
         Unknown = false;
     }
 
+    /// <summary>Every row unknown: a null constant's answer.</summary>
+    internal void FillUnknown()
+    {
+        Truth.Clear();
+        Known.Clear();
+        Unknown = Rows > 0;
+    }
+
+    /// <summary>Rows <c>[from, from + count)</c> selected, the others left as they are.</summary>
+    internal readonly void SetRange(int from, int count) =>
+        BitmapKernels.SetRange(MemoryMarshal.AsBytes(Truth), from, count);
+
     /// <summary>The selection turned over: the rows selected become the rows not, unknown rows staying unselected.</summary>
     internal void Invert()
     {
@@ -98,6 +110,13 @@ internal ref struct PredicateBits
         Span<byte> known = MemoryMarshal.AsBytes(Known);
         known.Clear();
         BitmapKernels.CopyRange(validity.Bits, validity.BitOffset, known, 0, Rows);
+        AndKnown();
+    }
+
+    /// <summary>The rows <paramref name="known"/> says are known, a row of no other unknown and unselected.</summary>
+    internal void ApplyKnown(ReadOnlySpan<ulong> known)
+    {
+        known[..Known.Length].CopyTo(Known);
         AndKnown();
     }
 

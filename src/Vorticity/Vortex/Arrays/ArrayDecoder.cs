@@ -217,4 +217,21 @@ internal abstract class ArrayDecoder
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
         Compute.EncodedPredicate predicate, ref Compute.PredicateBits bits) =>
         false;
+
+    /// <summary>
+    /// Answers <paramref name="question"/>, asked of this node's integer patterns, a bit a row
+    /// into <paramref name="bits"/>: what a parent of integers asks its child once it moved its
+    /// own question into the child's patterns.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <param name="dtype">The integer DType this node would produce.</param>
+    /// <param name="length">The row count this node would produce.</param>
+    /// <param name="question">The range or the set, on this node's patterns.</param>
+    /// <param name="bits">Receives the rows selected and, when some row is unknown, the rows known.</param>
+    /// <returns><see langword="false"/> when this encoding will not answer.</returns>
+    public virtual bool TryEvaluateIntegers(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        in Compute.IntegerQuestion question, ref Compute.PredicateBits bits) =>
+        false;
 }

@@ -52,11 +52,18 @@ internal sealed class EncodedPredicate
         Values = members;
         Integers = kind switch
         {
-            EncodedPredicateKind.Compare => IntegerRange.OfComparison(op, literal),
-            EncodedPredicateKind.Between => IntegerRange.OfBetween(literal, lowInclusive, high, highInclusive),
+            EncodedPredicateKind.Compare => IntegerRange.OfComparison(op, literal, decimals: false),
+            EncodedPredicateKind.Between => IntegerRange.OfBetween(literal, lowInclusive, high, highInclusive, decimals: false),
             _ => null,
         };
-        Members = kind == EncodedPredicateKind.In ? IntegerMembers(members) : null;
+        Members = kind == EncodedPredicateKind.In ? IntegerMembers(members, decimals: false) : null;
+        Decimals = kind switch
+        {
+            EncodedPredicateKind.Compare => IntegerRange.OfComparison(op, literal, decimals: true),
+            EncodedPredicateKind.Between => IntegerRange.OfBetween(literal, lowInclusive, high, highInclusive, decimals: true),
+            _ => null,
+        };
+        DecimalMembers = kind == EncodedPredicateKind.In ? IntegerMembers(members, decimals: true) : null;
     }
 
     /// <summary>The predicate's shape.</summary>
@@ -95,6 +102,15 @@ internal sealed class EncodedPredicate
     /// </summary>
     internal Int128[]? Members { get; }
 
+    /// <summary>
+    /// The unscaled integers a comparison or a range of a decimal column selects, its literals read as the decimal
+    /// comparison reads them (<see cref="ComparisonKernels.TryDecimal"/>); null for another shape or literal.
+    /// </summary>
+    internal IntegerRange? Decimals { get; }
+
+    /// <summary>The unscaled integers of <see cref="EncodedPredicateKind.In"/> on a decimal column, as <see cref="Members"/>.</summary>
+    internal Int128[]? DecimalMembers { get; }
+
     /// <summary><c>column op literal</c>.</summary>
     internal static EncodedPredicate Compare(ComparisonOp op, FilterLiteral literal) =>
         new EncodedPredicate(EncodedPredicateKind.Compare, op, literal, default, false, false, []);
@@ -115,7 +131,7 @@ internal sealed class EncodedPredicate
     /// The members as integers, ascending and distinct: a float member that is no integer equals no integer and is left
     /// out; null when one is null, which turns a miss unknown, or is no number.
     /// </summary>
-    private static Int128[]? IntegerMembers(FilterLiteral[] members)
+    private static Int128[]? IntegerMembers(FilterLiteral[] members, bool decimals)
     {
         List<Int128> integers = new List<Int128>(members.Length);
         foreach (FilterLiteral member in members)
@@ -125,10 +141,18 @@ internal sealed class EncodedPredicate
                 case FilterLiteralKind.Signed:
                     integers.Add(member.SignedValue);
                     break;
-                case FilterLiteralKind.Unsigned:
+                case FilterLiteralKind.Bytes when decimals && ComparisonKernels.TryDecimal(member, out Types.Numerics.Int256 wide):
+                    // A member past every unscaled value an integer holds equals none of them.
+                    if (wide.TryToInt128(out Int128 narrow))
+                    {
+                        integers.Add(narrow);
+                    }
+
+                    break;
+                case FilterLiteralKind.Unsigned when !decimals:
                     integers.Add(member.UnsignedValue);
                     break;
-                case FilterLiteralKind.Float:
+                case FilterLiteralKind.Float when !decimals:
                     double value = member.FloatValue;
                     if (!double.IsNaN(value) && Math.Floor(value) == value && Math.Abs(value) < IntegerRange.Beyond)
                     {
@@ -181,9 +205,24 @@ internal readonly record struct IntegerRange(Int128 Low, Int128 High, bool Negat
     internal IntegerRange Within(Int128 least, Int128 greatest) =>
         new IntegerRange(Int128.Max(Low, least), Int128.Min(High, greatest), Negated);
 
-    /// <summary>The values <c>column op literal</c> selects; null for a literal that is no number.</summary>
-    internal static IntegerRange? OfComparison(ComparisonOp op, FilterLiteral literal)
+    /// <summary>
+    /// The values <c>column op literal</c> selects; null for a literal that is no number. Of a decimal column when
+    /// <paramref name="decimals"/>: its unscaled values, against a signed literal or one of 16 or 32 bytes.
+    /// </summary>
+    internal static IntegerRange? OfComparison(ComparisonOp op, FilterLiteral literal, bool decimals)
     {
+        if (decimals)
+        {
+            if (literal.Kind != FilterLiteralKind.Signed && literal.Kind != FilterLiteralKind.Bytes
+                || !ComparisonKernels.TryDecimal(literal, out Types.Numerics.Int256 wide))
+            {
+                return null;
+            }
+
+            // A literal past every unscaled value an integer holds settles as one at the clamp.
+            return OfBound(op, wide.TryToInt128(out Int128 narrow) ? Int128.Clamp(narrow, -Far, Far) : wide.IsNegative ? -Far : Far);
+        }
+
         switch (literal.Kind)
         {
             case FilterLiteralKind.Signed:
@@ -219,10 +258,10 @@ internal readonly record struct IntegerRange(Int128 Low, Int128 High, bool Negat
     }
 
     /// <summary>The values between two literals, each bound included or not; null for a bound that is no number.</summary>
-    internal static IntegerRange? OfBetween(FilterLiteral low, bool lowInclusive, FilterLiteral high, bool highInclusive)
+    internal static IntegerRange? OfBetween(FilterLiteral low, bool lowInclusive, FilterLiteral high, bool highInclusive, bool decimals)
     {
-        if (OfComparison(lowInclusive ? ComparisonOp.GreaterOrEqual : ComparisonOp.Greater, low) is not { } above
-            || OfComparison(highInclusive ? ComparisonOp.LessOrEqual : ComparisonOp.Less, high) is not { } below)
+        if (OfComparison(lowInclusive ? ComparisonOp.GreaterOrEqual : ComparisonOp.Greater, low, decimals) is not { } above
+            || OfComparison(highInclusive ? ComparisonOp.LessOrEqual : ComparisonOp.Less, high, decimals) is not { } below)
         {
             return null;
         }

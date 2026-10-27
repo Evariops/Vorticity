@@ -1872,7 +1872,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // A range or a set of numbers: the encodings of integers answer them, and none answers one of bytes, whose
         // first split would decode the column for nothing.
         static PushPlan Numeric(FieldExpr field, Compute.EncodedPredicate predicate) =>
-            predicate.Integers is null && predicate.Members is null ? NoPush : new PushPlan(field, predicate);
+            predicate.Integers is null && predicate.Members is null && predicate.Decimals is null && predicate.DecimalMembers is null
+                ? NoPush
+                : new PushPlan(field, predicate);
     }
 
     /// <summary>A predicate an encoding may answer, on a top-level field.</summary>

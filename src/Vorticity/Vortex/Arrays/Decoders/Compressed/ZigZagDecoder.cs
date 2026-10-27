@@ -49,11 +49,41 @@ internal sealed class ZigZagDecoder : ArrayDecoder
         return Core(context, in node, dtype, length, wanted, selective: true);
     }
 
-    private static int Core(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
-    {
+    /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
 
+    /// <summary>A predicate on the values is the question it asks of their integers.</summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        PType signed = Signed(in node, dtype);
+        return Compute.IntegerQuestion.TryOf(predicate, signed, out Compute.IntegerQuestion question)
+            && TryEvaluateIntegers(context, in node, dtype, length, in question, ref bits);
+    }
+
+    /// <summary>
+    /// Asks the encoded child the question zigzagged: a value's pattern is its zigzag, so an equality, an inequality or
+    /// a set is asked of the zigzag of each value; a wider range declines, the zigzag interleaving the signs.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluateIntegers(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, in Compute.IntegerQuestion question,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        PType signed = Signed(in node, dtype);
+        DType encodedType = context.Types.Primitive(CompressedValues.ToUnsigned(signed), dtype.Nullability);
+        return question.TryZigZagged(out Compute.IntegerQuestion child)
+            && context.TryEvaluateIntegersChild(in node, 0, encodedType, length, in child, ref bits);
+    }
+
+    /// <summary>The signed type of the values, checked against the node's shape first.</summary>
+    /// <exception cref="VortexFormatException">The node is not a zigzag over one child, or its dtype is no signed integer.</exception>
+    private static PType Signed(in ArrayNode node, DType dtype)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 1, Id);
 
@@ -68,7 +98,14 @@ internal sealed class ZigZagDecoder : ArrayDecoder
             CompressedThrow.Format($"{Id} requires a signed integer primitive dtype, not {dtype}.");
         }
 
-        PType signed = dtype.PType;
+        return dtype.PType;
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        ReadOnlySpan<int> wanted, bool selective)
+    {
+        PType signed = Signed(in node, dtype);
         PType unsigned = CompressedValues.ToUnsigned(signed);
         DType encodedType = context.Types.Primitive(unsigned, dtype.Nullability);
 

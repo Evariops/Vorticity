@@ -228,6 +228,25 @@ internal sealed class ArrayDecodeContext
             && decoder.TryEvaluate(this, in child, childDType, childLength, predicate, ref bits);
     }
 
+    /// <summary>
+    /// Asks child <paramref name="childIndex"/> of <paramref name="node"/> to answer <paramref name="question"/>, already
+    /// moved into the child's integer patterns: false when the child's encoding declines.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's integer DType.</param>
+    /// <param name="childLength">The child's row count.</param>
+    /// <param name="question">The question on the child's patterns.</param>
+    /// <param name="bits">Receives the child's answer.</param>
+    internal bool TryEvaluateIntegersChild(
+        in ArrayNode node, int childIndex, DType childDType, int childLength, in Compute.IntegerQuestion question,
+        ref Compute.PredicateBits bits)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        ArrayDecoder decoder = ArrayDecoderTable.Require(_scan, child.Encoding, child.EncodingSpecIndex);
+        return decoder.TryEvaluateIntegers(this, in child, childDType, childLength, in question, ref bits);
+    }
+
     /// <summary>Whether <paramref name="node"/>'s encoding decodes a range of its rows, children included.</summary>
     /// <param name="node">The node.</param>
     internal bool DecodesRange(in ArrayNode node) =>

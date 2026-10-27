@@ -98,38 +98,48 @@ internal sealed class BitPackedDecoder : ArrayDecoder
     public override bool EvaluatesWithoutFullDecode => true;
 
     /// <summary>
-    /// Answers a comparison, a range or a set on the packed values themselves, a block of 1 024 rows at a time,
-    /// without writing a value out: the integers the predicate selects are a range or a set of the column's values,
-    /// which the kernel tests as it unpacks (<see cref="FastLanes.InRange{T}"/>).
+    /// Answers a comparison, a range or a set on the packed values themselves: the question it asks of the column's
+    /// integers (<see cref="TryEvaluateIntegers"/>).
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Packed values lie from 0 to <c>2^w - 1</c> for a width <c>w</c> under the element's: the predicate's range is cut
-    /// to them first, which settles every packed row when it holds none of them or all, whatever the literal's sign or
-    /// size. A patch holds a value of any width; each is judged on its own value and set over its row's bit.
-    /// </para>
-    /// <para>
-    /// A set is tested by its members while they are few, by a bit for each value of the width up to 16 bits, and
-    /// declined past both, where an equality a member would cost more than decoding.
-    /// </para>
-    /// </remarks>
+    /// <inheritdoc/>
     public override bool TryEvaluate(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
         ref Compute.PredicateBits bits)
     {
         ArgumentNullException.ThrowIfNull(context);
-        if (predicate.Integers is null && predicate.Members is null)
-        {
-            return false;
-        }
+        PType ptype = CompressedValues.RequireIntegerPrimitive(dtype, Id);
+        return Compute.IntegerQuestion.TryOf(predicate, ptype, out Compute.IntegerQuestion question)
+            && TryEvaluateIntegers(context, in node, dtype, length, in question, ref bits);
+    }
 
+    /// <summary>
+    /// Answers a question on the packed patterns, a block of 1 024 rows at a time, without writing a value out: a range
+    /// is tested as the kernel unpacks (<see cref="FastLanes.InRange{T}"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Packed patterns lie from 0 to <c>2^w - 1</c> for a width <c>w</c> under the element's: a range that holds none of
+    /// them or all settles every packed row. A patch holds a pattern of any width; each is judged on its own and set over
+    /// its row's bit.
+    /// </para>
+    /// <para>
+    /// A set is tested by its members while they are few, by a bit for each pattern of the width up to 16 bits, and
+    /// declined past both, where an equality a member would cost more than decoding.
+    /// </para>
+    /// </remarks>
+    /// <inheritdoc/>
+    public override bool TryEvaluateIntegers(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, in Compute.IntegerQuestion question,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
         Packing packing = Packing.Of(in node, dtype, length);
         bool answered = packing.PType.ByteWidth() switch
         {
-            1 => Answer<byte>(in packing, length, predicate, ref bits),
-            2 => Answer<ushort>(in packing, length, predicate, ref bits),
-            4 => Answer<uint>(in packing, length, predicate, ref bits),
-            _ => Answer<ulong>(in packing, length, predicate, ref bits),
+            1 => Answer<byte>(in packing, length, in question, ref bits),
+            2 => Answer<ushort>(in packing, length, in question, ref bits),
+            4 => Answer<uint>(in packing, length, in question, ref bits),
+            _ => Answer<ulong>(in packing, length, in question, ref bits),
         };
 
         if (!answered)
@@ -137,9 +147,14 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             return false;
         }
 
-        if (packing.Metadata.HasPatches)
+        if (packing.Metadata.HasPatches && question.Kind is Compute.QuestionKind.Range or Compute.QuestionKind.Members)
         {
-            JudgePatches(context, in node, dtype, length, in packing, predicate, ref bits);
+            ReadOnlySpan<byte> values = ReadPatches(context, in node, dtype, length, packing.Metadata, retained: false, out Patches patches);
+            int width = packing.PType.ByteWidth();
+            for (int i = 0; i < patches.Count; i++)
+            {
+                bits.Set(patches.GetPosition(i), question.Holds(ReadPattern(values.Slice(i * width, width))));
+            }
         }
 
         bits.ApplyValidity(ValidityMask.From(
@@ -148,41 +163,66 @@ internal sealed class BitPackedDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// The packed rows' answer: settled for every row when the packed values' range decides it, else the kernel's,
-    /// over the blocks the rows touch. False for a set the kernels do not take.
+    /// The packed rows' answer: settled for every row when the packed patterns' range decides it, else the kernel's, over
+    /// the blocks the rows touch. False for a set the kernels do not take.
     /// </summary>
-    private static bool Answer<T>(in Packing packing, int length, Compute.EncodedPredicate predicate, ref Compute.PredicateBits bits)
+    private static bool Answer<T>(in Packing packing, int length, in Compute.IntegerQuestion question, ref Compute.PredicateBits bits)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         int bitWidth = packing.BitWidth;
-        int elementBits = Unsafe.SizeOf<T>() * 8;
-        (Int128 least, Int128 greatest) = bitWidth == elementBits ? Domain(packing.PType) : (Int128.Zero, (Int128.One << bitWidth) - 1);
+        ulong packedMask = bitWidth == 64 ? ulong.MaxValue : (1UL << bitWidth) - 1;
         ReadOnlySpan<T> packed = MemoryMarshal.Cast<byte, T>(packing.Packed.Span);
-        if (predicate.Integers is { } integers)
+        switch (question.Kind)
         {
-            Compute.IntegerRange range = integers.Within(least, greatest);
-            if (range.IsEmpty || (range.Low == least && range.High == greatest))
-            {
-                bits.Fill(range.IsEmpty == range.Negated);
+            case Compute.QuestionKind.None:
+            case Compute.QuestionKind.All:
+                bits.Fill(question.Kind == Compute.QuestionKind.All);
                 return true;
-            }
 
-            Blocks(packed, bitWidth, packing.Offset, length, Kernel.Range, T.CreateTruncating(range.Low),
-                T.CreateTruncating(range.High - range.Low), default, default, bits.Truth);
-            bits.Trim();
-            if (range.Negated)
-            {
-                bits.Invert();
-            }
+            case Compute.QuestionKind.Range:
+                // Where 0 falls in the range's frame: the packed patterns run from it, packedMask past it, wrapping.
+                ulong first = (0 - question.Low) & question.Mask;
+                bool wraps = packedMask > question.Mask - first;
+                if (first > question.Span && !wraps)
+                {
+                    bits.Fill(question.Negated);
+                    return true;
+                }
 
-            return true;
+                if (first <= question.Span && packedMask <= question.Span - first)
+                {
+                    bits.Fill(!question.Negated);
+                    return true;
+                }
+
+                Blocks(packed, bitWidth, packing.Offset, length, Kernel.Range, T.CreateTruncating(question.Low),
+                    T.CreateTruncating(question.Span), default, default, bits.Truth);
+                bits.Trim();
+                if (question.Negated)
+                {
+                    bits.Invert();
+                }
+
+                return true;
         }
 
-        // The members the packed values can equal, as those values' bits.
-        ReadOnlySpan<Int128> members = predicate.Members!;
-        int first = LowerBound(members, least);
-        int end = LowerBound(members, greatest + 1);
-        int count = end - first;
+        // The members' patterns the packed values can hold.
+        ReadOnlySpan<Int128> members = question.Members;
+        Span<T> few = stackalloc T[FewMembers];
+        int count = 0;
+        for (int m = 0; m < members.Length && count <= FewMembers; m++)
+        {
+            if (question.TryPattern(members[m], out ulong pattern) && pattern <= packedMask)
+            {
+                if (count < FewMembers)
+                {
+                    few[count] = T.CreateTruncating(pattern);
+                }
+
+                count++;
+            }
+        }
+
         if (count == 0)
         {
             bits.Fill(false);
@@ -191,13 +231,7 @@ internal sealed class BitPackedDecoder : ArrayDecoder
 
         if (count <= FewMembers)
         {
-            Span<T> kept = stackalloc T[FewMembers];
-            for (int m = 0; m < count; m++)
-            {
-                kept[m] = T.CreateTruncating(members[first + m]);
-            }
-
-            Blocks(packed, bitWidth, packing.Offset, length, Kernel.Members, default, default, kept[..count], default, bits.Truth);
+            Blocks(packed, bitWidth, packing.Offset, length, Kernel.Members, default, default, few[..count], default, bits.Truth);
             bits.Trim();
             return true;
         }
@@ -207,15 +241,18 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             return false;
         }
 
-        ulong[] set = ArrayPool<ulong>.Shared.Rent(Math.Max(1, (1 << bitWidth) >> 6));
+        int words = Math.Max(1, (1 << bitWidth) >> 6);
+        ulong[] set = ArrayPool<ulong>.Shared.Rent(words);
         try
         {
-            Span<ulong> held = set.AsSpan(0, Math.Max(1, (1 << bitWidth) >> 6));
+            Span<ulong> held = set.AsSpan(0, words);
             held.Clear();
-            for (int m = first; m < end; m++)
+            for (int m = 0; m < members.Length; m++)
             {
-                int value = int.CreateTruncating(T.CreateTruncating(members[m]));
-                held[value >> 6] |= 1UL << (value & 63);
+                if (question.TryPattern(members[m], out ulong pattern) && pattern <= packedMask)
+                {
+                    held[(int)(pattern >> 6)] |= 1UL << (int)(pattern & 63);
+                }
             }
 
             Blocks(packed, bitWidth, packing.Offset, length, Kernel.Set, default, default, default, held, bits.Truth);
@@ -309,66 +346,14 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
     }
 
-    /// <summary>Sets each patched row's bit by the predicate on its own value, which the packed bits do not hold.</summary>
-    private static void JudgePatches(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, in Packing packing,
-        Compute.EncodedPredicate predicate, ref Compute.PredicateBits bits)
+    /// <summary>A little-endian pattern of one to eight bytes.</summary>
+    private static ulong ReadPattern(ReadOnlySpan<byte> bytes) => bytes.Length switch
     {
-        ReadOnlySpan<byte> values = ReadPatches(context, in node, dtype, length, packing.Metadata, retained: false, out Patches patches);
-        int width = packing.PType.ByteWidth();
-        bool signed = packing.PType.IsSignedInteger();
-        for (int i = 0; i < patches.Count; i++)
-        {
-            Int128 value = Read(values.Slice(i * width, width), signed);
-            bool selected = predicate.Integers is { } range
-                ? range.Holds(value)
-                : Array.BinarySearch(predicate.Members!, value) >= 0;
-            bits.Set(patches.GetPosition(i), selected);
-        }
-    }
-
-    /// <summary>A little-endian integer of one to eight bytes, sign-extended when <paramref name="signed"/>.</summary>
-    private static Int128 Read(ReadOnlySpan<byte> bytes, bool signed) => bytes.Length switch
-    {
-        1 => signed ? (sbyte)bytes[0] : bytes[0],
-        2 => signed ? BinaryPrimitives.ReadInt16LittleEndian(bytes) : BinaryPrimitives.ReadUInt16LittleEndian(bytes),
-        4 => signed ? BinaryPrimitives.ReadInt32LittleEndian(bytes) : BinaryPrimitives.ReadUInt32LittleEndian(bytes),
-        _ => signed ? BinaryPrimitives.ReadInt64LittleEndian(bytes) : BinaryPrimitives.ReadUInt64LittleEndian(bytes),
+        1 => bytes[0],
+        2 => BinaryPrimitives.ReadUInt16LittleEndian(bytes),
+        4 => BinaryPrimitives.ReadUInt32LittleEndian(bytes),
+        _ => BinaryPrimitives.ReadUInt64LittleEndian(bytes),
     };
-
-    /// <summary>The least and the greatest value of an integer type.</summary>
-    private static (Int128 Least, Int128 Greatest) Domain(PType ptype) => ptype switch
-    {
-        PType.I8 => (sbyte.MinValue, sbyte.MaxValue),
-        PType.I16 => (short.MinValue, short.MaxValue),
-        PType.I32 => (int.MinValue, int.MaxValue),
-        PType.I64 => (long.MinValue, long.MaxValue),
-        PType.U8 => (0, byte.MaxValue),
-        PType.U16 => (0, ushort.MaxValue),
-        PType.U32 => (0, uint.MaxValue),
-        _ => (0, ulong.MaxValue),
-    };
-
-    /// <summary>The first of the ascending <paramref name="values"/> at or past <paramref name="value"/>.</summary>
-    private static int LowerBound(ReadOnlySpan<Int128> values, Int128 value)
-    {
-        int low = 0;
-        int high = values.Length;
-        while (low < high)
-        {
-            int middle = low + ((high - low) >> 1);
-            if (values[middle] < value)
-            {
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle;
-            }
-        }
-
-        return low;
-    }
 
     /// <summary>A node's packing, checked against its rows and its type before a byte of it is read.</summary>
     private readonly struct Packing
