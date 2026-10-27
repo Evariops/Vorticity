@@ -374,7 +374,8 @@ internal sealed class GranuleAnswer
     /// those of the granules that hold several values of the key's first column or of the granule value
     /// (<see cref="ObjectContents.PureGranuleRows"/>), short runs gathered, unless the question would answer such a granule too,
     /// every column it keys or filters but one, under counts alone, constant over the object, and then those of the granules
-    /// that do not list that column's values (<see cref="ObjectContents.ListedRows"/>); none when the object does not say,
+    /// that do not list that column's values (<see cref="ObjectContents.ListedRows"/>), or, for a function of a column, those
+    /// where its groups change (<see cref="Changing"/>); none when the object does not say,
     /// the granules then taken to answer, as before it said. And those of the granules that hold a row a delete marked,
     /// which are read as rows (<see cref="Settle"/>). With <paramref name="edges"/>, for a price that bounds what is
     /// read, those a window on a column of the key cuts too, which the choice of the path need not weigh: a window on the
@@ -396,15 +397,18 @@ internal sealed class GranuleAnswer
         {
             // In a granule of several runs, the first column varies, and so does every key and filtered column the object's
             // summaries do not hold constant. One column that varies, under counts alone, answers where its values are
-            // listed; a function of one, a truncation, where the granule's extremes fall in one group, as they mostly do.
+            // listed; a function of one, a truncation, where the granule's extremes fall in one group: all but the granules
+            // where its groups change.
             int varying = 0;
             int listing = -1;
+            double changing = 0;
             foreach ((int field, FieldExpr key) in _keys)
             {
                 if (CountsAnswer.ConstantOf(summaries, _schema.Columns[field].Name, key) is null)
                 {
                     varying++;
                     listing = key is ColumnFieldExpr ? field : -1;
+                    changing = key is FunctionFieldExpr function ? Changing(summaries, field, function, entry.PhysicalRows) : 0;
                 }
             }
 
@@ -419,6 +423,7 @@ internal sealed class GranuleAnswer
 
             share = varying > (CountsOnly ? 1 : 0) ? 1 - Math.Clamp(contents.PureGranuleRows / (double)entry.PhysicalRows, 0, 1)
                 : varying == 1 && listing >= 0 ? 1 - Math.Clamp(contents.ListedRowsOf(listing) / (double)entry.PhysicalRows, 0, 1)
+                : varying == 1 ? changing
                 : 0;
         }
 
@@ -440,6 +445,75 @@ internal sealed class GranuleAnswer
 
         return Math.Min(1, share);
     }
+
+    /// <summary>
+    /// The share of the rows of an object of <paramref name="rows"/> rows, whose summaries are <paramref name="summaries"/>,
+    /// in the granules where the groups of <paramref name="key"/>, a function of column <paramref name="field"/> that varies
+    /// over it, change: a granule a change, the changes counted between the column's extremes, of an integer storage, one
+    /// of another, for a column the object holds in order (<see cref="InOrder"/>); every granule for another.
+    /// </summary>
+    private double Changing(ObjectSummaries summaries, int field, FunctionFieldExpr key, long rows)
+    {
+        if (!InOrder(summaries, field))
+        {
+            return 1;
+        }
+
+        // Each group past the first starts at the least value whose image passes the one before's; beyond a change a
+        // granule, every granule holds one.
+        long granules = (rows + _granuleRows - 1) / _granuleRows;
+        long changes = 0;
+        ValueFunction function = key.Function;
+        if (key.Column is ColumnFieldExpr && summaries.TryGet(_schema.Columns[field].Name, out ColumnSummary column) && column.HasMin && column.HasMax
+            && ValueFunction.TryInteger(column.Min, out Int128 at) && ValueFunction.TryInteger(column.Max, out Int128 high))
+        {
+            while (changes < granules && function.TryMap(function.Literal(at), out FilterLiteral image) && ValueFunction.TryInteger(image, out Int128 group)
+                && function.TryLeast(group + 1, out Int128 next) && next <= high)
+            {
+                changes++;
+                at = next;
+            }
+        }
+
+        return Math.Min(1, Math.Max(1, changes) * (double)_granuleRows / rows);
+    }
+
+    /// <summary>
+    /// Whether the object whose summaries are <paramref name="summaries"/> holds column <paramref name="field"/> in order: a
+    /// column of the sort key whose components before it, of other columns, each hold one value over the object; a
+    /// function of the column itself orders it as the column does.
+    /// </summary>
+    private bool InOrder(ObjectSummaries summaries, int field)
+    {
+        foreach (LayoutColumn component in _schema.Layout?.Components ?? [])
+        {
+            if (component.Read is not null)
+            {
+                return false;
+            }
+
+            if (component.Field == field)
+            {
+                if (component.IsColumn)
+                {
+                    return true;
+                }
+            }
+            else if (!summaries.TryGet(_schema.Columns[component.Field].Name, out ColumnSummary column) || !column.HasMin || !column.HasMax
+                || !column.HasNullCount || column.NullCount != 0 || !Same(component.Function, column.Min, column.Max))
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Whether <paramref name="low"/> and <paramref name="high"/> are one value through <paramref name="function"/>, or themselves.</summary>
+    private static bool Same(ValueFunction? function, FilterLiteral low, FilterLiteral high) =>
+        function is null
+            ? KeyCursor.Compare(low, high) == 0
+            : function.TryMap(low, out FilterLiteral first) && function.TryMap(high, out FilterLiteral last) && KeyCursor.Compare(first, last) == 0;
 
     private bool Keyed(int field)
     {
