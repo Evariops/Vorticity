@@ -96,6 +96,16 @@ internal static class DatasetRowChanges
         RunAsync(dataset, filter, start, null, cancellationToken);
 
     /// <summary>
+    /// Whether <paramref name="pruner"/>'s filter selects every row of <paramref name="held"/>: by its summaries, or by its
+    /// partition, whose column's values there it selects whole.
+    /// </summary>
+    private static bool Covers(SummaryPruner pruner, DatasetSchema schema, in PositionedObject held) =>
+        pruner.MustMatch(held.Entry.Summaries.Columns, held.Entry.PhysicalRows)
+        || (schema.Cut is { } cut && held.TreeKey.Length > VortexDataset.UidBytes
+            && cut.Bounds(VortexDataset.OrderOf(held.TreeKey).Span) is { } partition
+            && pruner.MustMatch(partition, held.Entry.PhysicalRows));
+
+    /// <summary>
     /// Takes out of the dataset every object whose rows <paramref name="filter"/> is true for, as the bounds its entry
     /// states prove, and no other: an expiry, which opens no object and rewrites none. The rows of an object it does
     /// not cover whole stay.
@@ -145,7 +155,9 @@ internal static class DatasetRowChanges
                 {
                     // An object whose summaries prove every row selected goes whole, unopened, when no
                     // sink wants its rows: bounds only loosen under marks, so its live rows are selected too.
-                    Change change = changed is null && (pruner is null ? whole : pruner.MustMatch(held.Entry.Summaries.Columns, held.Entry.PhysicalRows))
+                    // So does an object whose partition the filter covers whole, every value its column takes
+                    // there selected: the days before an instant under a partition by day, whatever the object holds.
+                    Change change = changed is null && (pruner is null ? whole : Covers(pruner, version.Schema, held))
                         ? new Change(held.Entry.Rows, null, null)
                         : whole
                             ? new Change(0, null, null)

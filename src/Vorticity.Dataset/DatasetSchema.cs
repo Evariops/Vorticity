@@ -54,7 +54,7 @@ internal sealed class DatasetSchema
             : null;
         KeyColumns = Layout?.ColumnPaths();
         Key = Layout is { Partition: null } && KeyColumns is { } paths ? ClusteringKey.OfLayout(paths, DType) : null;
-        Cut = ValueCut.Of(Layout, Key, Tree);
+        Cut = ValueCut.Of(Layout, Tree);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);

@@ -65,7 +65,9 @@ internal sealed class DatasetScanSource : ScanSource
     internal override async ValueTask<(VortexExpr Filter, VortexExpr Window)?> AlignAsync(
         ScanSpec spec, Aggregating.StateRequest states, CancellationToken cancellationToken)
     {
-        if (!KeepsStates || spec.Filter is not { } filter || _version.Schema.Key is not { } key
+        // The column a window is aligned on: the key's first, or under a partition the column it reads, objects holding one
+        // partition each.
+        if (!KeepsStates || spec.Filter is not { } filter || AlignedOn() is not { } key
             || !await _version.KeepsCountsAsync(cancellationToken).ConfigureAwait(false))
         {
             return null;
@@ -121,7 +123,7 @@ internal sealed class DatasetScanSource : ScanSource
         (byte[] Bytes, FilterLiteral Value)? highest = null;
         await foreach (PositionedObject held in WalkAsync(spec, others, Window(range, null, null), cancellationToken).ConfigureAwait(false))
         {
-            if (Bounds(held, key) is not { } of || Above(of.Low.Bytes, high) || Below(of.High.Bytes, low) || answer.FieldOf(held) is null)
+            if (Bounds(held, key, _version.Schema.Key is not null) is not { } of || Above(of.Low.Bytes, high) || Below(of.High.Bytes, low) || answer.FieldOf(held) is null)
             {
                 continue;
             }
@@ -142,7 +144,7 @@ internal sealed class DatasetScanSource : ScanSource
         {
             await foreach (PositionedObject held in WalkAsync(spec, others, Window(range, lowest?.Value, highest?.Value), cancellationToken).ConfigureAwait(false))
             {
-                if (Bounds(held, key) is not { } of || answer.FieldOf(held) is null)
+                if (Bounds(held, key, _version.Schema.Key is not null) is not { } of || answer.FieldOf(held) is null)
                 {
                     continue;
                 }
@@ -208,12 +210,20 @@ internal sealed class DatasetScanSource : ScanSource
     }
 
     /// <summary>
-    /// The least and the greatest value of the key's first column in the object <paramref name="held"/>, each with its bytes
-    /// row-encoded as the key orders the column: by its summaries, its keys bounding a text (<see cref="PositionedObject.Summaries"/>);
-    /// null when they do not bound it, or prove it holds no null.
+    /// The column a window is aligned on, as a key of it alone: the layout key's first column, or the column the partition
+    /// reads when the layout has a partition; null for neither.
     /// </summary>
-    private static ((byte[] Bytes, FilterLiteral Value) Low, (byte[] Bytes, FilterLiteral Value) High)? Bounds(in PositionedObject held, ClusteringKey key) =>
-        held.Summaries(key).TryGet(key.InstantPath, out ColumnSummary column) && column.HasMin && column.HasMax
+    private ClusteringKey? AlignedOn() =>
+        _version.Schema.Key ?? (_version.Schema.Cut is { Path: { } path } ? ClusteringKey.For([path], _version.Schema.DType) : null);
+
+    /// <summary>
+    /// The least and the greatest value of the aligned column in the object <paramref name="held"/>, each with its bytes
+    /// row-encoded as the key orders the column: by its summaries, its keys bounding a text when the column leads the
+    /// layout's key (<paramref name="ownKey"/>, <see cref="PositionedObject.Summaries"/>); null when they do not bound it, or
+    /// prove it holds no null.
+    /// </summary>
+    private static ((byte[] Bytes, FilterLiteral Value) Low, (byte[] Bytes, FilterLiteral Value) High)? Bounds(in PositionedObject held, ClusteringKey key, bool ownKey) =>
+        (ownKey ? held.Summaries(key) : held.Entry.Summaries).TryGet(key.InstantPath, out ColumnSummary column) && column.HasMin && column.HasMax
         && column.HasNullCount && column.NullCount == 0 && Encoded(key, column.Min) is { } low && Encoded(key, column.Max) is { } high
             ? ((low, column.Min), (high, column.Max))
             : null;

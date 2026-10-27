@@ -1406,6 +1406,13 @@ internal static class DatasetCommitter
                         List<UInt128> covered = [.. index.Covered];
                         covered.Remove(gone.Uid);
                         PutIndex(index with { Covered = covered });
+
+                        // An index that covers nothing any more, its partition expired or rewritten, goes: its object with it.
+                        if (covered.Count == 0)
+                        {
+                            byte[] key = index.TreeKey;
+                            Batch(PartitionIndexTree)[key] = TreeChange.Remove(key);
+                        }
                     }
                 }
             }

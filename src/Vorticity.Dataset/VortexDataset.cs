@@ -608,12 +608,12 @@ public sealed class VortexDataset : IAsyncDisposable
     public Scan Scan(params ReadOnlySpan<string> columns) => new Scan(new DatasetScanSource(this, Snapshot), columns);
 
     /// <summary>
-    /// Asks <paramref name="question"/> over the values of the clustering key's first column from <paramref name="from"/>
+    /// Asks <paramref name="question"/> over the values of the column the partition reads from <paramref name="from"/>
     /// up to <paramref name="to"/> part by part, a part a partition (<see cref="DatasetLayout.Partition"/>), the last
     /// part first unless <paramref name="descending"/> is false: each part's answer delivered once it and every part before
     /// it are in, with the share of the range they cover (<see cref="ValuePart{TValue, TAnswer}.Covered"/>).
     /// </summary>
-    /// <typeparam name="TValue">The values of the key's first column: an instant, a date, an integer.</typeparam>
+    /// <typeparam name="TValue">The values of the partition's column: an instant, a date, an integer.</typeparam>
     /// <typeparam name="TAnswer">What the question answers.</typeparam>
     /// <param name="from">The range's first value.</param>
     /// <param name="to">The value past its last.</param>
@@ -625,14 +625,14 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the questions in flight.</param>
     /// <returns>The parts, in the order asked, each with its bounds, its answer and the share of the range covered so far.</returns>
     /// <exception cref="InvalidOperationException">
-    /// The dataset declares no clustering value, or one of a column whose next value no function tells, a text's or a
-    /// float's.
+    /// The dataset declares no partition over a column, or one over a column whose next value no function tells, a text's
+    /// or a float's.
     /// </exception>
     /// <exception cref="ArgumentException">The range holds no value the column stores.</exception>
     /// <remarks>
     /// A part's answer is final for its values, so a page that shows a range part by part shows the first part asked while
-    /// the rest is read. Every object above level 0 holds rows of one clustering value, so a part's question reads whole
-    /// objects but at the range's ends. The parts are asked several at once, sixteen at most and no more than the session
+    /// the rest is read. Every object holds rows of one partition, so a part's question reads whole objects but at the
+    /// range's ends. The parts are asked several at once, sixteen at most and no more than the session
     /// lets reads be in flight. Answers over parts add up for counts and sums, and their extremes are the range's, but a
     /// mean over the range is its sum over its count.
     /// </remarks>

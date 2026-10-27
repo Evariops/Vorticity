@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Keys;
@@ -10,8 +11,8 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// A dataset's partition, which leads the keys of its tree and of its merges: what tells two keys of one partition apart as
-/// a job writes its rows, their first value's bytes. When the partition is the key's first column or a function of it, also
-/// the one partition an object's summaries prove it holds, and where a part of a range of that column starts.
+/// a job writes its rows, their first value's bytes. When the partition is a column or a function of one, also the one
+/// partition an object's summaries prove it holds, and where a part of a range of that column starts.
 /// </summary>
 internal sealed class ValueCut
 {
@@ -21,36 +22,34 @@ internal sealed class ValueCut
     private readonly string? _path;
     private readonly bool _mayHoldNull;
 
-    private ValueCut(LayoutColumn partition, SortKey tree, ClusteringKey? key)
+    private ValueCut(LayoutColumn partition, SortKey tree)
     {
         Partition = partition;
         _partition = tree.TypeAt(0);
-        _column = key?.LeadingType ?? _partition;
-        _path = key?.InstantPath;
-        _mayHoldNull = key?.MayHoldNull ?? true;
-        _function = key is null ? null : partition.Function;
+        bool column = partition.Read is null;
+        _column = column ? partition.Source : _partition;
+        _path = column ? partition.Value.SourcePath : null;
+        _mayHoldNull = !column || partition.Source.IsNullable;
+        _function = column ? partition.Function : null;
     }
 
-    /// <summary>
-    /// The cut of <paramref name="plan"/>'s partition, which leads <paramref name="tree"/>; read over the key's first column
-    /// when the partition is that column or a function of it. Null for no partition.
-    /// </summary>
-    internal static ValueCut? Of(LayoutPlan? plan, ClusteringKey? key, SortKey? tree) =>
-        plan?.Partition is not { } partition || tree is null ? null
-        : new ValueCut(
-            partition,
-            tree,
-            partition.Read is null && key is not null && string.Equals(partition.Value.SourcePath, key.InstantPath, StringComparison.Ordinal)
-                ? key
-                : null);
+    /// <summary>The cut of <paramref name="plan"/>'s partition, which leads <paramref name="tree"/>; null for no partition.</summary>
+    internal static ValueCut? Of(LayoutPlan? plan, SortKey? tree) =>
+        plan?.Partition is not { } partition || tree is null ? null : new ValueCut(partition, tree);
 
     /// <summary>The partition.</summary>
     internal LayoutColumn Partition { get; }
 
+    /// <summary>The column the partition reads, itself or through a function; null for a variant key's.</summary>
+    internal string? Path => _path;
+
+    /// <summary>That column's type, which a range of its values is asked in.</summary>
+    internal DType Column => _column;
+
     /// <summary>
-    /// The integer storage of the key's first column, whose values a part of a range starts at, one partition
-    /// after the other: an integer's, an instant's, a date's. Null for a text, a float or a binary, whose next value no
-    /// function tells, and for a partition of another source.
+    /// The integer storage of the partition's column, whose values a part of a range starts at, one partition after the
+    /// other: an integer's, an instant's, a date's. Null for a text, a float or a binary, whose next value no function
+    /// tells, and for a variant key's.
     /// </summary>
     internal PType? Integers
     {
@@ -136,9 +135,9 @@ internal sealed class ValueCut
     }
 
     /// <summary>
-    /// The one value an object holds, when its summaries prove it: the images of its key's first column's bounds the same,
-    /// and no null; none for a partition of another source. Bounds that are not exact lie outwards, which keeps the proof: a non-decreasing function sends every
-    /// value between them between their images. Null when they prove none.
+    /// The one value an object holds, when its summaries prove it: the images of the partition column's bounds the same, and
+    /// no null; none for a variant key's. Bounds that are not exact lie outwards, which keeps the proof: a non-decreasing
+    /// function sends every value between them between their images. Null when they prove none.
     /// </summary>
     internal FilterLiteral? Single(ObjectSummaries summaries)
     {
@@ -149,6 +148,38 @@ internal sealed class ValueCut
         }
 
         return Map(column.Min) is { } low && Map(column.Max) is { } high && Equal(low, high) ? low : null;
+    }
+
+    /// <summary>
+    /// What the partition a tree key leads with says of its column over every row of it: the values whose image is the
+    /// partition, from the least to the last before the next partition's least, and no null. Null for a variant key's
+    /// partition, or a null one, which say nothing a summary holds.
+    /// </summary>
+    internal IReadOnlyList<ColumnSummary>? Bounds(ReadOnlySpan<byte> treeKey)
+    {
+        if (_path is null || treeKey.IsEmpty)
+        {
+            return null;
+        }
+
+        FilterLiteral value = RowEncoder.ReadFirstValue(treeKey, _partition);
+        if (value.Kind == FilterLiteralKind.Null)
+        {
+            return null;
+        }
+
+        if (_function is null)
+        {
+            return [new ColumnSummary(_path, value, true, value, true, true, 0, true)];
+        }
+
+        if (!ValueFunction.TryInteger(value, out Int128 image) || !_function.TryLeast(image, out Int128 from))
+        {
+            return null;
+        }
+
+        bool bounded = _function.TryLeast(image + 1, out Int128 past);
+        return [new ColumnSummary(_path, _function.Literal(from), true, bounded ? _function.Literal(past - 1) : default, bounded, false, 0, true)];
     }
 
     /// <summary>Whether an object's summaries prove it holds <paramref name="value"/> alone.</summary>
