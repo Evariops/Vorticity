@@ -569,12 +569,22 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanContext first = _lanes[0]!.Context;
         Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
         lane.Context.VariantKeys = first.VariantKeys;
-        lane.Context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, first.File, _take) : null;
+        lane.Context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, first.File, _take, _live, Scanned) : null;
         return lane;
     }
 
     // The geometry of the chunks the scan may read a part of, which each lane plans its granule reads by; null for none.
     private Indexes.GranuleGeometry? _granules;
+
+    /// <summary>The rows the scan reads, from its plan's first boundary to its last.</summary>
+    private RowRange Scanned
+    {
+        get
+        {
+            SplitPlan plan = _cursor.Plan;
+            return plan.BoundaryCount == 0 ? default : new RowRange(plan.BoundaryAt(0), plan.BoundaryAt(plan.BoundaryCount - 1));
+        }
+    }
 
     /// <summary>Tells the lanes the geometry of the chunks they may read a part of, each planning its own reads by it.</summary>
     internal Indexes.GranuleGeometry? Granules
@@ -586,7 +596,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             {
                 if (lane is not null)
                 {
-                    lane.Context.Granules = value is null ? null : new Indexes.GranulePlans(value, lane.Context.File, _take);
+                    lane.Context.Granules = value is null ? null : new Indexes.GranulePlans(value, lane.Context.File, _take, _live, Scanned);
                 }
             }
         }

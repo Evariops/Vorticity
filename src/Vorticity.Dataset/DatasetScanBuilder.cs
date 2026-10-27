@@ -133,11 +133,11 @@ internal sealed partial class DatasetScanBuilder
     private BlockAnswer? _blockAnswer;
     private bool _blockAnswerKnown;
 
-    // The ranges of each object's rows a selected row may lie in, by where its columns' values live, for the objects whose
-    // indexes leave rows out (SheetPruning.KeptAsync); read by the lanes that read the objects. Made at the first such
-    // object: a scan that meets none allocates nothing for them.
-    private System.Collections.Concurrent.ConcurrentDictionary<UInt128, RowRange[]>? _narrowed;
-    private Action<PositionedObject, RowRange[]>? _narrowing;
+    // The granules of each object a selected row may lie in, a bit a granule, by where its columns' values lie, for the
+    // objects whose indexes leave granules out (SheetPruning.KeptAsync); read by the lanes that read the objects. Made at the
+    // first such object: a scan that meets none allocates nothing for them.
+    private System.Collections.Concurrent.ConcurrentDictionary<UInt128, ulong[]>? _narrowed;
+    private Action<PositionedObject, ulong[]>? _narrowing;
 
     // Whether the walk counts the objects it considers: not in a part of a scan whose own walk counted them (Part).
     private bool _considers = true;
@@ -875,13 +875,13 @@ internal sealed partial class DatasetScanBuilder
         }
     }
 
-    /// <summary>Keeps the ranges of the object <paramref name="held"/>'s rows a selected row may lie in, which its read takes alone.</summary>
-    private void Narrow(PositionedObject held, RowRange[] ranges)
+    /// <summary>Keeps the granules of the object <paramref name="held"/> a selected row may lie in, which its read takes alone.</summary>
+    private void Narrow(PositionedObject held, ulong[] granules)
     {
-        System.Collections.Concurrent.ConcurrentDictionary<UInt128, RowRange[]> narrowed = Volatile.Read(ref _narrowed)
-            ?? Interlocked.CompareExchange(ref _narrowed, new System.Collections.Concurrent.ConcurrentDictionary<UInt128, RowRange[]>(), null)
+        System.Collections.Concurrent.ConcurrentDictionary<UInt128, ulong[]> narrowed = Volatile.Read(ref _narrowed)
+            ?? Interlocked.CompareExchange(ref _narrowed, new System.Collections.Concurrent.ConcurrentDictionary<UInt128, ulong[]>(), null)
             ?? _narrowed!;
-        narrowed[held.Entry.Uid] = ranges;
+        narrowed[held.Entry.Uid] = granules;
     }
 }
 

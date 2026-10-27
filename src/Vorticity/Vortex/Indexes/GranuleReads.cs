@@ -17,7 +17,17 @@ internal sealed class GranuleGeometry
 {
     private readonly Dictionary<ulong, (ChunkGeometry Geometry, int GranuleRows, long FirstRow)> _chunks;
 
-    private GranuleGeometry(Dictionary<ulong, (ChunkGeometry Geometry, int GranuleRows, long FirstRow)> chunks) => _chunks = chunks;
+    private GranuleGeometry(Dictionary<ulong, (ChunkGeometry Geometry, int GranuleRows, long FirstRow)> chunks, long requestBytes)
+    {
+        _chunks = chunks;
+        RequestBytes = requestBytes;
+    }
+
+    /// <summary>
+    /// The bytes a request to the file's store is worth (<see cref="IO.CostProfile.RequestBytes"/>): what a chunk's live
+    /// granules, read apart, must spare per request more than the chunk read whole (spec D, 4.4).
+    /// </summary>
+    internal long RequestBytes { get; }
 
     /// <summary>
     /// The geometry of the chunk whose segment starts at <paramref name="offset"/>, and its first row in the file; false when
@@ -39,9 +49,9 @@ internal sealed class GranuleGeometry
     /// The geometry of the columns of <paramref name="tree"/>, a struct of them, whose marks <paramref name="marks"/> gives by
     /// the column's place: each column's chunks, the leaves its layout holds in their order, paired with its marks' chunks,
     /// each first row the rows of the leaves before it; a column whose chunks and marks do not pair is left out, its chunks
-    /// read whole. Null when no column pairs.
+    /// read whole. Null when no column pairs. <paramref name="requestBytes"/> is what a request to its store is worth.
     /// </summary>
-    internal static GranuleGeometry? Of(LayoutTree tree, IReadOnlyList<ColumnMarks?> marks)
+    internal static GranuleGeometry? Of(LayoutTree tree, IReadOnlyList<ColumnMarks?> marks, long requestBytes)
     {
         LayoutNode root = tree.Root;
         if (root.Encoding != LayoutEncodingId.Struct)
@@ -78,7 +88,7 @@ internal sealed class GranuleGeometry
             }
         }
 
-        return chunks is null ? null : new GranuleGeometry(chunks);
+        return chunks is null ? null : new GranuleGeometry(chunks, requestBytes);
     }
 
     /// <summary>
@@ -115,11 +125,15 @@ internal sealed class GranuleGeometry
 /// <summary>
 /// What one lane of a scan plans of the chunks it reads a part of (spec C, 2.2): for each, the ranges of its region of
 /// buffers that the part's granules hold, registered with the split's segments in place of the whole segment, and the plan its
-/// batches decode by. Under a take, the part is the rows it wants of the split's (<paramref name="take"/>, spec C, 3), each
-/// cluster of them as the reader decodes it (<see cref="FlatLayoutReader.ClusterGap"/>). A chunk the split wants whole, whose
-/// geometry is not known, or whose granules hold most of its bytes is read whole, as before.
+/// batches decode by. A split reads a part of a chunk alone when the scan reads that part of it alone (its rows
+/// <paramref name="scanned"/>), or, of a chunk it reads all of, when the blocks <paramref name="live"/> leaves dead within it
+/// spare more than the requests its live granules cost read apart (spec D, 4.4). Under a take, the part is the rows it wants
+/// of the split's (<paramref name="take"/>, spec C, 3), each cluster of them as the reader decodes it
+/// (<see cref="FlatLayoutReader.ClusterGap"/>). A chunk the split wants whole, whose geometry is not known, or whose granules
+/// hold most of its bytes is read whole, as before, and once.
 /// </summary>
-internal sealed class GranulePlans(GranuleGeometry geometry, VortexFile file, Scanning.RowSelection? take = null)
+internal sealed class GranulePlans(
+    GranuleGeometry geometry, VortexFile file, Scanning.RowSelection? take = null, Compute.BlockMask? live = null, RowRange? scanned = null)
 {
     /// <summary>The share of a chunk's bytes past which its granules are read with the rest of it, in one request (N9).</summary>
     internal const double WholeShare = 0.75;
@@ -130,6 +144,9 @@ internal sealed class GranulePlans(GranuleGeometry geometry, VortexFile file, Sc
     private readonly ArrayNodeArena _nodes = new ArrayNodeArena();
     private readonly GranuleBytes _planner = new GranuleBytes();
     private readonly Dictionary<ulong, List<Plan>> _plans = [];
+
+    // Whether each chunk the scan reads every row of is read by its live granules, by its segment's offset.
+    private readonly Dictionary<ulong, bool> _sparse = [];
 
     /// <summary>
     /// A part of a chunk read by its granules: its rows, the chunk's tree, the ranges of the chunk's region of buffers read,
@@ -153,7 +170,8 @@ internal sealed class GranulePlans(GranuleGeometry geometry, VortexFile file, Sc
         RowRange inFile = new RowRange(firstRow + part.Start, firstRow + part.End);
         int wanted = take is null ? 0 : take.CountIn(inFile);
         bool selected = wanted > 0 && wanted < part.Length;
-        if ((take is not null && wanted == 0) || (!selected && part.Start == 0 && part.End >= rows))
+        if ((take is not null && wanted == 0)
+            || (!selected && ((part.Start == 0 && part.End >= rows) || (take is null && !Apart(spec, firstRow, rows)))))
         {
             return false;
         }
@@ -193,6 +211,54 @@ internal sealed class GranulePlans(GranuleGeometry geometry, VortexFile file, Sc
 
         held.Add(new Plan(start, start + count, chunk.Tree, ranges, regionLength, spec.AlignmentExponent));
         return true;
+    }
+
+    /// <summary>
+    /// Whether the splits of the chunk of segment <paramref name="spec"/>, its rows from <paramref name="firstRow"/>, read
+    /// their parts of it apart: when the scan reads a part of the chunk alone; or, reading every row of it, when its live
+    /// granules make <c>r</c> runs and a share <c>s</c> of its rows such that <c>(r − 1)</c> requests more spare less than
+    /// the <c>(1 − s)</c> of its bytes they leave (spec D, 4.4). Otherwise its splits read it whole, once.
+    /// </summary>
+    private bool Apart(in SegmentSpec spec, long firstRow, int rows)
+    {
+        RowRange chunk = new RowRange(firstRow, firstRow + rows);
+        if (scanned is { } range && chunk.Intersect(range).Length < rows)
+        {
+            return true;
+        }
+
+        if (live is null)
+        {
+            return false;
+        }
+
+        if (!_sparse.TryGetValue(spec.Offset, out bool sparse))
+        {
+            _sparse[spec.Offset] = sparse = Sparse(chunk, spec.Length);
+        }
+
+        return sparse;
+    }
+
+    /// <summary>Whether the live blocks of <paramref name="chunk"/>, of <paramref name="bytes"/>, pay their reads apart.</summary>
+    private bool Sparse(RowRange chunk, uint bytes)
+    {
+        long blockRows = live!.BlockRows;
+        int first = (int)(chunk.Start / blockRows);
+        int end = (int)Math.Min((chunk.End + blockRows - 1) / blockRows, live.BlockCount);
+        int lived = 0;
+        int runs = 0;
+        bool before = false;
+        for (int block = first; block < end; block++)
+        {
+            bool on = live.IsLive(block);
+            lived += on ? 1 : 0;
+            runs += on && !before ? 1 : 0;
+            before = on;
+        }
+
+        int blocks = end - first;
+        return lived > 0 && lived < blocks && (runs - 1) * (double)geometry.RequestBytes < (1 - ((double)lived / blocks)) * bytes;
     }
 
     /// <summary>

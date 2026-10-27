@@ -140,6 +140,19 @@ internal sealed class ScanBuilder
 
     private Indexes.GranuleGeometry? _granules;
 
+    /// <summary>
+    /// Reads only the blocks <paramref name="granted"/> keeps, those where a row the filter selects may lie by structures the
+    /// caller read, a dataset's object's index of where its values lie (spec D, 4.3): the scan's pruning starts from them
+    /// and adds its own. Null for every block.
+    /// </summary>
+    internal ScanBuilder WithGranuleMask(BlockMask? granted)
+    {
+        _granted = granted;
+        return this;
+    }
+
+    private BlockMask? _granted;
+
     internal ScanBuilder(VortexFile file)
     {
         ArgumentNullException.ThrowIfNull(file);
@@ -650,7 +663,7 @@ internal sealed class ScanBuilder
             return _pruned && _live is not null ? new LiveBatches(batches, _live) : batches;
         }
 
-        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live };
+        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live, Granted = _granted };
     }
 
     /// <summary>The batches of an unfiltered scan that reads only the splits a mask keeps.</summary>
