@@ -1631,7 +1631,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// </summary>
     private int ExecuteFiltered(Lane lane, RowRange split)
     {
-        if (_push != PushDeclined && Pushable() is { } pushable)
+        // A split the zone maps prove the filter keeps whole is delivered without the filter, pushed to its encodings or not.
+        bool proven = ZoneProven(split);
+        if (!proven && _push != PushDeclined && Pushable() is { } pushable)
         {
             int answered = ExecutePushed(lane, split, pushable);
             if (answered >= 0)
@@ -1642,7 +1644,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         if (FilterReadsAlone(out FieldMask columns))
         {
-            if (!ZoneProven(split))
+            if (!proven)
             {
                 return ExecuteLate(lane, split, in columns);
             }
@@ -1654,7 +1656,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         int root = SplitExecution.Execute(lane.Context, _tree, in _mask, split, _take);
         lane.ReadRoot = root;
-        return ApplyFilter(lane, root, ZoneProven(split));
+        return ApplyFilter(lane, root, proven);
     }
 
     /// <summary>Whether the filter is evaluated on its own columns, read in a pass of their own.</summary>
