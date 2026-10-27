@@ -51,7 +51,12 @@ internal static partial class CompactionPolicy
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(jobs);
         PlannedVersion version = new PlannedVersion(dataset);
         CompactionOptions settings = SettingsFor(version, options);
-        CompactionStyle style = settings.StyleFor(version.Keyed);
+        CompactionStyle style = StyleOf(version, settings);
+        if (Tiers(version, style))
+        {
+            return await PlanTiersAsync(version, settings, jobs, consolidateAll: false, cancellationToken).ConfigureAwait(false);
+        }
+
         bool descends = style switch
         {
             CompactionStyle.Leveled => version.Keyed,
@@ -75,10 +80,38 @@ internal static partial class CompactionPolicy
         ArgumentNullException.ThrowIfNull(dataset);
         PlannedVersion version = new PlannedVersion(dataset);
         CompactionOptions settings = SettingsFor(version, options);
-        return await ReadEveryLeafAsync(
-                version, settings, settings.StyleFor(version.Keyed), jobs, cancellationToken)
-            .ConfigureAwait(false);
+        CompactionStyle style = StyleOf(version, settings);
+        return Tiers(version, style)
+            ? await PlanTiersAsync(version, settings, jobs, consolidateAll: false, cancellationToken).ConfigureAwait(false)
+            : await ReadEveryLeafAsync(version, settings, style, jobs, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The consolidations of every partition of a tiered dataset with a key whose level 0 holds an object, calm or not,
+    /// whatever its share of its level 1: what <see cref="VortexDataset.ConsolidateAsync"/> runs, a job a partition.
+    /// </summary>
+    internal static async ValueTask<CompactionPlan> PlanConsolidationsAsync(VortexDataset dataset, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataset);
+        PlannedVersion version = new PlannedVersion(dataset);
+        CompactionOptions settings = SettingsFor(version, null);
+        return Tiers(version, StyleOf(version, settings))
+            ? await PlanTiersAsync(version, settings, int.MaxValue, consolidateAll: true, cancellationToken).ConfigureAwait(false)
+            : new CompactionPlan { Version = version.Version };
+    }
+
+    /// <summary>
+    /// The style a dataset compacts under: its layout's organization, levels or tiers, which every writer shares; the
+    /// options' for a dataset without a layout.
+    /// </summary>
+    private static CompactionStyle StyleOf(PlannedVersion version, CompactionOptions settings) =>
+        version.Header.Layout is { } layout
+            ? layout.Organized == LayoutOrganization.Leveled ? CompactionStyle.Leveled : CompactionStyle.Tiered
+            : settings.StyleFor(version.Keyed);
+
+    /// <summary>Whether a dataset compacts by partition in tiers: tiered, with a partition or a key.</summary>
+    private static bool Tiers(PlannedVersion version, CompactionStyle style) =>
+        style == CompactionStyle.Tiered && (version.Keyed || version.Header.Layout?.Partition is not null);
 
     /// <summary>
     /// The version a plan reads, taken from the handle once. Loops that share a handle commit and
@@ -133,25 +166,50 @@ internal static partial class CompactionPolicy
 
         /// <summary>The handle's options, which no version changes.</summary>
         internal DatasetOptions Options { get; } = dataset.Options;
+
+        /// <summary>
+        /// The partition an object's tree key places it in, row-encoded: its first value, or what comes before its position
+        /// without a key; empty for a dataset of one partition.
+        /// </summary>
+        internal ReadOnlySpan<byte> PartitionOf(ReadOnlySpan<byte> treeKey)
+        {
+            DatasetSchema schema = _snapshot.Schema;
+            if (!schema.Partitioned)
+            {
+                return default;
+            }
+
+            ReadOnlySpan<byte> order = treeKey[..^VortexDataset.UidBytes];
+            return schema.Keyed ? order[..schema.Tree!.PrefixLength(order, 1)] : order[..^sizeof(long)];
+        }
+
+        /// <summary>A partition's value as text, from its encoding; empty for a dataset of one.</summary>
+        internal string Describe(ReadOnlySpan<byte> partition)
+        {
+            if (partition.IsEmpty)
+            {
+                return string.Empty;
+            }
+
+            Expressions.FilterLiteral value = RowEncoding.RowEncoder.ReadFirstValue(partition, _snapshot.Schema.Tree!.TypeAt(0));
+            return value.Kind switch
+            {
+                Expressions.FilterLiteralKind.Null => "null",
+                Expressions.FilterLiteralKind.Bool => value.BoolValue ? "true" : "false",
+                Expressions.FilterLiteralKind.Signed => value.SignedValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                Expressions.FilterLiteralKind.Unsigned => value.UnsignedValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                Expressions.FilterLiteralKind.Float => value.FloatValue.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+                _ => System.Text.Encoding.UTF8.GetString(value.BytesValue),
+            };
+        }
     }
 
     /// <summary>
     /// The options a plan works to: the caller's, under whatever the dataset's header states, and on a
     /// store that locks what it keeps no purge, which would add bytes for the lock's term and free none.
     /// </summary>
-    /// <exception cref="ArgumentException">The options ask for tiered levels on a dataset with a clustering key.</exception>
     private static CompactionOptions SettingsFor(PlannedVersion dataset, CompactionOptions? options)
     {
-        if (options is { Style: CompactionStyle.Tiered } && dataset.Keyed)
-        {
-            // The style is not written in the dataset, so two writers could compact it under two;
-            // refusing the one that breaks the key's invariant keeps every level above 0 a merge's.
-            throw new ArgumentException(
-                "A dataset with a clustering key compacts leveled: its key cursor, its deletes and its ranks take every level " +
-                "above 0 to hold sorted objects whose keys do not overlap, and tiered levels hold objects that do.",
-                nameof(options));
-        }
-
         CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
 
         // The size the dataset's objects aim at is every writer's, as its layout is.

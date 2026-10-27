@@ -85,6 +85,18 @@ public enum CompactionTrigger
     /// order as merges make them grow with keys at random.
     /// </summary>
     Neighbours = 6,
+
+    /// <summary>
+    /// A partition of a tiered dataset holds at level 0 as many objects of one size class as the fan-out: the earliest
+    /// arrived of them are merged into one of the class below, in level 0.
+    /// </summary>
+    Tier = 7,
+
+    /// <summary>
+    /// A partition of a tiered dataset with a key is calm, or asked for: its level 0 joins its level 1, merged with the
+    /// consolidated objects it meets into objects disjoint by key, or moved there whole.
+    /// </summary>
+    Consolidation = 8,
 }
 
 /// <summary>
@@ -439,6 +451,12 @@ public sealed record CompactionPlan
     /// compacting those reads index bytes only, and is planned once no compaction that moves rows is due.
     /// </summary>
     public long FragmentedObjects { get; init; }
+
+    /// <summary>
+    /// What each partition of a tiered dataset holds at level 0 and owes, in the tree's order; empty for a dataset that
+    /// is not.
+    /// </summary>
+    public ImmutableArray<PartitionCompaction> Partitions { get; init; } = [];
 
     /// <summary>Whether a compaction is due.</summary>
     public bool HasWork => Job is not null;

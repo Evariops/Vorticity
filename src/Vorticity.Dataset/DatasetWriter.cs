@@ -565,7 +565,7 @@ public sealed class DatasetWriter
     }
 
     /// <summary>The partition of value <paramref name="partition"/>, row-encoded, met before or new.</summary>
-    /// <exception cref="InvalidOperationException">The append would touch more partitions than the dataset allows one.</exception>
+    /// <exception cref="ArgumentException">The append would touch more partitions than the dataset allows one.</exception>
     private Part PartOf(ReadOnlySpan<byte> partition)
     {
         if (_lastPart is { } last && partition.SequenceEqual(last.Partition))
@@ -583,7 +583,7 @@ public sealed class DatasetWriter
 
         if (_parts.Count >= _mostPartitions)
         {
-            throw new InvalidOperationException(
+            throw new ArgumentException(
                 $"The append touches more than {_mostPartitions} partitions (DatasetOptions.MaxPartitionsPerAppend), each an object at " +
                 "least and merges after; nothing it wrote is committed. Split it by partition, or raise the bound for a load of history.");
         }

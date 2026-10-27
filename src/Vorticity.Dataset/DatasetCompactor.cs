@@ -113,8 +113,10 @@ internal static class DatasetCompactor
 
         // Every input is read as this schema and every output written in it: a compaction is also
         // how objects of an earlier schema come to hold the current one.
+        // A leveled job merges on the key, and so does a tiered one of a dataset with a key: its merges and its
+        // consolidations; a tiered one of a dataset without concatenates.
         DatasetSchema schema = dataset.Snapshot.Schema;
-        bool merge = job.Style is CompactionStyle.Leveled;
+        bool merge = job.Style is CompactionStyle.Leveled || (job.Style is CompactionStyle.Tiered && schema.Keyed);
         if (merge)
         {
             Check(schema);
@@ -141,7 +143,7 @@ internal static class DatasetCompactor
         // A leveled exit of level 0 keeps the rows that came late apart, in an object of level 0, while they weigh little
         // against the objects of its destination they fall among (LateRows): it reads its sources alone, and those
         // objects stand. Past that weight, it runs again as the merge with them it was planned as.
-        LateRows? late = merge && key is not null && !schema.Partitioned ? LateRows.Of(job, key) : null;
+        LateRows? late = job.Style is CompactionStyle.Leveled && key is not null && !schema.Partitioned ? LateRows.Of(job, key) : null;
         CompactionJob ran = late is null ? job : LateRows.Sources(job);
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job
@@ -312,20 +314,30 @@ internal static class DatasetCompactor
     /// </remarks>
     private static async ValueTask<CompactionResult?> MoveAsync(VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
     {
-        CompactionInput input = job.Inputs[0];
-        ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
-        await using (lease.ConfigureAwait(false))
+        // Each object moves whole, its entry taken out of one tree and put into the other byte for byte; one written under
+        // an earlier schema is rewritten instead, and with it the whole job.
+        List<(int Level, ReadOnlyMemory<byte> Key)> consumed = new List<(int, ReadOnlyMemory<byte>)>(job.Inputs.Count);
+        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = new List<(int, ReadOnlyMemory<byte>, ObjectEntry)>(job.Inputs.Count);
+        List<ObjectEntry> expected = new List<ObjectEntry>(job.Inputs.Count);
+        foreach (CompactionInput input in job.Inputs)
         {
-            if (dataset.Snapshot.Schema.ColumnsOf(lease.File.DType, input.Entry.Key) is not null)
+            ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
             {
-                return null;
+                if (dataset.Snapshot.Schema.ColumnsOf(lease.File.DType, input.Entry.Key) is not null)
+                {
+                    return null;
+                }
             }
+
+            consumed.Add((input.Level, input.Key));
+            produced.Add((job.ToLevel, input.Key, input.Entry));
+            expected.Add(input.Entry);
         }
 
-        DatasetOperation.ReplaceObjects move = new DatasetOperation.ReplaceObjects(
-            [(input.Level, input.Key)], [(job.ToLevel, input.Key, input.Entry)])
+        DatasetOperation.ReplaceObjects move = new DatasetOperation.ReplaceObjects(consumed, produced)
         {
-            Expected = [input.Entry],
+            Expected = expected,
             Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
             Range = job.Range,
         };
@@ -337,9 +349,9 @@ internal static class DatasetCompactor
             ToLevel = job.ToLevel,
             Trigger = job.Trigger,
             Style = job.Style,
-            ObjectsIn = 1,
-            ObjectsOut = 1,
-            ObjectsMoved = 1,
+            ObjectsIn = job.Inputs.Count,
+            ObjectsOut = job.Inputs.Count,
+            ObjectsMoved = job.Inputs.Count,
             Outcome = commit.Outcomes[0],
         };
     }

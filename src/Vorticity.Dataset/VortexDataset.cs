@@ -1930,7 +1930,6 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="options">The sizes and bounds to plan against; null for the defaults, and the dataset's own settings win where it states them.</param>
     /// <param name="cancellationToken">Cancels the reads of the tree.</param>
     /// <returns>The plan.</returns>
-    /// <exception cref="ArgumentException">The options ask for <see cref="CompactionStyle.Tiered"/> on a dataset with a clustering key.</exception>
     public ValueTask<CompactionPlan> PlanCompactionAsync(
         CompactionOptions? options = null, CancellationToken cancellationToken = default) =>
         CompactionPolicy.PlanAsync(this, options, cancellationToken);
@@ -1942,7 +1941,6 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="options">The sizes and bounds to plan against; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the rewrite and the commit.</param>
     /// <returns>What the compaction did, or null when nothing was due.</returns>
-    /// <exception cref="ArgumentException">The options ask for <see cref="CompactionStyle.Tiered"/> on a dataset with a clustering key.</exception>
     /// <exception cref="DatasetIntegrityException">A guard found that the compaction would lose rows; nothing was committed.</exception>
     public async ValueTask<CompactionResult?> CompactAsync(
         CompactionOptions? options = null, CancellationToken cancellationToken = default)
@@ -1951,6 +1949,30 @@ public sealed class VortexDataset : IAsyncDisposable
         return plan.Job is { } job
             ? await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false)
             : null;
+    }
+
+    /// <summary>
+    /// Consolidates every partition whose level 0 holds an object, calm or not, whatever its share of what it meets: its
+    /// objects merged with the consolidated ones they meet into objects disjoint by key, of at most the layout's top each,
+    /// or moved there whole when they meet none. What a dataset asks once a partition receives no more rows, or after a load
+    /// of history, rather than wait for its calm.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the rewrites and the commits.</param>
+    /// <returns>What each consolidation did, a partition each; empty when the dataset is not tiered with a key, or none is due.</returns>
+    /// <exception cref="DatasetIntegrityException">A guard found that a consolidation would lose rows; nothing was committed for it.</exception>
+    public async ValueTask<IReadOnlyList<CompactionResult>> ConsolidateAsync(CancellationToken cancellationToken = default)
+    {
+        CompactionPlan plan = await CompactionPolicy.PlanConsolidationsAsync(this, cancellationToken).ConfigureAwait(false);
+        List<CompactionResult> results = [];
+        foreach (CompactionJob job in plan.Jobs)
+        {
+            if (job.Trigger == CompactionTrigger.Consolidation)
+            {
+                results.Add(await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false));
+            }
+        }
+
+        return results;
     }
 
     /// <summary>
@@ -2228,18 +2250,23 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal async ValueTask CompactInlineAsync(CancellationToken cancellationToken)
     {
+        // Under tiers, the merges due of any partition whose inputs stay under the budget; under levels, level 0's exit.
         long budget = _options.InlineCompactionBytes;
-        if (budget <= 0 || Lag == 0 || Interlocked.CompareExchange(ref _compactingInline, 1, 0) != 0)
+        bool tiered = Snapshot.Header.Layout?.Organized == LayoutOrganization.Tiered && (Snapshot.Schema.Keyed || Snapshot.Schema.Partitioned);
+        if (budget <= 0 || (!tiered && Lag == 0) || Interlocked.CompareExchange(ref _compactingInline, 1, 0) != 0)
         {
             return;
         }
 
         try
         {
-            CompactionPlan plan = await PlanCompactionAsync(null, cancellationToken).ConfigureAwait(false);
-            if (plan.Job is { Trigger: CompactionTrigger.LevelZeroCeiling } job && job.Bytes <= budget)
+            CompactionPlan plan = await CompactionPolicy.PlanAsync(this, null, tiered ? int.MaxValue : 1, cancellationToken).ConfigureAwait(false);
+            foreach (CompactionJob job in plan.Jobs)
             {
-                await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false);
+                if (job.Trigger is CompactionTrigger.LevelZeroCeiling or CompactionTrigger.Tier && job.Bytes <= budget)
+                {
+                    await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
