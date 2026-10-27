@@ -56,15 +56,24 @@ public sealed partial class DatasetValueRangeTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Event.Schema, ByDay(), Ct);
         await AppendAsync(dataset, [.. Enumerable.Range(0, 48).Select(i => new Event(Midnight.AddHours(i), i))]);
 
+        // An append writes an object a partition, a day's rows each: the first day's goes whole from level 0.
         RowChangeResult result = await dataset.ExpireAsync<Event>(r => r.At < Midnight.AddDays(1), Ct);
-        Assert.Equal(OperationOutcome.AlreadyThere, result.Outcome);
-        Assert.Equal(48, dataset.RowCount);
-
-        // Compacted, the object of each day stands alone, and the first goes.
-        await DrainAsync(dataset);
-        result = await dataset.ExpireAsync<Event>(r => r.At < Midnight.AddDays(1), Ct);
+        Assert.Equal(OperationOutcome.Applied, result.Outcome);
         Assert.Equal(24, result.Rows);
         Assert.Equal(24, dataset.RowCount);
+
+        // A bound inside the second day, whose object straddles it, takes nothing.
+        ulong version = dataset.Version;
+        result = await dataset.ExpireAsync<Event>(r => r.At < Midnight.AddDays(1).AddHours(12), Ct);
+        Assert.Equal(OperationOutcome.AlreadyThere, result.Outcome);
+        Assert.Equal(version, dataset.Version);
+        Assert.Equal(24, dataset.RowCount);
+
+        // Compacted, the day stands alone, and goes past its end.
+        await DrainAsync(dataset);
+        result = await dataset.ExpireAsync<Event>(r => r.At < Midnight.AddDays(2), Ct);
+        Assert.Equal(24, result.Rows);
+        Assert.Equal(0, dataset.RowCount);
     }
 
     [Fact]
