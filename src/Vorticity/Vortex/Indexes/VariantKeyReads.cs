@@ -418,16 +418,104 @@ internal sealed class VariantKeyReads
         /// <summary>A chunk of <paramref name="rows"/> rows, its first shredded key's range at <paramref name="start"/>, read for its residual.</summary>
         internal static Chunk ResidualOf(ulong start, int rows) => new Chunk(start, rows, [], [], default, default) { Residual = true };
 
-        /// <summary>Registers each key's range.</summary>
-        internal void Register(SegmentRequestSet segments)
+        /// <summary>
+        /// Registers each key's range, or, where the split reads the chunk's live granules apart, the granules of its rows
+        /// <paramref name="rows"/> alone (<see cref="GranulePlans.TryRegisterKey"/>, spec E, 4.1); every range whole in a chunk
+        /// that kept a key's values of other classes beside its typed column, which a split does not decode apart.
+        /// </summary>
+        internal void Register(SegmentRequestSet segments, RowRange rows)
         {
+            bool apart = segments.Granules is not null && Typed;
             foreach (Key key in Keys)
             {
-                if (key.Part is { Length: > 0 } part)
+                if (key.Part is { Length: > 0 } part && (!apart || !segments.Granules!.TryRegisterKey(part, key.Shape, rows, segments)))
                 {
                     segments.Add(Spec(part));
                 }
             }
+        }
+
+        /// <summary>Whether every key the chunk shreds is its typed column alone, with no values of other classes beside it.</summary>
+        private bool Typed => Array.TrueForAll(Keys, static key => key.Part is null || key.Shape.Kind != DTypeKind.Variant);
+
+        /// <summary>
+        /// Rows <c>[start, start + count)</c> of the chunk as a variant node of <paramref name="variant"/>'s dtype, each key
+        /// decoded from the granules <paramref name="plans"/> read of it for them, or, read whole, from its range; -1 when no
+        /// key was read by its granules, the chunk's decode, retained for all its splits, then serving.
+        /// </summary>
+        internal int DecodeRange(ScanContext context, DType variant, int start, int count, GranulePlans plans)
+        {
+            RowRange rows = new RowRange(start, start + count);
+            bool planned = false;
+            foreach (Key key in Keys)
+            {
+                if (key.Part is { Length: > 0 } part)
+                {
+                    planned |= plans.Find(part.Offset, rows) is not null;
+                }
+            }
+
+            if (!planned || !Typed)
+            {
+                return -1;
+            }
+
+            CanonicalArena arena = context.Canonical;
+            Span<int> stack = stackalloc int[16];
+            using Scratch<int> groups = new(Keys.Length, stack);
+            int none = -1;
+            for (int k = 0; k < Keys.Length; k++)
+            {
+                Key key = Keys[k];
+                if (key.Part is not { } part)
+                {
+                    int absent = None();
+                    groups.Span[k] = arena.AddStruct(Groups[k], count, Validity.NonNullable, [absent, absent, arena.AddNull(key.Typed, count)]);
+                    continue;
+                }
+
+                Buffers.VortexBuffer region = default;
+                ReadOnlyMemory<byte> tree = part.Tree;
+                if (part.Length > 0 && plans.Find(part.Offset, rows) is { } plan)
+                {
+                    tree = plan.Tree;
+                    region = Region(context, part, plan);
+                }
+                else if (part.Length > 0)
+                {
+                    region = context.Segments.GetBuffer(context.Segments.Add(Spec(part)));
+                }
+
+                context.Decode.LoadBlob(tree.Span, region);
+                ArrayNode root = context.Nodes.Root;
+                int typed = context.Decode.DecodeRootRange(in root, key.Shape, Rows, start, count, keepEncoding: false);
+                int metadata = None();
+                groups.Span[k] = arena.AddStruct(Groups[k], count, Validity.NonNullable, [metadata, metadata, typed]);
+            }
+
+            int struct_ = arena.AddStruct(Tree, count, Validity.NonNullable, groups.Span);
+            int nulls = None();
+            return arena.AddStruct(variant, count, variant.IsNullable ? Validity.AllValid : Validity.NonNullable, [nulls, nulls, struct_]);
+
+            int None() => none >= 0 ? none : none = Nulls(arena, Binary, count);
+        }
+
+        /// <summary>The region of the key's buffers, the ranges <paramref name="plan"/> read laid at their places, every other byte cleared.</summary>
+        private static Buffers.VortexBuffer Region(ScanContext context, PathChunk part, GranulePlans.Plan plan)
+        {
+            SegmentRequestSet segments = context.Segments;
+            Buffers.VortexBuffer region = context.Canonical.AllocateUninitialized(checked((int)plan.RegionLength), 1 << plan.Alignment, out Span<byte> bytes);
+            long at = 0;
+            foreach ((long start, long end) in plan.Ranges)
+            {
+                bytes[(int)at..(int)start].Clear();
+                int slot = segments.Add(new SegmentSpec(part.Offset + (ulong)start, checked((uint)(end - start)), 0, 0, 0));
+                segments.GetBuffer(slot).Span[..(int)(end - start)].CopyTo(bytes[(int)start..]);
+                at = end;
+            }
+
+            bytes[(int)at..].Clear();
+            return region;
         }
 
         /// <summary>

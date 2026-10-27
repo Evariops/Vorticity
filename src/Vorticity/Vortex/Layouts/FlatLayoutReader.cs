@@ -61,7 +61,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             SegmentSpec spec = SpecOf(in node, 0);
             if (reads.Find(spec.Offset, spec.Length) is { Residual: false } chunk)
             {
-                chunk.Register(segments);
+                chunk.Register(segments, rows);
                 return;
             }
         }
@@ -308,6 +308,14 @@ internal sealed class FlatLayoutReader : LayoutReader
     private static int ExecuteKeys(
         in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, Indexes.VariantKeyReads.Chunk chunk, int total, int length)
     {
+        // The keys read by the granules of the split's rows (spec E, 4.1): decoded from them alone, the selection gathered
+        // out of them; nothing retained, which would read the rest of the chunk.
+        if (context.Granules is { } granules && chunk.DecodeRange(context, node.DType, (int)rows.Start, length, granules) is int ranged and >= 0)
+        {
+            Decoded(context, length);
+            return context.HasSelection ? GatherRebased(context, ranged, (int)rows.Start) : ranged;
+        }
+
         if (!context.HasSelection && rows.Start == 0 && length == total)
         {
             Decoded(context, total);

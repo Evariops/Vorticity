@@ -214,6 +214,60 @@ internal sealed class GranulePlans(
     }
 
     /// <summary>
+    /// Registers in <paramref name="segments"/> the ranges of the shredded key <paramref name="part"/>'s buffers that rows
+    /// <paramref name="rows"/> of its chunk hold, the key read as <paramref name="dtype"/>, its typed column, and keeps the
+    /// plan (spec E, 4.1): when the split reads the chunk's live granules apart, as a column's by
+    /// <see cref="TryRegister"/>. The path map keeps the key's tree and no marks, so an encoding whose geometry needs them,
+    /// a text's compressed bytes, leaves the key's range read whole, as a sparse stream, which holds its values alone,
+    /// does; false then.
+    /// </summary>
+    internal bool TryRegisterKey(PathChunk part, DType dtype, RowRange rows, SegmentRequestSet segments)
+    {
+        int chunkRows = checked((int)part.Rows);
+        SegmentSpec spec = new SegmentSpec(part.Offset, part.Length, part.AlignmentExponent, 0, 0);
+        if (part.Length == 0 || dtype.Kind == DTypeKind.Variant || live is null || rows.IsEmpty
+            || (rows.Start == 0 && rows.End >= chunkRows) || !Apart(spec, part.FirstRow, chunkRows))
+        {
+            return false;
+        }
+
+        (long Start, long Length)[] layout = ArrayBlobReader.BufferLayout(part.Tree, out long regionLength);
+        if (regionLength <= 0 || regionLength > part.Length)
+        {
+            return false;
+        }
+
+        ArrayBlobReader.LoadLayout(_nodes, part.Tree, file.ResolvedArrayEncodings);
+        ArrayNode root = _nodes.Root;
+        int start = checked((int)rows.Start);
+        int count = checked((int)Math.Min(rows.Length, chunkRows - rows.Start));
+        if (!_planner.TryPlan(in root, WidthOf(dtype), chunkRows, start, count, layout, new ChunkGeometry(part.Tree, []), checked((int)live.BlockRows))
+            || _planner.Bytes > WholeShare * part.Length)
+        {
+            return false;
+        }
+
+        (long Start, long End)[] ranges = [.. _planner.Ranges];
+        foreach ((long rangeStart, long rangeEnd) in ranges)
+        {
+            segments.Add(new SegmentSpec(part.Offset + (ulong)rangeStart, checked((uint)(rangeEnd - rangeStart)), 0, 0, 0));
+        }
+
+        if (!_plans.TryGetValue(part.Offset, out List<Plan>? held))
+        {
+            _plans[part.Offset] = held = new List<Plan>(PlansPerChunk);
+        }
+
+        if (held.Count == PlansPerChunk)
+        {
+            held.RemoveAt(0);
+        }
+
+        held.Add(new Plan(start, start + count, part.Tree, ranges, regionLength, part.AlignmentExponent));
+        return true;
+    }
+
+    /// <summary>
     /// Whether the splits of the chunk of segment <paramref name="spec"/>, its rows from <paramref name="firstRow"/>, read
     /// their parts of it apart: when the scan reads a part of the chunk alone; or, reading every row of it, when its live
     /// granules make <c>r</c> runs and a share <c>s</c> of its rows such that <c>(r − 1)</c> requests more spare less than
