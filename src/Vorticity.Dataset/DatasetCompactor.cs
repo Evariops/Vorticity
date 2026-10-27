@@ -64,7 +64,7 @@ public sealed record CompactionResult
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the clustering key when there is
 /// one, a concatenation otherwise.</summary>
-internal static class DatasetCompactor
+internal static partial class DatasetCompactor
 {
     /// <summary>Reads the job's inputs and replaces them by the objects it writes; the dataset moves
     /// to the version the commit creates.</summary>
@@ -156,65 +156,83 @@ internal static class DatasetCompactor
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job
         // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
-        ObjectStream outputs;
+        ObjectStream OutputsOf(CompactionJob ran, int doublings) => new ObjectStream(
+            dataset, schema, ran.TargetBytes, ran.FirstRow, inKeyOrder: merge, rowBound: ran.Rows,
+            ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
+        {
+            Keys = indexed ? schema.Tree : null,
+            Prefix = Math.Min(schema.Layout?.Layout.Prefix ?? 0, schema.Layout?.Components.Count ?? 0),
+            Skip = schema.Partitioned ? 1 : 0,
+            Shreddings = shreddings,
+            Values = schema.Cut,
+            Dictionaries = unions,
+            SortedColumn = schema.SortedColumn,
+            Arrival = Latest(ran),
+        };
+
+        // A consolidation of several objects' worth runs in ranges of the key side by side, on the session's lanes, each
+        // reading of its inputs the granules of its range alone (KeyRanges); one of a value, since each object of a
+        // range shreds the paths of the first.
+        KeyRanges? ranges = late is null && merge && job.Trigger == CompactionTrigger.Consolidation && shreddings is not { Count: > 1 }
+            ? await KeyRangesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        // The destination's objects, in the key's order: those of one stream, or of one a range.
+        ObjectStream[] streams;
         ObjectStream? lateOutputs = null;
         long rows;
         Provenance? provenance = null;
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
         {
-            for (int doublings = 0; ; doublings++)
+            if (ranges is not null)
             {
-                lateOutputs = late is null ? null : new ObjectStream(
-                    dataset, schema, ran.Bytes, ran.FirstRow, inKeyOrder: true, rowBound: ran.Rows,
-                    0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                (streams, rows) = await RangesAsync(dataset, schema, job, ranges, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                for (int doublings = 0; ; doublings++)
                 {
-                    Arrival = Latest(ran),
-                };
-                outputs = new ObjectStream(
-                    dataset, schema, ran.TargetBytes, ran.FirstRow, inKeyOrder: merge, rowBound: ran.Rows,
-                    ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
-                {
-                    Keys = indexed ? schema.Tree : null,
-                    Prefix = Math.Min(schema.Layout?.Layout.Prefix ?? 0, schema.Layout?.Components.Count ?? 0),
-                    Skip = schema.Partitioned ? 1 : 0,
-                    Shreddings = shreddings,
-                    Values = schema.Cut,
-                    Dictionaries = unions,
-                    SortedColumn = schema.SortedColumn,
-                    Arrival = Latest(ran),
-                };
-                try
-                {
-                    provenance = new Provenance();
-                    rows = merge
-                        ? await MergeAsync(dataset, schema, ran, outputs, provenance, late, lateOutputs, cancellationToken).ConfigureAwait(false)
-                        : await ConcatenateAsync(dataset, schema, ran, outputs, provenance, cancellationToken).ConfigureAwait(false);
-                    await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
-                    if (lateOutputs is not null)
+                    lateOutputs = late is null ? null : new ObjectStream(
+                        dataset, schema, ran.Bytes, ran.FirstRow, inKeyOrder: true, rowBound: ran.Rows,
+                        0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
                     {
-                        await lateOutputs.FinishAsync(cancellationToken).ConfigureAwait(false);
-                    }
+                        Arrival = Latest(ran),
+                    };
+                    ObjectStream outputs = OutputsOf(ran, doublings);
+                    try
+                    {
+                        provenance = new Provenance();
+                        rows = merge
+                            ? await MergeAsync(dataset, schema, ran, outputs, provenance, late, lateOutputs, cancellationToken).ConfigureAwait(false)
+                            : await ConcatenateAsync(dataset, schema, ran, outputs, provenance, cancellationToken).ConfigureAwait(false);
+                        await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+                        if (lateOutputs is not null)
+                        {
+                            await lateOutputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+                        }
 
-                    break;
-                }
-                catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
-                {
-                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
-                }
-                catch (LateRows.Overflow)
-                {
-                    // The late rows weigh too much to stand apart: the exit as planned, merged with the objects they meet.
-                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
-                    late = null;
-                    lateOutputs = null;
-                    ran = job;
-                    doublings = -1;
-                }
-                catch
-                {
-                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
-                    throw;
+                        streams = [outputs];
+                        break;
+                    }
+                    catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
+                    {
+                        await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                    }
+                    catch (LateRows.Overflow)
+                    {
+                        // The late rows weigh too much to stand apart: the exit as planned, merged with the objects they meet.
+                        await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                        late = null;
+                        lateOutputs = null;
+                        ran = job;
+                        doublings = -1;
+                    }
+                    catch
+                    {
+                        await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                        throw;
+                    }
                 }
             }
         }
@@ -244,11 +262,14 @@ internal static class DatasetCompactor
             produced.Add((lateOutputs!.Levels[i], lateOutputs.Written[i].Key, lateOutputs.Written[i].Entry));
         }
 
-        for (int i = 0; i < outputs.Written.Count; i++)
+        foreach (ObjectStream outputs in streams)
         {
-            WrittenObject written = outputs.Written[i];
-            produced.Add((outputs.Levels[i], written.Key, written.Entry));
-            filled.Add(new CompactionInput(outputs.Levels[i], written.Key, written.Entry));
+            for (int i = 0; i < outputs.Written.Count; i++)
+            {
+                WrittenObject written = outputs.Written[i];
+                produced.Add((outputs.Levels[i], written.Key, written.Entry));
+                filled.Add(new CompactionInput(outputs.Levels[i], written.Key, written.Entry));
+            }
         }
 
         // What each input was read as: a delete that marked rows in one meanwhile leaves it under its
@@ -272,17 +293,27 @@ internal static class DatasetCompactor
             .CommitAsync([replacement], CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
 
         // An object written from inputs none of which a delete marked, each of which sent it every row, holds their rows,
-        // all and no other: the partials the questions learned of them, summed, are its own (LearnedPartials).
+        // all and no other: the partials the questions learned of them, summed, are its own (LearnedPartials). The
+        // objects of ranges inherit none, an input sending rows to each range its keys meet.
         OperationOutcome outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied;
-        if (outcome == OperationOutcome.Applied && !ran.Inputs.Any(static input => input.Entry.HasDeletions))
+        if (outcome == OperationOutcome.Applied && provenance is not null && !ran.Inputs.Any(static input => input.Entry.HasDeletions))
         {
+            ObjectStream outputs = streams[0];
             for (int o = 0; o < outputs.Written.Count; o++)
             {
-                if (provenance!.SoleInputsOf(o, ran.Inputs) is { Length: > 0 and <= LearnedPartials.MaxInputs } inputs)
+                if (provenance.SoleInputsOf(o, ran.Inputs) is { Length: > 0 and <= LearnedPartials.MaxInputs } inputs)
                 {
                     dataset.Partials.Inherit(outputs.Written[o].Entry.Uid, inputs, dataset.Session.Options.SynopsisCache);
                 }
             }
+        }
+
+        int objectsOut = lateOutputs?.Written.Count ?? 0;
+        long bytesOut = lateOutputs?.Bytes ?? 0;
+        foreach (ObjectStream outputs in streams)
+        {
+            objectsOut += outputs.Written.Count;
+            bytesOut += outputs.Bytes;
         }
 
         return new CompactionResult
@@ -293,10 +324,10 @@ internal static class DatasetCompactor
             Trigger = job.Trigger,
             Style = job.Style,
             ObjectsIn = ran.Inputs.Count,
-            ObjectsOut = outputs.Written.Count + (lateOutputs?.Written.Count ?? 0),
+            ObjectsOut = objectsOut,
             Rows = rows,
             BytesIn = ran.Bytes,
-            BytesOut = outputs.Bytes + (lateOutputs?.Bytes ?? 0),
+            BytesOut = bytesOut,
             Outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied,
         };
     }
@@ -529,27 +560,31 @@ internal static class DatasetCompactor
 
     /// <summary>
     /// An input's rows in its own order, the key's, as <paramref name="schema"/>'s columns, or those of them
-    /// <paramref name="fields"/> names: its own scan, each batch reshaped when it was written under another schema.
+    /// <paramref name="fields"/> names: its own scan, each batch reshaped when it was written under another schema; with
+    /// <paramref name="rows"/>, those rows of it alone, which a range of the key reads.
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
-        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null)
+        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null, RowRange? rows = null)
     {
         VortexFile file = lease.File;
         FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            return LiveRowsAsync(fields is null ? file.ScanBuilder() : file.ScanBuilder().ProjectMask(projection), entry, cancellationToken);
+            return LiveRowsAsync(Ranged(fields is null ? file.ScanBuilder() : file.ScanBuilder().ProjectMask(projection), rows), entry, cancellationToken);
         }
 
         ObjectReadPlan read = columns.Read(null, projection);
         return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, cancellationToken),
+            LiveRowsAsync(Ranged(file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), rows), entry, cancellationToken),
             read.Shape,
             null,
             0,
             compact: true,
             cancellationToken);
     }
+
+    /// <summary>The scan of <paramref name="rows"/> alone, or of every row.</summary>
+    private static ScanBuilder Ranged(ScanBuilder scan, RowRange? rows) => rows is { } range ? scan.Rows(range) : scan;
 
     /// <summary>
     /// An input's rows through <paramref name="scan"/>, in their order, without the rows it deleted: a compaction is also
@@ -637,18 +672,23 @@ internal static class DatasetCompactor
         return rows;
     }
 
-    /// <summary>The k-way merge, one run of rows at a time.</summary>
+    /// <summary>
+    /// The k-way merge, one run of rows at a time; with <paramref name="ranges"/>, of the rows of range
+    /// <paramref name="range"/> alone. The outputs each run goes to are noted in <paramref name="provenance"/>, when given.
+    /// </summary>
     private static async ValueTask<long> MergeAsync(
         VortexDataset dataset,
         DatasetSchema schema,
         CompactionJob job,
         ObjectStream outputs,
-        Provenance provenance,
+        Provenance? provenance,
         LateRows? late,
         ObjectStream? lateOutputs,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        KeyRanges? ranges = null,
+        int range = 0)
     {
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, cancellationToken);
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, cancellationToken, ranges: ranges, range: range);
         ValueCut? values = schema.Cut;
         long rows = 0;
         await using (merge.ConfigureAwait(false))
@@ -664,7 +704,7 @@ internal static class DatasetCompactor
                 if (start > 0)
                 {
                     late!.Add(start);
-                    provenance.Wrote(merge.CurrentObject, LateRows.Output);
+                    provenance?.Wrote(merge.CurrentObject, LateRows.Output);
                     for (int at = 0, end; at < start; at = end)
                     {
                         end = values is null ? start : values.EndOfValue(merge, at, start);
@@ -701,7 +741,7 @@ internal static class DatasetCompactor
                         await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
                     }
 
-                    provenance.Wrote(merge.CurrentObject, outputs.Written.Count);
+                    provenance?.Wrote(merge.CurrentObject, outputs.Written.Count);
                     await outputs.WriteAsync(merge, at, end, cancellationToken).ConfigureAwait(false);
                 }
 
@@ -749,15 +789,35 @@ internal static class DatasetCompactor
     /// </summary>
     /// <remarks>
     /// With <paramref name="fields"/>, each input reads those fields of <paramref name="schema"/> alone, the ones the
-    /// partition and the key read among them, and the rows merged hold them alone.
+    /// partition and the key read among them, and the rows merged hold them alone. With <paramref name="ranges"/>, the
+    /// merge holds the rows of range <paramref name="range"/> alone: each input its keys meet reads the rows the range
+    /// names of it, and leaves out those outside the range.
     /// </remarks>
     private static KeyOrderedMerge InputsMerged(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken, int[]? fields = null)
+        VortexDataset dataset,
+        DatasetSchema schema,
+        CompactionJob job,
+        CancellationToken cancellationToken,
+        int[]? fields = null,
+        KeyRanges? ranges = null,
+        int range = 0)
     {
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
+        Dictionary<string, RowRange>? rows = ranges is null ? null : new Dictionary<string, RowRange>(StringComparer.Ordinal);
         for (int i = 0; i < job.Inputs.Count; i++)
         {
             CompactionInput input = job.Inputs[i];
+            if (ranges is not null)
+            {
+                RowRange read = ranges.RowsOf(i, range);
+                if (read.IsEmpty)
+                {
+                    continue;
+                }
+
+                rows![input.Entry.Key] = read;
+            }
+
             inputs.Add((input.Key, new MergeObject(input.Entry, VortexDataset.OrderOf(input.Key), i)));
         }
 
@@ -767,9 +827,11 @@ internal static class DatasetCompactor
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             schema.Tree!,
             rankedTies: false,
-            (lease, entry) => RowsOfAsync(lease, entry, schema, cancellationToken, fields),
+            (lease, entry) => RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key]),
             opened: null,
-            cancellationToken);
+            cancellationToken,
+            ranges?.Low(range) ?? default,
+            ranges?.High(range) ?? default);
     }
 
     /// <summary>

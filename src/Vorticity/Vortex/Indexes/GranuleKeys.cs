@@ -174,6 +174,30 @@ internal sealed class GranuleKeys
             : (0, 0);
     }
 
+    /// <summary>
+    /// The first granule whose key lies at or past <paramref name="key"/>, <see cref="Granules"/> when none does: the one
+    /// before it may hold keys at or past it too, those before that none. Every page in hand first.
+    /// </summary>
+    internal int FirstAtOrPast(ReadOnlySpan<byte> key)
+    {
+        int lo = 0;
+        int hi = Granules;
+        while (lo < hi)
+        {
+            int middle = lo + ((hi - lo) >> 1);
+            if (Key(middle).SequenceCompareTo(key) < 0)
+            {
+                lo = middle + 1;
+            }
+            else
+            {
+                hi = middle;
+            }
+        }
+
+        return lo;
+    }
+
     /// <summary>The key of entry <paramref name="entry"/>: a granule's, or a page's first.</summary>
     private ReadOnlySpan<byte> EntryKey(int entry, bool granules) => granules ? Key(entry) : _pageKeys[entry];
 
