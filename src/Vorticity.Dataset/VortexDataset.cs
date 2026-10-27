@@ -3259,6 +3259,33 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The object dictionaries the object <paramref name="entry"/> names writes its columns against, read with no open of
+    /// it: each column's values' segment, a request each, null for a column whose chunks hold its values.
+    /// </summary>
+    internal async ValueTask<Writing.ObjectDictionary?[]> DictionariesAsync(
+        ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken)
+    {
+        Writing.ObjectDictionary?[] dictionaries = new Writing.ObjectDictionary?[contents.Dictionaries.Count];
+        if (dictionaries.Length == 0)
+        {
+            return dictionaries;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            using Indexes.SpanReader reader = Indexes.SpanReader.Open(Footerless(source, entry, contents), null, contents)
+                ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
+            for (int field = 0; field < dictionaries.Length; field++)
+            {
+                dictionaries[field] = await reader.DictionaryAsync(field, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        return dictionaries;
+    }
+
+    /// <summary>
     /// The rows strictly inside <paramref name="first"/> to <paramref name="end"/> of the object <paramref name="entry"/>
     /// names at which a chunk of one of <paramref name="columns"/> starts, read from its chunk directories with no open of it
     /// (<see cref="Indexes.SpanReader.ChunkStartsAsync"/>): where a span of its rows may be cut between lanes.

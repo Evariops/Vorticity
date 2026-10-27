@@ -45,12 +45,10 @@ public sealed class DatasetWriter
     private readonly IReadOnlyDictionary<string, VariantShredding>? _shredded;
 
     // The tree's key the rows are sorted by, the partition leading it, and the indexed prefix of the key past it, null to
-    // keep their order; the partition's value alone, null for one partition; the column the key's first component reads as
-    // it is, whose dictionary is priced as sorted.
+    // keep their order; the partition's value alone, null for one partition.
     private readonly SortKey? _key;
     private readonly int _prefix;
     private readonly SortKey? _partition;
-    private readonly int _sortedColumn = -1;
     private readonly bool _buffered;
     private readonly long _bufferBytes;
     private readonly int _mostPartitions;
@@ -93,8 +91,6 @@ public sealed class DatasetWriter
             {
                 _key = schema.Tree;
                 _prefix = Math.Min(plan.Layout.Prefix, plan.Components.Count);
-                LayoutColumn first = plan.Components[0];
-                _sortedColumn = first.Function is null && first.Read is null && !first.Value.SourcePath.Contains('.', StringComparison.Ordinal) ? first.Field : -1;
             }
 
             _partition = plan.Partition is null ? null : SortKey.Of(plan, partition: true, components: 0);
@@ -769,7 +765,7 @@ public sealed class DatasetWriter
             int column = node.GetFieldIndex(field);
             if (ObjectDictionary.Of(arena, column) is { } dictionary)
             {
-                writer.TryDeclareDictionary(field, dictionary, rows, RowBytes(arena, column, type, rows), sorted: field == _sortedColumn);
+                writer.TryDeclareDictionary(field, dictionary, rows, RowBytes(arena, column, type, rows), sorted: field == _schema.SortedColumn);
             }
         }
     }

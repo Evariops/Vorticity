@@ -290,6 +290,36 @@ internal sealed class SpanReader : IDisposable
         }
     }
 
+    /// <summary>
+    /// The object dictionary column <paramref name="field"/> is written against: its values' segment read in one request and
+    /// decoded, sorted as the writer wrote them. Null when the column's chunks hold its values, or the values are of no kind a
+    /// dictionary holds.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The values do not decode.</exception>
+    internal async ValueTask<Writing.ObjectDictionary?> DictionaryAsync(int field, CancellationToken cancellationToken)
+    {
+        if (DictionaryOf(field) is not { } named)
+        {
+            return null;
+        }
+
+        ScanContext context = new ScanContext(_encodings, _options);
+        try
+        {
+            int request = context.Segments.Add(new SegmentSpec(named.Offset, named.Length, named.AlignmentExponent, 0, 0));
+            await _source.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
+            context.Segments.Complete();
+            context.Decode.LoadBlob(context.Segments.GetBuffer(request));
+            ArrayNode root = context.Nodes.Root;
+            int values = context.Canonical.Decoded(context.Decode.DecodeRoot(in root, _schema.GetField(field), checked((int)named.Values)));
+            return Writing.ObjectDictionary.Of(context.Canonical, values);
+        }
+        finally
+        {
+            context.Dispose();
+        }
+    }
+
     private async ValueTask<RecordBatch> ReadSpanAsync(RowRange span, int[]? columns, CancellationToken cancellationToken)
     {
         int[] fields = columns ?? AllColumns();

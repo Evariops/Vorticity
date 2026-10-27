@@ -5,12 +5,14 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Types.Variants;
+using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
@@ -140,6 +142,12 @@ internal static class DatasetCompactor
             shreddings = await PlanValuesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
         }
 
+        // A merge writes each column every input writes against an object dictionary against their union, sorted, when the
+        // writer prices it below a dictionary a chunk: the dictionaries go on through the merges.
+        IReadOnlyList<(int Field, ObjectDictionary Dictionary, long RowBytes)> unions = merge
+            ? await UnionsAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false)
+            : [];
+
         // A leveled exit of level 0 keeps the rows that came late apart, in an object of level 0, while they weigh little
         // against the objects of its destination they fall among (LateRows): it reads its sources alone, and those
         // objects stand. Past that weight, it runs again as the merge with them it was planned as.
@@ -172,6 +180,8 @@ internal static class DatasetCompactor
                     Skip = schema.Partitioned ? 1 : 0,
                     Shreddings = shreddings,
                     Values = schema.Cut,
+                    Dictionaries = unions,
+                    SortedColumn = schema.SortedColumn,
                     Arrival = Latest(ran),
                 };
                 try
@@ -369,6 +379,85 @@ internal static class DatasetCompactor
                 ComponentKind.Feature,
                 "A leveled compaction merges on the layout's key, and this dataset declares none. Compact it tiered, which concatenates.");
         }
+    }
+
+    /// <summary>
+    /// The union of the object dictionaries the job's inputs write each column against, sorted, with the bytes the column's
+    /// values take over the job's rows, about: a text's average value a row, a number's width. A column some input writes
+    /// in its chunks, or whose union passes what a dictionary holds, has none. Each input's dictionaries are read with no
+    /// open of it, from its table of contents.
+    /// </summary>
+    private static async ValueTask<IReadOnlyList<(int Field, ObjectDictionary Dictionary, long RowBytes)>> UnionsAsync(
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
+    {
+        int fields = schema.DType.FieldCount;
+        List<ObjectDictionary>?[] held = new List<ObjectDictionary>?[fields];
+        long[] rowBytes = new long[fields];
+        bool first = true;
+        foreach (CompactionInput input in job.Inputs)
+        {
+            if (input.Entry.Contents is not { Dictionaries.Count: > 0 } contents || contents.Dictionaries.Count != fields)
+            {
+                return [];
+            }
+
+            ObjectDictionary?[] dictionaries = await dataset.DictionariesAsync(input.Entry, contents, cancellationToken).ConfigureAwait(false);
+            for (int field = 0; field < fields; field++)
+            {
+                if (dictionaries[field] is not { } dictionary)
+                {
+                    held[field] = null;
+                    continue;
+                }
+
+                if (first)
+                {
+                    held[field] = [];
+                }
+
+                if (held[field] is { } list)
+                {
+                    list.Add(dictionary);
+                    DType type = schema.DType.GetField(field);
+                    rowBytes[field] += type.Kind == DTypeKind.Primitive
+                        ? input.Entry.PhysicalRows * type.PType.ByteWidth()
+                        : input.Entry.PhysicalRows * dictionary.ValueBytes / Math.Max(dictionary.Count, 1);
+                }
+            }
+
+            first = false;
+        }
+
+        List<(int, ObjectDictionary, long)> unions = [];
+        for (int field = 0; field < fields; field++)
+        {
+            if (held[field] is not { Count: > 0 } list)
+            {
+                continue;
+            }
+
+            CanonicalArena arena = new CanonicalArena(64, dataset.Session.Options.EnginePool);
+            try
+            {
+                DType type = schema.DType.GetField(field);
+                (CanonicalArena, int)[] values = new (CanonicalArena, int)[list.Count];
+                for (int i = 0; i < values.Length; i++)
+                {
+                    values[i] = (arena, list[i].ValuesNode(arena, type));
+                }
+
+                if (ObjectDictionary.Union(values, out _) is { } union)
+                {
+                    unions.Add((field, union, rowBytes[field]));
+                }
+            }
+            finally
+            {
+                arena.Reset();
+            }
+        }
+
+        return unions;
     }
 
     /// <summary>When the latest rows a job reads arrived: what its outputs say of theirs.</summary>
@@ -917,6 +1006,15 @@ internal static class DatasetCompactor
         internal ValueCut? Values { get; init; }
 
         /// <summary>
+        /// The object dictionaries each object declares to its writer before its first row, each column's with the bytes its
+        /// values take over the job's rows: the union of the inputs' (<see cref="UnionsAsync"/>).
+        /// </summary>
+        internal IReadOnlyList<(int Field, ObjectDictionary Dictionary, long RowBytes)> Dictionaries { get; init; } = [];
+
+        /// <summary>The column the key's first component reads as it is, whose dictionary is priced as sorted; -1 for none.</summary>
+        internal int SortedColumn { get; init; } = -1;
+
+        /// <summary>
         /// Writes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
         /// key's order: the first starts the next clustering value's shredding when they start an object of another value,
         /// and the object's sparse index and blocks take them.
@@ -973,6 +1071,10 @@ internal static class DatasetCompactor
                 variantChunks: shredding?.VariantChunks, byteBound: _byteBound);
             _output = output;
             _census = shredding is null ? null : Census(output.Writer.BlockRows);
+            foreach ((int field, ObjectDictionary dictionary, long rowBytes) in Dictionaries)
+            {
+                output.Writer.TryDeclareDictionary(field, dictionary, _rowBound, rowBytes, sorted: field == SortedColumn);
+            }
             return output;
         }
 

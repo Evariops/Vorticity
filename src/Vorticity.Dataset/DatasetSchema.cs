@@ -93,6 +93,13 @@ internal sealed class DatasetSchema
     internal bool Partitioned => Layout?.Partition is not null;
 
     /// <summary>
+    /// The top-level column the key's first component reads as it is, whose values an object's rows come in the order of:
+    /// what its dictionary is priced as sorted by; -1 for none.
+    /// </summary>
+    internal int SortedColumn => Layout is { Components: [{ Function: null, Read: null } first, ..] }
+        && !first.Value.SourcePath.Contains('.', StringComparison.Ordinal) ? first.Field : -1;
+
+    /// <summary>
     /// The key over the columns of the layout's components, when each is a column's own values and no partition leads the
     /// tree's keys: what the reads seek by until they seek by the sparse index. Null for a layout of no key, of a computed
     /// component or of a partition, whose reads prune by summaries alone until then.
