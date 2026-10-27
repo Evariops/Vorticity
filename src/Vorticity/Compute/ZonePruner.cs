@@ -1615,6 +1615,9 @@ internal sealed class ZonePruner : IBlockPruner
 
     private System.Collections.Concurrent.ConcurrentDictionary<string, ZoneColumn?>? _through;
 
+    /// <summary>Drops the zones the pruner derived of its columns' through functions, which a caller that sets its columns' zones again (<see cref="ZoneColumn.SetSingle"/>) asks first.</summary>
+    internal void Forget() => _through = null;
+
     private static ComparisonOp Negate(ComparisonOp op) => op switch
     {
         ComparisonOp.Equal => ComparisonOp.NotEqual,

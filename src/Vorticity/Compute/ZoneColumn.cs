@@ -43,10 +43,29 @@ internal sealed class ZoneColumn
     internal bool IsDecimal { get; }
 
     /// <summary>Rows per zone; zero means the map is unusable.</summary>
-    internal long ZoneLength { get; }
+    internal long ZoneLength { get; private set; }
 
     /// <summary>The column's own row count, which bounds the last zone.</summary>
-    internal long RowCount { get; }
+    internal long RowCount { get; private set; }
+
+    /// <summary>
+    /// A column of one zone whose bounds its caller sets before each question (<see cref="SetSingle"/>): what a pruner of
+    /// summaries asks of extents one after another, with no column made a question. None before.
+    /// </summary>
+    internal static ZoneColumn Single(FieldExpr field) => new ZoneColumn(field, 0, 0, new ZoneBounds[1]);
+
+    /// <summary>
+    /// Sets the one zone of a column <see cref="Single"/> made to <paramref name="bounds"/> over <paramref name="rows"/>
+    /// rows, or to no zone for none; the pruners over it forget what they derived of the zone before
+    /// (<see cref="ZonePruner.Forget"/>).
+    /// </summary>
+    internal void SetSingle(ZoneBounds bounds, long rows)
+    {
+        _zones![0] = bounds;
+        ZoneLength = rows;
+        RowCount = rows;
+        _table = null;
+    }
 
     /// <summary>Whether this column can prune anything at all.</summary>
     internal bool HasStatistics => ZoneLength > 0 && ZoneCount > 0;

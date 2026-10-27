@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Serialization.Schemas;
@@ -260,7 +261,14 @@ internal sealed class SummaryPruner
             return true;
         }
 
-        return Pruner(summaries, rows) is not { } pruner || pruner.MayMatch(new RowRange(0, rows));
+        if (Pruner(summaries, rows) is not { } scratch)
+        {
+            return true;
+        }
+
+        bool may = scratch.Pruner.MayMatch(new RowRange(0, rows));
+        Return(scratch);
+        return may;
     }
 
     /// <summary>Whether the predicate selects every row behind these summaries: the dual of <see cref="MayMatch"/>.</summary>
@@ -282,26 +290,91 @@ internal sealed class SummaryPruner
             return false;
         }
 
-        return Pruner(summaries, rows) is { } pruner && pruner.MustMatch(new RowRange(0, rows));
-    }
-
-    /// <summary>The zone pruner over the summaries of the columns the predicate reads, or null when none is summarised.</summary>
-    private ZonePruner? Pruner(IReadOnlyList<ColumnSummary> summaries, long rows)
-    {
-        List<ZoneColumn>? columns = null;
-        for (int i = 0; i < summaries.Count; i++)
+        if (Pruner(summaries, rows) is not { } scratch)
         {
-            ColumnSummary summary = summaries[i];
-            if (summary.IsEmpty || !_paths.Contains(summary.Path))
-            {
-                continue;
-            }
-
-            columns ??= [];
-            columns.Add(new ZoneColumn(
-                Expr.Field(summary.Path), rows, rows, [ColumnSummaries.Bounds(summary, rows)]));
+            return false;
         }
 
-        return columns is null ? null : new ZonePruner(_filter, columns.ToArray());
+        bool must = scratch.Pruner.MustMatch(new RowRange(0, rows));
+        Return(scratch);
+        return must;
+    }
+
+    // A pruner over one zone of each column the predicate reads, set to the summaries of each question and given back
+    // after it: a cache of one, so that the questions asked of extents one after another, of every granule of an object,
+    // make no pruner; a lane that finds it taken makes its own.
+    private Scratch? _spare;
+
+    /// <summary>
+    /// The zone pruner over the summaries of the columns the predicate reads, a rented one (<see cref="Return"/>), or null
+    /// when none is summarised.
+    /// </summary>
+    private Scratch? Pruner(IReadOnlyList<ColumnSummary> summaries, long rows)
+    {
+        Scratch scratch = Interlocked.Exchange(ref _spare, null) ?? new Scratch(_filter, _paths);
+        if (scratch.Set(summaries, rows))
+        {
+            return scratch;
+        }
+
+        Return(scratch);
+        return null;
+    }
+
+    private void Return(Scratch scratch) => Interlocked.CompareExchange(ref _spare, scratch, null);
+
+    /// <summary>A zone pruner over a column of one zone for each column a predicate reads, its zones set again at each question.</summary>
+    private sealed class Scratch
+    {
+        private readonly ZoneColumn[] _columns;
+
+        internal Scratch(VortexExpr filter, List<string> paths)
+        {
+            List<ZoneColumn> columns = new List<ZoneColumn>(paths.Count);
+            foreach (string path in paths)
+            {
+                if (!columns.Exists(column => string.Equals(column.Field.Path, path, StringComparison.Ordinal)))
+                {
+                    columns.Add(ZoneColumn.Single(Expr.Field(path)));
+                }
+            }
+
+            _columns = [.. columns];
+            Pruner = new ZonePruner(filter, _columns);
+        }
+
+        internal ZonePruner Pruner { get; }
+
+        /// <summary>Sets each column's zone to its summary among <paramref name="summaries"/> over <paramref name="rows"/> rows, or none; false when none is summarised.</summary>
+        internal bool Set(IReadOnlyList<ColumnSummary> summaries, long rows)
+        {
+            Pruner.Forget();
+            foreach (ZoneColumn column in _columns)
+            {
+                column.SetSingle(default, 0);
+            }
+
+            bool any = false;
+            for (int i = 0; i < summaries.Count; i++)
+            {
+                ColumnSummary summary = summaries[i];
+                if (summary.IsEmpty)
+                {
+                    continue;
+                }
+
+                for (int c = 0; c < _columns.Length; c++)
+                {
+                    if (string.Equals(_columns[c].Field.Path, summary.Path, StringComparison.Ordinal))
+                    {
+                        _columns[c].SetSingle(ColumnSummaries.Bounds(summary, rows), rows);
+                        any = true;
+                        break;
+                    }
+                }
+            }
+
+            return any;
+        }
     }
 }
