@@ -763,16 +763,18 @@ library recommends the column to lead the key with, whose clustering would have 
 read, through a diagnostic call and telemetry. The application declares its key and its clustering;
 the library never does.
 
-Built in a handle (`VortexDataset.RecommendClustering`, `ClusteringAdvice`): each object read as rows
-whole under a filter, its rows not narrowed by an index, credits each top-level column the filter reads
-but the key's first with its bytes of the columns read, by the cost formula, times the share of its
-rows the filter left out, which a clustering by the column would have left in other objects; a filter
-on several columns credits each the whole, an upper bound. Sixty-four columns at most are counted, and
-the telemetry counts the same bytes by column (`vortex.dataset.clustering.avoidable_bytes`). On a log of
-twenty questions over four hours of 5 000 calls, a tenant of fifty asked eight times ranks first with
-2.2 MB, a status of two values asked eight times second with 1.1 MB, and the windows of the instant, the
-key's first column, not at all *(measured, `DatasetClusteringAdviceTests`)*. Not built: the counters
-poured into the dataset and added up across processes; each handle counts its own questions.
+Built in a handle (`VortexDataset.RecommendLayoutAsync`, `LayoutAdvice`): each object read as rows
+whole under a filter, its rows not narrowed by an index, credits each top-level column and each variant
+key's read the filter reads but the layout key's first column with its bytes of the columns read, by the
+cost formula, times the share of its rows the filter left out, which an order by the value would have
+left in other granules; a filter on several values credits each the whole, an upper bound. Sixty-four
+values at most are counted, and the telemetry counts the same bytes by value
+(`vortex.dataset.layout.avoidable_bytes`). The advice orders the values credited as a key would take
+them: the fewest distinct values a partition first, by the column sheets of the version's objects, each
+partition's registers merged, with the bytes a row would take of each in runs at its place; and it says
+where the sparse index would stop, past the last component whose values still group a granule's rows
+within a partition. Not built: the counters poured into the dataset and added up across processes; each
+handle counts its own questions, and a variant key's read has no sheet to count its values.
 
 ## 11. Decisions, and the alternatives weighed
 

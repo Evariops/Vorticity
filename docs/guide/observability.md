@@ -96,7 +96,7 @@ instrument vortex.dataset.compactions ({compaction}): Compactions of datasets, b
 instrument vortex.dataset.compaction.bytes_read (By): Bytes the compactions that ran to their commit read, by trigger.
 instrument vortex.dataset.compaction.bytes_written (By): Bytes the compactions that ran to their commit wrote, by trigger.
 instrument vortex.dataset.vacuum.objects_deleted ({object}): Objects vacuums deleted.
-instrument vortex.dataset.clustering.avoidable_bytes (By): Bytes the objects read as rows under a filter would have been spared by a clustering of the filter's column, by column (ClusteringAdvice).
+instrument vortex.dataset.layout.avoidable_bytes (By): Bytes the objects read as rows under a filter would have been spared by an order of the rows by the filter's column or variant key, by value (ComponentAdvice).
 ```
 
 A commit is tagged with `vortex.operation` (`create`, `append`, `import`, `replace`, `delete`, `update`,
@@ -117,10 +117,10 @@ total vortex.dataset.compactions = 1
 
 A dry run deletes nothing and counts nothing. No tag of these counters names a dataset: a process can
 hold a hundred thousand of them, and a tag per location would make a series per dataset. The
-location is on the activities instead. The clustering counter is tagged with `vortex.column`, a
-column a filter read, a set as small as a schema. It adds the bytes each object read as rows whole
-under that filter would have been spared had the dataset been clustered by the column, the figure
-`VortexDataset.RecommendClustering` ranks for one handle (see
+location is on the activities instead. The layout counter is tagged with `vortex.column`, a column or
+a variant key's read a filter read, a set as small as a schema. It adds the bytes each object read as
+rows whole under that filter would have been spared had the dataset's rows been ordered by the value,
+the figure `VortexDataset.RecommendLayoutAsync` ranks for one handle (see
 [the key and the clustering](datasets.md#the-key-and-the-clustering)). Summed over the processes, it
 says which column the questions keep paying for. A dataset's compaction lag has no counter, since
 the library keeps no list of the handles a process holds, so export `VortexDataset.Lag` for the

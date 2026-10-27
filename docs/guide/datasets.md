@@ -102,16 +102,21 @@ A filter on the key's first column reads the objects of its values alone; a grou
 key's second column answers from the blocks when the blocks follow that function. Any other column is
 still answered by its counts, its sheets and where its values live, at a cost the plan states.
 
-Which column to lead the key with is the application's choice, and the questions it asks tell. A handle
-keeps count: `RecommendClustering()` ranks the columns its questions' filters read by the bytes a
-clustering by each would have spared the objects it read as rows, and the telemetry counts the same
-(`vortex.dataset.clustering.avoidable_bytes`). It is advice for the next dataset, never applied.
+Which values to key the rows by is the application's choice, and the questions it asks tell. A handle
+keeps count: `RecommendLayoutAsync()` takes the columns and variant keys its questions' filters read,
+each with the bytes an order by it would have spared the objects it read as rows, orders them as a key
+would take them, the fewest distinct values a partition first, and says where the sparse index would
+stop. The telemetry counts the same bytes (`vortex.dataset.layout.avoidable_bytes`). It is advice for the
+next dataset, never applied, and the partition stays the application's choice.
 
 ```csharp
-foreach (ClusteringAdvice advice in dataset.RecommendClustering())
+LayoutAdvice advice = await dataset.RecommendLayoutAsync();
+foreach (ComponentAdvice component in advice.Components)
 {
-    Console.WriteLine($"{advice.Column}: {advice.BytesAvoided:N0} bytes over {advice.Objects} objects");
+    Console.WriteLine($"{component.Path}: {component.DistinctPerPartition:N0} values a partition, {component.BytesAvoided:N0} bytes spared");
 }
+
+Console.WriteLine($"index the first {advice.IndexedPrefix} component(s)");
 ```
 
 ## Adding rows

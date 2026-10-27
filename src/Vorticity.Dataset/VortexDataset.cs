@@ -2723,18 +2723,159 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The batches where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
     internal PredicatePages Predicates { get; } = new PredicatePages();
 
-    /// <summary>What a clustering of each column the filters of this handle's questions read would have spared them (<see cref="ClusteringAdvisor"/>).</summary>
-    internal ClusteringAdvisor Advisor { get; } = new ClusteringAdvisor();
+    /// <summary>What an order of the rows by each value the filters of this handle's questions read would have spared them (<see cref="LayoutAdvisor"/>).</summary>
+    internal LayoutAdvisor Advisor { get; } = new LayoutAdvisor();
+
+    /// <summary>The rows of a granule the advice reckons with, a dataset writer's block.</summary>
+    private const int AdvisedGranuleRows = 8192;
 
     /// <summary>
-    /// The columns a clustering by which would have spared the questions this handle asked the most bytes, the most first: of
-    /// each object read as rows under a filter, its bytes of the columns read, by the cost formula, times the share of its rows
-    /// the filter left out, credited to each top-level column the filter reads but the key's first. A diagnostic, which
-    /// the telemetry counts too (<c>vortex.dataset.clustering.avoidable_bytes</c>, by column): the library never clusters by
-    /// a column on its own, a clustering being declared when the dataset is created.
+    /// The key the questions this handle asked call for (spec A, 9): the columns and variant keys their filters read, each
+    /// with the bytes an order by it would have spared them, the objects read as rows credited as
+    /// <see cref="ComponentAdvice.BytesAvoided"/> says; ordered as a key would take them, the fewest distinct values a
+    /// partition first, by the column sheets of the version's objects, each partition's merged; and where the sparse index
+    /// would stop. A diagnostic, which the telemetry counts too (<c>vortex.dataset.layout.avoidable_bytes</c>, by value):
+    /// the library never lays a dataset out on its own, a layout being declared when the dataset is created, and the
+    /// partition stays the application's choice.
     /// </summary>
-    /// <returns>The columns credited, ranked; empty before a question read an object as rows under a filter.</returns>
-    public IReadOnlyList<ClusteringAdvice> RecommendClustering() => Advisor.Ranked();
+    /// <param name="cancellationToken">Cancels the reads of the sheets.</param>
+    /// <returns>The advice; no component before a question read an object as rows under a filter.</returns>
+    /// <remarks>The sheets of every object are read, a request an object, none the session's cache or this handle holds.</remarks>
+    public async ValueTask<LayoutAdvice> RecommendLayoutAsync(CancellationToken cancellationToken = default)
+    {
+        List<(string Path, long Bytes, long Objects)> credited = Advisor.Ranked();
+        if (credited.Count == 0)
+        {
+            return new LayoutAdvice([], 0);
+        }
+
+        // The columns credited, by their place in the schema; a variant key's read has none, and no sheet.
+        DatasetSnapshot version = Snapshot;
+        DType schema = version.Schema.DType;
+        List<int> fields = [];
+        int[] place = new int[credited.Count];
+        for (int i = 0; i < credited.Count; i++)
+        {
+            int field = schema.IndexOfField(credited[i].Path);
+            place[i] = field < 0 ? -1 : fields.Count;
+            if (field >= 0)
+            {
+                fields.Add(field);
+            }
+        }
+
+        // Each partition's rows, and of each column its sheets' registers merged.
+        Dictionary<string, (long Rows, byte[]?[] Registers)> partitions = new Dictionary<string, (long, byte[]?[])>(StringComparer.Ordinal);
+        await foreach (PositionedObject held in version.WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        {
+            string partition = version.Schema.Partitioned && held.TreeKey.Length > UidBytes
+                ? Convert.ToHexString(OrderOf(held.TreeKey).Span[..version.Schema.Tree!.PrefixLength(OrderOf(held.TreeKey).Span, 1)])
+                : string.Empty;
+            if (!partitions.TryGetValue(partition, out (long Rows, byte[]?[] Registers) known))
+            {
+                known = (0, new byte[]?[fields.Count]);
+            }
+
+            known.Rows += held.Entry.Rows;
+            Indexes.ColumnSheet?[] sheets = fields.Count == 0 ? [] : await ReadSheetsAsync(held.Entry, fields, cancellationToken).ConfigureAwait(false);
+            for (int c = 0; c < sheets.Length; c++)
+            {
+                if (sheets[c] is not { } sheet)
+                {
+                    continue;
+                }
+
+                byte[] merged = known.Registers[c] ??= new byte[Indexes.ColumnSheet.Registers];
+                ReadOnlySpan<byte> ranks = sheet.Ranks;
+                for (int r = 0; r < merged.Length; r++)
+                {
+                    merged[r] = Math.Max(merged[r], ranks[r]);
+                }
+            }
+
+            partitions[partition] = known;
+        }
+
+        // Each value's distinct values a partition, the partitions that count it averaged.
+        double rows = 0;
+        foreach ((long count, byte[]?[] _) in partitions.Values)
+        {
+            rows += count;
+        }
+
+        rows /= Math.Max(partitions.Count, 1);
+        List<ComponentAdvice> components = [];
+        for (int i = 0; i < credited.Count; i++)
+        {
+            double distinct = double.NaN;
+            if (place[i] >= 0)
+            {
+                double sum = 0;
+                int counted = 0;
+                foreach ((long _, byte[]?[] registers) in partitions.Values)
+                {
+                    if (registers[place[i]] is { } merged)
+                    {
+                        sum += Math.Max(1, Indexes.HyperLogLog.Estimate(merged, Indexes.ColumnSheet.Precision));
+                        counted++;
+                    }
+                }
+
+                distinct = counted == 0 ? double.NaN : sum / counted;
+            }
+
+            components.Add(new ComponentAdvice(credited[i].Path, credited[i].Bytes, credited[i].Objects, distinct, double.NaN));
+        }
+
+        // The fewest distinct values first, the uncounted last, the most bytes avoided first among equals.
+        components.Sort(static (left, right) =>
+        {
+            bool leftCounted = !double.IsNaN(left.DistinctPerPartition);
+            bool rightCounted = !double.IsNaN(right.DistinctPerPartition);
+            if (leftCounted != rightCounted)
+            {
+                return leftCounted ? -1 : 1;
+            }
+
+            int order = leftCounted ? left.DistinctPerPartition.CompareTo(right.DistinctPerPartition) : 0;
+            return order != 0 ? order : right.BytesAvoided.CompareTo(left.BytesAvoided);
+        });
+
+        // Each component's runs at its place: the distinct values up to it multiplied, at most a partition's rows, at a value
+        // and a length each; the index stops past the last whose runs still hold a granule's rows.
+        double runs = 1;
+        int prefix = 0;
+        for (int i = 0; i < components.Count; i++)
+        {
+            ComponentAdvice component = components[i];
+            int field = schema.IndexOfField(component.Path);
+            double width = field >= 0 ? WidthOf(schema.GetField(field)) : 16;
+            runs = double.IsNaN(component.DistinctPerPartition) ? double.NaN : Math.Min(rows, runs * component.DistinctPerPartition);
+            components[i] = component with { BytesPerRow = double.IsNaN(runs) || rows <= 0 ? double.NaN : runs * (width + 1) / rows };
+            if (!double.IsNaN(runs) && rows / runs >= AdvisedGranuleRows)
+            {
+                prefix = i + 1;
+            }
+        }
+
+        return new LayoutAdvice(components, components.Count > 0 ? Math.Max(prefix, 1) : 0);
+
+        // A value's bytes in a run: a fixed width's, about sixteen for a text or anything else.
+        static double WidthOf(DType type)
+        {
+            while (type.Kind == DTypeKind.Extension)
+            {
+                type = type.StorageType;
+            }
+
+            return type.Kind switch
+            {
+                DTypeKind.Primitive => type.PType.ByteWidth(),
+                DTypeKind.Bool => 1,
+                _ => 16,
+            };
+        }
+    }
 
     /// <summary>A synopsis read from the bytes of the region at <paramref name="position"/> of those asked, and the bytes it holds in memory.</summary>
     private delegate (object Synopsis, long Bytes) SynopsisReader(int position, ReadOnlySpan<byte> bytes);

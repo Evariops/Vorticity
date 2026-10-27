@@ -381,7 +381,7 @@ internal sealed class DatasetScanBuilder
     {
         if (_filterColumns is null)
         {
-            string? leading = _version.Schema.Key?.InstantPath;
+            string? leading = _version.Schema.KeyColumns is { Count: > 0 } key ? key[0] : null;
             List<string> columns = [];
             foreach (string path in FilterPaths())
             {
@@ -393,11 +393,32 @@ internal sealed class DatasetScanBuilder
                 }
             }
 
+            // A variant key's read is a value of its own, which a component may read as well.
+            if (_filter is { } filter)
+            {
+                VariantReads reads = new VariantReads(columns);
+                ScanBuilder.VisitFields(filter, ref reads);
+            }
+
             columns.Sort(StringComparer.Ordinal);
             _filterColumns = columns;
         }
 
         return _filterColumns;
+    }
+
+    /// <summary>A walk over a filter's columns that keeps the text of each variant key's read it meets.</summary>
+    private readonly struct VariantReads(List<string> into) : ScanBuilder.IFieldVisitor
+    {
+        public bool Visit(FieldExpr field)
+        {
+            if (field is Compute.VariantFieldExpr variant && !into.Contains(variant.Text))
+            {
+                into.Add(variant.Text);
+            }
+
+            return true;
+        }
     }
 
     private List<string>? _filterColumns;
