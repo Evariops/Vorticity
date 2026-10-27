@@ -52,19 +52,26 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// give come with the per-column synopses and the planner. The bytes cold measured again on 2026-10-25, the dataset
     /// cut by the hour of its instant where it took periods of an hour. The allocations of the questions whose filter is evaluated on rows raised on 2026-10-25 by some 0.5 KB, each
     /// in a process of its own: the filter's key, its canonical text hashed, and the lookup of its pages (PredicatePages).
+    /// <para>
+    /// Measured again on 2026-10-27, after the redesign. Cold, an hour's object of 44 KB holds 1.6 KB more, each of its
+    /// columns in one chunk over granules of 8,192 rows where slices of 100 rows cut it: 174,800 bytes over the four where
+    /// 168,519 were. Warm, 2 to 21 % more: among it, the type arena a scan's context makes for the sequence decoder of the
+    /// instants, some 8 KB, and the summaries and walks a plan weighs each object by. The allocations of the paths that
+    /// pass keep their ceilings.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["count by service"] = new(4, 168519, 0, 0, 36144),
-        ["count by service, at eight lanes"] = new(4, 168519, 0, 0, 58240),
-        ["count by service and hour"] = new(4, 168519, 0, 0, 41648),
-        ["by minute, the last hour, under a predicate"] = new(1, 41890, 0, 0, 40964),
-        ["an unaligned window"] = new(3, 126629, 0, 0, 45076),
-        ["an unaligned window, at eight lanes"] = new(3, 126629, 0, 0, 65117),
-        ["every row but one id"] = new(4, 168519, 0, 0, 47998),
-        ["measures by region and hour"] = new(4, 168519, 0, 0, 49328),
-        ["count by route, a shredded path"] = new(4, 168519, 0, 0, 55888),
-        ["the rows of one id"] = new(4, 168519, 0, 0, 81328),
+        ["count by service"] = new(4, 174800, 0, 0, 38516),
+        ["count by service, at eight lanes"] = new(4, 174800, 0, 0, 60099),
+        ["count by service and hour"] = new(4, 174800, 0, 0, 44024),
+        ["by minute, the last hour, under a predicate"] = new(1, 43476, 0, 0, 43893),
+        ["an unaligned window"] = new(3, 131324, 0, 0, 52461),
+        ["an unaligned window, at eight lanes"] = new(3, 131324, 0, 0, 80613),
+        ["every row but one id"] = new(4, 174800, 0, 0, 52176),
+        ["measures by region and hour"] = new(4, 174800, 0, 0, 51694),
+        ["count by route, a shredded path"] = new(4, 174800, 0, 0, 55888),
+        ["the rows of one id"] = new(4, 174800, 0, 0, 81328),
     };
 
     private readonly Fixture _fixture;
@@ -214,7 +221,7 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
                 await dataset.AppendAsync(draft);
             }
 
-            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }) is not null)
             {
             }
         }

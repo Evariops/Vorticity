@@ -42,14 +42,20 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// lowered the same day to 2 % above the larger of this machine's figure and CI's Linux runner's, the runner's counted
     /// alone by the 112 bytes the other classes take off: 99,800 and 106,560 bytes, from ceilings of 168,752 and 162,592.
     /// QP-10 allocates 2 to 4 % more on the runner than on Windows.
+    /// <para>
+    /// Measured again on 2026-10-27, after the redesign, an object an hour as before (the fixture's compaction aims past an
+    /// hour's bytes since a job's objects keep to their target): the same requests and bytes, cold and warm, and QP-1,
+    /// QP-2, QP-4 and QP-6 allocate 0.5 to 9 % more warm, the per-question costs of the scans and plans the query paths
+    /// name; QP-3 and QP-10 pass and keep their ceilings.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361216, 4, 98960, 82237),
-        ["QP-2 the pods of a route"] = new(4, 262256, 0, 0, 70837),
+        ["QP-1 a service's routes under 5xx, per hour"] = new(8, 361216, 4, 98960, 86741),
+        ["QP-2 the pods of a route"] = new(4, 262256, 0, 0, 75211),
         ["QP-3 the services under a shredded status of 500 or more"] = new(4, 262256, 0, 0, 101796),
-        ["QP-4 the spans of a trace"] = new(5, 286996, 1, 24740, 73760),
-        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90304, 1, 24740, 137553),
+        ["QP-4 the spans of a trace"] = new(5, 286996, 1, 24740, 81960),
+        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(2, 90304, 1, 24740, 140948),
         ["QP-10 the services of a residual key"] = new(4, 262256, 0, 0, 108692),
     };
 
@@ -194,7 +200,7 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
                 await dataset.AppendAsync(draft);
             }
 
-            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1L << 30 }) is not null)
             {
             }
         }

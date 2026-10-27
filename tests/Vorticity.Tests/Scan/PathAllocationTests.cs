@@ -314,19 +314,24 @@ public sealed class PathAllocationTests
         // the enumerable hold which ones, a reference each, 16 bytes on every axis that scans. The
         // pruned filter pays 16 more, for the same reference on the context that reads its zone map
         // and on that context's segment set, which are made for it rather than taken from a pool.
-        ("open, first batch", File, 49_088, FirstBatch),
+        //
+        // A scan reads a part of a chunk by its granules and pushes its filter to the encodings: the builder holds the
+        // granules' geometry and those it is granted, the enumerable the geometry, the enumerator the geometry and the plan
+        // of its pushed predicates, five references, 40 bytes on every axis that scans (2026-10-27).
+        ("open, first batch", File, 49_128, FirstBatch),
         // A scan binds each batch into the object its previous batch was rather than allocating
         // one: 120 bytes less a batch after the first, on every axis below that reads more than
         // one -- 7 560 over the 64 batches of this file, 120 over the two the pruned filter reads.
         // A full scan now costs what its first batch does.
-        ("full scan", File, 49_088, FullScan),
+        ("full scan", File, 49_128, FullScan),
         // A projection of one whole column is held in the mask itself, with no node and no arrays:
         // 104 bytes less.
         // It parses the one column it reads, not the five: 20 736 bytes less.
-        ("projected scan, 1 of 5 columns", File, 25_192, ProjectedScan),
+        ("projected scan, 1 of 5 columns", File, 25_232, ProjectedScan),
         // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
         // one more field each: 16 bytes a scan.
-        ("take 64 rows from 64 splits", File, 50_336, ScatteredTake),
+        // A take reads its rows by their granules: 96 bytes besides the scan's 40 (2026-10-27).
+        ("take 64 rows from 64 splits", File, 50_472, ScatteredTake),
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
@@ -358,7 +363,10 @@ public sealed class PathAllocationTests
         // A zone map's decoding is claimed on the file, for the scans that miss the map together, a
         // question's lanes, to await it rather than each read it again (VortexFile.ClaimZones): 48
         // bytes, the claim's.
-        ("selective filter, pruning on", File, 34_488, PrunedFilter),
+        //
+        // A filter pushed to the encodings plans its predicates once a scan: 480 bytes besides the scan's 40, and 48 more
+        // on the pruned filter, not told apart byte by byte (2026-10-27).
+        ("selective filter, pruning on", File, 35_056, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -372,7 +380,7 @@ public sealed class PathAllocationTests
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains. The lane's context holds its zstd
         // decoder's field, 8 bytes, as above.
-        ("selective filter, pruning off", File, 26_480, UnprunedFilter),
+        ("selective filter, pruning off", File, 27_000, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
@@ -383,22 +391,22 @@ public sealed class PathAllocationTests
         //
         // The mapping these scans read through is made by the scan rather than by the open, and
         // the reader that makes it is smaller than the mapped source was: 48 bytes less on each.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 2_928, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 2_968, FullScan),
         // The page sizes are read in place from the node's metadata rather than into a list a
         // chunk, and the chunk metadata with its ANS tables and the latent states are kept from one
         // decode to the next rather than built by each: 1 536 bytes less on this file's one chunk,
         // and on a column of many chunks of many-bin tables a few hundred kilobytes a chunk.
-        ("scan, vortex.pco", "encodings/pco", 2_880, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 2_920, FullScan),
         // A node's frames go through one ManagedCompressions.Zstd decompressor rather than one each,
         // and the decompressor is the process's, taken by the scan's context and given back when it
         // is disposed, so a warm scan builds none: its tables and buffers are 160 KB at least.
-        ("scan, vortex.zstd", "encodings/zstd", 2_880, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 2_920, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
         // The walk of the reads along is behind a reference of the enumerator, 8 bytes, as on every
         // axis that scans.
         ("scan, vortex.map", "encodings/map", 3_664, FullScan),
-        ("scan, vortex.variant", "encodings/variant", 3_304, FullScan),
+        ("scan, vortex.variant", "encodings/variant", 3_344, FullScan),
     ];
 
     [Fact]
