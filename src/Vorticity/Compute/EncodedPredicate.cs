@@ -18,6 +18,9 @@ internal enum EncodedPredicateKind : byte
 
     /// <summary>The column starting with a bytes literal.</summary>
     Prefix = 3,
+
+    /// <summary>The column holding a bytes literal anywhere: <c>LIKE '%x%'</c>.</summary>
+    Contains = 4,
 }
 
 /// <summary>
@@ -126,6 +129,10 @@ internal sealed class EncodedPredicate
     /// <summary>The column starting with the bytes of <paramref name="prefix"/>.</summary>
     internal static EncodedPredicate Prefix(FilterLiteral prefix) =>
         new EncodedPredicate(EncodedPredicateKind.Prefix, ComparisonOp.Equal, prefix, default, false, false, []);
+
+    /// <summary>The column holding the bytes of <paramref name="pattern"/> anywhere.</summary>
+    internal static EncodedPredicate Contains(FilterLiteral pattern) =>
+        new EncodedPredicate(EncodedPredicateKind.Contains, ComparisonOp.Equal, pattern, default, false, false, []);
 
     /// <summary>
     /// The members as integers, ascending and distinct: a float member that is no integer equals no integer and is left

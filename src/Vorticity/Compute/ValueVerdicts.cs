@@ -13,13 +13,26 @@ internal static class ValueVerdicts
 {
     /// <summary>
     /// The verdict of <paramref name="predicate"/> on each value of <paramref name="values"/>, into
-    /// <paramref name="states"/>; <paramref name="scratch"/> as long. False for a prefix of no text, which has no verdict.
+    /// <paramref name="states"/>; <paramref name="scratch"/> as long. False for a match of bytes on no text, which has no
+    /// verdict.
     /// </summary>
     internal static bool TryJudge(
         CanonicalArena arena, int values, EncodedPredicate predicate, Span<byte> states, Span<byte> scratch)
     {
         switch (predicate.Kind)
         {
+            case EncodedPredicateKind.Prefix or EncodedPredicateKind.Contains:
+                if (arena.GetNode(values).DType.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary)
+                    || predicate.Literal.Kind != FilterLiteralKind.Bytes)
+                {
+                    return false;
+                }
+
+                ComparisonKernels.StringMatch(
+                    arena, values, predicate.Kind == EncodedPredicateKind.Prefix ? StringMatchOp.StartsWith : StringMatchOp.Contains,
+                    predicate.Literal, escape: 0, states);
+                return true;
+
             case EncodedPredicateKind.Compare:
                 ComparisonKernels.Compare(arena, values, predicate.Op, predicate.Literal, states);
                 return true;
@@ -37,14 +50,7 @@ internal static class ValueVerdicts
                 return true;
 
             default:
-                if (arena.GetNode(values).DType.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary)
-                    || predicate.Literal.Kind != FilterLiteralKind.Bytes)
-                {
-                    return false;
-                }
-
-                ComparisonKernels.StringMatch(arena, values, StringMatchOp.StartsWith, predicate.Literal, escape: 0, states);
-                return true;
+                return false;
         }
     }
 }

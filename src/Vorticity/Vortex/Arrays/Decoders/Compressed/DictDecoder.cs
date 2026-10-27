@@ -73,7 +73,8 @@ internal sealed class DictDecoder : ArrayDecoder
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
         ref Compute.PredicateBits bits)
     {
-        if (predicate.Kind == Compute.EncodedPredicateKind.Prefix && dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary))
+        if (predicate.Kind is Compute.EncodedPredicateKind.Prefix or Compute.EncodedPredicateKind.Contains
+            && dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary))
         {
             return false;
         }

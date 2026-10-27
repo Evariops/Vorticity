@@ -1862,6 +1862,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 when match.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 } && match.Pattern.Kind == FilterLiteralKind.Bytes:
                 return new PushPlan(match.Field, Compute.EncodedPredicate.Prefix(match.Pattern));
 
+            case StringMatchExpr { Op: StringMatchOp.Contains } match
+                when match.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 } && match.Pattern.Kind == FilterLiteralKind.Bytes:
+                return new PushPlan(match.Field, Compute.EncodedPredicate.Contains(match.Pattern));
+
             default:
                 return NoPush;
         }

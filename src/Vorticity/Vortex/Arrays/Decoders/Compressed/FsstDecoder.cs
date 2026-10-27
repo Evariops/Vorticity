@@ -41,15 +41,16 @@ internal sealed class FsstDecoder : ArrayDecoder
     public override bool EvaluatesWithoutFullDecode => true;
 
     /// <summary>
-    /// Answers an equality, its negation or a prefix on the codes (<see cref="CompareStates"/>,
-    /// <see cref="PrefixStates"/>), a state a row; anything else declines.
+    /// Answers an equality, its negation, a prefix or a pattern anywhere on the codes (<see cref="CompareStates"/>,
+    /// <see cref="PrefixStates"/>, <see cref="ContainsStates"/>), a state a row; anything else declines.
     /// </summary>
     /// <inheritdoc/>
     public override bool TryEvaluate(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
         ref Compute.PredicateBits bits)
     {
-        if (predicate.Kind is not (Compute.EncodedPredicateKind.Compare or Compute.EncodedPredicateKind.Prefix))
+        if (predicate.Kind is not (Compute.EncodedPredicateKind.Compare or Compute.EncodedPredicateKind.Prefix
+            or Compute.EncodedPredicateKind.Contains))
         {
             return false;
         }
@@ -58,9 +59,12 @@ internal sealed class FsstDecoder : ArrayDecoder
         try
         {
             Span<byte> states = rented.AsSpan(0, length);
-            bool answered = predicate.Kind == Compute.EncodedPredicateKind.Prefix
-                ? PrefixStates(context, in node, dtype, length, predicate.Literal, states)
-                : CompareStates(context, in node, dtype, length, predicate.Op, predicate.Literal, states);
+            bool answered = predicate.Kind switch
+            {
+                Compute.EncodedPredicateKind.Prefix => PrefixStates(context, in node, dtype, length, predicate.Literal, states),
+                Compute.EncodedPredicateKind.Contains => ContainsStates(context, in node, dtype, length, predicate.Literal, states),
+                _ => CompareStates(context, in node, dtype, length, predicate.Op, predicate.Literal, states),
+            };
             if (answered)
             {
                 bits.FromStates(states);
@@ -229,6 +233,84 @@ internal sealed class FsstDecoder : ArrayDecoder
         finally
         {
             System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Answers a pattern anywhere in the rows on their codes, by the automaton <see cref="FsstContains"/> builds over the
+    /// chunk's symbols: a code a step, no byte decoded.
+    /// </summary>
+    private static bool ContainsStates(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        Expressions.FilterLiteral literal, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (literal.Kind != Expressions.FilterLiteralKind.Bytes ||
+            dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary) ||
+            node.BufferCount != 3)
+        {
+            return false;
+        }
+
+        CanonicalSupport.RequireBinaryLike(dtype, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, 3, Id);
+
+        FsstMetadata metadata = FsstMetadata.Read(node.Metadata);
+        FsstSymbolTable table = FsstSymbolTable.Create(node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id);
+        using FsstContains? pattern = FsstContains.Create(table, literal.BytesValue);
+        if (pattern is null)
+        {
+            return false;
+        }
+
+        PType offsetsPType = metadata.CodesOffsetsPType;
+        RowCodes(context, in node, dtype, length, offsetsPType, out ReadOnlySpan<byte> raw, out ReadOnlySpan<byte> stream, out ValidityReader rows);
+        switch (offsetsPType)
+        {
+            case PType.U8: Contains<byte>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.U16: Contains<ushort>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.U32: Contains<uint>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.U64: Contains<ulong>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.I8: Contains<sbyte>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.I16: Contains<short>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.I32: Contains<int>(raw, stream, pattern, in rows, length, destination); break;
+            case PType.I64: Contains<long>(raw, stream, pattern, in rows, length, destination); break;
+            default: return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Marks the rows that hold the pattern, with the offsets typed once, as <see cref="Prefix{T}"/>.</summary>
+    private static void Contains<T>(
+        ReadOnlySpan<byte> raw, ReadOnlySpan<byte> stream, FsstContains pattern,
+        in ValidityReader rows, int length, Span<byte> destination)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> offsets = System.Runtime.InteropServices.MemoryMarshal
+            .Cast<byte, T>(raw)[..(length + 1)];
+        long origin = long.CreateChecked(offsets[0]);
+        long previous = origin;
+        bool allValid = rows.IsAllValid;
+        for (int row = 0; row < length; row++)
+        {
+            long next = long.CreateChecked(offsets[row + 1]);
+            if (next < previous || next - origin > stream.Length)
+            {
+                BadSpan(row, previous, next, stream.Length);
+            }
+
+            int start = (int)(previous - origin);
+            int size = (int)(next - previous);
+            previous = next;
+
+            if (!allValid && !rows.IsValid(row))
+            {
+                destination[row] = Compute.Trilean.Unknown;
+                continue;
+            }
+
+            destination[row] = pattern.Match(stream.Slice(start, size)) ? Compute.Trilean.True : Compute.Trilean.False;
         }
     }
 

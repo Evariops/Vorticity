@@ -62,9 +62,9 @@ internal sealed class SparseDecoder : ArrayDecoder
     /// row: a cost of the rows over 64 and of the values present, where decoding writes every row.
     /// </summary>
     /// <remarks>
-    /// The verdicts are the comparison kernels' over the fill as a value of one row and over the patch values, so the
-    /// answer is the one the decoded column gives, a null fill or a null patch unknown. A comparison, a range and a
-    /// prefix are answered; a set declines.
+    /// The verdicts are the comparison kernels' over the fill as a value of one row and over the patch values
+    /// (<see cref="Compute.ValueVerdicts"/>), so the answer is the one the decoded column gives, a null fill or a null
+    /// patch unknown. A match of bytes on no text declines.
     /// </remarks>
     /// <inheritdoc/>
     public override bool TryEvaluate(
@@ -72,7 +72,8 @@ internal sealed class SparseDecoder : ArrayDecoder
         ref Compute.PredicateBits bits)
     {
         ArgumentNullException.ThrowIfNull(context);
-        if (predicate.Kind == Compute.EncodedPredicateKind.In)
+        if (predicate.Kind is Compute.EncodedPredicateKind.Prefix or Compute.EncodedPredicateKind.Contains
+            && dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary))
         {
             return false;
         }
@@ -99,7 +100,11 @@ internal sealed class SparseDecoder : ArrayDecoder
         {
             Span<byte> verdict = rented.AsSpan(0, 1);
             Span<byte> scratch = rented.AsSpan(1, 1);
-            Judge(context.Canonical, fillIndex, predicate, verdict, scratch);
+            if (!Compute.ValueVerdicts.TryJudge(context.Canonical, fillIndex, predicate, verdict, scratch))
+            {
+                return false;
+            }
+
             if (verdict[0] == Compute.Trilean.Unknown)
             {
                 bits.FillUnknown();
@@ -112,7 +117,7 @@ internal sealed class SparseDecoder : ArrayDecoder
             if (patchCount > 0)
             {
                 Span<byte> states = rented.AsSpan(0, patchCount);
-                Judge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(patchCount, patchCount));
+                Compute.ValueVerdicts.TryJudge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(patchCount, patchCount));
                 for (int i = 0; i < patchCount; i++)
                 {
                     bits.SetState(patches.GetPosition(i), states[i]);
@@ -124,33 +129,6 @@ internal sealed class SparseDecoder : ArrayDecoder
         finally
         {
             ArrayPool<byte>.Shared.Return(rented);
-        }
-    }
-
-    /// <summary>The predicate's state for each row of a canonical node, by the comparison kernels.</summary>
-    private static void Judge(
-        CanonicalArena arena, int nodeIndex, Compute.EncodedPredicate predicate, Span<byte> states, Span<byte> scratch)
-    {
-        switch (predicate.Kind)
-        {
-            case Compute.EncodedPredicateKind.Prefix:
-                Compute.ComparisonKernels.StringMatch(
-                    arena, nodeIndex, Expressions.StringMatchOp.StartsWith, predicate.Literal, escape: 0, states);
-                break;
-            case Compute.EncodedPredicateKind.Between:
-                Compute.ComparisonKernels.Compare(
-                    arena, nodeIndex,
-                    predicate.LowInclusive ? Expressions.ComparisonOp.GreaterOrEqual : Expressions.ComparisonOp.Greater,
-                    predicate.Literal, states);
-                Compute.ComparisonKernels.Compare(
-                    arena, nodeIndex,
-                    predicate.HighInclusive ? Expressions.ComparisonOp.LessOrEqual : Expressions.ComparisonOp.Less,
-                    predicate.High, scratch);
-                Compute.Trilean.And(states, scratch);
-                break;
-            default:
-                Compute.ComparisonKernels.Compare(arena, nodeIndex, predicate.Op, predicate.Literal, states);
-                break;
         }
     }
 
