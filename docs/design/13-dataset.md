@@ -241,7 +241,10 @@ A consolidation of a dataset that declares identifiers writes, beside the partit
 index object for the partition (`vorticity.partition.index.v1`), and the objects it writes keep no
 postings of their own: each one's hashed postings hand their hashes to the index as its rows are
 written. A lookup of a value over a window of days then reads a page of the index a day, where it read
-the postings of each object, some 160 for a consolidated day of objects of 1 GiB.
+the postings of each object, some 160 for a consolidated day of objects of 1 GiB. An object the index covers is
+read by the blocks its postings name, its chunk directories then its chunks, with no open of it; one
+that holds none of the values sought is passed over unread. An object outside the coverage, or one
+with rows marked, is looked up by its own postings, or read.
 
 The object holds each identifier's postings in pages of about 64 KiB: hashes ascending, each the
 XXH3-64 of a value's bytes as hashed postings key it, coded forward, then the blocks that hold it,

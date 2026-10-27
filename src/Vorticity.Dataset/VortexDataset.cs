@@ -2473,6 +2473,67 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The rows of the blocks <paramref name="blocks"/> of the object <paramref name="entry"/> names, blocks of
+    /// <paramref name="blockRows"/> rows, ascending, which the index of its partition located (<see cref="PartitionLookup"/>):
+    /// read with no open of it by the chunks that hold them, the columns <paramref name="columns"/> names or every one, its
+    /// chunk directories and the chunks two requests. None for no block; null when the object keeps no table of contents.
+    /// </summary>
+    internal async ValueTask<List<RecordBatch>?> ReadBlocksAsync(
+        ObjectEntry entry, uint[] blocks, int blockRows, int[]? columns, CancellationToken cancellationToken)
+    {
+        if (blocks.Length == 0)
+        {
+            return [];
+        }
+
+        if (entry.Contents is not { } contents || blockRows <= 0)
+        {
+            return null;
+        }
+
+        ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            if (Indexes.SpanReader.Open(Footerless(source, entry, contents), null, contents) is not { } opened)
+            {
+                return null;
+            }
+
+            using Indexes.SpanReader rowsOf = opened;
+            DType schema = contents.SchemaType;
+            Task[] chunks = new Task[columns?.Length ?? schema.FieldCount];
+            for (int c = 0; c < chunks.Length; c++)
+            {
+                chunks[c] = rowsOf.LoadDirectoryAsync(columns?[c] ?? c, cancellationToken).AsTask();
+            }
+
+            await Task.WhenAll(chunks).ConfigureAwait(false);
+
+            // Each run of neighbouring blocks one span of rows.
+            List<RowRange> ranges = [];
+            for (int i = 0; i < blocks.Length;)
+            {
+                int first = i;
+                while (i + 1 < blocks.Length && blocks[i + 1] == blocks[i] + 1)
+                {
+                    i++;
+                }
+
+                long start = (long)blocks[first] * blockRows;
+                long end = Math.Min(((long)blocks[i] + 1) * blockRows, entry.PhysicalRows);
+                if (end > start)
+                {
+                    ranges.Add(new RowRange(start, end));
+                }
+
+                i++;
+            }
+
+            return ranges.Count == 0 ? [] : [.. await rowsOf.ReadSpansAsync(ranges, columns, cancellationToken).ConfigureAwait(false)];
+        }
+    }
+
+    /// <summary>
     /// The rows of the object <paramref name="entry"/> names that its locating indexes, its identifiers'
     /// runs among them, leave for <paramref name="filter"/>, read with no open of the object: its index
     /// directory beside every column's chunk directory, then the runs' segments that may hold the values,

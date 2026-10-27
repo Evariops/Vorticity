@@ -33,6 +33,9 @@ internal sealed class DatasetScanCounters
     /// </summary>
     public long ObjectsPrunedByKey { get; internal set; }
 
+    /// <summary>The objects a lookup passed over unread, the index of their partition locating none of its values in them (D13).</summary>
+    public long ObjectsPassedByPartitionIndex { get; internal set; }
+
     /// <summary>The granules of the objects read that the key's pruning passed over.</summary>
     public long GranulesPrunedByKey { get; internal set; }
 
@@ -1541,6 +1544,19 @@ internal sealed class DatasetScanBuilder
     internal static bool LooksUp(ObjectEntry entry, DatasetOptions options) =>
         !entry.HasDeletions && entry.FooterBytes >= options.LookupFooterBytes && entry.Contents is { DirectoryRegion: not null };
 
+    /// <summary>Whether <paramref name="held"/> holds the version's own columns, whose rows a read of its chunks gives as they are.</summary>
+    private bool OwnColumns(in PositionedObject held)
+    {
+        try
+        {
+            return held.Entry.Contents is { } contents && _version.Schema.ColumnsOf(contents.SchemaType, held.Entry.Key) is null;
+        }
+        catch (VortexFormatException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>
     /// The filter's lookup when <paramref name="held"/> takes it: an object the scan covers whole, with no row marked, of the
     /// version's own columns, whose footer an open would read is large (<see cref="DatasetOptions.LookupFooterBytes"/>), and
@@ -1578,6 +1594,10 @@ internal sealed class DatasetScanBuilder
         List<(PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)> objects = [];
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         SemaphoreSlim? reading = null;
+
+        // The objects the index of a consolidated partition covers are found by it, a page a partition; an object whose blocks
+        // hold no value sought is passed over unread.
+        PartitionLookup? partitions = PartitionLookup.Of(_dataset, _version, lookup);
         try
         {
             int read = 0;
@@ -1585,6 +1605,23 @@ internal sealed class DatasetScanBuilder
             {
                 if (Covered(held) > 0)
                 {
+                    if (partitions is not null && Covered(held) == held.Entry.Rows && !held.Entry.HasDeletions && OwnColumns(held)
+                        && await partitions.BlocksAsync(held, cancellationToken).ConfigureAwait(false) is { } located)
+                    {
+                        if (located.Blocks.Length == 0)
+                        {
+                            if (_metrics is { } metrics)
+                            {
+                                metrics.ObjectsPassedByPartitionIndex++;
+                            }
+
+                            continue;
+                        }
+
+                        objects.Add((held, _dataset.ReadBlocksAsync(held.Entry, located.Blocks, located.BlockRows, columns, stopped.Token).AsTask(), true));
+                        continue;
+                    }
+
                     bool looked = LookupFor(held) is not null;
                     objects.Add((held, looked ? _dataset.LookupAsync(held.Entry, lookup, columns, stopped.Token).AsTask() : null, looked));
                     read += looked ? 0 : 1;
