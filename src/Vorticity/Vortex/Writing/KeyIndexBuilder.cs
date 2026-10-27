@@ -37,6 +37,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>The bytes of a fixed-width value, which a hashed builder's own keys do not share.</summary>
     private readonly int _valueWidth;
 
+    /// <summary>Where a hashed builder hands its hashes when another object holds them, building nothing of its own; null to build.</summary>
+    private readonly IHashTap? _tap;
+
     private readonly ChunkKeys _spare = new ChunkKeys();
     private readonly List<int> _lastBlock = [];
     private ChunkKeys _table;
@@ -57,13 +60,15 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>
     /// A hashed postings builder: the keys are the XXH3-64 of each value's bytes in
     /// <paramref name="values"/>, the bytes a Bloom filter hashes, so a probe hashes a literal as
-    /// both do; each distinct (hash, block) pair is an entry.
+    /// both do; each distinct (hash, block) pair is an entry. With <paramref name="tap"/>, each value's hash and block go
+    /// there as the rows come, and the builder writes nothing.
     /// </summary>
-    internal static KeyIndexBuilder ForHashes(KeyLayout values, int segmentEntries) =>
-        new KeyIndexBuilder(values, segmentEntries);
+    internal static KeyIndexBuilder ForHashes(KeyLayout values, int segmentEntries, IHashTap? tap = null) =>
+        new KeyIndexBuilder(values, segmentEntries, tap);
 
-    private KeyIndexBuilder(KeyLayout values, int segmentEntries)
+    private KeyIndexBuilder(KeyLayout values, int segmentEntries, IHashTap? tap)
     {
+        _tap = tap;
         _table = new ChunkKeys();
         _rows = false;
         _layout = KeyRunOptions.HashedLayout;
@@ -90,6 +95,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _trigrams = true;
         _fold = fold;
     }
+
+    /// <summary>Whether the builder hands its hashes to a tap and writes nothing.</summary>
+    internal bool Taps => _tap is not null;
 
     internal string Kind => _trigrams
         ? IndexKinds.PostingsNgram3
@@ -263,7 +271,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                     {
                         if (_hashed)
                         {
-                            Buckets.Note(constantHash, checked((uint)_block));
+                            Hashed(constantHash);
                             continue;
                         }
 
@@ -342,11 +350,23 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         // Hashed postings place a value's hash at its block, once a block, in its bucket.
         if (_hashed)
         {
-            Buckets.Note(XxHash3.HashToUInt64(key), checked((uint)_block));
+            Hashed(XxHash3.HashToUInt64(key));
             return;
         }
 
         NoteId(Intern(key), row);
+    }
+
+    /// <summary>A value's hash at the open block: in its bucket, or to the tap.</summary>
+    private void Hashed(ulong hash)
+    {
+        if (_tap is { } tap)
+        {
+            tap.Note(hash, checked((uint)_block));
+            return;
+        }
+
+        Buckets.Note(hash, checked((uint)_block));
     }
 
     /// <summary>The id of a value's key, its bytes: hashed postings place hashes in their buckets and intern none.</summary>
@@ -375,7 +395,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     internal override void CloseBlock()
     {
         _block++;
-        if (_hashed)
+        if (_hashed && _tap is null)
         {
             HashedBuckets buckets = Buckets;
             buckets.CloseBlock();
@@ -398,6 +418,12 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     {
         if (Abandoned is not null)
         {
+            return;
+        }
+
+        if (_hashed && _tap is { } tap)
+        {
+            await tap.ChunkClosedAsync(cancellationToken).ConfigureAwait(false);
             return;
         }
 

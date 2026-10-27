@@ -53,7 +53,20 @@ internal abstract record DatasetOperation
         /// read the level, and the outputs would overlap it.
         /// </summary>
         public LevelRange? Range { get; init; }
+
+        /// <summary>
+        /// The index of the partition the outputs fill (D13), which the commit puts in the tree of partition indexes with
+        /// the replacement, over the one the job merged it from; null for none. A partition that holds another index by
+        /// then abandons the replacement, whose outputs keep no postings of their own.
+        /// </summary>
+        public PartitionIndexChange? PartitionIndex { get; init; }
     }
+
+    /// <summary>
+    /// The index of a partition a consolidation wrote (<see cref="ReplaceObjects.PartitionIndex"/>), and the key of the index
+    /// it merged it from, null for none: what the tree must still hold for the partition.
+    /// </summary>
+    public sealed record PartitionIndexChange(PartitionIndexEntry Entry, string? Previous);
 
     /// <summary>Attaches an index fragment to an object.</summary>
     /// <param name="Key">The object's sort key.</param>

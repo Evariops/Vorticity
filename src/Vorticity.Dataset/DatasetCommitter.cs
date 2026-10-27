@@ -295,9 +295,13 @@ internal static class DatasetCommitter
                     continue;
                 }
 
-                // The tree of rollups, whose entries carry no bounds a fold reads.
+                // The trees of rollups and of partition indexes, whose entries carry no bounds a fold reads.
                 next = level == RollupTree
                     ? next.WithRollups(await next.Rollups
+                        .CommitAsync(batch, options.NewRule(), NoSummary.Instance, pages, builder, cancellationToken)
+                        .ConfigureAwait(false))
+                    : level == PartitionIndexTree
+                    ? next.WithPartitionIndexes(await next.PartitionIndexes
                         .CommitAsync(batch, options.NewRule(), NoSummary.Instance, pages, builder, cancellationToken)
                         .ConfigureAwait(false))
                     : next.With(
@@ -339,6 +343,15 @@ internal static class DatasetCommitter
                     repack.Moved += moved;
                 }
 
+                if (!next.PartitionIndexes.IsEmpty)
+                {
+                    (DatasetTree relocated, int moved) = await next.PartitionIndexes
+                        .RelocateAsync(reference => repack.Versions.Contains(reference.Version), pages, builder, cancellationToken)
+                        .ConfigureAwait(false);
+                    next = next.WithPartitionIndexes(relocated);
+                    repack.Moved += moved;
+                }
+
                 foreach (int at in repack.At)
                 {
                     outcomes[at] = repack.Moved > 0 ? OperationOutcome.Applied : OperationOutcome.AlreadyThere;
@@ -367,7 +380,8 @@ internal static class DatasetCommitter
                 return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages, commit, knownAt);
             }
 
-            (IReadOnlyList<CommitLevel> recorded, CommitLevel? rollups, IReadOnlyList<PagesStart> starts) = LevelsOf(next, builder, pages);
+            (IReadOnlyList<CommitLevel> recorded, CommitLevel? rollups, CommitLevel? partitionIndexes, IReadOnlyList<PagesStart> starts) =
+                LevelsOf(next, builder, pages);
             CommitHeader header = template with
             {
                 Version = version,
@@ -376,6 +390,7 @@ internal static class DatasetCommitter
                 CreatedAtUnixMilliseconds = options.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
                 Levels = recorded,
                 Rollups = rollups,
+                PartitionIndexes = partitionIndexes,
                 Schema = schema.Schema,
                 Retired = schema.Retired,
                 WritePolicy = schema.WritePolicy,
@@ -848,7 +863,7 @@ internal static class DatasetCommitter
     /// level 0 up, since every lookup descends level 0; a level whose top does not fit costs one
     /// request to read instead.
     /// </summary>
-    private static (IReadOnlyList<CommitLevel> Levels, CommitLevel? Rollups, IReadOnlyList<PagesStart> Starts) LevelsOf(
+    private static (IReadOnlyList<CommitLevel> Levels, CommitLevel? Rollups, CommitLevel? PartitionIndexes, IReadOnlyList<PagesStart> Starts) LevelsOf(
         DatasetLevels levels, CommitObjectBuilder builder, CommitPageSource pages)
     {
         List<CommitLevel> recorded = [];
@@ -873,7 +888,15 @@ internal static class DatasetCommitter
             rollups = new CommitLevel(0, held.Entries, held.Root) { Depth = held.Depth, Rows = held.Rows };
         }
 
-        return (recorded, rollups, StartsOf(named, builder.Version, pages));
+        // So is the tree of partition indexes.
+        CommitLevel? indexes = null;
+        if (levels.PartitionIndexes is { IsEmpty: false } partitionIndexes)
+        {
+            named.Add(partitionIndexes.Root);
+            indexes = new CommitLevel(0, partitionIndexes.Entries, partitionIndexes.Root) { Depth = partitionIndexes.Depth, Rows = partitionIndexes.Rows };
+        }
+
+        return (recorded, rollups, indexes, StartsOf(named, builder.Version, pages));
     }
 
     /// <summary>Re-applies the operations to the levels as they are now.</summary>
@@ -899,6 +922,11 @@ internal static class DatasetCommitter
 
         // The rollups the batch puts, by their tree keys; and whether it changes the schema, which takes every rollup away.
         Dictionary<byte[], RollupEntry> rollups = new Dictionary<byte[], RollupEntry>(Buffers.ByteKeys.Instance);
+
+        // The partition indexes the batch changes, by their tree keys; and the tree's own, read once a replacement takes away
+        // an object one may cover.
+        Dictionary<byte[], PartitionIndexEntry> indexes = new Dictionary<byte[], PartitionIndexEntry>(Buffers.ByteKeys.Instance);
+        List<PartitionIndexEntry>? heldIndexes = null;
         bool reschemed = false;
         List<OperationOutcome> outcomes = new List<OperationOutcome>(operations.Count);
 
@@ -986,6 +1014,19 @@ internal static class DatasetCommitter
                         break;
                     }
 
+                    // A consolidation's index goes over the one it was merged from, or not at all: its outputs keep no
+                    // postings of their own.
+                    PartitionIndexEntry? before = null;
+                    if (replace.PartitionIndex is { } change)
+                    {
+                        before = await IndexAsync(change.Entry.TreeKey).ConfigureAwait(false);
+                        if (!string.Equals(before?.ObjectKey, change.Previous, StringComparison.Ordinal))
+                        {
+                            outcomes.Add(OperationOutcome.Abandoned);
+                            break;
+                        }
+                    }
+
                     foreach ((int level, ReadOnlyMemory<byte> input) in replace.Inputs)
                     {
                         Remove(level, input);
@@ -994,6 +1035,29 @@ internal static class DatasetCommitter
                     foreach ((int level, ReadOnlyMemory<byte> key, ObjectEntry entry) in replace.Outputs)
                     {
                         Put(level, key, WithCurrentFragments(entry, key, replace.Inputs, currents));
+                    }
+
+                    // The inputs an index of their partition covers leave its coverage; a new index covers the outputs and
+                    // what the one before still covers of what it names, this version its writer.
+                    await UncoverAsync(replace, currents, replace.PartitionIndex?.Entry.TreeKey).ConfigureAwait(false);
+                    if (replace.PartitionIndex is { } put)
+                    {
+                        HashSet<UInt128> produced = [];
+                        foreach ((int _, ReadOnlyMemory<byte> _, ObjectEntry entry) in replace.Outputs)
+                        {
+                            produced.Add(entry.Uid);
+                        }
+
+                        List<UInt128> covered = [];
+                        foreach (UInt128 uid in put.Entry.Covered)
+                        {
+                            if (produced.Contains(uid) || before?.Covers(uid) == true)
+                            {
+                                covered.Add(uid);
+                            }
+                        }
+
+                        PutIndex(put.Entry with { Version = builder.Version, Covered = covered });
                     }
 
                     outcomes.Add(OperationOutcome.Applied);
@@ -1233,7 +1297,7 @@ internal static class DatasetCommitter
             List<(int Level, SortedDictionary<byte[], TreeChange> Batch)> levelBatches = [];
             foreach ((int level, SortedDictionary<byte[], TreeChange> batch) in changes)
             {
-                if (level != RollupTree && batch.Count > 0)
+                if (level >= 0 && batch.Count > 0)
                 {
                     levelBatches.Add((level, batch));
                 }
@@ -1281,6 +1345,67 @@ internal static class DatasetCommitter
 
                             break;
                         }
+                    }
+                }
+            }
+        }
+
+        // The index of a partition as the batch leaves it so far, by its tree key; null for none.
+        async ValueTask<PartitionIndexEntry?> IndexAsync(byte[] treeKey)
+        {
+            if (indexes.TryGetValue(treeKey, out PartitionIndexEntry? changed))
+            {
+                return changed;
+            }
+
+            TreeEntry? found = await levels.PartitionIndexes.FindAsync(treeKey, pages, cancellationToken).ConfigureAwait(false);
+            return found is { } entry ? PartitionIndexEntry.FromBytes(entry.Key.Span, entry.Value.Span) : null;
+        }
+
+        void PutIndex(PartitionIndexEntry entry)
+        {
+            byte[] key = entry.TreeKey;
+            Batch(PartitionIndexTree)[key] = TreeChange.Put(key, entry.ToBytes(), entry.Covered.Count);
+            indexes[key] = entry;
+        }
+
+        // Takes the replacement's inputs above level 0 out of the coverage of the index of their partition, but of the
+        // partition whose index the replacement brings: their uids name objects gone, and the objects that replace them,
+        // a purge's, keep their own postings. The tree's indexes are read once, and only when it holds any.
+        async ValueTask UncoverAsync(DatasetOperation.ReplaceObjects replace, ObjectEntry?[] currents, byte[]? except)
+        {
+            if (levels.PartitionIndexes.IsEmpty && indexes.Count == 0)
+            {
+                return;
+            }
+
+            if (heldIndexes is null)
+            {
+                heldIndexes = [];
+                await foreach (TreeEntry entry in levels.PartitionIndexes.EnumerateAsync(pages, cancellationToken).ConfigureAwait(false))
+                {
+                    heldIndexes.Add(PartitionIndexEntry.FromBytes(entry.Key.Span, entry.Value.Span));
+                }
+            }
+
+            for (int i = 0; i < replace.Inputs.Count; i++)
+            {
+                (int level, ReadOnlyMemory<byte> input) = replace.Inputs[i];
+                if (level == 0 || currents[i] is not { } gone)
+                {
+                    continue;
+                }
+
+                foreach (PartitionIndexEntry held in heldIndexes)
+                {
+                    PartitionIndexEntry index = indexes.GetValueOrDefault(held.TreeKey, held);
+                    if (input.Span.StartsWith(index.Partition.Span)
+                        && index.Covers(gone.Uid)
+                        && (except is null || !except.AsSpan().SequenceEqual(index.TreeKey)))
+                    {
+                        List<UInt128> covered = [.. index.Covered];
+                        covered.Remove(gone.Uid);
+                        PutIndex(index with { Covered = covered });
                     }
                 }
             }
@@ -1401,6 +1526,9 @@ internal static class DatasetCommitter
 
     /// <summary>Where a batch's changes to the tree of rollups lie among its changes by level: past every level.</summary>
     private const int RollupTree = -1;
+
+    /// <summary>Where a batch's changes to the tree of partition indexes lie among its changes by level.</summary>
+    private const int PartitionIndexTree = -2;
 
     /// <summary>
     /// What a rollup of <paramref name="rollup"/>'s place sums in <paramref name="levels"/>, hashed as its builder hashes it,

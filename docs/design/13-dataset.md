@@ -235,6 +235,33 @@ rewritten, which the prolly rule makes common after a rebase. One conditional cr
 ([the commit protocol](#8-the-commit-protocol)), its cost does not depend on the number of objects,
 and a crash leaves nothing to clean up except data objects.
 
+### 4.4 The index of a consolidated partition
+
+A consolidation of a dataset that declares identifiers writes, beside the partition's objects, one
+index object for the partition (`vorticity.partition.index.v1`), and the objects it writes keep no
+postings of their own: each one's hashed postings hand their hashes to the index as its rows are
+written. A lookup of a value over a window of days then reads a page of the index a day, where it read
+the postings of each object, some 160 for a consolidated day of objects of 1 GiB.
+
+The object holds each identifier's postings in pages of about 64 KiB: hashes ascending, each the
+XXH3-64 of a value's bytes as hashed postings key it, coded forward, then the blocks that hold it,
+each as the rank of its object and the block there. A directory follows: the objects the index was
+written for, by uid, rows and rows a block, a rank being a place among them; for each identifier, the
+ranks it covers and its pages, each by its first hash, length and XXH3-64. A tail of 24 bytes ends it:
+the directory's offset, length and XXH3-64, and the magic `VXPI`. A sealed dataset seals it as it
+seals a data object.
+
+The header's field 28 names a tree of these indexes, by partition: the partition's value row-encoded as
+it leads its objects' tree keys, behind a byte of its own, so that a dataset without a partition keys
+its one index all the same. An entry names the index object, its uid and bytes, the version that wrote
+it, and the uids of the objects it answers for. The consolidation puts its index in the commit of its
+replacement, over the index it merged it from, or not at all: a partition that holds another index by
+then abandons the replacement, whose objects keep no postings. The new index carries the postings the
+one before holds of the objects the job leaves, read from its pages at their new ranks, then those of
+its own objects. A replacement that takes a covered object away, a purge, takes its uid out of the
+entry in the same commit; the objects written in its place keep their own postings, as every object
+written since the consolidation does. A vacuum keeps the index objects the versions it keeps name.
+
 ## 5. Levels and compaction
 
 ### 5.1 Why levels are part of the read bound
@@ -663,8 +690,9 @@ another is refused with a message that says whether an earlier release or a late
 read in part, and a dataset of an earlier format is rebuilt from its rows. Every field of a header of
 format 5 is one each reader of it understands, so a header names no features. Besides the levels and
 the sources, it carries settings, most fixed when the dataset is created: the erasure delay, the
-identifier columns, the shredded paths, the clustering and the tree of rollups. A library refuses a
-header that carries a tree of rollups it does not name. The fields earlier formats held and format 5
+identifier columns, the shredded paths, the clustering, the tree of rollups and the tree of partition
+indexes ([the index of a consolidated partition](#44-the-index-of-a-consolidated-partition)). A library
+refuses a header that carries a tree of rollups it does not name. The fields earlier formats held and format 5
 retired are never reused ([the registry](90-registry.md#7-vorticitys-own-formats)).
 
 A dataset clustered by a value (`DatasetOptions.Clustering`) keeps its clustering in every header

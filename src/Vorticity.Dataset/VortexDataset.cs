@@ -862,7 +862,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ObjectOutput StartObjectUnder(
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false, bool synopses = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
-        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1)
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
@@ -947,6 +947,12 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             // The mandatory sorted run on the clustering key, added to the caller's own policy.
             write = clustering.Applied(write);
+        }
+
+        // The identifiers of an object the index of its partition covers hand their hashes to it, and the object keeps none.
+        if (postings is not null)
+        {
+            write = write with { HashTaps = postings.TapsOf(Uid(identity)) };
         }
 
         // The session's degree and its lanes, which every writer of the session shares.
@@ -3714,7 +3720,7 @@ public sealed class VortexDataset : IAsyncDisposable
         return prefix;
     }
 
-    private static UInt128 Uid(Guid identity)
+    internal static UInt128 Uid(Guid identity)
     {
         Span<byte> bytes = stackalloc byte[16];
         identity.TryWriteBytes(bytes);

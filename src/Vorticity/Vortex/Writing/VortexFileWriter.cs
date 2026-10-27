@@ -559,7 +559,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
         FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired,
         bool sealScratch = false, bool carriesContents = false,
-        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null)
+        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null,
+        Func<string, IHashTap?>? hashTaps = null)
     {
         VortexRuntimeChecks.Require();
         _sink = sink;
@@ -606,7 +607,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _indexes = IndexWriter.Asks(indexes) || carriesContents
             ? new IndexWriter(
                 indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
-                scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch, variantKeys)
+                scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch, variantKeys, hashTaps)
             {
                 Fences = fences,
                 BudgetSparesRequired = budgetSparesRequired,
@@ -829,7 +830,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
             options.SealScratch,
             options.CarriesContents || options.ColumnSheetBytes is not null || options.ShreddedVariants is { Count: > 0 } || options.VariantDirectories is { Count: > 0 },
-            IndexWriter.Asks(indexes) ? IndexedKeys(schema, options.ShreddedVariants) : null)
+            IndexWriter.Asks(indexes) ? IndexedKeys(schema, options.ShreddedVariants) : null,
+            options.HashTaps)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _zstdLevel = options.ZstdLevel,

@@ -184,10 +184,15 @@ internal static class DatasetVacuum
                 await MarkAsync(tree.Root, tree.Depth).ConfigureAwait(false);
             }
 
-            // The tree of rollups, whose leaves name the rollups' objects.
+            // The tree of rollups, whose leaves name the rollups' objects; the tree of partition indexes, theirs.
             if (!trees.Rollups.IsEmpty)
             {
-                await MarkAsync(trees.Rollups.Root, trees.Rollups.Depth, rollups: true).ConfigureAwait(false);
+                await MarkAsync(trees.Rollups.Root, trees.Rollups.Depth, Leaves.Rollups).ConfigureAwait(false);
+            }
+
+            if (!trees.PartitionIndexes.IsEmpty)
+            {
+                await MarkAsync(trees.PartitionIndexes.Root, trees.PartitionIndexes.Depth, Leaves.PartitionIndexes).ConfigureAwait(false);
             }
         }
 
@@ -252,7 +257,7 @@ internal static class DatasetVacuum
             Sparse = sparse,
         };
 
-        async ValueTask MarkAsync(PageReference reference, int depth, bool rollups = false)
+        async ValueTask MarkAsync(PageReference reference, int depth, Leaves leaves = Leaves.Objects)
         {
             if (!reference.Exists || !seen.Add(reference))
             {
@@ -262,11 +267,21 @@ internal static class DatasetVacuum
             markedCommits.Add(reference.Version);
             live[reference.Version] = live.GetValueOrDefault(reference.Version) + reference.Length;
             ReadOnlyMemory<byte> page = await pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
-            if (depth == 1 && rollups)
+            if (depth == 1 && leaves == Leaves.Rollups)
             {
                 foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
                 {
                     markedData.Add(RollupEntry.FromBytes(leaf.Key.Span, leaf.Value.Span).Key);
+                }
+
+                return;
+            }
+
+            if (depth == 1 && leaves == Leaves.PartitionIndexes)
+            {
+                foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
+                {
+                    markedData.Add(PartitionIndexEntry.FromBytes(leaf.Key.Span, leaf.Value.Span).ObjectKey);
                 }
 
                 return;
@@ -313,7 +328,7 @@ internal static class DatasetVacuum
 
             foreach (InternalEntry child in TreePage.ReadInternal(page))
             {
-                await MarkAsync(child.Child, depth - 1, rollups).ConfigureAwait(false);
+                await MarkAsync(child.Child, depth - 1, leaves).ConfigureAwait(false);
             }
         }
 
@@ -365,5 +380,13 @@ internal static class DatasetVacuum
 
             batch = [];
         }
+    }
+
+    /// <summary>What the leaves of a tree the vacuum marks name: data objects, rollups, or the indexes of partitions.</summary>
+    private enum Leaves
+    {
+        Objects,
+        Rollups,
+        PartitionIndexes,
     }
 }

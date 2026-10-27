@@ -259,6 +259,13 @@ public sealed record VortexWriteOptions
     internal bool SealScratch { get; init; }
 
     /// <summary>
+    /// The tap the hashed postings of a column or a path hand their hashes to, by the column's name or the path's text,
+    /// instead of writing them: an object the index of its partition covers keeps no postings of its identifiers. Null,
+    /// or a null tap, for postings written in the file.
+    /// </summary>
+    internal Func<string, IHashTap?>? HashTaps { get; init; }
+
+    /// <summary>
     /// The most rows the file will hold, when the caller knows a bound, 0 otherwise: a compaction knows
     /// its inputs' rows. A writer that sizes its chunks (no <see cref="ChunkTargetBytes"/>) then keeps
     /// them long enough that the footer, a node per chunk and column, stays within half the tables a

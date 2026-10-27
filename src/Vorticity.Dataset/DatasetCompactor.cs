@@ -154,6 +154,12 @@ internal static partial class DatasetCompactor
         LateRows? late = job.Style is CompactionStyle.Leveled && key is not null && !schema.Partitioned ? LateRows.Of(job, key) : null;
         CompactionJob ran = late is null ? job : LateRows.Sources(job);
 
+        // A consolidation of a dataset with identifiers hands their postings to the index of its partition (D13), which it
+        // writes over the one before for the objects that one covers still: its own objects keep none.
+        using PartitionPostings? postings = merge && indexed && job.Trigger == CompactionTrigger.Consolidation && schema.Identifiers.Count > 0
+            ? new PartitionPostings(schema.Identifiers, dataset.Store is SealedObjectStore { Seals: true })
+            : null;
+
         // Each object it streams is announced to the store as at most what the job reads, times what a job
         // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
         ObjectStream OutputsOf(CompactionJob ran, int doublings) => new ObjectStream(
@@ -168,6 +174,7 @@ internal static partial class DatasetCompactor
             Dictionaries = unions,
             SortedColumn = schema.SortedColumn,
             Arrival = Latest(ran),
+            Postings = postings,
         };
 
         // A consolidation of several objects' worth runs in ranges of the key side by side, on the session's lanes, each
@@ -287,6 +294,7 @@ internal static partial class DatasetCompactor
 
             // Apart, the outputs take over the part of the destination they fill alone, which no object it holds may meet.
             Range = late is null ? job.Range : filled.Count == 0 ? null : LevelRange.Of(job.ToLevel, filled, key),
+            PartitionIndex = postings is null ? null : await PartitionIndexAsync(dataset, schema, ran, streams, postings, cancellationToken).ConfigureAwait(false),
         };
 
         CommitResult commit = await dataset
@@ -330,6 +338,32 @@ internal static partial class DatasetCompactor
             BytesOut = bytesOut,
             Outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied,
         };
+    }
+
+    /// <summary>
+    /// The index of the partition a consolidation fills (D13), over the one the version holds: the postings of its outputs'
+    /// identifiers, which they handed to <paramref name="postings"/>, and those of the objects the index before covers that
+    /// the job leaves.
+    /// </summary>
+    private static async ValueTask<DatasetOperation.PartitionIndexChange> PartitionIndexAsync(
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ObjectStream[] streams, PartitionPostings postings, CancellationToken cancellationToken)
+    {
+        byte[] partition = schema.Partitioned ? PartitionOf(schema, job.Inputs[0]) : [];
+        PartitionIndexEntry? previous = await dataset.Snapshot.PartitionIndexAsync(partition, cancellationToken).ConfigureAwait(false);
+        HashSet<UInt128> consumed = [];
+        foreach (CompactionInput input in job.Inputs)
+        {
+            consumed.Add(input.Entry.Uid);
+        }
+
+        List<WrittenObject> outputs = [];
+        foreach (ObjectStream stream in streams)
+        {
+            outputs.AddRange(stream.Written);
+        }
+
+        PartitionIndexEntry entry = await postings.WriteAsync(dataset, partition, outputs, previous, consumed, cancellationToken).ConfigureAwait(false);
+        return new DatasetOperation.PartitionIndexChange(entry, previous?.ObjectKey);
     }
 
     /// <summary>Abandons what a job's streams wrote: its outputs, and its late rows' when it kept them apart.</summary>
@@ -1077,6 +1111,12 @@ internal static partial class DatasetCompactor
         internal int SortedColumn { get; init; } = -1;
 
         /// <summary>
+        /// The postings of the index of the partition the objects fill, which their identifiers' hashed postings hand their
+        /// hashes to; null for objects that keep their own.
+        /// </summary>
+        internal PartitionPostings? Postings { get; init; }
+
+        /// <summary>
         /// Writes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
         /// key's order: the first starts the next clustering value's shredding when they start an object of another value,
         /// and the object's sparse index and blocks take them.
@@ -1130,8 +1170,9 @@ internal static partial class DatasetCompactor
             ValueShredding? shredding = Shreddings is { } shreddings ? shreddings[Math.Clamp(_value, 0, shreddings.Count - 1)] : null;
             output = _dataset.StartObjectUnder(
                 _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
-                variantChunks: shredding?.VariantChunks, byteBound: _byteBound);
+                variantChunks: shredding?.VariantChunks, byteBound: _byteBound, postings: Postings);
             _output = output;
+            Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
             _census = shredding is null ? null : Census(output.Writer.BlockRows);
             foreach ((int field, ObjectDictionary dictionary, long rowBytes) in Dictionaries)
             {
@@ -1242,7 +1283,21 @@ internal static partial class DatasetCompactor
             {
                 _sorted?.Clear();
                 output.Sink.Discard();
+                Postings?.Drop(VortexDataset.Uid(output.Identity));
                 throw;
+            }
+
+            // What the object's taps still hold goes to the scratch, once its writer has noted every row.
+            if (Postings is { } postings)
+            {
+                if (written is not null)
+                {
+                    await postings.CloseAsync(VortexDataset.Uid(output.Identity), cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    postings.Drop(VortexDataset.Uid(output.Identity));
+                }
             }
 
             if (written is { } made)
@@ -1269,6 +1324,7 @@ internal static partial class DatasetCompactor
             _output = null;
             _firstKey = null;
             _sorted?.Clear();
+            Postings?.Drop(VortexDataset.Uid(output.Identity));
             await output.DisposeAsync().ConfigureAwait(false);
         }
     }

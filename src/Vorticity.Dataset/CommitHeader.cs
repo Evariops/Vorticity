@@ -159,6 +159,12 @@ internal sealed record CommitHeader
     /// <summary>The tree of rollups (<see cref="RollupEntry"/>), as a level is recorded, without inlined pages; null for none.</summary>
     public CommitLevel? Rollups { get; init; }
 
+    /// <summary>
+    /// The tree of partition indexes (<see cref="PartitionIndexEntry"/>), by partition, as a level is recorded, without
+    /// inlined pages; null for none.
+    /// </summary>
+    public CommitLevel? PartitionIndexes { get; init; }
+
     /// <summary>The longest delay a header reads, in seconds: what a <see cref="TimeSpan"/> holds.</summary>
     private const ulong MaxDelaySeconds = (ulong)(long.MaxValue / TimeSpan.TicksPerSecond);
 
@@ -191,6 +197,7 @@ internal sealed record CommitHeader
         // 25 held the clustering options, retired with them: never reused.
         internal const int Rollups = 26;
         internal const int Layout = 27;
+        internal const int PartitionIndexes = 28;
     }
 
     internal static class SourceField
@@ -285,6 +292,11 @@ internal sealed record CommitHeader
         if (Rollups is { } rollups)
         {
             WriteLevel(ref writer, rollups, Field.Rollups);
+        }
+
+        if (PartitionIndexes is { } indexes)
+        {
+            WriteLevel(ref writer, indexes, Field.PartitionIndexes);
         }
 
         foreach (RetiredColumn column in Retired)
@@ -570,6 +582,7 @@ internal sealed record CommitHeader
         List<string> shreddedPaths = [];
         DatasetLayout? layout = null;
         CommitLevel? rollups = null;
+        CommitLevel? partitionIndexes = null;
 
         try
         {
@@ -638,6 +651,9 @@ internal sealed record CommitHeader
                     case (Field.Rollups, ProtoWireType.LengthDelimited):
                         rollups = ReadLevel(reader.ReadLengthDelimited());
                         break;
+                    case (Field.PartitionIndexes, ProtoWireType.LengthDelimited):
+                        partitionIndexes = ReadLevel(reader.ReadLengthDelimited());
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -678,6 +694,7 @@ internal sealed record CommitHeader
             ShreddedPaths = shreddedPaths,
             Layout = layout,
             Rollups = rollups,
+            PartitionIndexes = partitionIndexes,
         };
     }
 

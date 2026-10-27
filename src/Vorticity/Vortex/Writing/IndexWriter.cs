@@ -85,13 +85,16 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// The budget is a share per mille of the data bytes. Rows per block is 0 when the caller's
-    /// batches are the blocks, and a row span past <c>wideRowsAbove</c> writes rows at 64 bits.
+    /// batches are the blocks, and a row span past <c>wideRowsAbove</c> writes rows at 64 bits. The
+    /// hashed postings of a column or a path <paramref name="taps"/> gives a tap for hand their hashes
+    /// there and write nothing.
     /// </summary>
     internal IndexWriter(
         WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0,
         IKeyEncoder? keyEncoder = null, string? scratchDirectory = null, long scratchMemoryBytes = DefaultScratchMemoryBytes,
         long wideRowsAbove = uint.MaxValue, bool sealScratch = false,
-        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null)
+        IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null,
+        Func<string, IHashTap?>? taps = null)
     {
         _policy = policy;
         _isTabular = isTabular;
@@ -131,7 +134,7 @@ internal sealed class IndexWriter : IDisposable
             (_nested ??= new int[]?[total])[slot] = chain;
             _refusals[slot] = column.Kind == IndexPolicyKind.Auto
                 ? "Auto chooses among the top-level columns; a nested column is indexed when its override names a kind"
-                : Explicit(column, leaf, _builders[slot]);
+                : Explicit(column, leaf, _builders[slot], taps?.Invoke(path));
         }
 
         // Each shredded key in its class is a column of its own, under the policy that names it, as
@@ -155,7 +158,7 @@ internal sealed class IndexWriter : IDisposable
                 IndexPolicyKind.None => null,
                 IndexPolicyKind.Auto when BloomBuilder.Supports(dtype, out _) => AutoBloom(_builders[slot], blockRows),
                 IndexPolicyKind.Auto => null,
-                IndexPolicyKind.Bloom or IndexPolicyKind.HashedPostings => Explicit(column, dtype, _builders[slot]),
+                IndexPolicyKind.Bloom or IndexPolicyKind.HashedPostings => Explicit(column, dtype, _builders[slot], taps?.Invoke(path.Text)),
                 _ => $"a path takes a Bloom filter or hashed postings, and {column.Kind} reads no path yet",
             };
         }
@@ -197,7 +200,7 @@ internal sealed class IndexWriter : IDisposable
 
                     break;
                 default:
-                    reason = Explicit(column, dtype, builders);
+                    reason = Explicit(column, dtype, builders, taps?.Invoke(_paths[field]));
                     break;
             }
 
@@ -249,7 +252,7 @@ internal sealed class IndexWriter : IDisposable
         return supported ? null : reason;
     }
 
-    private static string? Explicit(IndexSpec column, DType dtype, List<IndexBuilder> builders)
+    private static string? Explicit(IndexSpec column, DType dtype, List<IndexBuilder> builders, IHashTap? tap)
     {
         string? reason = null;
         switch (column.Kind)
@@ -286,7 +289,7 @@ internal sealed class IndexWriter : IDisposable
             case IndexPolicyKind.HashedPostings:
                 if (KeyIndexBuilder.Supports(dtype, out KeyLayout values, out _, out reason))
                 {
-                    builders.Add(KeyIndexBuilder.ForHashes(values, column.SegmentEntries));
+                    builders.Add(KeyIndexBuilder.ForHashes(values, column.SegmentEntries, tap));
                 }
 
                 break;
@@ -1541,6 +1544,13 @@ internal sealed class IndexWriter : IDisposable
         if (keys is null || keys.Abandoned is not null)
         {
             Abandoned(field, kind, keys?.Abandoned ?? _refusals[field] ?? "no builder ran");
+            return;
+        }
+
+        // Hashes handed to another object, which holds them: nothing in this one.
+        if (keys.Taps)
+        {
+            Report(field, kind, IndexOutcome.Built, "its hashes went to the object that holds them", 0, 0, 0);
             return;
         }
 

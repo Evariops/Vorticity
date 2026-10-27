@@ -120,6 +120,22 @@ internal sealed class DatasetSnapshot
         }
     }
 
+    /// <summary>The index of <paramref name="partition"/> the version holds (D13), or null for none.</summary>
+    /// <param name="partition">The partition's value, row-encoded as it leads its objects' tree keys; empty for a dataset without one.</param>
+    /// <param name="cancellationToken">Cancels the reads of the tree.</param>
+    internal async ValueTask<PartitionIndexEntry?> PartitionIndexAsync(ReadOnlyMemory<byte> partition, CancellationToken cancellationToken)
+    {
+        if (Levels.PartitionIndexes.IsEmpty)
+        {
+            return null;
+        }
+
+        byte[] key = PartitionIndexEntry.TreeKeyOf(partition.Span);
+        return await Levels.PartitionIndexes.FindAsync(key, Pages, cancellationToken).ConfigureAwait(false) is { } found
+            ? PartitionIndexEntry.FromBytes(found.Key.Span, found.Value.Span)
+            : null;
+    }
+
     /// <summary>
     /// The root of <paramref name="level"/>'s tree as the key walks of the version share it, read the
     /// first time one asks; null for an empty level.

@@ -11,18 +11,19 @@ namespace Vorticity.Dataset;
 /// </summary>
 internal sealed class DatasetLevels
 {
-    private static readonly DatasetLevels None = new DatasetLevels([], null, DatasetTree.Empty);
+    private static readonly DatasetLevels None = new DatasetLevels([], null, DatasetTree.Empty, DatasetTree.Empty);
     private readonly DatasetTree[] _levels;
 
     // Where each level's last job stopped, by level; null while no level records one, which is
     // every version of a dataset compacted by its largest objects.
     private readonly ReadOnlyMemory<byte>[]? _pointers;
 
-    private DatasetLevels(DatasetTree[] levels, ReadOnlyMemory<byte>[]? pointers, DatasetTree rollups)
+    private DatasetLevels(DatasetTree[] levels, ReadOnlyMemory<byte>[]? pointers, DatasetTree rollups, DatasetTree partitionIndexes)
     {
         _levels = levels;
         _pointers = pointers;
         Rollups = rollups;
+        PartitionIndexes = partitionIndexes;
     }
 
     /// <summary>A dataset with nothing in it.</summary>
@@ -33,6 +34,12 @@ internal sealed class DatasetLevels
     /// the first tree key each covers. Empty when the version keeps none; no level, so that no walk of the objects meets it.
     /// </summary>
     public DatasetTree Rollups { get; }
+
+    /// <summary>
+    /// The tree of partition indexes (<see cref="PartitionIndexEntry"/>): the index object of each consolidated partition,
+    /// by partition, and the objects it covers. Empty when the version keeps none; no level either.
+    /// </summary>
+    public DatasetTree PartitionIndexes { get; }
 
     /// <summary>
     /// Whether no two objects of a level overlap on the clustering key, so that its objects follow
@@ -104,7 +111,7 @@ internal sealed class DatasetLevels
 
         if (highest < 0)
         {
-            return None.WithRollups(RollupsOf(header));
+            return new DatasetLevels([], null, RollupsOf(header), PartitionIndexesOf(header));
         }
 
         DatasetTree[] trees = new DatasetTree[highest + 1];
@@ -123,18 +130,29 @@ internal sealed class DatasetLevels
             }
         }
 
-        return new DatasetLevels(trees, pointers, RollupsOf(header));
+        return new DatasetLevels(trees, pointers, RollupsOf(header), PartitionIndexesOf(header));
     }
 
     /// <summary>The tree of rollups a header names.</summary>
     private static DatasetTree RollupsOf(CommitHeader header) =>
         header.Rollups is { Top.Exists: true } rollups ? new DatasetTree(rollups.Top, rollups.Depth, rollups.Entries, rollups.Rows) : DatasetTree.Empty;
 
+    /// <summary>The tree of partition indexes a header names.</summary>
+    private static DatasetTree PartitionIndexesOf(CommitHeader header) =>
+        header.PartitionIndexes is { Top.Exists: true } indexes ? new DatasetTree(indexes.Top, indexes.Depth, indexes.Entries, indexes.Rows) : DatasetTree.Empty;
+
     /// <summary>These levels with <paramref name="rollups"/> their tree of rollups.</summary>
     public DatasetLevels WithRollups(DatasetTree rollups)
     {
         ArgumentNullException.ThrowIfNull(rollups);
-        return ReferenceEquals(rollups, Rollups) ? this : new DatasetLevels(_levels, _pointers, rollups);
+        return ReferenceEquals(rollups, Rollups) ? this : new DatasetLevels(_levels, _pointers, rollups, PartitionIndexes);
+    }
+
+    /// <summary>These levels with <paramref name="indexes"/> their tree of partition indexes.</summary>
+    public DatasetLevels WithPartitionIndexes(DatasetTree indexes)
+    {
+        ArgumentNullException.ThrowIfNull(indexes);
+        return ReferenceEquals(indexes, PartitionIndexes) ? this : new DatasetLevels(_levels, _pointers, Rollups, indexes);
     }
 
     /// <summary>These levels with one of them replaced.</summary>
@@ -148,7 +166,7 @@ internal sealed class DatasetLevels
         Array.Fill(trees, DatasetTree.Empty);
         _levels.CopyTo(trees, 0);
         trees[level] = tree;
-        return new DatasetLevels(trees, _pointers, Rollups);
+        return new DatasetLevels(trees, _pointers, Rollups, PartitionIndexes);
     }
 
     /// <summary>
@@ -171,7 +189,7 @@ internal sealed class DatasetLevels
         ReadOnlyMemory<byte>[] pointers = new ReadOnlyMemory<byte>[Math.Max(_pointers?.Length ?? 0, level + 1)];
         _pointers?.CopyTo(pointers, 0);
         pointers[level] = key;
-        return new DatasetLevels(_levels, pointers, Rollups);
+        return new DatasetLevels(_levels, pointers, Rollups, PartitionIndexes);
     }
 
     /// <summary>
