@@ -52,7 +52,8 @@ internal sealed class DatasetSchema
         Tree = Layout is { } plan && (plan.Partition is not null || plan.Components.Count > 0)
             ? SortKey.Of(plan, partition: true, plan.Components.Count)
             : null;
-        Key = Layout is { Partition: null } && Layout.ColumnPaths() is { } paths ? ClusteringKey.For(paths, DType) : null;
+        KeyColumns = Layout?.ColumnPaths();
+        Key = Layout is { Partition: null } && KeyColumns is { } paths ? ClusteringKey.OfLayout(paths, DType) : null;
         Cut = ValueCut.Of(Layout, Key, Tree);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -105,6 +106,12 @@ internal sealed class DatasetSchema
     /// component or of a partition, whose reads prune by summaries alone until then.
     /// </summary>
     internal ClusteringKey? Key { get; }
+
+    /// <summary>
+    /// The columns the layout's key components read as they are, in key order, whose order every object's rows lie in
+    /// within its partition, nulls last; null when a component is computed, or the layout has no key.
+    /// </summary>
+    internal IReadOnlyList<string>? KeyColumns { get; }
 
     /// <summary>The partition the dataset's jobs cut their objects by, over the tree's keys; null when it declares none.</summary>
     internal ValueCut? Cut { get; }

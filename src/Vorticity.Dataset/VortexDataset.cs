@@ -940,15 +940,6 @@ public sealed class VortexDataset : IAsyncDisposable
             }
         }
 
-        bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
-
-        // An object keeps a sorted run on the key, unless its rows come in the order of a key whose column orders it alone.
-        if (schema.Key is { } clustering && !bySortedColumn)
-        {
-            // The mandatory sorted run on the clustering key, added to the caller's own policy.
-            write = clustering.Applied(write);
-        }
-
         // The identifiers of an object the index of its partition covers hand their hashes to it, and the object keeps none.
         if (postings is not null)
         {
@@ -956,10 +947,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         // The session's degree and its lanes, which every writer of the session shares.
-        return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session))
-        {
-            BySortedColumn = bySortedColumn,
-        };
+        return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session));
     }
 
     /// <summary>
@@ -3596,11 +3584,6 @@ public sealed class VortexDataset : IAsyncDisposable
             .OpenAsync(source, options, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
-            if (draft.BySortedColumn)
-            {
-                await CheckSortedAsync(file, cancellationToken).ConfigureAwait(false);
-            }
-
             // The keys of its first and last rows when its writer took them in the key's order; its position after its
             // partition's when the dataset has no key.
             ObjectSummaries summaries = Summaries(file);
@@ -3617,25 +3600,6 @@ public sealed class VortexDataset : IAsyncDisposable
             (byte[] prefix, byte[] last) = await BoundsAsync(file, summaries, firstRow, cancellationToken).ConfigureAwait(false);
             return (summaries, prefix, last);
         }
-    }
-
-    /// <summary>
-    /// Refuses an object written without a run whose key column does not walk by itself: its rows
-    /// were to come in key order, and a key cursor that found no source in it would take it for an
-    /// object without the key, whose rows no walk delivers.
-    /// </summary>
-    private async ValueTask CheckSortedAsync(VortexFile file, CancellationToken cancellationToken)
-    {
-        ClusteringKey clustering = Key!;
-        Keys.KeyCursor? cursor = await clustering.TryOpenAsync(file, indexes: false, cancellationToken).ConfigureAwait(false);
-        if (cursor is null)
-        {
-            throw new DatasetIntegrityException(
-                $"An object written in key order carries no run on '{clustering.Paths[0]}', and its statistics do not say " +
-                "the column is sorted: a rewrite that loses the order of its rows is the one thing it must not do.");
-        }
-
-        await cursor.DisposeAsync().ConfigureAwait(false);
     }
 
     /// <summary>

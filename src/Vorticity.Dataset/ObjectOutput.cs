@@ -36,12 +36,6 @@ internal sealed class ObjectOutput : IAsyncDisposable
     internal ObjectSegmentSink Sink { get; }
 
     /// <summary>
-    /// Whether the object is written with no run on the clustering key, its rows coming in key order:
-    /// its seal checks that the statistics say so, since a key cursor then walks the column itself.
-    /// </summary>
-    internal bool BySortedColumn { get; init; }
-
-    /// <summary>
     /// The tree's keys of the object's first and last rows (<see cref="DatasetSchema.Tree"/>), which its writer took them
     /// in the order of: what its tree key leads with and its entry's last key; null when the dataset has no key, the
     /// object's position leading its tree key then.

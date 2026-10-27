@@ -154,7 +154,8 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
 
     /// <summary>
     /// Prepares a walk of one column over the objects of <paramref name="version"/>: the clustering
-    /// key's own walk when the column is that key, a walk that opens every object otherwise.
+    /// key's own walk when the column is that key, a walk that opens every object otherwise. The
+    /// layout's first key column is walked in each object's own order, whatever else it is.
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="path"/> names no column of the dataset.</exception>
     internal static ValueTask<DatasetKeyCursor> OpenAsync(
@@ -162,7 +163,10 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     {
         ClusteringKey? key = version.Schema.Key;
         bool clustering = key is { IsComposite: false } && string.Equals(key.Paths[0], path, StringComparison.Ordinal);
-        ClusteringKey walked = clustering ? key! : ClusteringKey.For([path], version.Schema.DType)!;
+        bool leading = version.Schema.KeyColumns is { Count: > 0 } columns && string.Equals(columns[0], path, StringComparison.Ordinal);
+        ClusteringKey walked = clustering ? key!
+            : leading ? ClusteringKey.OfLayout([path], version.Schema.DType)!
+            : ClusteringKey.For([path], version.Schema.DType)!;
         return OpenAsync(version, walked, clustering, distinct, indexes, cancellationToken);
     }
 
@@ -1203,16 +1207,17 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             paths = named;
         }
 
-        // Every object is written in the clustering key's order with null keys last, an append's as a merge's, so on that
+        // Every object is written in the layout key's order with null keys last, an append's as a merge's, so on that
         // key an entry's rank is its row and a deleted row's rank needs no read.
         slot.Cursor = await _key.TryOpenAsync(
-                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded, cancellationToken)
+                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded || _key.InRowOrder, cancellationToken,
+                slot.Entry.Contents?.Keys is { HoldsEvery: true } index ? index : null)
             .ConfigureAwait(false)
             ?? throw new VortexUnsupportedException(
                 slot.Entry.Key,
                 ComponentKind.Index,
-                $"The object has no run on '{string.Join(", ", _key.Paths)}' and no sorted column to stand in, so a " +
-                "key-ordered walk would leave its rows out. Rewrite it through the dataset, or index it.");
+                $"The object has no source of keys on '{string.Join(", ", _key.Paths)}': no run its policy asked for, and the " +
+                "column is not one its rows are sorted by, so a key-ordered walk would leave its rows out. Index it.");
         Cursors++;
         return slot.Cursor;
     }

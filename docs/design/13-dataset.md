@@ -314,27 +314,20 @@ merge of the inputs on the clustering key when there is one, and a concatenation
 writer builds the outputs' embedded indexes once, dropping the inputs' fragments, so compaction is
 also the index compaction of everything it touches.
 
-An append is not sorted. It arrives in any order, and the writer streams with bounded memory
-([11-write-strategy.md](11-write-strategy.md)). So the write policy requires a sorted run on the
-clustering key in every object whose rows may be out of order (see [the
-policy](10-indexes.md#6-the-policy)), and the compaction reads each input in key order through that
-run (see [rows in key order](12-index-reads.md#5-rows-in-key-order)). The merge's inputs are ordered,
-and its outputs are sorted by construction. The run is the object's structure rather than a hint, so
-the index budget spares it. On a narrow table it is as large as the column it orders, and a budget of
-a tenth of the data would refuse it on every object past a mebibyte, the merge's outputs included.
+Every object's rows lie in the tree's order, the partition and then the key's components, each
+ascending with nulls last: an append sorts each partition's rows in memory before it writes them, and
+a merge's outputs are sorted by construction. A compaction reads each input in its own order, and no
+object needs an index to be read or walked in the key's order. A read in the order of columns that
+lead the key takes each object's rows as they lie, downward in reverse, the rows whose first column is
+null last; across objects, a merge of them. A key cursor walks a single column's values with the
+column's zone map as their index, and a tuple's encoding with the object's sparse index as its own
+([the sparse index](10-indexes.md#44-vorticitykeyindexv1-the-first-key-of-each-granule)), bisecting the
+granules and then the rows of one. No object keeps a sorted run on the key, which on a narrow table
+was as large as the column it ordered.
 
-A job cuts an object that aims at a mebibyte or more into slices of the key, a slice ending at the
-first change of key past three million rows, and the object's table of contents lists them by their
-first keys ([clustering](15-compaction.md#clustering-by-a-value-and-a-size)), so that a filter on the
-key's first column reads the slices it reaches alone.
-
-An object whose rows come in key order carries no run when the key is a single column of integers, or
-of instants, which integers store, with no nulls, as is the case for a merge's output or its rewrite
-([deleting rows](#12-deleting-and-updating-rows)). Its statistics say the column is sorted, and a
-sorted column is the source a key cursor and a key-ordered read take before any run, with its zone map
-as the index, so a run next to it would be bytes nobody reads. Sealing the object checks that a key
-cursor opens on the column alone, so an object whose order was lost is refused rather than read as one
-without the key.
+A job's object of a mebibyte or more keeps the sparse index of the key's indexed prefix, the first key
+of each granule, which a filter on the key's leading components bisects to read the granules it
+reaches alone.
 
 Level 0 empties into the first level whose capacity can hold it, not always into level 1. A few
 small commits of a few kilobytes merge into level 1, rewriting a level a few times their size rather
@@ -906,7 +899,7 @@ step:
 |---|---|
 | a filtered count, an any | the object's count with the rows left out, tier by tier, in one pass: arithmetic on a sorted column's slices, a test of each row on an index's rows, the zone's rows minus the marked ones on a zone the maps decide whole, and the marked rows cleared before counting on a decode |
 | rows in file order | a batch without a marked row is delivered as it came, renumbered, and one with some is gathered without them. An aggregation's batches stay whole, with the marked rows deselected and their columns still encoded |
-| rows in key order, a key cursor | the key source steps over the marked rows' entries as it walks, and a rank subtracts the entries marked below it. That is arithmetic when the ranks are rows (a sorted column's, or the clustering run of a level above 0), and otherwise uses the marked rows' keys, read by one take when the cursor opens |
+| rows in key order, a key cursor | the key source steps over the marked rows' entries as it walks, and a rank subtracts the entries marked below it. That is arithmetic when the ranks are rows (a sorted column's, or the layout's key, whose order every object's rows lie in), and otherwise uses the marked rows' keys, read by one take when the cursor opens |
 | a minimum, a maximum | on a column the object's statistics say is sorted and that holds no null, its first or last live row: the statistic while that row is the column's end, and one row read once a delete took it. Otherwise the object's extreme when a count finds a live row holding it, and its live rows read when none does |
 | the summaries | an entry with marks keeps its bounds, which its live rows still lie inside, and drops what they no longer prove: exactness, a null count other than zero, a column left with no bound. They prune, but no longer answer |
 | counts, sums, means, distinct values | the object's counts less those of its marked rows, below |

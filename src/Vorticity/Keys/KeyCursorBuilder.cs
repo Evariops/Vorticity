@@ -24,6 +24,7 @@ internal sealed class KeyCursorBuilder
     private Scanning.IRowExclusion? _excluded;
     private Func<CancellationToken, ValueTask<ExcludedKey[]>>? _excludedKeys;
     private bool _ranksAreRows;
+    private bool _inRowOrder;
 
     internal KeyCursorBuilder(VortexFile file, string path)
     {
@@ -78,6 +79,17 @@ internal sealed class KeyCursorBuilder
     public KeyCursorBuilder WithSource(KeySourceKind source)
     {
         _forced = source;
+        return this;
+    }
+
+    /// <summary>
+    /// Says the file's rows are in this column's key order, its nulls last, as a dataset's writer sorts an object: the
+    /// column itself is the source, whatever the statistics say, its entries the rows before the nulls.
+    /// </summary>
+    /// <returns>This builder.</returns>
+    internal KeyCursorBuilder InRowOrder()
+    {
+        _inRowOrder = true;
         return this;
     }
 
@@ -343,7 +355,7 @@ internal sealed class KeyCursorBuilder
         if (candidate == KeySourceKind.SortedColumn)
         {
             (SortedColumnSource? column, string? reason) =
-                await SortedColumnSource.OpenAsync(_file, _path, cancellationToken).ConfigureAwait(false);
+                await SortedColumnSource.OpenAsync(_file, _path, cancellationToken, inRowOrder: _inRowOrder).ConfigureAwait(false);
             return column is null ? (null, reason) : (new SortedColumnWalker(column), null);
         }
 

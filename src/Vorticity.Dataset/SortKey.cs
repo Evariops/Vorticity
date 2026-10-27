@@ -24,11 +24,21 @@ internal sealed class SortKey
     private readonly RowSortField[] _fields;
     private readonly DType[] _types;
 
-    private SortKey(Source[] sources, bool descending)
+    private SortKey(Source[] sources, bool descending, bool reversed = false)
     {
         _sources = sources;
         _fields = new RowSortField[sources.Length];
         Array.Fill(_fields, KeyOrderedMerge.Field(descending));
+
+        // The reverse of the ascending order with nulls last is the descending one with nulls first, but for the first
+        // value, whose nulls a downward read gives last.
+        if (reversed)
+        {
+            for (int i = 1; i < _fields.Length; i++)
+            {
+                _fields[i] = RowSortField.Ascending.WithDescending(true);
+            }
+        }
         _types = new DType[sources.Length];
         DTypeArena arena = new DTypeArena();
         for (int i = 0; i < sources.Length; i++)
@@ -63,9 +73,13 @@ internal sealed class SortKey
         return new SortKey([.. sources], descending);
     }
 
-    /// <summary>A key of the columns <paramref name="paths"/> of <paramref name="schema"/>, each as it is: what a read ordered by columns merges on.</summary>
+    /// <summary>
+    /// A key of the columns <paramref name="paths"/> of <paramref name="schema"/>, each as it is: what a read ordered by columns
+    /// merges on. With <paramref name="reversed"/>, downward as the reverse of the upward order, nulls last for the first
+    /// column alone: the order a downward read of objects sorted by the columns, nulls last, gives.
+    /// </summary>
     /// <exception cref="ArgumentException">A path names no column.</exception>
-    internal static SortKey OfColumns(DType schema, IReadOnlyList<string> paths, bool descending)
+    internal static SortKey OfColumns(DType schema, IReadOnlyList<string> paths, bool descending, bool reversed = false)
     {
         Source[] sources = new Source[paths.Count];
         for (int i = 0; i < sources.Length; i++)
@@ -73,7 +87,7 @@ internal sealed class SortKey
             sources[i] = new Source(paths[i], LayoutColumn.Resolve(schema, paths[i]), null, null, null);
         }
 
-        return new SortKey(sources, descending);
+        return new SortKey(sources, descending, reversed && descending);
     }
 
     /// <summary>The keys of every row of <paramref name="batch"/>, row-encoded; the caller disposes them.</summary>

@@ -18,21 +18,32 @@ internal sealed class ClusteringKey
     private readonly DType[] _dtypes;
     private readonly RowSortField[] _fields;
 
-    private ClusteringKey(string[] paths, DType[] dtypes, bool mayHoldNull)
+    private ClusteringKey(string[] paths, DType[] dtypes, bool mayHoldNull, bool inRowOrder)
     {
         _paths = paths;
         _dtypes = dtypes;
         MayHoldNull = mayHoldNull;
+        InRowOrder = inRowOrder;
         _fields = new RowSortField[paths.Length];
 
         // Ascending, nulls last, as the tree, the merges and the sorted objects order every key.
         Array.Fill(_fields, KeyOrderedMerge.Field(descending: false));
     }
 
-    /// <summary>The key a dataset declares, in key order, or null when it declares none.</summary>
+    /// <summary>
+    /// The key a dataset's layout declares over columns as they are, in key order, or null when it declares none: every
+    /// object's rows are in its order, nulls last (<see cref="InRowOrder"/>).
+    /// </summary>
     /// <param name="paths">The key's columns, in key order.</param>
     /// <param name="schema">The dataset's schema.</param>
-    public static ClusteringKey? For(IReadOnlyList<string>? paths, DType schema)
+    public static ClusteringKey? OfLayout(IReadOnlyList<string>? paths, DType schema) => Of(paths, schema, inRowOrder: true);
+
+    /// <summary>A key over <paramref name="paths"/>, in key order, which the objects' rows need not follow; null for none.</summary>
+    /// <param name="paths">The key's columns, in key order.</param>
+    /// <param name="schema">The dataset's schema.</param>
+    public static ClusteringKey? For(IReadOnlyList<string>? paths, DType schema) => Of(paths, schema, inRowOrder: false);
+
+    private static ClusteringKey? Of(IReadOnlyList<string>? paths, DType schema, bool inRowOrder)
     {
         if (paths is null || paths.Count == 0)
         {
@@ -48,8 +59,14 @@ internal sealed class ClusteringKey
             mayHoldNull |= ColumnPath.MayBeNull(schema, kept[i]);
         }
 
-        return new ClusteringKey(kept, dtypes, mayHoldNull);
+        return new ClusteringKey(kept, dtypes, mayHoldNull, inRowOrder);
     }
+
+    /// <summary>
+    /// Whether every object's rows are in this key's order, nulls last, as the dataset's writers sort them: its key is the
+    /// layout's. An object's own rows are then its entries in key order, and no index stands in for them.
+    /// </summary>
+    public bool InRowOrder { get; }
 
     /// <summary>The key's first column: the one a clustering value is a function of, and the one a level's ranges are judged on.</summary>
     public string InstantPath => _paths[0];
@@ -147,52 +164,6 @@ internal sealed class ClusteringKey
     /// <summary>Whether the key is a tuple rather than one column.</summary>
     public bool IsComposite => _paths.Length > 1;
 
-    /// <summary>
-    /// Whether an object whose rows come in key order needs no run to be walked by key: one
-    /// top-level column of integers that holds no null, or of an extension stored as integers, an
-    /// instant or a date. Its file statistics then say the column is sorted, and a sorted column is
-    /// the source a key cursor and a key-ordered read take before any run, with the zone map as its
-    /// index, so a run beside it is bytes nobody reads: as much as the column itself.
-    /// </summary>
-    public bool OrdersBySortedColumn
-    {
-        get
-        {
-            DType storage = _dtypes[0];
-            while (storage.Kind == DTypeKind.Extension)
-            {
-                storage = storage.StorageType;
-            }
-
-            return !IsComposite
-                && !_paths[0].Contains('.', StringComparison.Ordinal)
-                && storage.Kind == DTypeKind.Primitive
-                && storage.PType.IsInteger()
-                && !_dtypes[0].IsNullable;
-        }
-    }
-
-    /// <summary>The caller's write options, with the mandatory sorted run on the key added.</summary>
-    public VortexWriteOptions Applied(VortexWriteOptions options)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-        // Required rather than budgeted, and spared by the budget: on a narrow table the run is as
-        // large as the column it orders, so the budget would refuse it on every object past a
-        // mebibyte, compaction outputs included, and a dataset whose objects have no run cannot be
-        // walked in key order at all.
-        IndexSpec run = IndexSpec.SortedRuns.AsRequired();
-        options = options with { BudgetSparesRequired = true };
-        if (!IsComposite)
-        {
-            return options.WithIndexes(options.WritePolicy.For(_paths[0], run));
-        }
-
-        VortexWriteOptions composite = options.WithIndexes(options.WritePolicy.ForKey(_paths, run));
-        return options.KeyEncoder is null
-            ? composite.WithKeyEncoder(new RowKeyEncoder(_fields))
-            : composite;
-    }
-
     /// <summary>The row encoding of a leading tuple of key values, for a seek or a comparison.</summary>
     public byte[] Encode(ReadOnlySpan<FilterLiteral> values)
     {
@@ -240,9 +211,10 @@ internal sealed class ClusteringKey
     }
 
     /// <summary>
-    /// Opens the object's cursor over this key, which the caller disposes, or null when the object
-    /// carries no run on the key. Null rather than an exception: a dataset may hold imported objects
-    /// it did not write, and every consumer here has an answer for one.
+    /// Opens the object's cursor over this key, which the caller disposes, or null when nothing in the object serves the
+    /// key. On the layout's key (<see cref="InRowOrder"/>) the object's rows are its entries, read in their order: a single
+    /// column's values with the zone map as their index, a tuple's encoding with the sparse index as theirs. On another
+    /// key, the file's own sources: a column its statistics call sorted, or a run its policy asked for.
     /// </summary>
     public ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, CancellationToken cancellationToken) =>
         TryOpenAsync(file, indexes: true, cancellationToken);
@@ -270,12 +242,19 @@ internal sealed class ClusteringKey
     /// when the source needs them.
     /// </summary>
     public async ValueTask<KeyCursor?> TryOpenAsync(
-        VortexFile file, IReadOnlyList<string> paths, bool indexes, DeletionVector deletions, bool ranksAreRows, CancellationToken cancellationToken)
+        VortexFile file, IReadOnlyList<string> paths, bool indexes, DeletionVector deletions, bool ranksAreRows, CancellationToken cancellationToken,
+        GranuleKeys? index = null)
     {
         ArgumentNullException.ThrowIfNull(file);
+        if (InRowOrder && IsComposite)
+        {
+            KeySource tuples = new SortedColumnWalker(new ObjectKeyEntries(file, [.. paths], index));
+            return new KeyCursor(deletions.IsEmpty ? tuples : new ExcludingKeySource(tuples, deletions, 0));
+        }
+
         try
         {
-            KeyCursorBuilder keys = file.Keys(paths as string[] ?? [.. paths]);
+            KeyCursorBuilder keys = InRowOrder ? file.Keys(paths[0]).InRowOrder() : file.Keys(paths as string[] ?? [.. paths]);
             if (!deletions.IsEmpty)
             {
                 keys.Excluding(deletions, ranksAreRows, token => LiveRows.ExcludedKeysAsync(file, deletions, paths, this, token));

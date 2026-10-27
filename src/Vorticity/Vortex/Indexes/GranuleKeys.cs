@@ -79,6 +79,23 @@ internal sealed class GranuleKeys
     /// <summary>Whether page <paramref name="page"/>'s keys are in hand.</summary>
     internal bool HasPage(int page) => System.Threading.Volatile.Read(ref _keys[page]) is not null;
 
+    /// <summary>Whether every page's keys are in hand, so that any granule's key is.</summary>
+    internal bool HoldsEvery
+    {
+        get
+        {
+            for (int page = 0; page < _keys.Length; page++)
+            {
+                if (!HasPage(page))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
     /// <summary>
     /// The key of granule <paramref name="granule"/>, row-encoded; its page in hand first (<see cref="TakePage"/>).
     /// </summary>

@@ -2771,10 +2771,11 @@ internal sealed class DatasetScanBuilder
         FieldMask mask = _mask ?? FieldMask.All;
         bool drop = !mask.IsAll && !Array.TrueForAll(paths, path => Covers(mask, _version.Schema.DType, path));
         ScanProjection? kept = null;
+        // Read downward in their own order, objects give the reverse of the key's order, the nulls of its first column last.
         KeyOrderedMerge merge = new KeyOrderedMerge(
             _version,
             MergeObjectsAsync(paths, cancellationToken),
-            SortKey.OfColumns(_version.Schema.DType, paths, _descending),
+            SortKey.OfColumns(_version.Schema.DType, paths, _descending, reversed: InObjectOrder(paths)),
             rankedTies: true,
             (lease, entry) => OrderedBatchesAsync(lease, entry, paths, drop, cancellationToken),
             lease => RecordOpen(lease),
@@ -2957,6 +2958,75 @@ internal sealed class DatasetScanBuilder
         }
     }
 
+    /// <summary>
+    /// Whether the columns lead the dataset's key components as they are (<see cref="DatasetSchema.KeyColumns"/>), in whose
+    /// order every object's rows lie, nulls last: an object is then read in its own order, with no index.
+    /// </summary>
+    private bool InObjectOrder(string[] paths)
+    {
+        if (_version.Schema.KeyColumns is not { } key || paths.Length > key.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < paths.Length; i++)
+        {
+            if (!string.Equals(paths[i], key[i], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary><paramref name="mask"/> with the key's columns <paramref name="paths"/> read too when <paramref name="withKey"/> asks.</summary>
+    private FieldMask? Keyed(FieldMask? mask, string[] paths, bool withKey)
+    {
+        if (!withKey || mask is not { } projection)
+        {
+            return mask;
+        }
+
+        FieldMaskBuilder keyed = new FieldMaskBuilder().Include(in projection);
+        foreach (string path in paths)
+        {
+            keyed.Include(ToolPaths.Resolve(_version.Schema.Columns, path));
+        }
+
+        return keyed.Build();
+    }
+
+    /// <summary>
+    /// One object's rows in the order of columns that lead the dataset's key, <paramref name="first"/> the first of them as the
+    /// object names it: the object's own order, its writer having sorted its rows by the key, nulls last. Downward, its rows
+    /// whose first column holds a value come in reverse, then those where it is null, in reverse too, as a key-ordered read
+    /// gives them; its marked rows left out either way.
+    /// </summary>
+    private IAsyncEnumerable<RecordBatch> InObjectOrderAsync(
+        VortexFile file, ObjectEntry entry, string first, VortexExpr? filter, FieldMask? projection, bool canonical, CancellationToken cancellationToken)
+    {
+        if (!_descending)
+        {
+            return LiveAsync(Scan(null));
+        }
+
+        bool nullable = ColumnPath.MayBeNull(file.DType, first);
+        IAsyncEnumerable<RecordBatch> keyed = LiveRows.ReversedAsync(
+            LiveAsync(Scan(nullable ? Expr.IsNotNull(Expr.Field(first)) : null).InReverse()), cancellationToken);
+        return nullable
+            ? System.Linq.AsyncEnumerable.Concat(keyed, LiveRows.ReversedAsync(LiveAsync(Scan(Expr.IsNull(Expr.Field(first))).InReverse()), cancellationToken))
+            : keyed;
+
+        ScanBuilder Scan(VortexExpr? also) =>
+            Configure(file.ScanBuilder(), also is null ? filter : filter is null ? also : Expr.And(also, filter), projection, canonical);
+
+        IAsyncEnumerable<RecordBatch> LiveAsync(ScanBuilder scan) =>
+            entry.HasDeletions
+                ? LiveRows.WithoutDeletedAsync(scan.WithCompaction(false).ExecuteAsync(), entry.Deletions, compact: true, 0, cancellationToken)
+                : scan.ExecuteAsync();
+    }
+
     /// <summary>One object's own key-ordered scan, carrying this builder's filter, projection and options.</summary>
     private ScanBuilder OrderedOf(VortexFile file, string[] paths, bool withKey)
     {
@@ -2977,8 +3047,14 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     private IAsyncEnumerable<RecordBatch> OrderedBatchesAsync(ObjectLease lease, ObjectEntry entry, string[] paths, bool withKey, CancellationToken cancellationToken)
     {
+        bool inObjectOrder = InObjectOrder(paths);
         if (ColumnsOf(lease, entry) is not { } columns)
         {
+            if (inObjectOrder)
+            {
+                return InObjectOrderAsync(lease.File, entry, paths[0], _filter, Keyed(_mask, paths, withKey), canonical: false, cancellationToken);
+            }
+
             return entry.HasDeletions
                 ? LiveOrderedAsync(lease.File, entry, paths, withKey, cancellationToken)
                 : OrderedOf(lease.File, paths, withKey).ExecuteAsync();
@@ -3005,7 +3081,11 @@ internal sealed class DatasetScanBuilder
 
         ScanBuilder scan = Configure(lease.File.ScanBuilder(), read.Pushed, read.Shape.Source, canonical: true).WithCompaction(true);
         IAsyncEnumerable<RecordBatch> rows;
-        if (source is not null)
+        if (source is not null && inObjectOrder)
+        {
+            rows = InObjectOrderAsync(lease.File, entry, source[0], read.Pushed, read.Shape.Source, canonical: true, cancellationToken);
+        }
+        else if (source is not null)
         {
             scan = scan.InKeyOrder(source, _descending);
             rows = entry.HasDeletions
