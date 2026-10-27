@@ -276,8 +276,7 @@ a question of counts, sums and extremes does not read: on the design's requests,
 
 ### 5.3 Block statistics, and settling blocks
 
-For each block of section 3.3 and each column, a region a column (`vorticity.block.stats.v1`), beside
-the blocks' rows and range of the key (`vorticity.block.table.v1`):
+For each block of section 3.3 and each column, a region a column (`vorticity.block.stats.v1`):
 
 - the block's rows and nulls;
 - the values present, each by its number in the column's index of section 5.4, and their rows, as long
@@ -285,7 +284,7 @@ the blocks' rows and range of the key (`vorticity.block.table.v1`):
 - for each number column the counts carry as a measure, the count, exact sum, least and greatest.
 
 A column whose values hardly repeat and that is no measure, an identifier, keeps none
-([10-indexes.md](10-indexes.md#412-vorticityblockstatsv1-a-column-over-the-blocks)).
+([10-indexes.md](10-indexes.md#411-vorticityblockstatsv1-a-column-over-the-blocks)).
 
 The engine already settles a block from its zone maps when its key maps to a single group and every
 aggregate is a count, a least or a greatest ([16-queries.md](16-queries.md#93-statistics-and-zone-maps)),
@@ -746,16 +745,15 @@ days and the rollups; the sheets and directories take under 1 GB of memory *(com
 | `vorticity.column.sheet.v1` | an object's region, which its table of contents names | the column sheets |
 | `vorticity.column.counts.v1` | an object's region, which its table of contents names; a rollup's | the counts of each value, kept by bucket in a rollup whose run spans several clustering values |
 | `vorticity.column.sketches.v1` | an object's region right after the counts, which its table of contents names; a rollup's | the counts' quantile sketches and distinct registers |
-| `vorticity.block.table.v1` | an object's region right after the counts, which its table of contents names | its blocks, their rows and keys |
 | `vorticity.block.stats.v1` | an object's region a column, right after the column's index of where its values live, which its table of contents names | each block's rows, nulls, values by their numbers and their rows, and a measure's states |
 | `vorticity.column.where.v1` | an object's region a column, which its table of contents names | where each value lives: the values, their numbers and their ranges of rows |
 | `vorticity.partials.v1` | the local cache; beside the rollups | learned partials |
 
 Readers skip a kind they do not know, as they do now. The kinds of the former synopsis tables are no
 longer written nor read. The leaf entry keeps its table of contents, at a second version that holds
-them no more and names the regions of the column sheets, counts and sketches. An entry of the first
-version is read through its object's directory, so a dataset written before stays readable and the
-commit format's version does not rise.
+them no more and names the regions of the column sheets, counts and sketches; a table of contents of
+another version is not read, and a dataset is read in commit format 5 alone ([sources and
+offsets](13-dataset.md#84-sources-and-offsets)).
 
 ### 10.4 The recommendation of a leading column
 

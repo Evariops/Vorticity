@@ -146,7 +146,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#414-the-file-level-filter)).
+file-level filter](#413-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -215,35 +215,27 @@ chunk, and a chunk that is not a dictionary claims nothing.
 
 ### 4.4 `vorticity.slices.v1`: the slices of a file
 
-A file a dataset's job writes in slices carries its slice table: per slice, its first row and its row
-count, in order, covering every row once, and its bounds. Like the dictionary probe it has no payload.
-The entry is on the column the bounds are on, one run over every block, and its options hold the table
-behind a version byte. A key table (version 6), which a job writes into each object of a mebibyte or
-more, holds the slice count, then per slice its rows and its first key, row-encoded as the key orders
-it and kept as the bytes it shares with the first key before it and the rest, then the last key of the
-last slice the same way; its entry is on the key's first column, and a job cuts a slice only at a
-change of key, so that a key lies in one slice. A time table (version 5) holds the instant's unit, then
-per slice the gap from the previous slice's end, its width and its rows, each a varint, a few bytes a
-slice: the datasets an earlier release compacted by periods wrote their objects in time slices, which
-a reader still walks. Version 4 followed the time slices with the columns each slice's rows were sorted
-by and the paths the file's synopsis counted, which a reader skips; the three before it, which only the
-first writers of the format made and no store keeps, are not read. A table that does not decode, or
-whose rows are not the file's, is not read. The writer declares the slices before it completes the
-file, which checks that they cover its rows ([key
+A file a dataset's job writes in slices carries its slice table: per slice, its rows and its first key,
+in order, covering every row once. Like the dictionary probe it has no payload. The entry is on the
+key's first column, one run over every block, and its options hold the table behind a version byte
+(6): the slice count, then per slice its rows and its first key, row-encoded as the key orders it and
+kept as the bytes it shares with the first key before it and the rest, then the last key of the last
+slice the same way. A job writes it into each object of a mebibyte or more, and cuts a slice only at a
+change of key, so that a key lies in one slice. A table of another version, one that does not decode,
+or one whose rows are not the file's, is not read. The writer declares the slices before it completes
+the file, which checks that they cover its rows ([key
 slices](11-write-strategy.md#9-key-slices-and-shredded-variants)), and writes an index directory for
-them even when its policy asks for no index. A time table is also the instant's key source for those
-objects of periods ([sources of order](12-index-reads.md#2-sources-of-order)). A scan of an object's
-rows under a range of the key's first column, or under a window on a time table's instant, covers the
-rows of the slices the range reaches, which the table of the object's entry names before any read: its
-plan, its zone maps and its walk then count those slices' blocks alone.
+them even when its policy asks for no index. A scan of an object's rows under a range of the key's
+first column covers the rows of the slices the range reaches, which the table of the object's entry
+names before any read: its plan, its zone maps and its walk then count those slices' blocks alone, and
+the pieces a scan is cut into between lanes cover those rows alone too.
 
 A sliced file also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
 root. Its options hold the file's table of array encodings, and its one run has a payload region per
 top-level column, in column order. A column's region holds, behind a version byte, its chunks, each
 its offset, length, alignment and rows as varints. That is about ten bytes a chunk, 250 KB a column
 for a day of 10⁹ rows, so the regions are read when needed rather than kept in the options every open
-reads, and a read of one column, the instant at the edges of a window, fetches that column's region
-alone. With it a reader decodes the chunks that hold a slice from their own bytes, since a chunk's
+reads, and a read of one column fetches that column's region alone. With it a reader decodes the chunks that hold a slice from their own bytes, since a chunk's
 segment ends with its encoding tree, and never reads the footer ([the rows of a
 slice](12-index-reads.md#51-the-rows-of-a-slice-without-the-footer)). An append drops both slice
 kinds, since they describe the file as its writer cut it.
@@ -291,8 +283,7 @@ greatest cut to the bytes a text column's zones keep, the greatest one past its 
 shares it. Each path also names, a bit each, the slices of the object it may hold a value in, from the
 spans of rows its values lie in as the rows are written: two values closer than a slice is long share a
 span, so a path keeps about a span per slice at most, and the bits are a superset of the slices that hold
-it. An object of an earlier release's period counted the spans by time, its rows in time order. The entry
-is on the variant column. Its one run holds one region, behind a version byte and the body's length, the
+it. The entry is on the variant column. Its one run holds one region, behind a version byte and the body's length, the
 body one zstd frame.
 
 The directory fits the file's index budget. Over it, the paths of the residual held least are left
@@ -394,8 +385,7 @@ measure's states as varints, a float sum as its three bins, the values it skippe
 part, and a float's extremes as their eight bytes. A reader refuses groups out of that order, which it
 searches a value in, and one that wants a few values reads the header, then their chunks, each checked
 against its sum. Entries of two objects of the same value merge word for word, which is how a rollup's
-are summed ([rollups](15-compaction.md#rollups)). The counts of version 1, by the hours of a period's
-instant, which an earlier writer of this branch kept, are read as no counts. The sheets and the counts of
+are summed ([rollups](15-compaction.md#rollups)). The sheets and the counts of
 an object lie right after its data, where no read of the structures a scan reads together bridges them.
 On the design's requests, two measures one of them a float, an entry takes 52 to 61 bytes, and the counts
 cost the writer 9.4 to 12.0 ns a counted column a row, one thread (`vortex-queries --micro counts`).
@@ -425,36 +415,28 @@ repeat, is no wide column: its distinct values in an entry are the entry's rows.
 merge register by register. The sheet of a wide column hashes each row of a batch for them, and the
 columns of few values raise their entries' registers once the whole batch is in.
 
-### 4.11 `vorticity.block.table.v1`: an object's blocks
+### 4.11 `vorticity.block.stats.v1`: a column over the blocks
 
-An object a compaction job writes in slices bounded by keys keeps its blocks on its key's first column,
-in a region of their own right after the counts, which its table of contents names. As with its sheets
-and counts, only an object of 1 MiB or more keeps them: a smaller one is read whole. A block is a run of
-the object's rows in key order. It ends where the key's first column changes once it holds 4 096 rows,
-and at 65 536 rows whatever its rows hold. A first column whose runs are shorter, such as an identifier,
-gives blocks of several values rather than one block per row: the values of a block change only within
-its first 4 096 rows. Under a block value the application declares, a function of the key's second
-column, a block ends where that value changes too, past the same rows. Blocks are row ranges,
-independent of the file's chunks and zones.
+An object a compaction job writes in slices bounded by keys cuts its rows in blocks on its key's first
+column. A block is a run of the object's rows in key order. It ends where the key's first column changes
+once it holds 4 096 rows, and at 65 536 rows whatever its rows hold. A first column whose runs are
+shorter, such as an identifier, gives blocks of several values rather than one block per row: the values
+of a block change only within its first 4 096 rows. Under a block value the application declares, a
+function of the key's second column, a block ends where that value changes too, past the same rows.
+Blocks are row ranges, independent of the file's chunks and zones. The writer finds the end of a block
+by halves in the runs it merges, one bisection per change of the first column *(computed: a few dozen
+comparisons per block)*, and counts the rows of the blocks that hold one value of the first column and
+of the block value, which the object's table of contents names: a question grouped by both answers
+those blocks from their statistics.
 
-The region holds a version byte, the count of blocks, then for each block its rows and its first and
-last keys, as the clustering key encodes them. Each key is written as the bytes it shares with the key
-before it, a count, and the rest. The blocks cover the object's rows once, in order, and their keys
-follow the key. A reader reads the region with no open of the object, in one request, and the statistics
-of each column of each block extend it ([section 4.12](#412-vorticityblockstatsv1-a-column-over-the-blocks)).
-On sixty sources whose runs are a few rows, thousands, or more than two blocks, a block took 46 bytes,
-the keys a source text and an integer. The writer finds the end of a block by halves in the runs it
-merges, one bisection per change of the first column and a key copied per run *(computed: a few dozen
-comparisons per block)*.
-
-### 4.12 `vorticity.block.stats.v1`: a column over the blocks
-
-An object that keeps blocks keeps, for each top-level column with a sheet, that column's statistics over
-them, in a region of their own that its table of contents names, right after where the column's values
-live ([section 4.13](#413-vorticitycolumnwherev1-where-each-value-lives)): a reader takes both in one
-request. They are built as the column is written. The dataset's job declares each block's end before it
-writes the rows the block ends in, and each column's builder, fed right after the column's sheet and
-counts, cuts its blocks there; at the end they must be the table's blocks, or the column keeps none.
+As with its sheets and counts, only an object of 1 MiB or more keeps statistics over its blocks: a
+smaller one is read whole. It keeps, for each top-level column with a sheet, that column's statistics
+over them, in a region of their own that its table of contents names, right after where the column's
+values live ([section 4.12](#412-vorticitycolumnwherev1-where-each-value-lives)): a reader takes both in
+one request. They are built as the column is written. The dataset's job declares each block's end before
+it writes the rows the block ends in, and each column's builder, fed right after the column's sheet and
+counts, cuts its blocks there; at the end they must be as many as the job cut over the object's rows, or
+the column keeps none.
 
 The region holds a version, the count of blocks and the parts it holds, then a section a part, so that a
 part given up midway is dropped whole:
@@ -462,7 +444,7 @@ part given up midway is dropped whole:
 - **rows:** each block's rows and nulls;
 - **values:** each block's count of distinct values, then, for a block of at most 256 of them, their
   numbers ascending, as the gaps between them, and past one value each one's rows. A number names a value
-  in the column's index of section 4.13. The part holds while the column's sheet numbers every row and
+  in the column's index of section 4.12. The part holds while the column's sheet numbers every row and
   keeps every value's bytes;
 - **a measure:** for a number column the counts carry as a measure, of more than 64 values, each block's
   count of values, the words of its exact sum, an `Int128` or a float's wide sum, its least and its
@@ -476,7 +458,7 @@ the design over four hours, in the order of a key by emitter and cut as a job cu
 which the endpoints took 129 and the hosts 83, the values of a service's block, each a number and its
 rows, and the instant 32, its extremes *(measured, `--micro blocks`)*.
 
-### 4.13 `vorticity.column.where.v1`: where each value lives
+### 4.12 `vorticity.column.where.v1`: where each value lives
 
 For each column whose blocks list values, the column's values in the order of their bytes, each with its
 number and the ranges of rows of the blocks it appears in, consecutive blocks joined into one range. A
@@ -489,10 +471,10 @@ everywhere and whose blocks list none keeps no index.
 
 The region holds a version, the object's rows and the count of values, then each value: its bytes, as
 those it shares with the value before it, a count, and the rest; its number; its count of ranges, then
-each range as the rows from the end of the one before it and its rows. On the requests of section 4.12,
+each range as the rows from the end of the one before it and its rows. On the requests of section 4.11,
 the index took 209 KB, most of it the endpoints' and hosts' names, which an object holds once each.
 
-### 4.14 The file-level filter
+### 4.13 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

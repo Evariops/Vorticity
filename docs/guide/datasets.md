@@ -608,15 +608,10 @@ never lend its values to an unrelated column.
 
 * The dataset format is experimental and specific to this project. Pin the package version, and do
   not expect another Vortex implementation to read the commit tree.
-* A dataset written in commit format 4 is refused by earlier releases, which would otherwise misread
-  it. A dataset takes format 4 once it declares a clustering, identifiers, shredded paths
-  or an erasure delay, once it holds rollups, or once one of its objects has a footer past the first
-  64 KiB an open reads.
-  Upgrade every process that writes or reads such a dataset before any of them uses one of those.
-* A dataset an earlier release wrote by periods opens and reads as before, but compaction plans
-  nothing for it: its late level's objects overlap, and the rows of its other levels are in no key
-  order, which a merge on the key would take them to be. Append its rows to a clustered dataset to
-  compact them.
+* This release reads and writes commit format 5 alone. A dataset an earlier release wrote, in
+  formats 1 to 4, is refused with a message that says so: read its rows with the release that wrote
+  it and append them to a new dataset. A later release's format is refused too, so upgrade every
+  process that writes or reads a dataset together.
 * Marked rows keep their bytes until compaction. A delete that marks rows frees no space, since the
   object holds them (up to an eighth of its rows) until compaction rewrites it or a later delete
   passes that share. An object under a mebibyte is rewritten by every delete that touches it, so

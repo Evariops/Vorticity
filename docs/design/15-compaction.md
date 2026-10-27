@@ -341,16 +341,6 @@ thirty days of 2 000 routes, an object a day and rollups of four, a count of eve
 requests and 261 698 bytes, against 30 requests and 1 930 456 bytes of the objects' counts
 (`RollupBudgetTests`).
 
-### Datasets written by periods
-
-An earlier release compacted a dataset that declared periods of time by them: its level 1 a late
-level whose objects overlap, its other levels' objects one period each, in time slices whose rows were
-in no key order. Such a dataset still opens and reads. Its flag (`DatasetFeatures.Periods`) keeps level
-1 a level of overlapping objects, which a lookup opens as it opens level 0's, and says that its levels'
-rows are in no key order, so that a read in key order sorts each slice's instants. Its compaction plans
-no job, since a merge on the key would take its rows for sorted, and its header's fields of periods are
-skipped and never reused. Its rows go into a clustered dataset to be compacted again.
-
 ### Resuming a long job
 
 A job that writes a day's object at the design's rate reads and writes some 170 GB, and a failure

@@ -889,8 +889,8 @@ upload.
 
 A rewrite, a compaction's or a delete's that keeps some of an object's rows, announces a bound with
 that put (`ObjectBound`): what it reads, times 1.03, the most bytes a rewrite wrote for each byte it
-read on the lifecycle bench, measured when the library compacted by periods too (1.024 at worst over
-periods of a day and of an hour and the leveled style, 1.000 for a seal). Without it, parts sized for
+read on the lifecycle bench (1.024 at worst over the compaction styles measured then, the leveled one
+among them, 1.000 for a seal). Without it, parts sized for
 an unknown length reach about a terabyte on S3, but 168 GB on R2, whose parts keep one size, and 106 GB
 on Scaleway, which takes a thousand parts, short of an object of a day at a few thousand rows a second,
 which would fail at its end, every time it ran. With it, the parts are sized for the bound from the

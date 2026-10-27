@@ -430,9 +430,7 @@ slices of the key: past `SliceTargetRows` rows, 3 × 10⁶ by default, a minute 
 the next change of key starts a slice, so that a key's rows lie in one slice ([clustering by a
 value](15-compaction.md#clustering-by-a-value-and-a-size)). The slice table records each slice's rows
 and first key, and the last key of the last ([the slice
-table](10-indexes.md#44-vorticityslicesv1-the-slices-of-a-file)). An earlier release's datasets of periods
-cut their objects into time slices instead, a calendar unit chosen from the rows' pace, which a reader
-still walks.
+table](10-indexes.md#44-vorticityslicesv1-the-slices-of-a-file)).
 
 A dataset's object chunks each column on its own. A column gathers its rows across the object's chunks
 until they would encode to about 1 MiB (`DatasetOptions.ChunkBytes`, internal) at the rate its last
@@ -448,9 +446,7 @@ Measured on the client's spans, two hours at 500 rows a second over a store 5 ms
 each on average; QP-1 read 33.9 MB in 75 requests in 123 ms, against 177.7 MB in 232 in 280 ms; QP-5
 504 MB in 545 requests in 470 ms, against 1 061 MB in 2 688 in 1 291 ms. A needle takes a segment a
 column now, about a megabyte, where it took the small chunk of every column in one: QP-4 read 15.5 MB in
-13 requests in 39 ms, against 0.8 MB in 7 in 18 ms. A load of four hourly periods at 50 000 rows a
-second, in the load of periods an earlier release had, took 2.07 s against 1.75 (+19 %), its process
-peaking at 8.0 GB against 6.1, for 4 % fewer bytes.
+13 requests in 39 ms, against 0.8 MB in 7 in 18 ms.
 
 Chunks of a column do not end at every slice when a column gathers no further: a slice's end closes
 the group, not a chunk of the object's own. Ending the object's chunks around each slice's first row

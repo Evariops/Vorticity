@@ -183,11 +183,10 @@ A leaf entry describes one data object:
   each variant column's path directory, each column's sheet ([the column
   sheet](10-indexes.md#48-vorticitycolumnsheetv1-what-a-column-holds)), its columns' counts ([the
   counts](10-indexes.md#49-vorticitycolumncountsv1-a-columns-counts)) and their sketches ([the
-  sketches](10-indexes.md#410-vorticitycolumnsketchesv1-the-sketches-of-a-columns-counts)), its
-  blocks ([the block table](10-indexes.md#411-vorticityblocktablev1-an-objects-blocks)), each column's
-  statistics over them ([the block statistics](10-indexes.md#412-vorticityblockstatsv1-a-column-over-the-blocks))
+  sketches](10-indexes.md#410-vorticitycolumnsketchesv1-the-sketches-of-a-columns-counts)), each column's
+  statistics over its blocks ([the block statistics](10-indexes.md#411-vorticityblockstatsv1-a-column-over-the-blocks))
   and where each of its values lives ([the
-  index](10-indexes.md#413-vorticitycolumnwherev1-where-each-value-lives)), the bytes and the chunks of each of
+  index](10-indexes.md#412-vorticitycolumnwherev1-where-each-value-lives)), the bytes and the chunks of each of
   its columns, which a planner weighs a path against, the
   region of the object's index directory, and where in it the entry of each locating index lies ([the
   directory](10-indexes.md#3-the-directory-and-the-runs)). With no open of the object, a reader of a slice
@@ -196,10 +195,9 @@ A leaf entry describes one data object:
   over when they prove the value absent, or reads only the ranges of rows the values live in; a question on one column
   reads that column's counts in one request instead of its rows; and a lookup by a value
   reads its index entries with its columns' page tables, then its postings, the pages of its rows and its
-  chunks, four round trips. A table of contents of the first version, which also
-  held the synopsis tables of the time, is ignored, and its object read through its directory. It is a tagged field
+  chunks, four round trips. It is a tagged field
   like the footer's length, about 2.2 KB for an hour of the design's requests, and 19.7 KB for a
-  day, measured on objects of periods, where it took 318 KB while it held every table's chunks
+  day, where it took 318 KB while it held every table's chunks
 
 An internal entry holds a page reference to a child, the sum of its rows, the union of its children's
 summaries, and the tally of the objects under it: their bytes, the largest of them, the rows marked
@@ -266,10 +264,6 @@ library never stalls a writer.
   no object above level 0 holds rows of two values: its jobs write the rows of each value into objects
   of their own ([clustering](15-compaction.md#clustering-by-a-value-and-a-size)). The size an object
   aims at, when it declares one, bounds every level's objects in place of the cap.
-- A dataset an earlier release compacted by periods keeps level 1 as its late level, whose sorted
-  objects overlap, and its other levels' rows in no key order. It reads as it was written, a lookup
-  touching level 0, the late level and one object per other level, and its compaction plans nothing
-  ([datasets written by periods](15-compaction.md#datasets-written-by-periods)).
 - Inside every object, an index entry has at most four runs, the same rule as for a single file
   appended in place (see [the directory and the runs](10-indexes.md#3-the-directory-and-the-runs)).
 
@@ -462,9 +456,9 @@ The trees are ordered by the clustering key, so the order of that one key is bou
 | need | mechanism | cost |
 |---|---|---|
 | walk the objects by key | an in-order walk of a level's tree, with the next pages prefetched eight ahead | O(log N + objects touched), about one dependent round trip per window of eight pages |
-| rows in key order, `OrderBy` | a merge of each object's key-ordered read. Inside a level above 0 the objects are key-disjoint. An object of an earlier release's periods, in sorted slices, is read slice by slice, each slice decoded once ([rows in key order](12-index-reads.md#5-rows-in-key-order)) | at most 8 + L objects open at once, and a slice of each object in sorted slices |
+| rows in key order, `OrderBy` | a merge of each object's key-ordered read. Inside a level above 0 the objects are key-disjoint ([rows in key order](12-index-reads.md#5-rows-in-key-order)) | at most 8 + L objects open at once |
 | rows by position, `Rows(a, b)` | the row sums of every node | O(log N) plus the objects the range touches |
-| count and rank on the clustering key | objects whose summaries lie wholly inside the range are counted unopened, and the core's exact cover handles the boundary objects | at most level 0's objects plus two per level opened, and in an object in sorted slices the instants of the slice a bound falls in |
+| count and rank on the clustering key | objects whose summaries lie wholly inside the range are counted unopened, and the core's exact cover handles the boundary objects | at most level 0's objects plus two per level opened |
 | an order on another column | no tree helps | one cursor per object the summaries cannot refute |
 | the rows of a slice, in an object written with its slices | the object's slice table and chunk directory ([the rows of a slice](12-index-reads.md#51-the-rows-of-a-slice-without-the-footer)) | a few small requests once per object, then one per slice, and never the object's footer |
 
@@ -652,33 +646,22 @@ idempotent with no identifier the caller chooses, and the commit that applied is
 may act outside the dataset on them. Compactions, indexings and vacuums declare nothing and carry
 the table on, as they carry the rest of the header.
 
-A writer that predates the table would rebuild the header without it and forget every offset at its
-first commit. So a header that carries an offset is written in commit format 3, which such a writer
-refuses, and a dataset whose table is empty, never used or emptied by `ForgetSourcesAsync`, is
-written in format 2 still. Every header carries the whole table, about 30 bytes a source: 256
-sources take 7.5 KiB of the 192 KiB a header keeps for itself and its pages.
+Every header carries the whole table, about 30 bytes a source: 256 sources take 7.5 KiB of the
+192 KiB a header keeps for itself and its pages.
 
-A library that reads format 3 would parse an entry that carries a footer's length as one with deleted
-rows, and refuse it, or worse. So the header names the features of format 4 the dataset's trees use,
-`Features`, and a header that names one is written in commit format 4. The first is entries with
-such fields. A feature stays named in every header after the one that introduced it, since the pages
-that hold its entries stay in the trees, and a dataset that never uses one is written in format 2 or
-3 as before. The others are settings, most fixed when the dataset is created, which a library that
-does not know them would ignore against what the dataset promises: the erasure delay, the identifier
-columns, the shredded paths, the clustering and the tree of rollups. The flag of periods an earlier
-release set stays known, so that its datasets read. Two flags, partition
-columns and joined periods, were retired with them and are never reused. A library refuses a header that names a feature
-it does not know, as it refuses a later format, so that a feature added later is never read as
-nothing; and it refuses one whose flag of clustering and clustering disagree, or that carries a tree
-of rollups it does not name.
+A commit object is written in commit format 5, and a library reads that format alone: a commit of
+another is refused with a message that says whether an earlier release or a later one wrote it, never
+read in part, and a dataset of an earlier format is rebuilt from its rows. Every field of a header of
+format 5 is one each reader of it understands, so a header names no features. Besides the levels and
+the sources, it carries settings, most fixed when the dataset is created: the erasure delay, the
+identifier columns, the shredded paths, the clustering and the tree of rollups. A library refuses a
+header that carries a tree of rollups it does not name. The fields earlier formats held and format 5
+retired are never reused ([the registry](90-registry.md#7-vorticitys-own-formats)).
 
 A dataset clustered by a value (`DatasetOptions.Clustering`) keeps its clustering in every header
 (field 25, flag 128): the function of the key's first column with its unit or width, and the size an
 object aims at, so that every writer cuts alike. The creation refuses a function that does not apply
-to the column's type, and a value without a key. A header an earlier release wrote for a dataset of
-periods also kept its lateness horizon, the length of a period and the changes of it, in fields 19, 21
-and 22: a reader skips them, reads the dataset's periods from its flag alone, and never reuses the
-fields.
+to the column's type, and a value without a key.
 Identifier columns (`DatasetOptions.Identifiers`) name the
 columns whose values questions look up one at a time; each names a column of the schema, once. An
 identifier whose column a change of the schema drops or renames names nothing the writers hold any
@@ -851,8 +834,7 @@ positions, read before anything is written, since the rows a range takes form on
 number.
 
 An application that owes the erasure of deleted rows within a delay declares it,
-`DatasetOptions.ErasureDelay`, when it creates the dataset. Every header carries the delay, in commit
-format 4, so a library that does not know it refuses the dataset rather than keep marks past it. An
+`DatasetOptions.ErasureDelay`, when it creates the dataset. Every header carries the delay. An
 entry then records when its oldest mark was made, and the planner rewrites an object whose oldest mark
 is half the delay old, with every delete gathered since, so that the rewrite has the other half to
 run (`CompactionTrigger.Erasure`). The vector's bytes alone no longer make an object due: the delay
@@ -901,7 +883,7 @@ in the counts' own format ([10-indexes.md](10-indexes.md)). The pass that finds 
 reads the counted columns and their measures for it, and the object's counts are read from its table of
 contents for their measures. A delete after another adds its rows to the earlier ones', entry by entry.
 The counts always lie out of line, written into the commit object that made them as a vector past 256
-bytes is, and the entry names them by reference, field 5 of format 4, 36 bytes. Vacuum keeps the commit
+bytes is, and the entry names them by reference, its field 5, 36 bytes. Vacuum keeps the commit
 object they lie in, a repack moves them, and verify reads them and counts the rows the vector names
 again from the object, which must give the same values, rows and sums. An update counts the rows it
 takes as a delete does. An object marked before its marks were counted, or whose counts changed columns

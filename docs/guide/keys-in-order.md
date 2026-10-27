@@ -74,13 +74,11 @@ KeyPlan plan = await file.Scan<Reading>().Keys(r => r.Day).ExplainAsync();
 ```
 day: source SortedColumn, 1 run, 1000000 entries, rows reachable: True
   turned down SortedRuns: the file carries no index directory
-  turned down Slices: the file carries no index directory
   turned down Postings: it holds keys without rows, which only a Distinct() cursor takes
   turned down Dictionary: it holds keys without rows, which only a Distinct() cursor takes
 ```
 
-Two sources can serve a cursor that returns rows in a file you write yourself, and a third serves the
-objects an earlier release's datasets of periods sorted slice by slice (`Slices`):
+Two sources can serve a cursor that returns rows:
 
 * A sorted column: when the file statistics say a column is sorted, the column is its own index, and
   it costs nothing to write: just order the rows by that column. A seek is a binary search over the

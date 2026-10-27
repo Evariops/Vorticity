@@ -122,9 +122,8 @@ await using VortexDataset events = await VortexDataset.CreateAsync(store, Event.
 An object is then rewritten without its deleted rows once its oldest mark is fifteen days old, by a
 job whose `Trigger` is `Erasure`, and its vector's size alone no longer triggers anything. The old
 object stays readable by the versions the retention keeps, and a vacuum deletes it after them: the
-rows are gone from the store within the delay plus the retention. Every commit of such a dataset is
-written in commit format 4, which earlier releases refuse to open, and a dataset on a locked store
-refuses a delay. A compaction that read an object before a delete marked rows in it finds the object's entry
+rows are gone from the store within the delay plus the retention. A dataset on a locked store refuses
+a delay. A compaction that read an object before a delete marked rows in it finds the object's entry
 changed when it commits, and ends `Abandoned` rather than bringing those rows back.
 
 ## Verify
