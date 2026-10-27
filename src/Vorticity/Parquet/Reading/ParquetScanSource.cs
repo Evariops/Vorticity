@@ -186,7 +186,8 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource, IR
     /// </remarks>
     private protected override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
-        if (spec is { Filter: null, Rows: null, Take: null, Analysis.Live: null, MatchesNothing: false, Options.UseStatistics: true }
+        if (spec is { Filter: null, Rows: null, Take: null, MatchesNothing: false, Options.UseStatistics: true }
+            && spec.Analysis?.Live is null
             && column is not FunctionFieldExpr
             && Leaf(column.Path) is int leaf
             && TryExtremes(leaf, exact: true, out FilterLiteral low, out FilterLiteral high))
