@@ -17,14 +17,16 @@ namespace Vorticity;
 /// <summary>The columns written against an object dictionary: their codes in the chunks, their values once.</summary>
 public sealed partial class VortexFileWriter
 {
-    // Per top-level column, its object dictionary, the type of its codes, the segment its values went to, and what the
-    // dictionary was priced at against what it wrote, and the arena of the codes' types; null for a file that declares none.
+    // Per top-level column, its object dictionary, the type of its codes, the segment its values went to (-1 until they
+    // do), and what the dictionary was priced at against what it wrote; the arena of the codes' types, and the one the
+    // values are written from; null for a file that declares none.
     private ObjectDictionary?[]? _dictionaries;
     private DType[]? _codesTypes;
     private int[]? _dictionarySegments;
     private long[]? _dictionaryPriced;
     private long[]? _dictionaryWritten;
     private DTypeArena? _dictionaryTypes;
+    private CanonicalArena? _dictionaryArena;
 
     /// <summary>
     /// Writes column <paramref name="field"/> against <paramref name="dictionary"/>, its values once and a code a row,
@@ -85,6 +87,12 @@ public sealed partial class VortexFileWriter
         _codesTypes ??= new DType[_fieldCount];
         _dictionaryPriced ??= new long[_fieldCount];
         _dictionaryWritten ??= new long[_fieldCount];
+        if (_dictionarySegments is null)
+        {
+            _dictionarySegments = new int[_fieldCount];
+            _dictionarySegments.AsSpan().Fill(-1);
+        }
+
         _dictionaries[field] = dictionary;
         _codesTypes[field] = (_dictionaryTypes ??= new DTypeArena()).Primitive(dictionary.CodesPType, type.Nullability);
 
@@ -172,35 +180,39 @@ public sealed partial class VortexFileWriter
     private DType ChunkType(int field) =>
         _dictionaries?[field] is not null ? _codesTypes![field] : _isTabular ? _schema.GetField(field) : _schema;
 
-    /// <summary>Writes each object dictionary's values as a segment of their own, right after the data.</summary>
-    private async ValueTask WriteDictionariesAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Writes column <paramref name="field"/>'s object dictionary, its values, as a segment of its own, when the column is
+    /// written against one not written yet: right before the column's first chunk, so that a read of that chunk, the
+    /// column's only one in an object of a few mebibytes, takes the dictionary in the same request.
+    /// </summary>
+    private async ValueTask WriteDictionaryAsync(int field, CancellationToken cancellationToken)
     {
-        if (_dictionaries is not { } dictionaries)
+        if (_dictionaries?[field] is not { } dictionary || _dictionarySegments![field] >= 0)
         {
             return;
         }
 
-        _dictionarySegments = new int[_fieldCount];
-        for (int field = 0; field < dictionaries.Length; field++)
+        // An arena of its own: the scratch one may hold the batch whose rows the column's first chunk takes.
+        CanonicalArena arena = _dictionaryArena ??= new CanonicalArena(64, Session.Options.EnginePool);
+        try
         {
-            _dictionarySegments[field] = -1;
-            if (dictionaries[field] is not { } dictionary)
-            {
-                continue;
-            }
+            using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(
+                Blobs, arena, dictionary.ValuesNode(arena, _schema.GetField(field)), _arrayEncodings, _compress);
+            _dictionaryWritten![field] += blob.Length;
+            _dictionarySegments[field] = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            arena.Reset();
+        }
+    }
 
-            CanonicalArena arena = Scratch();
-            try
-            {
-                using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(
-                    Blobs, arena, dictionary.ValuesNode(arena, _schema.GetField(field)), _arrayEncodings, _compress);
-                _dictionaryWritten![field] += blob.Length;
-                _dictionarySegments[field] = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                arena.Reset();
-            }
+    /// <summary>Writes, after the data, the object dictionaries of the columns no chunk was written of.</summary>
+    private async ValueTask WriteDictionariesAsync(CancellationToken cancellationToken)
+    {
+        for (int field = 0; _dictionaries is not null && field < _fieldCount; field++)
+        {
+            await WriteDictionaryAsync(field, cancellationToken).ConfigureAwait(false);
         }
     }
 

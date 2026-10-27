@@ -98,7 +98,7 @@ there.
 | `vortex.struct` | a child per field | `core2025.05.0` | yes |
 | `vortex.zoned` | a zone map for pruning | `core2026.08.0` | yes, one zone per block |
 | `vortex.stats` | the zone map's predecessor | `core2025.05.0` | no, since no Vortex release ever emitted one |
-| `vortex.dict` | a dictionary shared across a child layout | `core2025.05.0` | no (see [determinism and its limit](11-write-strategy.md#7-determinism-and-its-limit)) |
+| `vortex.dict` | a dictionary shared across a child layout | `core2025.05.0` | an [object dictionary](23-query-architecture.md#54-ordered-object-dictionaries) a dataset's writer declares, its values before the column's first chunk; no other (see [determinism and its limit](11-write-strategy.md#7-determinism-and-its-limit)) |
 | `vortex.list` | elements, offsets and validity stored apart | none, experimental upstream | no |
 
 ## 3. Extension dtypes and aggregates

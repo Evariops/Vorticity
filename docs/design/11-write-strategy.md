@@ -380,9 +380,10 @@ file is valid and reads back value for value, but its size changes. Rewriting an
 column at forced batch counts costs 65 980 bytes in 2 chunks, 92 212 in 3, 146 076 in 5 and 169 860
 in 9, about 26 kB per extra chunk, because each chunk builds and writes its own dictionary of the same
 distinct values. The reference shares one values child across a column's chunks through the
-`vortex.dict` layout, which this writer does not emit. `BatchingSizeTests` pins those numbers as a
-ratchet on a cost known to be bad. A caller who wants the smallest file writes the largest batches it
-can, or gives the column chunks of its own.
+`vortex.dict` layout, which this writer emits only for a column a dataset's writer declares an
+[object dictionary](23-query-architecture.md#54-ordered-object-dictionaries) of. `BatchingSizeTests`
+pins those numbers as a ratchet on a cost known to be bad. A caller who wants the smallest file writes
+the largest batches it can, or gives the column chunks of its own.
 
 ## 8. Choosing encodings ahead: the advisor
 
@@ -488,7 +489,7 @@ is shredded as attributes are, and shown again from its columns and residual, ke
 | rewriting without decoding, passing encoded arrays through | a separate feature, worth an order of magnitude on rewrites and compactions and nothing on first writes |
 | buffering a column for global decisions, or a global sorted index | it breaks streaming and bounds memory by the file. Sorted runs per chunk, merged, give the same answers (see [sorted runs](10-indexes.md#52-vorticitysortedrunsv1-value-to-rows-exact)) |
 | one FSST symbol table shared across chunks | measured at 4.3 % more bytes |
-| the `vortex.dict` layout, one values child per column | what the [determinism limit](#7-determinism-and-its-limit) would need. It changes the bytes of every dictionary column, and has to be weighed on the size ratchet and the cross-check together |
+| the `vortex.dict` layout, one values child per column, for any file | what the [determinism limit](#7-determinism-and-its-limit) would need. It changes the bytes of every dictionary column, and has to be weighed on the size ratchet and the cross-check together; a dataset's writers emit it for the columns whose values they know ahead |
 
 The reference writer this is measured against is `vortex-file`'s strategy and `vortex-btrblocks`'
 schemes at 0.86.1. The kernels follow FastLanes (Afroozeh and Boncz, VLDB 2023) and ALP (Afroozeh,

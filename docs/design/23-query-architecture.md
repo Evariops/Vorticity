@@ -273,7 +273,9 @@ reads these files unchanged.
 - A locating index over a dictionary column stores codes, the dictionary itself being the sorted list of keys.
 
 The writer prices an object dictionary against a dictionary per chunk with the exact formulas it already uses, since an
-object may hold more distinct values than a chunk and need wider codes.
+object may hold more distinct values than a chunk and need wider codes. The dictionary's values lie right before the
+column's first chunk, so that a read of that chunk, the column's only one in an object of a few mebibytes, takes them in
+the same request; the planner prices a column's reads with them.
 
 ### 5.5 Metadata per granule, and locating indexes
 

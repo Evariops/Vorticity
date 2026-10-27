@@ -2256,6 +2256,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             if (Codes(field))
             {
+                // The column's values, right before its first chunk.
+                await WriteDictionaryAsync(field, cancellationToken).ConfigureAwait(false);
                 _written[field].Add(nameof(EncodingHint.Dictionary));
                 _dictionaryWritten![field] += blob.Length;
             }
@@ -2516,7 +2518,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
 
-        // The values of the columns written against an object dictionary, once each, with the data.
+        // The values of a column written against an object dictionary went out before its first chunk; those of a column
+        // no chunk was written of, after the data.
         await WriteDictionariesAsync(cancellationToken).ConfigureAwait(false);
 
         // The last runs, after the last data segment and before the zone maps: the generation the
