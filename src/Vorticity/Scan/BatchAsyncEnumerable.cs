@@ -1795,43 +1795,95 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private byte _push = PushUnasked;
 
     /// <summary>
-    /// The one comparison this scan may offer to an encoding, or null when it has none to offer.
+    /// The predicate this scan offers to an encoding, worked out at the first ask: null before it,
+    /// <see cref="NoPush"/> when the filter is none an encoding answers.
+    /// </summary>
+    private PushPlan? _pushPlan;
+
+    /// <summary>A filter no encoding answers.</summary>
+    private static readonly PushPlan NoPush = new PushPlan(null!, null!);
+
+    /// <summary>The most members of an <c>IN</c> offered to an encoding: past them, a hash of the decoded rows.</summary>
+    private const int MostPushedMembers = 4_096;
+
+    /// <summary>
+    /// The one predicate this scan may offer to an encoding, or null when it has none to offer.
     /// </summary>
     /// <remarks>
-    /// Derived rather than stored: these paths are held to a ceiling in bytes and the test is two
-    /// type checks on a reference the enumerator already holds. The conditions are narrow on
-    /// purpose. A conjunction is not pushed because answering one arm does not select the rows, a
-    /// take is not pushed because its own selection already owns the row space, and a dotted path
-    /// is not pushed because only the struct reader resolves one and it resolves a name.
+    /// Worked out once a scan, an object of it held for every split: the predicate carries what
+    /// an encoding of integers answers by, worked out from its literals once. The conditions are
+    /// narrow on purpose. A conjunction is not pushed because answering one arm does not select the
+    /// rows, unless both arms bound the same column, which is a range; a take is not pushed because
+    /// its own selection already owns the row space; a dotted path is not pushed because only the
+    /// struct reader resolves one and it resolves a name; and a function of a column is not the
+    /// column, whose encoding answers for its own values.
     /// <para>
-    /// A prefix match is offered too, as the one string match an encoding answers from a part of
-    /// each value: a compressed string has to be decompressed only as far as the prefix is long.
+    /// A set and a prefix match are offered too: a set is a range of codes or of packed values
+    /// tested as it is unpacked, and a compressed string has to be decompressed only as far as a
+    /// prefix is long.
     /// </para>
     /// </remarks>
-    private PushedPredicate? Pushable()
+    private PushPlan? Pushable()
     {
         if (_take is not null || _filterProven)
         {
             return null;
         }
 
-        return _evaluator?.Filter switch
-        {
-            // A function of the column is not the column, whose encoding answers for its own values.
-            ComparisonExpr comparison when comparison.Field.SegmentsUtf8.Length == 1 && comparison.Field is not Compute.FunctionFieldExpr =>
-                new PushedPredicate(comparison.Field, comparison.Op, comparison.Value, Prefix: false),
-            StringMatchExpr { Op: StringMatchOp.StartsWith } match
-                when match.Field.SegmentsUtf8.Length == 1 && match.Pattern.Kind == FilterLiteralKind.Bytes =>
-                new PushedPredicate(match.Field, ComparisonOp.Equal, match.Pattern, Prefix: true),
-            _ => null,
-        };
+        PushPlan plan = _pushPlan ??= PlanPush(_evaluator?.Filter);
+        return ReferenceEquals(plan, NoPush) ? null : plan;
     }
 
-    /// <summary>
-    /// A predicate an encoding may answer: a comparison of a top-level field, or when
-    /// <paramref name="Prefix"/> a prefix match of it on <paramref name="Literal"/>.
-    /// </summary>
-    private readonly record struct PushedPredicate(FieldExpr Field, ComparisonOp Op, FilterLiteral Literal, bool Prefix);
+    /// <summary>The predicate <paramref name="filter"/> offers an encoding, or <see cref="NoPush"/>.</summary>
+    private static PushPlan PlanPush(VortexExpr? filter)
+    {
+        switch (filter)
+        {
+            case ComparisonExpr comparison when comparison.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 }:
+                return new PushPlan(comparison.Field, Compute.EncodedPredicate.Compare(comparison.Op, comparison.Value));
+
+            case LogicalExpr { IsAnd: true, Left: ComparisonExpr left, Right: ComparisonExpr right }
+                when left.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 }
+                    && right.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 }
+                    && left.Field.SegmentsUtf8[0].AsSpan().SequenceEqual(right.Field.SegmentsUtf8[0]):
+                // A range: one arm a low bound and the other a high one, in either order.
+                (ComparisonExpr? low, ComparisonExpr? high) = IsLow(left.Op) && IsHigh(right.Op) ? (left, right)
+                    : IsLow(right.Op) && IsHigh(left.Op) ? (right, left)
+                    : (null, null);
+                return low is null || high is null
+                    ? NoPush
+                    : Numeric(left.Field, Compute.EncodedPredicate.Between(
+                        low.Value, low.Op == ComparisonOp.GreaterOrEqual, high.Value, high.Op == ComparisonOp.LessOrEqual));
+
+            case InExpr set when set.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 } && set.Literals.Length <= MostPushedMembers:
+                return Numeric(set.Field, Compute.EncodedPredicate.In(set.Literals));
+
+            case StringMatchExpr { Op: StringMatchOp.StartsWith } match
+                when match.Field is ColumnFieldExpr { SegmentsUtf8.Length: 1 } && match.Pattern.Kind == FilterLiteralKind.Bytes:
+                return new PushPlan(match.Field, Compute.EncodedPredicate.Prefix(match.Pattern));
+
+            default:
+                return NoPush;
+        }
+
+        static bool IsLow(ComparisonOp op) => op is ComparisonOp.Greater or ComparisonOp.GreaterOrEqual;
+        static bool IsHigh(ComparisonOp op) => op is ComparisonOp.Less or ComparisonOp.LessOrEqual;
+
+        // A range or a set of numbers: the encodings of integers answer them, and none answers one of bytes, whose
+        // first split would decode the column for nothing.
+        static PushPlan Numeric(FieldExpr field, Compute.EncodedPredicate predicate) =>
+            predicate.Integers is null && predicate.Members is null ? NoPush : new PushPlan(field, predicate);
+    }
+
+    /// <summary>A predicate an encoding may answer, on a top-level field.</summary>
+    private sealed class PushPlan(FieldExpr field, Compute.EncodedPredicate predicate)
+    {
+        /// <summary>The field.</summary>
+        internal FieldExpr Field { get; } = field;
+
+        /// <summary>The predicate on it.</summary>
+        internal Compute.EncodedPredicate Predicate { get; } = predicate;
+    }
 
     /// <summary>
     /// Offers the comparison to the predicate's column and, when its encoding answers, reads the
@@ -1844,7 +1896,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// do. When it declines, the first pass has decoded that one column for nothing, once, and no
     /// split of this scan asks again.
     /// </remarks>
-    private int ExecutePushed(Lane lane, RowRange split, PushedPredicate pushable)
+    private int ExecutePushed(Lane lane, RowRange split, PushPlan pushable)
     {
         ScanContext context = lane.Context;
 
@@ -1862,8 +1914,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         FieldMask only = FieldMask.Single(field);
-        (byte[]? Field, ComparisonOp Op, FilterLiteral Literal, bool Prefix) saved =
-            context.ExchangePushedPredicate(name, pushable.Op, pushable.Literal, pushable.Prefix);
+        (byte[]? Field, Compute.EncodedPredicate? Predicate) saved =
+            context.ExchangePushedPredicate(name, pushable.Predicate);
         int answer;
         FilterWindow(context, split);
         try
@@ -1872,7 +1924,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         finally
         {
-            context.ExchangePushedPredicate(saved.Field, saved.Op, saved.Literal, saved.Prefix);
+            context.ExchangePushedPredicate(saved.Field, saved.Predicate);
             ProjectionWindow(context, split);
         }
 

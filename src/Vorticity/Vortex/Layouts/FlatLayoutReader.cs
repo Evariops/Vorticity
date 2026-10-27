@@ -968,11 +968,12 @@ internal sealed class FlatLayoutReader : LayoutReader
             return false;
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
+        ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(total, 1)));
         try
         {
-            Span<byte> states = rented.AsSpan(0, total);
-            if (!Asked(decoder, in root, node.DType, total, context, states))
+            int words = Compute.PredicateBits.WordsOf(total);
+            Compute.PredicateBits bits = new Compute.PredicateBits(rented.AsSpan(0, words), rented.AsSpan(words, words), total);
+            if (!decoder.TryEvaluate(context.Decode, in root, node.DType, total, context.PushedPredicate!, ref bits))
             {
                 return false;
             }
@@ -987,7 +988,7 @@ internal sealed class FlatLayoutReader : LayoutReader
                 retained = -1;
                 try
                 {
-                    retained = Answer(context, states, total);
+                    retained = Answer(context, ref bits);
                 }
                 finally
                 {
@@ -1002,23 +1003,16 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
         }
     }
 
-    /// <summary>Asks the encoding the pushed predicate: the comparison, or the prefix match.</summary>
-    private static bool Asked(
-        ArrayDecoder decoder, in ArrayNode root, Types.DType dtype, int total, ScanContext context, Span<byte> states) =>
-        context.PushedPrefix
-            ? decoder.TryStartsWith(context.Decode, in root, dtype, total, context.PushedLiteral, states)
-            : decoder.TryCompare(context.Decode, in root, dtype, total, context.PushedOp, context.PushedLiteral, states);
-
     /// <summary>
-    /// Offers the pushed comparison to this node's encoding, and turns an answer into the column.
+    /// Offers the pushed predicate to this node's encoding, and turns an answer into the column.
     /// </summary>
     /// <param name="root">The node's parsed array root.</param>
     /// <param name="node">The flat layout node.</param>
-    /// <param name="context">The scan context carrying the comparison.</param>
+    /// <param name="context">The scan context carrying the predicate.</param>
     /// <param name="total">The node's row count.</param>
     /// <returns>The canonical node holding the answer, or -1 when the encoding declined.</returns>
     /// <remarks>
@@ -1038,63 +1032,57 @@ internal sealed class FlatLayoutReader : LayoutReader
             return -1;
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
+        ulong[] rented = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(total, 1)));
         try
         {
-            Span<byte> states = rented.AsSpan(0, total);
-            if (!Asked(decoder, in root, node.DType, total, context, states))
+            int words = Compute.PredicateBits.WordsOf(total);
+            Compute.PredicateBits bits = new Compute.PredicateBits(rented.AsSpan(0, words), rented.AsSpan(words, words), total);
+            if (!decoder.TryEvaluate(context.Decode, in root, node.DType, total, context.PushedPredicate!, ref bits))
             {
                 return -1;
             }
 
             context.PredicateAnswered = true;
-            return Answer(context, states, total);
+            return Answer(context, ref bits);
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(rented);
         }
     }
 
-    /// <summary>Builds the <c>Bool</c> column one run of trilean states means.</summary>
+    /// <summary>Builds the <c>Bool</c> column an encoding's answer means: its truth, and its known rows as validity.</summary>
     /// <param name="context">The scan context owning the arena.</param>
-    /// <param name="states">One state per row.</param>
-    /// <param name="total">The row count.</param>
+    /// <param name="bits">The answer.</param>
     /// <returns>The canonical node's index.</returns>
     /// <remarks>
-    /// Two bitmaps out of one byte array, and the second one only when a row is unknown: a
-    /// comparison over a column with no null answers no unknown, and a validity bitmap nobody needs
-    /// is a block rented and cleared for nothing.
+    /// The second bitmap only when a row is unknown: a comparison over a column with no null
+    /// answers no unknown, and a validity bitmap nobody needs is a block allocated for nothing.
     /// </remarks>
-    private static int Answer(ScanContext context, ReadOnlySpan<byte> states, int total)
+    private static int Answer(ScanContext context, ref Compute.PredicateBits bits)
     {
         Arrays.CanonicalArena arena = context.Canonical;
-        states = states[..total];
-
-        // Whole words, every one written: the first here in case there is no row, the rest by the
-        // kernel, which leaves the bits past the rows clear.
-        int bytes = Math.Max((total + 63) >> 6, 1) * sizeof(ulong);
-        VortexBuffer truth = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> bits);
-        Span<ulong> truthWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bits);
+        int total = bits.Rows;
+        int bytes = Math.Max(bits.Truth.Length, 1) * sizeof(ulong);
+        VortexBuffer truth = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> truthBytes);
+        Span<ulong> truthWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(truthBytes);
         truthWords[0] = 0;
-        Compute.Trilean.ToWords(states, Compute.Trilean.True, equal: true, truthWords);
-        bool unknown = states.Contains(Compute.Trilean.Unknown);
+        bits.Truth.CopyTo(truthWords);
 
         Validity validity = Validity.NonNullable;
-        if (unknown)
+        if (bits.Unknown)
         {
-            VortexBuffer known = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> valid);
-            Span<ulong> knownWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(valid);
+            VortexBuffer known = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> knownBytes);
+            Span<ulong> knownWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(knownBytes);
             knownWords[0] = 0;
-            Compute.Trilean.ToWords(states, Compute.Trilean.Unknown, equal: false, knownWords);
-
+            bits.Known.CopyTo(knownWords);
             validity = Validity.Bitmap(arena.AddBool(
                 context.Types.Bool(Types.Nullability.NonNullable), total, Validity.NonNullable,
                 known, 0));
         }
 
         return arena.AddBool(
-            context.Types.Bool(unknown ? Types.Nullability.Nullable : Types.Nullability.NonNullable),
+            context.Types.Bool(bits.Unknown ? Types.Nullability.Nullable : Types.Nullability.NonNullable),
             total, validity, truth, 0);
     }
 

@@ -379,7 +379,7 @@ internal readonly ref struct Patches
     /// </remarks>
     public static Patches Create(
         ArrayDecodeContext ctx,
-        in PatchesMetadata metadata,
+        scoped in PatchesMetadata metadata,
         int arrayLength,
         int indicesNodeIndex,
         int valuesNodeIndex,

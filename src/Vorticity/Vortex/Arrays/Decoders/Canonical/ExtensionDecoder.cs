@@ -47,6 +47,30 @@ internal sealed class ExtensionDecoder : ArrayDecoder
         return context.Canonical.AddExtension(dtype, length, storageIndex);
     }
 
+    /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <summary>
+    /// Asks the storage: a filter on an extension compares its storage, the column under a label,
+    /// so a timestamp's comparison is its integers', answered by their encoding.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        EncodingMetadata.RequireEmpty(node.Metadata, Id);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 1, Id);
+        CanonicalSupport.RequireKind(dtype, DTypeKind.Extension, Id);
+
+        DType storageDType = dtype.StorageType;
+        ValidateExtensionDType(dtype, storageDType, context.Scan.HasFile ? context.Scan.File.Session.Options.Extensions : null);
+        return context.TryEvaluateChild(in node, 0, storageDType, length, predicate, ref bits);
+    }
+
     /// <summary>
     /// Resolves the extension id and parses its metadata against the storage dtype. An extension
     /// neither built in nor registered on the session fails here, when the field is first used,

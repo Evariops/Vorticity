@@ -64,22 +64,39 @@ internal sealed class DictDecoder : ArrayDecoder
     /// cannot hold the literal before they are read, while this answers the rows of a chunk that
     /// was read. The two compose, and share one decode of the values child.
     /// </para>
+    /// <para>
+    /// A prefix match is answered as a comparison is: the distinct values matched once, the answers
+    /// spread over the rows by their codes.
+    /// </para>
     /// </remarks>
-    public override bool TryCompare(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination) =>
-        TryAnswer(context, in node, dtype, length, op, literal, prefix: false, destination);
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        bool prefix = predicate.Kind == Compute.EncodedPredicateKind.Prefix;
+        if (!(predicate.Kind == Compute.EncodedPredicateKind.Compare
+            || (prefix && predicate.Literal.Kind == Expressions.FilterLiteralKind.Bytes && dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary)))
+        {
+            return false;
+        }
 
-    /// <summary>
-    /// Answers a prefix match as a comparison is answered: the distinct values matched once, the
-    /// answers spread over the rows by their codes.
-    /// </summary>
-    /// <inheritdoc/>
-    public override bool TryStartsWith(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.FilterLiteral literal, Span<byte> destination) =>
-        literal.Kind == Expressions.FilterLiteralKind.Bytes && dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary &&
-        TryAnswer(context, in node, dtype, length, Expressions.ComparisonOp.Equal, literal, prefix: true, destination);
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
+        try
+        {
+            Span<byte> states = rented.AsSpan(0, length);
+            if (!TryAnswer(context, in node, dtype, length, predicate.Op, predicate.Literal, prefix, states))
+            {
+                return false;
+            }
+
+            bits.FromStates(states);
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
 
     private static bool TryAnswer(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,

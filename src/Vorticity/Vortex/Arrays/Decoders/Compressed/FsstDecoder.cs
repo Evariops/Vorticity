@@ -41,6 +41,40 @@ internal sealed class FsstDecoder : ArrayDecoder
     public override bool EvaluatesWithoutFullDecode => true;
 
     /// <summary>
+    /// Answers an equality, its negation or a prefix on the codes (<see cref="CompareStates"/>,
+    /// <see cref="PrefixStates"/>), a state a row; anything else declines.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        if (predicate.Kind is not (Compute.EncodedPredicateKind.Compare or Compute.EncodedPredicateKind.Prefix))
+        {
+            return false;
+        }
+
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
+        try
+        {
+            Span<byte> states = rented.AsSpan(0, length);
+            bool answered = predicate.Kind == Compute.EncodedPredicateKind.Prefix
+                ? PrefixStates(context, in node, dtype, length, predicate.Literal, states)
+                : CompareStates(context, in node, dtype, length, predicate.Op, predicate.Literal, states);
+            if (answered)
+            {
+                bits.FromStates(states);
+            }
+
+            return answered;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
     /// Answers an equality by compressing the literal and comparing code for code, so the column is
     /// never decompressed.
     /// </summary>
@@ -66,7 +100,7 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// heap here.
     /// </para>
     /// </remarks>
-    public override bool TryCompare(
+    private static bool CompareStates(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
         Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination)
     {
@@ -136,7 +170,7 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// </summary>
     /// <remarks>
     /// <para>
-    /// It rests on the rule <see cref="TryCompare"/> rests on, that compression takes the longest
+    /// It rests on the rule <see cref="CompareStates"/> rests on, that compression takes the longest
     /// symbol matching at each position; <see cref="FsstPrefix"/> says why that fixes the codes a
     /// row starting with the prefix opens with.
     /// </para>
@@ -146,8 +180,7 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// decoding each row only as far as the prefix, and the views over it, are not built at all.
     /// </para>
     /// </remarks>
-    /// <inheritdoc/>
-    public override bool TryStartsWith(
+    private static bool PrefixStates(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
         Expressions.FilterLiteral literal, Span<byte> destination)
     {

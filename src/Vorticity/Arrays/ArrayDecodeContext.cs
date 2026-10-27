@@ -207,6 +207,27 @@ internal sealed class ArrayDecodeContext
         return DecodeNode(in child, childDType, childLength);
     }
 
+    /// <summary>
+    /// Asks child <paramref name="childIndex"/> of <paramref name="node"/> to answer <paramref name="predicate"/> over its
+    /// rows without decoding them, as a parent whose rows are its child's under a label or a transform moves a predicate
+    /// into the child's domain: false when the child's encoding declines.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's DType.</param>
+    /// <param name="childLength">The child's row count.</param>
+    /// <param name="predicate">The predicate, in the child's domain.</param>
+    /// <param name="bits">Receives the child's answer.</param>
+    internal bool TryEvaluateChild(
+        in ArrayNode node, int childIndex, DType childDType, int childLength, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        ArrayDecoder decoder = ArrayDecoderTable.Require(_scan, child.Encoding, child.EncodingSpecIndex);
+        return decoder.EvaluatesWithoutFullDecode
+            && decoder.TryEvaluate(this, in child, childDType, childLength, predicate, ref bits);
+    }
+
     /// <summary>Whether <paramref name="node"/>'s encoding decodes a range of its rows, children included.</summary>
     /// <param name="node">The node.</param>
     internal bool DecodesRange(in ArrayNode node) =>

@@ -690,21 +690,17 @@ internal sealed class ScanContext : IDisposable
         internal long Base { get; }
     }
 
-    /// <summary>The pushed comparison, held behind one reference rather than in three fields.</summary>
+    /// <summary>The pushed predicate and the projection's fields, held behind one reference rather than inline.</summary>
     /// <remarks>
-    /// A <see cref="Expressions.FilterLiteral"/> is a wide value and this context is allocated once
-    /// per lane of every scan, filtered or not: inline, the three fields cost thirty-two bytes on
-    /// every scan in the process to serve the few that push. Behind a reference they cost eight,
-    /// and the holder is allocated once for a scan that pushes and reused by each of its splits.
+    /// This context is allocated once per lane of every scan, filtered or not: inline, the fields
+    /// would cost every scan in the process to serve the few that push. Behind a reference they
+    /// cost eight bytes, and the holder is allocated once for a scan that pushes and reused by each
+    /// of its splits; the predicate itself is the scan's, built once.
     /// </remarks>
     private sealed class Pushed
     {
         internal byte[]? Field;
-        internal Expressions.ComparisonOp Op;
-        internal Expressions.FilterLiteral Literal;
-
-        /// <summary>Whether the predicate is <c>StartsWith(Literal)</c> rather than <c>Op</c>.</summary>
-        internal bool Prefix;
+        internal Compute.EncodedPredicate? Predicate;
         internal Layouts.FieldMask Fields;
         internal bool FieldsHonoured;
         internal ulong EncodedFields;
@@ -713,7 +709,7 @@ internal sealed class ScanContext : IDisposable
     private Pushed? _pushed;
 
     /// <summary>
-    /// The comparison this pass may let an encoding answer instead of decoding, or
+    /// The column whose predicate this pass may let an encoding answer instead of decoding, or
     /// <see langword="null"/> when there is none.
     /// </summary>
     /// <remarks>
@@ -724,17 +720,8 @@ internal sealed class ScanContext : IDisposable
     /// </remarks>
     internal ReadOnlySpan<byte> PushedField => _pushed?.Field;
 
-    /// <summary>The comparison of <see cref="PushedField"/>.</summary>
-    internal Expressions.ComparisonOp PushedOp => _pushed!.Op;
-
-    /// <summary>The right-hand side of <see cref="PushedField"/>'s comparison.</summary>
-    internal Expressions.FilterLiteral PushedLiteral => _pushed!.Literal;
-
-    /// <summary>
-    /// Whether the pushed predicate is a prefix match, <c>StartsWith(PushedLiteral)</c>, in which
-    /// case <see cref="PushedOp"/> means nothing.
-    /// </summary>
-    internal bool PushedPrefix => _pushed!.Prefix;
+    /// <summary>The predicate on <see cref="PushedField"/>: a comparison, a range, a set or a prefix.</summary>
+    internal Compute.EncodedPredicate? PushedPredicate => _pushed?.Predicate;
 
     /// <summary>
     /// Whether the reader running right now is inside the column <see cref="PushedField"/> names.
@@ -815,24 +802,18 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
-    /// Replaces the pushed comparison and returns what was there, for the driver to restore.
+    /// Replaces the pushed predicate and returns what was there, for the driver to restore.
     /// </summary>
     /// <param name="field">The field's name, UTF-8, or <see langword="null"/> to clear it.</param>
-    /// <param name="op">The comparison.</param>
-    /// <param name="literal">Its right-hand side.</param>
-    /// <param name="prefix">Whether the predicate is a prefix match on <paramref name="literal"/> instead.</param>
+    /// <param name="predicate">The predicate on it.</param>
     /// <returns>The previous predicate.</returns>
-    internal (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal, bool Prefix)
-        ExchangePushedPredicate(
-            byte[]? field, Expressions.ComparisonOp op, Expressions.FilterLiteral literal, bool prefix)
+    internal (byte[]? Field, Compute.EncodedPredicate? Predicate) ExchangePushedPredicate(
+        byte[]? field, Compute.EncodedPredicate? predicate)
     {
         Pushed held = _pushed ??= new Pushed();
-        (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal, bool Prefix) previous =
-            (held.Field, held.Op, held.Literal, held.Prefix);
+        (byte[]? Field, Compute.EncodedPredicate? Predicate) previous = (held.Field, held.Predicate);
         held.Field = field;
-        held.Op = op;
-        held.Literal = literal;
-        held.Prefix = prefix;
+        held.Predicate = predicate;
         return previous;
     }
 
@@ -1705,8 +1686,7 @@ internal sealed class ScanContext : IDisposable
         if (_pushed is { } pushed)
         {
             pushed.Field = null;
-            pushed.Op = default;
-            pushed.Literal = default;
+            pushed.Predicate = null;
             pushed.Fields = Layouts.FieldMask.All;
             pushed.FieldsHonoured = false;
         }
