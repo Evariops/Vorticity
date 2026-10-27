@@ -106,22 +106,35 @@ public sealed partial class DatasetGranuleStatsTests
             }
 
             // The text and the columns of few values list their values; the instant and the latency, whose values hardly
-            // repeat, are measures alone.
-            foreach (int field in (int[])[0, 2, 3, 4, 6])
+            // repeat, are measures alone. The sources and the endpoints lie in a few granules each and keep a locate; every
+            // status and code lies in nearly every granule, which a locate would spare none of, and they keep none.
+            foreach (int field in (int[])[0, 2, 3, 4])
             {
                 Assert.True(stats[field]!.HoldsValueLists, $"column {field} lists no values");
-                Assert.True(field == 6 ? locates[field] is null : locates[field] is not null, $"column {field}'s locate");
+                Assert.True(field is 0 or 2 ? locates[field] is not null : locates[field] is null, $"column {field}'s locate");
             }
 
-            // The route, of more values than a granule lists and lying everywhere, keeps no locate.
+            // The route, of more values than a granule lists and lying everywhere, keeps no locate, and its values only where a
+            // granule, a short one, lists them.
             Assert.Null(locates[1]);
             Assert.Null(locates[5]);
+            Assert.Null(locates[6]);
             Assert.Equal(MeasureKind.Signed, stats[1]!.Measure);
             Assert.Equal(MeasureKind.Float, stats[5]!.Measure);
             Assert.Null(stats[3]!.Measure);
             Assert.Null(stats[0]!.Measure);
             Assert.Equal(MeasureKind.Signed, stats[6]!.Measure);
-            Assert.Contains(Enumerable.Range(0, cut.Count), g => stats[6]!.Distinct![g] > GranuleStats.ListedValues);
+            Assert.True(!stats[6]!.HoldsValueLists || Enumerable.Range(0, cut.Count).Any(g => stats[6]!.Distinct![g] <= GranuleStats.ListedValues));
+
+            // The table of contents says the rows of the granules that list each column's values.
+            for (int field = 0; field < fields.Length; field++)
+            {
+                GranuleStats column = stats[field]!;
+                long listing = column.HoldsValueLists
+                    ? Enumerable.Range(0, cut.Count).Where(g => column.Distinct![g] <= GranuleStats.ListedValues).Sum(g => cut.Rows[g])
+                    : 0;
+                Assert.Equal(listing, contents.ListedRowsOf(field));
+            }
 
             for (int field = 0; field < fields.Length; field++)
             {
@@ -154,8 +167,19 @@ public sealed partial class DatasetGranuleStatsTests
             // The shared endpoint lies everywhere, each source's own where its source does.
             ColumnLocate endpoints = locates[2]!;
             Assert.True(endpoints.IsEverywhere(endpoints.Find("/health"u8)));
+            // A source lies everywhere where its rows fill more than three granules in four, as a large one's may.
             ColumnLocate sources = locates[0]!;
-            Assert.All(Enumerable.Range(0, sources.Values.Count), place => Assert.False(sources.IsEverywhere(place) && sources.Values.Count > 2));
+            long most = sources.Granules - (sources.Granules / 4);
+            for (int place = 0; place < sources.Values.Count; place++)
+            {
+                string value = Convert.ToHexString(sources.Values[place]);
+                long holding = Enumerable.Range(0, stored.Length)
+                    .Where(row => Convert.ToHexString(BytesOf(stored[row], 0)!) == value)
+                    .Select(row => row / sources.GranuleRows)
+                    .Distinct()
+                    .LongCount();
+                Assert.Equal(holding > most, sources.IsEverywhere(place));
+            }
         }
 
         Console.WriteLine(

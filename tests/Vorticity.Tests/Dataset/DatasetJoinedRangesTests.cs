@@ -1,5 +1,5 @@
 // The ranges a question on one clustered value reads of an object store: each column it reads asked apart, the columns
-// between them never bridged, under the rule a request's cost sets (SegmentReadOptions.Remote).
+// between them never bridged, under the rule a request's cost sets (CostProfile.Remote, a store in memory's by default).
 //
 // THE ORACLE IS THE COLUMNS' BYTES: the bytes a question asks are those of the columns it reads, and its requests one a
 // column and an object.
@@ -19,7 +19,7 @@ public sealed partial class DatasetJoinedRangesTests
 
     /// <summary>
     /// Tenants cut into objects of their own, of some 100 000 rows each: two narrow columns apart by a wide one of some
-    /// 800 KB, wider than a gap a request bridges. A count by both of one tenant reads the narrow columns of the tenant's
+    /// 700 KB, wider than a gap a request bridges. A count by both of one tenant reads the narrow columns of the tenant's
     /// object in requests apart, and not the wide column between them, which a bridge of a mebibyte read.
     /// </summary>
     [Fact]
@@ -65,12 +65,13 @@ public sealed partial class DatasetJoinedRangesTests
         List<Total> answers = await question.As<Total>().ToRecordsAsync(Ct).ToListAsync(Ct);
         Assert.Equal(40, answers.Count);
 
-        // Each object's sheet, which proves the tenant absent from the other three; the tenant's object opened; then its data in
-        // two reads, the columns before the wide one joined across gaps under 256 KiB, then the narrow column after it. The wide
-        // column between, some 800 KB, is not read: a bridge of a mebibyte read the whole object in one request.
+        // The other three tenants' objects, whose keys refute the filter, are not read. The tenant's: its sheet and the marks of
+        // its columns; its open, whose tail holds the narrow column after the wide one; its filter's column alone; then the
+        // columns before the wide one joined across gaps under 256 KiB. The wide column, some 700 KB, is not read: a bridge of
+        // a mebibyte read the whole object in one request.
         long reads = store.CountOf(ObjectOperation.Read);
         Console.WriteLine($"JOINED: {objects} objects, {reads} reads, {store.BytesRead:N0} bytes of an object of {largest:N0}, {question.Metrics.BytesRequested:N0} requested");
-        Assert.Equal(objects + 1 + 2, reads);
+        Assert.Equal(5, reads);
         Assert.True(store.BytesRead < largest / 2, $"{store.BytesRead} bytes read of an object of {largest}: the wide column was bridged");
     }
 
