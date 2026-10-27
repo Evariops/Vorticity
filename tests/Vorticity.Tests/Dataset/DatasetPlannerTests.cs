@@ -72,12 +72,15 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
     public async Task AWindowThatCutsAnObjectReadsItsRows()
     {
         // Cut at 37.5 and 155.25 minutes, the window holds the second hour's object whole, whose counts answer, and reads the
-        // rows of the two it cuts; on the hours, it holds its two objects whole.
+        // rows of the two it cuts; on the hours, it holds its two objects whole, which their synopses answer: their counts or
+        // the statistics of their granules, whichever weighs less.
         await using VortexDataset dataset = await VortexDataset.OpenAsync(_fixture.Store, Options(), Ct);
         ScanPlan plan = await Ask(dataset, "measures by service, an unaligned window", synopses: true).ExplainAsync(analyze: true, Ct);
         Assert.Equal(1, plan.Units.Count(step => step.Alternative == "counts"));
+        Assert.Equal(2, plan.Units.Count(step => step.Alternative == "rows"));
         ScanPlan aligned = await Ask(dataset, "count by service, an aligned window", synopses: true).ExplainAsync(analyze: true, Ct);
-        Assert.Equal(2, aligned.Units.Count(step => step.Alternative == "counts"));
+        Assert.Equal(2, aligned.Units.Length);
+        Assert.All(aligned.Units, step => Assert.Contains(step.Alternative, (string[])["counts", "granules"]));
     }
 
     // Questions drawn at random on the tables DatasetCountsTests draws, columns of every kind and nulls among them: a key

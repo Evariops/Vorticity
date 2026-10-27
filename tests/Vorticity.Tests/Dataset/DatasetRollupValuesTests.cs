@@ -1,14 +1,15 @@
 // The rollups' totals of a column of many values, read in part under the few values a question asks.
 //
 // WHAT IS HELD: over six hours of hits on 1,000 routes, each with four measures, cut by the hour and rolled up, a question
-// of one route or two by the hour takes the rollups that hold an hour, and reads of each its totals' header, then the
-// chunks that hold the routes asked, side by side with their sketches' for a quantile, two requests a rollup; its answer
-// is the rows'. A count of one route reads less than half the bytes of the rollups' totals whole, and a second ask of the
-// handle reads nothing. A question of every route reads the totals whole.
+// of one route or two by the hour takes rollups, and reads of each the header of its totals or of its counts by bucket,
+// then the chunks that hold the routes asked, two requests a rollup; its answer is the rows'. A count of one route reads
+// less than half the bytes of the rollups' regions whole, and a second ask of the handle reads nothing. A question of every
+// route reads the totals whole. A median by a route, whose values hold 24 to 72 rows each, finds no sketches, which a
+// column keeps where its values hold 256 rows each, and reads rows.
 //
-// WHY ONLY ONE ROUTE'S BYTES: a read bridges segments under 1 MiB apart, so that two routes' chunks, or a chunk of the
-// counts and those of their sketches, which follow them, come with what lies between; totals of megabytes, a day's of a
-// busy service, leave them apart.
+// WHY THE MEMORY PROFILE: totals of tens of kilobytes, priced by their bytes alone. At a remote request's price, an
+// hour's counts read whole in one request weigh less than a rollup's header and chunks in two: the part read pays for
+// totals of megabytes, a day's of a busy service.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -56,13 +57,15 @@ public sealed partial class DatasetRollupValuesTests : IClassFixture<DatasetRoll
         long again = store.Requests;
 
         UnitStep[] rolled = [.. plan.Units.Where(step => step.Alternative == "rollup")];
-        int inPart = rolled.Count(step => step.Detail.StartsWith("the header of the totals", StringComparison.Ordinal));
+        int inPart = rolled.Count(step => step.Detail.StartsWith("the header of the", StringComparison.Ordinal));
+        List<RollupEntry> rollups = await RollupsAsync(dataset);
         long whole = 0;
-        foreach (RollupEntry rollup in await RollupsAsync(dataset))
+        foreach (UnitStep step in rolled)
         {
-            if (rolled.Any(step => step.Unit == rollup.Key))
+            bool buckets = step.Detail.Contains("by bucket", StringComparison.Ordinal);
+            foreach (RollupColumn column in rollups.Single(rollup => rollup.Key == step.Unit).Columns)
             {
-                whole += rollup.Columns.Sum(column => column.Counts.Length + (question.StartsWith("median", StringComparison.Ordinal) ? column.Sketches?.Length ?? 0 : 0));
+                whole += buckets ? column.BucketCounts?.Length ?? 0 : column.Counts.Length;
             }
         }
 
@@ -72,6 +75,12 @@ public sealed partial class DatasetRollupValuesTests : IClassFixture<DatasetRoll
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
         Assert.Equal(0, again);
+        if (question.StartsWith("median", StringComparison.Ordinal))
+        {
+            Assert.Empty(rolled);
+            return;
+        }
+
         Assert.NotEmpty(rolled);
         if (question == "count by route")
         {
@@ -88,6 +97,7 @@ public sealed partial class DatasetRollupValuesTests : IClassFixture<DatasetRoll
             Assert.True(bytes * 2 < whole, $"{bytes} bytes read, {whole} for the rollups' regions whole");
         }
     }
+
 
     private static async Task<List<RollupEntry>> RollupsAsync(VortexDataset dataset)
     {
@@ -141,6 +151,7 @@ public sealed partial class DatasetRollupValuesTests : IClassFixture<DatasetRoll
         SheetObjectBytes = 0,
         ContentsObjectBytes = 0,
         RollupFanout = 2,
+        CostProfile = Vorticity.IO.CostProfile.Memory,
     };
 
     /// <summary>
