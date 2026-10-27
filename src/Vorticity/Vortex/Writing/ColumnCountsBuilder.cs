@@ -841,9 +841,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
     /// <summary>
     /// The counts' bytes and their sketches', once every row is in and every number settled, the sketches null when the
-    /// column keeps none; null for a column that keeps no counts.
+    /// column keeps none, the fields of the measures their records carry, and whether a budget left values out; null for a
+    /// column that keeps no counts.
     /// </summary>
-    internal (byte[] Counts, byte[]? Sketches)? Finish()
+    internal (byte[] Counts, byte[]? Sketches, int[] Measures, bool LeavesOut)? Finish()
     {
         long valid = _sheet.Rows - _sheet.Nulls;
         int distinct = _sheet.Distinct;
@@ -960,7 +961,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         };
         return (counts.ToBytes(), sketched || registers is not null
             ? new ColumnSketches(_entries, carried.Count, sketched ? sketchBytes : null, attached.Count, registers).ToBytes()
-            : null);
+            : null, fields, _otherEntry >= 0);
     }
 
     /// <summary>

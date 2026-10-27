@@ -401,7 +401,7 @@ public sealed class ColumnCountsTests
         }
 
         counts.Settle();
-        (byte[] bytes, byte[]? sketches) = counts.Finish()!.Value;
+        (byte[] bytes, byte[]? sketches, _, _) = counts.Finish()!.Value;
         return (ColumnCounts.From(bytes), sketches is null ? null : ColumnSketches.From(sketches));
     }
 

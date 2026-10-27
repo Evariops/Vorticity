@@ -233,6 +233,26 @@ internal sealed class ObjectContents(
     internal long ListedRowsOf(int field) => (uint)field < (uint)ListedRows.Count ? ListedRows[field] : 0;
 
     /// <summary>
+    /// What each column's counts carry (<see cref="Counts"/>), by its field: the fields of the measures their records hold,
+    /// and whether a budget left values out, counted as one group of the others. Empty when the object does not say.
+    /// </summary>
+    internal IReadOnlyList<(int Field, int[] Measures, bool LeavesOut)> Carried { get; init; } = [];
+
+    /// <summary>What the counts of column <paramref name="field"/> carry (<see cref="Carried"/>); null when the object does not say.</summary>
+    internal (int[] Measures, bool LeavesOut)? CarriedOf(int field)
+    {
+        foreach ((int at, int[] measures, bool leavesOut) in Carried)
+        {
+            if (at == field)
+            {
+                return (measures, leavesOut);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Each top-level column's geometry (<see cref="ColumnMarks"/>), the regions of its index entry, in column order: what a
     /// read of a few granules reads before their bytes alone. Empty when the object keeps none, and its chunks read whole.
     /// </summary>
@@ -287,6 +307,7 @@ internal sealed class ObjectContents(
             ColumnClasses = ColumnClasses,
             PureGranuleRows = PureGranuleRows,
             ListedRows = ListedRows,
+            Carried = Carried,
             Marks = Marks,
             Dictionaries = Dictionaries,
             KeyIndex = KeyIndex,
@@ -396,6 +417,11 @@ internal sealed class ObjectContents(
 
     // The rows of the granules whose statistics list each top-level column's values, packed, by the column's place.
     private const int TagListedRows = 32;
+
+    // What a column's counts carry: its field, the fields of their measures, packed, and whether they leave values out.
+    private const int TagCarried = 33;
+    private const int TagCarriedMeasures = 2;
+    private const int TagCarriedLeavesOut = 3;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -701,6 +727,25 @@ internal sealed class ObjectContents(
                 }
             }
 
+            foreach ((int field, int[] measures, bool leavesOut) in Carried)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagCarried);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                if (measures.Length > 0)
+                {
+                    using ProtoWriter.MessageScope packed = writer.BeginMessage(TagCarriedMeasures);
+                    foreach (int measure in measures)
+                    {
+                        writer.WriteVarint((ulong)measure);
+                    }
+                }
+
+                if (leavesOut)
+                {
+                    writer.WriteUInt32Always(TagCarriedLeavesOut, 1);
+                }
+            }
+
             if (DirectoryRegion is { } directoryRegion)
             {
                 IndexDirectory.WriteSegment(ref writer, TagIndexDirectory, directoryRegion);
@@ -759,6 +804,7 @@ internal sealed class ObjectContents(
             List<uint> columnClasses = [];
             long pureGranuleRows = -1;
             List<long> listedRows = [];
+            List<(int, int[], bool)> carried = [];
             List<IndexSegment> marks = [];
             List<(int Field, ColumnDictionary Dictionary)> dictionaries = [];
             IndexSegment? indexDirectory = null;
@@ -884,6 +930,14 @@ internal sealed class ObjectContents(
                     case (TagPureGranuleRows, ProtoWireType.Varint):
                         pureGranuleRows = checked((long)reader.ReadVarint());
                         break;
+                    case (TagCarried, ProtoWireType.LengthDelimited):
+                        if (CarriedBy(reader.ReadMessage()) is not { } carrying)
+                        {
+                            return null;
+                        }
+
+                        carried.Add(carrying);
+                        break;
                     case (TagListedRows, ProtoWireType.LengthDelimited):
                         ProtoReader listing = reader.ReadMessage();
                         while (!listing.End)
@@ -957,6 +1011,7 @@ internal sealed class ObjectContents(
                     ColumnClasses = [.. columnClasses],
                     PureGranuleRows = pureGranuleRows,
                     ListedRows = listedRows,
+                    Carried = carried,
                     Marks = marks.Count == directories.Count ? marks : [],
                     Dictionaries = Placed(dictionaries, directories.Count),
                 }
@@ -986,6 +1041,39 @@ internal sealed class ObjectContents(
     }
 
     /// <summary>A shredded key's index of where its values lie, as its message names it; null when it lacks a part.</summary>
+    /// <summary>What a column's counts carry, as <see cref="TagCarried"/> holds it; null for a message without its field.</summary>
+    private static (int, int[], bool)? CarriedBy(ProtoReader reader)
+    {
+        int? field = null;
+        List<int> measures = [];
+        bool leavesOut = false;
+        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
+        {
+            switch (tag, wire)
+            {
+                case (TagDirectoryField, ProtoWireType.Varint):
+                    field = checked((int)reader.ReadVarint32());
+                    break;
+                case (TagCarriedMeasures, ProtoWireType.LengthDelimited):
+                    ProtoReader packed = reader.ReadMessage();
+                    while (!packed.End)
+                    {
+                        measures.Add(checked((int)packed.ReadVarint32()));
+                    }
+
+                    break;
+                case (TagCarriedLeavesOut, ProtoWireType.Varint):
+                    leavesOut = reader.ReadVarint32() != 0;
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return field is { } at ? (at, [.. measures], leavesOut) : null;
+    }
+
     private static (int, string, PathClass, IndexSegment)? PathLocated(ProtoReader reader)
     {
         int? field = null;

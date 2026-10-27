@@ -288,7 +288,7 @@ internal sealed class CountsAnswer
     /// The column whose counts answer for the object <paramref name="held"/>: the column asked, or for a question of no
     /// column the one whose counts' region is least; null when its rows are read: rows a delete marked, which its counts
     /// still hold, unless the delete counted them and the question subtracts them; a conjunct or a key its summaries do
-    /// not prove true over every row or constant; no counts of the column, or none sketched under a quantile; or columns of
+    /// not prove true over every row or constant; no counts of the column that answer (<see cref="Carries"/>); or columns of
     /// an earlier schema, which its counts name by their places.
     /// </summary>
     internal int? FieldOf(in PositionedObject held)
@@ -322,8 +322,36 @@ internal sealed class CountsAnswer
         }
 
         return Column is { } asked
-            ? contents.CountsOf(asked) is not null && (!AsksSketches || contents.SketchesOf(asked) is not null) ? asked : null
-            : Least(contents, AsksSketches);
+            ? contents.CountsOf(asked) is not null && Carries(contents, asked) ? asked : null
+            : Least(contents);
+    }
+
+    /// <summary>
+    /// Whether the counts of column <paramref name="field"/> of an object of <paramref name="contents"/> answer the request:
+    /// sketched under a quantile, and, as its contents say, carrying every measure it reads, and every value where a key or
+    /// the values asked read them, a budget having left none out; taken to where the contents do not say.
+    /// </summary>
+    private bool Carries(ObjectContents contents, int field)
+    {
+        if (AsksSketches && contents.SketchesOf(field) is null)
+        {
+            return false;
+        }
+
+        if (contents.CarriedOf(field) is not { } carried)
+        {
+            return true;
+        }
+
+        foreach ((_, int measure, _, _) in Measures)
+        {
+            if (Array.IndexOf(carried.Measures, measure) < 0)
+            {
+                return false;
+            }
+        }
+
+        return !carried.LeavesOut || (!Keyed && Values is null);
     }
 
     /// <summary>
@@ -667,13 +695,13 @@ internal sealed class CountsAnswer
             ? index
             : null;
 
-    /// <summary>The column of the least counts region of <paramref name="contents"/>, among those sketched when <paramref name="sketched"/>; null for none.</summary>
-    private static int? Least(ObjectContents contents, bool sketched)
+    /// <summary>The column of the least counts region of <paramref name="contents"/> among those that answer (<see cref="Carries"/>); null for none.</summary>
+    private int? Least(ObjectContents contents)
     {
         (int Field, long Bytes)? least = null;
         foreach ((int field, IndexSegment region) in contents.Counts)
         {
-            if ((!sketched || contents.SketchesOf(field) is not null) && region.Length < (least?.Bytes ?? long.MaxValue))
+            if (Carries(contents, field) && region.Length < (least?.Bytes ?? long.MaxValue))
             {
                 least = (field, region.Length);
             }

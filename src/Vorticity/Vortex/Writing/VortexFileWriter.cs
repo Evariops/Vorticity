@@ -224,7 +224,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private ObjectContents Contents(
         IndexSegment? keyIndex, IndexSegment? keyPages, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
-        List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
+        List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, int[] Measures, bool LeavesOut)> carried,
+        List<(int Field, IndexSegment Region)> sketches,
         List<(int Field, IndexSegment Region)> granuleStats, long[] listed, List<(int Field, IndexSegment Region)> granuleHistograms, List<(int Field, IndexSegment Region)> locates,
         List<(int Field, string Key, Types.Variants.PathClass Class, IndexSegment Region)> pathLocates,
         long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
@@ -235,6 +236,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Paging = paging,
             Sheets = sheets,
             Counts = counts,
+            Carried = carried,
             Sketches = sketches,
             GranuleStats = granuleStats,
             GranuleHistograms = granuleHistograms,
@@ -2517,6 +2519,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             // no read of those bridges them. A file too small for a reader to ask its sheets before it keeps neither.
             List<(int Field, IndexSegment Region)> sheets = [];
             List<(int Field, IndexSegment Region)> counts = [];
+            List<(int Field, int[] Measures, bool LeavesOut)> carried = [];
             List<(int Field, IndexSegment Region)> sketches = [];
             List<(int Field, IndexSegment Region)> stated = [];
             long[] listed = [];
@@ -2540,6 +2543,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     counts.Add((field, await closed.AddColumnRegionAsync(
                         _sink, IndexKinds.ColumnCounts, field, counted.Counts, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                    carried.Add((field, counted.Measures, counted.LeavesOut));
                     if (counted.Sketches is { } sketched)
                     {
                         sketches.Add((field, await closed.AddColumnRegionAsync(
@@ -2689,7 +2693,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_carriesContents)
             {
                 _contents = Contents(
-                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, listed, histogrammed, locates, pathLocates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
+                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, carried, sketches, stated, listed, histogrammed, locates, pathLocates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.
