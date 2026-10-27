@@ -47,8 +47,9 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
     }
 
     /// <summary>
-    /// Each object a job writes says the rows of its blocks that hold one service and one hour: every call of the large
-    /// services, an hour of one filling blocks of its own, and none of the small ones, whose blocks gather several.
+    /// Each object a job writes says the rows of its granules that hold one service and one hour, as its rows count them in
+    /// granules of the writer's rows: granules are not cut where the key changes, so an hour of a large service, 10,000
+    /// calls, fills one whole and parts of two; the small ones' share granules of several.
     /// </summary>
     [Fact]
     public async Task AnObjectSaysTheRowsOfItsBlocksOfOneValue()
@@ -60,13 +61,22 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
         {
             objects++;
             Assert.NotNull(held.Entry.Contents);
-            long rows = held.Entry.Rows;
-            Assert.InRange(held.Entry.Contents.PureGranuleRows, 0, rows);
-            pure += held.Entry.Contents.PureGranuleRows;
+            await using ObjectLease lease = await dataset.RentAsync(held.Entry, Ct);
+            long granuleRows = Vorticity.Scanning.SplitPlan.NaturalBatchRows(lease.File.LayoutTree);
+            List<Call> rows = await lease.File.Scan<Call>().ToRecordsAsync(Ct).ToListAsync(Ct);
+            long counted = 0;
+            for (int first = 0; first < rows.Count; first += (int)granuleRows)
+            {
+                List<Call> granule = rows.GetRange(first, (int)Math.Min(granuleRows, rows.Count - first));
+                counted += granule.Select(c => (c.Service, c.At.UtcTicks / TimeSpan.TicksPerHour)).Distinct().Count() == 1 ? granule.Count : 0;
+            }
+
+            Assert.Equal(counted, held.Entry.Contents.PureGranuleRows);
+            pure += counted;
         }
 
         Console.WriteLine($"FORMULA pure granules: {pure:N0} rows of {Large * LargeCalls:N0} large calls in {objects} objects");
-        Assert.Equal(Large * LargeCalls, pure);
+        Assert.InRange(pure, 1, Large * LargeCalls);
     }
 
     /// <summary>
@@ -96,12 +106,15 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
     /// <summary>
     /// In the order of arrival every block gathers several instants, each its own value of the key's first column. Under a
     /// question where two columns vary, the route and the status, no block would be answered: the objects read their
-    /// rows, and no statistics for nothing. Under counts by service within a window of the instant, where the service
-    /// alone varies in a block and the window holds the block whole or not at all but at its edges, the blocks answer still.
+    /// rows, and no statistics for nothing. Under counts by status within a window of the instant, where the status alone
+    /// varies in a block, its four values listed, and the window holds the block whole or not at all but at its edges, the
+    /// blocks would answer still, chosen where they weigh less than the rows; by service, a block gathers some three
+    /// hundred, past the 256 its statistics list, and none would.
     /// </summary>
     [Theory]
     [InlineData("count by route under 5xx", false)]
-    [InlineData("count by service, a window", true)]
+    [InlineData("count by status, a window", true)]
+    [InlineData("count by service, a window", false)]
     public async Task BlocksThatGatherSeveralValuesAnswerOnlyWhereOneColumnVaries(string question, bool answered)
     {
         await using CountingObjectStore store = new CountingObjectStore(_fixture.ByArrival);
@@ -113,7 +126,7 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
             }
 
             ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
-            Assert.Equal(answered, plan.Units.Any(step => step.Alternative == "granules"));
+            Assert.Equal(answered, plan.Units.Any(step => step.Alternative == "granules" || step.Rejected.Any(r => r.StartsWith("granules: weighs", StringComparison.Ordinal))));
         }
 
         (long read, _) = await ReadAsync(store, question, synopses: true);
@@ -146,6 +159,7 @@ public sealed partial class DatasetFormulaTests : IClassFixture<DatasetFormulaTe
         return question switch
         {
             "count by service, a window" => scan.Where(c => c.At >= Noon.AddMinutes(10) && c.At < Noon.AddMinutes(50)).GroupBy(c => c.Service).Select(g => (g.Key, g.Count())),
+            "count by status, a window" => scan.Where(c => c.At >= Noon.AddMinutes(10) && c.At < Noon.AddMinutes(50)).GroupBy(c => c.Status).Select(g => (g.Key, g.Count())),
             "count by service and hour" => scan.GroupBy(c => (c.Service, c.At.Truncate(CalendarUnit.Hour))).Select(g => (g.Key.Service, g.Key.Item2, g.Count())),
             "count by route, a large service" => scan.Where(c => c.Service == "large-1").GroupBy(c => c.Route).Select(g => (g.Key, g.Count())),
             "count by route, a small service" => scan.Where(c => c.Service == "small-150").GroupBy(c => c.Route).Select(g => (g.Key, g.Count())),

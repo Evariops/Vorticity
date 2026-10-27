@@ -60,13 +60,19 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         List<string> states = await AskAsync(dataset, question, synopses: true);
         (long requests, long bytes) = (store.Requests, store.BytesRead);
         ScanPlan plan = await Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
-        Console.WriteLine($"PLANNER {question}: {rowBytes} bytes read as rows, {bytes} in {requests} requests with the counts of " +
-            $"{plan.Units.Count(step => step.Alternative == "counts")} objects");
+        Console.WriteLine($"PLANNER {question}: {rowBytes} bytes read as rows, {bytes} in {requests} requests with the synopses of " +
+            $"{plan.Units.Count(Synopses)} objects");
         Assert.True(bytes < rowBytes, $"{question}: {bytes} bytes with the counts, against {rowBytes} as rows");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
-        Assert.Contains(plan.Units, step => step.Alternative == "counts");
+        Assert.Contains(plan.Units, Synopses);
     }
+
+    /// <summary>
+    /// Whether <paramref name="step"/> answers its unit from synopses rather than rows: an object's counts or its granules'
+    /// statistics, whichever weighs less, a rollup's totals, or the entry.
+    /// </summary>
+    internal static bool Synopses(UnitStep step) => step.Alternative is "counts" or "granules" or "rollup" or "entry";
 
     [Fact]
     public async Task AWindowThatCutsAnObjectReadsItsRows()
@@ -80,7 +86,7 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
         Assert.Equal(2, plan.Units.Count(step => step.Alternative == "rows"));
         ScanPlan aligned = await Ask(dataset, "count by service, an aligned window", synopses: true).ExplainAsync(analyze: true, Ct);
         Assert.Equal(2, aligned.Units.Length);
-        Assert.All(aligned.Units, step => Assert.Contains(step.Alternative, (string[])["counts", "granules"]));
+        Assert.All(aligned.Units, step => Assert.True(Synopses(step), $"{step.Unit} answered by its {step.Alternative}"));
     }
 
     // Questions drawn at random on the tables DatasetCountsTests draws, columns of every kind and nulls among them: a key
@@ -110,13 +116,13 @@ public sealed partial class DatasetPlannerTests : IClassFixture<DatasetPlannerTe
             Assert.True(read.SequenceEqual(counted), $"{asked}: {read.Count} groups as rows, {counted.Count} with the counts, " +
                 $"first apart: '{read.Except(counted).FirstOrDefault()}' against '{counted.Except(read).FirstOrDefault()}'");
             ScanPlan plan = await Ask(dataset, keys, results, filter, synopses: true).ExplainAsync(analyze: true, Ct);
-            answered += plan.Units.Any(step => step.Alternative == "counts") ? 1 : 0;
+            answered += plan.Units.Any(Synopses) ? 1 : 0;
         }
 
         // A window that cuts every object it reaches reads their rows, and so does a number column of many values, which no
-        // counts keep: the counts answer a third of the questions at least.
-        Console.WriteLine($"PLANNER seed {seed}: the counts answered {answered} questions of {Questions}");
-        Assert.True(answered >= Questions / 3, $"seed {seed}: the counts answered {answered} questions of {Questions}");
+        // counts keep: the synopses answer a third of the questions at least.
+        Console.WriteLine($"PLANNER seed {seed}: the synopses answered {answered} questions of {Questions}");
+        Assert.True(answered >= Questions / 3, $"seed {seed}: the synopses answered {answered} questions of {Questions}");
     }
 
     // The same questions drawn at random under a key led by a drawn column, a code of a few values, the rows of each value

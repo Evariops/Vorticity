@@ -42,11 +42,11 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
         List<string> rows = await DatasetPlannerTests.AskAsync(dataset, question, synopses: false);
         List<string> states = await DatasetPlannerTests.AskAsync(dataset, question, synopses: true);
         ScanPlan plan = await DatasetPlannerTests.Ask(dataset, question, synopses: true).ExplainAsync(analyze: true, Ct);
-        int answered = plan.Units.Count(step => step.Alternative == "counts");
-        Console.WriteLine($"PLANNER {(byHour ? "BY HOUR" : "BY SIZE")} {question}: the counts of {answered} objects answered");
+        int answered = plan.Units.Count(DatasetPlannerTests.Synopses);
+        Console.WriteLine($"PLANNER {(byHour ? "BY HOUR" : "BY SIZE")} {question}: the synopses of {answered} objects answered");
         Assert.NotEmpty(rows);
         Assert.Equal(rows, states);
-        Assert.True(!byHour || answered > 0, $"{question}: no object's counts answered");
+        Assert.True(!byHour || answered > 0, $"{question}: no object's synopses answered");
     }
 
     // The unaligned window of the planner's questions, cut at 37.5 and 155.25 minutes past noon, grows under AlignWindow to
@@ -61,7 +61,7 @@ public sealed partial class DatasetPlannerGenericTests : IClassFixture<DatasetPl
         ScanPlan plan = await aligned.ExplainAsync(analyze: true, Ct);
         VortexExpr window = Assert.IsAssignableFrom<VortexExpr>(plan.Window);
         Console.WriteLine($"ALIGNED {asked} grows to {window}");
-        Assert.Equal(3, plan.Units.Count(step => step.Alternative == "counts"));
+        Assert.Equal(3, plan.Units.Count(DatasetPlannerTests.Synopses));
         List<string> answered = await DatasetAlignedWindowTests.RowsAsync(aligned);
         Assert.Equal(window.ToString(), aligned.Metrics.Window?.ToString());
         Assert.Equal(await DatasetAlignedWindowTests.RowsAsync(ByService(dataset, window, new ScanOptions { UseSynopses = false })), answered);
