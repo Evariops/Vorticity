@@ -80,12 +80,35 @@ internal ref struct PredicateBits
     /// <summary>The truth's bits past the rows cleared, after a kernel that answers whole blocks wrote them.</summary>
     internal readonly void Trim() => ClearTail(Truth);
 
-    /// <summary>Row <paramref name="row"/> selected or not.</summary>
+    /// <summary>
+    /// Row <paramref name="row"/> given a state (<see cref="Trilean"/>): selected, not, or unknown, the known rows
+    /// started all set the first time a row is unknown.
+    /// </summary>
+    internal void SetState(int row, byte state)
+    {
+        if (state == Trilean.Unknown && !Unknown)
+        {
+            Known.Fill(ulong.MaxValue);
+            ClearTail(Known);
+            Unknown = true;
+        }
+
+        ulong bit = 1UL << (row & 63);
+        int word = row >> 6;
+        if (Unknown)
+        {
+            Known[word] = state == Trilean.Unknown ? Known[word] & ~bit : Known[word] | bit;
+        }
+
+        Truth[word] = state == Trilean.True ? Truth[word] | bit : Truth[word] & ~bit;
+    }
+
+    /// <summary>Row <paramref name="row"/> selected or not; an unknown row stays unselected.</summary>
     internal readonly void Set(int row, bool selected)
     {
         ulong bit = 1UL << (row & 63);
         ref ulong word = ref Truth[row >> 6];
-        word = selected ? word | bit : word & ~bit;
+        word = selected && (!Unknown || (Known[row >> 6] & bit) != 0) ? word | bit : word & ~bit;
     }
 
     /// <summary>

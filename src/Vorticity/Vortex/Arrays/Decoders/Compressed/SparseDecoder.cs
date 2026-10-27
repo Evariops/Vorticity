@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -53,9 +54,105 @@ internal sealed class SparseDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override bool SelectsWithoutFullDecode => true;
 
-    // There is deliberately no pushed comparison: expanding a sparse column is a fill of one value
-    // plus its patches, and answering a comparison over it would be a fill too, so both write one
-    // state per row and there is nothing to win.
+    /// <inheritdoc/>
+    public override bool EvaluatesWithoutFullDecode => true;
+
+    /// <summary>
+    /// Judges the fill once and spreads its verdict a word at a time, then judges the patches alone, each set over its
+    /// row: a cost of the rows over 64 and of the values present, where decoding writes every row.
+    /// </summary>
+    /// <remarks>
+    /// The verdicts are the comparison kernels' over the fill as a value of one row and over the patch values, so the
+    /// answer is the one the decoded column gives, a null fill or a null patch unknown. A comparison, a range and a
+    /// prefix are answered; a set declines.
+    /// </remarks>
+    /// <inheritdoc/>
+    public override bool TryEvaluate(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Compute.EncodedPredicate predicate,
+        ref Compute.PredicateBits bits)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (predicate.Kind == Compute.EncodedPredicateKind.In)
+        {
+            return false;
+        }
+
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
+        SparseMetadata metadata = SparseMetadata.Read(node.Metadata);
+        PatchesMetadata patchesMetadata = metadata.Patches;
+        int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
+        DType indicesType = context.Types.Primitive(patchesMetadata.IndicesPType, Nullability.NonNullable);
+        int indicesIndex = context.DecodeChild(in node, 0, indicesType, patchCount);
+        int valuesIndex = context.DecodeChild(in node, 1, dtype, patchCount);
+        bool walked = context.IsNodeChecked(in node);
+        Patches patches = Patches.Create(context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
+        if (!walked)
+        {
+            context.MarkNodeChecked(in node);
+        }
+
+        TypedScalar fill = TypedScalarReader.Read(node.GetBuffer(0).Span, dtype, context.Scalars, context.Types);
+        int fillIndex = Canonical.ConstantCanonicalizer.Build(context, dtype, 1, in fill);
+        byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(2 * patchCount, 2));
+        try
+        {
+            Span<byte> verdict = rented.AsSpan(0, 1);
+            Span<byte> scratch = rented.AsSpan(1, 1);
+            Judge(context.Canonical, fillIndex, predicate, verdict, scratch);
+            if (verdict[0] == Compute.Trilean.Unknown)
+            {
+                bits.FillUnknown();
+            }
+            else
+            {
+                bits.Fill(verdict[0] == Compute.Trilean.True);
+            }
+
+            if (patchCount > 0)
+            {
+                Span<byte> states = rented.AsSpan(0, patchCount);
+                Judge(context.Canonical, valuesIndex, predicate, states, rented.AsSpan(patchCount, patchCount));
+                for (int i = 0; i < patchCount; i++)
+                {
+                    bits.SetState(patches.GetPosition(i), states[i]);
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>The predicate's state for each row of a canonical node, by the comparison kernels.</summary>
+    private static void Judge(
+        CanonicalArena arena, int nodeIndex, Compute.EncodedPredicate predicate, Span<byte> states, Span<byte> scratch)
+    {
+        switch (predicate.Kind)
+        {
+            case Compute.EncodedPredicateKind.Prefix:
+                Compute.ComparisonKernels.StringMatch(
+                    arena, nodeIndex, Expressions.StringMatchOp.StartsWith, predicate.Literal, escape: 0, states);
+                break;
+            case Compute.EncodedPredicateKind.Between:
+                Compute.ComparisonKernels.Compare(
+                    arena, nodeIndex,
+                    predicate.LowInclusive ? Expressions.ComparisonOp.GreaterOrEqual : Expressions.ComparisonOp.Greater,
+                    predicate.Literal, states);
+                Compute.ComparisonKernels.Compare(
+                    arena, nodeIndex,
+                    predicate.HighInclusive ? Expressions.ComparisonOp.LessOrEqual : Expressions.ComparisonOp.Less,
+                    predicate.High, scratch);
+                Compute.Trilean.And(states, scratch);
+                break;
+            default:
+                Compute.ComparisonKernels.Compare(arena, nodeIndex, predicate.Op, predicate.Literal, states);
+                break;
+        }
+    }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
