@@ -288,8 +288,8 @@ internal sealed class CountsAnswer
     /// The column whose counts answer for the object <paramref name="held"/>: the column asked, or for a question of no
     /// column the one whose counts' region is least; null when its rows are read: rows a delete marked, which its counts
     /// still hold, unless the delete counted them and the question subtracts them; a conjunct or a key its summaries do
-    /// not prove true over every row or constant; no counts of the column; or columns of an earlier schema, which its
-    /// counts name by their places.
+    /// not prove true over every row or constant; no counts of the column, or none sketched under a quantile; or columns of
+    /// an earlier schema, which its counts name by their places.
     /// </summary>
     internal int? FieldOf(in PositionedObject held)
     {
@@ -321,8 +321,9 @@ internal sealed class CountsAnswer
             }
         }
 
-        int counted = Column ?? Least(contents.Counts);
-        return contents.CountsOf(counted) is null ? null : counted;
+        return Column is { } asked
+            ? contents.CountsOf(asked) is not null && (!AsksSketches || contents.SketchesOf(asked) is not null) ? asked : null
+            : Least(contents, AsksSketches);
     }
 
     /// <summary>
@@ -666,16 +667,19 @@ internal sealed class CountsAnswer
             ? index
             : null;
 
-    /// <summary>The column of the least counts region among <paramref name="regions"/>.</summary>
-    private static int Least(IReadOnlyList<(int Field, IndexSegment Region)> regions)
+    /// <summary>The column of the least counts region of <paramref name="contents"/>, among those sketched when <paramref name="sketched"/>; null for none.</summary>
+    private static int? Least(ObjectContents contents, bool sketched)
     {
-        (int field, long bytes) least = (regions[0].Field, long.MaxValue);
-        foreach ((int field, IndexSegment region) in regions)
+        (int Field, long Bytes)? least = null;
+        foreach ((int field, IndexSegment region) in contents.Counts)
         {
-            least = region.Length < least.bytes ? (field, region.Length) : least;
+            if ((!sketched || contents.SketchesOf(field) is not null) && region.Length < (least?.Bytes ?? long.MaxValue))
+            {
+                least = (field, region.Length);
+            }
         }
 
-        return least.field;
+        return least?.Field;
     }
 
     /// <summary>The bytes of each of <paramref name="literals"/> as a column of <paramref name="dtype"/> stores them, each once; null for one it cannot hold so.</summary>
