@@ -474,8 +474,15 @@ internal sealed partial class DatasetScanBuilder
     /// rows of the question's columns they may spare.
     /// </summary>
     internal bool ReadsSheets(in PositionedObject held) =>
-        SheetColumns() is { } columns && SheetPruning.Keeps(held.Entry, _version.Schema)
-        && _version.Costs.Weight(SheetPruning.Cost(held.Entry, columns, _version.Costs)) < _version.Costs.Weight(_version.Costs.Rows(held.Entry, FieldsRead()));
+        (SheetColumns() ?? (SheetPaths() is { Count: > 0 } ? [] : null)) is { } columns && SheetPruning.Keeps(held.Entry, _version.Schema)
+        && _version.Costs.Weight(SheetPruning.Cost(held.Entry, columns, _version.Costs, SheetPaths()))
+            < _version.Costs.Weight(_version.Costs.Rows(held.Entry, FieldsRead()));
+
+    /// <summary>The shredded keys whose values the filter asks, which the walk reads where they lie (spec E, 3.3); empty for none. Found once.</summary>
+    private List<(int Field, string Key, Types.Variants.PathClass Class)> SheetPaths() =>
+        _sheetPaths ??= _summaries && _filter is { } filter ? SheetPruning.Paths(filter, _version.Schema.DType) : [];
+
+    private List<(int Field, string Key, Types.Variants.PathClass Class)>? _sheetPaths;
 
     /// <summary>
     /// Whether the scan reads the sparse index of the object <paramref name="held"/> to pass over the granules its filter

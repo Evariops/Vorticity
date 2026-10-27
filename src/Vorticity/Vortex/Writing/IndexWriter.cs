@@ -1840,7 +1840,8 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>
     /// Writes a synopsis of <paramref name="kind"/> of the top-level column <paramref name="field"/>, its sheet, its counts
     /// or their sketches, one region from the sink's position, and adds the entry that names it: on the column, one run
-    /// over every block of the file's <paramref name="rows"/>.
+    /// over every block of the file's <paramref name="rows"/>; on a shredded key's slot, its variant column, its key and
+    /// its class.
     /// </summary>
     internal async ValueTask<IndexSegment> AddColumnRegionAsync(
         ISegmentSink sink, string kind, int field, byte[] bytes, long rows, int blockRows, CancellationToken cancellationToken)
@@ -1848,9 +1849,9 @@ internal sealed class IndexWriter : IDisposable
         IndexSegment region = IndexSegment.Of(sink.Position, bytes, 0);
         await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
         int length = Math.Max(blockRows, 1);
-        _entries.Add(new IndexEntry(
-            kind, [checked((uint)field)], (ulong)length, [],
-            [new IndexRun(0, Blocks(rows, length), [region], [])]));
+        _entries.Add(EntryOf(new IndexEntry(
+            kind, field < _fieldCount ? [checked((uint)field)] : ColumnPath(field), (ulong)length, [],
+            [new IndexRun(0, Blocks(rows, length), [region], [])]), field));
         return region;
     }
 
@@ -1901,10 +1902,21 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// Gives every top-level column with a sheet, but a float's, where each of its values lies, granule by granule (spec D,
-    /// 3), fed right after its sheet's numbering of its rows' values.
+    /// 3), fed right after its sheet's numbering of its rows' values; and each shredded key read in its class, but a float or
+    /// a boolean, a sheet of its own that numbers its values and where each lies (spec E, 3.3).
     /// </summary>
     internal void AddLocates(DType schema)
     {
+        for (int slot = 0; _variants is { } variants && slot < variants.Length; slot++)
+        {
+            if (variants[slot] is { } path && path.Path.Read is not (Compute.VariantRead.AsDouble or Compute.VariantRead.AsBool))
+            {
+                ColumnSheetBuilder sheet = new ColumnSheetBuilder();
+                _builders[slot].Add(sheet);
+                _builders[slot].Add(new LocateBuilder(sheet));
+            }
+        }
+
         for (int field = 0; _isTabular && field < _fieldCount; field++)
         {
             DType storage = schema.GetField(field);
@@ -1919,6 +1931,13 @@ internal sealed class IndexWriter : IDisposable
             }
         }
     }
+
+    /// <summary>The slots the writer keeps: the columns, then the composite keys, the nested columns and the shredded keys.</summary>
+    internal int Slots => _builders.Length;
+
+    /// <summary>The variant column, key and class of slot <paramref name="slot"/>, a shredded key read in its class; null for another slot.</summary>
+    internal (int Field, string Key, Types.Variants.PathClass Class)? VariantOf(int slot) =>
+        _variants?[slot] is { } path ? (path.Field, path.Path.Steps[0].Key!, ClassOf(path.Path.Read)) : null;
 
     /// <summary>The builder of where column <paramref name="field"/>'s values lie, or null when it has none.</summary>
     internal LocateBuilder? LocateOf(int field)

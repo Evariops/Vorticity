@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Types;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Dataset;
 
@@ -24,6 +25,66 @@ internal static class SheetPruning
         List<int> columns = [];
         Collect(filter, schema, columns);
         return columns;
+    }
+
+    /// <summary>
+    /// The shredded keys of variant columns of <paramref name="schema"/> whose values <paramref name="filter"/>'s
+    /// equalities, sets and prefixes ask, through <c>AND</c> and <c>OR</c>, each once (spec E, 3.3); empty for none.
+    /// </summary>
+    internal static List<(int Field, string Key, PathClass Class)> Paths(VortexExpr filter, DType schema)
+    {
+        List<(int Field, string Key, PathClass Class)> paths = [];
+        CollectPaths(filter, schema, paths);
+        return paths;
+    }
+
+    private static void CollectPaths(VortexExpr filter, DType schema, List<(int Field, string Key, PathClass Class)> paths)
+    {
+        switch (filter)
+        {
+            case ComparisonExpr { Op: ComparisonOp.Equal } equal when GranuleAlgebra.PathOf(equal.Field, schema) is { } path:
+                AddPath(paths, path);
+                break;
+            case InExpr set when GranuleAlgebra.PathOf(set.Field, schema) is { } path:
+                AddPath(paths, path);
+                break;
+            case StringMatchExpr { Op: StringMatchOp.StartsWith } prefix when GranuleAlgebra.PathOf(prefix.Field, schema) is { } path:
+                AddPath(paths, path);
+                break;
+            case LogicalExpr logical:
+                CollectPaths(logical.Left, schema, paths);
+                CollectPaths(logical.Right, schema, paths);
+                break;
+            default:
+                break;
+        }
+    }
+
+    private static void AddPath(List<(int Field, string Key, PathClass Class)> paths, (int Field, string Key, PathClass Class) path)
+    {
+        foreach ((int field, string key, PathClass @class) in paths)
+        {
+            if (field == path.Field && @class == path.Class && string.Equals(key, path.Key, StringComparison.Ordinal))
+            {
+                return;
+            }
+        }
+
+        paths.Add(path);
+    }
+
+    /// <summary>Whether the object <paramref name="entry"/> names keeps where the values of one of <paramref name="paths"/> lie.</summary>
+    internal static bool LocatesPaths(ObjectEntry entry, List<(int Field, string Key, PathClass Class)> paths)
+    {
+        foreach ((int field, string key, PathClass @class) in paths)
+        {
+            if (entry.Contents?.PathLocateOf(field, key, @class) is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -51,19 +112,24 @@ internal static class SheetPruning
     /// What a scan reads of the object <paramref name="entry"/> names before it, under a filter that asks
     /// <paramref name="columns"/> for values: where their values lie when each keeps that index, else their sheets.
     /// </summary>
-    internal static PathCosts.Cost Cost(ObjectEntry entry, List<int> columns, PathCosts costs)
+    internal static PathCosts.Cost Cost(ObjectEntry entry, List<int> columns, PathCosts costs, List<(int Field, string Key, PathClass Class)>? paths = null)
     {
-        if (entry.Contents is null || columns.Count == 0)
+        if (entry.Contents is null || (columns.Count == 0 && paths is not { Count: > 0 }))
         {
             return default;
         }
 
         ObjectContents contents = entry.Contents!;
         bool lies = Locates(entry, columns);
-        IndexSegment?[] regions = new IndexSegment?[columns.Count];
-        for (int i = 0; i < regions.Length; i++)
+        IndexSegment?[] regions = new IndexSegment?[columns.Count + (paths?.Count ?? 0)];
+        for (int i = 0; i < columns.Count; i++)
         {
             regions[i] = lies ? contents.LocateOf(columns[i]) : contents.SheetOf(columns[i]);
+        }
+
+        for (int i = 0; i < (paths?.Count ?? 0); i++)
+        {
+            regions[columns.Count + i] = contents.PathLocateOf(paths![i].Field, paths[i].Key, paths[i].Class);
         }
 
         return costs.Regions(entry.Uid, regions);
@@ -95,10 +161,11 @@ internal static class SheetPruning
     internal static async Task<List<PositionedObject>> KeptAsync(
         VortexDataset dataset, DatasetSchema schema, List<PositionedObject> batch, VortexExpr filter, List<int> columns, DatasetScanCounters? metrics,
         Func<PositionedObject, bool> consulted, CancellationToken cancellationToken, Action<PositionedObject, ulong[]>? narrowed = null,
-        PartitionLocates? partitions = null)
+        PartitionLocates? partitions = null, List<(int Field, string Key, PathClass Class)>? paths = null)
     {
         Task<ColumnSheet?[]>?[] reads = new Task<ColumnSheet?[]>?[batch.Count];
         Task<IValueGranules?[]>?[]? located = null;
+        Task<ColumnLocate?[]>?[]? pathsLie = null;
         for (int i = 0; i < batch.Count; i++)
         {
             if (consulted(batch[i]))
@@ -107,9 +174,14 @@ internal static class SheetPruning
                 {
                     (located ??= new Task<IValueGranules?[]>?[batch.Count])[i] = LocatesAsync(dataset, partitions, batch[i], columns, cancellationToken);
                 }
-                else
+                else if (columns.Count > 0)
                 {
                     reads[i] = dataset.ReadSheetsAsync(batch[i].Entry, columns, cancellationToken).AsTask();
+                }
+
+                if (paths is { Count: > 0 } && LocatesPaths(batch[i].Entry, paths))
+                {
+                    (pathsLie ??= new Task<ColumnLocate?[]>?[batch.Count])[i] = dataset.ReadPathLocatesAsync(batch[i].Entry, paths, cancellationToken).AsTask();
                 }
             }
         }
@@ -127,13 +199,15 @@ internal static class SheetPruning
                 }
             }
 
-            if (located?[i] is { } lying)
+            if (located?[i] is not null || pathsLie?[i] is not null)
             {
-                IValueGranules?[] locates = await lying.ConfigureAwait(false);
+                IValueGranules?[] locates = located?[i] is { } lying ? await lying.ConfigureAwait(false) : [];
+                ColumnLocate?[] pathLocates = pathsLie?[i] is { } pathLying ? await pathLying.ConfigureAwait(false) : [];
                 ObjectEntry entry = batch[i].Entry;
-                int granules = locates.Length > 0 && locates[0] is { } first ? first.Granules : 0;
+                int granules = GranulesOf(locates, pathLocates);
                 ulong[]? may = granules == 0 ? null : GranuleAlgebra.May(
-                    filter, schema.DType, field => columns.IndexOf(field) is int at and >= 0 ? locates[at] : null, granules);
+                    filter, schema.DType, field => columns.IndexOf(field) is int at and >= 0 && at < locates.Length ? locates[at] : null, granules,
+                    path => paths!.IndexOf(path) is int at and >= 0 && at < pathLocates.Length ? pathLocates[at] : null);
                 if (may is not null && GranuleAlgebra.None(may))
                 {
                     Refuted(metrics);
@@ -150,6 +224,28 @@ internal static class SheetPruning
         }
 
         return kept;
+    }
+
+    /// <summary>The granules of the object the first index of <paramref name="locates"/> or <paramref name="paths"/> describes; 0 for none.</summary>
+    private static int GranulesOf(IValueGranules?[] locates, ColumnLocate?[] paths)
+    {
+        foreach (IValueGranules? locate in locates)
+        {
+            if (locate is not null)
+            {
+                return locate.Granules;
+            }
+        }
+
+        foreach (ColumnLocate? path in paths)
+        {
+            if (path is not null)
+            {
+                return path.Granules;
+            }
+        }
+
+        return 0;
     }
 
     /// <summary>

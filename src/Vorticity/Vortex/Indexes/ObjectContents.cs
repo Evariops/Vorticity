@@ -4,6 +4,7 @@ using System.Text;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
+using Vorticity.Types.Variants;
 
 namespace Vorticity.Indexes;
 
@@ -141,6 +142,26 @@ internal sealed class ObjectContents(
     internal IndexSegment? LocateOf(int field) => RegionOf(Locates, field);
 
     /// <summary>
+    /// Where each value of each shredded key of a variant column lies, read in its class (spec E, 3.3): the variant column,
+    /// the key, the class and the region. Empty when the object keeps none.
+    /// </summary>
+    internal IReadOnlyList<(int Field, string Key, PathClass Class, IndexSegment Region)> PathLocates { get; init; } = [];
+
+    /// <summary>The region of where key <paramref name="key"/> of the variant column <paramref name="field"/>, read as <paramref name="class"/>, lies; null for none.</summary>
+    internal IndexSegment? PathLocateOf(int field, string key, PathClass @class)
+    {
+        foreach ((int column, string named, PathClass held, IndexSegment region) in PathLocates)
+        {
+            if (column == field && held == @class && string.Equals(named, key, StringComparison.Ordinal))
+            {
+                return region;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// The bytes of each top-level column's data in the object, by the column's place: what reading its rows costs, which a
     /// planner weighs against the synopses that would answer instead. Empty when the object does not say.
     /// </summary>
@@ -249,6 +270,7 @@ internal sealed class ObjectContents(
             GranuleStats = GranuleStats,
             GranuleHistograms = GranuleHistograms,
             Locates = Locates,
+            PathLocates = PathLocates,
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
             ColumnClasses = ColumnClasses,
@@ -354,6 +376,11 @@ internal sealed class ObjectContents(
 
     // Where a column's values lie, granule by granule: its field and its region, as a path directory's.
     private const int TagLocate = 30;
+
+    // Where a shredded key's values lie, read in its class: its variant column's field, its region, its key and its class.
+    private const int TagPathLocate = 31;
+    private const int TagPathLocateKey = 3;
+    private const int TagPathLocateClass = 4;
 
     /// <summary>The file's schema, read into <paramref name="types"/>; a struct of its columns.</summary>
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
@@ -472,6 +499,11 @@ internal sealed class ObjectContents(
         }
 
         foreach ((int _, IndexSegment region) in Locates)
+        {
+            Declare(region);
+        }
+
+        foreach ((int _, string _, PathClass _, IndexSegment region) in PathLocates)
         {
             Declare(region);
         }
@@ -604,6 +636,15 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
+            foreach ((int field, string key, PathClass @class, IndexSegment region) in PathLocates)
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagPathLocate);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+                writer.WriteString(TagPathLocateKey, key);
+                writer.WriteUInt32Always(TagPathLocateClass, (uint)@class);
+            }
+
             if (ColumnBytes.Count > 0)
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagColumnBytes);
@@ -688,6 +729,7 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> granuleStats = [];
             List<(int, IndexSegment)> granuleHistograms = [];
             List<(int, IndexSegment)> locates = [];
+            List<(int, string, PathClass, IndexSegment)> pathLocates = [];
             List<long> columnBytes = [];
             List<long> columnChunks = [];
             List<uint> columnClasses = [];
@@ -825,6 +867,14 @@ internal sealed class ObjectContents(
 
                         locates.Add(lying);
                         break;
+                    case (TagPathLocate, ProtoWireType.LengthDelimited):
+                        if (PathLocated(reader.ReadMessage()) is not { } pathLying)
+                        {
+                            return null;
+                        }
+
+                        pathLocates.Add(pathLying);
+                        break;
                     case (TagLocating, ProtoWireType.LengthDelimited):
                         if (Located(reader.ReadMessage()) is not { } located)
                         {
@@ -868,6 +918,7 @@ internal sealed class ObjectContents(
                     GranuleStats = granuleStats,
                     GranuleHistograms = granuleHistograms,
                     Locates = locates,
+                    PathLocates = pathLocates,
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,
                     ColumnClasses = [.. columnClasses],
@@ -898,6 +949,40 @@ internal sealed class ObjectContents(
         }
 
         return placed;
+    }
+
+    /// <summary>A shredded key's index of where its values lie, as its message names it; null when it lacks a part.</summary>
+    private static (int, string, PathClass, IndexSegment)? PathLocated(ProtoReader reader)
+    {
+        int? field = null;
+        IndexSegment? region = null;
+        string? key = null;
+        uint? @class = null;
+        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
+        {
+            switch (tag, wire)
+            {
+                case (TagDirectoryField, ProtoWireType.Varint):
+                    field = checked((int)reader.ReadVarint32());
+                    break;
+                case (TagDirectoryRegion, ProtoWireType.LengthDelimited):
+                    region = IndexDirectory.ReadSegment(reader.ReadMessage());
+                    break;
+                case (TagPathLocateKey, ProtoWireType.LengthDelimited):
+                    key = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case (TagPathLocateClass, ProtoWireType.Varint):
+                    @class = reader.ReadVarint32();
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return field is { } at && region is { } segment && key is not null && @class is { } held && held <= (uint)PathClass.Other
+            ? (at, key, (PathClass)held, segment)
+            : null;
     }
 
     private static (int, IndexSegment)? Directory(ProtoReader reader)

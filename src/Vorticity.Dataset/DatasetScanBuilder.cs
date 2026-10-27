@@ -752,7 +752,7 @@ internal sealed partial class DatasetScanBuilder
     private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken, bool granules = false)
     {
         IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken);
-        if (_summaries && _filter is { } filter && SheetPruning.Asks(filter, _version.Schema.DType))
+        if (_summaries && _filter is { } filter && (SheetPruning.Asks(filter, _version.Schema.DType) || SheetPaths() is { Count: > 0 }))
         {
             walk = SheetPrunedAsync(walk, filter, cancellationToken);
         }
@@ -862,7 +862,7 @@ internal sealed partial class DatasetScanBuilder
 
                 foreach (PositionedObject kept in await SheetPruning.KeptAsync(
                     _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow,
-                    partitions).ConfigureAwait(false))
+                    partitions, SheetPaths()).ConfigureAwait(false))
                 {
                     yield return kept;
                 }
@@ -881,7 +881,7 @@ internal sealed partial class DatasetScanBuilder
 
             foreach (PositionedObject kept in await SheetPruning.KeptAsync(
                 _dataset, _version.Schema, batch, filter, columns, metrics, _consulted ??= held => ReadsSheets(held), cancellationToken, _narrowing ??= Narrow,
-                partitions).ConfigureAwait(false))
+                partitions, SheetPaths()).ConfigureAwait(false))
             {
                 yield return kept;
             }

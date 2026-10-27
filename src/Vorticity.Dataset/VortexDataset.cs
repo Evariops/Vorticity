@@ -3187,6 +3187,38 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Where the values of the shredded keys <paramref name="paths"/>, each a variant column, a key and a class, lie in the
+    /// object <paramref name="entry"/> names (spec E, 3.3), by their position in <paramref name="paths"/>, read with no open
+    /// of the object: the regions its table of contents names, side by side in one round trip, none once this handle read
+    /// them. A key the object keeps none of has none.
+    /// </summary>
+    internal async ValueTask<Indexes.ColumnLocate?[]> ReadPathLocatesAsync(
+        ObjectEntry entry, IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)> paths, CancellationToken cancellationToken)
+    {
+        Indexes.ColumnLocate?[] locates = new Indexes.ColumnLocate?[paths.Count];
+        if (entry.Contents is not { PathLocates.Count: > 0 } contents)
+        {
+            return locates;
+        }
+
+        object?[] read = new object?[paths.Count];
+        Indexes.IndexSegment?[] regions = new Indexes.IndexSegment?[read.Length];
+        for (int i = 0; i < paths.Count; i++)
+        {
+            regions[i] = contents.PathLocateOf(paths[i].Field, paths[i].Key, paths[i].Class);
+        }
+
+        await ReadSynopsesAsync(entry, contents, regions, read, static (_, bytes) => (Indexes.ColumnLocate.From(bytes.ToArray())!, bytes.Length), cancellationToken)
+            .ConfigureAwait(false);
+        for (int i = 0; i < paths.Count; i++)
+        {
+            locates[i] = read[i] as Indexes.ColumnLocate;
+        }
+
+        return locates;
+    }
+
+    /// <summary>
     /// The statistics of columns <paramref name="fields"/> of the object <paramref name="entry"/> names over its granules
     /// (<see cref="Indexes.GranuleStats"/>), and the histograms of those of them <paramref name="histogrammed"/> names
     /// (<see cref="Indexes.GranuleHistograms"/>), by their position in <paramref name="fields"/>, read with no open of the
