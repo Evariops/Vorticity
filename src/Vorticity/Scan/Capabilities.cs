@@ -46,6 +46,21 @@ internal interface IRowsCapability
     /// read opens as the order reaches them. A file whose statistics say a column is sorted needs no asking.
     /// </summary>
     bool OrdersOnAsking(FieldExpr column, bool stopsEarly) => false;
+
+    /// <summary>
+    /// Whether a window of the rows in the order of <paramref name="column"/> reads cheaper late (spec G, 2): the column
+    /// read alone, the places of the window's rows kept, then the other columns at those places, rather than walked in the
+    /// order from a key source. A dataset on any column but the first of its sort key, in whose order its objects lie.
+    /// </summary>
+    bool ReadsTopLate(FieldExpr column) => false;
+
+    /// <summary>
+    /// The places of the best <paramref name="keep"/> rows <paramref name="spec"/> keeps in the order of
+    /// <paramref name="path"/>, ascending, a null last and a tie to the earlier place (spec G, 2); null for the one read of
+    /// the filter and the column that serves every source. A dataset reads its objects and granules best first (spec G, 3).
+    /// </summary>
+    ValueTask<long[]?> TopPositionsAsync(ScanSpec spec, string path, bool descending, long keep, ScanCounters metrics, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<long[]?>(null);
 }
 
 /// <summary>What a source knows of its rows before reading them (spec B, 8): their number, bounds, and what rules a filter out.</summary>

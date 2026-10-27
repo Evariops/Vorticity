@@ -15,7 +15,7 @@ namespace Vorticity.Dataset;
 /// scan, its batches count the dataset's rows, and an answer takes the cheapest proof each object
 /// offers: its entry, its statistics, then its blocks.
 /// </summary>
-internal sealed class DatasetScanSource
+internal sealed partial class DatasetScanSource
     : ScanSource, IRowsCapability, IStatisticsCapability, IKeysCapability, IStatesCapability, ITasksCapability, ICostCapability
 {
     private readonly VortexDataset _dataset;
@@ -319,6 +319,9 @@ internal sealed class DatasetScanSource
     public bool OrdersOnAsking(FieldExpr column, bool stopsEarly) =>
         stopsEarly && _version.Schema.Key is { } key && key.Paths.Count > 0
         && string.Equals(key.Paths[0], column.Path, System.StringComparison.Ordinal);
+
+    /// <summary>Any column but the first of the sort key, which the objects lie in the order of (spec G, 2).</summary>
+    public bool ReadsTopLate(FieldExpr column) => !OrdersOnAsking(column, stopsEarly: true);
 
     /// <summary>
     /// The loosest bounds the summaries of the version's root pages in hand give the column, over

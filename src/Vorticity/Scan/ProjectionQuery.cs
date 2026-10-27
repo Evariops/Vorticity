@@ -312,7 +312,12 @@ internal sealed class ProjectedBatches : IAsyncEnumerator<RecordBatch>
         {
             _query.Host.Begin();
             _begun = true;
-            _inner = _query.Host.Source.Rows.BatchesAsync(_spec, _query.Counters).GetAsyncEnumerator(_cancellationToken);
+            ScanSource source = _query.Host.Source;
+
+            // A window of an order the source reads cheaper late: the places of its rows first, then those rows (spec G, 2).
+            _inner = _spec.OrderPath is { } order && _end != long.MaxValue && source.Rows.ReadsTopLate(new ColumnFieldExpr(order))
+                ? TopRows.BatchesAsync(source, _spec, _end, _query.Counters, _cancellationToken).GetAsyncEnumerator(_cancellationToken)
+                : source.Rows.BatchesAsync(_spec, _query.Counters).GetAsyncEnumerator(_cancellationToken);
         }
 
         // Once the window is served the scan is asked for nothing more: a Take stops the reads.
