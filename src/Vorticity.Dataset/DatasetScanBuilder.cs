@@ -746,20 +746,46 @@ internal sealed partial class DatasetScanBuilder
     private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? new SummaryPruner(filter) : null;
 
     /// <summary>
-    /// The objects the scan walks: those the summaries keep, and of them those the sheets do not refute; with
-    /// <paramref name="granules"/>, those the key's pruning keeps, by the ranges of their granules it keeps.
+    /// The objects the scan walks: those the summaries keep; with <paramref name="granules"/>, those whose key range the
+    /// filter does not refute, judged first since the tree holds their keys, then of them those the sheets do not refute,
+    /// by the ranges of their granules the key's pruning keeps.
     /// </summary>
     private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken, bool granules = false)
     {
         IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken);
+        KeyPruning? pruning = granules && _summaries && _indexes && _take is null ? KeyPruning.Of(_version.Schema, _filter) : null;
+        if (pruning is not null)
+        {
+            walk = KeyHeldAsync(walk, pruning, cancellationToken);
+        }
+
         if (_summaries && _filter is { } filter && (SheetPruning.Asks(filter, _version.Schema.DType) || SheetPaths() is { Count: > 0 }))
         {
             walk = SheetPrunedAsync(walk, filter, cancellationToken);
         }
 
-        return granules && _summaries && _indexes && _take is null && KeyPruning.Of(_version.Schema, _filter) is { } pruning
-            ? KeyPrunedAsync(walk, pruning, cancellationToken)
-            : walk;
+        return pruning is not null ? KeyPrunedAsync(walk, pruning, cancellationToken) : walk;
+    }
+
+    /// <summary>The objects of <paramref name="walk"/> whose key range the filter does not refute (<see cref="KeyPruning.MayHold"/>), with no read.</summary>
+    private async IAsyncEnumerable<PositionedObject> KeyHeldAsync(
+        IAsyncEnumerable<PositionedObject> walk, KeyPruning pruning, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            ReadOnlyMemory<byte> first = held.TreeKey.Length > VortexDataset.UidBytes ? VortexDataset.OrderOf(held.TreeKey) : default;
+            if (!first.IsEmpty && !pruning.MayHold(first.Span, held.Entry.LastKey.Span))
+            {
+                if (_considers && _metrics is { } skipped)
+                {
+                    skipped.ObjectsPrunedByKey++;
+                }
+
+                continue;
+            }
+
+            yield return held;
+        }
     }
 
     /// <summary>

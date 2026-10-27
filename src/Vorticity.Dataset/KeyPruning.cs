@@ -21,8 +21,9 @@ namespace Vorticity.Dataset;
 /// </summary>
 /// <remarks>
 /// It prunes well where the components before the one a filter bounds hold few values, a filter on the hour under
-/// <c>(Service, Hour)</c> keeping in each service the granules of its hours. A component read from a variant key bounds
-/// nothing, its values having no column a summary names.
+/// <c>(Service, Hour)</c> keeping in each service the granules of its hours. A component read from a variant's key bounds
+/// the filter's reads of that key in that class (spec E, 5.2): they are judged under a name of their own, which no column
+/// takes, as a column is under its path.
 /// </remarks>
 internal sealed class KeyPruning
 {
@@ -57,21 +58,43 @@ internal sealed class KeyPruning
         int skip = plan.Partition is null ? 0 : 1;
         if (plan.Partition is { } partition)
         {
-            sources[0] = partition.Read is null ? partition : null;
+            sources[0] = partition;
         }
 
         for (int i = 0; i < plan.Components.Count && skip + i < sources.Length; i++)
         {
-            LayoutColumn component = plan.Components[i];
-            sources[skip + i] = component.Read is null ? component : null;
+            sources[skip + i] = plan.Components[i];
         }
 
-        SummaryPruner pruner = new SummaryPruner(FunctionFieldExpr.Ranges(filter));
+        // The filter as the key reads it: each read of a variant's key a component reads, a column of its own name.
+        VortexExpr judged = Aggregating.GroupPredicates.Rewrite(
+            FunctionFieldExpr.Ranges(filter), field => field is VariantFieldExpr path && Named(sources, path) is { } name ? new ColumnFieldExpr(name) : field);
+        SummaryPruner pruner = new SummaryPruner(judged);
         foreach (LayoutColumn? source in sources)
         {
-            if (source is not null && Reads(pruner, source.Value.SourcePath))
+            if (source is not null && Reads(pruner, NameOf(source)))
             {
                 return new KeyPruning(tree, sources, skip, pruner);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The name a component's values are judged under: its column's path, or, for a read of a variant's key, its text behind
+    /// a character no column's name holds.
+    /// </summary>
+    private static string NameOf(LayoutColumn source) => source.Read is { } read ? "\0" + read.Text : source.Value.SourcePath;
+
+    /// <summary>The name of the component that reads <paramref name="path"/>, the same key in the same class; null for none.</summary>
+    private static string? Named(LayoutColumn?[] sources, VariantFieldExpr path)
+    {
+        foreach (LayoutColumn? source in sources)
+        {
+            if (source?.Read is { } read && string.Equals(read.Text, path.Text, StringComparison.Ordinal))
+            {
+                return NameOf(source);
             }
         }
 
@@ -235,7 +258,7 @@ internal sealed class KeyPruning
         }
 
         bool hasHigh = high.Kind != FilterLiteralKind.Null;
-        string path = source.Value.SourcePath;
+        string path = NameOf(source);
         if (source.Function is not { } function)
         {
             box.Add(new ColumnSummary(path, low, true, hasHigh ? high : default, hasHigh, false, 0, false));
