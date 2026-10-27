@@ -225,7 +225,7 @@ public sealed class DatasetKeyCursorReadTests
         DatasetOptions options = new DatasetOptions
         {
             Seed = Seed,
-            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")] },
+            Layout = new DatasetLayout { SortKey = [LayoutValue.Column("Key")], ObjectBytes = 2 << 10 },
             Write = new VortexWriteOptions
             {
                 RowBlockSize = 64,
@@ -266,7 +266,6 @@ public sealed class DatasetKeyCursorReadTests
             {
                 LevelZeroCeiling = 1,
                 TargetBytesAtLevelOne = levelOne,
-                MaxObjectBytes = 2 << 10,
                 Fanout = 4,
             };
             while (levelOne > 0 && await dataset.CompactAsync(compaction, ct) is not null)

@@ -871,9 +871,9 @@ public sealed class DatasetCompactionTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
 
-        // Level 1 holds 5 KiB, level 2 50 KiB, level 3 500 KiB: appends are written sorted, which takes their keys a few
+        // Level 1 holds 10 KiB, level 2 100 KiB, level 3 1 MiB: appends are written sorted, which takes their keys a few
         // bytes each.
-        CompactionOptions options = Options(target: 512);
+        CompactionOptions options = Options(target: 1 << 10);
         List<long> appended = [];
         for (int commit = 0; commit < 3; commit++)
         {
@@ -890,8 +890,8 @@ public sealed class DatasetCompactionTests
 
         for (int load = 0; load < 3; load++)
         {
-            await dataset.AppendAsync(Shuffled(types, schema, 1_000 + (load * 20_000), 20_000, load), ct);
-            appended.AddRange(Enumerable.Range(1_000 + (load * 20_000), 20_000).Select(key => (long)key));
+            await dataset.AppendAsync(Shuffled(types, schema, 1_000 + (load * 50_000), 50_000, load), ct);
+            appended.AddRange(Enumerable.Range(1_000 + (load * 50_000), 50_000).Select(key => (long)key));
         }
 
         CompactionJob large = (await dataset.PlanCompactionAsync(options, ct)).Job!;
@@ -900,7 +900,7 @@ public sealed class DatasetCompactionTests
         Assert.Equal(3, large.Inputs.Count);
         CompactionResult moved = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options, ct));
         Assert.Equal(3, moved.ToLevel);
-        Assert.Equal(60_000, moved.Rows);
+        Assert.Equal(150_000, moved.Rows);
 
         Assert.Equal(1, dataset.Levels[1].Entries);
         Assert.Equal(0, dataset.Levels[2].Entries);
