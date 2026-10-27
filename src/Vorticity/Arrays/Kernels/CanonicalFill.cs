@@ -77,6 +77,8 @@ internal static class CanonicalFill
                 return CanBuild(dtype.ElementType, depth + 1);
             case DTypeKind.Extension:
                 return CanBuild(dtype.StorageType, depth + 1);
+            case DTypeKind.Map:
+                return CanBuild(dtype.KeyType, depth + 1) && CanBuild(dtype.ValueType, depth + 1);
             case DTypeKind.Struct:
                 for (int i = 0; i < dtype.FieldCount; i++)
                 {
@@ -183,6 +185,22 @@ internal static class CanonicalFill
                 DType storage = dtype.StorageType;
                 int child = BuildZeroed(arena, context, storage, length, validity, depth + 1);
                 return arena.AddExtension(dtype, length, child);
+            }
+
+            case DTypeKind.Map:
+            {
+                // A list view of {key, value} entries that keeps the map dtype, as a read delivers it (MapDecoder), every
+                // row empty. The entries' struct is composed in the decode's arena, never in the file's.
+                DTypeArena types = context?.Types ?? new DTypeArena();
+                Span<int> names = [types.InternName("key"u8), types.InternName("value"u8)];
+                DType[] fields = [DTypeImport.Into(types, dtype.KeyType), DTypeImport.Into(types, dtype.ValueType)];
+                DType entries = types.Struct(names, fields, Nullability.NonNullable);
+                int elements = BuildZeroed(arena, context, entries, 0, Validity.NonNullable, depth + 1);
+                int bytes = ArrayDecodeContext.CheckedMultiply(length, 8, "map offsets");
+                return arena.AddListView(
+                    dtype, length, validity, elements,
+                    Allocate(arena, context, bytes, Align), PType.U64,
+                    Allocate(arena, context, bytes, Align), PType.U64);
             }
 
             default:
