@@ -835,8 +835,11 @@ public sealed class VortexDataset : IAsyncDisposable
     /// (<see cref="DatasetWriter"/>).
     /// </summary>
     /// <returns>The draft; write its rows, then append it, or dispose it to abandon it.</returns>
+    /// <exception cref="NotSupportedException">The store cannot create a key conditionally, which a commit needs: it hosts readers alone.</exception>
     public ObjectDraft StartObject()
     {
+        // Refused before a row is taken, as the commit the rows wait for would be.
+        RequireConditionalCreation(_store);
         DatasetSchema schema = Snapshot.Schema;
         return new ObjectDraft(this, new DatasetWriter(this, schema, _options.ShredOnAppend ? DeclaredShredding(schema) : null));
     }
