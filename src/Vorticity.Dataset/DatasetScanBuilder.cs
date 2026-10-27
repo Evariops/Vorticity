@@ -732,17 +732,15 @@ internal sealed partial class DatasetScanBuilder
     private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? new SummaryPruner(filter) : null;
 
     /// <summary>
-    /// The objects the scan walks: those the summaries keep, and of them those the sheets do not refute, but the objects
-    /// whose counts <paramref name="answered"/> answers, which read no sheet.
+    /// The objects the scan walks: those the summaries keep, and of them those the sheets do not refute; with
+    /// <paramref name="granules"/>, those the key's pruning keeps, by the ranges of their granules it keeps.
     /// </summary>
-    private IAsyncEnumerable<PositionedObject> WalkAsync(
-        CancellationToken cancellationToken, CountsAnswer? answered = null, RollupChoice? rollups = null, bool granules = false)
+    private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken, bool granules = false)
     {
-        IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(
-            Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers);
+        IAsyncEnumerable<PositionedObject> walk = _version.WalkAsync(Pruner(), _from, _to, _considers ? _metrics : null, cancellationToken);
         if (_summaries && _filter is { } filter && SheetPruning.Asks(filter, _version.Schema.DType))
         {
-            walk = SheetPrunedAsync(walk, filter, answered, rollups, cancellationToken);
+            walk = SheetPrunedAsync(walk, filter, cancellationToken);
         }
 
         return granules && _summaries && _indexes && _take is null && KeyPruning.Of(_version.Schema, _filter) is { } pruning
@@ -818,21 +816,18 @@ internal sealed partial class DatasetScanBuilder
     /// The objects of <paramref name="walk"/> their column sheets do not refute <paramref name="filter"/> by: an object
     /// whose sheets are to be read (<see cref="SheetPruning.Reads"/>) has them read with no open of it, the objects of a
     /// batch side by side, and one that lacks every value an equality or a set asks for there is passed over. An object
-    /// with none passes at once while no batch waits, so that a walk of small objects holds and allocates nothing; and so
-    /// does an object whose counts <paramref name="answered"/> answers, whose counts say which values it holds.
+    /// with none passes at once while no batch waits, so that a walk of small objects holds and allocates nothing.
     /// </summary>
     private async IAsyncEnumerable<PositionedObject> SheetPrunedAsync(
-        IAsyncEnumerable<PositionedObject> walk, VortexExpr filter, CountsAnswer? answered, RollupChoice? rollups,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        IAsyncEnumerable<PositionedObject> walk, VortexExpr filter, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         DType schema = _version.Schema.DType;
         List<int>? columns = null;
         List<PositionedObject>? batch = null;
-        Func<PositionedObject, bool>? unread = answered is null ? null : held => AnsweredBy(answered, held) is not null || rollups?.CoverOf(held) >= 0;
         DatasetScanCounters? metrics = _considers ? _metrics : null;
         await foreach (PositionedObject held in walk.ConfigureAwait(false))
         {
-            if (batch is not { Count: > 0 } && (!SheetPruning.Reads(held.Entry, _dataset.Options, _version.Schema) || unread?.Invoke(held) == true))
+            if (batch is not { Count: > 0 } && !SheetPruning.Reads(held.Entry, _dataset.Options, _version.Schema))
             {
                 yield return held;
                 continue;
@@ -843,7 +838,7 @@ internal sealed partial class DatasetScanBuilder
             {
                 columns ??= SheetPruning.Columns(filter, schema);
                 foreach (PositionedObject kept in await SheetPruning.KeptAsync(
-                    _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
+                    _dataset, _version.Schema, batch, filter, columns, metrics, null, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
                 {
                     yield return kept;
                 }
@@ -856,7 +851,7 @@ internal sealed partial class DatasetScanBuilder
         {
             columns ??= SheetPruning.Columns(filter, schema);
             foreach (PositionedObject kept in await SheetPruning.KeptAsync(
-                _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
+                _dataset, _version.Schema, batch, filter, columns, metrics, null, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false))
             {
                 yield return kept;
             }

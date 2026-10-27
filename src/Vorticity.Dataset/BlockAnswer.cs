@@ -227,9 +227,10 @@ internal sealed class BlockAnswer
     /// themselves and not a function of them, and of a filter the object's summaries do not prove true, those other than
     /// the first, and than a key's column they prove constant, may vary in a block: at most one under a question of
     /// counts, none under one of measures. Past that, every block would be read as rows after its statistics, a request
-    /// for nothing. A function of a column, a truncation, holds one group over a block whose extremes it sends to one.
+    /// for nothing. A function of a column, a truncation, holds one group over a block whose extremes it sends to one. What
+    /// they cost against the rows, the scan's choice weighs (<see cref="Costs"/>).
     /// </summary>
-    internal bool MayAnswer(in PositionedObject held)
+    internal bool Covers(in PositionedObject held)
     {
         ObjectEntry entry = held.Entry;
         if (entry.Contents is not { BlockStats.Count: > 0 } contents || !_schema.Holds(entry))
@@ -277,10 +278,9 @@ internal sealed class BlockAnswer
             }
         }
 
-        // And the statistics cost less than the rows they would spare, both by the formula; an object whose every block holds
-        // several values that the question needs one of reads its rows, the statistics a request for nothing.
-        (PathCosts.Cost statistics, _, PathCosts.Cost rows) = Costs(held);
-        return Unanswered(held) < 1 && _costs.Weight(statistics) < _costs.Weight(rows);
+        // An object whose every block holds several values that the question needs one of reads its rows, the statistics a
+        // request for nothing.
+        return Unanswered(held) < 1;
     }
 
     /// <summary>

@@ -6,10 +6,10 @@ using Vorticity.IO;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// What a path costs an object, as a planner weighs it before reading anything: its bytes, and its requests at the price of
-/// the bytes a request's round trip would have carried, both as the dataset's cost profile prices them
-/// (<see cref="CostProfile"/>). The inputs are the object's table of contents: each column's bytes and chunks, and the
-/// regions of its synopses, a region a cache holds priced at the cache's tier.
+/// What a path costs an object, as a planner weighs it before reading anything: its bytes, its requests at the price of the
+/// bytes a request's round trip would have carried, and what the processor spends on its values, all as the dataset's cost
+/// profile prices them (<see cref="CostProfile"/>). The inputs are the object's table of contents: each column's bytes,
+/// chunks and encoding classes, and the regions of its synopses, a region a cache holds priced at the cache's tier.
 /// </summary>
 /// <remarks>
 /// Two regions of one read are joined across a gap of the profile's joined gap at most, as the store's source joins them:
@@ -28,16 +28,74 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
     /// <summary>The profile the paths are priced at.</summary>
     internal CostProfile Profile => profile;
 
-    /// <summary>A path's cost: its requests and its bytes, at the store's tier, and the store-tier bytes its cached regions are worth.</summary>
-    internal readonly record struct Cost(int Requests, long Bytes, double Cached = 0);
+    /// <summary>
+    /// A path's cost: its requests and its bytes, at the store's tier, the store-tier bytes its cached regions are worth, and
+    /// the nanoseconds of one core its values cost the processor.
+    /// </summary>
+    internal readonly record struct Cost(int Requests, long Bytes, double Cached = 0, double Nanoseconds = 0)
+    {
+        /// <summary>Both costs, paid one after the other.</summary>
+        public static Cost operator +(Cost left, Cost right) =>
+            new Cost((int)Math.Min((long)left.Requests + right.Requests, int.MaxValue), left.Bytes + right.Bytes, left.Cached + right.Cached, left.Nanoseconds + right.Nanoseconds);
+    }
 
-    /// <summary>A path's weight, what the planner compares: its bytes and its requests' worth, at the profile's prices.</summary>
-    internal double Weight(Cost cost) => profile.Weight(cost.Requests, cost.Bytes) + cost.Cached;
+    /// <summary>A path's weight, what the planner compares: its bytes, its requests' worth and its processing, at the profile's prices.</summary>
+    internal double Weight(Cost cost) => profile.Weight(cost.Requests, cost.Bytes, cost.Nanoseconds) + cost.Cached;
+
+    /// <summary>A read of <paramref name="bytes"/> bytes at <paramref name="tier"/>, a cache's: its round trip and its bytes there, weighed in the store's bytes.</summary>
+    internal Cost At(CostTier tier, long bytes) =>
+        new Cost(0, 0, ((tier.Latency.TotalSeconds / Math.Max(tier.InFlight, 1)) + (bytes / tier.BytesPerSecond)) * profile.Store.BytesPerSecond);
+
+    /// <summary>
+    /// What the processor spends reading the rows of <paramref name="fields"/> of the object <paramref name="entry"/> names,
+    /// in nanoseconds of one core (spec B, 2.1): each column's values decoded at the price of the classes its chunks hold
+    /// (<see cref="Indexes.ObjectContents.ClassesOf"/>), those of <paramref name="judged"/> judged by a pushed predicate
+    /// besides, and <paramref name="folded"/> values a row folded, as the profile's node folds them. A column whose contents
+    /// name no class is priced at the medium class.
+    /// </summary>
+    internal double Processing(ObjectEntry entry, ReadOnlySpan<int> fields, ReadOnlySpan<int> judged, int folded)
+    {
+        long rows = entry.PhysicalRows;
+        double nanoseconds = 0;
+        foreach (int field in fields)
+        {
+            nanoseconds += Values(entry, field, rows, judge: false);
+        }
+
+        foreach (int field in judged)
+        {
+            nanoseconds += Values(entry, field, rows, judge: true);
+        }
+
+        // A node folds FoldValuesPerSecond over its cores: a value is that many cores' worth of a core's nanoseconds.
+        return nanoseconds + ((double)rows * folded * 1e9 * Math.Max(profile.Cores, 1) / profile.FoldValuesPerSecond);
+    }
+
+    /// <summary>What decoding, or judging, the values of column <paramref name="field"/> over <paramref name="rows"/> rows costs, by its classes.</summary>
+    private double Values(ObjectEntry entry, int field, long rows, bool judge)
+    {
+        ReadOnlySpan<uint> classes = entry.Contents is { } contents ? contents.ClassesOf(field) : default;
+        if (classes.IsEmpty)
+        {
+            ProcessorPrice medium = profile.PriceOf(EncodingClass.Medium);
+            return rows * (judge ? medium.Judge : medium.Decode);
+        }
+
+        double nanoseconds = 0;
+        foreach (uint held in classes)
+        {
+            ProcessorPrice price = profile.PriceOf((EncodingClass)(held & 7));
+            nanoseconds += (held >> 3) / 256.0 * rows * (judge ? price.Judge : price.Decode);
+        }
+
+        return nanoseconds;
+    }
 
     /// <summary>
     /// Reading the rows of <paramref name="fields"/> of the object <paramref name="entry"/> names: its open, a request for the
     /// bytes it reads from the object's end, then each column's chunks, a request each, as its contents count them or a
-    /// chunk's bytes each; every column's bytes, the object's, when its contents say none.
+    /// chunk's bytes each, every column's bytes, the object's, when its contents say none; and each value decoded
+    /// (<see cref="Processing"/>).
     /// </summary>
     /// <remarks>
     /// A column's chunks but its last lie where its writer flushed them, each a read of its own. The last chunks of all the
@@ -48,9 +106,10 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
     internal Cost Rows(ObjectEntry entry, ReadOnlySpan<int> fields)
     {
         IReadOnlyList<long>? columns = entry.Contents?.ColumnBytes;
+        double decoded = Processing(entry, fields, default, 0);
         if (columns is not { Count: > 0 })
         {
-            return new Cost(1 + (int)Math.Min(int.MaxValue - 1, (entry.Bytes + _chunkBytes - 1) / _chunkBytes), entry.Bytes);
+            return new Cost(1 + (int)Math.Min(int.MaxValue - 1, (entry.Bytes + _chunkBytes - 1) / _chunkBytes), entry.Bytes, 0, decoded);
         }
 
         IReadOnlyList<long>? chunks = entry.Contents?.ColumnChunks;
@@ -90,7 +149,7 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
             previous = field;
         }
 
-        return new Cost((int)Math.Min(int.MaxValue, requests), bytes);
+        return new Cost((int)Math.Min(int.MaxValue, requests), bytes, 0, decoded);
     }
 
     /// <summary>The chunks of column <paramref name="field"/>, as the contents count them or a chunk's bytes each, one at least.</summary>
@@ -133,7 +192,7 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
 
         double part = total > 0 ? touched / total : 1;
         long open = OpenBytes(entry);
-        return new Cost(1 + (int)Math.Ceiling((whole.Requests - 1) * part), open + (long)((whole.Bytes - open) * part));
+        return new Cost(1 + (int)Math.Ceiling((whole.Requests - 1) * part), open + (long)((whole.Bytes - open) * part), 0, whole.Nanoseconds * share);
     }
 
     /// <summary>The bytes an open of the object <paramref name="entry"/> names reads from its end: the first read's, or its footer's when they pass it.</summary>
@@ -187,7 +246,7 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
             if (residence?.Invoke(uid, some) is { } tier)
             {
                 // Its read at the cache's tier, as many bytes of the store's link as that time carries there.
-                cached += ((tier.Latency.TotalSeconds / Math.Max(tier.InFlight, 1)) + (some.Length / tier.BytesPerSecond)) * profile.Store.BytesPerSecond;
+                cached += At(tier, some.Length).Cached;
                 continue;
             }
 

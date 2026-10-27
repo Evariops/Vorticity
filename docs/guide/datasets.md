@@ -252,9 +252,11 @@ one, and `ToInt64()` converts every kind of value.
 
 ### How an aggregation is answered
 
-An aggregation answers each object by the cheapest path it can prove gives the rows' answer, to the
-bit, and reads the rows of the others. `ExplainAsync` says object by object which path it takes and
-what it costs (`ScanPlan.States`), and `ScanOptions.UseSynopses = false` reads every object's rows.
+An aggregation answers each object, or each rollup standing for the objects it covers, by the path
+of least weight among those it can prove give the rows' answer, to the bit: the bytes and requests
+each reads and what its values cost the processor, at the dataset's cost profile. `ExplainAsync` says
+unit by unit which path it takes, what it weighs, and why each other path lost (`ScanPlan.Units`),
+and `ScanOptions.UseSynopses = false` reads every object's rows.
 
 | path | which objects | measured |
 |---|---|---|

@@ -1,0 +1,625 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Threading;
+using System.Threading.Tasks;
+using Vorticity.Aggregating;
+using Vorticity.Indexes;
+using Vorticity.IO;
+
+namespace Vorticity.Dataset;
+
+/// <summary>The units a dataset question's answer is chosen over (spec B, 4), outermost first.</summary>
+internal enum UnitLevel
+{
+    /// <summary>The version.</summary>
+    Version,
+
+    /// <summary>A rollup's run, standing for the objects it covers.</summary>
+    Run,
+
+    /// <summary>A partition.</summary>
+    Partition,
+
+    /// <summary>An object.</summary>
+    Object,
+
+    /// <summary>A range of an object's granules.</summary>
+    Granules,
+}
+
+/// <summary>How much of a unit an alternative answers, known from the entries alone.</summary>
+internal enum Coverage
+{
+    /// <summary>None of it.</summary>
+    None,
+
+    /// <summary>Some of it, the rest by its rows.</summary>
+    Part,
+
+    /// <summary>All of it.</summary>
+    Whole,
+}
+
+/// <summary>The alternatives that answer a unit of a dataset's question (spec B, 6.2), in the order that breaks a tie of weights.</summary>
+internal enum AnswerPath
+{
+    /// <summary>The entry, which the walk holds: a count or an extreme its summaries give.</summary>
+    Entry,
+
+    /// <summary>A rollup's totals, for the objects it covers.</summary>
+    Rollup,
+
+    /// <summary>An object's counts of a column.</summary>
+    Counts,
+
+    /// <summary>The partial of the question's family an object learned, or the sum of those of the objects merged into it.</summary>
+    Partial,
+
+    /// <summary>The statistics of an object's columns over its blocks, the blocks they do not answer read as rows.</summary>
+    Blocks,
+
+    /// <summary>An object's rows, the blocks its zone maps settle taken from them.</summary>
+    Zones,
+
+    /// <summary>An object's rows.</summary>
+    Rows,
+}
+
+internal sealed partial class DatasetScanBuilder
+{
+    /// <summary>The bytes of a learned partial a read from the cache's disk takes, about: what the choice prices it at.</summary>
+    private const long PartialBytes = LearnedPartials.MaxBytes / 16;
+
+    /// <summary>
+    /// A unit of an aggregation's states (spec B, 4) and how it is answered: a rollup taken in place of the objects it covers,
+    /// or an object; the alternative its weight chose, what it costs, why the others lost, and the reads begun ahead of it.
+    /// </summary>
+    private sealed class Planned
+    {
+        /// <summary>An object of the walk.</summary>
+        internal Planned(PositionedObject held, int? field)
+        {
+            Held = held;
+            Field = field;
+        }
+
+        /// <summary>A rollup taken, its column <paramref name="field"/>, by bucket under <paramref name="buckets"/>.</summary>
+        internal Planned(RollupEntry run, int field, ObjectSummaries?[]? buckets)
+        {
+            Run = run;
+            Field = field;
+            Buckets = buckets;
+        }
+
+        /// <summary>The object; default for a rollup.</summary>
+        internal PositionedObject Held { get; }
+
+        /// <summary>The rollup; null for an object.</summary>
+        internal RollupEntry? Run { get; }
+
+        /// <summary>The summaries of the buckets of a rollup taken by bucket; null otherwise.</summary>
+        internal ObjectSummaries?[]? Buckets { get; }
+
+        /// <summary>The column whose counts answer it; null when none does.</summary>
+        internal int? Field { get; }
+
+        internal UnitLevel Level => Run is null ? UnitLevel.Object : UnitLevel.Run;
+
+        /// <summary>The unit's name: its key in the dataset.</summary>
+        internal string Name => Run?.Key ?? Held.Entry.Key;
+
+        /// <summary>The alternative its weight chose.</summary>
+        internal Alternative Chosen { get; set; } = null!;
+
+        /// <summary>What the alternative chosen costs.</summary>
+        internal PathCosts.Cost Cost { get; set; }
+
+        /// <summary>Its weight, at the dataset's cost profile.</summary>
+        internal double Weight { get; set; }
+
+        /// <summary>Each other alternative and why it lost, for an explanation; null for a run.</summary>
+        internal List<string>? Rejected { get; set; }
+
+        /// <summary>Whether its reads began (<see cref="Begin"/>).</summary>
+        internal bool Begun { get; set; }
+
+        /// <summary>The read of its counts, begun ahead; null before or after.</summary>
+        internal Task<(ColumnCounts?, ColumnSketches?)>? Counts { get; set; }
+
+        /// <summary>The read of its columns' statistics over its blocks, begun ahead; null before or after.</summary>
+        internal Task<(ColumnWhere? Where, ColumnBlocks? Blocks)[]>? Blocks { get; set; }
+
+        /// <summary>Its partial, being learned ahead; null before or after.</summary>
+        internal Task<AggregationPartial>? Learning { get; set; }
+
+        /// <summary>Its open, begun ahead; null before or after.</summary>
+        internal Task? Opened { get; set; }
+    }
+
+    /// <summary>
+    /// One way of answering a unit (spec B, 6.1): whether it covers the unit from the entries alone, and what it costs at the
+    /// dataset's profile, each region at the tier it lies in. What it gives, states or rows, the scan's loop reads through it.
+    /// </summary>
+    private abstract class Alternative(DatasetScanBuilder scan, AnswerPath path, UnitLevel level)
+    {
+        protected DatasetScanBuilder Scan { get; } = scan;
+
+        internal AnswerPath Path { get; } = path;
+
+        internal UnitLevel Level { get; } = level;
+
+        /// <summary>The alternative's name in an explanation.</summary>
+        internal string Name => Path.ToString().ToLowerInvariant();
+
+        /// <summary>How much of <paramref name="unit"/> it answers, from the entries alone.</summary>
+        internal abstract Coverage Covers(Planned unit);
+
+        /// <summary>What answering <paramref name="unit"/> through it costs.</summary>
+        internal abstract PathCosts.Cost Cost(Planned unit);
+
+        /// <summary>What it reads of <paramref name="unit"/>, in words.</summary>
+        internal abstract string Describe(Planned unit, PathCosts.Cost cost);
+    }
+
+    /// <summary>A rollup's totals, or its counts by bucket, for the objects it covers (<see cref="RollupChoice"/>).</summary>
+    private sealed class RollupAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Rollup, UnitLevel.Run)
+    {
+        internal override Coverage Covers(Planned unit) => unit.Run is null ? Coverage.None : Coverage.Whole;
+
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RollupCost(unit.Run!, unit.Field!.Value, unit.Buckets);
+
+        internal override string Describe(Planned unit, PathCosts.Cost cost)
+        {
+            RollupEntry rollup = unit.Run!;
+            CountsAnswer answer = Scan.Answer()!;
+            RollupColumn kept = rollup.ColumnOf(unit.Field!.Value)!.Value;
+            string column = Scan._version.Schema.Columns[unit.Field.Value].Name;
+            bool sketched = answer.AsksSketches && kept.Regions(unit.Buckets is not null).Sketches is not null;
+            string what = unit.Buckets is null ? $"totals of {column}" : $"counts by bucket of {column}";
+            string read = VortexDataset.ReadsInPart(kept, answer.AsksSketches, answer.Values, unit.Buckets is not null)
+                ? $"the header of the {what} and the chunks of {answer.Values!.Length} values"
+                : $"the {what}";
+            int answered = 0;
+            foreach (ObjectSummaries? bucket in unit.Buckets ?? [])
+            {
+                answered += bucket is null ? 0 : 1;
+            }
+
+            return $"{read}{(sketched ? " and their sketches" : string.Empty)} over {rollup.Objects} objects, rank {rollup.Rank}"
+                + (unit.Buckets is null ? string.Empty : $", {answered} of its {unit.Buckets.Length} buckets");
+        }
+    }
+
+    /// <summary>An object's counts of the column that answers the question (<see cref="CountsAnswer"/>).</summary>
+    private sealed class CountsAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Counts, UnitLevel.Object)
+    {
+        internal override Coverage Covers(Planned unit) => unit.Field is null ? Coverage.None : Coverage.Whole;
+
+        internal override PathCosts.Cost Cost(Planned unit)
+        {
+            ObjectEntry entry = unit.Held.Entry;
+            CountsAnswer answer = Scan.Answer()!;
+            int field = unit.Field!.Value;
+            PathCosts.Cost counts = Scan._version.Costs.Regions(entry.Uid, [entry.Contents!.CountsOf(field), answer.AsksSketches ? entry.Contents.SketchesOf(field) : null]);
+
+            // A delete's counts read beside, from the commit object they lie in; under a value of an identifier left out,
+            // the rows its postings find, in three round trips cold: the index entries and chunk directories, the runs, the
+            // chunks.
+            int less = (entry.HasDeletions ? 1 : 0) + (answer.Exclusion is null ? 0 : 3);
+            return less == 0 ? counts : counts + new PathCosts.Cost(less, entry.HasDeletions ? entry.NegativesAt.Length : 0);
+        }
+
+        internal override string Describe(Planned unit, PathCosts.Cost cost)
+        {
+            CountsAnswer answer = Scan.Answer()!;
+            ObjectEntry entry = unit.Held.Entry;
+            string column = Scan._version.Schema.Columns[unit.Field!.Value].Name;
+            bool sketched = answer.AsksSketches && entry.Contents!.SketchesOf(unit.Field.Value) is not null;
+            return (sketched ? $"the counts of {column} and their sketches" : $"the counts of {column}")
+                + (entry.HasDeletions ? ", less those of its deleted rows" : string.Empty)
+                + (answer.Exclusion is { } exclusion ? $", less those of the rows of {exclusion.Path} its postings find" : string.Empty);
+        }
+    }
+
+    /// <summary>
+    /// The partial of the question's family an object learned, or the sum of those of the objects a compaction merged into it,
+    /// each held; an object whose partial is to be learned from its rows is the rows' (<see cref="RowsAlternative"/>).
+    /// </summary>
+    private sealed class PartialAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Partial, UnitLevel.Object)
+    {
+        internal override Coverage Covers(Planned unit)
+        {
+            if (!Scan.Learns(unit.Held))
+            {
+                return Coverage.None;
+            }
+
+            SynopsisCache? cache = Scan._dataset.Session.Options.SynopsisCache;
+            LearnedPartials partials = Scan._dataset.Partials;
+            UInt128 uid = unit.Held.Entry.Uid;
+            UInt128 key = Scan.FamilyOf(unit.Held)!.Value.Key;
+            if (partials.Holds(uid, key, cache))
+            {
+                return Coverage.Whole;
+            }
+
+            if (partials.MergedInto(uid, cache) is not { } inputs)
+            {
+                return Coverage.None;
+            }
+
+            foreach (UInt128 input in inputs)
+            {
+                if (!partials.Holds(input, key, cache))
+                {
+                    return Coverage.None;
+                }
+            }
+
+            return Coverage.Whole;
+        }
+
+        /// <summary>Nothing for a partial in memory; a read from the cache's disk for one there, or for each of the partials it sums.</summary>
+        internal override PathCosts.Cost Cost(Planned unit)
+        {
+            PathCosts costs = Scan._version.Costs;
+            UInt128 key = Scan.FamilyOf(unit.Held)!.Value.Key;
+            UInt128 uid = unit.Held.Entry.Uid;
+            LearnedPartials partials = Scan._dataset.Partials;
+            SynopsisCache? cache = Scan._dataset.Session.Options.SynopsisCache;
+            if (partials.Holds(uid, key, cache))
+            {
+                return partials.InMemory(uid, key) ? default : costs.At(costs.Profile.DiskCache, PartialBytes);
+            }
+
+            PathCosts.Cost summed = default;
+            foreach (UInt128 input in partials.MergedInto(uid, cache) ?? [])
+            {
+                summed += partials.InMemory(input, key) ? default : costs.At(costs.Profile.DiskCache, PartialBytes);
+            }
+
+            return summed;
+        }
+
+        internal override string Describe(Planned unit, PathCosts.Cost cost) =>
+            Scan._dataset.Partials.Holds(unit.Held.Entry.Uid, Scan.FamilyOf(unit.Held)!.Value.Key, Scan._dataset.Session.Options.SynopsisCache)
+                ? "the partial of the question's family it learned"
+                : "the partials of the question's family of the objects a compaction merged into it, summed";
+    }
+
+    /// <summary>The statistics of an object's columns over its blocks, the blocks they do not answer read as rows (<see cref="BlockAnswer"/>).</summary>
+    private sealed class BlocksAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Blocks, UnitLevel.Object)
+    {
+        internal override Coverage Covers(Planned unit) =>
+            Scan.Answer() is not null && unit.Held.Entry.Contents is { BlockStats.Count: > 0 } && Scan.Covered(unit.Held) == unit.Held.Entry.Rows
+            && Scan.BlockAnswer() is { } blocks && blocks.Covers(unit.Held)
+                ? Coverage.Part
+                : Coverage.None;
+
+        internal override PathCosts.Cost Cost(Planned unit)
+        {
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.BlockAnswer()!.Costs(unit.Held);
+            return statistics + unanswered + Scan.SheetsCost(unit.Held);
+        }
+
+        internal override string Describe(Planned unit, PathCosts.Cost cost)
+        {
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.BlockAnswer()!.Costs(unit.Held);
+            return $"the statistics over the blocks of {Scan.BlockAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests, "
+                + $"and the rows of the blocks they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}";
+        }
+    }
+
+    /// <summary>
+    /// An object's rows, the blocks its zone maps settle taken from them (<see cref="ZoneSettling"/>): an aggregation's whose
+    /// filter, if any, the object's summaries prove true over every row. What its zone maps settle is known once it is
+    /// open, which its rows need anyway: it weighs its rows, no more.
+    /// </summary>
+    private sealed class ZonesAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Zones, UnitLevel.Object)
+    {
+        internal override Coverage Covers(Planned unit) =>
+            Scan._settles is not null && Scan._take is null && Scan._version.Schema.Holds(unit.Held.Entry) && Scan.MaySettle(unit.Held)
+                ? Coverage.Part
+                : Coverage.None;
+
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held);
+
+        internal override string Describe(Planned unit, PathCosts.Cost cost) =>
+            $"its rows, {cost.Bytes} bytes in {cost.Requests} requests, the blocks its zone maps settle taken from them";
+    }
+
+    /// <summary>An object's rows: those of the question's columns, or, for an object that learns its family's partial, the family's.</summary>
+    private sealed class RowsAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Rows, UnitLevel.Object)
+    {
+        internal override Coverage Covers(Planned unit) => Coverage.Whole;
+
+        internal override PathCosts.Cost Cost(Planned unit) => Scan.RowsCost(unit.Held);
+
+        internal override string Describe(Planned unit, PathCosts.Cost cost) =>
+            Scan.Learns(unit.Held)
+                ? $"its rows, {cost.Bytes} bytes in {cost.Requests} requests, the partial of the question's family learned from them"
+                : $"its rows, {cost.Bytes} bytes in {cost.Requests} requests";
+    }
+
+    /// <summary>The alternatives of a unit, in the order that breaks a tie: today's cascade (spec B, 6.3).</summary>
+    private Alternative[] Alternatives => _alternatives ??=
+    [
+        new RollupAlternative(this), new CountsAlternative(this), new PartialAlternative(this), new BlocksAlternative(this),
+        new ZonesAlternative(this), new RowsAlternative(this),
+    ];
+
+    private Alternative[]? _alternatives;
+
+    /// <summary>
+    /// Chooses how <paramref name="unit"/> is answered: of the alternatives that cover it, the one of least weight at the
+    /// dataset's profile, the first in their order at a tie; with <paramref name="explain"/>, why each other lost.
+    /// </summary>
+    private void Choose(Planned unit, bool explain)
+    {
+        Alternative? best = null;
+        PathCosts.Cost cost = default;
+        double least = double.PositiveInfinity;
+        List<string>? rejected = explain ? [] : null;
+        foreach (Alternative alternative in Alternatives)
+        {
+            if (alternative.Level != unit.Level)
+            {
+                continue;
+            }
+
+            if (alternative.Covers(unit) == Coverage.None)
+            {
+                rejected?.Add($"{alternative.Name}: does not cover it");
+                continue;
+            }
+
+            PathCosts.Cost its = alternative.Cost(unit);
+            double weight = _version.Costs.Weight(its);
+            if (weight < least)
+            {
+                if (best is not null)
+                {
+                    rejected?.Add(Weighs(best.Name, least));
+                }
+
+                (best, cost, least) = (alternative, its, weight);
+            }
+            else
+            {
+                rejected?.Add(Weighs(alternative.Name, weight));
+            }
+        }
+
+        unit.Chosen = best!;
+        unit.Cost = cost;
+        unit.Weight = least;
+        unit.Rejected = rejected;
+
+        static string Weighs(string name, double weight) => string.Create(CultureInfo.InvariantCulture, $"{name}: weighs {weight:F0}");
+    }
+
+    /// <summary>
+    /// What reading the column <paramref name="field"/> of <paramref name="rollup"/> costs: its totals, or its counts by bucket
+    /// under <paramref name="buckets"/>, whole, or under the values the question asks their header and a chunk a value; and
+    /// their sketches beside them for a quantile.
+    /// </summary>
+    private PathCosts.Cost RollupCost(RollupEntry rollup, int field, ObjectSummaries?[]? buckets)
+    {
+        CountsAnswer answer = Answer()!;
+        RollupColumn kept = rollup.ColumnOf(field)!.Value;
+        (IndexSegment? counted, IndexSegment? sketches, int countsHead, int sketchesHead) = kept.Regions(buckets is not null);
+        IndexSegment? sketched = answer.AsksSketches ? sketches : null;
+        if (!VortexDataset.ReadsInPart(kept, answer.AsksSketches, answer.Values, buckets is not null))
+        {
+            return _version.Costs.Regions(rollup.Uid, [counted, sketched]);
+        }
+
+        long bytes = InPart(counted!.Value, countsHead, answer.Values!.Length) + (sketched is { } some ? InPart(some, sketchesHead, answer.Values.Length) : 0);
+        return new PathCosts.Cost(sketched is null ? 2 : 4, bytes);
+    }
+
+    /// <summary>
+    /// What reading the rows of the object <paramref name="held"/> costs the scan: the question's columns, or the family's for
+    /// an object that learns its partial, each value decoded, the filter's columns judged, and, under an aggregation, each
+    /// value of the columns read folded; and its sheets, read first when the filter asks values of a column.
+    /// </summary>
+    private PathCosts.Cost RowsCost(in PositionedObject held)
+    {
+        PathCosts costs = _version.Costs;
+        bool learns = _states is not null && Learns(held);
+        int[] fields = learns ? FamilyFields() : FieldsRead();
+        PathCosts.Cost rows = costs.Rows(held.Entry, fields);
+        double processing = costs.Processing(held.Entry, default, FieldsJudged(), _states is not null || _settles is not null ? fields.Length : 0);
+        return rows with { Nanoseconds = rows.Nanoseconds + processing } + SheetsCost(held);
+    }
+
+    /// <summary>What reading the sheets of the object <paramref name="held"/> costs, when the filter asks values of a column; nothing otherwise.</summary>
+    private PathCosts.Cost SheetsCost(in PositionedObject held) =>
+        SheetColumns() is { } columns ? SheetPruning.Cost(held.Entry, _dataset.Options, _version.Schema, columns, _version.Costs) : default;
+
+    /// <summary>The columns whose sheets the walk reads, when the filter asks values of a column; null otherwise. Found once.</summary>
+    private List<int>? SheetColumns()
+    {
+        if (!_sheetColumnsKnown)
+        {
+            _sheetColumns = _summaries && _filter is { } filter && SheetPruning.Asks(filter, _version.Schema.DType)
+                ? SheetPruning.Columns(filter, _version.Schema.DType)
+                : null;
+            _sheetColumnsKnown = true;
+        }
+
+        return _sheetColumns;
+    }
+
+    private List<int>? _sheetColumns;
+    private bool _sheetColumnsKnown;
+
+    /// <summary>The top-level columns the filter reads, by their places, each once, ascending: those a pushed predicate judges. Found once.</summary>
+    private int[] FieldsJudged()
+    {
+        if (_fieldsJudged is null)
+        {
+            SortedSet<int> judged = [];
+            foreach (string path in _filter is null ? [] : FilterPaths())
+            {
+                int dot = path.IndexOf('.', StringComparison.Ordinal);
+                if (_version.Schema.DType.IndexOfField(dot < 0 ? path : path[..dot]) is int field and >= 0)
+                {
+                    judged.Add(field);
+                }
+            }
+
+            _fieldsJudged = [.. judged];
+        }
+
+        return _fieldsJudged;
+    }
+
+    private int[]? _fieldsJudged;
+
+    /// <summary>
+    /// The units of a question, each chosen (<see cref="Choose"/>): the rollups the scan takes, each weighing no more than
+    /// its objects (<see cref="KeepsAsync"/>), then the objects the walk meets that no rollup covers. With
+    /// <paramref name="read"/>, the units whose choice reads rows are passed through their sheets, as a read does
+    /// (<see cref="SheetsKeptAsync"/>); without, nothing but the entries is read, and the sheets weigh in each object's cost.
+    /// </summary>
+    private async ValueTask<(RollupChoice? Rollups, List<Planned> Units)> UnitsAsync(CountsAnswer? answer, bool explain, bool read, CancellationToken cancellationToken)
+    {
+        RollupChoice? rollups = answer is null ? null : await RollupsAsync(answer, cancellationToken).ConfigureAwait(false);
+        List<Planned> units = [];
+        foreach ((RollupEntry rollup, int field, ObjectSummaries?[]? buckets) in rollups?.Chosen ?? [])
+        {
+            Planned unit = new Planned(rollup, field, buckets);
+            Choose(unit, explain);
+            unit.Rejected = explain && _objectsWeighed?.TryGetValue(rollup.Key, out string? why) == true ? [why!] : unit.Rejected;
+            units.Add(unit);
+        }
+
+        await foreach (PositionedObject held in _version.WalkAsync(
+            Pruner(), _from, _to, read && _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers).ConfigureAwait(false))
+        {
+            if (Covered(held) > 0 && rollups?.CoverOf(held) is not >= 0)
+            {
+                Planned unit = new Planned(held, answer is null ? null : AnsweredBy(answer, held));
+                Choose(unit, explain);
+                units.Add(unit);
+            }
+        }
+
+        return (rollups, read ? await SheetsKeptAsync(units, cancellationToken).ConfigureAwait(false) : units);
+    }
+
+    /// <summary>
+    /// <paramref name="units"/> less the objects whose column sheets refute the filter (<see cref="SheetPruning"/>), in their
+    /// order: the sheets of the objects whose choice reads rows are read side by side, <see cref="SheetBatch"/> objects at a
+    /// time; an object its counts or a learned partial answer reads none, its synopses saying which values it holds, nor does
+    /// a rollup. Nothing is read when the filter asks no value of a column.
+    /// </summary>
+    private async ValueTask<List<Planned>> SheetsKeptAsync(List<Planned> units, CancellationToken cancellationToken)
+    {
+        if (!_summaries || _filter is not { } filter || SheetColumns() is not { } columns)
+        {
+            return units;
+        }
+
+        HashSet<long> answered = [];
+        foreach (Planned unit in units)
+        {
+            if (unit.Run is null && unit.Chosen.Path is AnswerPath.Counts or AnswerPath.Partial)
+            {
+                answered.Add(unit.Held.FirstRow);
+            }
+        }
+
+        List<Planned> kept = new List<Planned>(units.Count);
+        int first = 0;
+        for (; first < units.Count && units[first].Run is not null; first++)
+        {
+            kept.Add(units[first]);
+        }
+
+        List<PositionedObject> batch = new List<PositionedObject>(SheetBatch);
+        DatasetScanCounters? metrics = _considers ? _metrics : null;
+        Func<PositionedObject, bool>? unread = answered.Count == 0 ? null : held => answered.Contains(held.FirstRow);
+        for (int from = first; from < units.Count; from += SheetBatch)
+        {
+            int to = Math.Min(units.Count, from + SheetBatch);
+            batch.Clear();
+            for (int u = from; u < to; u++)
+            {
+                batch.Add(units[u].Held);
+            }
+
+            List<PositionedObject> passed = await SheetPruning.KeptAsync(
+                _dataset, _version.Schema, batch, filter, columns, metrics, unread, cancellationToken, _narrowing ??= Narrow).ConfigureAwait(false);
+            for (int u = from, p = 0; u < to; u++)
+            {
+                if (p < passed.Count && passed[p].FirstRow == units[u].Held.FirstRow)
+                {
+                    kept.Add(units[u]);
+                    p++;
+                }
+            }
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// Whether the rollup <paramref name="rollup"/>, read through its column <paramref name="field"/>, by bucket under
+    /// <paramref name="buckets"/>, weighs no more than the objects it covers at their cheapest (spec B, 6.3): each reads a
+    /// request at least, which bounds most rollups at once; past that bound, its objects are weighed each, as the walk
+    /// would meet them, once for every rollup. A learned partial of an object under a rollup is weighed only then.
+    /// </summary>
+    private async ValueTask<bool> KeepsAsync(RollupEntry rollup, int field, ObjectSummaries?[]? buckets, CancellationToken cancellationToken)
+    {
+        double rolled = _version.Costs.Weight(RollupCost(rollup, field, buckets));
+        double floor = rollup.Objects * (double)_version.Costs.Profile.RequestBytes;
+        if (rolled <= floor)
+        {
+            (_objectsWeighed ??= [])[rollup.Key] = string.Create(CultureInfo.InvariantCulture, $"its {rollup.Objects} objects: weigh {floor:F0} at least, a request each");
+            return true;
+        }
+
+        if (_weights is null)
+        {
+            // Each object of the version the summaries keep, at its cheapest, in the order of the levels and the tree keys.
+            List<(int Level, ReadOnlyMemory<byte> Key, double Weight)> weights = [];
+            await foreach (PositionedObject held in _version.WalkAsync(Pruner(), 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+            {
+                Planned unit = new Planned(held, AnsweredBy(Answer()!, held));
+                Choose(unit, explain: false);
+                weights.Add((held.Level, held.TreeKey, unit.Weight));
+            }
+
+            weights.Sort(static (left, right) => left.Level != right.Level ? left.Level.CompareTo(right.Level) : left.Key.Span.SequenceCompareTo(right.Key.Span));
+            _weights = weights;
+        }
+
+        double objects = 0;
+        int at = _weights.BinarySearch((rollup.Level, rollup.FirstKey, 0), WeightOrder.Instance);
+        for (at = at < 0 ? ~at : at; at < _weights.Count && _weights[at].Level == rollup.Level && rollup.Covers(_weights[at].Key.Span); at++)
+        {
+            objects += _weights[at].Weight;
+        }
+
+        (_objectsWeighed ??= [])[rollup.Key] = string.Create(CultureInfo.InvariantCulture, $"its {rollup.Objects} objects: weigh {objects:F0}");
+        return rolled <= objects;
+    }
+
+    // The objects of the version at their cheapest, for the rollups whose bound did not decide; null until one did not.
+    private List<(int Level, ReadOnlyMemory<byte> Key, double Weight)>? _weights;
+
+    // Why each rollup taken beat its objects, by its key, for an explanation.
+    private Dictionary<string, string>? _objectsWeighed;
+
+    /// <summary>The order of the objects' weights: by level, then by tree key.</summary>
+    private sealed class WeightOrder : IComparer<(int Level, ReadOnlyMemory<byte> Key, double Weight)>
+    {
+        internal static WeightOrder Instance { get; } = new WeightOrder();
+
+        public int Compare((int Level, ReadOnlyMemory<byte> Key, double Weight) x, (int Level, ReadOnlyMemory<byte> Key, double Weight) y) =>
+            x.Level != y.Level ? x.Level.CompareTo(y.Level) : x.Key.Span.SequenceCompareTo(y.Key.Span);
+    }
+}

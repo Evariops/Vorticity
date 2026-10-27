@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using Vorticity.Scanning;
@@ -15,23 +16,35 @@ namespace Vorticity;
 public sealed record PruningStep(string Structure, int BlocksPruned, int SegmentsRead, long BytesRead);
 
 /// <summary>
-/// What an aggregation reads of one object of a dataset whose synopses answer it: the states of its counts, or of its blocks'
-/// statistics, which stand for its rows.
+/// How one unit of a question over a dataset is answered (spec B, 7): a rollup's run or an object, the alternative its weight
+/// chose, what that reads and weighs, and why each other alternative lost.
 /// </summary>
-/// <param name="Object">The object, by its key in the dataset.</param>
-/// <param name="Read">
-/// What it reads: <c>states</c>, <c>rollup</c> for a rollup's totals, which stand for its objects', or <c>blocks</c> for the
-/// statistics of its columns over its blocks, the rows of the blocks they do not answer read besides.
+/// <param name="Unit">The unit, by its key in the dataset: a rollup's, or an object's.</param>
+/// <param name="Level"><c>run</c> for a rollup standing for the objects it covers, <c>object</c> for an object.</param>
+/// <param name="Alternative">
+/// The alternative taken: <c>rollup</c>, <c>counts</c> (the object's counts of a column), <c>partial</c> (the partial of the
+/// question's family it learned), <c>blocks</c> (its columns' statistics over its blocks, the rows of the others read
+/// besides), <c>zones</c> (its rows, the blocks its zone maps settle taken from them) or <c>rows</c>.
 /// </param>
-/// <param name="Detail">
-/// The column whose counts it reads, and their sketches when a quantile asks them; for blocks, the bytes and requests of
-/// their statistics and those of the rows they were weighed against.
+/// <param name="Detail">What it reads.</param>
+/// <param name="Requests">Its requests to the store.</param>
+/// <param name="Bytes">Its bytes from the store.</param>
+/// <param name="Weight">
+/// What it weighs at the dataset's cost profile, in bytes of the store's link: its bytes, a request's worth a request, its
+/// reads from a cache and its processing.
 /// </param>
-/// <param name="Count">
-/// The regions the states read: the counts, and their sketches; a rollup's totals read in part, under the values a
-/// question asks, count their header and their chunks; the requests of the blocks' statistics.
+/// <param name="Rejected">Each other alternative and why it lost: it does not cover the unit, or what it weighs.</param>
+public sealed record UnitStep(string Unit, string Level, string Alternative, string Detail, long Requests, long Bytes, double Weight, ImmutableArray<string> Rejected);
+
+/// <summary>What a plan costs at the source's cost profile, before reading anything (spec B, 7).</summary>
+/// <param name="Requests">Its requests to the store.</param>
+/// <param name="Bytes">Its bytes from the store.</param>
+/// <param name="Nanoseconds">What the processor spends on its values, in nanoseconds of one core.</param>
+/// <param name="Predicted">
+/// The time it is predicted to take cold: its requests in rounds of those in flight, a round trip each, its bytes over the
+/// link, its processing over the cores.
 /// </param>
-public sealed record StatesStep(string Object, string Read, string Detail, long Count);
+public sealed record PlanCost(long Requests, long Bytes, double Nanoseconds, TimeSpan Predicted);
 
 /// <summary>
 /// What a scan will do, worked out from statistics, zone maps and indexes before a data segment is
@@ -66,10 +79,13 @@ public sealed record ScanPlan(
     public GroupPlan? Grouping { get; init; }
 
     /// <summary>
-    /// For an aggregation over a dataset whose objects keep counts, what each object they answer reads: its counts' states;
-    /// empty when they answer none, every object read as rows.
+    /// Over a dataset, how each unit is answered: each rollup and object the scan covers, the alternative its weight chose at
+    /// the dataset's cost profile, and why the others lost; empty over a file.
     /// </summary>
-    public ImmutableArray<StatesStep> States { get; init; } = [];
+    public ImmutableArray<UnitStep> Units { get; init; } = [];
+
+    /// <summary>What the plan costs at the source's cost profile, before reading anything; null where the source does not say.</summary>
+    public PlanCost? Cost { get; init; }
 
     /// <summary>
     /// The range an aggregation over a dataset would answer under <see cref="ScanOptions.AlignWindow"/>, when it grows the

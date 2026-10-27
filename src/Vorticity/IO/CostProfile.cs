@@ -135,6 +135,17 @@ public sealed record CostProfile
         bytes + ((double)requests * RequestBytes) + (nanoseconds * 1e-9 * Store.BytesPerSecond / Math.Max(Cores, 1));
 
     /// <summary>
+    /// The time a step of <paramref name="requests"/> requests carrying <paramref name="bytes"/> bytes, which costs the
+    /// processor <paramref name="nanoseconds"/> of one core, takes cold (spec B, 2.2): its requests in rounds of those in
+    /// flight, a round trip each, its bytes over the link, its processing over the cores.
+    /// </summary>
+    public TimeSpan Predict(long requests, long bytes, double nanoseconds) =>
+        TimeSpan.FromSeconds(
+            (Math.Ceiling((double)requests / Math.Max(Store.InFlight, 1)) * Store.Latency.TotalSeconds)
+            + (bytes / Store.BytesPerSecond)
+            + (nanoseconds * 1e-9 / Math.Max(Cores, 1)));
+
+    /// <summary>
     /// The time a read of <paramref name="requests"/> requests carrying <paramref name="bytes"/> bytes takes cold, many
     /// requests in flight: its bytes and its requests' worth over the link.
     /// </summary>

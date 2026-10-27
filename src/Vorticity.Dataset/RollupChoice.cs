@@ -35,10 +35,12 @@ internal sealed class RollupChoice
 
     /// <summary>
     /// The rollups <paramref name="answer"/> takes over <paramref name="version"/>, those <paramref name="pruner"/> refutes
-    /// left to the walk, which finds no row in them; null when it takes none.
+    /// left to the walk, which finds no row in them, and those <paramref name="keeps"/> says weigh more than their objects
+    /// left to those below them; null when it takes none.
     /// </summary>
     internal static async ValueTask<RollupChoice?> OfAsync(
-        DatasetSnapshot version, CountsAnswer answer, SummaryPruner? pruner, CancellationToken cancellationToken)
+        DatasetSnapshot version, CountsAnswer answer, SummaryPruner? pruner, CancellationToken cancellationToken,
+        Func<RollupEntry, int, ObjectSummaries?[]?, CancellationToken, ValueTask<bool>>? keeps = null)
     {
         if (version.Levels.Rollups.IsEmpty)
         {
@@ -71,9 +73,13 @@ internal sealed class RollupChoice
 
             if (answer.FieldOf(rollup) is int field)
             {
-                chosen.Add((rollup, field, null));
+                if (keeps is null || await keeps(rollup, field, null, cancellationToken).ConfigureAwait(false))
+                {
+                    chosen.Add((rollup, field, null));
+                }
             }
-            else if (key is not null && answer.BucketsOf(rollup, key, pruner) is (int byBucket, var buckets) && ByBucket(rollup, byBucket, buckets, answer, version.Costs.Profile))
+            else if (key is not null && answer.BucketsOf(rollup, key, pruner) is (int byBucket, var buckets) && ByBucket(rollup, byBucket, buckets, answer, version.Costs.Profile)
+                && (keeps is null || await keeps(rollup, byBucket, buckets, cancellationToken).ConfigureAwait(false)))
             {
                 chosen.Add((rollup, byBucket, buckets));
             }

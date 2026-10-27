@@ -171,6 +171,9 @@ internal sealed class LearnedPartials
         return live;
     }
 
+    /// <summary>Whether the handle holds the partial of family <paramref name="family"/> of the object <paramref name="uid"/> in memory.</summary>
+    internal bool InMemory(UInt128 uid, UInt128 family) => _held.ContainsKey((uid, family));
+
     /// <summary>Whether the handle or the cache holds the partial of family <paramref name="family"/> of the object <paramref name="uid"/>, with no read of it.</summary>
     internal bool Holds(UInt128 uid, UInt128 family, SynopsisCache? cache) =>
         _held.ContainsKey((uid, family)) || cache?.HoldsSealed(NameOf(uid, family)) == true;
