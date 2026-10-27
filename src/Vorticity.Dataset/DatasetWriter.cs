@@ -685,11 +685,14 @@ public sealed class DatasetWriter
             RecordBatch? batch = null;
             try
             {
-                for (int start = 0; start < rows; start += WrittenRows)
+                // A batch a group of rows at most, so that the chunks of every column end together where the writer's groups
+                // do, and the object's lanes and ranges are cut there (DatasetOptions.GroupRows).
+                int batchRows = writer.GroupRows is > 0 and < WrittenRows ? (int)writer.GroupRows : WrittenRows;
+                for (int start = 0; start < rows; start += batchRows)
                 {
                     // The store's rows laid out again over an arena emptied for each batch, so that the gathered rows
                     // are copied a batch at a time and not twice whole.
-                    int count = Math.Min(WrittenRows, rows - start);
+                    int count = Math.Min(batchRows, rows - start);
                     arena.ResetKeepingBlocks();
                     root = store.Build(arena, rows);
                     int node = order is null

@@ -54,6 +54,12 @@ public sealed partial class VortexFileWriter
     public int BlockRows => _blockRows;
 
     /// <summary>
+    /// The rows after which the chunks of every column that gathers end together, or 0 (<see cref="VortexWriteOptions.GatheredGroupRows"/>):
+    /// a write that ends past a group ends them there, so a caller that holds many rows writes them a group at most at a time.
+    /// </summary>
+    internal long GroupRows => _groupRows;
+
+    /// <summary>
     /// Bytes accepted and not yet handed to the sink by a flush: encoded chunks the sink holds, and
     /// rows waiting for their chunk.
     /// </summary>
