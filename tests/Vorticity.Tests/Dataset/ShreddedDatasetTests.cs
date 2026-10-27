@@ -53,13 +53,12 @@ public sealed partial class ShreddedDatasetTests
             }
         }
 
-        // Every object a job wrote in slices bounded by keys shreds what the rows of its hour pay for. A whole hour,
-        // 2 880 rows, shreds the four keys its rows hold throughout. The last hour's 640 rows leave the flag in the
-        // residual: a boolean saves 0.13 bytes a row as a typed column, 83 bytes there, short of the 202 its path costs
-        // in a chunk.
+        // Every object a job wrote shreds the paths its rows hold 2,048 times or more (spec E, 2). A whole hour, 2 880 rows,
+        // shreds the four keys its rows hold throughout; the last hour's 640 rows hold none so often, and leave every key in
+        // the residual.
         List<(int Level, string[]? Keys)> shredded = [.. (await MapsAsync(clustered)).Where(map => map.Level > 0)];
         Assert.Equal(2, shredded.Count(map => map.Keys is { } keys && keys.SequenceEqual(Dense)));
-        Assert.Equal(["route", "score", "status"], Assert.Single(shredded, map => !(map.Keys ?? []).SequenceEqual(Dense)).Keys!);
+        Assert.Empty(Assert.Single(shredded, map => !(map.Keys ?? []).SequenceEqual(Dense)).Keys ?? []);
         Assert.All(await MapsAsync(levels), map => Assert.Null(map.Keys));
 
         // Each question over a key answers alike, whatever the order the objects give the rows in.
