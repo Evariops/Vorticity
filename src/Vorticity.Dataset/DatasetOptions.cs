@@ -159,6 +159,23 @@ public sealed record DatasetOptions
     public Action<ulong>? Moved { get; init; }
 
     /// <summary>
+    /// The bytes of learned partials the dataset's store keeps under <c>learned/</c> after a vacuum
+    /// (<see cref="VortexDataset.VacuumAsync"/>, spec H, 3.4): 2 GiB by default. A vacuum deletes the partials of the objects
+    /// no retained version holds, then, past this budget, the families whose latest partial is the oldest, each whole, which
+    /// their questions learn again from the rows; 0 keeps none.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The bytes are negative.</exception>
+    public long LearnedBudget
+    {
+        get => _learnedBudget;
+        init => _learnedBudget = value >= 0
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(value), value, "A budget of learned partials is 0 bytes or more.");
+    }
+
+    private readonly long _learnedBudget = 2L << 30;
+
+    /// <summary>
     /// Whether the dataset lives on a store that keeps every object under a retention lock, S3 Object
     /// Lock, Azure immutable blob storage, a GCS bucket lock, so that nothing it writes can be deleted
     /// before the lock's date; fixed when the dataset is created and carried by every commit.

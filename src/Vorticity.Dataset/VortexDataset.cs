@@ -2038,15 +2038,16 @@ public sealed class VortexDataset : IAsyncDisposable
         CompactionLoop.RunAsync(this, schedule ?? new CompactionSchedule(), cancellationToken);
 
     /// <summary>
-    /// Deletes what no version inside the retention window references. It marks from the store's
-    /// latest version, not from this handle's: a handle on an older version outlives the window at
-    /// its own risk, and is told so by the object it can no longer read.
+    /// Deletes what no version inside the retention window references, and the learned partials past
+    /// <see cref="DatasetOptions.LearnedBudget"/>. It marks from the store's latest version, not from
+    /// this handle's: a handle on an older version outlives the window at its own risk, and is told so
+    /// by the object it can no longer read.
     /// </summary>
     /// <param name="options">The clock and whether to delete; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the marking and the deletes.</param>
     /// <returns>What vacuum kept and deleted.</returns>
     public ValueTask<VacuumResult> VacuumAsync(VacuumOptions? options = null, CancellationToken cancellationToken = default) =>
-        DatasetVacuum.RunAsync(_store, options, _location, cancellationToken);
+        DatasetVacuum.RunAsync(_store, options, _location, _options.LearnedBudget, cancellationToken);
 
     /// <summary>
     /// Gives the dataset indexes: every writer of it builds them from then on, compactions included,
