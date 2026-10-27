@@ -736,7 +736,7 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (_metrics is { } metrics)
                 {
-                    metrics.BlocksSettled++;
+                    metrics.GranulesSettled++;
                 }
 
                 yield return settling.Batch(block, scratch, held.FirstRow + deletions.Logical(next.Start));

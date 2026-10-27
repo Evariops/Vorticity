@@ -188,23 +188,6 @@ internal sealed class SortKey
         return length >= 0 && right.Length >= length && left[..length].SequenceEqual(right[..length]);
     }
 
-    /// <summary>
-    /// Whether two row-encoded keys hold the same value at component <paramref name="component"/>, whatever the components
-    /// before it hold: false when a width is not told.
-    /// </summary>
-    internal bool SameAt(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, int component)
-    {
-        int leftAt = PrefixLength(left, component);
-        int rightAt = PrefixLength(right, component);
-        if (leftAt < 0 || rightAt < 0)
-        {
-            return false;
-        }
-
-        int length = RowEncoder.ValueLength(left[leftAt..], _types[component]);
-        return length >= 0 && RowEncoder.ValueLength(right[rightAt..], _types[component]) == length
-            && left.Slice(leftAt, length).SequenceEqual(right.Slice(rightAt, length));
-    }
 
     /// <summary>Where a value comes from and what it applies: a column's path, a variant key's read, a function.</summary>
     private sealed class Source(string path, DType column, VariantFieldExpr? read, ValueFunction? function, VortexType? readType)

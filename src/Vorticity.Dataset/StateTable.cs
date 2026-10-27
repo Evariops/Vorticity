@@ -186,10 +186,10 @@ internal abstract class StateTable
 }
 
 /// <summary>
-/// The rows of states the blocks of an object give (<see cref="BlockAnswer"/>): each one's keys' values, its rows and
+/// The rows of states the blocks of an object give (<see cref="GranuleAnswer"/>): each one's keys' values, its rows and
 /// its measures' states, added block by block; a block that turns out not to answer takes its rows back.
 /// </summary>
-internal sealed class BlockStateRows(BlockAnswer answer)
+internal sealed class GranuleStateRows(GranuleAnswer answer)
     : StateTable(answer.KeyFields.Length, answer.Measures, answer.Type, answer.Bool)
 {
     private readonly int _keys = answer.KeyFields.Length;

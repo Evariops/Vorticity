@@ -11,21 +11,21 @@ using Vorticity.Types;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// How the statistics of an object's columns over its blocks (<see cref="ColumnBlocks"/>), with where their values live
-/// (<see cref="ColumnWhere"/>), answer an aggregation that asks for states (<see cref="StateRequest"/>) block by block,
-/// where the object's counts do not (<see cref="CountsAnswer"/>). A block whose statistics prove the filter true over its
+/// How the statistics of an object's columns over its granules (<see cref="GranuleStats"/>) answer an aggregation that asks for
+/// states (<see cref="StateRequest"/>) granule by granule,
+/// where the object's counts do not (<see cref="CountsAnswer"/>). A granule whose statistics prove the filter true over its
 /// rows, and whose keys each hold one group through their functions, gives its rows and its measures' states: no column of
-/// the question varies in it. A block where one column of the question varies, under a question of counts alone, gives
-/// the rows of each of its values, the filter judged value by value. Any other block is read as rows: two columns varying,
+/// the question varies in it. A granule where one column of the question varies, under a question of counts alone, gives
+/// the rows of each of its values, the filter judged value by value. Any other granule is read as rows: two columns varying,
 /// a filter its statistics neither prove nor refute, or a measure its statistics do not hold.
 /// </summary>
 /// <remarks>
-/// A block is judged by the summaries its statistics make of each column: one value, or the least and the greatest of
-/// those it lists or of a measure, and its nulls; the columns the block keeps none of are judged by the object's
+/// A granule is judged by the summaries its statistics make of each column: one value, or the least and the greatest of
+/// those it lists or of a measure, and its nulls; the columns the granule keeps none of are judged by the object's
 /// summaries. Nothing here knows a time: a truncation of an instant is a function like any, which holds one group over a
-/// block when the instant's extremes there fall in one.
+/// granule when the instant's extremes there fall in one.
 /// </remarks>
-internal sealed class BlockAnswer
+internal sealed class GranuleAnswer
 {
     private readonly DatasetSchema _schema;
     private readonly PathCosts _costs;
@@ -35,23 +35,32 @@ internal sealed class BlockAnswer
     private readonly (int Field, FieldExpr Key)[] _keys;
     private readonly int[] _measured;
 
-    // The key's first column, whose runs the blocks follow, which a block holds one value of but where they are short.
+    // The sort key's first column, which the object holds in order; and the columns of its indexed prefix, which a granule of
+    // one value of the prefix holds one value of each (ObjectContents.PureGranuleRows).
     private readonly int _leading;
+    private readonly int[] _prefixed;
+
+    // The rows of a granule, which a window on the key's first column cuts at most two of.
+    private readonly int _granuleRows;
 
     // The filter, judged by summaries, and the columns it reads, top-level ones by their place; the columns whose statistics
-    // a block is judged by. Worked out at the first object whose keys may hold one group in a block, which most questions
+    // a granule is judged by. Worked out at the first object whose keys may hold one group in a granule, which most questions
     // the counts answer never meet.
     private SummaryPruner? _filter;
     private int[] _filtered = [];
     private int[]? _fields;
 
-    // The columns of the clustering key the filter only compares to a bound, a window: a block holds their values in order,
-    // or within one value of the first column, so its extremes decide those whole, mostly, and they never make a block vary
-    // for the planner's count. A bound on another column, whose values a block holds in any order, varies like any.
+    // The columns of the sort key the filter only compares to a bound, a window: a granule holds their values in order, or
+    // within one value of the columns before, so its extremes decide those whole, mostly, and they never make a granule vary
+    // for the planner's count. A bound on another column, whose values a granule holds in any order, varies like any.
     private int[] _ranged = [];
 
-    private BlockAnswer(CountsAnswer counts, DatasetSchema version, PathCosts costs, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, int[] measured, int leading)
+    private GranuleAnswer(
+        CountsAnswer counts, DatasetSchema version, PathCosts costs, VortexExpr? filter, (int Field, FieldExpr Key)[] keys, int[] measured, int leading,
+        int[] prefixed, int granuleRows)
     {
+        _prefixed = prefixed;
+        _granuleRows = Math.Max(granuleRows, 1);
         _schema = version;
         _costs = costs;
         _asked = filter;
@@ -69,10 +78,10 @@ internal sealed class BlockAnswer
         CountsOnly = Measures.Length == 0;
     }
 
-    /// <summary>The columns whose statistics a block is judged by: those of the keys, the filter and the measures, each once.</summary>
+    /// <summary>The columns whose statistics a granule is judged by: those of the keys, the filter and the measures, each once.</summary>
     internal int[] Fields => _fields ??= Judged();
 
-    /// <summary>The filter's columns and its pruner, then every column a block is judged by.</summary>
+    /// <summary>The filter's columns and its pruner, then every column a granule is judged by.</summary>
     private int[] Judged()
     {
         List<int> fields = [];
@@ -95,7 +104,7 @@ internal sealed class BlockAnswer
                 {
                     Add(filtered, field);
                     Add(fields, field);
-                    if (bounded.Contains(path) && !other.Contains(path) && _schema.Key is { } key && System.Linq.Enumerable.Contains(key.Paths, path, StringComparer.Ordinal))
+                    if (bounded.Contains(path) && !other.Contains(path) && Sorted(_schema, field))
                     {
                         Add(ranged, field);
                     }
@@ -129,16 +138,16 @@ internal sealed class BlockAnswer
     /// <summary>The words of a row of states: its rows, then each measure's.</summary>
     internal int Width { get; }
 
-    /// <summary>Whether the request asks counts alone, which the values of a column varying in a block answer.</summary>
+    /// <summary>Whether the request asks counts alone, which the values of a column varying in a granule answer.</summary>
     internal bool CountsOnly { get; }
 
     /// <summary>
-    /// How the blocks of the objects answer <paramref name="request"/> under <paramref name="filter"/> over the columns of
+    /// How the granules of the objects answer <paramref name="request"/> under <paramref name="filter"/> over the columns of
     /// <paramref name="version"/>, in the batches of states <paramref name="counts"/> lays out for the same request; null
-    /// when they answer no block of any: a quantile or a distribution, whose sketches no block keeps, a distinct count kept
+    /// when they answer no granule of any: a quantile or a distribution, whose sketches no granule keeps, a distinct count kept
     /// as a sketch, or a key or a measure on a path.
     /// </summary>
-    internal static BlockAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version, CountsAnswer counts)
+    internal static GranuleAnswer? Of(StateRequest request, VortexExpr? filter, DatasetSnapshot version, CountsAnswer counts, int granuleRows)
     {
         DType schema = version.Schema.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
@@ -180,8 +189,36 @@ internal sealed class BlockAnswer
             }
         }
 
-        int leading = version.Schema.Key is { } clustering && schema.IndexOfField(clustering.InstantPath) is int first and >= 0 ? first : -1;
-        return new BlockAnswer(counts, version.Schema, version.Costs, filter, keys, [.. measured], leading);
+        // The sort key's columns as they are: its first, and those of its indexed prefix.
+        int leading = -1;
+        List<int> prefixed = [];
+        if (version.Schema.Layout is { } layout)
+        {
+            for (int c = 0; c < layout.Components.Count && c < layout.Prefix; c++)
+            {
+                if (layout.Components[c] is { Function: null, Read: null } component)
+                {
+                    leading = c == 0 ? component.Field : leading;
+                    prefixed.Add(component.Field);
+                }
+            }
+        }
+
+        return new GranuleAnswer(counts, version.Schema, version.Costs, filter, keys, [.. measured], leading, [.. prefixed], granuleRows);
+    }
+
+    /// <summary>Whether column <paramref name="field"/> is one of the sort key's, read as it is: one whose values a granule holds in order.</summary>
+    private static bool Sorted(DatasetSchema schema, int field)
+    {
+        foreach (LayoutColumn component in schema.Layout?.Components ?? [])
+        {
+            if (component.Field == field && component.Function is null && component.Read is null)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -220,20 +257,20 @@ internal sealed class BlockAnswer
             : null;
 
     /// <summary>
-    /// Whether the blocks of the object <paramref name="held"/> may answer: the version's columns in their places, and
-    /// statistics of every column a key or a measure reads; a block that holds a row a delete marked, which its statistics
+    /// Whether the granules of the object <paramref name="held"/> may answer: the version's columns in their places, and
+    /// statistics of every column a key or a measure reads; a granule that holds a row a delete marked, which its statistics
     /// still count, is read as rows (<see cref="Settle"/>). And
-    /// whether a block of it may hold one group, as the blocks follow the key's first column: of the columns of the keys,
+    /// whether a granule of it may hold one group, as the granules follow the key's first column: of the columns of the keys,
     /// themselves and not a function of them, and of a filter the object's summaries do not prove true, those other than
-    /// the first, and than a key's column they prove constant, may vary in a block: at most one under a question of
-    /// counts, none under one of measures. Past that, every block would be read as rows after its statistics, a request
-    /// for nothing. A function of a column, a truncation, holds one group over a block whose extremes it sends to one. What
+    /// the first, and than a key's column they prove constant, may vary in a granule: at most one under a question of
+    /// counts, none under one of measures. Past that, every granule would be read as rows after its statistics, a request
+    /// for nothing. A function of a column, a truncation, holds one group over a granule whose extremes it sends to one. What
     /// they cost against the rows, the scan's choice weighs (<see cref="Costs"/>).
     /// </summary>
     internal bool Covers(in PositionedObject held)
     {
         ObjectEntry entry = held.Entry;
-        if (entry.Contents is not { BlockStats.Count: > 0 } contents || !_schema.Holds(entry))
+        if (entry.Contents is not { GranuleStats.Count: > 0 } contents || !_schema.Holds(entry))
         {
             return false;
         }
@@ -243,7 +280,7 @@ internal sealed class BlockAnswer
         int free = 0;
         foreach ((int field, FieldExpr key) in _keys)
         {
-            if (field != _leading && key is ColumnFieldExpr && CountsAnswer.ConstantOf(summaries, _schema.Columns[field].Name, key) is null)
+            if (Array.IndexOf(_prefixed, field) < 0 && key is ColumnFieldExpr && CountsAnswer.ConstantOf(summaries, _schema.Columns[field].Name, key) is null)
             {
                 free++;
             }
@@ -260,7 +297,7 @@ internal sealed class BlockAnswer
         {
             foreach (int field in _filtered)
             {
-                free += field != _leading && !Keyed(field) && Array.IndexOf(_ranged, field) < 0 ? 1 : 0;
+                free += Array.IndexOf(_prefixed, field) < 0 && !Keyed(field) && Array.IndexOf(_ranged, field) < 0 ? 1 : 0;
             }
         }
 
@@ -272,43 +309,43 @@ internal sealed class BlockAnswer
         // A column the filter alone reads may keep none: the object's summaries judge it.
         foreach (int field in fields)
         {
-            if (contents.BlockStatsOf(field) is null && (Keyed(field) || Measured(field)))
+            if (contents.GranuleStatsOf(field) is null && (Keyed(field) || Measured(field)))
             {
                 return false;
             }
         }
 
-        // An object whose every block holds several values that the question needs one of reads its rows, the statistics a
+        // An object whose every granule holds several values that the question needs one of reads its rows, the statistics a
         // request for nothing.
         return Unanswered(held) < 1;
     }
 
     /// <summary>
-    /// What the object <paramref name="held"/> costs through its blocks' statistics and their indexes, then through the rows of
-    /// the blocks they would not answer, as their share of the object's rows estimates them (<see cref="Unanswered"/>), and
+    /// What the object <paramref name="held"/> costs through its granules' statistics and their indexes, then through the rows of
+    /// the granules they would not answer, as their share of the object's rows estimates them (<see cref="Unanswered"/>), and
     /// through the rows of the question's columns alone (<see cref="PathCosts"/>).
     /// </summary>
     internal (PathCosts.Cost Statistics, PathCosts.Cost Unanswered, PathCosts.Cost Rows) Costs(in PositionedObject held)
     {
         ObjectContents contents = held.Entry.Contents!;
         int[] fields = Fields;
-        IndexSegment?[] regions = new IndexSegment?[2 * fields.Length];
+        IndexSegment?[] regions = new IndexSegment?[fields.Length];
         for (int i = 0; i < fields.Length; i++)
         {
-            (regions[2 * i], regions[(2 * i) + 1]) = (contents.WhereOf(fields[i]), contents.BlockStatsOf(fields[i]));
+            regions[i] = contents.GranuleStatsOf(fields[i]);
         }
 
         return (_costs.Regions(held.Entry.Uid, regions), _costs.Share(held.Entry, fields, Unanswered(held, edges: true)), _costs.Rows(held.Entry, fields));
     }
 
     /// <summary>
-    /// The share of the rows of the object <paramref name="held"/> whose blocks its statistics are not expected to answer:
-    /// those of the blocks that hold several values of the key's first column or of the block value
-    /// (<see cref="ObjectContents.PureBlockRows"/>), short runs gathered, unless the question would answer such a block too,
+    /// The share of the rows of the object <paramref name="held"/> whose granules its statistics are not expected to answer:
+    /// those of the granules that hold several values of the key's first column or of the granule value
+    /// (<see cref="ObjectContents.PureGranuleRows"/>), short runs gathered, unless the question would answer such a granule too,
     /// every column it keys or filters but one, under counts alone, constant over the object; none when the object does not
-    /// say, the blocks then taken to answer, as before it said. With <paramref name="edges"/>, for a price that bounds what
+    /// say, the granules then taken to answer, as before it said. With <paramref name="edges"/>, for a price that bounds what
     /// is read, those a window on a column of the key cuts too, which the choice of the path need not weigh: a window on
-    /// the block value cuts no block of one value.
+    /// the granule value cuts no granule of one value.
     /// </summary>
     internal double Unanswered(in PositionedObject held, bool edges = false)
     {
@@ -322,9 +359,9 @@ internal sealed class BlockAnswer
         _ = Fields;
         bool proven = _filter is not { } filter || filter.MustMatch(summaries.Columns, entry.PhysicalRows);
         double share = 0;
-        if (entry.Contents is { PureBlockRows: >= 0 } contents)
+        if (entry.Contents is { PureGranuleRows: >= 0 } contents)
         {
-            // In a block of several runs, the first column varies, and so does every key and filtered column the object's
+            // In a granule of several runs, the first column varies, and so does every key and filtered column the object's
             // summaries do not hold constant.
             int varying = 0;
             foreach ((int field, FieldExpr key) in _keys)
@@ -337,15 +374,15 @@ internal sealed class BlockAnswer
                 varying += !Keyed(field) && Array.IndexOf(_ranged, field) < 0 ? 1 : 0;
             }
 
-            share = varying <= (CountsOnly ? 1 : 0) ? 0 : 1 - Math.Clamp(contents.PureBlockRows / (double)entry.PhysicalRows, 0, 1);
+            share = varying <= (CountsOnly ? 1 : 0) ? 0 : 1 - Math.Clamp(contents.PureGranuleRows / (double)entry.PhysicalRows, 0, 1);
         }
 
-        // A window the object's summaries do not prove cuts the blocks at its bounds, read as rows: two at most on the first
-        // column, whose values the object holds in order; on another column of the key, a block of each run of the first,
-        // every block at most.
+        // A window the object's summaries do not prove cuts the granules at its bounds, read as rows: two at most on the first
+        // column, whose values the object holds in order; on another column of the key, a granule of each run of the first,
+        // every granule at most.
         foreach (int field in edges && !proven ? _ranged : [])
         {
-            share += field == _leading ? Math.Min(1, 2.0 * ColumnBlocks.MostRows / entry.PhysicalRows) : 1;
+            share += field == _leading ? Math.Min(1, 2.0 * _granuleRows / entry.PhysicalRows) : 1;
         }
 
         return Math.Min(1, share);
@@ -367,15 +404,15 @@ internal sealed class BlockAnswer
     private bool Measured(int field) => Array.IndexOf(_measured, field) >= 0;
 
     /// <summary>
-    /// The states the blocks of the object <paramref name="held"/> give, from the statistics and the indexes of
-    /// <see cref="Fields"/>, by their places in it, and the ranges of its live rows, from its first, that its blocks do not
-    /// answer, which are read as rows; every row when the statistics do not describe the object's blocks alike. A block
+    /// The states the granules of the object <paramref name="held"/> give, from the statistics and the indexes of
+    /// <see cref="Fields"/>, by their places in it, and the ranges of its live rows, from its first, that its granules do not
+    /// answer, which are read as rows; every row when the statistics do not describe the object's granules alike. A granule
     /// that holds a row of <paramref name="deletions"/> is not answered: its statistics count that row.
     /// </summary>
-    internal (BlockStateRows? States, List<RowRange> Unsettled, int Settled) Settle(
-        in PositionedObject held, (ColumnWhere? Where, ColumnBlocks? Blocks)[] columns, DeletionVector deletions)
+    internal (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) Settle(
+        in PositionedObject held, GranuleStats?[] columns, DeletionVector deletions)
     {
-        (BlockStateRows? states, List<RowRange> unsettled, int settled) = SettlePhysical(held, columns, deletions);
+        (GranuleStateRows? states, List<RowRange> unsettled, int settled) = SettlePhysical(held, columns, deletions);
         if (deletions.IsEmpty)
         {
             return (states, unsettled, settled);
@@ -391,12 +428,12 @@ internal sealed class BlockAnswer
     }
 
     /// <summary><see cref="Settle"/>, its ranges the object's own row positions, deleted rows included.</summary>
-    private (BlockStateRows? States, List<RowRange> Unsettled, int Settled) SettlePhysical(
-        in PositionedObject held, (ColumnWhere? Where, ColumnBlocks? Blocks)[] columns, DeletionVector deletions)
+    private (GranuleStateRows? States, List<RowRange> Unsettled, int Settled) SettlePhysical(
+        in PositionedObject held, GranuleStats?[] columns, DeletionVector deletions)
     {
         long objectRows = held.Entry.PhysicalRows;
-        ColumnBlocks? any = null;
-        foreach ((_, ColumnBlocks? blocks) in columns)
+        GranuleStats? any = null;
+        foreach (GranuleStats? blocks in columns)
         {
             if (blocks is null)
             {
@@ -417,21 +454,21 @@ internal sealed class BlockAnswer
         }
 
         ObjectSummaries summaries = held.Summaries(_schema.Key);
-        BlockColumn[] described = new BlockColumn[Fields.Length];
+        GranuleColumn[] described = new GranuleColumn[Fields.Length];
         for (int i = 0; i < Fields.Length; i++)
         {
-            described[i] = new BlockColumn(_schema.Columns[Fields[i]].Name, _schema.DType.GetField(Fields[i]), columns[i].Where, columns[i].Blocks);
+            described[i] = new GranuleColumn(_schema.Columns[Fields[i]].Name, _schema.DType.GetField(Fields[i]), columns[i]);
         }
 
-        // Which blocks their statistics answer, then those answered between two read as rows that cost less read as rows
+        // Which granules their statistics answer, then those answered between two read as rows that cost less read as rows
         // too than a part of the scan more, which would read again the chunks the two parts share.
-        BlockStateRows states = new BlockStateRows(this);
+        GranuleStateRows states = new GranuleStateRows(this);
         List<ColumnSummary> judged = [];
         bool[] answers = new bool[any.Count];
         for (int b = 0; b < any.Count; b++)
         {
             long first = any.FirstRow(b);
-            answers[b] = deletions.DeletedIn(first, first + any.Rows[b]) == 0 && SettleBlock(b, any.Rows[b], described, summaries, judged, states);
+            answers[b] = deletions.DeletedIn(first, first + any.Rows[b]) == 0 && SettleGranule(b, any.Rows[b], described, summaries, judged, states);
             states.Truncate(0);
         }
 
@@ -444,7 +481,7 @@ internal sealed class BlockAnswer
             long rows = any.Rows[b];
             if (answers[b])
             {
-                SettleBlock(b, rows, described, summaries, judged, states);
+                SettleGranule(b, rows, described, summaries, judged, states);
                 settled++;
                 continue;
             }
@@ -463,10 +500,10 @@ internal sealed class BlockAnswer
     }
 
     /// <summary>
-    /// Reads as rows each run of blocks <paramref name="answers"/> answers between two it does not, when reading its rows of
+    /// Reads as rows each run of granules <paramref name="answers"/> answers between two it does not, when reading its rows of
     /// the question's columns costs less than a part of the scan more (<see cref="PathCosts.Bridges"/>).
     /// </summary>
-    private void Bridge(ObjectEntry entry, ColumnBlocks blocks, bool[] answers)
+    private void Bridge(ObjectEntry entry, GranuleStats blocks, bool[] answers)
     {
         int b = 0;
         while (b < answers.Length && answers[b])
@@ -476,7 +513,7 @@ internal sealed class BlockAnswer
 
         while (b < answers.Length)
         {
-            // From an unanswered block, the run of answered ones after it, and whether an unanswered one ends it.
+            // From an unanswered granule, the run of answered ones after it, and whether an unanswered one ends it.
             while (b < answers.Length && !answers[b])
             {
                 b++;
@@ -498,16 +535,16 @@ internal sealed class BlockAnswer
     }
 
     /// <summary>
-    /// Settles block <paramref name="block"/> of <paramref name="rows"/> rows into <paramref name="states"/>: true when its
+    /// Settles granule <paramref name="granule"/> of <paramref name="rows"/> rows into <paramref name="states"/>: true when its
     /// statistics answer it, its rows of states added, none when they prove the filter selects no row of it.
     /// </summary>
-    private bool SettleBlock(int block, long rows, BlockColumn[] columns, ObjectSummaries summaries, List<ColumnSummary> judged, BlockStateRows states)
+    private bool SettleGranule(int granule, long rows, GranuleColumn[] columns, ObjectSummaries summaries, List<ColumnSummary> judged, GranuleStateRows states)
     {
-        // The block's summaries: each column's own, the object's for the columns the block keeps none of.
+        // The granule's summaries: each column's own, the object's for the columns the granule keeps none of.
         judged.Clear();
-        foreach (BlockColumn column in columns)
+        foreach (GranuleColumn column in columns)
         {
-            if (column.SummaryOf(block) is { } own)
+            if (column.SummaryOf(granule) is { } own)
             {
                 judged.Add(own);
             }
@@ -529,19 +566,19 @@ internal sealed class BlockAnswer
 
         bool whole = _filter is not { } proving || proving.MustMatch(judged, rows);
 
-        // The column that varies: a key's column that holds more than one group, or, under a filter the block's summaries
+        // The column that varies: a key's column that holds more than one group, or, under a filter the granule's summaries
         // do not prove, a column it reads that holds more than one value; at most one, which lists its values.
         int varying = -1;
         for (int i = 0; i < Fields.Length; i++)
         {
-            bool varies = !KeysHoldOneGroup(i, columns[i], block, rows)
-                || (!whole && Array.IndexOf(_filtered, Fields[i]) >= 0 && !columns[i].HoldsOneValue(block, rows));
+            bool varies = !KeysHoldOneGroup(i, columns[i], granule, rows)
+                || (!whole && Array.IndexOf(_filtered, Fields[i]) >= 0 && !columns[i].HoldsOneValue(granule, rows));
             if (!varies)
             {
                 continue;
             }
 
-            if (varying >= 0 || !CountsOnly || !columns[i].Lists(block))
+            if (varying >= 0 || !CountsOnly || !columns[i].Lists(granule))
             {
                 return false;
             }
@@ -551,16 +588,16 @@ internal sealed class BlockAnswer
 
         if (varying < 0)
         {
-            return whole && AddWhole(block, rows, columns, states);
+            return whole && AddWhole(granule, rows, columns, states);
         }
 
         // Each of its values, and its nulls, judged apart: the column's summary replaced by the value's.
-        BlockColumn x = columns[varying];
+        GranuleColumn x = columns[varying];
         int at = IndexOf(judged, judged.Count, x.Path);
-        (ReadOnlyMemory<int> ids, ReadOnlyMemory<long> counted) = x.Blocks!.ValuesOf(block);
+        (ReadOnlyMemory<int> ids, ReadOnlyMemory<long> counted) = x.Blocks!.ValuesOf(granule);
         for (int v = 0; v <= ids.Length; v++)
         {
-            long taken = v < ids.Length ? counted.Span[v] : x.Blocks.Nulls[block];
+            long taken = v < ids.Length ? counted.Span[v] : x.Blocks.Nulls[granule];
             if (taken == 0)
             {
                 continue;
@@ -587,7 +624,7 @@ internal sealed class BlockAnswer
             for (int k = 0; k < KeyFields.Length; k++)
             {
                 int place = Array.IndexOf(Fields, KeyFields[k]);
-                states.SetKey(row, k, place == varying ? value : columns[place].ConstantOf(block, rows));
+                states.SetKey(row, k, place == varying ? value : columns[place].ConstantOf(granule, rows));
             }
         }
 
@@ -608,12 +645,12 @@ internal sealed class BlockAnswer
         return -1;
     }
 
-    /// <summary>Whether every key on the column at <see cref="Fields"/>' <paramref name="place"/> holds one group over the block: true for a column no key reads.</summary>
-    private bool KeysHoldOneGroup(int place, BlockColumn column, int block, long rows)
+    /// <summary>Whether every key on the column at <see cref="Fields"/>' <paramref name="place"/> holds one group over the granule: true for a column no key reads.</summary>
+    private bool KeysHoldOneGroup(int place, GranuleColumn column, int granule, long rows)
     {
         foreach ((int field, FieldExpr key) in _keys)
         {
-            if (field == Fields[place] && !column.HoldsOneGroup(block, rows, key))
+            if (field == Fields[place] && !column.HoldsOneGroup(granule, rows, key))
             {
                 return false;
             }
@@ -622,21 +659,21 @@ internal sealed class BlockAnswer
         return true;
     }
 
-    /// <summary>A block no column of the question varies in, the filter proven over its rows: its rows and each measure's states, a row of states.</summary>
-    private bool AddWhole(int block, long rows, BlockColumn[] columns, BlockStateRows states)
+    /// <summary>A granule no column of the question varies in, the filter proven over its rows: its rows and each measure's states, a row of states.</summary>
+    private bool AddWhole(int granule, long rows, GranuleColumn[] columns, GranuleStateRows states)
     {
         int row = states.Add(rows);
         for (int k = 0; k < KeyFields.Length; k++)
         {
             int place = Array.IndexOf(Fields, KeyFields[k]);
-            states.SetKey(row, k, columns[place].ConstantOf(block, rows));
+            states.SetKey(row, k, columns[place].ConstantOf(granule, rows));
         }
 
         int word = 1;
         foreach ((_, int field, bool floats, _) in Measures)
         {
             int place = Array.IndexOf(Fields, field);
-            if (!columns[place].MeasureInto(block, floats, states.Words(row).Slice(word, MeasureLayout.Words(floats))))
+            if (!columns[place].MeasureInto(granule, floats, states.Words(row).Slice(word, MeasureLayout.Words(floats))))
             {
                 return false;
             }
@@ -649,10 +686,10 @@ internal sealed class BlockAnswer
 }
 
 /// <summary>
-/// One column's statistics over an object's blocks and where its values live, as a block of a question reads them: the
+/// One column's statistics over an object's granules and where its values live, as a granule of a question reads them: the
 /// summary it makes of the column, whether the column holds one value or one group of a key there, and that value.
 /// </summary>
-internal sealed class BlockColumn(string path, DType dtype, ColumnWhere? where, ColumnBlocks? blocks)
+internal sealed class GranuleColumn(string path, DType dtype, GranuleStats? blocks)
 {
     private readonly KeyLayout _layout = KeyLayout.TryOf(dtype, out KeyLayout layout) ? layout : default;
     private readonly bool _keyed = KeyLayout.TryOf(dtype, out _);
@@ -661,41 +698,41 @@ internal sealed class BlockColumn(string path, DType dtype, ColumnWhere? where, 
     /// <summary>The column, as a filter names it.</summary>
     internal string Path { get; } = path;
 
-    /// <summary>Its statistics over the blocks; null when the object keeps none of it.</summary>
-    internal ColumnBlocks? Blocks { get; } = blocks;
+    /// <summary>Its statistics over the granules; null when the object keeps none of it.</summary>
+    internal GranuleStats? Blocks { get; } = blocks;
 
-    /// <summary>Whether block <paramref name="block"/> lists the column's values, each named in the index.</summary>
-    internal bool Lists(int block) =>
-        Blocks is { HoldsValueLists: true } stats && where is not null && stats.Distinct![block] <= ColumnBlocks.ListedValues;
+    /// <summary>Whether granule <paramref name="granule"/> lists the column's values, each named in the index.</summary>
+    internal bool Lists(int granule) =>
+        Blocks is { HoldsValueLists: true } stats && stats.Distinct![granule] <= GranuleStats.ListedValues;
 
-    /// <summary>The value numbered <paramref name="id"/>, as the column stores it; null for a number the index lacks.</summary>
-    internal byte[]? ValueOf(int id) => where is { } index && index.PlaceOf(id) is int place and >= 0 ? index.Values[place] : null;
+    /// <summary>The value numbered <paramref name="id"/>, as the column stores it; null for a number the dictionary lacks.</summary>
+    internal byte[]? ValueOf(int id) => Blocks?.ValueOf(id);
 
     /// <summary>The literal of the value numbered <paramref name="id"/>, decoded once; null for none.</summary>
     private FilterLiteral? LiteralOf(int id)
     {
-        if (where is not { } index || !_keyed || index.PlaceOf(id) is not (int place and >= 0))
+        if (Blocks is not { } stats || !_keyed || stats.ValueOf(id) is not { } value)
         {
             return null;
         }
 
-        _literals ??= new FilterLiteral?[index.Values.Length];
-        return _literals[place] ??= _layout.ToLiteral(index.Values[place]);
+        _literals ??= new FilterLiteral?[stats.Named];
+        return _literals[id] ??= _layout.ToLiteral(value);
     }
 
     /// <summary>
-    /// The summary block <paramref name="block"/> makes of the column: the least and the greatest of the values it lists
+    /// The summary granule <paramref name="granule"/> makes of the column: the least and the greatest of the values it lists
     /// or of its measure, exact, and its nulls; null when it keeps no statistics.
     /// </summary>
-    internal ColumnSummary? SummaryOf(int block)
+    internal ColumnSummary? SummaryOf(int granule)
     {
         if (Blocks is not { } stats)
         {
             return null;
         }
 
-        long nulls = stats.Nulls[block];
-        if (Bounds(block) is ({ } least, { } greatest))
+        long nulls = stats.Nulls[granule];
+        if (Bounds(granule) is ({ } least, { } greatest))
         {
             return new ColumnSummary(Path, least, true, greatest, true, true, nulls, true);
         }
@@ -709,15 +746,15 @@ internal sealed class BlockColumn(string path, DType dtype, ColumnWhere? where, 
             ? new ColumnSummary(Path, default, false, default, false, false, rows, true)
             : new ColumnSummary(Path, _layout.ToLiteral(value), true, _layout.ToLiteral(value), true, true, 0, true);
 
-    /// <summary>The least and the greatest value of block <paramref name="block"/>: of those it lists, else of its measure; null for none known.</summary>
-    private (FilterLiteral? Least, FilterLiteral? Greatest) Bounds(int block)
+    /// <summary>The least and the greatest value of granule <paramref name="granule"/>: of those it lists, else of its measure; null for none known.</summary>
+    private (FilterLiteral? Least, FilterLiteral? Greatest) Bounds(int granule)
     {
-        ColumnBlocks stats = Blocks!;
-        if (Lists(block))
+        GranuleStats stats = Blocks!;
+        if (Lists(granule))
         {
             FilterLiteral? least = null;
             FilterLiteral? greatest = null;
-            foreach (int id in stats.ValuesOf(block).Ids.Span)
+            foreach (int id in stats.ValuesOf(granule).Ids.Span)
             {
                 if (LiteralOf(id) is not { } value)
                 {
@@ -731,7 +768,7 @@ internal sealed class BlockColumn(string path, DType dtype, ColumnWhere? where, 
             return (least, greatest);
         }
 
-        if (stats.Measure is { } kind && stats.MeasureOf(block) is { } words && words[MeasureLayout.Values] > 0)
+        if (stats.Measure is { } kind && stats.MeasureOf(granule) is { } words && words[MeasureLayout.Values] > 0)
         {
             bool floats = kind == MeasureKind.Float;
             long least = words[MeasureLayout.Least(floats)];
@@ -749,80 +786,80 @@ internal sealed class BlockColumn(string path, DType dtype, ColumnWhere? where, 
         return (null, null);
     }
 
-    /// <summary>Whether block <paramref name="block"/> of <paramref name="rows"/> rows holds one value of the column, or nulls alone.</summary>
-    internal bool HoldsOneValue(int block, long rows)
+    /// <summary>Whether granule <paramref name="granule"/> of <paramref name="rows"/> rows holds one value of the column, or nulls alone.</summary>
+    internal bool HoldsOneValue(int granule, long rows)
     {
         if (Blocks is not { } stats)
         {
             return false;
         }
 
-        long nulls = stats.Nulls[block];
+        long nulls = stats.Nulls[granule];
         if (nulls == rows)
         {
             return true;
         }
 
-        return nulls == 0 && Bounds(block) is ({ } least, { } greatest) && KeyCursor.Compare(least, greatest) == 0;
+        return nulls == 0 && Bounds(granule) is ({ } least, { } greatest) && KeyCursor.Compare(least, greatest) == 0;
     }
 
     /// <summary>
-    /// Whether block <paramref name="block"/> of <paramref name="rows"/> rows holds one group of <paramref name="key"/>: one
+    /// Whether granule <paramref name="granule"/> of <paramref name="rows"/> rows holds one group of <paramref name="key"/>: one
     /// value or nulls alone, or no null and extremes the key's functions send to one group.
     /// </summary>
-    internal bool HoldsOneGroup(int block, long rows, FieldExpr key)
+    internal bool HoldsOneGroup(int granule, long rows, FieldExpr key)
     {
-        if (HoldsOneValue(block, rows))
+        if (HoldsOneValue(granule, rows))
         {
             return true;
         }
 
-        return key is FunctionFieldExpr && Blocks is { } stats && stats.Nulls[block] == 0 && Bounds(block) is ({ } least, { } greatest)
+        return key is FunctionFieldExpr && Blocks is { } stats && stats.Nulls[granule] == 0 && Bounds(granule) is ({ } least, { } greatest)
             && CountsAnswer.Image(key, least) is { } low && CountsAnswer.Image(key, greatest) is { } high && KeyCursor.Compare(low, high) == 0;
     }
 
     /// <summary>
-    /// The value of the column that stands for the one group of block <paramref name="block"/> of <paramref name="rows"/>
+    /// The value of the column that stands for the one group of granule <paramref name="granule"/> of <paramref name="rows"/>
     /// rows, as the column stores it: its value, or its least under a function that sends its extremes to one group; null
     /// for nulls.
     /// </summary>
-    internal byte[]? ConstantOf(int block, long rows)
+    internal byte[]? ConstantOf(int granule, long rows)
     {
-        ColumnBlocks stats = Blocks!;
-        if (stats.Nulls[block] == rows)
+        GranuleStats stats = Blocks!;
+        if (stats.Nulls[granule] == rows)
         {
             return null;
         }
 
-        if (Lists(block) && stats.ValuesOf(block).Ids.Span is [int id, ..])
+        if (Lists(granule) && stats.ValuesOf(granule).Ids.Span is [int id, ..])
         {
             return ValueOf(id);
         }
 
-        return Bounds(block).Least is { } least && CountsAnswer.ValuesOf([least], dtype) is [{ } bytes, ..] ? bytes : null;
+        return Bounds(granule).Least is { } least && CountsAnswer.ValuesOf([least], dtype) is [{ } bytes, ..] ? bytes : null;
     }
 
     /// <summary>
-    /// Writes into <paramref name="into"/> the states of the column as a measure over block <paramref name="block"/>, in
+    /// Writes into <paramref name="into"/> the states of the column as a measure over granule <paramref name="granule"/>, in
     /// <see cref="MeasureLayout"/>'s words: its own, or those its listed values give; false when it holds neither.
     /// </summary>
-    internal bool MeasureInto(int block, bool floats, Span<long> into)
+    internal bool MeasureInto(int granule, bool floats, Span<long> into)
     {
-        ColumnBlocks stats = Blocks!;
+        GranuleStats stats = Blocks!;
         if (stats.Measure is { } kind && (kind == MeasureKind.Float) == floats)
         {
-            stats.MeasureOf(block).CopyTo(into);
+            stats.MeasureOf(granule).CopyTo(into);
             return true;
         }
 
-        if (!Lists(block))
+        if (!Lists(granule))
         {
             return false;
         }
 
         // A number of few values, which lists them: each value its rows' worth.
         into.Clear();
-        (ReadOnlyMemory<int> ids, ReadOnlyMemory<long> counted) = stats.ValuesOf(block);
+        (ReadOnlyMemory<int> ids, ReadOnlyMemory<long> counted) = stats.ValuesOf(granule);
         if (floats)
         {
             WideIndexedSum sum = default;

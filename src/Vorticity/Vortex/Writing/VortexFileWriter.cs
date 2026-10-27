@@ -225,8 +225,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private ObjectContents Contents(
         IndexSegment? keyIndex, IndexSegment? keyPages, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories, ChunkPaging? paging,
         List<(int Field, IndexSegment Region)> sheets, List<(int Field, IndexSegment Region)> counts, List<(int Field, IndexSegment Region)> sketches,
-        List<(int Field, IndexSegment Region)> blockStats, List<(int Field, IndexSegment Region)> wheres,
-        List<(int Field, IndexSegment Region)> locates,
+        List<(int Field, IndexSegment Region)> granuleStats, List<(int Field, IndexSegment Region)> locates,
         long[] columnBytes, long[] columnChunks, IndexSegment[] marks, ColumnDictionary?[] dictionaries) =>
         new ObjectContents(Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, _rowCount, directories, pathDirectories)
         {
@@ -236,13 +235,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Sheets = sheets,
             Counts = counts,
             Sketches = sketches,
-            BlockStats = blockStats,
-            Wheres = wheres,
+            GranuleStats = granuleStats,
             Locates = locates,
             ColumnBytes = columnBytes,
             ColumnChunks = columnChunks,
             ColumnClasses = ColumnClasses(),
-            PureBlockRows = blockStats.Count > 0 && _blocks is { } declared ? declared.PureRows : -1,
+            PureGranuleRows = granuleStats.Count > 0 ? PureGranuleRows() : -1,
             Marks = marks,
             Dictionaries = dictionaries,
         };
@@ -475,50 +473,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     // The sparse index of the file's key the caller declared, the key of each granule's first row and the last row's, built
     // and written at completion; null for none.
-    private (int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey)? _keyIndex;
-
-    // The blocks the caller cut on its key's indexed prefix, which every column's statistics over them are checked against
-    // at completion, and the rows of those of one value; null for none.
-    private (int Count, long PureRows)? _blocks;
-
-    // Where the blocks end, which the caller declares as it writes and every column's statistics over them read; null for
-    // a file that keeps none.
-    private BlockCuts? _cuts;
+    private (int Components, IReadOnlyList<byte[]> Keys, byte[] LastKey, long PureRows)? _keyIndex;
 
     /// <summary>
-    /// Declares that a block ends after the file's first <paramref name="rows"/> rows, before the rows it ends in are
-    /// written: every column's statistics over the blocks cut there (<see cref="VortexWriteOptions.Blocked"/>). The
-    /// blocks declared at completion (<see cref="DeclareBlocks"/>) must end at the same rows, or the file keeps no
-    /// statistics over them. Nothing for a file that keeps none.
+    /// The rows of the file's granules that hold one value of its key's indexed prefix (<see cref="ObjectContents.PureGranuleRows"/>),
+    /// which the caller declared with its sparse index; -1 when it declared none.
     /// </summary>
-    internal void EndBlock(long rows) => _cuts?.Add(rows);
-
-    /// <summary>
-    /// Declares that the file's rows lie in <paramref name="count"/> blocks of its key's indexed prefix, the ends of all but
-    /// the last declared by <see cref="EndBlock"/>, <paramref name="pureRows"/> of them in blocks of one value of it
-    /// (<see cref="ObjectContents.PureBlockRows"/>): the caller, which writes its rows in the key's order, knows where the
-    /// prefix changes. A column whose statistics did not cut that many blocks over the file's rows
-    /// keeps none.
-    /// </summary>
-    /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold the statistics.</exception>
-    internal void DeclareBlocks(int count, long pureRows)
-    {
-        if (_indexes is null)
-        {
-            throw new InvalidOperationException("A file's statistics over its blocks ride in its index directory, which a writer that builds no index does not write.");
-        }
-
-        _blocks = (count, pureRows);
-    }
+    private long PureGranuleRows() => _keyIndex is { } declared ? declared.PureRows : -1;
 
     /// <summary>
     /// Declares the sparse index of the file's key (<see cref="GranuleKeys"/>): the key of the first row of each granule of
     /// <see cref="BlockRows"/> rows, row-encoded over <paramref name="components"/> components, and the last row's, which
-    /// completion builds the index of, writes and names in the table of contents. The caller, which writes its rows in the
-    /// key's order, knows them; the keys are the writer's until it completes.
+    /// completion builds the index of, writes and names in the table of contents; and the rows of the granules that hold one
+    /// value of the components, <paramref name="pureRows"/> (<see cref="ObjectContents.PureGranuleRows"/>). The caller, which
+    /// writes its rows in the key's order, knows them; the keys are the writer's until it completes.
     /// </summary>
     /// <exception cref="InvalidOperationException">The writer carries no table of contents, or cuts no granules.</exception>
-    internal void DeclareKeyIndex(int components, IReadOnlyList<byte[]> keys, byte[] lastKey)
+    internal void DeclareKeyIndex(int components, IReadOnlyList<byte[]> keys, byte[] lastKey, long pureRows)
     {
         ArgumentNullException.ThrowIfNull(keys);
         ArgumentNullException.ThrowIfNull(lastKey);
@@ -527,7 +498,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             throw new InvalidOperationException("A file's key index rides in its table of contents, over granules, which this writer does not write.");
         }
 
-        _keyIndex = (components, keys, lastKey);
+        _keyIndex = (components, keys, lastKey, pureRows);
     }
 
     /// <summary>
@@ -934,13 +905,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 writer._indexes?.AddCounts(plan);
 
-                // And each column's statistics over the blocks the caller declares, with where each value lives; and where each
-                // value lies, granule by granule.
-                if (options.Blocked && writer._indexes is { } blocked)
+                // And each column's statistics over the granules, and where each value lies, granule by granule.
+                if (options.Granulated && writer._indexes is { } granulated)
                 {
-                    writer._cuts = new BlockCuts();
-                    blocked.AddBlockStats(schema, writer._cuts);
-                    blocked.AddLocates(schema);
+                    granulated.AddGranuleStats(schema);
+                    granulated.AddLocates(schema);
                 }
             }
         }
@@ -2542,7 +2511,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             List<(int Field, IndexSegment Region)> counts = [];
             List<(int Field, IndexSegment Region)> sketches = [];
             List<(int Field, IndexSegment Region)> stated = [];
-            List<(int Field, IndexSegment Region)> wheres = [];
             List<(int Field, IndexSegment Region)> locates = [];
             bool keepsSheets = _sheetBytes is { } least && _sink.Position >= least;
             for (int field = 0; keepsSheets && field < _fieldCount; field++)
@@ -2569,24 +2537,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
-            // Each column's statistics over the blocks of the key's indexed prefix, right after where its values live, which a
-            // question on a value reads with them in one request, and which a file's table of contents names beside the
-            // counts; as its sheets and counts, kept only by a file large enough for a reader to ask them before it, which a
-            // smaller one reads whole.
-            if (_blocks is { } declared && _carriesContents && keepsSheets)
+            // Each column's statistics over the granules, which a question reads to answer them without their rows, and which a
+            // file's table of contents names beside the counts; as its sheets and counts, kept only by a file large enough for a
+            // reader to ask them before it, which a smaller one reads whole.
+            if (_carriesContents && keepsSheets)
             {
-                for (int field = 0; _cuts is not null && field < _fieldCount; field++)
+                for (int field = 0; field < _fieldCount; field++)
                 {
-                    if (closed.BlockStatsOf(field)?.Finish(declared.Count, _rowCount) is ({ } statistics, var where))
+                    if (closed.GranuleStatsOf(field)?.Finish(_rowCount) is { } statistics)
                     {
-                        if (where is not null)
-                        {
-                            wheres.Add((field, await closed.AddColumnRegionAsync(
-                                _sink, IndexKinds.ColumnWhere, field, where, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
-                        }
-
                         stated.Add((field, await closed.AddColumnRegionAsync(
-                            _sink, IndexKinds.BlockStats, field, statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
+                            _sink, IndexKinds.GranuleStats, field, statistics, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false)));
                     }
                 }
 
@@ -2684,7 +2645,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (_carriesContents)
             {
                 _contents = Contents(
-                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, wheres, locates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
+                    keyIndex, keyPages, chunks!, chunkDirectories, pathDirectories, paging, sheets, counts, sketches, stated, locates, closed.ColumnBytes(_isTabular ? _fieldCount : 0), ColumnChunks(), marks, dictionaries);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

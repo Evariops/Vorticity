@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using Vorticity.Indexes;
 using Vorticity.RowEncoding;
 
 namespace Vorticity.Dataset;
@@ -14,25 +13,19 @@ internal interface IOrderedKeys
 
 /// <summary>
 /// What a sorted object's rows give its writer as they come in the key's order (<see cref="SortKey"/>): the indexed prefix
-/// of the key of each granule's first row, which its sparse index keeps, the blocks the prefix cuts, which its statistics
-/// are kept over, and its last key. What a compaction, an append and a rewrite share of every object they write sorted.
+/// of the key of each granule's first row, which its sparse index keeps, its last key, and the rows of the granules that
+/// hold one value of the prefix, whose first and last rows hold the same, the keys following one another. What a
+/// compaction, an append and a rewrite share of every object they write sorted. A granule is the writer's block.
 /// </summary>
-/// <remarks>
-/// A block ends at a change of the indexed prefix once it holds <see cref="ColumnBlocks.LeastRows"/> rows, at a change of
-/// the prefix's last component, its finest grain, once it holds <see cref="ColumnBlocks.FewestRows"/> when the prefix has
-/// several, and at <see cref="ColumnBlocks.MostRows"/> rows. The keys come in order, and so their prefixes, so a bisection
-/// finds each change. The keys a block starts and ends with lie in buffers that grow and are kept.
-/// </remarks>
 /// <param name="keys">The key the rows come in the order of.</param>
-/// <param name="prefix">The components of the key the object indexes and cuts its blocks on.</param>
-/// <param name="blocks">Whether the object keeps statistics over blocks, a job's, which are cut then.</param>
+/// <param name="prefix">The components of the key the object indexes.</param>
 /// <param name="skip">
 /// The components that lead the keys before the key's own, the partition's, one value in an object, which its index
 /// leaves out.
 /// </param>
-internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true, int skip = 0)
+internal sealed class SortedRows(SortKey keys, int prefix, int skip = 0)
 {
-    // The components the blocks are cut on, those skipped included: they hold one value in an object.
+    // The components of the prefix, those skipped included: they hold one value in an object.
     private readonly int _cut = skip + prefix;
 
     // The keys of the object's granules, as they come; the rows taken; the keys of the first and the last.
@@ -42,19 +35,9 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true, i
     private byte[] _lastKey = [];
     private int _lastKeyLength = -1;
 
-    // The blocks: each closed block's rows and the rows of those of one value of the prefix; then the rows of the one
-    // being written, its first key and its last.
-    private readonly List<long> _blockRows = [];
+    // The rows of the granules closed that hold one value of the prefix; the rows of a granule.
     private long _pureRows;
-    private long _blockFilled;
-    private byte[] _blockLow = [];
-    private int _blockLowLength;
-    private byte[] _blockHigh = [];
-    private int _blockHighLength;
-
-    // The blocks already declared to the writer, and the rows they end at.
-    private int _declaredBlocks;
-    private long _declaredEnd;
+    private int _granuleRows;
 
     /// <summary>The rows taken since the object started.</summary>
     internal long Rows => _rows;
@@ -64,8 +47,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true, i
 
     /// <summary>
     /// Takes rows <paramref name="from"/> to <paramref name="to"/> of <paramref name="source"/>, the object's next rows in the
-    /// key's order: the keys of those that start a granule of <paramref name="granuleRows"/> rows, the blocks they close,
-    /// and the last one's key.
+    /// key's order: the keys of those that start a granule of <paramref name="granuleRows"/> rows, and the last one's key.
     /// </summary>
     internal void Take<TKeys>(TKeys source, int from, int to, int granuleRows)
         where TKeys : IOrderedKeys
@@ -76,6 +58,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true, i
         }
 
         _firstKey ??= source.KeyAt(from).ToArray();
+        _granuleRows = granuleRows;
 
         // The keys of the rows that start a granule: the object's rows before them are those taken.
         for (long row = (_rows + granuleRows - 1) / granuleRows * granuleRows; row < _rows + (to - from); row += granuleRows)
@@ -83,9 +66,14 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true, i
             _granuleKeys.Add(Prefixed(source.KeyAt(from + (int)(row - _rows))).ToArray());
         }
 
-        if (blocks)
+        // The granules these rows close, each holding one value of the prefix when its last row holds its first's.
+        for (long end = ((_rows / granuleRows) + 1) * granuleRows; end <= _rows + (to - from); end += granuleRows)
         {
-            Block(source, from, to);
+            int granule = (int)(end / granuleRows) - 1;
+            if (granule < _granuleKeys.Count && Prefixed(source.KeyAt(from + (int)(end - 1 - _rows))).SequenceEqual(_granuleKeys[granule]))
+            {
+                _pureRows += granuleRows;
+            }
         }
 
         _rows += to - from;
@@ -93,39 +81,18 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true, i
     }
 
     /// <summary>
-    /// Declares to <paramref name="writer"/> where the blocks closed since the last call end, before the rows they end in
-    /// are written: every column's statistics over them cut there.
-    /// </summary>
-    internal void DeclareEnds(VortexFileWriter writer)
-    {
-        for (; _declaredBlocks < _blockRows.Count; _declaredBlocks++)
-        {
-            _declaredEnd += _blockRows[_declaredBlocks];
-            writer.EndBlock(_declaredEnd);
-        }
-    }
-
-    /// <summary>
     /// Declares to <paramref name="writer"/>, before it completes, the object's sparse index, from the keys taken and the
-    /// last one, and its blocks, the last one closed; then starts over for the next object.
+    /// last one, and the rows of its granules of one value of the prefix, the last one closed; then starts over for the
+    /// next object.
     /// </summary>
     internal void Finish(VortexFileWriter writer)
     {
-        CloseBlock();
-        long covered = 0;
-        foreach (long rows in _blockRows)
-        {
-            covered += rows;
-        }
-
         if (_granuleKeys.Count > 0 && _lastKeyLength >= 0)
         {
-            writer.DeclareKeyIndex(prefix, [.. _granuleKeys], Prefixed(_lastKey.AsSpan(0, _lastKeyLength)).ToArray());
-        }
-
-        if (_blockRows.Count > 0 && covered == _rows)
-        {
-            writer.DeclareBlocks(_blockRows.Count, _pureRows);
+            byte[] last = Prefixed(_lastKey.AsSpan(0, _lastKeyLength)).ToArray();
+            long open = _granuleRows <= 0 ? 0 : _rows % _granuleRows;
+            long pure = _pureRows + (open > 0 && last.AsSpan().SequenceEqual(_granuleKeys[^1]) ? open : 0);
+            writer.DeclareKeyIndex(prefix, [.. _granuleKeys], last, pure);
         }
 
         Clear();
@@ -138,11 +105,7 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true, i
         _rows = 0;
         _firstKey = null;
         _lastKeyLength = -1;
-        _blockRows.Clear();
         _pureRows = 0;
-        _blockFilled = 0;
-        _declaredBlocks = 0;
-        _declaredEnd = 0;
     }
 
     /// <summary>
@@ -154,112 +117,6 @@ internal sealed class SortedRows(SortKey keys, int prefix, bool blocks = true, i
         int start = skip == 0 ? 0 : keys.PrefixLength(key, skip);
         int end = keys.PrefixLength(key, _cut);
         return start < 0 ? key : end < 0 ? key[start..] : key[start..end];
-    }
-
-    /// <summary>Notes rows <paramref name="from"/> to <paramref name="to"/> of the source, the object's next, in its blocks.</summary>
-    private void Block<TKeys>(TKeys source, int from, int to)
-        where TKeys : IOrderedKeys
-    {
-        // The last component, the finest grain the prefix groups rows by, ends a block where it changes; the rows a block
-        // takes before any change may end it.
-        int last = prefix > 1 ? _cut - 1 : -1;
-        int open = last >= 0 ? ColumnBlocks.FewestRows : ColumnBlocks.LeastRows;
-        for (int at = from; at < to;)
-        {
-            if (_blockFilled == 0)
-            {
-                _blockLowLength = Keep(ref _blockLow, source.KeyAt(at));
-            }
-
-            // Past those rows, the first change of the prefix ends a block of the least rows, and under them the first that
-            // changes the last component, each change found in turn. Up to the most a block holds.
-            int limit = (int)Math.Min(to, at + (ColumnBlocks.MostRows - _blockFilled));
-            int end = limit;
-            int checkFrom = at + (int)Math.Clamp(open - _blockFilled, 0, limit - at);
-            ReadOnlySpan<byte> before = checkFrom > at ? source.KeyAt(checkFrom - 1) : _blockHigh.AsSpan(0, _blockHighLength);
-            while (checkFrom < limit)
-            {
-                int change = FirstChange(source, before, checkFrom, limit);
-                if (change >= limit
-                    || _blockFilled + (change - at) >= ColumnBlocks.LeastRows
-                    || (last >= 0 && !keys.SameAt(before, source.KeyAt(change), last)))
-                {
-                    end = change;
-                    break;
-                }
-
-                before = source.KeyAt(change);
-                checkFrom = change + 1;
-            }
-
-            if (end > at)
-            {
-                _blockHighLength = Keep(ref _blockHigh, source.KeyAt(end - 1));
-                _blockFilled += end - at;
-                at = end;
-            }
-
-            if (end < limit || _blockFilled == ColumnBlocks.MostRows)
-            {
-                CloseBlock();
-            }
-        }
-    }
-
-    /// <summary>
-    /// The first row from <paramref name="from"/> to <paramref name="to"/> of the source whose indexed prefix is not
-    /// <paramref name="before"/>'s, or <paramref name="to"/>.
-    /// </summary>
-    private int FirstChange<TKeys>(TKeys source, ReadOnlySpan<byte> before, int from, int to)
-        where TKeys : IOrderedKeys
-    {
-        if (keys.SamePrefix(before, source.KeyAt(to - 1), _cut))
-        {
-            return to;
-        }
-
-        if (!keys.SamePrefix(before, source.KeyAt(from), _cut))
-        {
-            return from;
-        }
-
-        // Row `low` holds the prefix of `before`, row `high` another.
-        int low = from;
-        int high = to - 1;
-        while (high - low > 1)
-        {
-            int middle = low + ((high - low) >> 1);
-            if (keys.SamePrefix(before, source.KeyAt(middle), _cut))
-            {
-                low = middle;
-            }
-            else
-            {
-                high = middle;
-            }
-        }
-
-        return high;
-    }
-
-    /// <summary>
-    /// Closes the block being written at its last row; its rows are of one value of the prefix when its first and last keys
-    /// hold one, since the keys follow one another and every row between holds it too.
-    /// </summary>
-    private void CloseBlock()
-    {
-        if (_blockFilled == 0)
-        {
-            return;
-        }
-
-        if (keys.SamePrefix(_blockLow.AsSpan(0, _blockLowLength), _blockHigh.AsSpan(0, _blockHighLength), _cut))
-        {
-            _pureRows += _blockFilled;
-        }
-
-        _blockRows.Add(_blockFilled);
-        _blockFilled = 0;
     }
 
     /// <summary>Copies <paramref name="key"/> into <paramref name="buffer"/>, grown when short; its length.</summary>

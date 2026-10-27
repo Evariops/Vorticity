@@ -37,8 +37,8 @@ namespace Vorticity.Dataset;
 /// </remarks>
 public sealed class DatasetWriter
 {
-    // The rows of a batch the sorted rows are written in.
-    private const int WrittenRows = ColumnBlocks.MostRows;
+    // The rows of a batch the sorted rows are written in: eight granules of the default's.
+    private const int WrittenRows = 65_536;
 
     private readonly VortexDataset _dataset;
     private readonly DatasetSchema _schema;
@@ -681,7 +681,7 @@ public sealed class DatasetWriter
             output = _dataset.StartObjectUnder(_schema, inKeyOrder: keys is not null, rowBound: rows, contents: true, shredded: _shredded);
             VortexFileWriter writer = output.Writer;
             DeclareDictionaries(writer, arena, root, rows);
-            SortedRows? sorted = keys is null ? null : _sorted ??= new SortedRows(_key!, _prefix, blocks: false, skip: _partition is null ? 0 : 1);
+            SortedRows? sorted = keys is null ? null : _sorted ??= new SortedRows(_key!, _prefix, skip: _partition is null ? 0 : 1);
             RecordBatch? batch = null;
             try
             {
@@ -699,7 +699,6 @@ public sealed class DatasetWriter
                     if (sorted is not null)
                     {
                         sorted.Take(new OrderedRows(keys!, order!, start), 0, count, writer.BlockRows);
-                        sorted.DeclareEnds(writer);
                     }
 
                     await writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);

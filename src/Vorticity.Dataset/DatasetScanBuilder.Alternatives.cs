@@ -56,10 +56,10 @@ internal enum AnswerPath
     /// <summary>The partial of the question's family an object learned, or the sum of those of the objects merged into it.</summary>
     Partial,
 
-    /// <summary>The statistics of an object's columns over its blocks, the blocks they do not answer read as rows.</summary>
-    Blocks,
+    /// <summary>The statistics of an object's columns over its granules, the granules they do not answer read as rows.</summary>
+    Granules,
 
-    /// <summary>An object's rows, the blocks its zone maps settle taken from them.</summary>
+    /// <summary>An object's rows, the granules its zone maps settle taken from them.</summary>
     Zones,
 
     /// <summary>An object's rows.</summary>
@@ -128,7 +128,7 @@ internal sealed partial class DatasetScanBuilder
         internal Task<(ColumnCounts?, ColumnSketches?)>? Counts { get; set; }
 
         /// <summary>The read of its columns' statistics over its blocks, begun ahead; null before or after.</summary>
-        internal Task<(ColumnWhere? Where, ColumnBlocks? Blocks)[]>? Blocks { get; set; }
+        internal Task<GranuleStats?[]>? Blocks { get; set; }
 
         /// <summary>Its partial, being learned ahead; null before or after.</summary>
         internal Task<AggregationPartial>? Learning { get; set; }
@@ -318,26 +318,26 @@ internal sealed partial class DatasetScanBuilder
                 : "the partials of the question's family of the objects a compaction merged into it, summed";
     }
 
-    /// <summary>The statistics of an object's columns over its blocks, the blocks they do not answer read as rows (<see cref="BlockAnswer"/>).</summary>
-    private sealed class BlocksAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Blocks, UnitLevel.Object)
+    /// <summary>The statistics of an object's columns over its granules, the granules they do not answer read as rows (<see cref="GranuleAnswer"/>).</summary>
+    private sealed class GranulesAlternative(DatasetScanBuilder scan) : Alternative(scan, AnswerPath.Granules, UnitLevel.Object)
     {
         internal override Coverage Covers(Planned unit) =>
-            Scan.Answer() is not null && unit.Held.Entry.Contents is { BlockStats.Count: > 0 } && Scan.Covered(unit.Held) == unit.Held.Entry.Rows
-            && Scan.BlockAnswer() is { } blocks && blocks.Covers(unit.Held)
+            Scan.Answer() is not null && unit.Held.Entry.Contents is { GranuleStats.Count: > 0 } && Scan.Covered(unit.Held) == unit.Held.Entry.Rows
+            && Scan.GranuleAnswer() is { } granules && granules.Covers(unit.Held)
                 ? Coverage.Part
                 : Coverage.None;
 
         internal override PathCosts.Cost Cost(Planned unit)
         {
-            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.BlockAnswer()!.Costs(unit.Held);
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held);
             return statistics + unanswered + Scan.SheetsCost(unit.Held);
         }
 
         internal override string Describe(Planned unit, PathCosts.Cost cost)
         {
-            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.BlockAnswer()!.Costs(unit.Held);
-            return $"the statistics over the blocks of {Scan.BlockAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests, "
-                + $"and the rows of the blocks they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}";
+            (PathCosts.Cost statistics, PathCosts.Cost unanswered, _) = Scan.GranuleAnswer()!.Costs(unit.Held);
+            return $"the statistics over the granules of {Scan.GranuleAnswer()!.Fields.Length} columns, {statistics.Bytes} bytes in {statistics.Requests} requests, "
+                + $"and the rows of the granules they do not answer, about {unanswered.Bytes} bytes in {unanswered.Requests}";
         }
     }
 
@@ -376,7 +376,7 @@ internal sealed partial class DatasetScanBuilder
     private Alternative[] Alternatives => _alternatives ??=
     [
         new EntryAlternative(this), new RollupAlternative(this), new CountsAlternative(this), new PartialAlternative(this),
-        new BlocksAlternative(this), new ZonesAlternative(this), new RowsAlternative(this),
+        new GranulesAlternative(this), new ZonesAlternative(this), new RowsAlternative(this),
     ];
 
     private Alternative[]? _alternatives;

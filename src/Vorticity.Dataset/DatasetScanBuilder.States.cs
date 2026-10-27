@@ -175,15 +175,15 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>How the statistics of the objects' blocks answer the states the scan asks, worked out once; null when they answer none.</summary>
-    private BlockAnswer? BlockAnswer()
+    private GranuleAnswer? GranuleAnswer()
     {
-        if (!_blockAnswerKnown)
+        if (!_granuleAnswerKnown)
         {
-            _blockAnswer = _states is { } request && Answer() is { } counts ? Dataset.BlockAnswer.Of(request, _filter, _version, counts) : null;
-            _blockAnswerKnown = true;
+            _granuleAnswer = _states is { } request && Answer() is { } counts ? Dataset.GranuleAnswer.Of(request, _filter, _version, counts, _dataset.Options.Write.BlockRows) : null;
+            _granuleAnswerKnown = true;
         }
 
-        return _blockAnswer;
+        return _granuleAnswer;
     }
 
     /// <summary>The column whose counts answer the object <paramref name="held"/> for <paramref name="answer"/>: one the scan covers whole; null for its rows.</summary>
@@ -329,19 +329,19 @@ internal sealed partial class DatasetScanBuilder
                     path = AnswerPath.Rows;
                 }
 
-                if (path == AnswerPath.Blocks)
+                if (path == AnswerPath.Granules)
                 {
                     // An object whose blocks answer: the states of the blocks its statistics answer, then the rows of the
                     // others, each run of them a part of the scan. The blocks that hold a row a delete marked are read as rows
                     // too.
-                    Task<(Indexes.ColumnWhere? Where, Indexes.ColumnBlocks? Blocks)[]> statistics = unit.Blocks!;
+                    Task<Indexes.GranuleStats?[]> statistics = unit.Blocks!;
                     unit.Blocks = null;
-                    (Indexes.ColumnWhere? Where, Indexes.ColumnBlocks? Blocks)[] blockColumns = await statistics.ConfigureAwait(false);
+                    Indexes.GranuleStats?[] blockColumns = await statistics.ConfigureAwait(false);
                     await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
-                    (BlockStateRows? settled, List<RowRange> unsettled, int answered) = BlockAnswer()!.Settle(held, blockColumns, held.Entry.Deletions);
+                    (GranuleStateRows? settled, List<RowRange> unsettled, int answered) = GranuleAnswer()!.Settle(held, blockColumns, held.Entry.Deletions);
                     if (_metrics is { } counted)
                     {
-                        counted.BlocksAnswered += answered;
+                        counted.GranulesAnswered += answered;
                         counted.StateRows += settled?.Count ?? 0;
                     }
 
@@ -468,8 +468,8 @@ internal sealed partial class DatasetScanBuilder
                     : answer.Exclusion is { } exclusion ? KeptCountsAsync(answer, entry, field, exclusion.Field, exclusion.Found, cancellationToken)
                     : _dataset.ReadCountsAsync(entry, field, answer.AsksSketches, cancellationToken).AsTask();
                 break;
-            case AnswerPath.Blocks:
-                unit.Blocks = _dataset.ReadBlockColumnsAsync(unit.Held.Entry, BlockAnswer()!.Fields, stats: true, cancellationToken).AsTask();
+            case AnswerPath.Granules:
+                unit.Blocks = _dataset.ReadGranuleStatsAsync(unit.Held.Entry, GranuleAnswer()!.Fields, cancellationToken).AsTask();
                 break;
         }
     }

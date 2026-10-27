@@ -114,22 +114,13 @@ internal sealed class ObjectContents(
     internal IndexSegment? SketchesOf(int field) => RegionOf(Sketches, field);
 
     /// <summary>
-    /// The statistics of each column over the object's blocks (<see cref="ColumnBlocks"/>) and their regions: what a
-    /// question reads to answer a block from its columns' values without its rows. Empty when the object keeps none.
+    /// The statistics of each column over the object's granules (<see cref="Indexes.GranuleStats"/>) and their regions: what a
+    /// question reads to answer a granule from its columns' values without its rows. Empty when the object keeps none.
     /// </summary>
-    internal IReadOnlyList<(int Field, IndexSegment Region)> BlockStats { get; init; } = [];
+    internal IReadOnlyList<(int Field, IndexSegment Region)> GranuleStats { get; init; } = [];
 
-    /// <summary>The region of column <paramref name="field"/>'s statistics over the blocks, or null when the object keeps none of it.</summary>
-    internal IndexSegment? BlockStatsOf(int field) => RegionOf(BlockStats, field);
-
-    /// <summary>
-    /// Where each value of each column lives (<see cref="ColumnWhere"/>), and their regions: what a filter on a value reads
-    /// to read the value's rows alone. Empty when the object keeps none.
-    /// </summary>
-    internal IReadOnlyList<(int Field, IndexSegment Region)> Wheres { get; init; } = [];
-
-    /// <summary>The region of where column <paramref name="field"/>'s values live, or null when the object keeps none of it.</summary>
-    internal IndexSegment? WhereOf(int field) => RegionOf(Wheres, field);
+    /// <summary>The region of column <paramref name="field"/>'s statistics over the granules, or null when the object keeps none of it.</summary>
+    internal IndexSegment? GranuleStatsOf(int field) => RegionOf(GranuleStats, field);
 
     /// <summary>
     /// Where each value of each column lies, granule by granule (<see cref="ColumnLocate"/>), and their regions: what a filter
@@ -194,11 +185,11 @@ internal sealed class ObjectContents(
     }
 
     /// <summary>
-    /// The rows of the object's blocks (<see cref="BlockStats"/>) that hold one value of the key's indexed prefix: those a
-    /// question grouped by its components may answer from their statistics, where a block that holds
+    /// The rows of the object's granules (<see cref="GranuleStats"/>) that hold one value of the key's indexed prefix: those a
+    /// question grouped by its components may answer from their statistics, where a granule that holds
     /// several reads its rows. -1 when the object does not say.
     /// </summary>
-    internal long PureBlockRows { get; init; } = -1;
+    internal long PureGranuleRows { get; init; } = -1;
 
     /// <summary>
     /// Each top-level column's geometry (<see cref="ColumnMarks"/>), the regions of its index entry, in column order: what a
@@ -246,13 +237,12 @@ internal sealed class ObjectContents(
             Sheets = Sheets,
             Counts = Counts,
             Sketches = Sketches,
-            BlockStats = BlockStats,
-            Wheres = Wheres,
+            GranuleStats = GranuleStats,
             Locates = Locates,
             ColumnBytes = ColumnBytes,
             ColumnChunks = ColumnChunks,
             ColumnClasses = ColumnClasses,
-            PureBlockRows = PureBlockRows,
+            PureGranuleRows = PureGranuleRows,
             Marks = Marks,
             Dictionaries = Dictionaries,
             KeyIndex = KeyIndex,
@@ -317,11 +307,10 @@ internal sealed class ObjectContents(
 
     // 17 held the region of the blocks' keys, retired: never reused.
 
-    // A column's statistics over the blocks: its field and its region, as a path directory's.
-    private const int TagBlockStats = 18;
+    // A column's statistics over the granules: its field and its region, as a path directory's.
+    private const int TagGranuleStats = 18;
 
-    // Where a column's values live: its field and its region, as a path directory's.
-    private const int TagWhere = 19;
+    // 19 held where a column's values lived, by the ranges of runs of the key's prefix: retired, never reused.
 
     // The bytes of each top-level column's data, packed, by the column's place.
     private const int TagColumnBytes = 20;
@@ -329,8 +318,8 @@ internal sealed class ObjectContents(
     // The chunks of each top-level column's data, packed, by the column's place.
     private const int TagColumnChunks = 21;
 
-    // The rows of the blocks that hold one value of the key's indexed prefix.
-    private const int TagPureBlockRows = 22;
+    // The rows of the granules that hold one value of the key's indexed prefix.
+    private const int TagPureGranuleRows = 22;
 
     // A column's geometry, its region, one a column in column order.
     private const int TagMarks = 23;
@@ -461,12 +450,7 @@ internal sealed class ObjectContents(
             Declare(region);
         }
 
-        foreach ((int _, IndexSegment region) in BlockStats)
-        {
-            Declare(region);
-        }
-
-        foreach ((int _, IndexSegment region) in Wheres)
+        foreach ((int _, IndexSegment region) in GranuleStats)
         {
             Declare(region);
         }
@@ -583,16 +567,9 @@ internal sealed class ObjectContents(
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
 
-            foreach ((int field, IndexSegment region) in BlockStats)
+            foreach ((int field, IndexSegment region) in GranuleStats)
             {
-                using ProtoWriter.MessageScope message = writer.BeginMessage(TagBlockStats);
-                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
-                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
-            }
-
-            foreach ((int field, IndexSegment region) in Wheres)
-            {
-                using ProtoWriter.MessageScope message = writer.BeginMessage(TagWhere);
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagGranuleStats);
                 writer.WriteUInt32Always(TagDirectoryField, (uint)field);
                 IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
             }
@@ -631,9 +608,9 @@ internal sealed class ObjectContents(
                 }
             }
 
-            if (PureBlockRows >= 0)
+            if (PureGranuleRows >= 0)
             {
-                writer.WriteUInt64Always(TagPureBlockRows, (ulong)PureBlockRows);
+                writer.WriteUInt64Always(TagPureGranuleRows, (ulong)PureGranuleRows);
             }
 
             if (DirectoryRegion is { } directoryRegion)
@@ -685,13 +662,12 @@ internal sealed class ObjectContents(
             List<(int, IndexSegment)> sheets = [];
             List<(int, IndexSegment)> counts = [];
             List<(int, IndexSegment)> sketches = [];
-            List<(int, IndexSegment)> blockStats = [];
-            List<(int, IndexSegment)> wheres = [];
+            List<(int, IndexSegment)> granuleStats = [];
             List<(int, IndexSegment)> locates = [];
             List<long> columnBytes = [];
             List<long> columnChunks = [];
             List<uint> columnClasses = [];
-            long pureBlockRows = -1;
+            long pureGranuleRows = -1;
             List<IndexSegment> marks = [];
             List<(int Field, ColumnDictionary Dictionary)> dictionaries = [];
             IndexSegment? indexDirectory = null;
@@ -774,13 +750,13 @@ internal sealed class ObjectContents(
 
                         sketches.Add(sketched);
                         break;
-                    case (TagBlockStats, ProtoWireType.LengthDelimited):
+                    case (TagGranuleStats, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } stated)
                         {
                             return null;
                         }
 
-                        blockStats.Add(stated);
+                        granuleStats.Add(stated);
                         break;
                     case (TagColumnBytes, ProtoWireType.LengthDelimited):
                         ProtoReader packed = reader.ReadMessage();
@@ -806,16 +782,8 @@ internal sealed class ObjectContents(
                         }
 
                         break;
-                    case (TagPureBlockRows, ProtoWireType.Varint):
-                        pureBlockRows = checked((long)reader.ReadVarint());
-                        break;
-                    case (TagWhere, ProtoWireType.LengthDelimited):
-                        if (Directory(reader.ReadMessage()) is not { } placed)
-                        {
-                            return null;
-                        }
-
-                        wheres.Add(placed);
+                    case (TagPureGranuleRows, ProtoWireType.Varint):
+                        pureGranuleRows = checked((long)reader.ReadVarint());
                         break;
                     case (TagLocate, ProtoWireType.LengthDelimited):
                         if (Directory(reader.ReadMessage()) is not { } lying)
@@ -865,13 +833,12 @@ internal sealed class ObjectContents(
                     Sheets = sheets,
                     Counts = counts,
                     Sketches = sketches,
-                    BlockStats = blockStats,
-                    Wheres = wheres,
+                    GranuleStats = granuleStats,
                     Locates = locates,
                     ColumnBytes = columnBytes,
                     ColumnChunks = columnChunks,
                     ColumnClasses = [.. columnClasses],
-                    PureBlockRows = pureBlockRows,
+                    PureGranuleRows = pureGranuleRows,
                     Marks = marks.Count == directories.Count ? marks : [],
                     Dictionaries = Placed(dictionaries, directories.Count),
                 }

@@ -1885,17 +1885,16 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Gives every top-level column with a sheet its statistics over the blocks <paramref name="cuts"/> end, fed right after
-    /// its counts, from the values its sheet numbers and the measures the counts' plan reads; nothing for a file that keeps
-    /// no counts.
+    /// Gives every top-level column with a sheet its statistics over the granules, fed right after its counts, from the values
+    /// its sheet numbers and the measures the counts' plan reads; nothing for a file that keeps no counts.
     /// </summary>
-    internal void AddBlockStats(DType schema, BlockCuts cuts)
+    internal void AddGranuleStats(DType schema)
     {
         for (int field = 0; _counts is { } plan && _isTabular && field < _fieldCount; field++)
         {
             if (SheetOf(field) is { } sheet)
             {
-                _builders[field].Add(new ColumnBlocksBuilder(sheet, plan, field, cuts, schema.GetField(field)));
+                _builders[field].Add(new GranuleStatsBuilder(sheet, plan, field, schema.GetField(field)));
             }
         }
     }
@@ -1935,14 +1934,14 @@ internal sealed class IndexWriter : IDisposable
         return null;
     }
 
-    /// <summary>The builder of column <paramref name="field"/>'s statistics over the blocks, or null when it has none.</summary>
-    internal ColumnBlocksBuilder? BlockStatsOf(int field)
+    /// <summary>The builder of column <paramref name="field"/>'s statistics over the granules, or null when it has none.</summary>
+    internal GranuleStatsBuilder? GranuleStatsOf(int field)
     {
         foreach (IndexBuilder builder in _builders[field])
         {
-            if (builder is ColumnBlocksBuilder blocks)
+            if (builder is GranuleStatsBuilder granules)
             {
-                return blocks;
+                return granules;
             }
         }
 

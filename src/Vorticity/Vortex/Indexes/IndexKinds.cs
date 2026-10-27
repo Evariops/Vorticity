@@ -105,19 +105,15 @@ internal static class IndexKinds
     // vorticity.block.table.v1 held each block's rows and its first and last keys, written and never read: retired, its
     // name never reused.
 
-    /// <summary>
-    /// One column's statistics over the blocks of a file whose rows follow a key, runs of rows of one value of its first
-    /// column: each block's rows, nulls, values and their rows, and a measure's count, exact sum and extremes, in one
-    /// payload region that a table of contents names (<see cref="ColumnBlocks"/>).
-    /// </summary>
-    public const string BlockStats = "vorticity.block.stats.v1";
+    // vorticity.block.stats.v1 held a column's statistics over runs of the key's prefix of 4,096 to 65,536 rows, and
+    // vorticity.column.where.v1 the ranges of those runs each value lived in: retired, their names never reused.
 
     /// <summary>
-    /// Where each value of a column lives: its values by their bytes, each with the ranges of rows of the blocks it appears
-    /// in, or none where it lives everywhere, in one payload region that a table of contents names
-    /// (<see cref="Indexes.ColumnWhere"/>).
+    /// One column's statistics over the granules of a file whose rows follow a key: each granule's rows, nulls, values and
+    /// their rows, and a measure's count, exact sum and extremes, with the values' dictionary, in one payload region that a
+    /// table of contents names (<see cref="GranuleStats"/>).
     /// </summary>
-    public const string ColumnWhere = "vorticity.column.where.v1";
+    public const string GranuleStats = "vorticity.granule.stats.v1";
 
     /// <summary>
     /// Where each value of a column lies, granule by granule: its values by their bytes, each with the granules it lies in,
@@ -136,7 +132,7 @@ internal static class IndexKinds
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
                 or PostingsNgram3 or PostingsHashed or KeyIndex or SliceChunks or Marks or VariantPaths or VariantDirectory or VariantBlocks
-                or ColumnSheet or ColumnCounts or ColumnSketches or BlockStats or ColumnWhere or ColumnLocate => true,
+                or ColumnSheet or ColumnCounts or ColumnSketches or GranuleStats or ColumnLocate => true,
             _ => false,
         };
 

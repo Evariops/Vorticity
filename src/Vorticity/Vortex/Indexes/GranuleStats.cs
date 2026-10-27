@@ -6,48 +6,27 @@ using Vorticity.Serialization.Protobuf;
 namespace Vorticity.Indexes;
 
 /// <summary>
-/// One column's statistics over the blocks of a file whose rows follow a key (<see cref="IndexKinds.BlockStats"/>): each
-/// block's rows and nulls; the values it holds by their numbers in the column's
-/// <see cref="ColumnWhere"/>, with each one's rows, while it holds at most <see cref="ListedValues"/> of them, and their
-/// count past that; and for a measure, its count of values, exact sum, least and greatest, in
-/// <see cref="MeasureLayout"/>'s words. A block whose columns of a question hold one value each is that question's
-/// answer for its rows, read from these alone.
+/// One column's statistics over the granules of a file whose rows follow a key (<see cref="IndexKinds.GranuleStats"/>,
+/// spec D, 6): each granule's rows and nulls; the values it holds by their numbers, with each one's rows, while it holds at
+/// most <see cref="ListedValues"/> of them, and their count past that, each number's value in the statistics'
+/// dictionary; and for a measure, its count of values, exact sum, least and greatest, in <see cref="MeasureLayout"/>'s
+/// words. A granule whose columns of a question hold one value each is that question's answer for its rows, read from these
+/// alone.
 /// </summary>
 /// <remarks>
-/// <para>
-/// A block is a run of rows of one value of the key's indexed prefix: it ends where the prefix changes once it holds
-/// <see cref="LeastRows"/> rows, where its last component changes once it holds <see cref="FewestRows"/>, and at
-/// <see cref="MostRows"/> rows whatever its rows hold, so that a prefix whose runs are shorter, an identifier, gives
-/// blocks of several values rather than a block a row. A block is a range of rows,
-/// independent of the file's chunks and zones.
-/// </para>
-/// <para>
-/// Encoded as its version, its count of blocks and the parts it holds, then a section a part: each block's rows and nulls;
-/// each block's values, their count then, for a block of at most <see cref="ListedValues"/>, their numbers ascending as
-/// the gaps between them and, past one value, each one's rows; each block's measure, its count of values then, for a
-/// block of one or more, its sum's words and its extremes. Sections rather than blocks, so that a writer that gives a
-/// part up midway drops its section whole.
-/// </para>
+/// A granule is the writer's block, the zone of the zone maps and the place of the sparse index. Encoded as its version,
+/// its count of granules and the parts it holds, then a section a part: each granule's rows and nulls; each granule's
+/// values, their count then, for a granule of at most <see cref="ListedValues"/>, their numbers ascending as the gaps
+/// between them and, past one value, each one's rows; each granule's measure, its count of values then, for a granule of
+/// one or more, its sum's words and its extremes; and with the values, their dictionary: each number's value, its length
+/// then its bytes. Sections rather than granules, so that a writer that gives a part up midway drops its section whole.
 /// </remarks>
-internal sealed class ColumnBlocks
+internal sealed class GranuleStats
 {
-    /// <summary>The rows a block holds at most.</summary>
-    internal const int MostRows = 65_536;
-
-    /// <summary>The rows a block holds before a change of the key's indexed prefix ends it: a sixteenth of <see cref="MostRows"/>.</summary>
-    internal const int LeastRows = MostRows / 16;
-
-    /// <summary>
-    /// The rows a block holds before a change of the last component of the prefix, its finest grain, ends it: a sixteenth of
-    /// <see cref="LeastRows"/>, so that a grain finer than the rows of a block (a prefix that ends on an instant) cuts no
-    /// blocks of a few rows, whose statistics would outweigh what they spare.
-    /// </summary>
-    internal const int FewestRows = LeastRows / 16;
-
-    /// <summary>The values a block lists at most, each with its rows; past them it gives their count alone.</summary>
+    /// <summary>The values a granule lists at most, each with its rows; past them it gives their count alone.</summary>
     internal const int ListedValues = 256;
 
-    private const byte Version = 1;
+    private const byte Version = 2;
 
     // The parts a file's statistics hold, and a measure's kind past them.
     private const int HoldsValues = 1;
@@ -56,7 +35,7 @@ internal sealed class ColumnBlocks
 
     private readonly long[] _starts;
 
-    private ColumnBlocks(long[] rows, long[] nulls)
+    private GranuleStats(long[] rows, long[] nulls)
     {
         Rows = rows;
         Nulls = nulls;
@@ -67,70 +46,91 @@ internal sealed class ColumnBlocks
         }
     }
 
-    /// <summary>The blocks.</summary>
+    /// <summary>The granules.</summary>
     internal int Count => Rows.Length;
 
-    /// <summary>Each block's rows.</summary>
+    /// <summary>Each granule's rows.</summary>
     internal long[] Rows { get; }
 
-    /// <summary>Each block's nulls.</summary>
+    /// <summary>Each granule's nulls.</summary>
     internal long[] Nulls { get; }
 
-    /// <summary>The first row of block <paramref name="block"/> in the file; <see cref="Count"/> gives the file's rows.</summary>
-    internal long FirstRow(int block) => _starts[block];
+    /// <summary>The first row of granule <paramref name="granule"/> in the file; <see cref="Count"/> gives the file's rows.</summary>
+    internal long FirstRow(int granule) => _starts[granule];
 
-    /// <summary>The rows the blocks cover.</summary>
+    /// <summary>The rows the granules cover.</summary>
     internal long TotalRows => _starts[^1];
 
-    /// <summary>Whether the blocks list their values (<see cref="Distinct"/>, <see cref="ValuesOf"/>).</summary>
+    /// <summary>Whether the granules list their values (<see cref="Distinct"/>, <see cref="ValuesOf"/>).</summary>
     internal bool HoldsValueLists => Distinct is not null;
 
-    /// <summary>Each block's distinct values; null when the statistics hold no values.</summary>
+    /// <summary>Each granule's distinct values; null when the statistics hold no values.</summary>
     internal int[]? Distinct { get; private init; }
 
-    // Where each block's values lie in the lists, a block past ListedValues listing none; the lists, numbers and rows.
+    // Where each granule's values lie in the lists, a granule past ListedValues listing none; the lists, numbers and rows.
     private int[] _listStarts = [];
     private int[] _ids = [];
     private long[] _valueRows = [];
 
+    // Each number's value, as the column stores it, while the granules list their values.
+    private byte[][] _dictionary = [];
+
+    /// <summary>The values the dictionary names, numbered from 0.</summary>
+    internal int Named => _dictionary.Length;
+
+    /// <summary>The value numbered <paramref name="id"/>, as the column stores it; null for a number the statistics do not name.</summary>
+    internal byte[]? ValueOf(int id) => (uint)id < (uint)_dictionary.Length ? _dictionary[id] : null;
+
     /// <summary>
-    /// The numbers of the values block <paramref name="block"/> holds, ascending, and each one's rows; empty for a block of
+    /// The numbers of the values granule <paramref name="granule"/> holds, ascending, and each one's rows; empty for a granule of
     /// no value or of more than <see cref="ListedValues"/>, whose <see cref="Distinct"/> says which.
     /// </summary>
-    internal (ReadOnlyMemory<int> Ids, ReadOnlyMemory<long> Rows) ValuesOf(int block)
+    internal (ReadOnlyMemory<int> Ids, ReadOnlyMemory<long> Rows) ValuesOf(int granule)
     {
-        int from = _listStarts[block];
-        int to = _listStarts[block + 1];
+        int from = _listStarts[granule];
+        int to = _listStarts[granule + 1];
         return (_ids.AsMemory(from, to - from), _valueRows.AsMemory(from, to - from));
     }
 
     /// <summary>The measure's kind; null when the statistics hold no measure.</summary>
     internal MeasureKind? Measure { get; private init; }
 
-    // Each block's measure, MeasureLayout's words a block.
+    // Each granule's measure, MeasureLayout's words a granule.
     private long[] _words = [];
 
-    /// <summary>Block <paramref name="block"/>'s measure: its count of values, sum, least and greatest in <see cref="MeasureLayout"/>'s words.</summary>
-    internal ReadOnlySpan<long> MeasureOf(int block)
+    /// <summary>Granule <paramref name="granule"/>'s measure: its count of values, sum, least and greatest in <see cref="MeasureLayout"/>'s words.</summary>
+    internal ReadOnlySpan<long> MeasureOf(int granule)
     {
         int width = MeasureLayout.Words(Measure == MeasureKind.Float);
-        return _words.AsSpan(block * width, width);
+        return _words.AsSpan(granule * width, width);
     }
 
     /// <summary>The bytes the statistics hold in memory.</summary>
     internal long Bytes =>
-        (Rows.Length * (2L * sizeof(long) + 2 * sizeof(int))) + (_ids.Length * (long)(sizeof(int) + sizeof(long))) + (_words.Length * (long)sizeof(long));
+        (Rows.Length * (2L * sizeof(long) + 2 * sizeof(int))) + (_ids.Length * (long)(sizeof(int) + sizeof(long))) + (_words.Length * (long)sizeof(long))
+        + DictionaryBytes();
 
-    /// <summary>Writes the header of statistics over <paramref name="blocks"/> blocks holding the parts named, its sections following.</summary>
-    internal static void WriteHeader(ref ProtoWriter writer, int blocks, bool values, MeasureKind? measure)
+    private long DictionaryBytes()
+    {
+        long bytes = 0;
+        foreach (byte[] value in _dictionary)
+        {
+            bytes += value.Length + 24;
+        }
+
+        return bytes;
+    }
+
+    /// <summary>Writes the header of statistics over <paramref name="granules"/> granules holding the parts named, its sections following.</summary>
+    internal static void WriteHeader(ref ProtoWriter writer, int granules, bool values, MeasureKind? measure)
     {
         writer.WriteVarint(Version);
-        writer.WriteVarint((ulong)blocks);
+        writer.WriteVarint((ulong)granules);
         int parts = (values ? HoldsValues : 0) | (measure is { } kind ? HoldsMeasure | ((int)kind << KindShift) : 0);
         writer.WriteVarint((ulong)parts);
     }
 
-    /// <summary>Writes a block's rows and nulls, in the first section.</summary>
+    /// <summary>Writes a granule's rows and nulls, in the first section.</summary>
     internal static void WriteRows(ref ProtoWriter writer, long rows, long nulls)
     {
         writer.WriteVarint((ulong)rows);
@@ -138,7 +138,7 @@ internal sealed class ColumnBlocks
     }
 
     /// <summary>
-    /// Writes a block's values, in the values' section: <paramref name="distinct"/> of them, and while they are at most
+    /// Writes a granule's values, in the values' section: <paramref name="distinct"/> of them, and while they are at most
     /// <see cref="ListedValues"/>, their numbers <paramref name="ids"/> ascending and, past one, each one's rows.
     /// </summary>
     internal static void WriteValues(ref ProtoWriter writer, int distinct, ReadOnlySpan<int> ids, ReadOnlySpan<long> rows)
@@ -162,7 +162,18 @@ internal sealed class ColumnBlocks
         }
     }
 
-    /// <summary>Writes a block's measure of <paramref name="kind"/>, its words in <see cref="MeasureLayout"/>'s layout, in the measure's section.</summary>
+    /// <summary>Writes each number's value, the values' dictionary, the last section, after the measure's.</summary>
+    internal static void WriteDictionary(ref ProtoWriter writer, byte[]?[] values)
+    {
+        writer.WriteVarint((ulong)values.Length);
+        foreach (byte[]? value in values)
+        {
+            writer.WriteVarint((ulong)value!.Length);
+            writer.WriteRawBytes(value);
+        }
+    }
+
+    /// <summary>Writes a granule's measure of <paramref name="kind"/>, its words in <see cref="MeasureLayout"/>'s layout, in the measure's section.</summary>
     internal static void WriteMeasure(ref ProtoWriter writer, MeasureKind kind, ReadOnlySpan<long> words)
     {
         long count = words[MeasureLayout.Values];
@@ -200,7 +211,7 @@ internal sealed class ColumnBlocks
     }
 
     /// <summary>The statistics <paramref name="bytes"/> encode, or null when they do not decode as statistics of this version.</summary>
-    internal static ColumnBlocks? From(ReadOnlySpan<byte> bytes)
+    internal static GranuleStats? From(ReadOnlySpan<byte> bytes)
     {
         try
         {
@@ -219,10 +230,10 @@ internal sealed class ColumnBlocks
                 return null;
             }
 
-            int blocks = (int)count;
-            long[] rows = new long[blocks];
-            long[] nulls = new long[blocks];
-            for (int b = 0; b < blocks; b++)
+            int granules = (int)count;
+            long[] rows = new long[granules];
+            long[] nulls = new long[granules];
+            for (int b = 0; b < granules; b++)
             {
                 rows[b] = checked((long)reader.ReadVarint());
                 nulls[b] = checked((long)reader.ReadVarint());
@@ -233,15 +244,15 @@ internal sealed class ColumnBlocks
             }
 
             int[]? distinct = null;
-            int[] listStarts = new int[blocks + 1];
+            int[] listStarts = new int[granules + 1];
             int[] ids = [];
             long[] valueRows = [];
             if ((parts & HoldsValues) != 0)
             {
-                distinct = new int[blocks];
+                distinct = new int[granules];
                 System.Collections.Generic.List<int> listed = [];
                 System.Collections.Generic.List<long> listedRows = [];
-                for (int b = 0; b < blocks; b++)
+                for (int b = 0; b < granules; b++)
                 {
                     listStarts[b] = listed.Count;
                     ulong held = reader.ReadVarint();
@@ -283,7 +294,7 @@ internal sealed class ColumnBlocks
                     }
                 }
 
-                listStarts[blocks] = listed.Count;
+                listStarts[granules] = listed.Count;
                 ids = [.. listed];
                 valueRows = [.. listedRows];
             }
@@ -294,23 +305,23 @@ internal sealed class ColumnBlocks
             {
                 bool floats = measured == MeasureKind.Float;
                 int width = MeasureLayout.Words(floats);
-                words = new long[blocks * width];
-                for (int b = 0; b < blocks; b++)
+                words = new long[granules * width];
+                for (int b = 0; b < granules; b++)
                 {
-                    Span<long> block = words.AsSpan(b * width, width);
+                    Span<long> granule = words.AsSpan(b * width, width);
                     long values = checked((long)reader.ReadVarint());
                     if (values > rows[b] - nulls[b])
                     {
                         return null;
                     }
 
-                    block[MeasureLayout.Values] = values;
+                    granule[MeasureLayout.Values] = values;
                     if (values == 0)
                     {
                         if (floats)
                         {
-                            block[MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(double.NaN);
-                            block[MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(double.NaN);
+                            granule[MeasureLayout.FloatLeast] = BitConverter.DoubleToInt64Bits(double.NaN);
+                            granule[MeasureLayout.FloatGreatest] = BitConverter.DoubleToInt64Bits(double.NaN);
                         }
 
                         continue;
@@ -318,10 +329,10 @@ internal sealed class ColumnBlocks
 
                     for (int w = 0; w < MeasureLayout.SumLength(floats); w++)
                     {
-                        block[MeasureLayout.Sum + w] = Varint.ZigZagDecode64(reader.ReadVarint());
+                        granule[MeasureLayout.Sum + w] = Varint.ZigZagDecode64(reader.ReadVarint());
                     }
 
-                    (block[MeasureLayout.Least(floats)], block[MeasureLayout.Greatest(floats)]) = measured switch
+                    (granule[MeasureLayout.Least(floats)], granule[MeasureLayout.Greatest(floats)]) = measured switch
                     {
                         MeasureKind.Float => ((long)reader.ReadFixed64(), (long)reader.ReadFixed64()),
                         MeasureKind.Signed => (Varint.ZigZagDecode64(reader.ReadVarint()), Varint.ZigZagDecode64(reader.ReadVarint())),
@@ -330,8 +341,33 @@ internal sealed class ColumnBlocks
                 }
             }
 
+            // The values' dictionary, each number the granules list among it.
+            byte[][] dictionary = [];
+            if (distinct is not null)
+            {
+                ulong named = reader.ReadVarint();
+                if (named > (ulong)bytes.Length)
+                {
+                    return null;
+                }
+
+                dictionary = new byte[(int)named][];
+                for (int id = 0; id < dictionary.Length; id++)
+                {
+                    dictionary[id] = reader.ReadLengthDelimited().ToArray();
+                }
+
+                foreach (int id in ids)
+                {
+                    if (id >= dictionary.Length)
+                    {
+                        return null;
+                    }
+                }
+            }
+
             return reader.End
-                ? new ColumnBlocks(rows, nulls) { Distinct = distinct, _listStarts = listStarts, _ids = ids, _valueRows = valueRows, Measure = measure, _words = words }
+                ? new GranuleStats(rows, nulls) { Distinct = distinct, _listStarts = listStarts, _ids = ids, _valueRows = valueRows, Measure = measure, _words = words, _dictionary = dictionary }
                 : null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException or ArgumentException)

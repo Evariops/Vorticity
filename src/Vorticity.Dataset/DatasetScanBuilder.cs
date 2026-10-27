@@ -68,14 +68,14 @@ internal sealed class DatasetScanCounters
     /// <summary>Rollups whose totals answered an aggregation as states, each for the objects it covers, which <see cref="ObjectsAnswered"/> counts.</summary>
     public long RollupsAnswered { get; internal set; }
 
-    /// <summary>Blocks of objects an aggregation took from their zone maps, their rows not read: blocks no delete marked a row of.</summary>
-    public long BlocksSettled { get; internal set; }
+    /// <summary>Granules of objects an aggregation took from their zone maps, their rows not read: granules no delete marked a row of.</summary>
+    public long GranulesSettled { get; internal set; }
 
     /// <summary>
-    /// Blocks of objects whose columns' statistics over them answered an aggregation as states (<see cref="BlockAnswer"/>),
+    /// Granules of objects whose columns' statistics over them answered an aggregation as states (<see cref="GranuleAnswer"/>),
     /// their rows not read; <see cref="StateRows"/> counts the rows of states they gave.
     /// </summary>
-    public long BlocksAnswered { get; internal set; }
+    public long GranulesAnswered { get; internal set; }
 
     /// <summary>
     /// The most data objects the scan read at once: one in the tree's order, two once a prefetch
@@ -130,8 +130,8 @@ internal sealed partial class DatasetScanBuilder
     // How the objects' counts answer _states, worked out the first time a read asks (Answer); null when they answer none.
     private CountsAnswer? _answer;
     private bool _answerKnown;
-    private BlockAnswer? _blockAnswer;
-    private bool _blockAnswerKnown;
+    private GranuleAnswer? _granuleAnswer;
+    private bool _granuleAnswerKnown;
 
     // The granules of each object a selected row may lie in, a bit a granule, by where its columns' values lie, for the
     // objects whose indexes leave granules out (SheetPruning.KeptAsync); read by the lanes that read the objects. Made at the

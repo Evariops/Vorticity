@@ -1142,7 +1142,6 @@ internal static partial class DatasetCompactor
             ObjectOutput output = Open();
 
             // The blocks the rows before these and these themselves closed, declared before their rows are written.
-            _sorted?.DeclareEnds(output.Writer);
             _rows += batch.RowCount;
             if (_census is { } census)
             {

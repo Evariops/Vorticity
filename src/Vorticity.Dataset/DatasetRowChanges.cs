@@ -366,7 +366,7 @@ internal static class DatasetRowChanges
                 : null;
             SortedRows? sorted = key is null || draft is null
                 ? null
-                : new SortedRows(key, Math.Min(schema.Layout!.Layout.Prefix, schema.Layout.Components.Count), blocks: false, skip: schema.Partitioned ? 1 : 0);
+                : new SortedRows(key, Math.Min(schema.Layout!.Layout.Prefix, schema.Layout.Components.Count), skip: schema.Partitioned ? 1 : 0);
             try
             {
                 long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, key, sorted, changed, cancellationToken).ConfigureAwait(false);
@@ -705,7 +705,6 @@ internal static class DatasetRowChanges
             }
         }
 
-        sorted.DeclareEnds(writer);
     }
 
     /// <summary>
