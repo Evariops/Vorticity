@@ -13,9 +13,10 @@ public sealed partial class DatasetLearnedPartialsTests
     /// On one lane, over a store that answers each request a round trip after it is sent, the objects that learn their
     /// family's partial are opened ahead, and each learns while the one before it is served: a handle's first asking waits
     /// on fewer round trips than it reads objects, where opening then reading each in turn waited on two an object. It
-    /// answers as the rows do.
+    /// answers as the rows do. The round trips are told apart by when they run, which a busy process delays: it runs alone.
     /// </summary>
     [Fact]
+    [Trait("Category", "RunsAlone")]
     public async Task OneLaneLearnsItsObjectsAhead()
     {
         const int Services = 16;
