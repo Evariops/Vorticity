@@ -626,63 +626,57 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The rows of the object <paramref name="held"/>, the blocks <paramref name="settling"/> settles in place of theirs: the
-    /// rows between them read as the object's own, its marked rows left out, and each settled block, which holds none, folded
-    /// as a block of as many rows of its zones' bounds at its place among the dataset's rows.
+    /// The rows of the object <paramref name="held"/>, the blocks <paramref name="settling"/> settles in place of theirs: one
+    /// read of the others as the object's own, its marked rows left out, its pruning starting from them (spec D, 4.3), and
+    /// each settled block, which holds none, folded as a block of as many rows of its zones' bounds at its place among the
+    /// dataset's rows.
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> SettledAsync(
         VortexFile file, PositionedObject held, ZoneSettling settling, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        (long lower, long upper) = PhysicalRange(held);
         ZoneSettling.Scratch scratch = settling.NewScratch();
         DeletionVector deletions = held.Entry.Deletions;
-        long at = lower;
-        for (int block = 0; block <= settling.Count; block++)
+        ScanBuilder? scan = held.Entry.HasDeletions
+            ? null
+            : Of(file, held).WithPruned(settling.Live).WithMaxBatchRows(BlockBatch(settling.Live)).WithGranules(GeometryOf(held));
+        using QueryMemory? ahead = scan is null ? null : ReadsAhead(scan, file);
+        IAsyncEnumerable<RecordBatch> rows = scan?.ExecuteAsync()
+            ?? LiveAsync(file, held, _filter, _mask, held.FirstRow, _options.Compact, reshaped: false, cancellationToken, pruned: settling.Live);
+        RecordBatch? view = null;
+        int block = 0;
+        await foreach (RecordBatch read in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            RowRange next = block < settling.Count ? settling.Range(block) : new RowRange(upper, upper);
-            if (at < next.Start)
+            RecordBatch batch = scan is null ? read : InDataset(read, held.FirstRow, ref view);
+            for (; block < settling.Count && held.FirstRow + deletions.Logical(settling.Range(block).Start) < batch.StartRow; block++)
             {
-                await foreach (RecordBatch batch in BetweenAsync(file, held, new RowRange(at, next.Start), cancellationToken).ConfigureAwait(false))
-                {
-                    yield return batch;
-                }
+                yield return SettledBlock(settling, block, scratch, held.FirstRow, deletions);
             }
 
-            if (block < settling.Count)
-            {
-                if (_metrics is { } metrics)
-                {
-                    metrics.GranulesSettled++;
-                }
+            yield return batch;
+        }
 
-                yield return settling.Batch(block, scratch, held.FirstRow + deletions.Logical(next.Start));
-                at = next.End;
-            }
+        for (; block < settling.Count; block++)
+        {
+            yield return SettledBlock(settling, block, scratch, held.FirstRow, deletions);
         }
     }
 
-    /// <summary>The rows of the object <paramref name="held"/> within <paramref name="within"/>, of its file, as the dataset's: its marked rows left out.</summary>
-    private async IAsyncEnumerable<RecordBatch> BetweenAsync(
-        VortexFile file, PositionedObject held, RowRange within, [EnumeratorCancellation] CancellationToken cancellationToken)
+    /// <summary>
+    /// The rows a batch of a read pruned by <paramref name="live"/> holds at most: a block, so that a split reads no row of a
+    /// dead one, or fewer when the scan asks it.
+    /// </summary>
+    private int BlockBatch(Compute.BlockMask live) =>
+        _options.BatchRows > 0 && _options.BatchRows < live.BlockRows ? _options.BatchRows : (int)live.BlockRows;
+
+    /// <summary>The settled block <paramref name="block"/>, folded at its place among the dataset's rows, its object's from <paramref name="firstRow"/>.</summary>
+    private RecordBatch SettledBlock(ZoneSettling settling, int block, ZoneSettling.Scratch scratch, long firstRow, DeletionVector deletions)
     {
-        if (held.Entry.HasDeletions)
+        if (_metrics is { } metrics)
         {
-            await foreach (RecordBatch batch in LiveAsync(file, held, _filter, _mask, held.FirstRow, _options.Compact, reshaped: false, cancellationToken, within)
-                .ConfigureAwait(false))
-            {
-                yield return batch;
-            }
-
-            yield break;
+            metrics.GranulesSettled++;
         }
 
-        RecordBatch? view = null;
-        ScanBuilder scan = Of(file, held, _filter, _mask, canonical: false, within);
-        using QueryMemory? ahead = ReadsAhead(scan, file);
-        await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
-        {
-            yield return InDataset(batch, held.FirstRow, ref view);
-        }
+        return settling.Batch(block, scratch, firstRow + deletions.Logical(settling.Range(block).Start));
     }
 
     /// <summary>Selects the rows of <paramref name="batch"/> <paramref name="filter"/> holds for.</summary>
@@ -1163,14 +1157,16 @@ internal sealed partial class DatasetScanBuilder
     /// <paramref name="baseRow"/>. Batches not compacted that nobody reads a place of keep their rows
     /// instead, the deleted ones deselected, and their columns encoded as an object without deletions
     /// delivers them; <paramref name="reshaped"/> decodes every column all the same, for the
-    /// reshaping of another schema's batches.
+    /// reshaping of another schema's batches. With <paramref name="pruned"/>, the blocks it keeps alone, its pruning done.
     /// </summary>
     private IAsyncEnumerable<RecordBatch> LiveAsync(
         VortexFile file, PositionedObject held, VortexExpr? filter, FieldMask? mask, long baseRow, bool compact, bool reshaped, CancellationToken cancellationToken,
-        RowRange? within = null)
+        RowRange? within = null, Compute.BlockMask? pruned = null)
     {
         bool deselect = !compact && _positionsUnread;
-        IAsyncEnumerable<RecordBatch> rows = Of(file, held, filter, mask, canonical: reshaped || !deselect, within).WithCompaction(false).ExecuteAsync();
+        ScanBuilder scan = Of(file, held, filter, mask, canonical: reshaped || !deselect, within).WithCompaction(false);
+        IAsyncEnumerable<RecordBatch> rows =
+            (pruned is null ? scan : scan.WithPruned(pruned).WithMaxBatchRows(BlockBatch(pruned)).WithGranules(GeometryOf(held))).ExecuteAsync();
         return deselect
             ? LiveRows.DeselectedAsync(rows, held.Entry.Deletions, baseRow, cancellationToken)
             : LiveRows.WithoutDeletedAsync(rows, held.Entry.Deletions, compact, baseRow, cancellationToken);
