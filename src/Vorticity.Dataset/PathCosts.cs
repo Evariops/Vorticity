@@ -236,8 +236,15 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         return new Cost(1 + (int)Math.Ceiling((whole.Requests - 1) * part), open + (long)((whole.Bytes - open) * part), 0, whole.Nanoseconds * share) + dictionaries;
     }
 
-    /// <summary>The bytes an open of the object <paramref name="entry"/> names reads from its end: the first read's, or its footer's when they pass it.</summary>
-    internal static long OpenBytes(ObjectEntry entry) => Math.Min(entry.Bytes, Math.Max(OpenTailBytes, entry.FooterBytes));
+    /// <summary>
+    /// The bytes an open of the object <paramref name="entry"/> names reads from its end: the first read's, or its footer's
+    /// when they pass it, from a 64-byte boundary as the open reads them.
+    /// </summary>
+    internal static long OpenBytes(ObjectEntry entry)
+    {
+        long window = Math.Max(OpenTailBytes, entry.FooterBytes);
+        return entry.Bytes <= window ? entry.Bytes : window + ((entry.Bytes - window) & (VortexLimits.MaxAlignment - 1));
+    }
 
 
     /// <summary>
@@ -305,9 +312,10 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         ulong joined = (ulong)profile.JoinedGap;
         foreach ((ulong offset, uint length) in held)
         {
+            // As the reader joins them (SegmentCoalescer): a run starts on a 64-byte boundary below its first region.
             bool merged = requests > 0 && offset <= end + joined;
             requests += merged ? 0 : 1;
-            bytes += merged ? Math.Max(0, (long)(offset + length) - (long)end) : length;
+            bytes += merged ? Math.Max(0, (long)(offset + length) - (long)end) : length + (long)(offset & ((ulong)VortexLimits.MaxAlignment - 1));
             end = Math.Max(end, offset + length);
         }
 
