@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
+using Vorticity.Scanning;
 using Vorticity.Types;
 
 namespace Vorticity.Dataset;
@@ -11,8 +13,9 @@ namespace Vorticity.Dataset;
 /// <see cref="BlockRows"/> rows that hold one are fewer than half the object's, the second pass reads the rows by their
 /// places: the granules that hold one, where the object keeps their geometry (spec C, 3), and their blocks that do; otherwise
 /// the granules that hold one, whole. With <c>k</c> rows kept among <c>b</c> blocks, about <c>min(k, b)</c> blocks are read
-/// where every one was, at the price of a round trip more for those. The sheets' estimate of the rows kept rules an object
-/// out before any pass, when it says half its blocks or more.
+/// where every one was, at the price of a round trip more for those. The estimate of the rows kept, by the sheets or, for a
+/// window on a number, by the object's summaries, rules an object out before any pass when it says half its blocks or more:
+/// a first pass given up then would have read the filter's columns twice.
 /// </summary>
 internal static class TwoPhaseReads
 {
@@ -26,19 +29,67 @@ internal static class TwoPhaseReads
     internal static bool ByPlaces(long kept, long blocks) => kept * 2 < blocks;
 
     /// <summary>
-    /// The rows an object holds that <paramref name="filter"/> keeps, as the sheets of its columns, by place
-    /// (<paramref name="sheetOf"/>), say: a value of the sheet's most frequent its rows; one its presence filter refutes,
-    /// none; any other the rows its sheet leaves to the values past its most frequent, shared out evenly; a set their sum;
-    /// a conjunction the least of its sides', a disjunction their sum. Null where they say nothing, a comparison or a column
-    /// with no sheet: no fewer rows than the object's.
+    /// The rows an object of <paramref name="rows"/> rows holds that <paramref name="filter"/> keeps, as the sheets of its
+    /// columns, by place (<paramref name="sheetOf"/>), say: a value of the sheet's most frequent its rows; one its presence
+    /// filter refutes, none; any other the rows its sheet leaves to the values past its most frequent, shared out evenly; a
+    /// set their sum. An order comparison on a number, as its summary in <paramref name="summaries"/> says: its values spread
+    /// evenly between its bounds (<see cref="Spread"/>). A conjunction the least of its sides', a disjunction their sum. Null
+    /// where they say nothing: no fewer rows than the object's.
     /// </summary>
-    internal static long? ExpectedRows(VortexExpr filter, DType schema, Func<int, ColumnSheet?> sheetOf) => filter switch
+    internal static long? ExpectedRows(
+        VortexExpr filter, DType schema, Func<int, ColumnSheet?> sheetOf, IReadOnlyList<ColumnSummary> summaries, long rows) => filter switch
     {
         ComparisonExpr { Op: ComparisonOp.Equal } equal when Column(equal.Field, schema) is int field && sheetOf(field) is { } sheet =>
             Values([equal.Value], sheet, schema.GetField(field)),
+        ComparisonExpr { Op: ComparisonOp.Less or ComparisonOp.LessOrEqual or ComparisonOp.Greater or ComparisonOp.GreaterOrEqual } order
+            when Column(order.Field, schema) is int => Spread(order, summaries, rows),
         InExpr set when Column(set.Field, schema) is int field && sheetOf(field) is { } sheet => Values(set.Literals, sheet, schema.GetField(field)),
-        LogicalExpr { IsAnd: true } and => Least(ExpectedRows(and.Left, schema, sheetOf), ExpectedRows(and.Right, schema, sheetOf)),
-        LogicalExpr or => ExpectedRows(or.Left, schema, sheetOf) is long left && ExpectedRows(or.Right, schema, sheetOf) is long right ? left + right : null,
+        LogicalExpr { IsAnd: true } and =>
+            Least(ExpectedRows(and.Left, schema, sheetOf, summaries, rows), ExpectedRows(and.Right, schema, sheetOf, summaries, rows)),
+        LogicalExpr or => ExpectedRows(or.Left, schema, sheetOf, summaries, rows) is long left
+            && ExpectedRows(or.Right, schema, sheetOf, summaries, rows) is long right
+                ? left + right
+                : null,
+        _ => null,
+    };
+
+    /// <summary>
+    /// The rows of an object of <paramref name="rows"/> rows that the order comparison <paramref name="order"/> keeps, the
+    /// values of its column taken evenly spread between the bounds its summary in <paramref name="summaries"/> gives: the
+    /// share of the span the comparison keeps, of the rows that are not null. Null for a column they do not bound, or not
+    /// a number compared with a number.
+    /// </summary>
+    private static long? Spread(ComparisonExpr order, IReadOnlyList<ColumnSummary> summaries, long rows)
+    {
+        foreach (ColumnSummary summary in summaries)
+        {
+            if (!string.Equals(summary.Path, order.Field.Path, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!summary.HasMin || !summary.HasMax || Number(summary.Min) is not double low || Number(summary.Max) is not double high
+                || Number(order.Value) is not double value)
+            {
+                return null;
+            }
+
+            bool below = order.Op is ComparisonOp.Less or ComparisonOp.LessOrEqual;
+            double share = high > low ? (below ? value - low : high - value) / (high - low)
+                : (below ? low <= value : low >= value) ? 1 : 0;
+            long valid = rows - (summary.HasNullCount ? summary.NullCount : 0);
+            return (long)Math.Ceiling(Math.Clamp(share, 0, 1) * Math.Max(valid, 0));
+        }
+
+        return null;
+    }
+
+    /// <summary>A number literal as a double; null for any other, or a NaN.</summary>
+    private static double? Number(FilterLiteral literal) => literal.Kind switch
+    {
+        FilterLiteralKind.Signed => literal.SignedValue,
+        FilterLiteralKind.Unsigned => literal.UnsignedValue,
+        FilterLiteralKind.Float when !double.IsNaN(literal.FloatValue) => literal.FloatValue,
         _ => null,
     };
 

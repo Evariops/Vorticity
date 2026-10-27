@@ -848,16 +848,23 @@ internal sealed partial class DatasetScanBuilder
             return null;
         }
 
+        // The rows the filter is expected to keep, by the sheets of the columns it asks values of and by the object's summaries
+        // for a window on a number: in half its blocks or more, the object is read in one pass, its filter's columns once.
+        List<int> asked = [];
+        Indexes.ColumnSheet?[] sheets = [];
         if (contents.Sheets.Count > 0 && SheetPruning.Asks(filter, schema))
         {
-            List<int> asked = SheetPruning.Columns(filter, schema);
-            Indexes.ColumnSheet?[] sheets = await _dataset.ReadSheetsAsync(held.Entry, asked, cancellationToken).ConfigureAwait(false);
-            long blocks = (held.Entry.PhysicalRows + TwoPhaseReads.BlockRows - 1) / TwoPhaseReads.BlockRows;
-            if (TwoPhaseReads.ExpectedRows(filter, schema, field => asked.IndexOf(field) is int at and >= 0 ? sheets[at] : null) is long rows
-                && !TwoPhaseReads.ByPlaces(rows, blocks))
-            {
-                return null;
-            }
+            asked = SheetPruning.Columns(filter, schema);
+            sheets = await _dataset.ReadSheetsAsync(held.Entry, asked, cancellationToken).ConfigureAwait(false);
+        }
+
+        long blocks = (held.Entry.PhysicalRows + TwoPhaseReads.BlockRows - 1) / TwoPhaseReads.BlockRows;
+        if (TwoPhaseReads.ExpectedRows(
+                filter, schema, field => asked.IndexOf(field) is int at and >= 0 ? sheets[at] : null, held.Summaries(_version.Schema.Key).Columns,
+                held.Entry.PhysicalRows) is long rows
+            && !TwoPhaseReads.ByPlaces(rows, blocks))
+        {
+            return null;
         }
 
         return FieldMasks.Of(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(fields));
