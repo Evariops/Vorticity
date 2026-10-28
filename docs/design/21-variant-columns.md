@@ -218,6 +218,7 @@ double class leaves out, from the field's `value` of the rows that hold them.
 | a variant whose chunks carry no path map: an object another writer wrote, or one written before this design | each chunk's segment read whole | the next compaction that rewrites the object builds its path map | the whole segment, until then |
 | many shredded paths over many chunks | path map entries, and trees, in proportion to paths times chunks | long variant chunks, per-chunk shredding of the keys a chunk holds, and the column budget | the paths past the budget stay in the residual |
 | a question touching many paths of one chunk | as many buffer ranges per chunk | coalescing, which joins neighbouring ranges | close to the whole segment, which is then what it reads |
+| a wide shredding read whole | the rebuild reads each shredded column a view or a value a row: a log's attributes, shredded into up to 434 columns, came to 7 KB a row, and a chunk of half a million rows decoded whole held a merge's input at 8 GB (measured) | the reader decodes a window of a chunk at a time, the variant decoding a range of its rows as its children do, and rebuilds the rows a slice at a time, the slice's shredded columns decoded in an arena cleared before the next slice: 32 MiB of them (`VortexReadOptions.VariantSliceBytes`), whole blocks of 1 024 rows. An input of a merge held 384 MB | the columns of one slice, decoded and thrown away |
 
 ## 6. How it is held
 
@@ -239,6 +240,7 @@ double class leaves out, from the field's `value` of the rows that hold them.
 | a key in the residual puts nothing back | a key no chunk shreds, read as stored, converted and under a filter, from the residuals alone, answers as on the rows written whole; beside a shredded key, the chunks are put back as before (`VariantKeyReadTests`) |
 | keys that are data are counted | four hundred user keys among others, at every append and compaction, appended and written objects alike (`VariantDiscoveryTests`) |
 | a path with dots stays one key | `http.route` and `http` holding `route` are two paths, in an index policy, the tool path and a plan |
+| a wide shredding is read a window and a slice at a time | the reference's chunks in both its shredded spellings and the writer's own, read whole, in windows and taken, a slice of a block at a time, as their rows unshredded; the slices counted per read (`ScanCounters.VariantSlices`): four for the writer's chunk read in windows, where decoding the chunk whole made twenty (`ShreddedVariantSliceTests`) |
 
 ## 7. Decisions
 
