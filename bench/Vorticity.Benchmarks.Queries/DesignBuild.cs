@@ -71,6 +71,13 @@ internal static class DesignBuild
             for (int hour = 0; hour < hours; hour++)
             {
                 List<ObjectDraft> drafts = await written[hour];
+
+                // The hour's objects arrive as it ends: the clock first, so that the day being written is not calm.
+                if (clock is not null)
+                {
+                    clock.Now = QuestionBench.Start.AddHours(hour + 1);
+                }
+
                 foreach (ObjectDraft draft in drafts)
                 {
                     await using (draft)
@@ -81,11 +88,6 @@ internal static class DesignBuild
 
                 Volatile.Write(ref s_appended, hour + 1);
                 Start();
-                if (clock is not null)
-                {
-                    clock.Now = QuestionBench.Start.AddHours(hour + 1);
-                }
-
                 while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
                 {
                 }

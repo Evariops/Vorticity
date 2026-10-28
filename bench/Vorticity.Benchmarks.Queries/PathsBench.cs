@@ -97,6 +97,9 @@ internal static partial class PathsBench
         /// <summary>Whether each windowed question is also asked cold over its whole window at once, with a part's bounds (<c>--bounded</c>).</summary>
         internal bool Bounded { get; init; }
 
+        /// <summary>Whether a build prints each compaction job as it ends (<c>--print-jobs</c>).</summary>
+        internal bool PrintJobs { get; init; }
+
         /// <summary>The stores the run builds and asks, by name (<c>--sets requests,logs,spans,logs2</c>); null for all.</summary>
         internal string[]? Sets { get; init; }
 
@@ -209,6 +212,7 @@ internal static partial class PathsBench
         }
 
         Directory.CreateDirectory(settings.Store);
+        IncrementalBuild.PrintJobs = settings.PrintJobs;
         if (settings.QpWrite is { } kind)
         {
             return await WriteOneAsync(settings, kind);

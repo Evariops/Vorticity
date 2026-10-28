@@ -17,11 +17,15 @@ namespace Vorticity.Benchmarks.Queries;
 /// </summary>
 internal static class IncrementalBuild
 {
+    /// <summary>Whether each compaction job is printed as it ends: its trigger, style, objects, rows and bytes (<c>--print-jobs</c>).</summary>
+    internal static bool PrintJobs { get; set; }
+
     /// <summary>
     /// <paramref name="hours"/> hours of <paramref name="perHour"/> rows each, the rows of an hour drawn by the generator
     /// <paramref name="hourly"/> gives for it, <paramref name="parallel"/> hours written at once, objects of
     /// <paramref name="partMinutes"/> minutes; the rows written. A <paramref name="clock"/> the handle runs by is set to the
-    /// end of each hour once it is appended, before its compactions.
+    /// end of each hour before its objects are appended, as they arrive when the hour ends: set after, it ran a full hour ahead
+    /// of the newest arrival, the delay that calms a partition, and the day being written was consolidated at every hour.
     /// </summary>
     internal static async Task<long> FillAsync<TRecord>(
         IObjectStore store, DatasetOptions options, int hours, long perHour, int parallel, int partMinutes, Func<int, Func<DateTimeOffset, TRecord>> hourly,
@@ -47,7 +51,13 @@ internal static class IncrementalBuild
         Start();
         for (int hour = 0; hour < hours; hour++)
         {
-            foreach (ObjectDraft draft in await written[hour])
+            List<ObjectDraft> drafts = await written[hour];
+            if (clock is not null)
+            {
+                clock.Now = QuestionBench.Start.AddHours(hour + 1);
+            }
+
+            foreach (ObjectDraft draft in drafts)
             {
                 await using (draft)
                 {
@@ -57,16 +67,20 @@ internal static class IncrementalBuild
 
             Volatile.Write(ref appended, hour + 1);
             Start();
-            if (clock is not null)
-            {
-                clock.Now = QuestionBench.Start.AddHours(hour + 1);
-            }
-
             long compacting = Stopwatch.GetTimestamp();
             int jobs = 0;
-            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
+            long jobBegan = Stopwatch.GetTimestamp();
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is { } done)
             {
                 jobs++;
+                if (PrintJobs)
+                {
+                    Console.WriteLine(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"    job {done.Trigger} {done.Style}: {done.ObjectsIn} objects in, {done.ObjectsOut} out, {done.ObjectsMoved} moved, {done.Rows:N0} rows, {done.BytesIn / 1e6:F1} MB in, {done.BytesOut / 1e6:F1} MB out, {Stopwatch.GetElapsedTime(jobBegan).TotalSeconds:F1} s"));
+                }
+
+                jobBegan = Stopwatch.GetTimestamp();
             }
 
             // Each hour's own pace and what its compactions took beside the cumulative pace, so that a pace that wanes as
