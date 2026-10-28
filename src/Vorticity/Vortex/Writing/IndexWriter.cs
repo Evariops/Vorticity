@@ -2218,21 +2218,42 @@ internal sealed class IndexWriter : IDisposable
             return;
         }
 
+        // The slots of each variant column at once, its rows sliced once and its keys read in one pass over them
+        // (VariantFieldExpr.ApplyKeys), where a slot at a time read every row's dictionary again.
+        int[] group = _variantGroup ??= new int[variants.Length];
+        Compute.VariantFieldExpr[] paths = _variantPaths ??= new Compute.VariantFieldExpr[variants.Length];
+        int[] reads = _variantReads ??= new int[variants.Length];
+        ulong[] done = _variantDone ??= new ulong[(variants.Length + 63) / 64];
+        Array.Clear(done);
         for (int slot = 0; slot < variants.Length; slot++)
         {
-            if (variants[slot] is not { } path || _builders[slot].Count == 0)
+            if ((done[slot >> 6] & (1UL << slot)) != 0 || variants[slot] is not { } first || _builders[slot].Count == 0)
             {
                 continue;
+            }
+
+            int members = 0;
+            for (int other = slot; other < variants.Length; other++)
+            {
+                if (variants[other] is { } path && path.Field == first.Field && _builders[other].Count > 0)
+                {
+                    group[members] = other;
+                    paths[members++] = path.Path;
+                    done[other >> 6] |= 1UL << other;
+                }
             }
 
             CanonicalArena rows = _variantRows ??= new CanonicalArena();
             try
             {
-                int variant = CanonicalSlice.SliceAcross(arena, rows, fieldNodes[path.Field], start, count);
-                int read = path.Path.Apply(rows, variant);
-                foreach (IndexBuilder builder in _builders[slot])
+                int variant = CanonicalSlice.SliceAcross(arena, rows, fieldNodes[first.Field], start, count);
+                Compute.VariantFieldExpr.ApplyKeys(rows, variant, paths.AsSpan(0, members), reads.AsSpan(0, members));
+                for (int m = 0; m < members; m++)
                 {
-                    builder.Accumulate(rows, read, 0, count);
+                    foreach (IndexBuilder builder in _builders[group[m]])
+                    {
+                        builder.Accumulate(rows, reads[m], 0, count);
+                    }
                 }
             }
             finally
@@ -2241,6 +2262,13 @@ internal sealed class IndexWriter : IDisposable
             }
         }
     }
+
+    // The slots of one variant column AccumulateVariants reads together, their paths and the nodes they read into, and the
+    // slots it read: made at its first call, for every call after.
+    private int[]? _variantGroup;
+    private Compute.VariantFieldExpr[]? _variantPaths;
+    private int[]? _variantReads;
+    private ulong[]? _variantDone;
 
     /// <summary>A composite key's columns, as the entry options carry them; null for a real column.</summary>
     private List<uint[]>? KeyColumns(int field) =>

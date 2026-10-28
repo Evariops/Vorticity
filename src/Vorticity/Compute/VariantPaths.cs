@@ -356,6 +356,179 @@ internal sealed class VariantFieldExpr : FieldExpr
         }
     }
 
+    /// <summary>
+    /// The values of <paramref name="paths"/>, each a key of the top-level object of the same variant column read in its class,
+    /// over the column's node <paramref name="node"/>, a node each into <paramref name="into"/>: what <see cref="Apply"/> gives
+    /// each, in two passes whatever their number. The first reads a row's dictionary once, where it differs from the row's
+    /// before, maps its ids to the keys asked by their bytes, and notes each field of the row's object a key asks for, where
+    /// it lies in the row's value; the second writes each path's column from its key's notes alone. A path at a time read every
+    /// row's dictionary again and looked its key up in it: a writer that indexes the hundreds of keys a log's attributes
+    /// shred spent most of its time there.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The node is not a variant's, or a row is malformed.</exception>
+    internal static void ApplyKeys(CanonicalArena arena, int node, ReadOnlySpan<VariantFieldExpr> paths, Span<int> into)
+    {
+        CanonicalNode variant = arena.GetNode(node);
+        if (paths.Length < 2 || variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2)
+        {
+            for (int i = 0; i < paths.Length; i++)
+            {
+                into[i] = paths[i].Apply(arena, node);
+            }
+
+            return;
+        }
+
+        int rows = variant.Length;
+        int valueIndex = EncodedForms.Canonical(arena, variant.GetFieldIndex(1));
+        int metadataIndex = EncodedForms.Canonical(arena, variant.GetFieldIndex(0));
+        CanonicalNode metadata = arena.GetNode(metadataIndex);
+        CanonicalNode values = arena.GetNode(valueIndex);
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        ReadOnlySpan<ulong> valueValid = ArenaWords.Validity(arena, valueIndex);
+        ReadOnlySpan<byte> metadataViews = metadata.Views.Span;
+        ReadOnlySpan<byte> valueViews = values.Views.Span;
+
+        // The keys asked, each once, and the key of each path; a table of them by their bytes, open addressing.
+        int[] keyOf = new int[paths.Length];
+        byte[][] keys = new byte[paths.Length][];
+        int keyCount = 0;
+        int[] table = new int[(int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(paths.Length * 2))];
+        table.AsSpan().Fill(-1);
+        for (int i = 0; i < paths.Length; i++)
+        {
+            byte[] key = paths[i].Steps[0].KeyUtf8!;
+            int found = Lookup(table, keys, key);
+            if (found < 0)
+            {
+                found = keyCount++;
+                keys[found] = key;
+                Insert(table, keys, found);
+            }
+
+            keyOf[i] = found;
+        }
+
+        int[] head = new int[keyCount];
+        head.AsSpan().Fill(-1);
+        Note[] notes = System.Buffers.ArrayPool<Note>.Shared.Rent(Math.Max(rows, 16));
+        int[] keyOfId = System.Buffers.ArrayPool<int>.Shared.Rent(64);
+        int noted = 0;
+        try
+        {
+            ReadOnlySpan<byte> lastMetadata = default;
+            bool resolved = false;
+            int ids = 0;
+            for (int row = 0; row < rows; row++)
+            {
+                if (!Valid(valid, row) || !Valid(valueValid, row))
+                {
+                    continue;
+                }
+
+                ReadOnlySpan<byte> rowMetadata = Bytes(in metadata, metadataViews, row);
+                if (!resolved || !Same(rowMetadata, lastMetadata))
+                {
+                    VariantDictionary dictionary = VariantDictionary.Read(rowMetadata);
+                    ids = dictionary.Count;
+                    if (ids > keyOfId.Length)
+                    {
+                        System.Buffers.ArrayPool<int>.Shared.Return(keyOfId);
+                        keyOfId = System.Buffers.ArrayPool<int>.Shared.Rent(ids);
+                    }
+
+                    for (int id = 0; id < ids; id++)
+                    {
+                        keyOfId[id] = Lookup(table, keys, dictionary[id]);
+                    }
+
+                    lastMetadata = rowMetadata;
+                    resolved = true;
+                }
+
+                ReadOnlySpan<byte> rowValue = Bytes(in values, valueViews, row);
+                if (rowValue.IsEmpty || (rowValue[0] & 0x03) != ParquetVariant.BasicObject)
+                {
+                    continue;
+                }
+
+                VariantNested fields = VariantNested.Read(rowValue);
+                for (int f = 0; f < fields.Count; f++)
+                {
+                    int id = fields.IdAt(f);
+                    if ((uint)id >= (uint)ids || keyOfId[id] is not (>= 0 and int key))
+                    {
+                        continue;
+                    }
+
+                    ReadOnlySpan<byte> field = fields.ValueAt(f);
+                    if (field.IsEmpty)
+                    {
+                        continue;
+                    }
+
+                    if (noted == notes.Length)
+                    {
+                        Note[] grown = System.Buffers.ArrayPool<Note>.Shared.Rent(notes.Length * 2);
+                        notes.AsSpan(0, noted).CopyTo(grown);
+                        System.Buffers.ArrayPool<Note>.Shared.Return(notes);
+                        notes = grown;
+                    }
+
+                    int offset = (int)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(rowValue), ref MemoryMarshal.GetReference(field));
+                    notes[noted] = new Note(row, offset, field.Length, head[key]);
+                    head[key] = noted++;
+                }
+            }
+
+            for (int i = 0; i < paths.Length; i++)
+            {
+                Output output = new(arena, paths[i].Read, rows);
+                for (int n = head[keyOf[i]]; n >= 0; n = notes[n].Next)
+                {
+                    Note note = notes[n];
+                    ReadOnlySpan<byte> rowValue = Bytes(in values, valueViews, note.Row);
+                    output.Write(note.Row, rowValue.Slice(note.Offset, note.Length), valueViews, rowValue);
+                }
+
+                into[i] = output.Finish(arena, values);
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<Note>.Shared.Return(notes);
+            System.Buffers.ArrayPool<int>.Shared.Return(keyOfId);
+        }
+
+        static int Lookup(int[] table, byte[][] keys, ReadOnlySpan<byte> key)
+        {
+            int mask = table.Length - 1;
+            for (int at = (int)System.IO.Hashing.XxHash3.HashToUInt64(key) & mask; ; at = (at + 1) & mask)
+            {
+                int held = table[at];
+                if (held < 0 || keys[held].AsSpan().SequenceEqual(key))
+                {
+                    return held;
+                }
+            }
+        }
+
+        static void Insert(int[] table, byte[][] keys, int key)
+        {
+            int mask = table.Length - 1;
+            int at = (int)System.IO.Hashing.XxHash3.HashToUInt64(keys[key]) & mask;
+            while (table[at] >= 0)
+            {
+                at = (at + 1) & mask;
+            }
+
+            table[at] = key;
+        }
+    }
+
+    /// <summary>A field of a row's object a key asks for: its row, where it lies in the row's value, and the key's note before.</summary>
+    private readonly record struct Note(int Row, int Offset, int Length, int Next);
+
     /// <summary>The ids of the path's keys in <paramref name="metadata"/>'s dictionary, -1 for a key it lacks; whether the dictionary is sorted.</summary>
     private bool Resolve(ReadOnlySpan<byte> metadata, Span<int> ids)
     {
