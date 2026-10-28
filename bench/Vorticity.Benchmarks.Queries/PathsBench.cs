@@ -32,7 +32,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// its time and processor time, the bytes the process allocated, every thread counted, and the most private bytes and
 /// working set it held above what it held as the ask began (<see cref="MemoryPeaks"/>). Cold is a session and a
 /// handle opened for the question with an empty cache, its open not counted; warm is the median of <c>--rounds</c>
-/// asks by the same handle (<c>--rows-rounds</c> for the rows). With <c>--verify</c> each question's answer from
+/// asks by the same handle (<c>--rows-rounds</c> for the rows). The partials a question's family learned stay in the store,
+/// for the next questions and runs: <c>--forget-learned</c> removes them before each cold, first and bounded asking, which
+/// then times the family's first. With <c>--verify</c> each question's answer from
 /// the synopses is held to the one from its rows, digest against digest. <c>--tsv</c> appends every line to a
 /// file that <c>--compare</c> reads back.
 /// </para>
@@ -96,6 +98,12 @@ internal static partial class PathsBench
 
         /// <summary>Whether each windowed question is also asked cold over its whole window at once, with a part's bounds (<c>--bounded</c>).</summary>
         internal bool Bounded { get; init; }
+
+        /// <summary>
+        /// Whether the partials the store learned are forgotten before each cold, first and bounded asking (<c>--forget-learned</c>):
+        /// those then time a question's family asked for the first time, where they otherwise time it as the asks before learned it.
+        /// </summary>
+        internal bool ForgetLearned { get; init; }
 
         /// <summary>Whether a build prints each compaction job as it ends (<c>--print-jobs</c>).</summary>
         internal bool PrintJobs { get; init; }
@@ -495,6 +503,20 @@ internal static partial class PathsBench
     }
 
     /// <summary>
+    /// Under <c>--forget-learned</c>, removes the partials the store <paramref name="built"/> learned, every family's: the
+    /// asking that follows meets its family for the first time. They persist in the store from one question to the next and
+    /// from one run to the next, as a client's do: a question's first asking learned them, every later one found them.
+    /// </summary>
+    private static void ForgetLearned(Settings settings, Built built)
+    {
+        string learned = Path.Combine(built.Directory, "learned");
+        if (settings.ForgetLearned && Directory.Exists(learned))
+        {
+            Directory.Delete(learned, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// One question by one path: cold by a session and a handle opened for it, with an empty synopsis cache, then warm
     /// by the same handle, the median of the rounds; each asked untimed first, with no wait and nothing kept, so that
     /// neither pays the question's compiles.
@@ -545,6 +567,7 @@ internal static partial class PathsBench
                 o.SynopsisCache = new SynopsisCache(cache, 8L << 30);
                 o.SegmentCache = settings.SegmentCacheBytes > 0 ? new SegmentCache(settings.SegmentCacheBytes) : null;
             });
+            ForgetLearned(settings, built);
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
             using TextWriter? trace = settings.TraceReads is { } traced ? TextWriter.Synchronized(new StreamWriter(traced, append: true)) : null;
             trace?.WriteLine($"# {question.Name} {(synopses ? "synopses" : "rows")} cold, degree {degree}");
@@ -693,6 +716,7 @@ internal static partial class PathsBench
         Settings settings, Built built, (DateTimeOffset From, DateTimeOffset To, Func<VortexDataset, ScanOptions, DateTimeOffset, DateTimeOffset, Asking> Ask) window,
         int degree, bool bounded)
     {
+        ForgetLearned(settings, built);
         ScanOptions options = new ScanOptions { UseSynopses = true, DegreeOfParallelism = degree };
         await using FileObjectStore files = new FileObjectStore(built.Directory);
         LatencyObjectStore remote = new LatencyObjectStore(settings.KeepHandles ? new HeldFileObjectStore(files) : files)

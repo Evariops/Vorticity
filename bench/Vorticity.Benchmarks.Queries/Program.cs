@@ -169,6 +169,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Qp = args.Contains("--qp"),
         Study = args.Contains("--study"),
         Bounded = args.Contains("--bounded"),
+        ForgetLearned = args.Contains("--forget-learned"),
         PrintJobs = args.Contains("--print-jobs"),
         Sets = Text(args, "--sets")?.Split(','),
         Declared = args.Contains("--declared"),
