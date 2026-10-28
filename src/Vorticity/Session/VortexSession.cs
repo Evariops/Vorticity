@@ -25,6 +25,7 @@ public sealed class VortexSessionOptions
     private int _mappedFileCacheCount = 64;
     private bool _mapFiles = true;
     private QueryMemoryBudget? _memoryBudget;
+    private QueryMemoryBudget? _jobMemoryBudget;
     private string? _scratchDirectory;
     private ScratchBudget? _scratchBudget;
     private VortexKeyring? _keyring;
@@ -203,6 +204,22 @@ public sealed class VortexSessionOptions
     {
         get => _memoryBudget;
         set => _memoryBudget = Set(value);
+    }
+
+    /// <summary>
+    /// The memory the session's background jobs share with those of every session given the same budget: the merges of a
+    /// dataset's levels, its consolidations, the stores of its appends. Null, the default, shares the process's jobs' share,
+    /// half the memory the process may use; the queries' <see cref="MemoryBudget"/> has the rest.
+    /// </summary>
+    /// <remarks>
+    /// A job holds what it reserves and waits for room rather than failing: a consolidation runs fewer ranges of its keys at
+    /// once, an append writes its largest part sooner. Only what a job cannot do in less fails it, with a
+    /// <see cref="VortexMemoryException"/>. The budget is the host's: disposing the session leaves it to the others.
+    /// </remarks>
+    public QueryMemoryBudget? JobMemoryBudget
+    {
+        get => _jobMemoryBudget;
+        set => _jobMemoryBudget = Set(value);
     }
 
     /// <summary>

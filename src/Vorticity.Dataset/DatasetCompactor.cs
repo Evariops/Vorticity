@@ -6,6 +6,7 @@ using System.Linq;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
@@ -55,6 +56,15 @@ public sealed record CompactionResult
 
     /// <summary>The bytes it wrote; none for an object it moved.</summary>
     public long BytesOut { get; init; }
+
+    /// <summary>
+    /// The most bytes it held at once of the session's jobs' budget (<see cref="VortexSessionOptions.JobMemoryBudget"/>):
+    /// what the ranges of a consolidation reserved side by side; none for a job that reserved nothing.
+    /// </summary>
+    public long MemoryReserved { get; init; }
+
+    /// <summary>The most ranges of the key it ran side by side, as many as the budget held; 1 for a job in one piece.</summary>
+    public int RangesAtOnce { get; init; } = 1;
 
     /// <summary>
     /// What the commit made of it: applied, or abandoned because another compaction took an input
@@ -191,16 +201,22 @@ internal static partial class DatasetCompactor
         ObjectStream[] streams;
         ObjectStream? lateOutputs = null;
         long rows;
+        long reserved = 0;
+        int atOnce = 1;
         Provenance? provenance = null;
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
         {
             if (ranges is not null)
             {
-                (streams, rows) = await RangesAsync(dataset, schema, job, ranges, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
+                (streams, rows, reserved, atOnce) =
+                    await RangesAsync(dataset, schema, job, ranges, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
             }
             else
             {
+                // A job in one piece runs whether the budget holds it or not; what it reserves tells the other jobs it holds it.
+                using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
+                memory.TryGrow(InputsBytes(ran, merge ? ran.Inputs.Count : 1));
                 for (int doublings = 0; ; doublings++)
                 {
                     lateOutputs = late is null ? null : new ObjectStream(
@@ -244,6 +260,8 @@ internal static partial class DatasetCompactor
                         throw;
                     }
                 }
+
+                reserved = memory.Peak;
             }
         }
         finally
@@ -339,6 +357,8 @@ internal static partial class DatasetCompactor
             Rows = rows,
             BytesIn = ran.Bytes,
             BytesOut = bytesOut,
+            MemoryReserved = reserved,
+            RangesAtOnce = atOnce,
             Outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied,
         };
     }
@@ -927,9 +947,23 @@ internal static partial class DatasetCompactor
         int[] variants = VariantColumns(schema.DType);
         ValueCut? values = schema.Cut;
         List<ValueCount>[] counts = new List<ValueCount>[job.Inputs.Count];
+
+        // Each lane reserves what it holds as it counts an input, the first whether the budget grants it or not: a window of
+        // the input's rows decoded, and a slice of a wide shredding.
+        using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
+        long perLane = (FlatLayoutReader.WindowRows * Math.Max(job.Bytes / Math.Max(job.Rows, 1), 1) * DecodedPerEncoded)
+            + File.VortexReadOptions.DefaultVariantSliceBytes;
+        memory.TryGrow(perLane);
+        int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), job.Inputs.Count);
+        int admitted = 1;
+        while (admitted < most && memory.TryGrow(perLane))
+        {
+            admitted++;
+        }
+
         ParallelOptions lanes = new ParallelOptions
         {
-            MaxDegreeOfParallelism = Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism),
+            MaxDegreeOfParallelism = admitted,
             CancellationToken = cancellationToken,
         };
         await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>

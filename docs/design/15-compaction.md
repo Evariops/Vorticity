@@ -312,6 +312,23 @@ of six to eight attributes, counting and choosing take 256 ns a row, and the shr
 row more than the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing, unless the
 dataset asks it to shred the paths it declares (`DatasetOptions.ShredOnAppend`).
 
+### The memory of a job
+
+A job holds what it reserves in the session's jobs' budget (`VortexSessionOptions.JobMemoryBudget`), half the process's
+limit by default and reserved in the process's budget too, so that the queries have the rest ([the
+governor](16-queries.md#the-governor)). The stores of an append reserve there what they hold, and write their largest
+partition sooner when it is refused. A consolidation's census counts its inputs on as many lanes as the budget holds,
+each reserving a window of an input's rows decoded and a slice of a wide shredding. Its ranges run side by side as many as
+the budget holds, each reserving before it starts what its inputs' batches hold, at sixteen times the bytes a row of its
+inputs is written in: the first runs whether it fits or not, as a job in one piece does, which reserves what its merge
+holds as well, and the others wait for a lane.
+A merge reads its inputs in batches that hold about a million rows together, an input of fifty-eight in batches of
+16 384 rows rather than of a window, each batch decoded on its own, so that what a range holds of its inputs does not
+grow with them. A variant shredded into many columns is read a window and a slice at a time ([shredded
+variants](21-variant-columns.md#5-the-worst-cases)). `CompactionResult.RangesAtOnce` and `MemoryReserved` say how many
+ranges a job ran at once and what it reserved, and `vortex-queries --print-jobs` prints them beside the process's
+memory over each pass.
+
 ### Late rows under levels
 
 Under levels, a row that comes after rows of later keys reaches level 0 with its append, and a job that

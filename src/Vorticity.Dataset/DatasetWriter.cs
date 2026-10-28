@@ -618,7 +618,7 @@ public sealed class DatasetWriter
         }
     }
 
-    /// <summary>Whether the session's budget holds <paramref name="bytes"/> for the stores, reserved a megabyte ahead.</summary>
+    /// <summary>Whether the session's jobs' budget holds <paramref name="bytes"/> for the stores, reserved a megabyte ahead.</summary>
     private bool Reserve(long bytes)
     {
         if (bytes <= _reserved)
@@ -626,7 +626,7 @@ public sealed class DatasetWriter
             return true;
         }
 
-        _memory ??= new QueryMemory(_dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        _memory ??= new QueryMemory(_dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
         long more = (bytes - _reserved + QueryMemory.Chunk - 1) / QueryMemory.Chunk * QueryMemory.Chunk;
         if (!_memory.TryGrow(more))
         {

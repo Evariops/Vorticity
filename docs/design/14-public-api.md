@@ -67,6 +67,7 @@ implement its interface by hand without referencing the generator.
 | the bound on reads in flight, `MaxConcurrentReads` | an object store sees at most that many requests from the process |
 | the degree of parallelism, `MaxDegreeOfParallelism`, 1 by default | where every scan and writer of the session starts (see [parallelism](09-contracts.md#2-parallelism)) |
 | the query memory and scratch budgets, `MemoryBudget` and `ScratchBudget` | what the session's group bys may hold in memory and spill to disk, shared with every session given the same budget |
+| the jobs' memory budget, `JobMemoryBudget` | what the session's background work holds, its datasets' merges and consolidations and the stores of their appends, shared with every session given the same budget; half the process's limit by default, the queries having the rest |
 | the index cache, `IndexCacheBytes` | how much of the decoded index runs each open file keeps |
 | the files kept mapped once closed, `MappedFileCacheCount` | opening a file again takes over its mapping and every page already mapped in it |
 | whether a path is mapped at all, `MapFiles`, true by default | a service that reads files others may truncate reads them positionally, so a truncated file fails a read rather than the process |

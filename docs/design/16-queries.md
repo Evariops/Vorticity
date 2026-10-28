@@ -1171,7 +1171,10 @@ them, the lanes read one split fewer ahead at a time, down to none, before they 
 them back when the pass ends. A mapping reads in place, its reads being views of it, so nothing more
 is admitted. What the queries release stays in the heap until a collection, so when that memory,
 or what the collector keeps committed beyond its heap, stands between a reservation and the ceiling, a
-collection that gives it back comes first. A query that is refused fails with a
+collection that gives it back comes first; before it, the pool gives back the native blocks it keeps
+for the next rents, which a container's limit counts. The background jobs reserve in a budget of their
+own, `JobMemoryBudget`, half the process's limit by default and reserved in the process's budget too:
+the queries have the rest ([memory of a job](15-compaction.md#the-memory-of-a-job)). A query that is refused fails with a
 `VortexMemoryException` naming the operator, its groups and its bytes, with everything it held given
 back.
 

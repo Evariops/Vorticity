@@ -1,5 +1,6 @@
 // The consolidation in ranges of the key (spec A, 6.4; A6): a partition consolidated by the lanes of a session side by
-// side, each a range of the key, as one lane consolidates it in one piece.
+// side, each a range of the key, as one lane consolidates it in one piece; and as many ranges side by side as the session's
+// jobs' budget holds, one at a time under a budget none fits in.
 //
 // THE ORACLE IS THE ONE PIECE AND THE INVARIANTS: the same appends and the same delete into a dataset of four lanes and one
 // of one; both consolidate a day each, hold every live row and no deleted one, at level 1 alone, and verify (each object one
@@ -26,19 +27,41 @@ public sealed partial class DatasetRangedConsolidationTests
     [Fact]
     public async Task ADayConsolidatedInRangesHoldsWhatOnePieceHolds()
     {
-        (List<Row> appended, List<Row> ranged) = await ConsolidateAsync(lanes: 4);
-        (List<Row> appendedAgain, List<Row> single) = await ConsolidateAsync(lanes: 1);
+        (List<Row> appended, List<Row> ranged, _) = await ConsolidateAsync(lanes: 4);
+        (List<Row> appendedAgain, List<Row> single, _) = await ConsolidateAsync(lanes: 1);
         Assert.Equal(appended, appendedAgain);
         List<Row> live = [.. appended.Where(static row => !(row.Day == 0 && row.Status == 7))];
         Assert.Equal(live, ranged.OrderBy(static row => row.Sequence));
         Assert.Equal(live, single.OrderBy(static row => row.Sequence));
     }
 
-    private static async Task<(List<Row> Appended, List<Row> Read)> ConsolidateAsync(int lanes)
+    /// <summary>
+    /// The same days consolidated on four lanes under a jobs' budget no range fits in: the ranges run one at a time, the first
+    /// unreserved, and hold every live row as ranges side by side hold them; the jobs say how many ran at once and what they
+    /// reserved.
+    /// </summary>
+    [Fact]
+    public async Task UnderABudgetNoRangeFitsTheRangesRunOneAtATimeAndHoldTheSame()
+    {
+        (List<Row> appended, List<Row> roomy, IReadOnlyList<CompactionResult> wide) = await ConsolidateAsync(lanes: 4);
+        (_, List<Row> tight, IReadOnlyList<CompactionResult> narrow) = await ConsolidateAsync(lanes: 4, new QueryMemoryBudget(1));
+        List<Row> live = [.. appended.Where(static row => !(row.Day == 0 && row.Status == 7))];
+        Assert.Equal(live, roomy.OrderBy(static row => row.Sequence));
+        Assert.Equal(live, tight.OrderBy(static row => row.Sequence));
+        Assert.True(wide.Any(static job => job.RangesAtOnce > 1 && job.MemoryReserved > 0), string.Join("; ", wide.Select(static job => $"{job.ObjectsIn} in, {job.BytesIn} B, {job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
+        Assert.All(narrow, static job => Assert.Equal((1, 0L), (job.RangesAtOnce, job.MemoryReserved)));
+    }
+
+    private static async Task<(List<Row> Appended, List<Row> Read, IReadOnlyList<CompactionResult> Consolidated)> ConsolidateAsync(
+        int lanes, QueryMemoryBudget? jobs = null)
     {
         Random random = new Random(47);
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.MaxDegreeOfParallelism = lanes;
+            options.JobMemoryBudget = jobs;
+        });
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
         {
             Session = session,
@@ -46,7 +69,7 @@ public sealed partial class DatasetRangedConsolidationTests
             {
                 Partition = LayoutValue.Column(nameof(Row.Day)),
                 SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Status))],
-                ObjectBytes = 1 << 20,
+                ObjectBytes = 1 << 18,
                 MergeFanout = 4,
                 CalmAfter = null,
             },
@@ -67,7 +90,8 @@ public sealed partial class DatasetRangedConsolidationTests
         }
 
         await dataset.DeleteAsync<Row>(static row => row.Day == 0 & row.Status == 7, Ct);
-        Assert.Equal(2, (await dataset.ConsolidateAsync(Ct)).Count);
+        IReadOnlyList<CompactionResult> consolidated = await dataset.ConsolidateAsync(Ct);
+        Assert.Equal(2, consolidated.Count);
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
             Assert.True(held.Level == 1 && !held.Entry.HasDeletions, $"{lanes} lanes: '{held.Entry.Key}' at level {held.Level}, deletions {held.Entry.HasDeletions}");
@@ -75,7 +99,7 @@ public sealed partial class DatasetRangedConsolidationTests
 
         DatasetVerification verified = await dataset.VerifyAsync(cancellationToken: Ct);
         Assert.True(verified.Holds, $"{lanes} lanes:\n{string.Join('\n', verified.Problems)}");
-        return (all, await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct));
+        return (all, await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct), consolidated);
     }
 
     [VortexRecord]

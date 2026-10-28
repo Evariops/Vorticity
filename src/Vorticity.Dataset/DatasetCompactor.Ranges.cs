@@ -15,10 +15,24 @@ internal static partial class DatasetCompactor
     private const int MostRanges = 8;
 
     /// <summary>
-    /// What a range holds of the session's memory for each input it holds open, about: a batch of a granule's rows, some
-    /// 0.8 MB, and its keys. The first range runs unreserved, as a job in one piece does.
+    /// What a decoded row's bytes come to over an encoded one's, about: a log's record, its attributes rebuilt from their
+    /// shredded keys, read some 360 bytes for the 25 it is written in.
     /// </summary>
-    private const long InputBytes = 1 << 20;
+    private const long DecodedPerEncoded = 16;
+
+    /// <summary>What a range of a consolidation holds, about: <see cref="InputsBytes"/> of the range of the most inputs.</summary>
+    private static long RangeBytes(CompactionJob job, KeyRanges ranges) => InputsBytes(job, ranges.MostInputs);
+
+    /// <summary>
+    /// What a merge of <paramref name="inputs"/> of the job's inputs holds of them, about: the batches they hold together
+    /// (<see cref="InputBatchRows"/>), at <see cref="DecodedPerEncoded"/> times the bytes a row of the job's inputs is
+    /// written in.
+    /// </summary>
+    private static long InputsBytes(CompactionJob job, int inputs)
+    {
+        long held = (long)inputs * InputBatchRows(inputs);
+        return held * Math.Max(job.Bytes / Math.Max(job.Rows, 1), 1) * DecodedPerEncoded;
+    }
 
     /// <summary>
     /// The ranges of the key a consolidation runs side by side: the cuts between them, keys of the tree's order that lead
@@ -237,7 +251,7 @@ internal static partial class DatasetCompactor
     /// hold together. A range whose object runs past its bound starts again under a bound twice as large, alone; a failure
     /// stops the others, whose objects are given up as a failed job's are.
     /// </summary>
-    private static async ValueTask<(ObjectStream[] Streams, long Rows)> RangesAsync(
+    private static async ValueTask<(ObjectStream[] Streams, long Rows, long Reserved, int AtOnce)> RangesAsync(
         VortexDataset dataset,
         DatasetSchema schema,
         CompactionJob job,
@@ -247,9 +261,14 @@ internal static partial class DatasetCompactor
     {
         ObjectStream[] streams = new ObjectStream[ranges.Count];
         long[] rows = new long[ranges.Count];
-        using QueryMemory memory = new QueryMemory(dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+
+        // Each range reserves what it holds before it starts, the first whether the budget grants it or not, as a job in one
+        // piece runs; the others wait for a lane, as many lanes as the budget holds ranges.
+        using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
+        long perRange = RangeBytes(job, ranges);
+        memory.TryGrow(perRange);
         int lanes = 1;
-        while (lanes < ranges.Count && memory.TryGrow(ranges.MostInputs * InputBytes))
+        while (lanes < ranges.Count && memory.TryGrow(perRange))
         {
             lanes++;
         }
@@ -274,12 +293,12 @@ internal static partial class DatasetCompactor
         }
 
         long written = 0;
-        foreach (long range in rows)
+        foreach (long merged in rows)
         {
-            written += range;
+            written += merged;
         }
 
-        return (streams, written);
+        return (streams, written, memory.Peak, lanes);
 
         async Task LaneAsync()
         {
