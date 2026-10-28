@@ -357,17 +357,18 @@ internal sealed class VariantFieldExpr : FieldExpr
     }
 
     /// <summary>
-    /// The values of <paramref name="paths"/>, each a key of the top-level object of the same variant column read in its class,
-    /// over the column's node <paramref name="node"/>, a node each into <paramref name="into"/>: what <see cref="Apply"/> gives
-    /// each, in two passes whatever their number. The first reads a row's dictionary once, where it differs from the row's
-    /// before, maps its ids to the keys asked by their bytes, and notes each field of the row's object a key asks for, where
-    /// it lies in the row's value; the second writes each path's column from its key's notes alone. A path at a time read every
-    /// row's dictionary again and looked its key up in it: a writer that indexes the hundreds of keys a log's attributes
-    /// shred spent most of its time there.
+    /// The values of the paths of <paramref name="reads"/>, each a key of the top-level object of the same variant column read
+    /// in its class, over the column's node <paramref name="node"/>, a node each into <paramref name="into"/>: what
+    /// <see cref="Apply"/> gives each, in two passes whatever their number. The first reads a row's dictionary once, where it
+    /// differs from the row's before, maps its ids to the keys asked by their bytes, and notes each field of the row's object
+    /// a key asks for, where it lies in the row's value; the second writes each path's column from its key's notes alone. A
+    /// path at a time read every row's dictionary again and looked its key up in it: a writer that indexes the hundreds of
+    /// keys a log's attributes shred spent most of its time there.
     /// </summary>
     /// <exception cref="VortexFormatException">The node is not a variant's, or a row is malformed.</exception>
-    internal static void ApplyKeys(CanonicalArena arena, int node, ReadOnlySpan<VariantFieldExpr> paths, Span<int> into)
+    internal static void ApplyKeys(CanonicalArena arena, int node, KeyReads reads, Span<int> into)
     {
+        VariantFieldExpr[] paths = reads.Paths;
         CanonicalNode variant = arena.GetNode(node);
         if (paths.Length < 2 || variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2)
         {
@@ -389,27 +390,7 @@ internal sealed class VariantFieldExpr : FieldExpr
         ReadOnlySpan<byte> metadataViews = metadata.Views.Span;
         ReadOnlySpan<byte> valueViews = values.Views.Span;
 
-        // The keys asked, each once, and the key of each path; a table of them by their bytes, open addressing.
-        int[] keyOf = new int[paths.Length];
-        byte[][] keys = new byte[paths.Length][];
-        int keyCount = 0;
-        int[] table = new int[(int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(paths.Length * 2))];
-        table.AsSpan().Fill(-1);
-        for (int i = 0; i < paths.Length; i++)
-        {
-            byte[] key = paths[i].Steps[0].KeyUtf8!;
-            int found = Lookup(table, keys, key);
-            if (found < 0)
-            {
-                found = keyCount++;
-                keys[found] = key;
-                Insert(table, keys, found);
-            }
-
-            keyOf[i] = found;
-        }
-
-        int[] head = new int[keyCount];
+        int[] head = reads.Heads;
         head.AsSpan().Fill(-1);
         Note[] notes = System.Buffers.ArrayPool<Note>.Shared.Rent(Math.Max(rows, 16));
         int[] keyOfId = System.Buffers.ArrayPool<int>.Shared.Rent(64);
@@ -439,7 +420,7 @@ internal sealed class VariantFieldExpr : FieldExpr
 
                     for (int id = 0; id < ids; id++)
                     {
-                        keyOfId[id] = Lookup(table, keys, dictionary[id]);
+                        keyOfId[id] = reads.Lookup(dictionary[id]);
                     }
 
                     lastMetadata = rowMetadata;
@@ -484,7 +465,7 @@ internal sealed class VariantFieldExpr : FieldExpr
             for (int i = 0; i < paths.Length; i++)
             {
                 Output output = new(arena, paths[i].Read, rows);
-                for (int n = head[keyOf[i]]; n >= 0; n = notes[n].Next)
+                for (int n = head[reads.KeyOf[i]]; n >= 0; n = notes[n].Next)
                 {
                     Note note = notes[n];
                     ReadOnlySpan<byte> rowValue = Bytes(in values, valueViews, note.Row);
@@ -499,35 +480,82 @@ internal sealed class VariantFieldExpr : FieldExpr
             System.Buffers.ArrayPool<Note>.Shared.Return(notes);
             System.Buffers.ArrayPool<int>.Shared.Return(keyOfId);
         }
+    }
 
-        static int Lookup(int[] table, byte[][] keys, ReadOnlySpan<byte> key)
+    /// <summary>A field of a row's object a key asks for: its row, where it lies in the row's value, and the key's note before.</summary>
+    private readonly record struct Note(int Row, int Offset, int Length, int Next);
+
+    /// <summary>
+    /// Paths that each read a key of the top-level object of the same variant column in its class, made ready once for
+    /// <see cref="ApplyKeys"/>: each key once, in a table by its bytes, and the key of each path. Read by one thread at a
+    /// time, whose pass it keeps the last note of each key for.
+    /// </summary>
+    internal sealed class KeyReads
+    {
+        // The keys by their numbers, and their numbers by the hash of their bytes, open addressing.
+        private readonly byte[][] _keys;
+        private readonly int[] _table;
+
+        internal KeyReads(VariantFieldExpr[] paths)
         {
-            int mask = table.Length - 1;
+            Paths = paths;
+            KeyOf = new int[paths.Length];
+            _keys = new byte[paths.Length][];
+            _table = new int[(int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Max(paths.Length * 2, 2))];
+            _table.AsSpan().Fill(-1);
+            int count = 0;
+            for (int i = 0; i < paths.Length; i++)
+            {
+                byte[] key = paths[i].Steps[0].KeyUtf8!;
+                int found = Lookup(key);
+                if (found < 0)
+                {
+                    found = count++;
+                    _keys[found] = key;
+                    Insert(found);
+                }
+
+                KeyOf[i] = found;
+            }
+
+            Heads = new int[count];
+        }
+
+        /// <summary>The paths, in the order <see cref="ApplyKeys"/> reads them into.</summary>
+        internal VariantFieldExpr[] Paths { get; }
+
+        /// <summary>The number of each path's key, the keys numbered in the order they first come.</summary>
+        internal int[] KeyOf { get; }
+
+        /// <summary>For each key, its last note in the pass over a batch, -1 for none.</summary>
+        internal int[] Heads { get; }
+
+        /// <summary>The number of key <paramref name="key"/>, -1 when no path reads it.</summary>
+        internal int Lookup(ReadOnlySpan<byte> key)
+        {
+            int mask = _table.Length - 1;
             for (int at = (int)System.IO.Hashing.XxHash3.HashToUInt64(key) & mask; ; at = (at + 1) & mask)
             {
-                int held = table[at];
-                if (held < 0 || keys[held].AsSpan().SequenceEqual(key))
+                int held = _table[at];
+                if (held < 0 || _keys[held].AsSpan().SequenceEqual(key))
                 {
                     return held;
                 }
             }
         }
 
-        static void Insert(int[] table, byte[][] keys, int key)
+        private void Insert(int key)
         {
-            int mask = table.Length - 1;
-            int at = (int)System.IO.Hashing.XxHash3.HashToUInt64(keys[key]) & mask;
-            while (table[at] >= 0)
+            int mask = _table.Length - 1;
+            int at = (int)System.IO.Hashing.XxHash3.HashToUInt64(_keys[key]) & mask;
+            while (_table[at] >= 0)
             {
                 at = (at + 1) & mask;
             }
 
-            table[at] = key;
+            _table[at] = key;
         }
     }
-
-    /// <summary>A field of a row's object a key asks for: its row, where it lies in the row's value, and the key's note before.</summary>
-    private readonly record struct Note(int Row, int Offset, int Length, int Next);
 
     /// <summary>The ids of the path's keys in <paramref name="metadata"/>'s dictionary, -1 for a key it lacks; whether the dictionary is sorted.</summary>
     private bool Resolve(ReadOnlySpan<byte> metadata, Span<int> ids)

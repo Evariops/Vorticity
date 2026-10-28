@@ -48,6 +48,7 @@ public sealed partial class VariantKeysTests
 
             await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
             VariantFieldExpr[] paths = [.. names.SelectMany(name => Reads.Select(read => new VariantFieldExpr(new ColumnFieldExpr(nameof(Row.Attributes)), [VariantStep.Of(name)], read)))];
+            VariantFieldExpr.KeyReads reads = new(paths);
             int[] together = new int[paths.Length];
             long checkedRows = 0;
             await foreach (RecordBatch batch in file.Scan<Row>().ToBatchesAsync(Ct))
@@ -57,7 +58,7 @@ public sealed partial class VariantKeysTests
                     CanonicalArena arena = batch.Arena;
                     int variant = arena.GetNode(batch.RootIndex).GetFieldIndex(1);
                     Assert.Equal(2, arena.GetNode(variant).FieldCount);
-                    VariantFieldExpr.ApplyKeys(arena, variant, paths, together);
+                    VariantFieldExpr.ApplyKeys(arena, variant, reads, together);
                     for (int p = 0; p < paths.Length; p++)
                     {
                         int alone = paths[p].Apply(arena, variant);

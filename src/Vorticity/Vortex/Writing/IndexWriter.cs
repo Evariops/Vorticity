@@ -56,8 +56,11 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     private readonly (int Field, Compute.VariantFieldExpr Path)?[]? _variants;
 
-    // Where a path's values are read into before its builders take them, emptied after each batch.
-    private CanonicalArena? _variantRows;
+    /// <summary>
+    /// For each variant column whose shredded keys feed builders, those keys, read together as the column is fed; null when
+    /// no key feeds one. Grouped again whenever a builder joins a key's slot (<see cref="GroupVariants"/>).
+    /// </summary>
+    private VariantFeed?[]? _variantFeeds;
     private CanonicalArena? _keySlices;
     private DTypeArena? _maskTypes;
     private bool _firstBlockClosed;
@@ -225,6 +228,8 @@ internal sealed class IndexWriter : IDisposable
                 }
             }
         }
+
+        GroupVariants();
     }
 
     private readonly RunScratch? _scratch;
@@ -950,31 +955,40 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    /// <summary>
+    /// Hands rows <paramref name="start"/> to <paramref name="start"/> + <paramref name="count"/> of column
+    /// <paramref name="field"/> to its builders, and each key the column shreds, read in its slot's class, to that slot's.
+    /// </summary>
     internal void Accumulate(int field, CanonicalArena arena, int nodeIndex, int start, int count)
     {
         foreach (IndexBuilder builder in _builders[field])
         {
             builder.Accumulate(arena, nodeIndex, start, count);
         }
+
+        if (_variantFeeds?[field] is { } feed && count > 0)
+        {
+            FeedVariant(feed, arena, nodeIndex, start, count);
+        }
     }
 
     /// <summary>
     /// Whether a chunk's rows may feed the builders on the writer's threads, each column's builders on the thread that
-    /// ingests the column: once the first block is closed, which tells them once what the statistics say of it, and when no
-    /// builder reads several columns at once, as a composite key's, a nested column's and a variant's paths do.
+    /// ingests the column, with those of the keys it shreds: once the first block is closed, which tells them once what the
+    /// statistics say of it, and when no builder reads several columns at once, as a composite key's and a nested column's do.
     /// </summary>
     internal bool FeedsAcross
     {
         get
         {
-            if (!_firstBlockClosed || _nested is not null || _variants is not null)
+            if (!_firstBlockClosed || _nested is not null)
             {
                 return false;
             }
 
             for (int composite = _fieldCount; composite < _builders.Length; composite++)
             {
-                if (_builders[composite].Count > 0)
+                if (_builders[composite].Count > 0 && _variants?[composite] is null)
                 {
                     return false;
                 }
@@ -984,8 +998,8 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    /// <summary>Whether column <paramref name="field"/> feeds a builder.</summary>
-    internal bool Feeds(int field) => _builders[field].Count > 0;
+    /// <summary>Whether column <paramref name="field"/> feeds a builder, its own or a key's it shreds.</summary>
+    internal bool Feeds(int field) => _builders[field].Count > 0 || _variantFeeds?[field] is not null;
 
     /// <summary>The rows the file is bounded by, 0 when unknown: what a hashed postings builder sizes its buckets by.</summary>
     internal long ExpectedRows
@@ -1041,12 +1055,20 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    /// <summary>Seals the open block of column <paramref name="field"/>'s builders, past the first block of the file.</summary>
+    /// <summary>Seals the open block of column <paramref name="field"/>'s builders and of the keys it shreds, past the first block of the file.</summary>
     internal void CloseBlock(int field)
     {
         foreach (IndexBuilder builder in _builders[field])
         {
             builder.CloseBlock();
+        }
+
+        foreach (int slot in _variantFeeds?[field]?.Slots ?? [])
+        {
+            foreach (IndexBuilder builder in _builders[slot])
+            {
+                builder.CloseBlock();
+            }
         }
     }
 
@@ -1937,6 +1959,8 @@ internal sealed class IndexWriter : IDisposable
                 _builders[field].Add(new LocateBuilder(sheet));
             }
         }
+
+        GroupVariants();
     }
 
     /// <summary>The slots the writer keeps: the columns, then the composite keys, the nested columns and the shredded keys.</summary>
@@ -2208,67 +2232,93 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Hands the rows <paramref name="start"/> to <paramref name="start"/> + <paramref name="count"/> of
-    /// each shredded key, read in its slot's class, to that slot's builders.
+    /// Hands rows <paramref name="start"/> to <paramref name="start"/> + <paramref name="count"/> of the variant column at
+    /// <paramref name="nodeIndex"/> to the builders of the keys <paramref name="feed"/> holds, each read in its slot's class:
+    /// the rows sliced once and every key read in one pass over them (<see cref="Compute.VariantFieldExpr.ApplyKeys"/>),
+    /// where a key at a time read every row's dictionary again.
     /// </summary>
-    internal void AccumulateVariants(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int start, int count)
+    private void FeedVariant(VariantFeed feed, CanonicalArena arena, int nodeIndex, int start, int count)
     {
-        if (_variants is not { } variants || count <= 0)
+        CanonicalArena rows = feed.Rows;
+        try
+        {
+            int variant = CanonicalSlice.SliceAcross(arena, rows, nodeIndex, start, count);
+            Compute.VariantFieldExpr.ApplyKeys(rows, variant, feed.Reads, feed.Nodes);
+            for (int k = 0; k < feed.Slots.Length; k++)
+            {
+                foreach (IndexBuilder builder in _builders[feed.Slots[k]])
+                {
+                    builder.Accumulate(rows, feed.Nodes[k], 0, count);
+                }
+            }
+        }
+        finally
+        {
+            rows.Reset();
+        }
+    }
+
+    /// <summary>Groups the shredded keys that feed builders by the variant column they read, for <see cref="Accumulate"/>.</summary>
+    private void GroupVariants()
+    {
+        if (_variants is not { } variants)
         {
             return;
         }
 
-        // The slots of each variant column at once, its rows sliced once and its keys read in one pass over them
-        // (VariantFieldExpr.ApplyKeys), where a slot at a time read every row's dictionary again.
-        int[] group = _variantGroup ??= new int[variants.Length];
-        Compute.VariantFieldExpr[] paths = _variantPaths ??= new Compute.VariantFieldExpr[variants.Length];
-        int[] reads = _variantReads ??= new int[variants.Length];
-        ulong[] done = _variantDone ??= new ulong[(variants.Length + 63) / 64];
-        Array.Clear(done);
-        for (int slot = 0; slot < variants.Length; slot++)
+        foreach (VariantFeed? before in _variantFeeds ?? [])
         {
-            if ((done[slot >> 6] & (1UL << slot)) != 0 || variants[slot] is not { } first || _builders[slot].Count == 0)
-            {
-                continue;
-            }
+            before?.Release();
+        }
 
-            int members = 0;
-            for (int other = slot; other < variants.Length; other++)
+        VariantFeed?[] feeds = new VariantFeed?[_fieldCount];
+        List<int> slots = [];
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            slots.Clear();
+            for (int slot = 0; slot < variants.Length; slot++)
             {
-                if (variants[other] is { } path && path.Field == first.Field && _builders[other].Count > 0)
+                if (variants[slot] is { } path && path.Field == field && _builders[slot].Count > 0)
                 {
-                    group[members] = other;
-                    paths[members++] = path.Path;
-                    done[other >> 6] |= 1UL << other;
+                    slots.Add(slot);
                 }
             }
 
-            CanonicalArena rows = _variantRows ??= new CanonicalArena();
-            try
+            if (slots.Count > 0)
             {
-                int variant = CanonicalSlice.SliceAcross(arena, rows, fieldNodes[first.Field], start, count);
-                Compute.VariantFieldExpr.ApplyKeys(rows, variant, paths.AsSpan(0, members), reads.AsSpan(0, members));
-                for (int m = 0; m < members; m++)
-                {
-                    foreach (IndexBuilder builder in _builders[group[m]])
-                    {
-                        builder.Accumulate(rows, reads[m], 0, count);
-                    }
-                }
-            }
-            finally
-            {
-                rows.Reset();
+                int[] held = [.. slots];
+                feeds[field] = new VariantFeed(held, new Compute.VariantFieldExpr.KeyReads(Array.ConvertAll(held, slot => variants[slot]!.Value.Path)));
             }
         }
+
+        _variantFeeds = feeds;
     }
 
-    // The slots of one variant column AccumulateVariants reads together, their paths and the nodes they read into, and the
-    // slots it read: made at its first call, for every call after.
-    private int[]? _variantGroup;
-    private Compute.VariantFieldExpr[]? _variantPaths;
-    private int[]? _variantReads;
-    private ulong[]? _variantDone;
+    /// <summary>
+    /// The shredded keys of one variant column that feed builders: their slots, their paths made ready to be read together,
+    /// and the nodes they read into, in an arena of the column's own, so that each variant column feeds its keys on the
+    /// thread that ingests it.
+    /// </summary>
+    private sealed class VariantFeed(int[] slots, Compute.VariantFieldExpr.KeyReads reads)
+    {
+        private CanonicalArena? _rows;
+
+        internal int[] Slots { get; } = slots;
+
+        internal Compute.VariantFieldExpr.KeyReads Reads { get; } = reads;
+
+        /// <summary>For each key, the node its values were read into in <see cref="Rows"/>.</summary>
+        internal int[] Nodes { get; } = new int[slots.Length];
+
+        /// <summary>Where the keys' values are read into before their builders take them, emptied after each batch.</summary>
+        internal CanonicalArena Rows => _rows ??= new CanonicalArena();
+
+        internal void Release()
+        {
+            _rows?.Reset();
+            _rows = null;
+        }
+    }
 
     /// <summary>A composite key's columns, as the entry options carry them; null for a real column.</summary>
     private List<uint[]>? KeyColumns(int field) =>
@@ -2332,8 +2382,10 @@ internal sealed class IndexWriter : IDisposable
         _payloads = null;
         _keySlices?.Reset();
         _keySlices = null;
-        _variantRows?.Reset();
-        _variantRows = null;
+        foreach (VariantFeed? feed in _variantFeeds ?? [])
+        {
+            feed?.Release();
+        }
         _scratch?.Dispose();
         _adopted?.Dispose();
         _adopted = null;
