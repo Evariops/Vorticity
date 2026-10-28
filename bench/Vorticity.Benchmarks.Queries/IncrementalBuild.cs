@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
@@ -33,6 +34,8 @@ internal static class IncrementalBuild
         where TRecord : IVortexRecord<TRecord>
     {
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, TRecord.Schema, options);
+        Dictionary<string, double> passes = new(StringComparer.Ordinal);
+        using ActivityListener? listener = PrintJobs ? ListenToPasses(passes) : null;
         Task<List<ObjectDraft>>[] written = new Task<List<ObjectDraft>>[hours];
         int next = 0;
         int appended = 0;
@@ -77,7 +80,7 @@ internal static class IncrementalBuild
                 {
                     Console.WriteLine(string.Create(
                         CultureInfo.InvariantCulture,
-                        $"    job {done.Trigger} {done.Style}: {done.ObjectsIn} objects in, {done.ObjectsOut} out, {done.ObjectsMoved} moved, {done.Rows:N0} rows, {done.BytesIn / 1e6:F1} MB in, {done.BytesOut / 1e6:F1} MB out, {Stopwatch.GetElapsedTime(jobBegan).TotalSeconds:F1} s"));
+                        $"    job {done.Trigger} {done.Style}: {done.ObjectsIn} objects in, {done.ObjectsOut} out, {done.ObjectsMoved} moved, {done.Rows:N0} rows, {done.BytesIn / 1e6:F1} MB in, {done.BytesOut / 1e6:F1} MB out, {Stopwatch.GetElapsedTime(jobBegan).TotalSeconds:F1} s{Passes(passes)}"));
                 }
 
                 jobBegan = Stopwatch.GetTimestamp();
@@ -99,6 +102,42 @@ internal static class IncrementalBuild
             CultureInfo.InvariantCulture,
             $"  built in {Stopwatch.GetElapsedTime(begin).TotalSeconds:F0} s: a peak of {self.PeakWorkingSet64 / 1e9:F2} GB in memory, {GC.GetTotalAllocatedBytes() / 1e9:F1} GB allocated"));
         return hours * perHour;
+    }
+
+    /// <summary>
+    /// Listens to the passes of the compactions, adding the seconds of each to its name in <paramref name="took"/> as it ends:
+    /// the census of a job over a variant column, <c>plan</c>, then <c>write</c>.
+    /// </summary>
+    private static ActivityListener ListenToPasses(Dictionary<string, double> took)
+    {
+        const string Prefix = "vortex.dataset.compaction.";
+        ActivityListener listener = new ActivityListener
+        {
+            ShouldListenTo = static source => source.Name == VortexDiagnostics.ActivitySourceName,
+            Sample = static (ref ActivityCreationOptions<ActivityContext> created) =>
+                created.Name.StartsWith(Prefix, StringComparison.Ordinal) ? ActivitySamplingResult.AllData : ActivitySamplingResult.None,
+            ActivityStopped = activity =>
+            {
+                lock (took)
+                {
+                    string pass = activity.OperationName[Prefix.Length..];
+                    took[pass] = took.GetValueOrDefault(pass) + activity.Duration.TotalSeconds;
+                }
+            },
+        };
+        ActivitySource.AddActivityListener(listener);
+        return listener;
+    }
+
+    /// <summary>The seconds of each pass of the job just ended, for its line; the passes then emptied for the next job.</summary>
+    private static string Passes(Dictionary<string, double> took)
+    {
+        lock (took)
+        {
+            string passes = string.Concat(took.Select(static pass => string.Create(CultureInfo.InvariantCulture, $", {pass.Key} {pass.Value:F1} s")));
+            took.Clear();
+            return passes;
+        }
     }
 
     /// <summary>The objects of one hour, its rows in time order, each object <paramref name="partMinutes"/> minutes of them.</summary>
