@@ -26,7 +26,8 @@ internal static partial class DatasetCompactor
     /// What a range of a consolidation holds, about: <see cref="InputsBytes"/> of the range of the most inputs, and its
     /// objects' <paramref name="writer"/> (<see cref="WriterBytes"/>).
     /// </summary>
-    private static long RangeBytes(CompactionJob job, KeyRanges ranges, long writer) => InputsBytes(job, ranges.MostInputs) + writer;
+    private static long RangeBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, KeyRanges ranges, long writer) =>
+        InputsBytes(dataset, schema, job, ranges.MostInputs) + writer;
 
     /// <summary>
     /// What the writer of a job's objects holds, about: each column what it gathers before it writes a chunk, at most
@@ -54,14 +55,55 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
+    /// What an input holds of its object besides its batch, in the encoded bytes of the chunks it holds open, about: the
+    /// segments it reads, a chunk of each column; a dictionary's values decompressed whole; the children a chunk's windows
+    /// share, decoded once for all of them. On S1's logs, inputs of 260 MB held about 30 MB each for 8 MB of segments.
+    /// </summary>
+    private const long HeldPerOpenByte = 4;
+
+    /// <summary>
     /// What a merge of <paramref name="inputs"/> of the job's inputs holds of them, about: the batches they hold together
     /// (<see cref="InputBatchRows"/>), at <see cref="DecodedPerEncoded"/> times the bytes a row of the job's inputs is
-    /// written in.
+    /// written in, and <see cref="HeldPerOpenByte"/> times the chunks each holds open (<see cref="OpenChunkBytes"/>).
     /// </summary>
-    private static long InputsBytes(CompactionJob job, int inputs)
+    private static long InputsBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, int inputs)
     {
         long held = (long)inputs * InputBatchRows(inputs);
-        return held * Math.Max(job.Bytes / Math.Max(job.Rows, 1), 1) * DecodedPerEncoded;
+        return (held * Math.Max(job.Bytes / Math.Max(job.Rows, 1), 1) * DecodedPerEncoded)
+            + ((long)inputs * HeldPerOpenByte * OpenChunkBytes(dataset, schema, job));
+    }
+
+    /// <summary>
+    /// The encoded bytes of the chunks an input of the job holds open, about, averaged over its inputs: a chunk of each
+    /// column, its bytes over its chunks as the object's contents count them; for an object whose contents do not say, a
+    /// chunk of the dataset's chunk bytes a column, its whole bytes at most.
+    /// </summary>
+    internal static long OpenChunkBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job)
+    {
+        if (job.Inputs.Count == 0)
+        {
+            return 0;
+        }
+
+        long sum = 0;
+        foreach (CompactionInput input in job.Inputs)
+        {
+            ObjectEntry entry = input.Entry;
+            if (entry.Contents is { ColumnBytes.Count: > 0 } contents)
+            {
+                for (int column = 0; column < contents.ColumnBytes.Count; column++)
+                {
+                    long chunks = column < contents.ColumnChunks.Count ? Math.Max(contents.ColumnChunks[column], 1) : 1;
+                    sum += contents.ColumnBytes[column] / chunks;
+                }
+            }
+            else
+            {
+                sum += Math.Min(entry.Bytes, (long)schema.DType.FieldCount * Math.Max(dataset.Options.ChunkBytes, 1));
+            }
+        }
+
+        return sum / job.Inputs.Count;
     }
 
     /// <summary>
@@ -296,7 +338,7 @@ internal static partial class DatasetCompactor
         // Each range reserves what it holds before it starts, the first whether the budget grants it or not, as a job in one
         // piece runs; the others wait for a lane, as many lanes as the budget holds ranges.
         using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
-        long perRange = RangeBytes(job, ranges, writer);
+        long perRange = RangeBytes(dataset, schema, job, ranges, writer);
         memory.TryGrow(perRange);
         int lanes = 1;
         while (lanes < ranges.Count && memory.TryGrow(perRange))

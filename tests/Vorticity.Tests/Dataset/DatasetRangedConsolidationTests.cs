@@ -69,6 +69,57 @@ public sealed partial class DatasetRangedConsolidationTests
         Assert.All(narrow, static job => Assert.Equal(1, job.RangesAtOnce));
     }
 
+    /// <summary>
+    /// What a consolidation's input holds open of its object, which a range's memory counts, is a chunk of each column, its
+    /// bytes over its chunks as the object's contents count them: nearly the data of objects whose columns are one chunk
+    /// each, a few chunks of 16 KiB of objects cut in those.
+    /// </summary>
+    [Fact]
+    public async Task AnInputHoldsAChunkOfEachColumnOpen()
+    {
+        (long whole, long wholeBytes) = await OpenChunkAsync(64 << 20);
+        (long chunked, long chunkedBytes) = await OpenChunkAsync(16 << 10);
+        Assert.InRange(whole, wholeBytes / 4, wholeBytes);
+        Assert.InRange(chunked, 1, 4L * Row.Schema.Count * (16 << 10));
+        Assert.True(chunked * 2 < whole, $"{chunked} bytes open of inputs of {chunkedBytes} in chunks of 16 KiB, {whole} of inputs of {wholeBytes} in one chunk a column");
+    }
+
+    /// <summary>The bytes an input of a day's consolidation holds open, and its inputs' bytes, both averaged over them.</summary>
+    private static async Task<(long Open, long Bytes)> OpenChunkAsync(int chunkBytes)
+    {
+        Random random = new Random(47);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Row.Day)),
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Status))],
+                ObjectBytes = 1 << 20,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+            ChunkBytes = chunkBytes,
+        }, Ct);
+        for (int a = 0; a < 8; a++)
+        {
+            Row[] rows = [.. Enumerable.Range(0, 30_000).Select(i => new Row(0, $"svc-{random.Next(0, 400):D3}", (a * 30_000) + i, random.Next(0, 100), random.NextDouble()))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Row>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(cancellationToken: Ct) is not null)
+        {
+        }
+
+        CompactionPlan plan = await CompactionPolicy.PlanConsolidationsAsync(dataset, Ct);
+        CompactionJob job = Assert.Single(plan.Jobs, static job => job.Trigger == CompactionTrigger.Consolidation);
+        Assert.All(job.Inputs, static input => Assert.NotNull(input.Entry.Contents));
+        return (DatasetCompactor.OpenChunkBytes(dataset, dataset.Snapshot.Schema, job), (long)job.Inputs.Average(static input => input.Entry.Bytes));
+    }
+
     private static async Task<(List<Row> Appended, List<Row> Read, IReadOnlyList<CompactionResult> Consolidated)> ConsolidateAsync(
         int lanes, QueryMemoryBudget? jobs = null, int chunkBytes = 1 << 20)
     {

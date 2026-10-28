@@ -217,7 +217,7 @@ internal static partial class DatasetCompactor
             {
                 // A job in one piece runs whether the budget holds it or not; what it reserves tells the other jobs it holds it.
                 using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
-                memory.TryGrow(InputsBytes(ran, merge ? ran.Inputs.Count : 1) + writer);
+                memory.TryGrow(InputsBytes(dataset, schema, ran, merge ? ran.Inputs.Count : 1) + writer);
                 for (int doublings = 0; ; doublings++)
                 {
                     lateOutputs = late is null ? null : new ObjectStream(

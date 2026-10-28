@@ -320,7 +320,9 @@ governor](16-queries.md#the-governor)). The stores of an append reserve there wh
 partition sooner when it is refused. A consolidation's census counts its inputs on as many lanes as the budget holds,
 each reserving a window of an input's rows decoded and a slice of a wide shredding. Its ranges run side by side as many as
 the budget holds, each reserving before it starts what its inputs' batches hold, at sixteen times the bytes a row of its
-inputs is written in, and what its writer gathers: sixteen times the dataset's chunk bytes for each column at most, the
+inputs is written in; four times the chunks each input holds open, a chunk of each column as its object's contents count
+them, for the segments it reads, a dictionary's values decompressed whole and the children its windows share; and what
+its writer gathers: sixteen times the dataset's chunk bytes for each column at most, the
 least rate a column is taken to encode to, and five times its chunk's target for a variant column it shreds, the values
 gathered, what the shredder takes of them and the column it lays out. The first runs whether it fits or not, as a job in
 one piece does, which reserves what its merge and its writer hold as well, and the others wait for a lane.
