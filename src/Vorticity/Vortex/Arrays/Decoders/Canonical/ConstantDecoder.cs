@@ -91,11 +91,24 @@ internal sealed class ConstantDecoder : ArrayDecoder
 
     /// <summary>
     /// A constant decodes to one value whatever its length, except as a list, whose offsets and
-    /// sizes are one per row, and in a struct holding one.
+    /// sizes are one per row, and in a struct holding one; and except a null one, whose rows are
+    /// laid out zeroed under their validity (<see cref="ConstantCanonicalizer"/>): a merge's input
+    /// whose variant column was null over a chunk of a million rows decoded it whole, 32 MB, and
+    /// kept it for every batch, where a window of its rows does.
     /// </summary>
     /// <inheritdoc/>
-    public override bool MaterializesNothing(ArrayDecodeContext context, in ArrayNode node, DType dtype) =>
-        OneValue(dtype);
+    public override bool MaterializesNothing(ArrayDecodeContext context, in ArrayNode node, DType dtype)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (!OneValue(dtype))
+        {
+            return false;
+        }
+
+        // A malformed node is the decode's to refuse.
+        return dtype.Kind == DTypeKind.Null || node.BufferCount != 1
+            || !TypedScalarReader.Read(node.GetBuffer(0).Span, dtype, context.Scalars, context.Types).IsNull;
+    }
 
     private static bool OneValue(DType dtype)
     {
