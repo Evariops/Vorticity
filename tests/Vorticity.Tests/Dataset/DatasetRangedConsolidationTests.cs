@@ -52,8 +52,25 @@ public sealed partial class DatasetRangedConsolidationTests
         Assert.All(narrow, static job => Assert.Equal((1, 0L), (job.RangesAtOnce, job.MemoryReserved)));
     }
 
+    /// <summary>
+    /// A range reserves what its writer gathers besides its inputs' batches: columns that gather chunks of 64 MiB, sixteen
+    /// times that each at most, run the ranges one at a time under a budget of 3 GiB, which the inputs' batches alone, a
+    /// few hundred megabytes a range, would have filled with every range at once; under the process's share, side by side.
+    /// </summary>
+    [Fact]
+    public async Task ARangeReservesWhatItsWriterGathers()
+    {
+        (List<Row> appended, List<Row> roomy, IReadOnlyList<CompactionResult> wide) = await ConsolidateAsync(lanes: 4, chunkBytes: 64 << 20);
+        (_, List<Row> tight, IReadOnlyList<CompactionResult> narrow) = await ConsolidateAsync(lanes: 4, new QueryMemoryBudget(3L << 30), chunkBytes: 64 << 20);
+        List<Row> live = [.. appended.Where(static row => !(row.Day == 0 && row.Status == 7))];
+        Assert.Equal(live, roomy.OrderBy(static row => row.Sequence));
+        Assert.Equal(live, tight.OrderBy(static row => row.Sequence));
+        Assert.True(wide.Any(static job => job.RangesAtOnce > 1), string.Join("; ", wide.Select(static job => $"{job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
+        Assert.All(narrow, static job => Assert.Equal(1, job.RangesAtOnce));
+    }
+
     private static async Task<(List<Row> Appended, List<Row> Read, IReadOnlyList<CompactionResult> Consolidated)> ConsolidateAsync(
-        int lanes, QueryMemoryBudget? jobs = null)
+        int lanes, QueryMemoryBudget? jobs = null, int chunkBytes = 1 << 20)
     {
         Random random = new Random(47);
         await using MemoryObjectStore store = new MemoryObjectStore();
@@ -74,6 +91,7 @@ public sealed partial class DatasetRangedConsolidationTests
                 CalmAfter = null,
             },
             ContentsObjectBytes = 0,
+            ChunkBytes = chunkBytes,
         }, Ct);
         List<Row> all = [];
         for (int a = 0; a < 8; a++)

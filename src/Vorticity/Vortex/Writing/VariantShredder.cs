@@ -42,6 +42,13 @@ internal static class VariantShredder
     private const int ViewSize = 16;
 
     /// <summary>
+    /// What a writer holds of a shredded variant column, about, in its chunk's target bytes of values: the values
+    /// gathered, once; what the shredder takes of them, three times at most, a row and a value of eight bytes or a row,
+    /// a length and the bytes for each value written in four bytes or more; the typed column laid out and its blob, one.
+    /// </summary>
+    internal const int HeldPerTarget = 5;
+
+    /// <summary>
     /// Writes <paramref name="node"/>, a <c>Struct{metadata, value}</c> wearing a variant dtype, shredded as
     /// <paramref name="plan"/> says, as one blob: the bytes <see cref="ArrayBlobWriter.Write"/> writes of the node
     /// <see cref="Shred"/> makes, each typed column laid out in the workspace's leaves while the blob writes it. What

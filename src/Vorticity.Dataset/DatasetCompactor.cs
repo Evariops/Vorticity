@@ -203,6 +203,7 @@ internal static partial class DatasetCompactor
         long rows;
         long reserved = 0;
         int atOnce = 1;
+        long writer = WriterBytes(dataset, schema, shreddings);
         Provenance? provenance = null;
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
@@ -210,13 +211,13 @@ internal static partial class DatasetCompactor
             if (ranges is not null)
             {
                 (streams, rows, reserved, atOnce) =
-                    await RangesAsync(dataset, schema, job, ranges, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
+                    await RangesAsync(dataset, schema, job, ranges, writer, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
             }
             else
             {
                 // A job in one piece runs whether the budget holds it or not; what it reserves tells the other jobs it holds it.
                 using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
-                memory.TryGrow(InputsBytes(ran, merge ? ran.Inputs.Count : 1));
+                memory.TryGrow(InputsBytes(ran, merge ? ran.Inputs.Count : 1) + writer);
                 for (int doublings = 0; ; doublings++)
                 {
                     lateOutputs = late is null ? null : new ObjectStream(

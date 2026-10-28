@@ -2404,6 +2404,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
+    /// <summary>
+    /// The canonical bytes a column that gathers to encoded bytes (<see cref="VortexWriteOptions.GatheredChunkBytes"/>)
+    /// holds at most, in its targets: what a job's memory counts its writer's columns at.
+    /// </summary>
+    internal const int MostGatheredPerTarget = 16;
+
     /// <summary>The rows a column with a chunk target of its own holds until they reach it, and the chunks it has written.</summary>
     private sealed class Gathering(long target)
     {
@@ -2414,10 +2420,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal const double FirstRate = 0.25;
 
         /// <summary>
-        /// The least share a column is taken to encode to: past 16 times its target in canonical bytes, it holds no more,
-        /// which bounds what a writer holds of a column that compresses better still.
+        /// The least share a column is taken to encode to: past <see cref="MostGatheredPerTarget"/> times its target in
+        /// canonical bytes, it holds no more, which bounds what a writer holds of a column that compresses better still.
         /// </summary>
-        private const double LeastRate = 1.0 / 16;
+        private const double LeastRate = 1.0 / MostGatheredPerTarget;
 
         internal readonly long Target = target;
         internal readonly List<int> Nodes = [];

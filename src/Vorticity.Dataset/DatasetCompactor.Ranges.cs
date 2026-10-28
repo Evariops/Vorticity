@@ -1,11 +1,13 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Indexes;
+using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
@@ -20,8 +22,36 @@ internal static partial class DatasetCompactor
     /// </summary>
     private const long DecodedPerEncoded = 16;
 
-    /// <summary>What a range of a consolidation holds, about: <see cref="InputsBytes"/> of the range of the most inputs.</summary>
-    private static long RangeBytes(CompactionJob job, KeyRanges ranges) => InputsBytes(job, ranges.MostInputs);
+    /// <summary>
+    /// What a range of a consolidation holds, about: <see cref="InputsBytes"/> of the range of the most inputs, and its
+    /// objects' <paramref name="writer"/> (<see cref="WriterBytes"/>).
+    /// </summary>
+    private static long RangeBytes(CompactionJob job, KeyRanges ranges, long writer) => InputsBytes(job, ranges.MostInputs) + writer;
+
+    /// <summary>
+    /// What the writer of a job's objects holds, about: each column what it gathers before it writes a chunk, at most
+    /// <see cref="VortexFileWriter.MostGatheredPerTarget"/> times the dataset's chunk bytes; a variant column shredded,
+    /// <see cref="VariantShredder.HeldPerTarget"/> times its chunk's target. Of the partition values of a job in one
+    /// piece, whose objects are written one after the other, the one whose writer holds the most.
+    /// </summary>
+    private static long WriterBytes(VortexDataset dataset, DatasetSchema schema, IReadOnlyList<ValueShredding>? shreddings)
+    {
+        long most = 0;
+        int values = shreddings?.Count ?? 0;
+        for (int value = 0; value < Math.Max(values, 1); value++)
+        {
+            ImmutableDictionary<string, int> chunks = values == 0 ? ImmutableDictionary<string, int>.Empty : shreddings![value].VariantChunks;
+            long bytes = (long)(schema.DType.FieldCount - chunks.Count) * VortexFileWriter.MostGatheredPerTarget * dataset.Options.ChunkBytes;
+            foreach (KeyValuePair<string, int> chunk in chunks)
+            {
+                bytes += (long)VariantShredder.HeldPerTarget * chunk.Value;
+            }
+
+            most = Math.Max(most, bytes);
+        }
+
+        return most;
+    }
 
     /// <summary>
     /// What a merge of <paramref name="inputs"/> of the job's inputs holds of them, about: the batches they hold together
@@ -247,15 +277,16 @@ internal static partial class DatasetCompactor
 
     /// <summary>
     /// The ranges of a consolidation merged side by side, each into objects of its own, as many at once as the session's
-    /// memory holds their open inputs, the first unreserved: each range's objects, in the ranges' order, and the rows they
-    /// hold together. A range whose object runs past its bound starts again under a bound twice as large, alone; a failure
-    /// stops the others, whose objects are given up as a failed job's are.
+    /// memory holds their open inputs and their writers, the first unreserved: each range's objects, in the ranges'
+    /// order, and the rows they hold together. A range whose object runs past its bound starts again under a bound twice
+    /// as large, alone; a failure stops the others, whose objects are given up as a failed job's are.
     /// </summary>
     private static async ValueTask<(ObjectStream[] Streams, long Rows, long Reserved, int AtOnce)> RangesAsync(
         VortexDataset dataset,
         DatasetSchema schema,
         CompactionJob job,
         KeyRanges ranges,
+        long writer,
         Func<int, ObjectStream> outputsOf,
         CancellationToken cancellationToken)
     {
@@ -265,7 +296,7 @@ internal static partial class DatasetCompactor
         // Each range reserves what it holds before it starts, the first whether the budget grants it or not, as a job in one
         // piece runs; the others wait for a lane, as many lanes as the budget holds ranges.
         using QueryMemory memory = new QueryMemory(dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
-        long perRange = RangeBytes(job, ranges);
+        long perRange = RangeBytes(job, ranges, writer);
         memory.TryGrow(perRange);
         int lanes = 1;
         while (lanes < ranges.Count && memory.TryGrow(perRange))
