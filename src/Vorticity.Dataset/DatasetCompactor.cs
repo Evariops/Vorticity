@@ -839,7 +839,8 @@ internal static partial class DatasetCompactor
     /// With <paramref name="fields"/>, each input reads those fields of <paramref name="schema"/> alone, the ones the
     /// partition and the key read among them, and the rows merged hold them alone. With <paramref name="ranges"/>, the
     /// merge holds the rows of range <paramref name="range"/> alone: each input its keys meet reads the rows the range
-    /// names of it, and leaves out those outside the range.
+    /// names of it, and leaves out those outside the range. With <paramref name="only"/>, it holds that input's rows alone,
+    /// their keys beside them.
     /// </remarks>
     private static KeyOrderedMerge InputsMerged(
         VortexDataset dataset,
@@ -848,13 +849,19 @@ internal static partial class DatasetCompactor
         CancellationToken cancellationToken,
         int[]? fields = null,
         KeyRanges? ranges = null,
-        int range = 0)
+        int range = 0,
+        int only = -1)
     {
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         Dictionary<string, RowRange>? rows = ranges is null ? null : new Dictionary<string, RowRange>(StringComparer.Ordinal);
         for (int i = 0; i < job.Inputs.Count; i++)
         {
             CompactionInput input = job.Inputs[i];
+            if (only >= 0 && i != only)
+            {
+                continue;
+            }
+
             if (ranges is not null)
             {
                 RowRange read = ranges.RowsOf(i, range);
@@ -883,45 +890,47 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
-    /// The first pass of a job whose objects carry a sparse index of their keys, over a schema with a variant column: its rows
-    /// merged once, through a projection of the key and the variant columns, the paths of each partition value's rows
-    /// counted, in the order of the values, and what each variant column shreds in the objects of each chosen from them
-    /// (<see cref="ShreddingChoice"/>), the keys the dataset declares shredded wherever a row holds one. Without a
-    /// partition value, the job's rows are counted together.
+    /// The first pass of a job whose objects carry a sparse index of their keys, over a schema with a variant column: the paths
+    /// of each partition value's rows counted, in the order of the values, and what each variant column shreds in the objects
+    /// of each chosen from them (<see cref="ShreddingChoice"/>), the keys the dataset declares shredded wherever a row holds
+    /// one. Without a partition value, the job's rows are counted together.
     /// </summary>
+    /// <remarks>
+    /// What a value's rows hold is the same whatever order they come in, so each input is counted apart, side by side on the
+    /// session's lanes, and the counts of a value are its inputs' added up (<see cref="PathCensus.Merge"/>): a merge of the
+    /// inputs counted every row on one thread, and took a fifth of a tier merge of log records.
+    /// </remarks>
     private static async ValueTask<IReadOnlyList<ValueShredding>> PlanValuesAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
     {
         int[] variants = VariantColumns(schema.DType);
-        int[] counted = Counted(schema);
-        int[] read = [.. variants.Select(field => Array.BinarySearch(counted, field))];
-        int textBound = dataset.Options.Write.StringBoundBytes;
         ValueCut? values = schema.Cut;
-        List<PathCensus[]> censuses = [];
-        byte[]? last = null;
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, cancellationToken, counted);
-        await using (merge.ConfigureAwait(false))
+        List<ValueCount>[] counts = new List<ValueCount>[job.Inputs.Count];
+        ParallelOptions lanes = new ParallelOptions
         {
-            while (await merge.MoveNextAsync().ConfigureAwait(false))
+            MaxDegreeOfParallelism = Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism),
+            CancellationToken = cancellationToken,
+        };
+        await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>
+            counts[input] = await CountAsync(dataset, schema, job, input, variants, token).ConfigureAwait(false)).ConfigureAwait(false);
+
+        // The values in the key's order, the partition leading it; each the counts of the inputs that hold it, added up.
+        List<ValueCount> all = [.. counts.SelectMany(static held => held)];
+        all.Sort(static (left, right) => left.First.AsSpan().SequenceCompareTo(right.First) is var order and not 0 ? order : left.Input.CompareTo(right.Input));
+        List<PathCensus[]> censuses = [];
+        byte[]? first = null;
+        foreach (ValueCount count in all)
+        {
+            if (censuses.Count == 0 || (values is not null && !values.Same(first, count.First)))
             {
-                RecordBatch run = merge.Current;
-                for (int at = 0, end; at < run.RowCount; at = end)
-                {
-                    // A value starts the job's rows, or follows the last counted where the key's value changes.
-                    if (censuses.Count == 0 || (values is not null && !values.Same(last, merge.KeyAt(at))))
-                    {
-                        censuses.Add([.. variants.Select(_ => new PathCensus(textBound))]);
-                    }
+                censuses.Add(count.Paths);
+                first = count.First;
+                continue;
+            }
 
-                    end = values is null ? run.RowCount : values.EndOfValue(merge, at, run.RowCount);
-                    RecordBatch part = at == 0 && end == run.RowCount ? run : run.Window(at, end - at);
-                    for (int v = 0; v < variants.Length; v++)
-                    {
-                        censuses[^1][v].Add(part, read[v]);
-                    }
-
-                    last = merge.KeyAt(end - 1).ToArray();
-                }
+            for (int v = 0; v < variants.Length; v++)
+            {
+                censuses[^1][v].Merge(count.Paths[v]);
             }
         }
 
@@ -945,6 +954,77 @@ internal static partial class DatasetCompactor
 
         return shreddings;
     }
+
+    /// <summary>
+    /// The paths of input <paramref name="input"/>'s rows counted for <see cref="PlanValuesAsync"/>, a value at a time in the
+    /// key's order: of an input that holds one value, or of a dataset with none, its variant columns alone, read through; of
+    /// one that holds several, the key's columns too, the input merged alone so that its keys tell its values apart.
+    /// </summary>
+    private static async ValueTask<List<ValueCount>> CountAsync(
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, int input, int[] variants, CancellationToken cancellationToken)
+    {
+        int textBound = dataset.Options.Write.StringBoundBytes;
+        CompactionInput held = job.Inputs[input];
+        ValueCut? values = schema.Cut;
+        List<ValueCount> counts = [];
+        if (values is null || values.HoldsOne(held))
+        {
+            PathCensus[] paths = [.. variants.Select(_ => new PathCensus(textBound))];
+            ObjectLease lease = await dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants)
+                    .WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    for (int v = 0; v < variants.Length; v++)
+                    {
+                        paths[v].Add(batch, v);
+                    }
+                }
+            }
+
+            if (paths[0].Rows > 0)
+            {
+                counts.Add(new ValueCount(held.Key.Span[..^VortexDataset.UidBytes].ToArray(), input, paths));
+            }
+
+            return counts;
+        }
+
+        int[] counted = Counted(schema);
+        int[] read = [.. variants.Select(field => Array.BinarySearch(counted, field))];
+        byte[]? last = null;
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, cancellationToken, counted, only: input);
+        await using (merge.ConfigureAwait(false))
+        {
+            while (await merge.MoveNextAsync().ConfigureAwait(false))
+            {
+                RecordBatch run = merge.Current;
+                for (int at = 0, end; at < run.RowCount; at = end)
+                {
+                    // A value starts the input's rows, or follows the last counted where the key's value changes.
+                    if (counts.Count == 0 || !values.Same(last, merge.KeyAt(at)))
+                    {
+                        counts.Add(new ValueCount(merge.KeyAt(at).ToArray(), input, [.. variants.Select(_ => new PathCensus(textBound))]));
+                    }
+
+                    end = values.EndOfValue(merge, at, run.RowCount);
+                    RecordBatch part = at == 0 && end == run.RowCount ? run : run.Window(at, end - at);
+                    for (int v = 0; v < variants.Length; v++)
+                    {
+                        counts[^1].Paths[v].Add(part, read[v]);
+                    }
+
+                    last = merge.KeyAt(end - 1).ToArray();
+                }
+            }
+        }
+
+        return counts;
+    }
+
+    /// <summary>The paths of one input's rows of one partition value, counted: the value's first key there, the input, and each variant column's census.</summary>
+    private sealed record ValueCount(byte[] First, int Input, PathCensus[] Paths);
 
     /// <summary>
     /// The fields of <paramref name="schema"/> a first pass counts, ascending: those the partition and the key read and the

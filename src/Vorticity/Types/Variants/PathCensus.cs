@@ -128,6 +128,25 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         Root.Add(this, in dictionary, value, depth: 1);
     }
 
+    /// <summary>
+    /// Adds what <paramref name="other"/> counted, as if its rows had been counted after these: its counts and bounds path by
+    /// path, its keys this census has not met counted as theirs while <see cref="MaxKeys"/> lets it, and as their objects'
+    /// other keys past it. Under that many keys, the census is the one the rows of both, counted one after the other, make.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Either census keeps the spans of its paths' rows, which only a count in order makes.</exception>
+    internal void Merge(PathCensus other)
+    {
+        if (_gap > 0 || other._gap > 0)
+        {
+            throw new InvalidOperationException("A census that keeps the spans of its rows counts them in order and merges with none.");
+        }
+
+        Rows += other.Rows;
+        ValueBytes += other.ValueBytes;
+        Partial |= other.Partial;
+        Root.Merge(this, other.Root);
+    }
+
     /// <summary>Key <paramref name="id"/> of the current metadata, decoded once per run of rows that share it.</summary>
     private string Name(in VariantDictionary dictionary, int id)
     {
@@ -379,6 +398,95 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                     Bound(census, scalar);
                     return;
                 }
+            }
+        }
+
+        /// <summary>Adds what <paramref name="other"/> counted at the same path of another census to these counts, in <paramref name="census"/> (<see cref="PathCensus.Merge"/>).</summary>
+        internal void Merge(PathCensus census, PathCount other)
+        {
+            Values += other.Values;
+            OtherKeys += other.OtherKeys;
+            for (int slot = 0; slot < Slots; slot++)
+            {
+                _classes[slot] += other._classes[slot];
+            }
+
+            for (int @class = 0; @class < PathClasses; @class++)
+            {
+                _read[@class] += other._read[@class];
+            }
+
+            _minInteger = Math.Min(_minInteger, other._minInteger);
+            _maxInteger = Math.Max(_maxInteger, other._maxInteger);
+            _minDouble = Math.Min(_minDouble, other._minDouble);
+            _maxDouble = Math.Max(_maxDouble, other._maxDouble);
+            _nans |= other._nans;
+            _minTime = Math.Min(_minTime, other._minTime);
+            _maxTime = Math.Max(_maxTime, other._maxTime);
+            _false |= other._false;
+            _true |= other._true;
+            if (other.HasTextBounds)
+            {
+                Text(other, census.StringBoundBytes);
+            }
+
+            if (other._keys is not { Count: > 0 } keys)
+            {
+                return;
+            }
+
+            _keys ??= new Dictionary<string, PathCount>(StringComparer.Ordinal);
+            foreach ((string name, PathCount count) in keys)
+            {
+                if (!_keys.TryGetValue(name, out PathCount? mine))
+                {
+                    // A key past the census's: its values go to its objects' other keys, as a count in order puts them.
+                    if (census._keyCount >= MaxKeys)
+                    {
+                        OtherKeys += count.Values;
+                        census.Partial = true;
+                        continue;
+                    }
+
+                    _keys[name] = mine = new PathCount();
+                    census._keyCount++;
+                }
+
+                mine.Merge(census, count);
+            }
+        }
+
+        /// <summary>Widens the text bounds by those of <paramref name="other"/>, already cut to <paramref name="bound"/> bytes.</summary>
+        private void Text(PathCount other, int bound)
+        {
+            if (!HasTextBounds)
+            {
+                _minText = new byte[bound];
+                _maxText = new byte[bound];
+                other.MinText.CopyTo(_minText);
+                other.MaxText.CopyTo(_maxText);
+                _minTextLength = other._minTextLength;
+                _maxTextLength = other._maxTextLength;
+                _maxTextCut = other._maxTextCut;
+                return;
+            }
+
+            if (other.MinText.SequenceCompareTo(MinText) < 0)
+            {
+                other.MinText.CopyTo(_minText);
+                _minTextLength = other._minTextLength;
+            }
+
+            int order = other.MaxText.SequenceCompareTo(MaxText);
+            if (order > 0)
+            {
+                other.MaxText.CopyTo(_maxText);
+                _maxTextLength = other._maxTextLength;
+                _maxTextCut = other._maxTextCut;
+            }
+            else if (order == 0)
+            {
+                _maxTextCut |= other._maxTextCut;
             }
         }
 
