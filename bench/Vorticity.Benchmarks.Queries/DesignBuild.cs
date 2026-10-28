@@ -101,7 +101,7 @@ internal static class DesignBuild
                 Console.WriteLine($"  hour {hour + 1} of {hours} appended and compacted, {(hour + 1) * perHour / seconds / 1e6:F2} M rows a second so far");
                 if ((hour + 1) % 12 == 0)
                 {
-                    await VacuumAsync(dataset);
+                    await VacuumAsync(dataset, writing: true);
                 }
             }
 
@@ -176,10 +176,16 @@ internal static class DesignBuild
         }
     }
 
-    /// <summary>Deletes the objects no version needs any more: the clock a month ahead, past every version's window.</summary>
-    private static async Task VacuumAsync(VortexDataset dataset)
+    /// <summary>
+    /// Deletes the objects no version needs any more: the clock a month ahead, past every version's window, once nothing is
+    /// written beside; while the hours ahead are written, the window ahead less half an hour, so that the objects they wrote
+    /// in that half hour and did not append yet stay, young, as a writer's in flight. A month ahead, they were old: the
+    /// vacuum at the twelfth hour of the requests at 5 000 a second deleted them, and the next hour's job lost its inputs.
+    /// </summary>
+    private static async Task VacuumAsync(VortexDataset dataset, bool writing = false)
     {
-        VacuumResult vacuumed = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = new Ahead(TimeSpan.FromDays(30)) });
+        TimeSpan ahead = writing ? DatasetVacuum.DefaultWindow - TimeSpan.FromMinutes(30) : TimeSpan.FromDays(30);
+        VacuumResult vacuumed = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = new Ahead(ahead) });
         Console.WriteLine($"  vacuum: {vacuumed.Deleted.Length} objects deleted");
     }
 
