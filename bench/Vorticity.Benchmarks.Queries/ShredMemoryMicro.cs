@@ -20,14 +20,15 @@ namespace Vorticity.Benchmarks.Queries;
 /// writes them, the variant column shredded as the census of the object's every row chooses, as a job's census of a
 /// partition's rows does, in chunks of a million rows as a job writes them,
 /// then of a quarter and of a sixteenth of that. For each: the most private bytes the process held above its start, the
-/// native blocks among them, the collector's committed memory, the seconds, and the bytes written.
+/// native blocks among them, the collector's committed memory, the seconds, and the bytes written. With <c>--out DIR</c>,
+/// each file stays there, named after its chunks' rows, for the files of two builds compared byte for byte.
 /// </summary>
 internal static class ShredMemoryMicro
 {
-    internal static async Task<int> Run(string directory, int rows)
+    internal static async Task<int> Run(string directory, int rows, string? keep)
     {
         List<string> files = await InputMemoryMicro.LargestAsync(directory, 1);
-        string target = Path.Combine(Path.GetTempPath(), $"vortex-shredmemory-{Guid.NewGuid():N}.vortex");
+        string temporary = Path.Combine(Path.GetTempPath(), $"vortex-shredmemory-{Guid.NewGuid():N}.vortex");
         try
         {
             await using VortexFile file = await VortexFile.OpenAsync(files[0]);
@@ -51,12 +52,15 @@ internal static class ShredMemoryMicro
             Console.WriteLine("chunk rows   seconds   private MB    native MB   managed MB   written MB");
             foreach (int share in new[] { 1, 4, 16 })
             {
-                await MeasureAsync(file, first, name, plan, chunk / share, ShreddingChoice.ChunkRows / share, target);
+                // Kept, the files of two builds compare byte for byte.
+                long chunkRows = ShreddingChoice.ChunkRows / share;
+                string target = keep is null ? temporary : Path.Combine(keep, $"shredded-{chunkRows}.vortex");
+                await MeasureAsync(file, first, name, plan, chunk / share, chunkRows, target);
             }
         }
         finally
         {
-            System.IO.File.Delete(target);
+            System.IO.File.Delete(temporary);
         }
 
         return 0;

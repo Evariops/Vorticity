@@ -143,8 +143,8 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         InputMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro inputs needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 8))),
     ["consolidation"] = ("--store DIR: what a consolidation holds apart from any other work, hours of log records left in level 0 consolidated on 1 lane and on 8 (ConsolidationMemoryMicro.cs)", () =>
         ConsolidationMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro consolidation needs --store DIR, a directory of its own."), (int)Option(args, "--hours", 4), Option(args, "--rate", 5_000), (int)Option(args, "--lanes", 0))),
-    ["shredmemory"] = ("--store DIR: what a job's writer holds while it shreds a variant column, a dataset's largest object written in chunks of a million rows and shorter (ShredMemoryMicro.cs)", () =>
-        ShredMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro shredmemory needs --store DIR, a dataset's directory."), (int)Option(args, "--rows", 3_000_000))),
+    ["shredmemory"] = ("--store DIR: what a job's writer holds while it shreds a variant column, a dataset's largest object written in chunks of a million rows and shorter; --out DIR keeps the files (ShredMemoryMicro.cs)", () =>
+        ShredMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro shredmemory needs --store DIR, a dataset's directory."), (int)Option(args, "--rows", 3_000_000), Text(args, "--out"))),
     ["census"] = ("--store DIR: what the census of a consolidation holds, the variant column of a dataset's largest objects counted at 1, 4 and 16 lanes (CensusMemoryMicro.cs)", () =>
         CensusMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro census needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 12))),
     ["paths"] = ("every query path of datasets partitioned by hour or by day at scale, over a store that waits a round trip per request (PathsBench.cs)", () => PathsBench.Run(new PathsBench.Settings
