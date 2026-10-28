@@ -139,6 +139,10 @@ internal sealed partial class DatasetScanBuilder
     private System.Collections.Concurrent.ConcurrentDictionary<UInt128, ulong[]>? _narrowed;
     private Action<PositionedObject, ulong[]>? _narrowing;
 
+    // The granules of one object a part of a scan reads alone, a bit a granule, the others answered by their statistics
+    // (StatesAsync): never noted as where the filter's rows lie, since those others hold some.
+    private (UInt128 Uid, ulong[] Granules)? _unsettled;
+
     // Whether the walk counts the objects it considers: not in a part of a scan whose own walk counted them (Part).
     private bool _considers = true;
 

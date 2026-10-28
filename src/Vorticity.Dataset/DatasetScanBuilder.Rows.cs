@@ -484,6 +484,10 @@ internal sealed partial class DatasetScanBuilder
         held.Entry.Contents is { Marks.Count: > 0 } && !(_geometries?.ContainsKey(held.Entry.Uid) ?? false)
         && held.Entry.Bytes > _version.Costs.Profile.RequestBytes;
 
+    /// <summary>The granules of <paramref name="held"/> a part reads alone (<see cref="_unsettled"/>); null for every one.</summary>
+    private ulong[]? UnsettledOf(in PositionedObject held) =>
+        _unsettled is { } only && only.Uid == held.Entry.Uid ? only.Granules : null;
+
     /// <summary>
     /// The blocks of <paramref name="file"/>'s pruning that <paramref name="granules"/> keeps, a bit a granule: null when the
     /// granules are not its blocks, which the scan then prunes alone.
@@ -587,6 +591,12 @@ internal sealed partial class DatasetScanBuilder
                 // into one view for the whole object.
                 RecordBatch? view = null;
                 ScanBuilder scan = Of(lease.File, held).WithGranules(GeometryOf(held));
+                if (UnsettledOf(held) is { } only)
+                {
+                    scan = scan.WithGranuleMask(Masked(lease.File, only)
+                        ?? throw new InvalidOperationException($"The granules of '{held.Entry.Key}' its statistics leave are not the blocks of its scan."));
+                }
+
                 using QueryMemory? ahead = ReadsAhead(scan, lease.File);
                 await foreach (RecordBatch batch in scan.ExecuteAsync()
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -760,7 +770,18 @@ internal sealed partial class DatasetScanBuilder
             may = may is null || may.Length != pages.Length ? pages : Both(may, pages);
         }
 
+        // A part that reads the granules its statistics leave reads them alone, and notes nothing: the others hold rows too.
+        if (UnsettledOf(held) is { } only)
+        {
+            may = may is null || may.Length != only.Length ? only : Both(may, only);
+            whole = false;
+        }
+
         Compute.BlockMask? granted = may is null ? null : Masked(file, may);
+        if (_unsettled is not null && granted is null)
+        {
+            throw new InvalidOperationException($"The granules of '{held.Entry.Key}' its statistics leave are not the blocks of its scan.");
+        }
         await GeometryAsync(file, held, marks, cancellationToken).ConfigureAwait(false);
         RecordBatch? view = null;
         if (granules >= TwoPhaseReads.LeastGranules && await TwoPassesAsync(held, filter, predicate, cancellationToken).ConfigureAwait(false) is { } filtered

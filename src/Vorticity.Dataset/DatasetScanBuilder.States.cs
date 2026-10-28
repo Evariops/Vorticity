@@ -376,6 +376,18 @@ internal sealed partial class DatasetScanBuilder
                         settled?.Release();
                     }
 
+                    // The granules the statistics leave, read as the rows path reads an object: in one pass over them, where a
+                    // part a run of them waited a round trip each, 155 for the routes of a service under 5xx sorted by it.
+                    if (UnsettledPart(held, unsettled) is { } rest)
+                    {
+                        await foreach (RecordBatch batch in rest.ExecuteAsync(cancellationToken).ConfigureAwait(false))
+                        {
+                            yield return batch;
+                        }
+
+                        continue;
+                    }
+
                     foreach (RowRange range in unsettled)
                     {
                         DatasetScanBuilder part = Part(_filter, held.FirstRow + range.Start, held.FirstRow + range.End);
@@ -503,6 +515,40 @@ internal sealed partial class DatasetScanBuilder
                 unit.Partial = PartialAsync(unit.Held, cancellationToken);
                 break;
         }
+    }
+
+    /// <summary>
+    /// The rows of the granules of <paramref name="held"/> its statistics leave, <paramref name="unsettled"/>, as one part of
+    /// the scan that reads them alone (<see cref="_unsettled"/>), its own settling of blocks left aside; null when there are
+    /// none, the object has rows marked, or a range is not whole granules, which a part a range reads.
+    /// </summary>
+    private DatasetScanBuilder? UnsettledPart(in PositionedObject held, List<RowRange> unsettled)
+    {
+        long granuleRows = _dataset.Options.Write.BlockRows;
+        long rows = held.Entry.PhysicalRows;
+        if (unsettled.Count == 0 || held.Entry.HasDeletions || granuleRows <= 0)
+        {
+            return null;
+        }
+
+        ulong[] granules = new ulong[(int)((((rows + granuleRows - 1) / granuleRows) + 63) / 64)];
+        foreach (RowRange range in unsettled)
+        {
+            if (range.Start % granuleRows != 0 || (range.End % granuleRows != 0 && range.End != rows))
+            {
+                return null;
+            }
+
+            for (long granule = range.Start / granuleRows; granule * granuleRows < range.End; granule++)
+            {
+                granules[granule >> 6] |= 1UL << (int)(granule & 63);
+            }
+        }
+
+        DatasetScanBuilder part = Part(_filter, held.FirstRow + unsettled[0].Start, held.FirstRow + unsettled[^1].End);
+        part._settles = null;
+        part._unsettled = (held.Entry.Uid, granules);
+        return part;
     }
 
     /// <summary>
