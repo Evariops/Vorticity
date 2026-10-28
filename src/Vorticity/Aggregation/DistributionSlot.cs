@@ -6,7 +6,9 @@ namespace Vorticity.Aggregating;
 /// <summary>
 /// A distribution per group: a <see cref="QuantileSketch"/> each, made at a group's first value. The
 /// sketches' arrays are counted as they grow, so the query's memory holds them as it holds every other
-/// state, and they spill as their buckets.
+/// state, and they spill as their buckets. A slot whose answers read their sketches, a quantile's, takes
+/// the arrays from its query's shelf and gives them back as it lets each sketch go; one whose answers are
+/// the sketches themselves leaves them to the answers.
 /// </summary>
 /// <typeparam name="TValue">The column's storage type.</typeparam>
 /// <typeparam name="TResult">The answer: the distribution itself, or a quantile of it.</typeparam>
@@ -18,6 +20,7 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
 
     private readonly int _bits;
     private readonly Func<QuantileSketch?, TResult> _final;
+    private readonly bool _shelved;
     private TValue[] _values = [];
     private MaskCache _rows;
     private ulong[] _clip = [];
@@ -28,17 +31,29 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
     private long _grown;
     private long _stepped;
 
-    internal DistributionSlot(int bits, Func<QuantileSketch?, TResult> final)
+    /// <param name="bits">The grid's mantissa bits.</param>
+    /// <param name="final">A group's answer from its sketch.</param>
+    /// <param name="shelved">Whether the answers only read the sketches, which may then take their arrays from the query's shelf.</param>
+    internal DistributionSlot(int bits, Func<QuantileSketch?, TResult> final, bool shelved)
     {
         _bits = bits;
         _final = final;
+        _shelved = shelved;
     }
 
     private protected override long ValueBytes => Math.Max(BytesPerValue, _stepped == 0 ? 0 : _grown / _stepped);
 
-    private protected override QuantileSketch New() => new QuantileSketch(_bits);
+    private protected override QuantileSketch New() => new QuantileSketch(_bits, _shelved ? Shelf : null);
 
-    private protected override QuantileSketch Read(ref SpillReader reader) => QuantileSketch.Read(_bits, ref reader);
+    private protected override QuantileSketch Read(ref SpillReader reader) => QuantileSketch.Read(_bits, ref reader, _shelved ? Shelf : null);
+
+    private protected override void Released(QuantileSketch sketch)
+    {
+        if (_shelved)
+        {
+            sketch.Release();
+        }
+    }
 
     private protected override void Stepped(long grown, long rows)
     {

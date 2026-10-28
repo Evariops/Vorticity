@@ -53,6 +53,17 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     {
     }
 
+    /// <summary>The shelf of the slot's query, which its sketches may take their arrays from; null outside a query's memory.</summary>
+    private protected ArrayShelf? Shelf => _shelf;
+
+    /// <summary>
+    /// A sketch the slot lets go of, its group released or left out: a slot whose sketches took their arrays from its
+    /// shelf gives them back here; one whose answers hold their sketches keeps them.
+    /// </summary>
+    private protected virtual void Released(TSketch sketch)
+    {
+    }
+
     /// <summary>A group's sketch, made at its first value.</summary>
     private protected TSketch Sketch(int group) => _sketches[group] ??= New();
 
@@ -146,14 +157,26 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
+        // The kept sketches taken aside, then those left let go, then the kept ones put first.
+        TSketch?[] kept = ArrayPool<TSketch?>.Shared.Rent(groups.Length);
         long bytes = 0;
         for (int i = 0; i < groups.Length; i++)
         {
-            TSketch? kept = _sketches[groups[i]];
-            _sketches[i] = kept;
-            bytes += kept?.Bytes ?? 0;
+            kept[i] = _sketches[groups[i]];
+            _sketches[groups[i]] = null;
+            bytes += kept[i]?.Bytes ?? 0;
         }
 
+        for (int group = 0; group < _groups; group++)
+        {
+            if (_sketches[group] is { } left)
+            {
+                Released(left);
+            }
+        }
+
+        kept.AsSpan(0, groups.Length).CopyTo(_sketches);
+        ArrayPool<TSketch?>.Shared.Return(kept, clearArray: true);
         Array.Clear(_sketches, groups.Length, _groups - groups.Length);
         _groups = groups.Length;
         _bytes = bytes;
@@ -163,6 +186,14 @@ internal abstract class SketchSlot<TSketch, TResult> : AggregateSlot<TResult>
     {
         if (_sketches.Length > 0)
         {
+            for (int group = 0; group < _groups; group++)
+            {
+                if (_sketches[group] is { } sketch)
+                {
+                    Released(sketch);
+                }
+            }
+
             Array.Clear(_sketches);
             _shelf?.Give(_sketches);
             _sketches = [];

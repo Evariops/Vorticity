@@ -120,7 +120,7 @@ internal static class Aggregators
     {
         int bits = QuantileSketch.BitsFor(relativeError);
         return new Sym<Distribution?>(new AggregateNode<Distribution?>(
-            AggregateKind.Distribution, shape, Distributed<Distribution?>(shape, bits, static s => s is null ? null : new Distribution(s)), null,
+            AggregateKind.Distribution, shape, Distributed<Distribution?>(shape, bits, static s => s is null ? null : new Distribution(s), shelved: false), null,
             parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{BitsParameter}{bits}")));
     }
 
@@ -158,26 +158,27 @@ internal static class Aggregators
 
         int bits = QuantileSketch.BitsFor(relativeError);
         return new Sym<double?>(new AggregateNode<double?>(
-            AggregateKind.Quantile, shape, Distributed<double?>(shape, bits, s => s?.Quantile(q)), null,
+            AggregateKind.Quantile, shape, Distributed<double?>(shape, bits, s => s?.Quantile(q), shelved: true), null,
             parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"q={q:R};{BitsParameter}{bits}")));
     }
 
-    private static Func<ScanSource?, AggregateSlot<T>> Distributed<T>(ColumnShape shape, int bits, Func<QuantileSketch?, T> final) =>
+    /// <summary>A slot of a distribution per group, whose answers <paramref name="final"/> makes; <paramref name="shelved"/> when they only read the sketches.</summary>
+    private static Func<ScanSource?, AggregateSlot<T>> Distributed<T>(ColumnShape shape, int bits, Func<QuantileSketch?, T> final, bool shelved) =>
         shape.Kind != StorageKind.Primitive
             ? throw shape.Unsupported("a distribution")
             : shape.PType switch
             {
-                PType.I8 => _ => new DistributionSlot<sbyte, T>(bits, final),
-                PType.I16 => _ => new DistributionSlot<short, T>(bits, final),
-                PType.I32 => _ => new DistributionSlot<int, T>(bits, final),
-                PType.I64 => _ => new DistributionSlot<long, T>(bits, final),
-                PType.U8 => _ => new DistributionSlot<byte, T>(bits, final),
-                PType.U16 => _ => new DistributionSlot<ushort, T>(bits, final),
-                PType.U32 => _ => new DistributionSlot<uint, T>(bits, final),
-                PType.U64 => _ => new DistributionSlot<ulong, T>(bits, final),
-                PType.F16 => _ => new DistributionSlot<Half, T>(bits, final),
-                PType.F32 => _ => new DistributionSlot<float, T>(bits, final),
-                _ => _ => new DistributionSlot<double, T>(bits, final),
+                PType.I8 => _ => new DistributionSlot<sbyte, T>(bits, final, shelved),
+                PType.I16 => _ => new DistributionSlot<short, T>(bits, final, shelved),
+                PType.I32 => _ => new DistributionSlot<int, T>(bits, final, shelved),
+                PType.I64 => _ => new DistributionSlot<long, T>(bits, final, shelved),
+                PType.U8 => _ => new DistributionSlot<byte, T>(bits, final, shelved),
+                PType.U16 => _ => new DistributionSlot<ushort, T>(bits, final, shelved),
+                PType.U32 => _ => new DistributionSlot<uint, T>(bits, final, shelved),
+                PType.U64 => _ => new DistributionSlot<ulong, T>(bits, final, shelved),
+                PType.F16 => _ => new DistributionSlot<Half, T>(bits, final, shelved),
+                PType.F32 => _ => new DistributionSlot<float, T>(bits, final, shelved),
+                _ => _ => new DistributionSlot<double, T>(bits, final, shelved),
             };
 
     /// <summary>An approximate count of the distinct non-null values of a column, about 0.81 % off at most typically.</summary>
