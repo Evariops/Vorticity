@@ -67,6 +67,12 @@ public sealed record CompactionResult
     public int RangesAtOnce { get; init; } = 1;
 
     /// <summary>
+    /// The bytes it spilled to disk, past what memory held of them: the runs of its objects' indexes, and of its
+    /// partition's postings for a consolidation; none for a job whose runs all fit.
+    /// </summary>
+    public long ScratchBytes { get; init; }
+
+    /// <summary>
     /// What the commit made of it: applied, or abandoned because another compaction took an input
     /// first, in which case its outputs are left for vacuum.
     /// </summary>
@@ -340,10 +346,12 @@ internal static partial class DatasetCompactor
 
         int objectsOut = lateOutputs?.Written.Count ?? 0;
         long bytesOut = lateOutputs?.Bytes ?? 0;
+        long scratch = (lateOutputs?.ScratchBytes ?? 0) + (postings?.ScratchBytes ?? 0);
         foreach (ObjectStream outputs in streams)
         {
             objectsOut += outputs.Written.Count;
             bytesOut += outputs.Bytes;
+            scratch += outputs.ScratchBytes;
         }
 
         return new CompactionResult
@@ -360,6 +368,7 @@ internal static partial class DatasetCompactor
             BytesOut = bytesOut,
             MemoryReserved = reserved,
             RangesAtOnce = atOnce,
+            ScratchBytes = scratch,
             Outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied,
         };
     }
@@ -1209,6 +1218,9 @@ internal static partial class DatasetCompactor
             }
         }
 
+        /// <summary>The bytes the writers of the objects it has sealed spilled to disk, their indexes' runs past their memory.</summary>
+        internal long ScratchBytes { get; private set; }
+
         /// <summary>Whether the object being written has reached the destination's size.</summary>
         internal bool WantsRoll => _output is not null && _output.Sink.Position + _output.Writer.HeldBytes >= _target;
 
@@ -1424,6 +1436,7 @@ internal static partial class DatasetCompactor
                     }
 
                     await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+                    ScratchBytes += output.Writer.ScratchBytes;
                 }
 
                 written = await _dataset.SealAsync(output, _rows, _firstRow, cancellationToken).ConfigureAwait(false);

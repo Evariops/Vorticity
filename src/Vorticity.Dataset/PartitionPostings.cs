@@ -43,6 +43,10 @@ internal sealed class PartitionPostings : IDisposable
     private readonly int[] _unitBlocks;
     private readonly string[] _columns;
     private readonly RunScratch _scratch;
+
+    /// <summary>The bytes the postings' runs went to disk with, past what their scratch's memory held.</summary>
+    internal long ScratchBytes => _scratch.FileBytes;
+
     private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
     private readonly List<Run> _runs = [];
     private readonly ConcurrentDictionary<UInt128, Tap[]> _taps = new();

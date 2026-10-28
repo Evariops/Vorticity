@@ -94,6 +94,9 @@ internal sealed class RunScratch : IDisposable
 
     internal long Length => _length;
 
+    /// <summary>The bytes the store holds in its file, once it has moved there; none while it is in memory.</summary>
+    internal long FileBytes => _file is null ? 0 : _length;
+
     /// <summary>Whether the store has moved to its file.</summary>
     internal bool OnDisk => _file is not null;
 

@@ -106,6 +106,42 @@ public sealed class RunMergeTests
         await AssertDistinctAsync(file, rows);
     }
 
+    /// <summary>
+    /// A writer says what its indexes spilled to disk once it completes: the runs of its key index past their scratch's
+    /// memory, all of them under a memory of none, and nothing when they fit.
+    /// </summary>
+    [Fact]
+    public async Task AWriterSaysWhatItsIndexesSpilled()
+    {
+        Decoders.EnsureRegistered();
+        string directory = Path.Combine(Path.GetTempPath(), $"vorticity-scratch-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            foreach ((long memory, bool spills) in new[] { (0L, true), (IndexWriter.DefaultScratchMemoryBytes, false) })
+            {
+                VortexWriteOptions options = new VortexWriteOptions
+                {
+                    RowBlockSize = Block,
+                    DataBlockTargetBytes = null,
+                    WritePolicy = Policy,
+                    IndexBudgetPerMille = 1_000_000,
+                    ScratchDirectory = directory,
+                    ScratchMemoryBytes = memory,
+                };
+                using MemoryStream stream = new MemoryStream();
+                await using VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), Schema, options);
+                await FeedAsync(writer, 0, Block * 8);
+                await writer.CompleteAsync(TestContext.Current.CancellationToken);
+                Assert.Equal(spills, writer.ScratchBytes > 0);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task MoreRunsThanOnePassTakesMergeInPassesOverAScratchOnDisk()
     {

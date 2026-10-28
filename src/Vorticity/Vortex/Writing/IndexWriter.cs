@@ -234,6 +234,9 @@ internal sealed class IndexWriter : IDisposable
 
     private readonly RunScratch? _scratch;
 
+    /// <summary>The bytes the indexes' runs went to disk with, past what their scratch's memory held.</summary>
+    internal long ScratchBytes => _scratch?.FileBytes ?? 0;
+
     /// <summary>The default memory the chunk runs may hold before they move to a file.</summary>
     internal const long DefaultScratchMemoryBytes = 64L << 20;
 

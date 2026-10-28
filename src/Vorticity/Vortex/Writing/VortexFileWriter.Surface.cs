@@ -59,6 +59,9 @@ public sealed partial class VortexFileWriter
     /// </summary>
     internal long GroupRows => _groupRows;
 
+    /// <summary>The bytes the file's indexes spilled to disk as it was written, past what their scratch's memory held.</summary>
+    internal long ScratchBytes => _indexes?.ScratchBytes ?? 0;
+
     /// <summary>
     /// Bytes accepted and not yet handed to the sink by a flush: encoded chunks the sink holds, and
     /// rows waiting for their chunk.

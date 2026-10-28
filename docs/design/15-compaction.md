@@ -330,9 +330,10 @@ A merge reads its inputs in batches that hold about a million rows together, an 
 16 384 rows rather than of a window, each batch decoded on its own, so that what a range holds of its inputs does not
 grow with them. A variant shredded into many columns is read a window and a slice at a time ([shredded
 variants](21-variant-columns.md#5-the-worst-cases)), and written a typed column at a time ([the
-write](11-write-strategy.md#10-shredded-variants)). `CompactionResult.RangesAtOnce` and `MemoryReserved` say how many
-ranges a job ran at once and what it reserved, and `vortex-queries --print-jobs` prints them beside the process's
-memory over each pass.
+write](11-write-strategy.md#10-shredded-variants)). What memory cannot hold goes to disk: the runs of an object's
+hashed key index and of a partition's postings past their scratch's memory. `CompactionResult.RangesAtOnce`,
+`MemoryReserved` and `ScratchBytes` say how many ranges a job ran at once, what it reserved and what it spilled, and
+`vortex-queries --print-jobs` prints them beside the process's memory over each pass.
 
 ### Late rows under levels
 
