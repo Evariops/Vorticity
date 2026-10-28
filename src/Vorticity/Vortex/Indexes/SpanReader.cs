@@ -361,8 +361,11 @@ internal sealed class SpanReader : IDisposable
         /// <summary>The chunk's region of buffers, in the batch's arena, zeroed, for granules.</summary>
         internal VortexBuffer Region { get; init; }
 
-        /// <summary>The first slot of the ranges, registered one after another.</summary>
-        internal int FirstSlot { get; init; }
+        /// <summary>
+        /// The slot of each range in the requests: a range another read asked for already shares its slot, so that the slots
+        /// of one read need not follow each other.
+        /// </summary>
+        internal int[] Slots { get; init; } = [];
 
         /// <summary>Where each range lies in the region.</summary>
         internal (long Start, long End)[] Ranges { get; init; } = [];
@@ -441,14 +444,14 @@ internal sealed class SpanReader : IDisposable
         }
 
         (long Start, long End)[] ranges = [.. granules.Ranges];
-        int first = -1;
-        foreach ((long rangeStart, long rangeEnd) in ranges)
+        int[] slots = new int[ranges.Length];
+        for (int r = 0; r < ranges.Length; r++)
         {
-            int slot = requests.Add(new SegmentSpec(chunk.Offset + (ulong)rangeStart, checked((uint)(rangeEnd - rangeStart)), 0, 0, 0));
-            first = first < 0 ? slot : first;
+            (long rangeStart, long rangeEnd) = ranges[r];
+            slots[r] = requests.Add(new SegmentSpec(chunk.Offset + (ulong)rangeStart, checked((uint)(rangeEnd - rangeStart)), 0, 0, 0));
         }
 
-        return new ChunkRead(chunk) { Tree = geometry.Tree, Region = region, FirstSlot = first, Ranges = ranges };
+        return new ChunkRead(chunk) { Tree = geometry.Tree, Region = region, Slots = slots, Ranges = ranges };
     }
 
     /// <summary>
@@ -482,7 +485,7 @@ internal sealed class SpanReader : IDisposable
             for (int r = 0; r < read.Ranges.Length; r++)
             {
                 (long start, long end) = read.Ranges[r];
-                requests.GetBuffer(read.FirstSlot + r).Span[..(int)(end - start)].CopyTo(region[(int)start..]);
+                requests.GetBuffer(read.Slots[r]).Span[..(int)(end - start)].CopyTo(region[(int)start..]);
             }
         }
     }

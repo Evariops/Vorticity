@@ -120,6 +120,29 @@ public sealed partial class DatasetGranuleReadsTests
     }
 
     /// <summary>
+    /// Ids that lie in different units of one object, looked up together: their spans are read in one set of requests, and a
+    /// buffer each of them reads whole, the ends of a sorted column's runs, is one request both share; each span's other
+    /// ranges keep their own. The rows are LINQ's, at units of granules and at granules.
+    /// </summary>
+    [Fact]
+    public async Task IdsInSeveralUnitsOfAnObjectAreReadTogether()
+    {
+        foreach (IdentifierLocation location in (IdentifierLocation[])[IdentifierLocation.Chunk, IdentifierLocation.Granule])
+        {
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            (VortexDataset dataset, Row[] rows) = await DayAsync(store, identifiers: [nameof(Row.Sequence)], location);
+            await using (dataset)
+            {
+                // Rows far apart in the object's order, the service then the instant: each in a unit of its own.
+                Row[] sorted = [.. rows.OrderBy(static r => r.Service, StringComparer.Ordinal).ThenBy(static r => r.At)];
+                long[] sought = [.. ((int[])[1_000, 140_000, 280_000, 420_000, 560_000]).Select(at => sorted[at].Sequence)];
+                List<Row> found = await dataset.Scan<Row>().Where(r => r.Sequence.In(sought)).ToRecordsAsync(Ct).ToListAsync(Ct);
+                Assert.Equal(rows.Where(r => sought.Contains(r.Sequence)).OrderBy(static r => r.Sequence), found.OrderBy(static r => r.Sequence));
+            }
+        }
+    }
+
+    /// <summary>
     /// A day of calls sorted by the service then the instant, merged and consolidated into one object whose instant is one
     /// chunk: a count of one service over twelve hours, by a cold handle, reads the granules its key's sparse index keeps,
     /// under a tenth of the object, its open's tail the most of it, where it read the instant's column whole, three quarters
