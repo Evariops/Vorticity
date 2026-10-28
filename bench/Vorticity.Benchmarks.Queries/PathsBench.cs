@@ -417,7 +417,7 @@ internal static partial class PathsBench
         new Question(set, name, true, (dataset, options) =>
         {
             Aggregation aggregation = ask(dataset.Scan<TRecord>().With(options with { AlignWindow = align }));
-            return new Asking(aggregation.Query.Batches(default), () => aggregation.Metrics) { Explain = () => aggregation.ExplainAsync() };
+            return new Asking(aggregation.Query.Batches(default), () => aggregation.Metrics) { Explain = () => aggregation.ExplainAsync(analyze: true) };
         });
 
     /// <summary>
@@ -599,7 +599,7 @@ internal static partial class PathsBench
                 }
             }
 
-            // --explain: what each object reads, once warm.
+            // --explain: what each object reads, once warm, as a read chooses it: the plan analyzed, the indexes a read reads read.
             if (settings.Explain && question.Ask(dataset, options) is { Explain: { } explain } asked)
             {
                 await asked.Batches.DisposeAsync();
