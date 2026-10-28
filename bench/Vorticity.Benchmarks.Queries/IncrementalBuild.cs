@@ -39,9 +39,16 @@ internal static class IncrementalBuild
         Task<List<ObjectDraft>>[] written = new Task<List<ObjectDraft>>[hours];
         int next = 0;
         int appended = 0;
+
+        // The hours written ahead hold their rows in their drafts' stores, which the session's jobs' budget counts: one past
+        // the hour being written starts while that budget is less than half reserved, so that the drafts leave the jobs
+        // their share, as an ingestion that appends as it goes would. The 4 hours ahead of S1's logs held 9.7 GB at its
+        // peak, beside the consolidation's 14.
+        QueryMemoryBudget share = options.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs;
         void Start()
         {
-            while (next < hours && next < Volatile.Read(ref appended) + parallel)
+            while (next < hours && next < Volatile.Read(ref appended) + parallel
+                && (next == Volatile.Read(ref appended) || share.ReservedBytes < share.CeilingBytes / 2))
             {
                 int hour = next++;
                 Func<DateTimeOffset, TRecord> draw = hourly(hour);
@@ -173,7 +180,7 @@ internal static class IncrementalBuild
     /// </summary>
     internal static string JobLine(CompactionResult done, double seconds, Dictionary<string, Pass> passes, PeakMemory memory) => string.Create(
         CultureInfo.InvariantCulture,
-        $"    job {done.Trigger} {done.Style}: {done.ObjectsIn} objects in, {done.ObjectsOut} out, {done.ObjectsMoved} moved, {done.Rows:N0} rows, {done.BytesIn / 1e6:F1} MB in, {done.BytesOut / 1e6:F1} MB out, {seconds:F1} s{Passes(passes)}; {done.RangesAtOnce} ranges at once, {done.MemoryReserved / 1e9:F2} GB reserved, a peak of {memory.Peak / 1e9:F1} GB private ({memory.PeakNative / 1e9:F1} native, {memory.PeakParked / 1e9:F1} parked)");
+        $"    job {done.Trigger} {done.Style}: {done.ObjectsIn} objects in, {done.ObjectsOut} out, {done.ObjectsMoved} moved, {done.Rows:N0} rows, {done.BytesIn / 1e6:F1} MB in, {done.BytesOut / 1e6:F1} MB out, {seconds:F1} s{Passes(passes)}; {done.RangesAtOnce} ranges at once, {done.MemoryReserved / 1e9:F2} GB reserved, {done.ScratchBytes / 1e6:F1} MB spilled, a peak of {memory.Peak / 1e9:F1} GB private ({memory.PeakNative / 1e9:F1} native, {memory.PeakParked / 1e9:F1} parked)");
 
     /// <summary>A pass's seconds, the process's private bytes when it began, and the most it held while it ran.</summary>
     internal readonly record struct Pass(double Seconds, long From, long Peak);
