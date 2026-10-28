@@ -406,7 +406,9 @@ internal sealed class ShortTextKeys : GroupKeys
 
     /// <summary>
     /// The words turned into a table of bytes, for good: every group's key added again in the order of
-    /// the groups, which keeps each its number, the null group's too; the words' arrays given back.
+    /// the groups, which keeps each its number, the null group's too; the words' arrays given back, and
+    /// their block to the process's shelf: dropped, a lane of a question grouped by a long text, the
+    /// pods of a route, grew a block of up to 32 768 words each time and lost it at its first long value.
     /// </summary>
     private void Demote()
     {
@@ -426,7 +428,7 @@ internal sealed class ShortTextKeys : GroupKeys
         words.Release();
         _words = null;
         _bytes = bytes;
-        _block = [];
+        Scratch.Return(ref _block);
         Renumbered();
     }
 
