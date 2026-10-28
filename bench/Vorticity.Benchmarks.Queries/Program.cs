@@ -18,6 +18,7 @@
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
 //   … -- --fixture spread-random-20000000-core2025.10                                   that fixture written if it is not yet, its path printed
 //   … -- --help                                                                         the micro benches --micro NAME runs, each with what it measures
+//   … -- --micro NAME --native-sites FILE                                               that micro, the native blocks it holds at its peak written by the site that rented them (NativeSites.cs)
 //
 // The files are written once under ~/.cache/vorticity/queries (VORTICITY_QUERIES_CORPUS overrides it).
 using System;
@@ -224,6 +225,8 @@ if (Text(args, "--micro") is { } micro)
 {
     if (micros.TryGetValue(micro, out (string Help, Func<Task<int>> Run) chosen))
     {
+        // --native-sites FILE: the native blocks the run holds at its peak, by the site that rented them (NativeSites.cs).
+        using NativeSites? sites = Text(args, "--native-sites") is { } path ? NativeSites.Watch(path) : null;
         return await chosen.Run();
     }
 
