@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Indexes;
 using Vorticity.Types;
 
@@ -417,10 +418,12 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private QuantileSketch?[][]? _sketches;
 
     // Each row's entry by its row in the batch being fed, which the distinct values read once the batch is in; and for each
-    // wide column of the plan, the registers of each entry, null once the column holds more than AttachCeiling values.
+    // wide column of the plan, the registers of its entries, ColumnSheet.Registers bytes an entry one after another in a
+    // block of the shared pool, those of an entry no row reached left at zero (a rank is 1 at least): none for a column
+    // whose counts went, and the whole null once the column holds more than AttachCeiling values.
     private readonly int _field;
     private int[] _batchEntries = new int[1_024];
-    private byte[]?[][]? _distinct;
+    private NativeSegmentOwner?[]? _distinct;
 
     /// <param name="sheet">The column's sheet, fed first, which numbers its rows' values.</param>
     /// <param name="plan">What the file's counts share.</param>
@@ -431,11 +434,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         _sheet = sheet;
         _plan = plan;
         _field = field;
-        _distinct = new byte[]?[plan.Wide.Count][];
-        for (int w = 0; w < _distinct.Length; w++)
-        {
-            _distinct[w] = [];
-        }
+        _distinct = new NativeSegmentOwner?[plan.Wide.Count];
 
         _self = plan.MeasureOf(field);
         _number = _self >= 0;
@@ -626,7 +625,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         if (_sheet.Distinct > AttachCeiling || !_sheet.Counting)
         {
-            _distinct = null;
+            ReleaseRegisters();
             return;
         }
 
@@ -636,7 +635,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             ReadOnlySpan<ulong> hashes = wide.Sheet.RowHashes;
             if (!wide.Live || wide.Field == _field)
             {
-                distinct[w] = [];
+                Release(ref distinct[w]);
                 continue;
             }
 
@@ -644,17 +643,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             {
                 // The wide column's sheet gave its hashes up: its counts went.
                 wide.Live = false;
-                distinct[w] = [];
+                Release(ref distinct[w]);
                 continue;
             }
 
-            byte[]?[] registers = distinct[w];
-            if (registers.Length < _entries)
-            {
-                Array.Resize(ref distinct[w], Math.Max(_entries, Math.Max(16, registers.Length * 2)));
-                registers = distinct[w];
-            }
-
+            Span<byte> registers = Registers(ref distinct[w], _entries);
             for (int row = 0; row < rows; row++)
             {
                 ulong hash = hashes[row];
@@ -663,11 +656,67 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
                     continue;
                 }
 
-                byte[] ranks = registers[_batchEntries[row]] ??= new byte[ColumnSheet.Registers];
-                ref byte rank = ref ranks[HyperLogLog.Register(hash, ColumnSheet.Precision)];
+                ref byte rank = ref registers[(_batchEntries[row] * ColumnSheet.Registers) + HyperLogLog.Register(hash, ColumnSheet.Precision)];
                 rank = Math.Max(rank, HyperLogLog.Rank(hash, ColumnSheet.Precision));
             }
         }
+    }
+
+    /// <summary>
+    /// The registers of <paramref name="entries"/> entries in <paramref name="block"/>, a block of the shared pool grown
+    /// twice over when they pass it, the registers past those it held zeroed: a column's registers were an array an entry,
+    /// a sixth of what a consolidation allocated, and its block goes back to the pool for the next object's.
+    /// </summary>
+    private static Span<byte> Registers(ref NativeSegmentOwner? block, int entries)
+    {
+        int bytes = checked(entries * ColumnSheet.Registers);
+        if (block is null || block.Length < bytes)
+        {
+            int held = block?.Length ?? 0;
+            NativeSegmentOwner grown = AlignedBufferPool.Shared.Rent(Math.Max(bytes, Math.Max(16 * ColumnSheet.Registers, 2 * held)), 64);
+            Span<byte> into = grown.WritableSpan;
+            if (block is not null)
+            {
+                block.WritableSpan.CopyTo(into);
+                AlignedBufferPool.Shared.Return(block);
+            }
+
+            into[held..].Clear();
+            block = grown;
+        }
+
+        return block.WritableSpan;
+    }
+
+    /// <summary>Gives a column's registers back to the pool.</summary>
+    private static void Release(ref NativeSegmentOwner? block)
+    {
+        if (block is not null)
+        {
+            AlignedBufferPool.Shared.Return(block);
+            block = null;
+        }
+    }
+
+    /// <summary>Gives every column's registers back to the pool, and keeps none: the counts carry no wide column's.</summary>
+    private void ReleaseRegisters()
+    {
+        if (_distinct is { } distinct)
+        {
+            for (int w = 0; w < distinct.Length; w++)
+            {
+                Release(ref distinct[w]);
+            }
+        }
+
+        _distinct = null;
+    }
+
+    /// <inheritdoc/>
+    public override void Dispose()
+    {
+        ReleaseRegisters();
+        base.Dispose();
     }
 
     /// <summary>Adds the rows' values of each measure to the sketch of their entry, from the batch's row <paramref name="start"/>.</summary>
@@ -925,8 +974,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             int at = 1;
             for (int a = 0; registers is not null && a < attached.Count; a++)
             {
-                byte[]?[] held = _distinct![attached[a]];
-                registers[(i * attached.Count) + a] = entry < held.Length && held[entry] is { } ranks ? HyperLogLog.Encode(ranks) : null;
+                NativeSegmentOwner? held = _distinct![attached[a]];
+                ReadOnlySpan<byte> ranks = held is not null && (long)(entry + 1) * ColumnSheet.Registers <= held.Length
+                    ? held.WritableSpan.Slice(entry * ColumnSheet.Registers, ColumnSheet.Registers)
+                    : default;
+                registers[(i * attached.Count) + a] = ranks.IndexOfAnyExcept((byte)0) >= 0 ? HyperLogLog.Encode(ranks) : null;
             }
 
             for (int c = 0; c < carried.Count; c++)
@@ -1179,7 +1231,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     {
         // Entries renumbered, the registers would follow them; a column of at most AttachCeiling values reaches the budget
         // only with the values left out, and lets them go.
-        _distinct = null;
+        ReleaseRegisters();
 
         int total = _entries;
         int[] values = _entryValue;
@@ -1259,7 +1311,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private void Drop()
     {
         _dropped = true;
-        _distinct = null;
+        ReleaseRegisters();
         _sketches = null;
         _entries = 0;
         _entryValue = [];
